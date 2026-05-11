@@ -4,7 +4,7 @@ A Fiji-style desktop application for viewing, filtering, and analysing
 [MINFLUX](https://abberior-instruments.com/technology/minflux/) nanoscopy data.
 
 Python/Qt port of the original MATLAB application developed at the
-[EMBL Imaging Centre](https://www.embl.org/research/facilities/imaging-centre/).
+[EMBL Imaging Centre](https://www.embl.org/about/info/imaging-centre/).
 
 ---
 
