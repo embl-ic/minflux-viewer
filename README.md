@@ -94,10 +94,3 @@ poetry run pytest --tb=short  # short tracebacks
 
 Ziqiang Huang — [ziqiang.huang@embl.de](mailto:ziqiang.huang@embl.de)  
 EMBL Imaging Centre, Heidelberg
-
----
-poetry run python tools/compile_ui.py --watch
-```
-
-See **[UI_DESIGNER.md](UI_DESIGNER.md)** for the complete workflow,
-what's in vs. out of the `.ui` files, and troubleshooting.
