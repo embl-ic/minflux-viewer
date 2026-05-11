@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Poetry / virtualenv
+.venv/
+venv/
+poetry.lock        # keep if you want reproducible installs, remove to let users resolve
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# MATLAB remnants
+*.asv
+*.m~
+
+# Vendor directory — contains bundled local wheels
+# These are intentionally committed so the repo is self-contained.
+# Do NOT add vendor/ to .gitignore.
+# Individual large binaries are tracked with Git LFS (see .gitattributes).
+!vendor/
+!vendor/**

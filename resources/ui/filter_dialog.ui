@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <!--
+   filter_dialog.ui — shell layout for the filter dialog.
+   
+   Table rows are added/removed dynamically by Python. Designer can
+   tweak the surrounding controls (labels, buttons, table column widths).
+ -->
+ <class>FilterDialog</class>
+ <widget class="QDialog" name="FilterDialog">
+  <property name="windowTitle"><string>Filter</string></property>
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>720</width><height>360</height></rect>
+  </property>
+
+  <layout class="QVBoxLayout" name="rootLayout">
+   <property name="leftMargin"><number>8</number></property>
+   <property name="topMargin"><number>8</number></property>
+   <property name="rightMargin"><number>8</number></property>
+   <property name="bottomMargin"><number>8</number></property>
+   <property name="spacing"><number>6</number></property>
+
+   <!-- Dataset label (updated dynamically) -->
+   <item>
+    <widget class="QLabel" name="datasetLabel">
+     <property name="text"><string>No data loaded.</string></property>
+     <property name="styleSheet"><string>font-weight: bold;</string></property>
+    </widget>
+   </item>
+
+   <!-- Filter rows table (6 columns: enabled/attr/mode/min/max/delete) -->
+   <item>
+    <widget class="QTableWidget" name="filterTable">
+     <property name="columnCount"><number>6</number></property>
+     <property name="rowCount"><number>0</number></property>
+     <attribute name="horizontalHeaderDefaultSectionSize"><number>100</number></attribute>
+     <attribute name="verticalHeaderVisible"><bool>false</bool></attribute>
+     <column><property name="text"><string>On</string></property></column>
+     <column><property name="text"><string>Attribute</string></property></column>
+     <column><property name="text"><string>Mode</string></property></column>
+     <column><property name="text"><string>Min</string></property></column>
+     <column><property name="text"><string>Max</string></property></column>
+     <column><property name="text"><string/></property></column>
+    </widget>
+   </item>
+
+   <!-- Button row -->
+   <item>
+    <layout class="QHBoxLayout" name="buttonLayout">
+     <item>
+      <widget class="QPushButton" name="addRowBtn">
+       <property name="text"><string>Add filter row</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="applyBtn">
+       <property name="text"><string>Apply all</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="resetBtn">
+       <property name="text"><string>Reset all filters</string></property>
+      </widget>
+     </item>
+     <item>
+      <spacer name="buttonSpacer"><property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property></spacer>
+     </item>
+     <item>
+      <widget class="QPushButton" name="saveJsonBtn">
+       <property name="text"><string>Save JSON…</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="loadJsonBtn">
+       <property name="text"><string>Load JSON…</string></property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+
+   <item>
+    <widget class="QLabel" name="infoLabel">
+     <property name="text"><string/></property>
+     <property name="styleSheet"><string>color: gray; font-size: 11px;</string></property>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+</ui>

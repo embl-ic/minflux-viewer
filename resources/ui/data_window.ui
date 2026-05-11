@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <!--
+   data_window.ui — per-dataset info card.
+   
+   This is a REFERENCE layout. The current Python implementation
+   (DataWindow in ui/data_window.py) generates the info rows
+   dynamically based on dataset fields. This .ui shows the
+   intended visual arrangement for Designer editing.
+ -->
+ <class>DataWindow</class>
+ <widget class="QWidget" name="DataWindow">
+  <property name="windowTitle">
+   <string>Dataset</string>
+  </property>
+  <property name="minimumSize">
+   <size><width>310</width><height>0</height></size>
+  </property>
+  <property name="sizePolicy">
+   <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+    <horstretch>0</horstretch>
+    <verstretch>0</verstretch>
+   </sizepolicy>
+  </property>
+
+  <layout class="QGridLayout" name="gridLayout">
+   <property name="leftMargin"><number>14</number></property>
+   <property name="topMargin"><number>12</number></property>
+   <property name="rightMargin"><number>14</number></property>
+   <property name="bottomMargin"><number>14</number></property>
+   <property name="verticalSpacing"><number>4</number></property>
+   <property name="horizontalSpacing"><number>12</number></property>
+
+   <!-- Header: dataset filename in bold -->
+   <item row="0" column="0" colspan="2">
+    <widget class="QLabel" name="headerLabel">
+     <property name="text"><string>filename.mat</string></property>
+     <property name="styleSheet">
+      <string>font-weight: bold; font-size: 11pt;</string>
+     </property>
+    </widget>
+   </item>
+
+   <!-- Separator -->
+   <item row="1" column="0" colspan="2">
+    <widget class="QFrame" name="separator">
+     <property name="frameShape"><enum>QFrame::Shape::HLine</enum></property>
+     <property name="frameShadow"><enum>QFrame::Shadow::Sunken</enum></property>
+    </widget>
+   </item>
+
+   <!-- Info rows (populated by Python; shown here for reference) -->
+   <item row="2" column="0">
+    <widget class="QLabel" name="folderKey">
+     <property name="text"><string>Folder</string></property>
+     <property name="styleSheet"><string>color: gray; font-size: 11px;</string></property>
+    </widget>
+   </item>
+   <item row="2" column="1">
+    <widget class="QLabel" name="folderValue">
+     <property name="text"><string>…/experiment/day1/</string></property>
+     <property name="styleSheet"><string>font-size: 11px;</string></property>
+     <property name="wordWrap"><bool>true</bool></property>
+    </widget>
+   </item>
+
+   <item row="3" column="0">
+    <widget class="QLabel" name="loadedKey">
+     <property name="text"><string>Loaded</string></property>
+     <property name="styleSheet"><string>color: gray; font-size: 11px;</string></property>
+    </widget>
+   </item>
+   <item row="3" column="1">
+    <widget class="QLabel" name="loadedValue">
+     <property name="text"><string>2025-Apr-16, 09:31:02</string></property>
+     <property name="styleSheet"><string>font-size: 11px;</string></property>
+    </widget>
+   </item>
+
+   <item row="4" column="0">
+    <widget class="QLabel" name="locsKey">
+     <property name="text"><string>Locs</string></property>
+     <property name="styleSheet"><string>color: gray; font-size: 11px;</string></property>
+    </widget>
+   </item>
+   <item row="4" column="1">
+    <widget class="QLabel" name="locsValue">
+     <property name="text"><string>45,231</string></property>
+     <property name="styleSheet"><string>font-size: 11px;</string></property>
+    </widget>
+   </item>
+
+   <item row="5" column="0">
+    <widget class="QLabel" name="tracesKey">
+     <property name="text"><string>Traces</string></property>
+     <property name="styleSheet"><string>color: gray; font-size: 11px;</string></property>
+    </widget>
+   </item>
+   <item row="5" column="1">
+    <widget class="QLabel" name="tracesValue">
+     <property name="text"><string>1,204</string></property>
+     <property name="styleSheet"><string>font-size: 11px;</string></property>
+    </widget>
+   </item>
+
+   <item row="6" column="0">
+    <widget class="QLabel" name="dimsKey">
+     <property name="text"><string>Dims</string></property>
+     <property name="styleSheet"><string>color: gray; font-size: 11px;</string></property>
+    </widget>
+   </item>
+   <item row="6" column="1">
+    <widget class="QLabel" name="dimsValue">
+     <property name="text"><string>3D  |  5 iterations</string></property>
+     <property name="styleSheet"><string>font-size: 11px;</string></property>
+    </widget>
+   </item>
+
+   <item row="7" column="0" colspan="2">
+    <spacer name="verticalSpacer">
+     <property name="sizeHint"><size><width>0</width><height>6</height></size></property>
+    </spacer>
+   </item>
+
+   <item row="8" column="0" colspan="2">
+    <widget class="QPushButton" name="activateBtn">
+     <property name="text"><string>Set as active</string></property>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+</ui>

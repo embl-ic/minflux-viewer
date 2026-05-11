@@ -1,0 +1,17 @@
+# Track large vendor binaries with Git LFS so they don't bloat the repo history.
+# Run `git lfs install` once before the first push if your remote supports LFS.
+vendor/*.whl filter=lfs diff=lfs merge=lfs -text
+
+# Normalise line endings for text files
+*.py    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.txt   text eol=lf
+
+# Binaries — no line-ending conversion
+*.whl   binary
+*.pyd   binary
+*.dll   binary
+*.so    binary
+*.pyc   binary

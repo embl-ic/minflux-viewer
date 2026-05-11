@@ -1,0 +1,1376 @@
+"""
+minflux_viewer.ui.main_window
+==============================
+Main application window — Fiji-style QMainWindow.
+
+Menu structure
+--------------
+File    — Open / Open recent / Save / Quit
+Edit    — Dataset manager / Filter
+View    — Scatter plot / Histogram / Attribute plot / Log
+Process — Render image  (Phase 3)
+Analysis — Loc precision / Local density  (Phase 4)
+Help    — About
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtGui import (
+    QAction,
+    QActionGroup,
+    QDragEnterEvent,
+    QDropEvent,
+    QIcon,
+    QKeySequence,
+)
+from PyQt6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QFileDialog,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QKeySequenceEdit,
+    QSpinBox,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+    QWidgetAction,
+)
+
+from ..core.app_state import AppState
+from ..core.loader import load_dataset
+from .. import resource_path
+from .data_window import DataWindow
+
+
+# ---------------------------------------------------------------------------
+# Supported file extensions for drag-and-drop and open dialogs
+# ---------------------------------------------------------------------------
+
+_SUPPORTED_EXTS: tuple[str, ...] = (
+    ".mat", ".npy", ".csv", ".tsv", ".xlsx", ".xlsm", ".msr", ".tif", ".tiff",
+)
+
+
+class _GreyMenuAction(QWidgetAction):
+    """Clickable grey menu row backed by a normal QAction."""
+
+    def __init__(self, source: QAction, parent: QMenu) -> None:
+        super().__init__(parent)
+        self._source = source
+        self.setText(source.text())
+        self.setEnabled(source.isEnabled())
+
+    def createWidget(self, parent):  # noqa: N802 - Qt API
+        text = self._source.text().replace("&", "")
+        shortcut = self._source.shortcut().toString()
+        if shortcut:
+            text = f"{text}    {shortcut}"
+        btn = QPushButton(text, parent)
+        btn.setFlat(True)
+        btn.setEnabled(self._source.isEnabled())
+        btn.setStyleSheet(
+            "QPushButton { color: #555555; text-align: left; padding: 4px 28px 4px 6px; "
+            "border: 0; background: transparent; }"
+            "QPushButton:hover { background: palette(highlight); color: palette(highlighted-text); }"
+        )
+        btn.clicked.connect(self._trigger_source)
+        return btn
+
+    def _trigger_source(self) -> None:
+        self._source.trigger()
+        menu = self.parent()
+        if isinstance(menu, QMenu):
+            menu.close()
+
+
+class MainWindow(QMainWindow):
+    """Top-level application window."""
+
+    APP_NAME = "MINFLUX Data Viewer"
+
+    def __init__(self, state: AppState) -> None:
+        super().__init__()
+        self._state = state
+        self._data_windows: dict[int, DataWindow] = {}
+
+        # One instance of each tool window (None = not yet opened)
+        self._scatter_win   = None
+        self._histogram_win = None
+        self._attr_win      = None
+        self._filter_dlg    = None
+        self._ds_manager    = None
+        self._log_win       = None
+        self._console_win   = None
+        self._memory_win    = None
+        self._roi_manager_win = None
+        self._shortcut_actions: dict[str, QAction] = {}
+        self._window_cycle_index = -1
+        # One render window per dataset: {dataset_idx: RenderWindow}
+        self._render_windows: dict[int, "RenderWindow"] = {}
+        # ParaView subprocesses spawned by this session — terminated on exit
+        self._paraview_procs: list = []
+
+        # Apply the generated UI (menus, toolbar, status bar, central widget)
+        from .generated.main_window_ui import Ui_MainWindow
+        self._ui = Ui_MainWindow()
+        self._ui.setupUi(self)
+        self.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
+
+        # Override the central widget with the live drop-target WelcomeWidget.
+        # Designer cannot declare custom widget subclasses without a plugin;
+        # the hint label stays where the designer placed it.
+        self.setCentralWidget(_WelcomeWidget())
+
+        # Status label lives in the status bar
+        self._status_label = QLabel("No data loaded.")
+        self.statusBar().addWidget(self._status_label)
+
+        # The generated UI defines menus and actions but leaves the recent-files
+        # submenu empty — we expose it as self._recent_menu for compatibility
+        # with _populate_recent_menu().
+        self._recent_menu = self._ui.menuOpenRecent
+
+        # Wire actions to handlers (previously spread across _build_menu/_toolbar)
+        self._connect_actions()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+        self._populate_recent_menu()
+        self._populate_plugins_menu()
+
+        # React to application-state changes
+        state.dataset_added.connect(self._on_dataset_added)
+        state.dataset_removed.connect(self._on_dataset_removed)
+        state.active_changed.connect(self._on_active_changed)
+        state.status_message.connect(self._status_label.setText)
+        state.log_message.connect(self._on_log_message)
+
+    # ------------------------------------------------------------------
+    # Action wiring
+    # ------------------------------------------------------------------
+
+    def _connect_actions(self) -> None:
+        """Connect every QAction from the generated UI to its handler."""
+        u = self._ui
+
+        # File menu
+        u.actionOpen.triggered.connect(self._open_dialog)
+        u.actionOpenMsr.triggered.connect(self._open_msr_dialog)
+        self.actionOpenSpreadsheet = QAction("Open spreadsheet data...", self)
+        self.actionOpenSpreadsheet.triggered.connect(self._open_spreadsheet_dialog)
+        self.actionOpenTiff = QAction("Open .tif file...", self)
+        self.actionOpenTiff.triggered.connect(self._open_tiff_dialog)
+        u.actionSave.triggered.connect(self._save_data)
+        u.actionQuit.triggered.connect(self.close)
+
+        # Edit menu
+        u.actionDatasetManager.triggered.connect(self._show_dataset_manager)
+        u.actionFilter.triggered.connect(self._show_filter)
+        u.actionDuplicate.triggered.connect(self._duplicate_active_dataset)
+        u.actionPreferences.triggered.connect(self._show_preferences)
+
+        # View menu
+        u.actionScatter.triggered.connect(self._show_scatter)
+        u.actionHistogram.triggered.connect(self._show_histogram)
+        u.actionAttributePlot.triggered.connect(self._show_attr_plot)
+        u.actionRender.triggered.connect(self._show_render)        # was Process > Render image
+        u.actionShowInfo.triggered.connect(self._show_info_for_active)
+        u.actionLog.triggered.connect(self._show_log)
+        u.actionConsole.triggered.connect(self._show_console)
+        # Brightness & Contrast: removed from menu but the action object is
+        # still defined so the render window's own toolbar button works.
+        u.actionBrightnessContrast.triggered.connect(self._show_brightness_contrast)
+
+        # Analysis menu
+        self.actionMeasure = QAction("Measure", self)
+        self.actionMeasure.triggered.connect(
+            lambda: self._placeholder("Measure", "a later implementation")
+        )
+        self.actionSetMeasurements = QAction("Set Measurements...", self)
+        self.actionSetMeasurements.triggered.connect(self._show_set_measurements)
+        u.actionLocPrecisionFrc.triggered.connect(self._loc_precision_frc)
+        u.actionLocPrecisionCrlb.triggered.connect(self._loc_precision_crlb)
+        u.actionLocPrecisionStdDev.triggered.connect(self._loc_precision_stddev)
+        u.actionLocalDensity.triggered.connect(self._run_local_density)
+        self.menuAnalyzeClustering = QMenu("Clustering", self)
+        self.actionDbscan = QAction("DBSCAN", self)
+        self.actionDbscan.triggered.connect(
+            lambda: self._placeholder("DBSCAN clustering", "a later implementation")
+        )
+        self.actionKNearestNeighbour = QAction("K Nearest Neighbour", self)
+        self.actionKNearestNeighbour.triggered.connect(
+            lambda: self._placeholder("K nearest neighbour", "a later implementation")
+        )
+        self.menuAnalyzeClustering.addAction(self.actionDbscan)
+        self.menuAnalyzeClustering.addAction(self.actionKNearestNeighbour)
+        # Tracking submenu — Phase 5 placeholders
+        u.actionParticleTracking.triggered.connect(
+            lambda: self._placeholder("Particle tracking", "Phase 5")
+        )
+        u.actionTraceViewer.triggered.connect(
+            lambda: self._placeholder("Trace viewer", "Phase 5")
+        )
+        u.actionMsdAnalysis.triggered.connect(
+            lambda: self._placeholder("MSD analysis", "Phase 5")
+        )
+
+        # Process menu — Batch Processing submenu (Phase 5 placeholders)
+        u.actionBatchRender.triggered.connect(
+            lambda: self._placeholder("Batch render", "Phase 5")
+        )
+        u.actionBatchExport.triggered.connect(
+            lambda: self._placeholder("Batch export", "Phase 5")
+        )
+        u.actionBatchFilter.triggered.connect(
+            lambda: self._placeholder("Batch filter", "Phase 5")
+        )
+        self.menuProcessChannel = QMenu("Channel...", self)
+        self.actionChannelTool = QAction("Channel Tool", self)
+        self.actionChannelTool.triggered.connect(
+            lambda: self._placeholder("Channel Tool", "a later implementation")
+        )
+        self.actionChannelOverlay = QAction("Overlay", self)
+        self.actionChannelOverlay.triggered.connect(
+            lambda: self._placeholder("Channel overlay", "a later implementation")
+        )
+        self.menuProcessChannel.addAction(self.actionChannelTool)
+        self.menuProcessChannel.addAction(self.actionChannelOverlay)
+
+        self.menuProcessRoi = QMenu("ROI", self)
+        self.actionRoiManager = QAction("ROI Manager", self)
+        self.actionRoiManager.triggered.connect(self._show_roi_manager)
+        self.menuProcessRoi.addAction(self.actionRoiManager)
+
+        # Help menu
+        u.actionAbout.triggered.connect(self._show_about)
+        u.actionMemoryMonitor.triggered.connect(self._show_memory_monitor)
+
+        # Toolbar duplicates
+        u.toolbarRender.triggered.connect(self._show_render)
+        u.toolbarLog.triggered.connect(self._show_log)
+
+        # Toolbar tools — LUT and Color (the silent-failure bug fix)
+        u.toolLut.triggered.connect(self._show_lut)
+        u.toolColor.triggered.connect(self._show_color_picker)
+        self._roi_tool_group = QActionGroup(self)
+        self._roi_tool_group.setExclusive(True)
+        for action, tool in (
+            (u.toolRect, "rectangle"),
+            (u.toolOval, "oval"),
+            (u.toolPolygon, "polygon"),
+            (u.toolFreehand, "freehand"),
+            (u.toolLine, "line"),
+            (u.toolPoint, "point"),
+        ):
+            self._roi_tool_group.addAction(action)
+            action.triggered.connect(lambda checked, t=tool: self._on_roi_tool(t, checked))
+
+        # Wire icon images for toolbar buttons
+        self._install_toolbar_icons()
+        self._configure_menus()
+        self._mark_ai_unapproved_actions()
+        self._apply_shortcuts()
+
+    # ------------------------------------------------------------------
+    # Menu and shortcuts
+    # ------------------------------------------------------------------
+
+    def _configure_menus(self) -> None:
+        u = self._ui
+
+        u.actionOpen.setText("Open...")
+        u.actionOpenMsr.setText("Open .msr File...")
+        u.actionSave.setText("Save Processed Data...")
+        u.actionQuit.setText("Quit")
+        u.actionDatasetManager.setText("Dataset Manager")
+        u.actionFilter.setText("Filter...")
+        u.actionDuplicate.setText("Duplicate")
+        u.actionPreferences.setText("Preferences...")
+        u.actionHistogram.setText("Attribute Histogram")
+        u.actionScatter.setText("Loc Scatter Plot")
+        u.actionAttributePlot.setText("Attribute Plot")
+        u.actionShowInfo.setText("Show Info...")
+        u.actionRender.setText("Render")
+        u.actionLog.setText("Log (Events)")
+        u.actionConsole.setText("Console (stdout / stderr)")
+        u.actionMemoryMonitor.setText("Monitor Memory...")
+        u.actionLocPrecisionFrc.setText("FRC (Fourier Ring Correlation)")
+        u.actionLocPrecisionCrlb.setText("CRLB (Cramer-Rao Lower Bound)")
+        u.actionLocPrecisionStdDev.setText("StdDev per Trace")
+        u.actionLocalDensity.setText("Local Density")
+        u.actionParticleTracking.setText("Particle Tracking")
+        u.actionTraceViewer.setText("Trace Viewer")
+        u.actionMsdAnalysis.setText("MSD Analysis")
+        u.actionBatchRender.setText("Batch Render...")
+        u.actionBatchExport.setText("Batch Export...")
+        u.actionBatchFilter.setText("Batch Filter...")
+        u.actionAbout.setText("About")
+        self.actionMeasure.setText("Measure")
+        self.actionSetMeasurements.setText("Set Measurements...")
+        self.menuAnalyzeClustering.setTitle("Clustering")
+        self.actionDbscan.setText("DBSCAN")
+        self.actionKNearestNeighbour.setText("K Nearest Neighbour")
+        self.menuProcessChannel.setTitle("Channel...")
+        self.actionChannelTool.setText("Channel Tool")
+        self.actionChannelOverlay.setText("Overlay")
+        self.menuProcessRoi.setTitle("ROI")
+        self.actionRoiManager.setText("ROI Manager")
+        self.actionOpenSpreadsheet.setText("Open Spreadsheet Data...")
+        self.actionOpenTiff.setText("Open .tif File...")
+        u.menuOpenRecent.setTitle("Open Recent")
+        u.menuBatchProcessing.setTitle("Batch Processing")
+        u.menuAnalysis.setTitle("Analyze")
+        u.menuLocPrecision.setTitle("Localization Precision")
+        u.menuTracking.setTitle("Tracking")
+
+        u.menuFile.clear()
+        u.menuFile.addAction(u.actionOpen)
+        u.menuFile.addAction(u.actionOpenMsr)
+        u.menuFile.addAction(self.actionOpenSpreadsheet)
+        u.menuFile.addAction(self.actionOpenTiff)
+        u.menuFile.addAction(u.menuOpenRecent.menuAction())
+        u.menuFile.addSeparator()
+        u.menuFile.addAction(u.actionSave)
+        u.menuFile.addSeparator()
+        u.menuFile.addAction(u.actionQuit)
+
+        u.menuView.clear()
+        u.menuView.addAction(u.actionShowInfo)
+        u.menuView.addSeparator()
+        u.menuView.addAction(u.actionAttributePlot)
+        u.menuView.addAction(u.actionHistogram)
+        u.menuView.addAction(u.actionScatter)
+        u.menuView.addAction(u.actionRender)
+        u.menuView.addSeparator()
+        u.menuView.addAction(u.actionLog)
+
+        u.menuProcess.clear()
+        u.menuProcess.addAction(self.menuProcessChannel.menuAction())
+        u.menuProcess.addAction(self.menuProcessRoi.menuAction())
+        u.menuProcess.addSeparator()
+        u.menuProcess.addAction(u.menuBatchProcessing.menuAction())
+
+        u.menuAnalysis.clear()
+        u.menuAnalysis.addAction(self.actionMeasure)
+        u.menuAnalysis.addAction(self.actionSetMeasurements)
+        u.menuAnalysis.addSeparator()
+        u.menuAnalysis.addAction(u.menuLocPrecision.menuAction())
+        u.menuAnalysis.addAction(u.actionLocalDensity)
+        u.menuAnalysis.addAction(self.menuAnalyzeClustering.menuAction())
+        u.menuAnalysis.addAction(u.menuTracking.menuAction())
+
+        self._shortcut_actions = {
+            "open": u.actionOpen,
+            "open_msr": u.actionOpenMsr,
+            "open_spreadsheet": self.actionOpenSpreadsheet,
+            "open_tiff": self.actionOpenTiff,
+            "save": u.actionSave,
+            "filter": u.actionFilter,
+            "duplicate": u.actionDuplicate,
+            "show_info": u.actionShowInfo,
+            "render": u.actionRender,
+            "attribute_plot": u.actionAttributePlot,
+            "attribute_histogram": u.actionHistogram,
+            "scatter_plot": u.actionScatter,
+            "log": u.actionLog,
+            "console": u.actionConsole,
+        }
+
+    def _mark_ai_unapproved_actions(self) -> None:
+        """Visually separate AI-generated/unapproved actions from approved UI."""
+        u = self._ui
+        actions = [
+            u.actionSave,
+            self.actionOpenSpreadsheet,
+            self.actionOpenTiff,
+            u.actionRender,
+            self.menuProcessChannel.menuAction(),
+            self.actionChannelTool,
+            self.actionChannelOverlay,
+            self.menuProcessRoi.menuAction(),
+            self.actionRoiManager,
+            u.menuBatchProcessing.menuAction(),
+            u.actionBatchRender,
+            u.actionBatchExport,
+            u.actionBatchFilter,
+            self.actionMeasure,
+            self.actionSetMeasurements,
+            u.actionLocPrecisionFrc,
+            u.actionLocPrecisionCrlb,
+            self.actionDbscan,
+            self.actionKNearestNeighbour,
+            u.menuTracking.menuAction(),
+            u.actionParticleTracking,
+            u.actionTraceViewer,
+            u.actionMsdAnalysis,
+            u.actionMemoryMonitor,
+        ]
+        for action in actions:
+            self._mark_action_ai_unapproved(action)
+
+        self._ai_menu_widget_actions = []
+        for menu in (
+            u.menuFile,
+            u.menuView,
+            self.menuProcessChannel,
+            self.menuProcessRoi,
+            u.menuBatchProcessing,
+            u.menuAnalysis,
+            u.menuLocPrecision,
+            self.menuAnalyzeClustering,
+            u.menuTracking,
+            u.menuHelp,
+        ):
+            self._replace_ai_actions_in_menu(menu, set(actions))
+
+    def _mark_action_ai_unapproved(self, action: QAction) -> None:
+        action.setProperty("ai_unapproved", True)
+        tip = action.statusTip() or action.toolTip()
+        note = "AI-generated; pending human approval."
+        action.setStatusTip(f"{tip} {note}".strip() if tip else note)
+        self.addAction(action)
+
+    def _replace_ai_actions_in_menu(self, menu: QMenu, marked: set[QAction]) -> None:
+        for action in list(menu.actions()):
+            if action not in marked:
+                continue
+            grey_action = _GreyMenuAction(action, menu)
+            menu.insertAction(action, grey_action)
+            menu.removeAction(action)
+            self._ai_menu_widget_actions.append(grey_action)
+
+    def _apply_shortcuts(self) -> None:
+        shortcuts = self._state.prefs.get("shortcuts", {})
+        for key, action in self._shortcut_actions.items():
+            seq = str(shortcuts.get(key, "") or "")
+            action.setShortcut(QKeySequence(seq) if seq else QKeySequence())
+            action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._ui.actionPreferences.setShortcut(QKeySequence())
+        self._ui.actionQuit.setShortcut(QKeySequence("Ctrl+Q"))
+        self._ui.actionQuit.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+
+    def _shortcut_text(self, key: str) -> str:
+        return str(self._state.prefs.get("shortcuts", {}).get(key, "") or "")
+
+    def _event_sequence_text(self, event) -> str:
+        key = int(event.key())
+        if key in (
+            int(Qt.Key.Key_Shift), int(Qt.Key.Key_Control),
+            int(Qt.Key.Key_Alt), int(Qt.Key.Key_Meta),
+        ):
+            return ""
+        mods = event.modifiers().value & (
+            Qt.KeyboardModifier.ShiftModifier.value
+            | Qt.KeyboardModifier.ControlModifier.value
+            | Qt.KeyboardModifier.AltModifier.value
+            | Qt.KeyboardModifier.MetaModifier.value
+        )
+        return QKeySequence(mods | key).toString(QKeySequence.SequenceFormat.PortableText)
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() != QEvent.Type.KeyPress:
+            return super().eventFilter(obj, event)
+        seq = self._event_sequence_text(event)
+        if not seq:
+            return super().eventFilter(obj, event)
+        shortcuts = self._state.prefs.get("shortcuts", {})
+        focus = QApplication.focusWidget()
+        editing_text = isinstance(
+            focus,
+            (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QKeySequenceEdit),
+        )
+        has_modifier = bool(event.modifiers().value & (
+            Qt.KeyboardModifier.ControlModifier.value
+            | Qt.KeyboardModifier.AltModifier.value
+            | Qt.KeyboardModifier.MetaModifier.value
+        ))
+        if seq == shortcuts.get("next_window", ""):
+            self._cycle_windows(1)
+            return True
+        if seq == shortcuts.get("previous_window", ""):
+            self._cycle_windows(-1)
+            return True
+        if seq == shortcuts.get("next_dataset", ""):
+            self._cycle_dataset(1)
+            return True
+        if seq == shortcuts.get("previous_dataset", ""):
+            self._cycle_dataset(-1)
+            return True
+        if seq == shortcuts.get("close_window", ""):
+            if editing_text:
+                return super().eventFilter(obj, event)
+            self._close_current_child_window()
+            return True
+        for command, action in self._shortcut_actions.items():
+            if seq and seq == shortcuts.get(command, ""):
+                if editing_text and not has_modifier:
+                    return super().eventFilter(obj, event)
+                if action.isEnabled():
+                    action.trigger()
+                    return True
+        return super().eventFilter(obj, event)
+
+
+
+    # ------------------------------------------------------------------
+    # File loading
+    # ------------------------------------------------------------------
+
+    def _open_dialog(self) -> None:
+        default = self._state.prefs["file"].get("default_folder", str(Path.home()))
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Open MINFLUX data",
+            default,
+            "All supported formats (*.mat *.npy *.csv *.msr);;"
+            "MATLAB (*.mat);;"
+            "NumPy (*.npy);;"
+            "CSV (*.csv);;"
+            "Imspector .msr (*.msr);;"
+            "All files (*)",
+        )
+        for p in paths:
+            self._route_file(p)
+
+    def _open_msr_dialog(self, msr_path: str | None = None) -> None:
+        """Open the MSR import dialog for an .msr file."""
+        if msr_path is None:
+            default = self._state.prefs["file"].get("default_folder", str(Path.home()))
+            msr_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Open Abberior .msr file",
+                default,
+                "Imspector MINFLUX data (*.msr);;All files (*)",
+            )
+        if not msr_path:
+            return
+        from .msr_import_dialog import open_msr
+        open_msr(msr_path, self._state, parent=self)
+
+    def _open_spreadsheet_dialog(self) -> None:
+        try:
+            from .spreadsheet_import_dialog import choose_spreadsheet_and_import
+            dataset = choose_spreadsheet_and_import(self)
+            if dataset is not None:
+                self._state.add_dataset(dataset)
+        except Exception as exc:
+            self._state.log(f"Failed to open spreadsheet data: {exc}", "ERROR")
+            QMessageBox.critical(self, "Open spreadsheet data", str(exc))
+
+    def _open_tiff_dialog(self) -> None:
+        default = self._state.prefs["file"].get("default_folder", str(Path.home()))
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open TIFF image",
+            default,
+            "TIFF image (*.tif *.tiff);;All files (*)",
+        )
+        if path:
+            self._load_tiff(path)
+
+    def _route_file(self, path: str) -> None:
+        """
+        Route a single file path to the correct loader based on extension.
+        Unsupported types are reported to the log.
+        """
+        p   = Path(path)
+        ext = p.suffix.lower()
+
+        if ext == ".mat":
+            self._load_mat(path)
+        elif ext == ".npy":
+            self._load_npy(path)
+        elif ext == ".csv":
+            self._load_csv(path)
+        elif ext in {".tsv", ".xlsx", ".xlsm"}:
+            self._load_spreadsheet(path)
+        elif ext == ".msr":
+            self._open_msr_dialog(path)
+        elif ext in {".tif", ".tiff"}:
+            self._load_tiff(path)
+        else:
+            msg = (
+                f"Unsupported file type: '{p.name}'  "
+                f"(extension '{ext or '(none)'}' is not recognised).  "
+                f"Supported formats: .mat, .npy, .csv, .tsv, .xlsx, .xlsm, .msr, .tif, .tiff"
+            )
+            self._state.log(msg, "WARN")
+            self._status_label.setText(f"Skipped: {p.name} (unsupported type)")
+
+    def _route_path(self, path: str) -> None:
+        """
+        Route a path that may be a file OR a directory.
+        Directories are scanned for all supported files (non-recursive).
+        """
+        p = Path(path)
+        if p.is_dir():
+            found = sorted(
+                f for f in p.iterdir()
+                if f.is_file() and f.suffix.lower() in _SUPPORTED_EXTS
+            )
+            if found:
+                self._state.log(
+                    f"Folder dropped: found {len(found)} supported file(s) in '{p.name}'",
+                    "INFO",
+                )
+                for f in found:
+                    self._route_file(str(f))
+            else:
+                msg = (
+                    f"Folder '{p.name}' contains no supported files "
+                    f"(.mat, .npy, .csv, .tsv, .xlsx, .xlsm, .msr, .tif, .tiff)."
+                )
+                self._state.log(msg, "WARN")
+                self._status_label.setText(f"No supported files in folder: {p.name}")
+        else:
+            self._route_file(path)
+
+    # -- individual loaders ----------------------------------------
+
+    def _load_mat(self, path: str) -> None:
+        self._status_label.setText(f"Loading {Path(path).name}…")
+        self._state.log(f"Opening .mat: {path}", "INFO")
+        try:
+            dataset = load_dataset(path, prefs=self._state.prefs)
+            self._state.add_dataset(dataset)
+        except Exception as exc:
+            self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
+            QMessageBox.critical(self, "Load error", str(exc))
+            self._status_label.setText("Load failed.")
+
+    def _load_npy(self, path: str) -> None:
+        self._status_label.setText(f"Loading {Path(path).name}…")
+        self._state.log(f"Opening .npy: {path}", "INFO")
+        try:
+            from ..core.loader import load_npy
+            dataset = load_npy(path, prefs=self._state.prefs)
+            self._state.add_dataset(dataset)
+        except Exception as exc:
+            self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
+            QMessageBox.critical(self, "Load error", str(exc))
+            self._status_label.setText("Load failed.")
+
+    def _load_csv(self, path: str) -> None:
+        self._status_label.setText(f"Loading {Path(path).name}…")
+        self._state.log(f"Opening .csv: {path}", "INFO")
+        try:
+            from ..core.loader import load_csv
+            dataset = load_csv(path, prefs=self._state.prefs)
+            self._state.add_dataset(dataset)
+        except Exception as exc:
+            self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
+            QMessageBox.critical(self, "Load error", str(exc))
+            self._status_label.setText("Load failed.")
+
+    def _load_spreadsheet(self, path: str) -> None:
+        self._status_label.setText(f"Loading {Path(path).name}…")
+        self._state.log(f"Opening spreadsheet: {path}", "INFO")
+        try:
+            from .spreadsheet_import_dialog import SpreadsheetImportDialog
+            dlg = SpreadsheetImportDialog(path, parent=self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                self._status_label.setText("Spreadsheet import cancelled.")
+                return
+            self._state.add_dataset(dlg.build_dataset())
+        except Exception as exc:
+            self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
+            QMessageBox.critical(self, "Load error", str(exc))
+            self._status_label.setText("Load failed.")
+
+    def _load_tiff(self, path: str) -> None:
+        self._status_label.setText(f"Loading {Path(path).name}…")
+        self._state.log(f"Opening TIFF: {path}", "INFO")
+        try:
+            from ..core.loader import load_tiff
+            dataset = load_tiff(path, prefs=self._state.prefs)
+            self._state.add_dataset(dataset)
+        except Exception as exc:
+            self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
+            QMessageBox.critical(self, "Load error", str(exc))
+            self._status_label.setText("Load failed.")
+
+    def _populate_recent_menu(self) -> None:
+        self._recent_menu.clear()
+        recent = self._state.prefs["file"].get("recent_files", [])
+        if not recent:
+            a = self._recent_menu.addAction("(none)")
+            a.setEnabled(False)
+            return
+        for path in recent:
+            act = QAction(path, self)
+            act.triggered.connect(lambda checked, p=path: self._route_file(p))
+            self._recent_menu.addAction(act)
+
+    def _populate_plugins_menu(self) -> None:
+        """
+        Fill the Plugins menu from the plugin registry.
+
+        Built-in plugins register themselves at import time; third-party
+        plugins that have been imported before this method runs appear here
+        too, in insertion order.
+        """
+        from .. import plugins
+
+        plugins.ensure_loaded()
+        menu = self._ui.menuPlugins
+        menu.clear()
+
+        entries = plugins.available()
+        if not entries:
+            placeholder = menu.addAction("(no plugins registered)")
+            placeholder.setEnabled(False)
+            return
+
+        for entry in entries:
+            act = QAction(entry.name, self)
+            if entry.tooltip:
+                act.setToolTip(entry.tooltip)
+                act.setStatusTip(entry.tooltip)
+            # Capture `entry` per-iteration with a default argument so the
+            # lambda doesn't all point at the last one.
+            act.triggered.connect(
+                lambda _=False, e=entry: e.launch(self._state, self)
+            )
+            if entry.name == "Generate Method Text":
+                self._mark_action_ai_unapproved(act)
+                grey_action = _GreyMenuAction(act, menu)
+                if not hasattr(self, "_ai_menu_widget_actions"):
+                    self._ai_menu_widget_actions = []
+                self._ai_menu_widget_actions.append(grey_action)
+                menu.addAction(grey_action)
+            else:
+                menu.addAction(act)
+
+    # ------------------------------------------------------------------
+    # Tool windows  — open once, raise if already open
+    # ------------------------------------------------------------------
+
+    def _show_scatter(self) -> None:
+        if self._state.active_dataset is None:
+            self._no_data_warning(); return
+        from .scatter_window import ScatterWindow
+        self._scatter_win = _raise_or_create(self._scatter_win, ScatterWindow, self._state)
+
+    def _show_histogram(self) -> None:
+        if self._state.active_dataset is None:
+            self._no_data_warning(); return
+        from .histogram_window import HistogramWindow
+        self._histogram_win = _raise_or_create(self._histogram_win, HistogramWindow, self._state)
+
+    def _show_attr_plot(self) -> None:
+        if self._state.active_dataset is None:
+            self._no_data_warning(); return
+        from .attribute_window import AttributeWindow
+        self._attr_win = _raise_or_create(self._attr_win, AttributeWindow, self._state)
+
+    def _show_filter(self) -> None:
+        if self._state.active_dataset is None:
+            self._no_data_warning(); return
+        from .filter_dialog import FilterDialog
+        self._filter_dlg = _raise_or_create(self._filter_dlg, FilterDialog, self._state)
+
+    def _show_dataset_manager(self) -> None:
+        from .dataset_manager import DatasetManager
+        self._ds_manager = _raise_or_create(self._ds_manager, DatasetManager, self._state)
+
+    def _show_roi_manager(self) -> None:
+        from .roi_manager import RoiManagerWindow
+        self._roi_manager_win = _raise_or_create(self._roi_manager_win, RoiManagerWindow, self._state)
+
+    def _on_roi_tool(self, tool: str, checked: bool) -> None:
+        self._state.rois.set_tool(tool if checked else None)
+        if checked and self._state.rois.active_adapter is None:
+            self._state.log("Select a render, scatter, or attribute plot window before drawing ROIs.", "WARN")
+
+    def _show_log(self) -> None:
+        """Open (or raise) the Log window — structured application events."""
+        self._ensure_log_window(show=True, raise_window=True)
+
+    def _ensure_log_window(self, *, show: bool = True, raise_window: bool = False):
+        from .log_window import LogWindow
+        if self._log_win is None or not self._log_win.isVisible():
+            if self._log_win is None:
+                self._log_win = LogWindow(self._state)
+            if show:
+                self._log_win.show()
+        elif show and not self._log_win.isVisible():
+            self._log_win.show()
+        if raise_window and self._log_win is not None:
+            self._log_win.raise_()
+            self._log_win.activateWindow()
+        return self._log_win
+
+    def _on_log_message(self, message: str, level: str) -> None:
+        was_missing = self._log_win is None
+        win = self._ensure_log_window(show=True, raise_window=False)
+        if was_missing and win is not None:
+            try:
+                win._append(message, level)
+            except Exception:
+                pass
+
+    def _show_console(self) -> None:
+        """Open (or raise) the Console window — raw stdout / stderr stream."""
+        from .console_window import ConsoleWindow
+        if self._console_win is None or not self._console_win.isVisible():
+            if self._console_win is None:
+                self._console_win = ConsoleWindow()
+            self._console_win.show()
+        self._console_win.raise_()
+        self._console_win.activateWindow()
+
+    def _show_brightness_contrast(self) -> None:
+        """
+        Forward to the render window of the currently active dataset.
+        The active dataset follows whichever render window is focused (#2).
+        """
+        if self._state.active_dataset is None:
+            self._no_data_warning()
+            return
+        idx = self._state.active_idx
+        rwin = self._render_windows.get(idx)
+        if rwin is None:
+            # Ensure a render window exists, then open B&C on it
+            self._show_render(idx)
+            rwin = self._render_windows.get(idx)
+        if rwin is not None:
+            rwin._show_brightness_contrast()
+            rwin.raise_()
+
+    def _viewer_windows(self) -> list[QWidget]:
+        app = QApplication.instance()
+        if app is None:
+            return []
+        windows = []
+        for win in app.topLevelWidgets():
+            if win.isVisible() and win.windowTitle():
+                windows.append(win)
+        return windows
+
+    def _cycle_windows(self, direction: int) -> None:
+        windows = self._viewer_windows()
+        if not windows:
+            return
+        active = QApplication.activeWindow()
+        try:
+            idx = windows.index(active)
+        except ValueError:
+            idx = self._window_cycle_index if 0 <= self._window_cycle_index < len(windows) else 0
+        next_idx = (idx + direction) % len(windows)
+        self._window_cycle_index = next_idx
+        win = windows[next_idx]
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _cycle_dataset(self, direction: int) -> None:
+        if not self._state.datasets:
+            self._show_dataset_manager()
+            return
+        current = self._state.active_idx if self._state.active_idx is not None else 0
+        idx = (current + direction) % len(self._state.datasets)
+        self._state.set_active(idx)
+        self._raise_dataset_window(idx)
+
+    def _raise_dataset_window(self, idx: int) -> None:
+        win = self._render_windows.get(idx) or self._data_windows.get(idx)
+        if win is None or win.isHidden():
+            self._show_dataset_manager()
+            return
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _close_current_child_window(self) -> None:
+        active = QApplication.activeWindow()
+        if active is None or active is self:
+            return
+        active.close()
+
+    # ------------------------------------------------------------------
+    # Preferences, memory monitor, duplicate
+    # ------------------------------------------------------------------
+
+    def _show_preferences(self) -> None:
+        """Open the modal Preferences dialog (Edit → Preferences…)."""
+        from .preferences_dialog import PreferencesDialog
+        dlg = PreferencesDialog(self._state, parent=self)
+        dlg.exec()
+        # After OK the dialog has already written prefs + saved; rebuild
+        # any UI bits that depend on them.
+        self._apply_shortcuts()
+        self._populate_recent_menu()
+
+    def _show_set_measurements(self) -> None:
+        from .set_measurements_dialog import SetMeasurementsDialog
+        SetMeasurementsDialog(self._state, parent=self).exec()
+
+    def _show_memory_monitor(self) -> None:
+        """Open (or raise) the memory monitor (Help → Monitor memory…)."""
+        if getattr(self, "_memory_win", None) is None:
+            from .memory_monitor import MemoryMonitor
+            self._memory_win = MemoryMonitor(self._state, parent=self)
+        self._memory_win.show()
+        self._memory_win.raise_()
+        self._memory_win.activateWindow()
+
+    def _duplicate_active_dataset(self) -> None:
+        """
+        Duplicate the active dataset (Edit → Duplicate).
+
+        Creates a deep copy with the current filter mask applied, prefixes
+        the display name with ``DUP_`` and adds it to AppState. The usual
+        signal chain then auto-opens a new render window.
+        """
+        import copy
+        from ..core.dataset import MinfluxDataset, FileInfo
+
+        src = self._state.active_dataset
+        if src is None:
+            self._no_data_warning()
+            return
+
+        try:
+            # Deep-copy the attribute store so edits to one don't leak to the other
+            new_attrs = copy.deepcopy(src.attr)
+            new_prop  = copy.deepcopy(src.prop)
+            new_cali  = copy.deepcopy(getattr(src, "cali", None))
+            new_channel = copy.deepcopy(getattr(src, "channel", None))
+
+            new_name = f"DUP_{src.file.name}"
+            new_file = FileInfo(
+                name=new_name,
+                folder=src.file.folder,
+                datetime=src.file.datetime,
+                raw_data=None,           # don't duplicate the heavy raw blob
+            )
+
+            # Build kwargs only for attributes the dataclass actually has
+            kwargs = dict(file=new_file, prop=new_prop, attr=new_attrs)
+            if new_cali is not None:
+                kwargs["cali"] = new_cali
+            if new_channel is not None:
+                kwargs["channel"] = new_channel
+
+            dup = MinfluxDataset(**kwargs)
+            # Copy filter mask so the duplicated dataset inherits the active view
+            try:
+                dup.filter_mask = src.filter_mask.copy()
+            except Exception:
+                pass
+        except Exception as exc:
+            self._state.log(f"Duplicate failed: {exc}", "ERROR")
+            QMessageBox.critical(self, "Duplicate", str(exc))
+            return
+
+        self._state.add_dataset(dup)
+        self._state.log(f"Duplicated dataset as '{new_name}'.")
+        try:
+            self._state.journal.add(
+                "transform",
+                f"Duplicated dataset '{src.file.name}' as '{new_name}' "
+                f"(filter mask preserved).",
+            )
+        except Exception:
+            pass
+
+    def _show_render(self, dataset_idx: int | None = None) -> None:
+        """
+        Open (or raise) the render window for a dataset.
+        Defaults to the active dataset.
+        """
+        if self._state.active_dataset is None:
+            self._no_data_warning()
+            return
+        idx = dataset_idx if dataset_idx is not None else self._state.active_idx
+        if idx is None:
+            return
+
+        win = self._render_windows.get(idx)
+        if win is not None and not win.isHidden():
+            win.raise_()
+            win.activateWindow()
+            return
+
+        from .render_window import RenderWindow
+        win = RenderWindow(self._state, dataset_idx=idx)
+        win.destroyed.connect(
+            lambda _=None, i=idx: self._render_windows.pop(i, None)
+        )
+        self._render_windows[idx] = win
+        win.show()
+
+    # ------------------------------------------------------------------
+    # ParaView
+    # ------------------------------------------------------------------
+
+    def _save_data(self) -> None:
+        self._placeholder("Save processed data", "Phase 2")
+
+    # ------------------------------------------------------------------
+    # AppState signal handlers
+    # ------------------------------------------------------------------
+
+    def _on_dataset_added(self, idx: int) -> None:
+        ds  = self._state.datasets[idx]
+        win = DataWindow(ds, idx, self._state)
+        offset = idx * 22
+        win.move(120 + offset, 600 - offset)
+        win.show()
+        self._data_windows[idx] = win
+        self._populate_recent_menu()
+
+        # Auto-open a render window for this dataset
+        self._show_render(idx)
+
+    def _on_dataset_removed(self, idx: int) -> None:
+        win = self._data_windows.pop(idx, None)
+        if win is not None:
+            win.close()
+            win.deleteLater()
+
+        rwin = self._render_windows.pop(idx, None)
+        if rwin is not None:
+            rwin.close()
+            rwin.deleteLater()
+
+    def _on_active_changed(self, idx: int) -> None:
+        ds = self._state.datasets[idx]
+        self.setWindowTitle(f"{self.APP_NAME}  —  {ds.name}")
+
+    # ------------------------------------------------------------------
+    # Drag-and-drop  (files AND folders; any supported extension)
+    # ------------------------------------------------------------------
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls():
+            # Accept if at least one URL is a supported file or a directory
+            for url in event.mimeData().urls():
+                p = Path(url.toLocalFile())
+                if p.is_dir() or p.suffix.lower() in _SUPPORTED_EXTS:
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        # Must accept dragMoveEvent too, or Qt cancels the drop mid-drag
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                p = Path(url.toLocalFile())
+                if p.is_dir() or p.suffix.lower() in _SUPPORTED_EXTS:
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        for url in event.mimeData().urls():
+            self._route_path(url.toLocalFile())
+        event.acceptProposedAction()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # LUT / Color / Show Info / Localization Precision / Toolbar icons
+    # ------------------------------------------------------------------
+
+    def _show_lut(self) -> None:
+        """Toolbar LUT button — open the Fiji-style LUT editor (#1 fix)."""
+        active = QApplication.activeWindow()
+        if active is not None and hasattr(active, "open_lut_dialog"):
+            try:
+                active.open_lut_dialog()
+                return
+            except Exception as exc:
+                self._state.log(f"LUT failed for active window: {exc}", "ERROR")
+        if self._state.active_dataset is None:
+            self._no_data_warning(); return
+        idx = self._state.active_idx
+        rwin = self._render_windows.get(idx)
+        if rwin is None:
+            self._show_render(idx)
+            rwin = self._render_windows.get(idx)
+        if rwin is None or not hasattr(rwin, "open_lut_dialog"):
+            QMessageBox.information(
+                self, "LUT",
+                "Open the render view first, then use the LUT button.",
+            )
+            return
+        rwin.open_lut_dialog()
+
+    def _show_color_picker(self) -> None:
+        """Toolbar Color button — pick a single colour for ROIs/render."""
+        from PyQt6.QtWidgets import QColorDialog
+        from PyQt6.QtGui import QColor
+        current = self._state.prefs.get("plot", {}).get("roi_color", "Yellow")
+        # Accept either a name like "Yellow" or a hex string
+        c0 = QColor(current) if QColor(current).isValid() else QColor("yellow")
+        c = QColorDialog.getColor(c0, self, "Choose colour")
+        if not c.isValid():
+            return
+        self._state.prefs.setdefault("plot", {})["roi_color"] = c.name()
+        self._state.save_prefs()
+        self._state.log(f"ROI / single colour set to {c.name()}.")
+
+    def _show_info_for_active(self) -> None:
+        """View → Show Info — open the data-info window for the active dataset."""
+        if self._state.active_dataset is None:
+            self._no_data_warning(); return
+        idx = self._state.active_idx
+        # Reuse the per-dataset DataWindow that's already created on load
+        win = self._data_windows.get(idx)
+        if win is None:
+            from .data_window import DataWindow
+            win = DataWindow(self._state.datasets[idx], idx, self._state)
+            self._data_windows[idx] = win
+        ds = self._state.datasets[idx]
+        win.setWindowTitle(f"Info of {ds.file.name}")
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _loc_precision_frc(self) -> None:
+        from .. import analysis
+        analysis.show_frc_info(self, self._state)
+
+    def _loc_precision_crlb(self) -> None:
+        from .. import analysis
+        analysis.show_crlb_info(self, self._state)
+
+    def _loc_precision_stddev(self) -> None:
+        if self._state.active_dataset is None:
+            self._no_data_warning(); return
+        from .. import analysis
+        analysis.run_stddev_per_trace(self, self._state)
+
+    def _run_local_density(self) -> None:
+        if self._state.active_dataset is None:
+            self._no_data_warning(); return
+        from .. import analysis
+        analysis.run_local_density(self, self._state)
+
+    def _install_toolbar_icons(self) -> None:
+        """Attach PNG icons to the toolbar QActions (item #5)."""
+        from PyQt6.QtGui import QIcon
+        from .. import resource_path
+        icon_dir = resource_path("icons")
+        mapping = {
+            "toolRect":     "rec.png",
+            "toolOval":     "ellipse.png",
+            "toolPolygon":  "polygon.png",
+            "toolFreehand": "free.png",
+            "toolLine":     "line.png",
+            "toolPoint":    "point.png",
+            "toolLut":      "lut.png",
+            "toolColor":    "color.png",
+        }
+        for attr, fname in mapping.items():
+            action = getattr(self._ui, attr, None)
+            if action is None:
+                continue
+            ipath = icon_dir / fname
+            if ipath.exists():
+                action.setIcon(QIcon(str(ipath)))
+
+    def _no_data_warning(self) -> None:        QMessageBox.information(self, "No data", "Please load a dataset first.")
+
+    def _placeholder(self, feature: str, phase: str) -> None:
+        QMessageBox.information(
+            self, feature,
+            f"<b>{feature}</b> will be implemented in {phase}.",
+        )
+
+    def _show_about(self) -> None:
+        from .. import __version__
+        QMessageBox.about(
+            self, f"About {self.APP_NAME}",
+            f"<h3>MINFLUX Data Viewer v{__version__}</h3>"
+            "<p>A Python/Qt GUI tool for reading, processing, visualizing, "
+            "and analyzing Abberior MINFLUX nanoscopy data.</p>"
+            "<p>The viewer was originally developed in MATLAB to support user "
+            "projects at the Advanced Light Microscopy service team of the "
+            "EMBL Imaging Centre.</p>"
+            "<p>It has been rewritten and redesigned in Python with assistance "
+            "from AI agents, with the goals of openness, flexibility, and "
+            "extensibility.</p>"
+            "<p>The interface deliberately follows an ImageJ-like design, so "
+            "biologists can more easily visualize, filter, process, and analyze "
+            "MINFLUX data in a range of formats.</p>"
+            "<p>To support user judgment, functions generated by AI agents that "
+            "have not yet been approved by a human are shown in grey. Human-approved "
+            "or human-scripted functions remain in black.</p>"
+            "<p>EMBL Imaging Centre<br>"
+            "<a href='mailto:ziqiang.huang@embl.de'>ziqiang.huang@embl.de</a></p>",
+        )
+
+    def closeEvent(self, event) -> None:
+        """
+        On shutdown, save prefs and close every child window this viewer
+        owns. Also optionally terminate any ParaView subprocesses we spawned.
+
+        Behaviour is controlled by the pref ``file.close_paraview_on_exit``
+        (default ``True``). Set it to ``False`` to let ParaView survive.
+        """
+        self._state.save_prefs()
+        self._close_all_child_windows()
+        close_paraview = bool(
+            self._state.prefs.get("file", {}).get("close_paraview_on_exit", True)
+        )
+        if close_paraview:
+            self._terminate_paraview_processes()
+        super().closeEvent(event)
+
+    # ------------------------------------------------------------------
+    # Cleanup helpers
+    # ------------------------------------------------------------------
+
+    def _close_all_child_windows(self) -> None:
+        """
+        Close every floating / tool window this main window has created.
+
+        Safe to call repeatedly. Uses ``close()`` (not ``deleteLater``) so
+        each child runs its own ``closeEvent`` (saves its settings, etc.)
+        before being torn down by Qt on the main window's destruction.
+        """
+        # Per-dataset windows
+        for win in list(self._data_windows.values()):
+            try: win.close()
+            except Exception: pass
+        for win in list(self._render_windows.values()):
+            try: win.close()
+            except Exception: pass
+
+        # Singleton tool windows
+        for attr in (
+            "_scatter_win", "_histogram_win", "_attr_win",
+            "_filter_dlg",  "_ds_manager",
+            "_log_win",     "_console_win", "_memory_win", "_roi_manager_win",
+        ):
+            w = getattr(self, attr, None)
+            if w is not None:
+                try: w.close()
+                except Exception: pass
+
+        # Plugin dialogs that stashed themselves on the main window
+        plugin_attr = "_plugin_msr_reader_dialog"
+        w = getattr(self, plugin_attr, None)
+        if w is not None:
+            try: w.close()
+            except Exception: pass
+
+    def _terminate_paraview_processes(self) -> None:
+        """
+        Politely stop every ParaView subprocess spawned during this session.
+
+        ParaView is launched in *detached* mode so it keeps running after
+        the viewer normally. When the user wants the viewer to act as the
+        owner of its children, we clean those subprocesses up here.
+        """
+        import subprocess  # stdlib, no deps
+        if not self._paraview_procs:
+            return
+
+        still_alive = [p for p in self._paraview_procs if p.poll() is None]
+        if not still_alive:
+            return
+
+        self._state.log(
+            f"Terminating {len(still_alive)} ParaView process(es)…",
+            "INFO",
+        )
+        # Graceful shutdown first
+        for p in still_alive:
+            try: p.terminate()
+            except Exception: pass
+        # Give each a couple of seconds, then kill anything still running
+        for p in still_alive:
+            try:
+                p.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    p.kill()
+                except Exception: pass
+            except Exception:
+                pass
+        self._paraview_procs.clear()
+
+
+
+# ---------------------------------------------------------------------------
+# Helper: raise existing window or create a new one
+# ---------------------------------------------------------------------------
+
+def _raise_or_create(existing, cls, state: AppState):
+    """Return *existing* (raised) if still alive, else create a new instance."""
+    if existing is not None:
+        try:
+            if not existing.isHidden():
+                existing.raise_()
+                existing.activateWindow()
+                return existing
+        except RuntimeError:
+            existing = None
+    win = cls(state)
+    win.show()
+    return win
+
+
+# ---------------------------------------------------------------------------
+# Welcome / drop-target widget
+# ---------------------------------------------------------------------------
+
+class _WelcomeWidget(QWidget):
+    """
+    Central drop-target widget.
+
+    Drop events are forwarded to the parent MainWindow, which is the only
+    widget that calls setAcceptDrops(True).  Child widgets must NOT call
+    setAcceptDrops(True) — doing so causes them to silently absorb the drop
+    without forwarding it, so nothing ever loads.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMinimumSize(500, 80)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+
+        hint = QLabel(
+            "Drag files or folders here  ·  supported: .mat  .npy  .csv  .msr  ·  or use  File › Open"
+        )
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setStyleSheet("color: gray; font-size: 12px;")
+        # Prevent the label from intercepting mouse/drag events
+        hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(hint)
+
+    def dragEnterEvent(self, event: "QDragEnterEvent") -> None:  # type: ignore[override]
+        if self.parent() is not None:
+            self.parent().dragEnterEvent(event)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self.parent() is not None:
+            self.parent().dragMoveEvent(event)
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: "QDropEvent") -> None:  # type: ignore[override]
+        if self.parent() is not None:
+            self.parent().dropEvent(event)
+        else:
+            event.ignore()
