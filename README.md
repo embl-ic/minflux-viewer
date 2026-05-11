@@ -1,2 +1,2 @@
-# mfx-viewer-py
+# minflux-viewer
 MINFLUX data viewer [Python] based
