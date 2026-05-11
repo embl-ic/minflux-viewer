@@ -1,7 +1,7 @@
 # MINFLUX Data Viewer
 
 A Fiji-style desktop application for viewing, filtering, and analysing
-[MINFLUX](https://abberior-instruments.com/technology/minflux/) nanoscopy data.
+[MINFLUX](https://www.embl.org/about/info/imaging-centre/super-resolution-imaging/#vf-tabs__section-c46b219a-947a-467f-a169-838b85a0d06b) nanoscopy data.
 
 Python/Qt port of the original MATLAB application developed at the
 [EMBL Imaging Centre](https://www.embl.org/about/info/imaging-centre/).
