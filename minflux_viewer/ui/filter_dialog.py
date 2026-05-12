@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -71,6 +72,12 @@ class FilterDialog(QDialog):
 
         self._build_ui()
         self._populate_attr_lists()
+
+        # Accept JSON filter files dropped anywhere on the dialog.
+        # The table widget must not intercept drops, or they won't reach here.
+        self.setAcceptDrops(True)
+        self._table.setAcceptDrops(False)
+        self._table.viewport().setAcceptDrops(False)
 
         state.active_changed.connect(self._on_active_changed)
 
@@ -323,11 +330,17 @@ class FilterDialog(QDialog):
             json.dump(rows, f, indent=2)
         self._info.setText(f"Saved: {Path(path).name}")
 
-    def _load_json(self) -> None:
-        default_dir = self._state.prefs["file"].get("default_folder", str(Path.home()))
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Load filter", default_dir, "Filter JSON (*.json)"
-        )
+    def _load_json(self, path: str | None = None) -> None:
+        """Load a JSON filter file and APPEND its rows to the table.
+
+        If *path* is None a file-open dialog is shown.  Existing rows are
+        kept; new rows are added at the bottom.
+        """
+        if path is None:
+            default_dir = self._state.prefs["file"].get("default_folder", str(Path.home()))
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Load filter", default_dir, "Filter JSON (*.json)"
+            )
         if not path:
             return
         try:
@@ -337,10 +350,7 @@ class FilterDialog(QDialog):
             QMessageBox.critical(self, "Load error", str(exc))
             return
 
-        # Clear existing rows and repopulate
-        while self._table.rowCount():
-            self._table.removeRow(0)
-
+        added = 0
         for r in rows:
             self._add_row(
                 attr    = r.get("attribute", ""),
@@ -349,7 +359,35 @@ class FilterDialog(QDialog):
                 hi      = float(r.get("max", 1.0)),
                 enabled = bool(r.get("apply", True)),
             )
-        self._info.setText(f"Loaded: {Path(path).name}")
+            added += 1
+        self._info.setText(f"Appended {added} row(s) from {Path(path).name}")
+
+    # ------------------------------------------------------------------
+    # Drag-and-drop  (JSON filter files)
+    # ------------------------------------------------------------------
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.toLocalFile().lower().endswith(".json"):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.toLocalFile().lower().endswith(".json"):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith(".json"):
+                self._load_json(path)
+        event.acceptProposedAction()
 
     # ------------------------------------------------------------------
     # Slots

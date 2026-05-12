@@ -59,6 +59,7 @@ from .data_window import DataWindow
 
 _SUPPORTED_EXTS: tuple[str, ...] = (
     ".mat", ".npy", ".csv", ".tsv", ".xlsx", ".xlsm", ".msr", ".tif", ".tiff",
+    ".json",  # filter preset files
 )
 
 
@@ -599,11 +600,13 @@ class MainWindow(QMainWindow):
             self._open_msr_dialog(path)
         elif ext in {".tif", ".tiff"}:
             self._load_tiff(path)
+        elif ext == ".json":
+            self._load_filter_json(path)
         else:
             msg = (
                 f"Unsupported file type: '{p.name}'  "
                 f"(extension '{ext or '(none)'}' is not recognised).  "
-                f"Supported formats: .mat, .npy, .csv, .tsv, .xlsx, .xlsm, .msr, .tif, .tiff"
+                f"Supported formats: .mat, .npy, .csv, .tsv, .xlsx, .xlsm, .msr, .tif, .tiff, .json"
             )
             self._state.log(msg, "WARN")
             self._status_label.setText(f"Skipped: {p.name} (unsupported type)")
@@ -779,6 +782,16 @@ class MainWindow(QMainWindow):
             self._no_data_warning(); return
         from .filter_dialog import FilterDialog
         self._filter_dlg = _raise_or_create(self._filter_dlg, FilterDialog, self._state)
+
+    def _load_filter_json(self, path: str) -> None:
+        """Open (or raise) the filter dialog and append filters from a JSON file."""
+        from .filter_dialog import FilterDialog
+        if not isinstance(self._filter_dlg, FilterDialog) or not self._filter_dlg.isVisible():
+            self._filter_dlg = _raise_or_create(self._filter_dlg, FilterDialog, self._state)
+        else:
+            self._filter_dlg.raise_()
+            self._filter_dlg.activateWindow()
+        self._filter_dlg._load_json(path)
 
     def _show_dataset_manager(self) -> None:
         from .dataset_manager import DatasetManager
