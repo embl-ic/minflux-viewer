@@ -474,6 +474,7 @@ class RenderWindow(QWidget):
                 "visible": visible,
                 "lut": color_cycle[len(self._channels) % len(color_cycle)],
                 "levels": None,
+                "loc_transform": ds.state.get("render_transform_2d"),
                 "transform": previous_transforms.get(idx, {"dx_nm": 0.0, "dy_nm": 0.0, "angle": 0.0}),
             })
         if len(self._channels) == 1:
@@ -487,6 +488,7 @@ class RenderWindow(QWidget):
                 "visible": True,
                 "lut": "Red",
                 "levels": None,
+                "loc_transform": ds.state.get("render_transform_2d"),
                 "transform": previous_transforms.get(self._idx, {"dx_nm": 0.0, "dy_nm": 0.0, "angle": 0.0}),
             })
 
@@ -550,7 +552,23 @@ class RenderWindow(QWidget):
         if mask.shape[0] == locs.shape[0]:
             locs = locs[mask]
         finite = np.all(np.isfinite(locs[:, :3]), axis=1)
-        return locs[finite, :3]
+        locs = locs[finite, :3]
+        return self._apply_dataset_render_transform(ds, locs)
+
+    def _apply_dataset_render_transform(self, ds, locs: np.ndarray) -> np.ndarray:
+        transform = ds.state.get("render_transform_2d")
+        if not transform:
+            return locs
+        try:
+            matrix = np.asarray(transform.get("matrix_3x3"), dtype=np.float64)
+        except Exception:
+            return locs
+        if matrix.shape != (3, 3) or locs.size == 0:
+            return locs
+        out = locs.copy()
+        xy_h = np.column_stack([out[:, :2], np.ones(out.shape[0], dtype=np.float64)])
+        out[:, :2] = (matrix @ xy_h.T).T[:, :2]
+        return out
 
     def _oriented_locs(self, ds) -> np.ndarray:
         locs = self._dataset_locs(ds)
@@ -875,6 +893,7 @@ class RenderWindow(QWidget):
             depth_key = ("slab", int(self._depth_slider.value()))
         key = (
             ch["dataset_idx"], ch["kind"], self._orientation,
+            self._channel_loc_transform_key(ch),
             round(x0, 3), round(x1, 3), round(y0, 3), round(y1, 3),
             h, w, round(sigma_nm, 3), depth_key,
         )
@@ -892,6 +911,16 @@ class RenderWindow(QWidget):
         if len(self._tile_cache) > _CACHE_LIMIT:
             self._tile_cache.popitem(last=False)
         return tile, count
+
+    def _channel_loc_transform_key(self, ch: dict) -> tuple:
+        transform = ch.get("loc_transform") or {}
+        matrix = transform.get("matrix_3x3") if isinstance(transform, dict) else None
+        if matrix is None:
+            return ()
+        arr = np.asarray(matrix, dtype=np.float64)
+        if arr.shape != (3, 3):
+            return ()
+        return tuple(np.round(arr.ravel(), 6).tolist())
 
     def _localization_tile(self, ds, x0, x1, y0, y1, h, w, sigma_nm, pixel_size_nm) -> tuple[np.ndarray, int]:
         locs = self._oriented_locs(ds)

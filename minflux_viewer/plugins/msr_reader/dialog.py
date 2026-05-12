@@ -1769,6 +1769,65 @@ class MsrReaderDialog(QWidget):
             return plan
         return {key: None for key in all_keys}
 
+    def _ask_viewer_channel_alignment(self, import_plan: dict[str, set[str] | None]) -> bool:
+        if self.parsed.get("mode") != "modern":
+            return False
+        selected = [
+            ds.get("display_name") or ds.get("did") or "dataset"
+            for ds in self.parsed.get("datasets", [])
+            if (ds.get("display_name") or ds.get("did") or "dataset") in import_plan
+        ]
+        if len(selected) < 2:
+            return False
+        answer = QMessageBox.question(
+            self,
+            "Open in MINFLUX viewer",
+            "Apply 2D channel alignment while opening these datasets?\n\n"
+            "The alignment uses bead positions from grd/mbm/points and stores a render transform "
+            "on the moving datasets. Raw localization attributes are not modified.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _viewer_channel_alignment_transforms(self, import_plan: dict[str, set[str] | None]) -> dict[str, dict]:
+        from ...msr import state as MFSTATE
+        from ...msr.alignment import align_channels_from_arrays
+
+        selected = [
+            ds.get("display_name") or ds.get("did") or "dataset"
+            for ds in self.parsed.get("datasets", [])
+            if (ds.get("display_name") or ds.get("did") or "dataset") in import_plan
+        ]
+        if len(selected) < 2:
+            return {}
+        ref_name = selected[0]
+        ref_mbm = MFSTATE.mbm_map.get(ref_name)
+        if ref_mbm is None:
+            raise ValueError(f"Could not find bead points (`grd/mbm/points`) for reference channel {ref_name}.")
+
+        transforms: dict[str, dict] = {}
+        for moving_name in selected[1:]:
+            moving_mbm = MFSTATE.mbm_map.get(moving_name)
+            if moving_mbm is None:
+                raise ValueError(f"Could not find bead points (`grd/mbm/points`) for {moving_name}.")
+            result = align_channels_from_arrays(ref_name, ref_mbm, moving_name, moving_mbm)
+            transforms[moving_name] = {
+                "reference_channel": ref_name,
+                "moving_channel": moving_name,
+                "matrix_3x3": result.matrix_3x3.tolist(),
+                "translation_nm": result.translation.tolist(),
+                "rotation_2x2": result.rotation.tolist(),
+                "matched_bead_count": int(result.bead_ids.size),
+                "rmse_xy_nm": float(result.rmse),
+            }
+            self.log(
+                f"[viewer align] {moving_name} -> {ref_name}; matched {result.bead_ids.size} beads; "
+                f"translation_nm=({result.translation[0]:.3f}, {result.translation[1]:.3f}); "
+                f"rmse_xy_nm={result.rmse:.3f}"
+            )
+        return transforms
+
     # ------------------------------------------------------------------
     # Alignment
     # ------------------------------------------------------------------
@@ -2015,6 +2074,17 @@ class MsrReaderDialog(QWidget):
         imported_indices = []
         errors = []
         render_group_id = f"msr:{msr_path.resolve() if str(msr_path) else 'memory'}:{uuid.uuid4().hex}"
+        viewer_transforms: dict[str, dict] = {}
+        if self._ask_viewer_channel_alignment(import_plan):
+            try:
+                viewer_transforms = self._viewer_channel_alignment_transforms(import_plan)
+            except Exception as exc:
+                self.log(f"[viewer align] failed: {exc}")
+                QMessageBox.warning(
+                    self,
+                    "Open in MINFLUX viewer",
+                    f"Channel alignment could not be computed and will be skipped:\n\n{exc}",
+                )
 
         previous_suspend_auto_render = getattr(self._state, "suspend_auto_render", False)
         self._state.suspend_auto_render = True
@@ -2055,11 +2125,17 @@ class MsrReaderDialog(QWidget):
                     dataset.state["render_group_id"] = render_group_id
                     dataset.metadata["msr_source_path"] = str(msr_path)
                     dataset.metadata["msr_dataset_key"] = key
+                    if key in viewer_transforms:
+                        dataset.state["render_transform_2d"] = viewer_transforms[key]
+                        dataset.metadata["render_transform_2d"] = viewer_transforms[key]
                     idx = self._state.add_dataset(dataset)
                     loaded = self._state.datasets[idx]
                     loaded.state["render_group_id"] = render_group_id
                     loaded.metadata["msr_source_path"] = str(msr_path)
                     loaded.metadata["msr_dataset_key"] = key
+                    if key in viewer_transforms:
+                        loaded.state["render_transform_2d"] = viewer_transforms[key]
+                        loaded.metadata["render_transform_2d"] = viewer_transforms[key]
                     imported_indices.append(idx)
                     imported.append(key)
                     self.log(f"[viewer] '{key}' → {loaded.prop.num_loc:,} loc")
