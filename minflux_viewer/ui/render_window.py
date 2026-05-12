@@ -456,16 +456,17 @@ class RenderWindow(QWidget):
         }
         self._channels = []
         color_cycle = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray"]
-        active_recent = None
+        active_group = None
         if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
             ds0 = self._state.datasets[self._idx]
-            active_recent = ds0.file.recent_path or ds0.file.path
+            active_group = ds0.state.get("render_group_id")
         for idx, ds in enumerate(self._state.datasets):
             if not (ds.has_localizations or ds.image_data is not None):
                 continue
-            source = ds.file.recent_path or ds.file.path
-            same_source = active_recent is not None and source == active_recent
-            visible = idx == self._idx or same_source
+            same_group = active_group is not None and ds.state.get("render_group_id") == active_group
+            if idx != self._idx and not same_group:
+                continue
+            visible = idx == self._idx or same_group
             self._channels.append({
                 "dataset_idx": idx,
                 "name": ds.name,

@@ -1031,8 +1031,10 @@ class MainWindow(QMainWindow):
         self._data_windows[idx] = win
         self._populate_recent_menu()
 
-        # Auto-open a render window for this dataset
-        self._show_render(idx)
+        # Auto-open a render window for this dataset unless a batch importer
+        # will open one grouped render view after adding all channels.
+        if not getattr(self._state, "suspend_auto_render", False):
+            self._show_render(idx)
 
     def _on_dataset_removed(self, idx: int) -> None:
         win = self._data_windows.pop(idx, None)

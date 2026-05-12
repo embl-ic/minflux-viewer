@@ -209,6 +209,9 @@ class AppState(QObject):
         self.rois = RoiStore(self)
         from ..scripting import create_facade
         self.mfv = create_facade(self)
+        # Batch importers can flip this while adding multiple datasets, then
+        # open one grouped render view after the batch is complete.
+        self.suspend_auto_render: bool = False
 
     # ------------------------------------------------------------------
     # Read-only accessors

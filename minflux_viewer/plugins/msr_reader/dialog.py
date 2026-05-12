@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -2011,47 +2012,62 @@ class MsrReaderDialog(QWidget):
 
         msr_path = Path(self.parsed.get("msr", ""))
         imported = []
+        imported_indices = []
         errors = []
+        render_group_id = f"msr:{msr_path.resolve() if str(msr_path) else 'memory'}:{uuid.uuid4().hex}"
 
-        for ds in datasets_info:
-            key = ds.get("display_name") or ds.get("did") or "dataset"
-            if key not in import_plan:
-                continue
-            mfx = MFSTATE.mfx_map.get(key)
+        previous_suspend_auto_render = getattr(self._state, "suspend_auto_render", False)
+        self._state.suspend_auto_render = True
+        try:
+            for ds in datasets_info:
+                key = ds.get("display_name") or ds.get("did") or "dataset"
+                if key not in import_plan:
+                    continue
+                mfx = MFSTATE.mfx_map.get(key)
 
-            if mfx is None:
-                errors.append(f"Dataset '{key}': mfx array not in memory — skipped.")
-                continue
+                if mfx is None:
+                    errors.append(f"Dataset '{key}': mfx array not in memory — skipped.")
+                    continue
 
-            try:
-                field_sel = import_plan.get(key)
-                if field_sel is not None:
-                    names = set(getattr(getattr(mfx, "dtype", None), "names", []) or [])
-                    if "loc" in names and "loc" not in field_sel:
-                        field_sel = set(field_sel)
-                        field_sel.add("loc")
-                        self.log(f"[viewer] added required 'loc' field for '{key}' so it can render.")
-                    mfx_to_load = self._subset_struct_fields(mfx, field_sel)
-                    if mfx_to_load is None:
-                        errors.append(f"Dataset '{key}': selected fields contain no importable mfx data — skipped.")
-                        continue
-                else:
-                    mfx_to_load = mfx
-                display_name = f"{msr_path.stem} / {key}" if msr_path.stem else key
-                dataset = load_from_mfx_array(
-                    mfx=mfx_to_load,
-                    name=display_name,
-                    folder=str(msr_path.parent),
-                    datetime_str=datetime.now().strftime("%Y-%b-%d, %H:%M:%S"),
-                    recent_path=str(msr_path),
-                    prefs=self._state.prefs,
-                )
-                self._state.add_dataset(dataset)
-                imported.append(key)
-                self.log(f"[viewer] '{key}' → {dataset.prop.num_loc:,} loc")
-            except Exception as exc:
-                errors.append(f"Dataset '{key}': {exc}")
-                self.log(f"[error] {key}: {exc}")
+                try:
+                    field_sel = import_plan.get(key)
+                    if field_sel is not None:
+                        names = set(getattr(getattr(mfx, "dtype", None), "names", []) or [])
+                        if "loc" in names and "loc" not in field_sel:
+                            field_sel = set(field_sel)
+                            field_sel.add("loc")
+                            self.log(f"[viewer] added required 'loc' field for '{key}' so it can render.")
+                        mfx_to_load = self._subset_struct_fields(mfx, field_sel)
+                        if mfx_to_load is None:
+                            errors.append(f"Dataset '{key}': selected fields contain no importable mfx data — skipped.")
+                            continue
+                    else:
+                        mfx_to_load = mfx
+                    display_name = f"{msr_path.stem} / {key}" if msr_path.stem else key
+                    dataset = load_from_mfx_array(
+                        mfx=mfx_to_load,
+                        name=display_name,
+                        folder=str(msr_path.parent),
+                        datetime_str=datetime.now().strftime("%Y-%b-%d, %H:%M:%S"),
+                        recent_path=str(msr_path),
+                        prefs=self._state.prefs,
+                    )
+                    dataset.state["render_group_id"] = render_group_id
+                    dataset.metadata["msr_source_path"] = str(msr_path)
+                    dataset.metadata["msr_dataset_key"] = key
+                    idx = self._state.add_dataset(dataset)
+                    loaded = self._state.datasets[idx]
+                    loaded.state["render_group_id"] = render_group_id
+                    loaded.metadata["msr_source_path"] = str(msr_path)
+                    loaded.metadata["msr_dataset_key"] = key
+                    imported_indices.append(idx)
+                    imported.append(key)
+                    self.log(f"[viewer] '{key}' → {loaded.prop.num_loc:,} loc")
+                except Exception as exc:
+                    errors.append(f"Dataset '{key}': {exc}")
+                    self.log(f"[error] {key}: {exc}")
+        finally:
+            self._state.suspend_auto_render = previous_suspend_auto_render
 
         if errors:
             QMessageBox.warning(
@@ -2060,6 +2076,12 @@ class MsrReaderDialog(QWidget):
             )
         if imported:
             self.log(f"[viewer] imported {len(imported)} dataset(s): {', '.join(imported)}")
+            parent = self.parent()
+            if parent is not None and hasattr(parent, "_show_render") and imported_indices:
+                existing = getattr(parent, "_render_windows", {}).get(imported_indices[0])
+                if existing is not None and hasattr(existing, "_refresh_from_dataset"):
+                    existing._refresh_from_dataset()
+                parent._show_render(imported_indices[0])
 
 
 # ---------------------------------------------------------------------------
