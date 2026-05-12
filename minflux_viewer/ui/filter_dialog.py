@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -69,6 +69,11 @@ class FilterDialog(QDialog):
         )
         self.resize(720, 360)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+        # Single-shot timer — debounces rapid edits (spinners) before applying.
+        self._apply_timer = QTimer(self)
+        self._apply_timer.setSingleShot(True)
+        self._apply_timer.timeout.connect(self._apply_all)
 
         self._build_ui()
         self._populate_attr_lists()
@@ -182,31 +187,42 @@ class FilterDialog(QDialog):
         row = self._table.rowCount()
         self._table.insertRow(row)
 
-        # Enabled checkbox
+        # Enabled checkbox — block signals during setup to avoid spurious applies
         chk = QCheckBox()
-        chk.setChecked(enabled)
         chk.setStyleSheet("margin-left: 8px;")
+        chk.blockSignals(True)
+        chk.setChecked(enabled)
+        chk.blockSignals(False)
+        chk.stateChanged.connect(self._apply_all)
         self._table.setCellWidget(row, _COL_ENABLED, chk)
 
         # Attribute combo
         attr_combo = QComboBox()
+        attr_combo.blockSignals(True)
         attr_combo.addItems(self._numeric_attrs)
         if attr in self._numeric_attrs:
             attr_combo.setCurrentText(attr)
         elif self._numeric_attrs:
-            attr_combo.setCurrentText(self._numeric_attrs[0])
+            attr_combo.setCurrentIndex(0)
+        attr_combo.blockSignals(False)
         attr_combo.currentTextChanged.connect(self._auto_fill_range)
+        attr_combo.currentTextChanged.connect(self._apply_all)
         self._table.setCellWidget(row, _COL_ATTR, attr_combo)
 
         # Mode combo
         mode_combo = QComboBox()
+        mode_combo.blockSignals(True)
         mode_combo.addItems(_AGG_MODES)
         mode_combo.setCurrentText(mode)
+        mode_combo.blockSignals(False)
+        mode_combo.currentTextChanged.connect(self._apply_all)
         self._table.setCellWidget(row, _COL_MODE, mode_combo)
 
-        # Min / Max spinners
+        # Min / Max spinners — use debounce timer so dragging doesn't hammer the renderer
         min_spin = _make_spin(lo)
         max_spin = _make_spin(hi)
+        min_spin.valueChanged.connect(lambda _: self._apply_timer.start(400))
+        max_spin.valueChanged.connect(lambda _: self._apply_timer.start(400))
         self._table.setCellWidget(row, _COL_MIN, min_spin)
         self._table.setCellWidget(row, _COL_MAX, max_spin)
 
@@ -220,6 +236,7 @@ class FilterDialog(QDialog):
 
     def _delete_row(self, row: int) -> None:
         self._table.removeRow(row)
+        self._apply_all()  # views update immediately when a row is removed
 
     def _auto_fill_range(self, attr: str, row: int | None = None) -> None:
         """Fill Min/Max spinners with the attribute's actual range."""
@@ -361,6 +378,8 @@ class FilterDialog(QDialog):
             )
             added += 1
         self._info.setText(f"Appended {added} row(s) from {Path(path).name}")
+        if added:
+            self._apply_all()
 
     # ------------------------------------------------------------------
     # Drag-and-drop  (JSON filter files)
