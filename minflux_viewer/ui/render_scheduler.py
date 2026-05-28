@@ -160,11 +160,11 @@ def _render_histogram(
         bins=[tile_px, tile_px],
         range=[[y0, y1], [x0, x1]],
     )
-    sigma_px = (
-        max(sigma_nm[0] / px_nm, 0.5),
-        max(sigma_nm[1] / px_nm, 0.5),
-    )
-    if max(sigma_px) < 30.0:
+    sigma_px = (sigma_nm[0] / px_nm, sigma_nm[1] / px_nm)
+    # Only blur when sigma is large enough to matter; skip for near-zero sigma
+    # (e.g. manual sigma set to MINFLUX precision << pixel size).
+    if max(sigma_px) >= 0.3:
+        sigma_px = (max(sigma_px[0], 0.3), max(sigma_px[1], 0.3))
         hist = gaussian_filter(hist.astype(np.float32), sigma=sigma_px, mode="constant")
     return hist.astype(np.float32, copy=False)
 
@@ -187,8 +187,8 @@ def _render_per_localization(
     if len(x) == 0:
         return result
 
-    sigma_y_px = max(sigma_nm[0] / px_nm, 0.5)
-    sigma_x_px = max(sigma_nm[1] / px_nm, 0.5)
+    sigma_y_px = max(sigma_nm[0] / px_nm, 0.3)
+    sigma_x_px = max(sigma_nm[1] / px_nm, 0.3)
     r_y = int(np.ceil(3.0 * sigma_y_px))
     r_x = int(np.ceil(3.0 * sigma_x_px))
 

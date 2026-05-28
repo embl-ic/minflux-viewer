@@ -1896,7 +1896,9 @@ class RenderWindow(QWidget):
             display_x, display_y = sy, sz
         else:
             display_x, display_y = sx, sy
-        auto_sigma = pixel_size_nm * 1.2
+        # Default: 0.5 px anti-aliasing, not 1.2.  MINFLUX precision is 1–5 nm;
+        # spreading each loc over a full pixel blurs away all spatial detail.
+        auto_sigma = pixel_size_nm * 0.5
         sigma_x = display_x if display_x > 0.0 else auto_sigma
         sigma_y = display_y if display_y > 0.0 else auto_sigma
         return float(sigma_y), float(sigma_x)
