@@ -116,6 +116,7 @@ class PhysicalTileCache:
                 tile_row=key.tile_row,
                 tile_col=key.tile_col,
                 transform_key=key.transform_key,
+                depth_range=key.depth_range,
             )
             coarser = self._cache.get(coarser_key)
             if coarser is not None:
