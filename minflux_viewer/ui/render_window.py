@@ -1395,6 +1395,31 @@ class RenderWindow(QWidget):
                 self._build_channel_grid(ch)
         self._compute_tile_grid_origin()
 
+    def _refresh_depth_state(self) -> None:
+        """Update depth axis bounds and slider from _locs_nm without resetting the viewport.
+
+        Called after a filter change so the depth slider reflects the new
+        filtered range while the pan/zoom position is preserved.
+        """
+        if self._locs_nm is None or self._locs_nm.shape[0] == 0:
+            return
+        o = self._orientation
+        if o == "XY":
+            xy_idx, depth_idx = [0, 1], 2
+        elif o == "XZ":
+            xy_idx, depth_idx = [0, 2], 1
+        elif o == "YZ":
+            xy_idx, depth_idx = [1, 2], 0
+        else:
+            return
+        self._xy    = self._locs_nm[:, xy_idx]
+        self._depth = self._locs_nm[:, depth_idx]
+        self._bounds_depth = (float(self._depth.min()), float(self._depth.max()))
+        self._has_depth = (self._bounds_depth[1] - self._bounds_depth[0]) > 1.0
+        # Clamp the active depth range to the new data bounds without resetting it
+        self._depth_slider.set_limits(*self._bounds_depth, reset_range=False)
+        self._update_depth_label()
+
     def _increment_mask_version(self, dataset_id: int) -> None:
         self._mask_versions[dataset_id] = self._mask_versions.get(dataset_id, 0) + 1
 
@@ -2022,15 +2047,13 @@ class RenderWindow(QWidget):
     def _on_filter_changed(self, idx: int) -> None:
         if any(ch["dataset_idx"] == idx for ch in self._channels):
             self._increment_mask_version(idx)
-            # Rebuild grids for this dataset's channels
             for ch in self._channels:
                 if ch["dataset_idx"] == idx and ch["kind"] == "localizations":
                     self._build_channel_grid(ch)
             self._compute_tile_grid_origin()
-            # Refresh locs_nm for primary channel (depth range display)
+            # Update depth slider range without touching the viewport
             if self._channels and self._channels[0]["dataset_idx"] == idx:
                 self._locs_nm = self._channel_locs(self._channels[0])
-                if self._locs_nm is not None and self._locs_nm.shape[0] > 0:
-                    self._apply_orientation()
+                self._refresh_depth_state()
             self._scheduler.cancel()
             self._schedule_render()
