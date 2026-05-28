@@ -360,6 +360,12 @@ class AppState(QObject):
         qs.setValue("prefs", json.dumps(self.prefs))
 
     def _record_recent(self, path: str) -> None:
+        try:
+            path_obj = Path(path)
+        except (TypeError, ValueError):
+            return
+        if not path_obj.is_file():
+            return
         recent = self.prefs["file"].setdefault("recent_files", [])
         if path in recent:
             recent.remove(path)
@@ -367,5 +373,5 @@ class AppState(QObject):
         limit = self.prefs["file"].get("num_file_history", 10)
         self.prefs["file"]["recent_files"] = recent[:limit]
         if self.prefs["file"].get("keep_last_folder", True):
-            self.prefs["file"]["default_folder"] = str(Path(path).parent)
+            self.prefs["file"]["default_folder"] = str(path_obj.parent)
         self.save_prefs()

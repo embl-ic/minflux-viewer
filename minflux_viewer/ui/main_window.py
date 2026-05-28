@@ -59,7 +59,7 @@ from .data_window import DataWindow
 
 _SUPPORTED_EXTS: tuple[str, ...] = (
     ".mat", ".npy", ".csv", ".tsv", ".xlsx", ".xlsm", ".msr", ".tif", ".tiff",
-    ".json",  # filter preset files
+    ".json",
 )
 
 
@@ -127,6 +127,8 @@ class MainWindow(QMainWindow):
         self._ui = Ui_MainWindow()
         self._ui.setupUi(self)
         self.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
+        self._ui.toolbar.setWindowTitle("Main Toolbar")
+        self._ui.toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
 
         # Override the central widget with the live drop-target WelcomeWidget.
         # Designer cannot declare custom widget subclasses without a plugin;
@@ -156,6 +158,10 @@ class MainWindow(QMainWindow):
         state.active_changed.connect(self._on_active_changed)
         state.status_message.connect(self._status_label.setText)
         state.log_message.connect(self._on_log_message)
+
+    def createPopupMenu(self):  # noqa: N802 - Qt override
+        """Suppress Qt's default toolbar visibility popup on right-click."""
+        return None
 
     # ------------------------------------------------------------------
     # Action wiring
@@ -534,11 +540,13 @@ class MainWindow(QMainWindow):
             self,
             "Open MINFLUX data",
             default,
-            "All supported formats (*.mat *.npy *.csv *.msr);;"
+            "All supported formats (*.mat *.npy *.csv *.tsv *.xlsx *.xlsm *.msr *.tif *.tiff *.json);;"
             "MATLAB (*.mat);;"
             "NumPy (*.npy);;"
-            "CSV (*.csv);;"
+            "Tables (*.csv *.tsv *.xlsx *.xlsm);;"
             "Imspector .msr (*.msr);;"
+            "TIFF image (*.tif *.tiff);;"
+            "MINFLUX JSON / filter preset (*.json);;"
             "All files (*)",
         )
         for p in paths:
@@ -601,7 +609,7 @@ class MainWindow(QMainWindow):
         elif ext in {".tif", ".tiff"}:
             self._load_tiff(path)
         elif ext == ".json":
-            self._load_filter_json(path)
+            self._load_json(path)
         else:
             msg = (
                 f"Unsupported file type: '{p.name}'  "
@@ -632,7 +640,7 @@ class MainWindow(QMainWindow):
             else:
                 msg = (
                     f"Folder '{p.name}' contains no supported files "
-                    f"(.mat, .npy, .csv, .tsv, .xlsx, .xlsm, .msr, .tif, .tiff)."
+                    f"(.mat, .npy, .csv, .tsv, .xlsx, .xlsm, .msr, .tif, .tiff, .json)."
                 )
                 self._state.log(msg, "WARN")
                 self._status_label.setText(f"No supported files in folder: {p.name}")
@@ -701,6 +709,26 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
             QMessageBox.critical(self, "Load error", str(exc))
+            self._status_label.setText("Load failed.")
+
+    def _load_json(self, path: str) -> None:
+        self._status_label.setText(f"Loading {Path(path).name}…")
+        self._state.log(f"Opening JSON: {path}", "INFO")
+        try:
+            from ..core.loader import load_json
+            dataset = load_json(path, prefs=self._state.prefs)
+            self._state.add_dataset(dataset)
+            return
+        except Exception as data_exc:
+            try:
+                from .filter_dialog import is_filter_json_file
+                if is_filter_json_file(path):
+                    self._load_filter_json(path)
+                    return
+            except Exception:
+                pass
+            self._state.log(f"Failed to load JSON '{Path(path).name}': {data_exc}", "ERROR")
+            QMessageBox.critical(self, "Load error", str(data_exc))
             self._status_label.setText("Load failed.")
 
     def _populate_recent_menu(self) -> None:

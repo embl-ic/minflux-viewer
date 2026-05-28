@@ -366,6 +366,13 @@ class FilterDialog(QDialog):
         except Exception as exc:
             QMessageBox.critical(self, "Load error", str(exc))
             return
+        if not is_filter_json_payload(rows):
+            QMessageBox.critical(
+                self,
+                "Load error",
+                f"'{Path(path).name}' is not a MINFLUX Viewer filter preset.",
+            )
+            return
 
         added = 0
         for r in rows:
@@ -388,7 +395,8 @@ class FilterDialog(QDialog):
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.toLocalFile().lower().endswith(".json"):
+                path = url.toLocalFile()
+                if path.lower().endswith(".json") and is_filter_json_file(path):
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -396,7 +404,8 @@ class FilterDialog(QDialog):
     def dragMoveEvent(self, event) -> None:
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.toLocalFile().lower().endswith(".json"):
+                path = url.toLocalFile()
+                if path.lower().endswith(".json") and is_filter_json_file(path):
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -427,6 +436,35 @@ def _make_spin(value: float) -> QDoubleSpinBox:
     spin.setValue(value)
     spin.setSingleStep(abs(value) * 0.01 if value != 0 else 0.01)
     return spin
+
+
+def is_filter_json_file(path: str) -> bool:
+    """Return True only for JSON files shaped like saved filter rows."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return False
+    return is_filter_json_payload(payload)
+
+
+def is_filter_json_payload(payload) -> bool:
+    """Validate the lightweight filter-preset JSON schema."""
+    if not isinstance(payload, list):
+        return False
+    if not payload:
+        return True
+    filter_keys = {"apply", "attribute", "value_as", "min", "max"}
+    data_keys = {"loc", "lnc", "ext", "tid", "tim", "itr", "vld", "efo", "cfr", "dcr"}
+    for row in payload:
+        if not isinstance(row, dict):
+            return False
+        keys = set(row.keys())
+        if keys & data_keys:
+            return False
+        if not keys & filter_keys:
+            return False
+    return True
 
 
 def _compute_mask(

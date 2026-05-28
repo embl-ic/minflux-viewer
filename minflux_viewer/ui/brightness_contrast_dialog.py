@@ -1,20 +1,19 @@
 """
 minflux_viewer.ui.brightness_contrast_dialog
 =============================================
-ImageJ/Fiji-style Brightness & Contrast dialog.
-
-Two sliders control the low and high display levels that map to the
-colormap limits. Moving them live-updates the image via the
-``on_levels_changed(lo, hi)`` callback.
+Fiji-style Brightness & Contrast dialog for rendered scalar tiles.
 """
 
 from __future__ import annotations
 
 from typing import Callable
 
+import numpy as np
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QGridLayout,
     QHBoxLayout,
@@ -26,36 +25,97 @@ from PyQt6.QtWidgets import (
 )
 
 
-# Slider resolution (integer range); mapped linearly onto the data range.
 _SLIDER_RES = 1000
+
+
+class HistogramPreview(QWidget):
+    """Small ImageJ/Fiji-like histogram and transfer-function preview."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._hist = np.zeros(128, dtype=float)
+        self._data_min = 0.0
+        self._data_max = 1.0
+        self._lo = 0.0
+        self._hi = 1.0
+        self.setMinimumSize(150, 70)
+
+    def set_state(
+        self,
+        hist: np.ndarray,
+        data_min: float,
+        data_max: float,
+        lo: float,
+        hi: float,
+    ) -> None:
+        self._hist = np.asarray(hist, dtype=float).ravel()
+        self._data_min = float(data_min)
+        self._data_max = float(data_max if data_max > data_min else data_min + 1.0)
+        self._lo = float(lo)
+        self._hi = float(hi)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        rect = self.rect().adjusted(1, 1, -2, -2)
+        painter.fillRect(rect, QColor("white"))
+        painter.setPen(QPen(QColor("black"), 1))
+        painter.drawRect(rect)
+
+        if self._hist.size:
+            hist = np.log1p(np.maximum(self._hist, 0.0))
+            peak = float(hist.max()) if hist.size else 0.0
+            if peak > 0.0:
+                w = max(rect.width() - 2, 1)
+                h = max(rect.height() - 2, 1)
+                x0 = rect.left() + 1
+                y_base = rect.bottom() - 1
+                painter.setPen(QPen(QColor(255, 0, 0), 1))
+                for i, value in enumerate(hist):
+                    x = x0 + int(round(i * w / max(hist.size - 1, 1)))
+                    y = y_base - int(round((float(value) / peak) * h))
+                    painter.drawLine(x, y_base, x, y)
+
+        span = self._data_max - self._data_min
+        lo_frac = np.clip((self._lo - self._data_min) / span, 0.0, 1.0)
+        hi_frac = np.clip((self._hi - self._data_min) / span, 0.0, 1.0)
+        x_lo = rect.left() + int(round(lo_frac * rect.width()))
+        x_hi = rect.left() + int(round(hi_frac * rect.width()))
+        painter.setPen(QPen(QColor("black"), 1))
+        painter.drawLine(x_lo, rect.bottom(), x_hi, rect.top())
 
 
 class BrightnessContrastDialog(QDialog):
     """
-    Fiji-style B&C dialog with Min / Max sliders.
+    Brightness/contrast dialog with live Min/Max controls.
 
     Callbacks:
-      on_levels_changed(lo, hi) — called live whenever sliders move
-      on_auto()                 — called when 'Auto' is clicked
-      on_reset()                — called when 'Reset' is clicked
+      on_levels_changed(lo, hi) - called live whenever levels change
+      on_auto()                 - called when Auto is clicked
+      on_reset()                - called when Reset is clicked
     """
 
     def __init__(
         self,
         on_levels_changed: Callable[[float, float], None],
-        on_auto: Callable[[bool], None] | None = None,
+        on_auto: Callable[[], None] | None = None,
         on_reset: Callable[[], None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._on_levels = on_levels_changed
-        self._on_auto   = on_auto
-        self._on_reset  = on_reset
+        self._on_auto = on_auto
+        self._on_reset = on_reset
 
+        self._pixels = np.empty(0, dtype=float)
+        self._hist = np.zeros(128, dtype=float)
         self._data_min = 0.0
         self._data_max = 1.0
-        self._lo       = 0.0
-        self._hi       = 1.0
+        self._lo = 0.0
+        self._hi = 1.0
+        self._levels_initialized = False
 
         self.setWindowTitle("Brightness / Contrast")
         self.setWindowFlags(
@@ -63,186 +123,198 @@ class BrightnessContrastDialog(QDialog):
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
-        self.resize(360, 170)
+        self.resize(230, 230)
         self._build_ui()
-
-    # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(6)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(4)
+
+        self._histogram = HistogramPreview(self)
+        root.addWidget(self._histogram)
+
+        range_row = QHBoxLayout()
+        self._data_min_label = QLabel("0")
+        self._data_max_label = QLabel("1")
+        range_row.addWidget(self._data_min_label)
+        range_row.addStretch()
+        range_row.addWidget(self._data_max_label)
+        root.addLayout(range_row)
 
         grid = QGridLayout()
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(4)
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(2)
 
-        # Min row
-        grid.addWidget(QLabel("Min"), 0, 0)
         self._min_slider = QSlider(Qt.Orientation.Horizontal)
         self._min_slider.setRange(0, _SLIDER_RES)
-        self._min_slider.setValue(0)
         self._min_slider.valueChanged.connect(self._on_slider_changed)
-        grid.addWidget(self._min_slider, 0, 1)
-
-        self._min_spin = QDoubleSpinBox()
-        self._min_spin.setDecimals(3)
-        self._min_spin.setRange(-1e12, 1e12)
-        self._min_spin.setKeyboardTracking(False)
+        self._min_spin = self._make_spin()
         self._min_spin.editingFinished.connect(self._on_spin_changed)
-        grid.addWidget(self._min_spin, 0, 2)
+        grid.addWidget(QLabel("Minimum"), 0, 0, 1, 2, Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(self._min_slider, 1, 0)
+        grid.addWidget(self._min_spin, 1, 1)
 
-        # Max row
-        grid.addWidget(QLabel("Max"), 1, 0)
         self._max_slider = QSlider(Qt.Orientation.Horizontal)
         self._max_slider.setRange(0, _SLIDER_RES)
-        self._max_slider.setValue(_SLIDER_RES)
         self._max_slider.valueChanged.connect(self._on_slider_changed)
-        grid.addWidget(self._max_slider, 1, 1)
-
-        self._max_spin = QDoubleSpinBox()
-        self._max_spin.setDecimals(3)
-        self._max_spin.setRange(-1e12, 1e12)
-        self._max_spin.setKeyboardTracking(False)
+        self._max_spin = self._make_spin()
         self._max_spin.editingFinished.connect(self._on_spin_changed)
-        grid.addWidget(self._max_spin, 1, 2)
-
+        grid.addWidget(QLabel("Maximum"), 2, 0, 1, 2, Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(self._max_slider, 3, 0)
+        grid.addWidget(self._max_spin, 3, 1)
         root.addLayout(grid)
 
-        # Status
         self._info_label = QLabel("")
         self._info_label.setStyleSheet("color: gray; font-size: 11px;")
         root.addWidget(self._info_label)
 
-        # Buttons
-        btns = QHBoxLayout()
+        buttons = QGridLayout()
         self._auto_btn = QPushButton("Auto")
         self._auto_btn.setCheckable(True)
-        self._auto_btn.setToolTip(
-            "Toggle dynamic auto brightness/contrast (0.35 % saturation, updates with view)"
-        )
         self._auto_btn.clicked.connect(self._on_auto_clicked)
-        btns.addWidget(self._auto_btn)
-
         reset_btn = QPushButton("Reset")
-        reset_btn.setToolTip("Revert to automatic levels on every render")
         reset_btn.clicked.connect(self._on_reset_clicked)
-        btns.addWidget(reset_btn)
+        set_btn = QPushButton("Set")
+        set_btn.clicked.connect(self._on_set_clicked)
+        buttons.addWidget(self._auto_btn, 0, 0)
+        buttons.addWidget(reset_btn, 0, 1)
+        buttons.addWidget(set_btn, 1, 0, 1, 2)
+        root.addLayout(buttons)
 
-        btns.addStretch()
+    def _make_spin(self) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setDecimals(4)
+        spin.setRange(-1e12, 1e12)
+        spin.setKeyboardTracking(False)
+        return spin
 
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        btns.addWidget(close_btn)
-
-        root.addLayout(btns)
-
-    # ------------------------------------------------------------------
-    # Public API — called from RenderWindow
-    # ------------------------------------------------------------------
+    def set_data(self, pixels: np.ndarray) -> None:
+        values = np.asarray(pixels, dtype=float).ravel()
+        values = values[np.isfinite(values)]
+        self._pixels = values
+        if values.size == 0:
+            self.set_data_range(0.0, 1.0)
+            return
+        self.set_data_range(float(values.min()), float(values.max()))
 
     def set_data_range(self, data_min: float, data_max: float) -> None:
-        """Tell the dialog the current image's data range."""
         if data_max <= data_min:
-            data_max = data_min + 1e-9
+            data_max = data_min + 1.0
         self._data_min = float(data_min)
         self._data_max = float(data_max)
-        # Keep spin box range generous so user can push beyond the data range
-        span = self._data_max - self._data_min
-        self._min_spin.setRange(self._data_min - span, self._data_max + span)
-        self._max_spin.setRange(self._data_min - span, self._data_max + span)
-        self._min_spin.setSingleStep(span / 100.0 if span > 0 else 1.0)
-        self._max_spin.setSingleStep(span / 100.0 if span > 0 else 1.0)
-        # If levels are unset, default them to the full data range
-        if self._lo == 0.0 and self._hi == 1.0:
-            self.set_levels(self._data_min, self._data_max)
+        if self._pixels.size:
+            self._hist, _ = np.histogram(
+                self._pixels,
+                bins=128,
+                range=(self._data_min, self._data_max),
+            )
         else:
-            self._update_controls_from_levels()
+            self._hist = np.zeros(128, dtype=float)
+
+        span = self._data_max - self._data_min
+        for spin in (self._min_spin, self._max_spin):
+            spin.setRange(self._data_min - span, self._data_max + span)
+            spin.setSingleStep(span / 100.0 if span > 0 else 1.0)
+        if not self._levels_initialized or self._hi <= self._lo:
+            self._lo, self._hi = self._data_min, self._data_max
+        self._update_controls_from_levels()
 
     def set_levels(self, lo: float, hi: float) -> None:
-        """Externally set the current levels (e.g. from Auto)."""
         if hi <= lo:
-            hi = lo + 1e-9
+            hi = lo + 1.0
         self._lo, self._hi = float(lo), float(hi)
+        self._levels_initialized = True
         self._update_controls_from_levels()
 
     def set_auto_state(self, checked: bool) -> None:
-        """Update the Auto button's checked state without firing the callback."""
         self._auto_btn.blockSignals(True)
-        self._auto_btn.setChecked(checked)
+        self._auto_btn.setChecked(bool(checked))
         self._auto_btn.blockSignals(False)
 
-    # ------------------------------------------------------------------
-    # Internal — slider/spin synchronisation
-    # ------------------------------------------------------------------
-
     def _update_controls_from_levels(self) -> None:
-        """Push current (_lo, _hi) to sliders AND spin boxes, suppressing signals."""
         span = self._data_max - self._data_min
         frac_lo = (self._lo - self._data_min) / span if span > 0 else 0.0
         frac_hi = (self._hi - self._data_min) / span if span > 0 else 1.0
 
-        for w in (self._min_slider, self._max_slider, self._min_spin, self._max_spin):
-            w.blockSignals(True)
-
-        self._min_slider.setValue(int(round(frac_lo * _SLIDER_RES)))
-        self._max_slider.setValue(int(round(frac_hi * _SLIDER_RES)))
+        for widget in (self._min_slider, self._max_slider, self._min_spin, self._max_spin):
+            widget.blockSignals(True)
+        self._min_slider.setValue(int(round(np.clip(frac_lo, 0.0, 1.0) * _SLIDER_RES)))
+        self._max_slider.setValue(int(round(np.clip(frac_hi, 0.0, 1.0) * _SLIDER_RES)))
         self._min_spin.setValue(self._lo)
         self._max_spin.setValue(self._hi)
+        for widget in (self._min_slider, self._max_slider, self._min_spin, self._max_spin):
+            widget.blockSignals(False)
 
-        for w in (self._min_slider, self._max_slider, self._min_spin, self._max_spin):
-            w.blockSignals(False)
-
-        self._update_info()
-
-    def _update_info(self) -> None:
-        self._info_label.setText(
-            f"data [{self._data_min:.3g}, {self._data_max:.3g}]   "
-            f"levels [{self._lo:.3g}, {self._hi:.3g}]"
+        self._data_min_label.setText(f"{self._data_min:.4g}")
+        self._data_max_label.setText(f"{self._data_max:.4g}")
+        self._info_label.setText(f"levels [{self._lo:.4g}, {self._hi:.4g}]")
+        self._histogram.set_state(
+            self._hist,
+            self._data_min,
+            self._data_max,
+            self._lo,
+            self._hi,
         )
-
-    # ------------------------------------------------------------------
-    # Signal handlers
-    # ------------------------------------------------------------------
 
     def _on_slider_changed(self, _value: int) -> None:
         span = self._data_max - self._data_min
         lo = self._data_min + (self._min_slider.value() / _SLIDER_RES) * span
         hi = self._data_min + (self._max_slider.value() / _SLIDER_RES) * span
-        # Keep lo < hi
         if hi <= lo:
+            step = max(span / _SLIDER_RES, np.finfo(float).eps)
             if self.sender() is self._min_slider:
-                lo = max(self._data_min, hi - span / _SLIDER_RES)
+                lo = hi - step
             else:
-                hi = min(self._data_max, lo + span / _SLIDER_RES)
-        self._lo, self._hi = lo, hi
-        self._min_spin.blockSignals(True); self._min_spin.setValue(lo); self._min_spin.blockSignals(False)
-        self._max_spin.blockSignals(True); self._max_spin.setValue(hi); self._max_spin.blockSignals(False)
-        self._update_info()
-        self._disable_auto_if_active()
-        self._on_levels(lo, hi)
+                hi = lo + step
+        self._apply_levels(lo, hi)
 
     def _on_spin_changed(self) -> None:
-        lo, hi = self._min_spin.value(), self._max_spin.value()
+        lo = float(self._min_spin.value())
+        hi = float(self._max_spin.value())
         if hi <= lo:
-            hi = lo + 1e-9
-            self._max_spin.blockSignals(True); self._max_spin.setValue(hi); self._max_spin.blockSignals(False)
-        self._lo, self._hi = lo, hi
-        self._update_controls_from_levels()   # re-sync sliders
-        self._disable_auto_if_active()
-        self._on_levels(lo, hi)
+            hi = lo + np.finfo(float).eps
+        self._apply_levels(lo, hi)
 
-    def _disable_auto_if_active(self) -> None:
-        """Uncheck Auto and notify parent when the user manually overrides levels."""
-        if self._auto_btn.isChecked():
-            self._auto_btn.setChecked(False)
-            if self._on_auto is not None:
-                self._on_auto(False)
+    def _apply_levels(self, lo: float, hi: float) -> None:
+        self._lo, self._hi = float(lo), float(hi)
+        self._levels_initialized = True
+        self._update_controls_from_levels()
+        self._on_levels(self._lo, self._hi)
 
-    def _on_auto_clicked(self, checked: bool) -> None:
+    def _on_auto_clicked(self) -> None:
         if self._on_auto is not None:
-            self._on_auto(checked)
+            self._on_auto()
 
     def _on_reset_clicked(self) -> None:
         if self._on_reset is not None:
             self._on_reset()
+
+    def _on_set_clicked(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set Brightness / Contrast")
+        layout = QVBoxLayout(dialog)
+        grid = QGridLayout()
+        layout.addLayout(grid)
+        min_spin = self._make_spin()
+        max_spin = self._make_spin()
+        span = self._data_max - self._data_min
+        for spin, value in ((min_spin, self._lo), (max_spin, self._hi)):
+            spin.setRange(self._data_min - span, self._data_max + span)
+            spin.setValue(float(value))
+        grid.addWidget(QLabel("Minimum"), 0, 0)
+        grid.addWidget(min_spin, 0, 1)
+        grid.addWidget(QLabel("Maximum"), 1, 0)
+        grid.addWidget(max_spin, 1, 1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            lo = float(min_spin.value())
+            hi = float(max_spin.value())
+            if hi <= lo:
+                hi = lo + np.finfo(float).eps
+            self._apply_levels(lo, hi)

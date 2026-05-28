@@ -29,8 +29,10 @@ supported.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import scipy.io as sio
@@ -45,7 +47,6 @@ from .dataset import (
     build_image_dataset,
     build_localization_dataset,
 )
-
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -900,6 +901,233 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
         cali=Calibration(),
         channel=Channel(),
     )
+
+
+def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
+    """
+    Load Abberior-style MINFLUX JSON localization records.
+
+    The expected shape is a list of record dictionaries, or a dictionary with
+    an ``mfx``/``records``/``data`` list. Coordinates are expected either in a
+    vector field such as ``loc``/``lnc``/``ext`` using metres, or in explicit
+    nanometre columns such as ``xnm``/``ynm``. The dataset is normalized into
+    the existing internal ``loc_x``/``loc_y``/``loc_z`` metre convention so all
+    current render, filter, plot, and analysis paths keep working.
+    """
+    path = Path(path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    with open(path, encoding="utf-8") as f:
+        payload = json.load(f)
+
+    records = _extract_json_records(payload)
+    if records is None or not _looks_like_minflux_json_records(records):
+        raise ValueError(
+            f"'{path.name}' is not recognised as MINFLUX localization JSON."
+        )
+
+    loc_m = _json_coordinate_array_m(records)
+    valid = np.isfinite(loc_m).all(axis=1)
+    vld = _json_values(records, "vld")
+    if vld is not None:
+        valid &= np.asarray([bool(v) for v in vld], dtype=bool)
+
+    if not np.any(valid):
+        raise ValueError(f"'{path.name}' contains no valid finite localizations.")
+
+    loc_m = loc_m[valid]
+    kept_records = [record for record, keep in zip(records, valid) if keep]
+    n = int(loc_m.shape[0])
+
+    attrs = AttrStore({
+        "loc_x": loc_m[:, 0],
+        "loc_y": loc_m[:, 1],
+        "loc_z": loc_m[:, 2],
+    })
+
+    keys = sorted({key for record in kept_records for key in record.keys()})
+    vector_xyz_keys = {"loc", "lnc", "ext"}
+    coordinate_aliases = {
+        "x", "y", "z", "xnm", "ynm", "znm",
+        "x_nm", "y_nm", "z_nm",
+        "loc_x", "loc_y", "loc_z",
+        "loc_x_nm", "loc_y_nm", "loc_z_nm",
+    }
+
+    for key in keys:
+        if key in coordinate_aliases:
+            continue
+        values = _json_values(kept_records, key)
+        if values is None:
+            continue
+
+        if key in vector_xyz_keys:
+            arr_m = _json_vector_array(values, width=3)
+            if arr_m is None:
+                continue
+            attrs[f"{key}_x"] = arr_m[:, 0]
+            attrs[f"{key}_y"] = arr_m[:, 1]
+            attrs[f"{key}_z"] = arr_m[:, 2] if arr_m.shape[1] > 2 else np.zeros(n)
+            continue
+
+        vector = _json_vector_array(values)
+        if vector is not None:
+            if key == "dcr":
+                attrs["dcr"] = vector[:, 0]
+                for col in range(vector.shape[1]):
+                    attrs[f"dcr_{col}"] = vector[:, col]
+            elif vector.shape[1] in (2, 3):
+                attrs[f"{key}_x"] = vector[:, 0]
+                attrs[f"{key}_y"] = vector[:, 1]
+                attrs[f"{key}_z"] = vector[:, 2] if vector.shape[1] > 2 else np.zeros(n)
+            continue
+
+        scalar = _json_scalar_array(values)
+        if scalar is not None and scalar.shape[0] == n:
+            attrs[key] = scalar
+
+    if "tid" not in attrs:
+        attrs["tid"] = np.arange(n, dtype=np.int32)
+    if "tim" not in attrs:
+        attrs["tim"] = np.zeros(n, dtype=float)
+    if "itr" not in attrs:
+        attrs["itr"] = np.zeros(n, dtype=np.int16)
+
+    num_itr_arr = attrs.get("itr", None)
+    num_itr = (
+        int(np.nanmax(num_itr_arr) + 1)
+        if num_itr_arr is not None and np.asarray(num_itr_arr).size
+        else 1
+    )
+
+    prop = _compute_properties(attrs, n, num_itr, prefs=prefs)
+    attrs = _add_derived_attributes(attrs, prop)
+    prop.attr_names = attrs.keys()
+
+    return MinfluxDataset(
+        file=FileInfo(
+            name=path.name,
+            folder=str(path.parent),
+            datetime=datetime.fromtimestamp(path.stat().st_mtime).strftime(
+                "%Y-%b-%d, %H:%M:%S"
+            ),
+        ),
+        prop=prop,
+        attr=attrs,
+        cali=Calibration(),
+        channel=_build_channel(attrs, prop),
+    )
+
+
+def _extract_json_records(payload: Any) -> list[dict] | None:
+    if isinstance(payload, list) and all(isinstance(item, dict) for item in payload):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("mfx", "records", "localizations", "localisations", "data"):
+            value = payload.get(key)
+            if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+                return value
+    return None
+
+
+def _looks_like_minflux_json_records(records: list[dict]) -> bool:
+    if not records:
+        return False
+    keys = set(records[0].keys())
+    return bool(
+        {"loc", "lnc", "ext"} & keys
+        or {"x", "y"} <= keys
+        or {"xnm", "ynm"} <= keys
+        or {"x_nm", "y_nm"} <= keys
+        or {"loc_x", "loc_y"} <= keys
+        or {"loc_x_nm", "loc_y_nm"} <= keys
+    )
+
+
+def _json_values(records: list[dict], key: str) -> list[Any] | None:
+    if not any(key in record for record in records):
+        return None
+    return [record.get(key) for record in records]
+
+
+def _json_coordinate_array_m(records: list[dict]) -> np.ndarray:
+    loc_values = _json_values(records, "loc")
+    if loc_values is not None:
+        arr = _json_vector_array(loc_values, width=3)
+        if arr is None:
+            raise ValueError("JSON 'loc' field must contain numeric xy or xyz values.")
+        return arr[:, :3]
+
+    lnc_values = _json_values(records, "lnc")
+    if lnc_values is not None:
+        arr = _json_vector_array(lnc_values, width=3)
+        if arr is not None:
+            return arr[:, :3]
+
+    for x_key, y_key, z_key, scale in (
+        ("loc_x", "loc_y", "loc_z", 1.0),
+        ("x", "y", "z", 1.0),
+        ("loc_x_nm", "loc_y_nm", "loc_z_nm", 1e-9),
+        ("xnm", "ynm", "znm", 1e-9),
+        ("x_nm", "y_nm", "z_nm", 1e-9),
+    ):
+        x = _json_scalar_array(_json_values(records, x_key) or [])
+        y = _json_scalar_array(_json_values(records, y_key) or [])
+        if x is None or y is None:
+            continue
+        z_values = _json_values(records, z_key)
+        z = _json_scalar_array(z_values) if z_values is not None else np.zeros_like(x)
+        if z is None:
+            z = np.zeros_like(x)
+        return np.column_stack([x, y, z]) * scale
+
+    raise ValueError("JSON data must contain loc/lnc or x/y localization coordinates.")
+
+
+def _json_vector_array(values: list[Any], width: int | None = None) -> np.ndarray | None:
+    rows: list[list[float]] = []
+    observed_width = width
+    for value in values:
+        if not isinstance(value, (list, tuple)):
+            return None
+        if observed_width is None:
+            observed_width = len(value)
+        if len(value) < 2:
+            return None
+        padded = list(value[:observed_width])
+        while len(padded) < int(observed_width):
+            padded.append(0.0)
+        try:
+            rows.append([float(item) for item in padded])
+        except (TypeError, ValueError):
+            return None
+    if observed_width is None:
+        return None
+    return np.asarray(rows, dtype=float)
+
+
+def _json_scalar_array(values: list[Any]) -> np.ndarray | None:
+    if not values:
+        return None
+    non_null = [value for value in values if value is not None]
+    if not non_null:
+        return None
+    if all(isinstance(value, bool) for value in non_null):
+        return np.asarray([False if value is None else bool(value) for value in values], dtype=bool)
+    if any(isinstance(value, (list, tuple, dict)) for value in non_null):
+        return None
+    try:
+        arr = np.asarray(
+            [np.nan if value is None else float(value) for value in values],
+            dtype=float,
+        )
+    except (TypeError, ValueError):
+        return None
+    finite = arr[np.isfinite(arr)]
+    if finite.size == arr.size and np.all(np.equal(np.mod(arr, 1), 0)):
+        return arr.astype(np.int64)
+    return arr
 
 
 def load_tiff(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":

@@ -4,7 +4,7 @@ from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import AttrStore, DataProp, FileInfo, MinfluxDataset
 
 
-def _dataset() -> MinfluxDataset:
+def _dataset(file: FileInfo | None = None) -> MinfluxDataset:
     attrs = AttrStore({
         "loc_x": np.array([0.0, 1e-9, 2e-9]),
         "loc_y": np.array([0.0, 0.0, 0.0]),
@@ -14,7 +14,7 @@ def _dataset() -> MinfluxDataset:
         "ftr": np.ones(3, dtype=bool),
     })
     return MinfluxDataset(
-        file=FileInfo(name="component-test", folder=""),
+        file=file or FileInfo(name="component-test", folder=""),
         prop=DataProp(num_loc=3, num_traces=2, attr_names=attrs.keys()),
         attr=attrs,
     )
@@ -52,3 +52,24 @@ def test_scripting_facade_exposes_active_dataset():
     counts, edges = state.mfv.plot_histogram([1, 1, 2], bins=2)
     assert counts.sum() == 3
     assert edges.shape == (3,)
+
+
+def test_synthetic_dataset_is_not_recorded_as_recent():
+    state = AppState()
+    state.prefs["file"]["recent_files"] = []
+
+    state.add_dataset(_dataset())
+
+    assert state.prefs["file"]["recent_files"] == []
+
+
+def test_existing_dataset_file_is_recorded_as_recent(tmp_path, monkeypatch):
+    path = tmp_path / "sample.mat"
+    path.write_bytes(b"")
+    state = AppState()
+    state.prefs["file"]["recent_files"] = []
+    monkeypatch.setattr(state, "save_prefs", lambda: None)
+
+    state.add_dataset(_dataset(FileInfo(name=path.name, folder=str(path.parent))))
+
+    assert state.prefs["file"]["recent_files"] == [str(path)]
