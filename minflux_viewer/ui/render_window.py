@@ -1,32 +1,35 @@
 """
 minflux_viewer.ui.render_window
 ================================
-Fast interactive render window.
+Fast interactive render window — pyramid / lazy-load edition.
 
-Displays a localization dataset as a rendered 2-D image:
-1. Build a 2-D histogram over the currently visible region.
-2. Apply a Gaussian blur whose sigma adapts to the current zoom.
-3. Show the result in a pyqtgraph ImageView with an interactive colormap.
+Displays a localization dataset as a rendered 2-D image using a three-layer
+pipeline:
 
-Interactions
-------------
+1. **SpatialGrid** — O(k) bounding-box queries replace the old O(N) scan.
+2. **PhysicalTileCache** — fixed-tile LRU cache keyed by (dataset, mask_version,
+   orientation, LOD, tile_row, tile_col).  Tiles survive pan/zoom and are
+   naturally invalidated when the mask changes (mask_version in key).
+3. **RenderScheduler** — QThreadPool workers with a generation counter so stale
+   results are silently discarded.  Tiles are composited progressively as they
+   arrive; coarser-LOD placeholders fill blank regions immediately.
+
+LOD levels (nm/pixel → behaviour):
+    LOD 0 >= 100 nm/px :  50 × 50 px histogram tile
+    LOD 1  20–100 nm/px: 100 × 100 px histogram tile
+    LOD 2   5–20 nm/px : 256 × 256 px histogram tile
+    LOD 3   1–5  nm/px : 512 × 512 px per-loc Gaussian tile
+    LOD 4   < 1  nm/px :1024 ×1024 px per-loc Gaussian tile
+
+Interactions (unchanged from pre-pyramid version)
+--------------------------------------------------
 * **Drag** the image to pan.
 * **Scroll** on the image to zoom in/out around the cursor.
 * **Orientation dropdown** — switch between XY (default), XZ, YZ.
-* **Z slider** (3-D data) — step through Z slabs; toggle "All Z" for
-  projection across the full depth range.
+* **Z slider** (3-D data) — step through Z slabs.
 * **Sigma** spin box to override the automatic blur.
 * **Reset view** resets orientation (XY), zoom, B&C, and Z to centre.
 * Focus on the window to make its dataset the active one (Fiji-style).
-
-Performance
------------
-* Rebinning uses ``numpy.histogram2d`` on the (filtered) loc coordinates
-  of the currently visible region — not the full dataset.
-* Rebinds are **debounced** to the next Qt idle tick so fast drag-pan
-  doesn't queue up work.
-* Render texture size is fixed (default 800 × 800 pixels); image quality
-  stays constant regardless of how many localizations are loaded.
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ from collections import OrderedDict
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QSignalBlocker, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QSignalBlocker, Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
@@ -58,13 +61,22 @@ from scipy.ndimage import affine_transform, gaussian_filter, zoom
 
 from .. import resource_path
 from ..core.app_state import AppState
+from ..core.spatial_grid import SpatialGrid
+from .render_config import (
+    PHYSICAL_TILE_NM,
+    actual_pixel_size_nm,
+    lod_for_pixel_size,
+    render_tile_px,
+)
+from .tile_cache import PhysicalTileCache, TileKey
+from .render_scheduler import RenderScheduler
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_RENDER_SIZE   = 800     # target image dimensions in pixels
+_RENDER_SIZE   = 800     # fallback target image dimension for image-mode render
 _DEBOUNCE_MS   = 25      # delay between view change and re-render
 _COLORMAPS     = ["hot", "inferno", "viridis", "magma", "plasma", "cividis", "gray"]
 _ORIENTATIONS  = ["XY", "XZ", "YZ", "3D"]
@@ -80,7 +92,6 @@ _CHANNEL_COLORS = {
     "Yellow": (1.0, 1.0, 0.0),
     "Gray": (1.0, 1.0, 1.0),
 }
-_CACHE_LIMIT = 16
 
 
 class DepthRangeSlider(QWidget):
@@ -585,7 +596,7 @@ class ManualAlignDialog(QDialog):
 
 class RenderWindow(QWidget):
     """
-    Fast interactive 2-D Gaussian-blur render window.
+    Fast interactive 2-D render window with pyramid / lazy-load pipeline.
 
     Reacts live to pan / zoom / filter changes; uses a Z slider for 3-D data.
     """
@@ -602,9 +613,9 @@ class RenderWindow(QWidget):
         self._state = state
         self._idx   = dataset_idx if dataset_idx is not None else state.active_idx
 
-        self._locs_nm: np.ndarray | None = None  # (N, 3) filtered
-        self._xy: np.ndarray | None = None       # (N, 2) histogram axes
-        self._depth: np.ndarray | None = None    # (N,)   remaining axis
+        self._locs_nm: np.ndarray | None = None  # (N, 3) filtered, for depth setup
+        self._xy: np.ndarray | None = None
+        self._depth: np.ndarray | None = None
         self._orientation: str = "XY"
         self._has_depth: bool = False
         self._depth_axis_name: str = "Z"
@@ -623,13 +634,25 @@ class RenderWindow(QWidget):
         self._sigma_nm_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._channels: list[dict] = []
         self._channel_rows: list[tuple[QCheckBox, QComboBox]] = []
-        self._tile_cache: OrderedDict[tuple, np.ndarray] = OrderedDict()
+
+        # Pyramid render pipeline state
+        self._phys_tile_cache: PhysicalTileCache = PhysicalTileCache()
+        self._scheduler: RenderScheduler = RenderScheduler(parent=self)
+        self._channel_grids: dict[int, SpatialGrid | None] = {}
+        self._channel_locs_xyz: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._mask_versions: dict[int, int] = {}
+        self._tile_grid_x0: float = 0.0
+        self._tile_grid_y0: float = 0.0
+        self._pending_tile_keys: set[TileKey] = set()
+        self._last_lod: int = 0
+        self._last_px_nm: float = 10.0
+
         self._last_scalar_tile: np.ndarray | None = None
         self._last_tile_geometry: tuple[float, float, float, float] | None = None
 
         # Manual levels override (set by B&C). None → pyqtgraph autoLevels.
         self._manual_levels: tuple[float, float] | None = None
-        self._auto_bc: bool = True   # True → recompute levels each render
+        self._auto_bc: bool = True
         self._bc_dialog = None
         self._roi_overlay = None
 
@@ -652,6 +675,7 @@ class RenderWindow(QWidget):
 
         state.active_changed.connect(self._on_active_changed)
         state.filter_changed.connect(self._on_filter_changed)
+        self._scheduler.tile_ready.connect(self._on_tile_ready)
 
     # ------------------------------------------------------------------
     # UI
@@ -714,7 +738,6 @@ class RenderWindow(QWidget):
         self._channel_area.setWidget(self._channel_widget)
         root.addWidget(self._channel_area)
 
-        # Depth slider row — XY→Z, XZ→Y, YZ→X
         self._depth_row = QWidget()
         z_lay = QHBoxLayout(self._depth_row)
         z_lay.setContentsMargins(0, 0, 0, 0)
@@ -763,7 +786,7 @@ class RenderWindow(QWidget):
         self._dataset_dim_label = f"{ds.prop.num_dim}D"
         self._build_channels()
         self._rebuild_channel_ui()
-        self._tile_cache.clear()
+        self._scheduler.cancel()
 
         if ds.image_data is not None and not ds.has_localizations:
             self._render_mode = "image"
@@ -784,6 +807,7 @@ class RenderWindow(QWidget):
             return
 
         self._apply_orientation()
+        self._rebuild_all_grids()
         self._schedule_render()
 
     def _build_channels(self) -> None:
@@ -1052,38 +1076,74 @@ class RenderWindow(QWidget):
         self._depth_range_initialized = False
         self._depth_slider.set_range(*self._bounds_depth)
         self._update_depth_label()
+        self._scheduler.cancel()
         if self._orientation != "XY":
             self._set_orientation("XY")
         else:
             self._apply_orientation()
+            self._rebuild_all_grids()
             self._schedule_render()
 
     # ------------------------------------------------------------------
-    # Rendering
+    # Rendering — pyramid pipeline
     # ------------------------------------------------------------------
 
     def _schedule_render(self) -> None:
         self._redraw_timer.start()
 
     def _render(self) -> None:
+        """Timer callback: composite from cache and queue missing tiles."""
+        if self._render_mode == "image":
+            self._render_image_mode()
+            return
+
         (x0, x1), (y0, y1) = self._view_box.viewRange()
         if x1 <= x0 or y1 <= y0:
             return
 
         view_w, view_h = x1 - x0, y1 - y0
-        pixel_size_nm = max(view_w, view_h) / _RENDER_SIZE
-        n_bins_x = max(int(round(view_w / pixel_size_nm)), 8)
-        n_bins_y = max(int(round(view_h / pixel_size_nm)), 8)
+        viewport_px_nm = max(view_w, view_h) / _RENDER_SIZE
+        lod = lod_for_pixel_size(viewport_px_nm)
+        px_nm = actual_pixel_size_nm(lod)
 
-        tiles = []
-        counts = []
-        for ch_idx, ch in enumerate(self._channels):
-            tile, count = self._tile_for_channel(ch_idx, ch, x0, x1, y0, y1, n_bins_y, n_bins_x, pixel_size_nm)
-            tiles.append(tile)
-            counts.append(count if ch["visible"] else 0)
+        self._last_lod = lod
+        self._last_px_nm = px_nm
+
+        # Increment generation — workers from before this call are stale.
+        self._scheduler.new_generation()
+        self._pending_tile_keys = set()
+
+        sigma_yx_nm = self._sigma_yx_for_orientation(px_nm)
+        depth_range_active: tuple[float, float] | None = None
+        if self._has_depth and not self._all_depth_check.isChecked():
+            depth_range_active = self._depth_range
+
+        tiles: list[np.ndarray] = []
+        all_missing: list[TileKey] = []
+
+        for ch in self._channels:
+            if ch["kind"] == "image":
+                ds = self._state.datasets[ch["dataset_idx"]]
+                n_bins_x = max(int(round(view_w / px_nm)), 8)
+                n_bins_y = max(int(round(view_h / px_nm)), 8)
+                canvas = self._image_tile(ds, x0, x1, y0, y1, n_bins_y, n_bins_x)
+                tiles.append(canvas)
+            else:
+                ds_idx = ch["dataset_idx"]
+                mask_ver = self._mask_versions.get(ds_idx, 0)
+                tr_key = self._channel_loc_transform_key(ch)
+                depth_key = (round(depth_range_active[0], 1), round(depth_range_active[1], 1)) if depth_range_active else None
+                canvas, missing = self._composite_loc_channel(
+                    ds_idx, mask_ver, self._orientation, tr_key, depth_key,
+                    x0, x1, y0, y1, lod, px_nm,
+                )
+                tiles.append(canvas)
+                all_missing.extend(missing)
+
         if not tiles:
             self._image_view.clear()
             return
+
         scalar = np.stack(tiles, axis=0).astype(np.float32, copy=False)
         self._last_scalar_tile = scalar
         self._last_tile_geometry = (x0, x1, y0, y1)
@@ -1100,18 +1160,247 @@ class RenderWindow(QWidget):
                     self._bc_dialog.set_levels(*levels)
 
         rgba = self._compose_rgba(scalar)
-        self._image_view.setImage(rgba, autoRange=False, autoLevels=False, pos=[x0, y0], scale=[(x1 - x0) / n_bins_x, (y1 - y0) / n_bins_y])
+        self._image_view.setImage(
+            rgba, autoRange=False, autoLevels=False,
+            pos=[x0, y0], scale=[px_nm, px_nm],
+        )
+
+        self._pending_tile_keys = set(all_missing)
+
+        # Submit missing tile jobs to the worker pool
+        if all_missing:
+            for ch in self._channels:
+                if ch["kind"] != "localizations":
+                    continue
+                ds_idx = ch["dataset_idx"]
+                mask_ver = self._mask_versions.get(ds_idx, 0)
+                tr_key = self._channel_loc_transform_key(ch)
+                depth_key = (round(depth_range_active[0], 1), round(depth_range_active[1], 1)) if depth_range_active else None
+                ch_missing = [
+                    k for k in all_missing
+                    if k.dataset_id == ds_idx
+                    and k.mask_version == mask_ver
+                    and k.transform_key == tr_key
+                    and k.depth_range == depth_key
+                ]
+                if not ch_missing:
+                    continue
+                xyz = self._channel_locs_xyz.get(ds_idx)
+                grid = self._channel_grids.get(ds_idx)
+                if xyz is None or grid is None:
+                    continue
+                xnm, ynm, znm = xyz
+                self._scheduler.request(
+                    ch_missing, xnm, ynm, znm, grid,
+                    sigma_yx_nm, depth_range_active,
+                    self._tile_grid_x0, self._tile_grid_y0,
+                )
+
+        n_vis = len([c for c in self._channels if c["visible"]])
+        suffix = f"  |  {len(all_missing)} tiles loading…" if all_missing else ""
+        self._info_label.setText(
+            f"{self._dataset_dim_label}  |  {n_vis} ch  |  "
+            f"LOD {lod}  |  px={px_nm:.1f} nm{suffix}"
+        )
 
         if self._bc_dialog is not None and self._bc_dialog.isVisible():
             first = scalar[0] if scalar.size else np.zeros((1, 1))
             self._bc_dialog.set_data(first)
 
-        self._info_label.setText(
-            f"{self._dataset_dim_label}  |  "
-            f"{sum(counts):,} samples in view  |  {len([c for c in self._channels if c['visible']])} channel(s)  |  "
-            f"{n_bins_x} × {n_bins_y} px  |  "
-            f"px={pixel_size_nm:.1f} nm"
+    def _render_image_mode(self) -> None:
+        if self._idx is None or self._image_data is None:
+            return
+        ds = self._state.datasets[self._idx]
+        self._show_image_dataset(ds)
+
+    def _composite_loc_channel(
+        self,
+        ds_idx: int,
+        mask_ver: int,
+        orientation: str,
+        tr_key: tuple,
+        depth_key: tuple | None,
+        vp_x0: float,
+        vp_x1: float,
+        vp_y0: float,
+        vp_y1: float,
+        lod: int,
+        px_nm: float,
+    ) -> tuple[np.ndarray, list[TileKey]]:
+        """Composite physical tiles into a viewport canvas; return missing keys."""
+        canvas_w = max(int(round((vp_x1 - vp_x0) / px_nm)), 1)
+        canvas_h = max(int(round((vp_y1 - vp_y0) / px_nm)), 1)
+        canvas = np.zeros((canvas_h, canvas_w), dtype=np.float32)
+        missing: list[TileKey] = []
+
+        col0 = int(np.floor((vp_x0 - self._tile_grid_x0) / PHYSICAL_TILE_NM))
+        col1 = int(np.floor((vp_x1 - self._tile_grid_x0) / PHYSICAL_TILE_NM))
+        row0 = int(np.floor((vp_y0 - self._tile_grid_y0) / PHYSICAL_TILE_NM))
+        row1 = int(np.floor((vp_y1 - self._tile_grid_y0) / PHYSICAL_TILE_NM))
+
+        tile_px = render_tile_px(lod)
+
+        for tile_row in range(row0, row1 + 1):
+            for tile_col in range(col0, col1 + 1):
+                key = TileKey(
+                    dataset_id=ds_idx,
+                    mask_version=mask_ver,
+                    orientation=orientation,
+                    lod=lod,
+                    tile_row=tile_row,
+                    tile_col=tile_col,
+                    transform_key=tr_key,
+                    depth_range=depth_key,
+                )
+
+                tile_array = self._phys_tile_cache.get(key)
+                if tile_array is None:
+                    placeholder = self._phys_tile_cache.get_placeholder(key, tile_px)
+                    missing.append(key)
+                    tile_array = placeholder
+
+                if tile_array is not None:
+                    tx0 = self._tile_grid_x0 + tile_col * PHYSICAL_TILE_NM
+                    ty0 = self._tile_grid_y0 + tile_row * PHYSICAL_TILE_NM
+                    px_col = int(round((tx0 - vp_x0) / px_nm))
+                    px_row = int(round((ty0 - vp_y0) / px_nm))
+                    th, tw = tile_array.shape
+                    dc0 = max(px_col, 0)
+                    dc1 = min(px_col + tw, canvas_w)
+                    dr0 = max(px_row, 0)
+                    dr1 = min(px_row + th, canvas_h)
+                    sc0 = dc0 - px_col
+                    sr0 = dr0 - px_row
+                    if dc1 > dc0 and dr1 > dr0:
+                        canvas[dr0:dr1, dc0:dc1] = tile_array[
+                            sr0 : sr0 + (dr1 - dr0),
+                            sc0 : sc0 + (dc1 - dc0),
+                        ]
+
+        return canvas, missing
+
+    @pyqtSlot(object, object)
+    def _on_tile_ready(self, key: TileKey, array: np.ndarray) -> None:
+        """Called on the main thread when a worker finishes a tile."""
+        self._phys_tile_cache.put(key, array)
+        self._pending_tile_keys.discard(key)
+
+        # Re-composite only if the tile is still relevant
+        if (
+            key.orientation == self._orientation
+            and key.mask_version == self._mask_versions.get(key.dataset_id, 0)
+            and self._last_tile_geometry is not None
+        ):
+            self._recomposite_from_tiles()
+
+    def _recomposite_from_tiles(self) -> None:
+        """Re-assemble the display image from whatever is in the tile cache."""
+        if self._last_tile_geometry is None:
+            return
+        x0, x1, y0, y1 = self._last_tile_geometry
+        lod = self._last_lod
+        px_nm = self._last_px_nm
+
+        depth_range_active: tuple[float, float] | None = None
+        if self._has_depth and not self._all_depth_check.isChecked():
+            depth_range_active = self._depth_range
+
+        tiles: list[np.ndarray] = []
+        for ch in self._channels:
+            if ch["kind"] == "image":
+                ds = self._state.datasets[ch["dataset_idx"]]
+                n_bins_x = max(int(round((x1 - x0) / px_nm)), 8)
+                n_bins_y = max(int(round((y1 - y0) / px_nm)), 8)
+                canvas = self._image_tile(ds, x0, x1, y0, y1, n_bins_y, n_bins_x)
+            else:
+                ds_idx = ch["dataset_idx"]
+                mask_ver = self._mask_versions.get(ds_idx, 0)
+                tr_key = self._channel_loc_transform_key(ch)
+                depth_key = (round(depth_range_active[0], 1), round(depth_range_active[1], 1)) if depth_range_active else None
+                canvas, _ = self._composite_loc_channel(
+                    ds_idx, mask_ver, self._orientation, tr_key, depth_key,
+                    x0, x1, y0, y1, lod, px_nm,
+                )
+            tiles.append(canvas)
+
+        if not tiles:
+            return
+
+        scalar = np.stack(tiles, axis=0).astype(np.float32, copy=False)
+        self._last_scalar_tile = scalar
+
+        if self._auto_bc and scalar.shape[0] == 1:
+            levels = self._compute_auto_levels(scalar[0])
+            if levels is not None:
+                self._manual_levels = levels
+
+        rgba = self._compose_rgba(scalar)
+        self._image_view.setImage(
+            rgba, autoRange=False, autoLevels=False,
+            pos=[x0, y0], scale=[px_nm, px_nm],
         )
+
+        pending = len(self._pending_tile_keys)
+        n_vis = len([c for c in self._channels if c["visible"]])
+        suffix = f"  |  {pending} tiles loading…" if pending else ""
+        self._info_label.setText(
+            f"{self._dataset_dim_label}  |  {n_vis} ch  |  "
+            f"LOD {lod}  |  px={px_nm:.1f} nm{suffix}"
+        )
+
+        if self._bc_dialog is not None and self._bc_dialog.isVisible():
+            first = scalar[0] if scalar.size else np.zeros((1, 1))
+            self._bc_dialog.set_data(first)
+
+    # ------------------------------------------------------------------
+    # Spatial grid management
+    # ------------------------------------------------------------------
+
+    def _build_channel_grid(self, ch: dict) -> None:
+        """Build SpatialGrid for one channel from its oriented filtered locs."""
+        ds_idx = ch["dataset_idx"]
+        ds = self._state.datasets[ds_idx]
+        oriented = self._oriented_locs(ds)
+        if oriented.shape[0] == 0:
+            self._channel_grids[ds_idx] = None
+            self._channel_locs_xyz[ds_idx] = (
+                np.empty(0, dtype=np.float64),
+                np.empty(0, dtype=np.float64),
+                np.empty(0, dtype=np.float64),
+            )
+            return
+        xnm = np.ascontiguousarray(oriented[:, 0], dtype=np.float64)
+        ynm = np.ascontiguousarray(oriented[:, 1], dtype=np.float64)
+        znm = np.ascontiguousarray(oriented[:, 2], dtype=np.float64)
+        self._channel_locs_xyz[ds_idx] = (xnm, ynm, znm)
+        self._channel_grids[ds_idx] = SpatialGrid(xnm, ynm)
+
+    def _compute_tile_grid_origin(self) -> None:
+        """Set _tile_grid_x0/_y0 aligned to PHYSICAL_TILE_NM boundaries."""
+        all_x = [v[0] for v in self._channel_locs_xyz.values() if len(v[0]) > 0]
+        all_y = [v[1] for v in self._channel_locs_xyz.values() if len(v[0]) > 0]
+        if not all_x:
+            self._tile_grid_x0 = 0.0
+            self._tile_grid_y0 = 0.0
+            return
+        xmin = float(min(a.min() for a in all_x))
+        ymin = float(min(a.min() for a in all_y))
+        self._tile_grid_x0 = float(np.floor(xmin / PHYSICAL_TILE_NM) * PHYSICAL_TILE_NM)
+        self._tile_grid_y0 = float(np.floor(ymin / PHYSICAL_TILE_NM) * PHYSICAL_TILE_NM)
+
+    def _rebuild_all_grids(self) -> None:
+        """Rebuild spatial grids for every localization channel."""
+        for ch in self._channels:
+            if ch["kind"] == "localizations":
+                self._build_channel_grid(ch)
+        self._compute_tile_grid_origin()
+
+    def _increment_mask_version(self, dataset_id: int) -> None:
+        self._mask_versions[dataset_id] = self._mask_versions.get(dataset_id, 0) + 1
+
+    # ------------------------------------------------------------------
+    # Brightness & Contrast helpers
+    # ------------------------------------------------------------------
 
     def _bc_pixels(self) -> np.ndarray | None:
         if self._last_scalar_tile is not None:
@@ -1122,28 +1411,28 @@ class RenderWindow(QWidget):
         return None if img is None else np.asarray(img)
 
     def _compose_from_cache(self, *_args) -> None:
+        """Recompose RGBA from the last scalar tile without re-rendering."""
         if self._last_scalar_tile is None:
             self._schedule_render()
             return
         if self._last_tile_geometry is None:
             (x0, x1), (y0, y1) = self._view_box.viewRange()
+            x0, x1, y0, y1 = x0, x1, y0, y1
         else:
             x0, x1, y0, y1 = self._last_tile_geometry
-        _, h, w = self._last_scalar_tile.shape
+        px_nm = self._last_px_nm
         rgba = self._compose_rgba(self._last_scalar_tile)
         self._image_view.setImage(
             rgba,
             autoRange=False,
             autoLevels=False,
             pos=[x0, y0],
-            scale=[(x1 - x0) / max(w, 1), (y1 - y0) / max(h, 1)],
+            scale=[px_nm, px_nm],
         )
 
     def _current_render_pixel_size_nm(self) -> float:
-        if self._last_tile_geometry is not None and self._last_scalar_tile is not None:
-            x0, x1, y0, y1 = self._last_tile_geometry
-            _, h, w = self._last_scalar_tile.shape
-            return max((x1 - x0) / max(w, 1), (y1 - y0) / max(h, 1), 1e-12)
+        if self._last_px_nm and self._last_px_nm > 0:
+            return self._last_px_nm
         (x0, x1), (y0, y1) = self._view_box.viewRange()
         return max((x1 - x0) / _RENDER_SIZE, (y1 - y0) / _RENDER_SIZE, 1e-12)
 
@@ -1240,38 +1529,9 @@ class RenderWindow(QWidget):
         idx = np.clip((norm * 255).astype(np.int16), 0, 255)
         return table[idx, :3]
 
-    def _tile_for_channel(self, ch_idx: int, ch: dict, x0: float, x1: float, y0: float, y1: float, h: int, w: int, pixel_size_nm: float) -> tuple[np.ndarray, int]:
-        sigma_yx_nm = self._sigma_yx_for_orientation(pixel_size_nm)
-        depth_key = ("all",)
-        if self._has_depth and not self._all_depth_check.isChecked():
-            d_lo, d_hi = self._depth_range
-            depth_key = (
-                "range",
-                round(d_lo, 3),
-                round(d_hi, 3),
-                bool(self._depth_inclusive[0]),
-                bool(self._depth_inclusive[1]),
-            )
-        key = (
-            ch["dataset_idx"], ch["kind"], self._orientation,
-            self._channel_loc_transform_key(ch),
-            round(x0, 3), round(x1, 3), round(y0, 3), round(y1, 3),
-            h, w, tuple(round(v, 3) for v in sigma_yx_nm), depth_key,
-        )
-        cached = self._tile_cache.get(key)
-        if cached is not None:
-            self._tile_cache.move_to_end(key)
-            return cached, int(np.count_nonzero(cached))
-        ds = self._state.datasets[ch["dataset_idx"]]
-        if ch["kind"] == "image":
-            tile = self._image_tile(ds, x0, x1, y0, y1, h, w)
-            count = int(np.count_nonzero(tile))
-        else:
-            tile, count = self._localization_tile(ds, x0, x1, y0, y1, h, w, sigma_yx_nm, pixel_size_nm)
-        self._tile_cache[key] = tile
-        if len(self._tile_cache) > _CACHE_LIMIT:
-            self._tile_cache.popitem(last=False)
-        return tile, count
+    # ------------------------------------------------------------------
+    # Tile helpers
+    # ------------------------------------------------------------------
 
     def _channel_loc_transform_key(self, ch: dict) -> tuple:
         transform = ch.get("loc_transform") or {}
@@ -1282,29 +1542,6 @@ class RenderWindow(QWidget):
         if arr.shape != (3, 3):
             return ()
         return tuple(np.round(arr.ravel(), 6).tolist())
-
-    def _localization_tile(self, ds, x0, x1, y0, y1, h, w, sigma_yx_nm, pixel_size_nm) -> tuple[np.ndarray, int]:
-        locs = self._oriented_locs(ds)
-        if locs.shape[0] == 0:
-            return np.zeros((h, w), dtype=np.float32), 0
-        xy = locs[:, :2]
-        depth = locs[:, 2]
-        x, y = xy[:, 0], xy[:, 1]
-        in_view = (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
-        if self._has_depth and not self._all_depth_check.isChecked():
-            d_lo, d_hi = self._depth_range
-            left = depth >= d_lo if self._depth_inclusive[0] else depth > d_lo
-            right = depth <= d_hi if self._depth_inclusive[1] else depth < d_hi
-            in_view &= left & right
-        self._update_depth_label()
-        xv, yv = x[in_view], y[in_view]
-        if xv.size == 0:
-            return np.zeros((h, w), dtype=np.float32), 0
-        hist, _, _ = np.histogram2d(yv, xv, bins=[h, w], range=[[y0, y1], [x0, x1]])
-        sigma_px = tuple(max(float(value) / pixel_size_nm, 0.5) for value in sigma_yx_nm)
-        if max(sigma_px) < 30.0:
-            hist = gaussian_filter(hist, sigma=sigma_px, mode="constant")
-        return hist.astype(np.float32, copy=False), int(xv.size)
 
     def _image_tile(self, ds, x0, x1, y0, y1, h, w) -> np.ndarray:
         image = self._prepare_image_payload(ds.image_data)
@@ -1350,7 +1587,6 @@ class RenderWindow(QWidget):
             self._compose_from_cache()
             return
 
-        # 1. pyqtgraph built-ins
         try:
             cmap = pg.colormap.get(name)
             if cmap is not None:
@@ -1359,7 +1595,6 @@ class RenderWindow(QWidget):
         except Exception:
             pass
 
-        # 2. Matplotlib (covers 'hot', 'gray', and everything else)
         try:
             cmap = self._pg_colormap_from_matplotlib(name)
             self._image_view.setColorMap(cmap)
@@ -1367,7 +1602,6 @@ class RenderWindow(QWidget):
         except Exception as e:
             print(f"Failed to load matplotlib colormap '{name}': {e!r}")
 
-        # 3. colorcet
         try:
             cmap = pg.colormap.get(name, source="colorcet")
             if cmap is not None:
@@ -1376,7 +1610,6 @@ class RenderWindow(QWidget):
         except Exception:
             pass
 
-        # 4. Final fallback — CET-L3 (perceptually uniform)
         try:
             self._image_view.setColorMap(pg.colormap.get("CET-L3"))
         except Exception:
@@ -1387,10 +1620,7 @@ class RenderWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _compute_auto_levels(self, hist: np.ndarray) -> tuple[float, float] | None:
-        """Fiji-style auto levels with 0.35% saturated pixels.
-
-        Returns None when there are fewer than 10 non-zero bins (empty view).
-        """
+        """Fiji-style auto levels with 0.35% saturated pixels."""
         values = np.asarray(hist, dtype=float).ravel()
         values = values[np.isfinite(values)]
         if values.size < 10:
@@ -1429,7 +1659,6 @@ class RenderWindow(QWidget):
         self._bc_dialog.activateWindow()
 
     def _on_levels_changed(self, lo: float, hi: float) -> None:
-        # Manual slider adjustment: disable dynamic auto
         if self._auto_bc:
             self._auto_bc = False
             if self._bc_dialog is not None:
@@ -1487,7 +1716,6 @@ class RenderWindow(QWidget):
         """Open the rich LUT editor for this render window."""
         from .lut_dialog import LutDialog, make_colormap
 
-        # Lazily build, then refresh state on every open
         if getattr(self, "_lut_dialog", None) is None:
             self._lut_dialog = LutDialog(
                 on_levels_changed=self._on_levels_changed,
@@ -1521,7 +1749,6 @@ class RenderWindow(QWidget):
         self._lut_dialog.activateWindow()
 
     def _on_lut_cmap_changed(self, name: str, invert: bool) -> None:
-        """Apply the LUT-dialog's colormap choice to the image."""
         from .lut_dialog import make_colormap
         self._lut_invert = invert
         self._active_cmap = name
@@ -1597,6 +1824,8 @@ class RenderWindow(QWidget):
             return
         self._orientation = text
         self._apply_orientation()
+        self._rebuild_all_grids()
+        self._scheduler.cancel()
         self._schedule_render()
 
     def _set_axis_visible_from_menu(self, checked: bool) -> None:
@@ -1607,7 +1836,8 @@ class RenderWindow(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._sigma_nm_xyz = dialog.values_xyz()
-        self._tile_cache.clear()
+        self._phys_tile_cache.clear()
+        self._scheduler.cancel()
         self._schedule_render()
 
     def _show_data_info_window(self) -> None:
@@ -1663,14 +1893,14 @@ class RenderWindow(QWidget):
         if self._has_depth and not checked and not self._depth_range_initialized:
             self._set_default_depth_range()
         self._update_depth_label()
-        self._tile_cache.clear()
+        self._scheduler.cancel()
         self._schedule_render()
 
     def _on_depth_range_changed(self, lo: float, hi: float) -> None:
         self._depth_range = (float(lo), float(hi))
         self._depth_range_initialized = True
         self._update_depth_label()
-        self._tile_cache.clear()
+        self._scheduler.cancel()
         self._schedule_render()
 
     def _set_default_depth_range(self) -> None:
@@ -1704,7 +1934,7 @@ class RenderWindow(QWidget):
         self._depth_slider.set_range(*self._depth_range)
         self._depth_slider.set_scroll_options(self._depth_scroll_step_nm, self._depth_reverse_scroll)
         self._update_depth_label()
-        self._tile_cache.clear()
+        self._scheduler.cancel()
         self._schedule_render()
 
     def _update_depth_label(self) -> None:
@@ -1746,7 +1976,7 @@ class RenderWindow(QWidget):
         event.accept()
 
     # ------------------------------------------------------------------
-    # Fiji-style active-dataset-follows-focus (requirement #2)
+    # Fiji-style active-dataset-follows-focus
     # ------------------------------------------------------------------
 
     def focusInEvent(self, event) -> None:
@@ -1768,7 +1998,6 @@ class RenderWindow(QWidget):
         super().changeEvent(event)
 
     def _adopt_visible_lut_dialog(self) -> None:
-        """If the floating LUT dialog is open, retarget it to this render window."""
         app = QApplication.instance()
         if app is None:
             return
@@ -1788,9 +2017,20 @@ class RenderWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _on_active_changed(self, idx: int) -> None:
-        # Each render window is pinned to one dataset; other views follow active.
         pass
 
     def _on_filter_changed(self, idx: int) -> None:
         if any(ch["dataset_idx"] == idx for ch in self._channels):
-            self._refresh_from_dataset()
+            self._increment_mask_version(idx)
+            # Rebuild grids for this dataset's channels
+            for ch in self._channels:
+                if ch["dataset_idx"] == idx and ch["kind"] == "localizations":
+                    self._build_channel_grid(ch)
+            self._compute_tile_grid_origin()
+            # Refresh locs_nm for primary channel (depth range display)
+            if self._channels and self._channels[0]["dataset_idx"] == idx:
+                self._locs_nm = self._channel_locs(self._channels[0])
+                if self._locs_nm is not None and self._locs_nm.shape[0] > 0:
+                    self._apply_orientation()
+            self._scheduler.cancel()
+            self._schedule_render()
