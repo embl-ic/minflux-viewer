@@ -87,3 +87,13 @@ def render_tile_px(lod: int) -> int:
 def actual_pixel_size_nm(lod: int) -> float:
     """Return the nm/pixel resolution a tile is rendered at for *lod*."""
     return PHYSICAL_TILE_NM / render_tile_px(lod)
+
+
+DIRECT_RENDER_THRESHOLD_NM: float = 20.0
+"""Viewport pixel size (nm/px) below which rendering switches from the LOD tile
+cache to a per-viewport direct render at exact viewport resolution.
+
+Below this threshold tiles would be upscaled on screen (their native pixel
+is coarser than the viewport pixel), causing visible pixelation.  Direct
+render uses the SpatialGrid for fast loc lookup and renders at the viewport's
+own nm/px, so the image stays sharp all the way to sub-nm zoom."""

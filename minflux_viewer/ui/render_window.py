@@ -64,6 +64,8 @@ from ..core.app_state import AppState
 from ..core.spatial_grid import SpatialGrid
 from .render_config import (
     PHYSICAL_TILE_NM,
+    PER_LOC_SWITCH_COUNT,
+    DIRECT_RENDER_THRESHOLD_NM,
     actual_pixel_size_nm,
     lod_for_pixel_size,
     render_tile_px,
@@ -1092,7 +1094,7 @@ class RenderWindow(QWidget):
         self._redraw_timer.start()
 
     def _render(self) -> None:
-        """Timer callback: composite from cache and queue missing tiles."""
+        """Timer callback: dispatch to tiled or direct render based on zoom."""
         if self._render_mode == "image":
             self._render_image_mode()
             return
@@ -1103,6 +1105,11 @@ class RenderWindow(QWidget):
 
         view_w, view_h = x1 - x0, y1 - y0
         viewport_px_nm = max(view_w, view_h) / _RENDER_SIZE
+
+        if viewport_px_nm < DIRECT_RENDER_THRESHOLD_NM:
+            self._render_direct(x0, x1, y0, y1, viewport_px_nm)
+            return
+
         lod = lod_for_pixel_size(viewport_px_nm)
         px_nm = actual_pixel_size_nm(lod)
 
@@ -1212,6 +1219,161 @@ class RenderWindow(QWidget):
             return
         ds = self._state.datasets[self._idx]
         self._show_image_dataset(ds)
+
+    def _render_direct(
+        self,
+        x0: float,
+        x1: float,
+        y0: float,
+        y1: float,
+        px_nm: float,
+    ) -> None:
+        """Render the viewport at its exact pixel size for fine zoom.
+
+        Bypasses the LOD tile cache completely.  Uses the SpatialGrid for
+        fast O(k) loc lookup then renders per-localization (sparse) or
+        histogram (dense) at the viewport's own nm/px resolution.
+
+        This ensures the image stays sharp at any zoom level — pixelation
+        only appears when individual localizations are so sparse that blank
+        pixels are physically correct.
+        """
+        from scipy.ndimage import gaussian_filter
+
+        self._scheduler.cancel()
+        self._pending_tile_keys.clear()
+        self._last_lod = -1
+        self._last_px_nm = px_nm
+
+        sigma_yx_nm = self._sigma_yx_for_orientation(px_nm)
+        depth_range_active: tuple[float, float] | None = None
+        if self._has_depth and not self._all_depth_check.isChecked():
+            depth_range_active = self._depth_range
+
+        n_bins_x = max(int(round((x1 - x0) / px_nm)), 1)
+        n_bins_y = max(int(round((y1 - y0) / px_nm)), 1)
+
+        tiles: list[np.ndarray] = []
+        total_count = 0
+
+        for ch in self._channels:
+            if ch["kind"] == "image":
+                canvas = self._image_tile(
+                    self._state.datasets[ch["dataset_idx"]],
+                    x0, x1, y0, y1, n_bins_y, n_bins_x,
+                )
+                tiles.append(canvas)
+                continue
+
+            ds_idx = ch["dataset_idx"]
+            xyz = self._channel_locs_xyz.get(ds_idx)
+            grid = self._channel_grids.get(ds_idx)
+            if xyz is None or grid is None or len(xyz[0]) == 0:
+                tiles.append(np.zeros((n_bins_y, n_bins_x), dtype=np.float32))
+                continue
+
+            xnm, ynm, znm = xyz
+            indices = grid.query(x0, x1, y0, y1)
+
+            if len(indices) > 0:
+                xv = xnm[indices]
+                yv = ynm[indices]
+                in_view = (xv >= x0) & (xv <= x1) & (yv >= y0) & (yv <= y1)
+                if depth_range_active is not None:
+                    z = znm[indices]
+                    d_lo, d_hi = depth_range_active
+                    in_view &= (z >= d_lo) & (z <= d_hi)
+                xv = xv[in_view]
+                yv = yv[in_view]
+            else:
+                xv = np.empty(0, dtype=np.float64)
+                yv = np.empty(0, dtype=np.float64)
+
+            count = len(xv)
+            total_count += count
+
+            if count == 0:
+                canvas = np.zeros((n_bins_y, n_bins_x), dtype=np.float32)
+
+            elif count < PER_LOC_SWITCH_COUNT:
+                # Per-localization Gaussian — accurate at any pixel size
+                canvas = np.zeros((n_bins_y, n_bins_x), dtype=np.float32)
+                sigma_y_px = max(sigma_yx_nm[0] / px_nm, 0.3)
+                sigma_x_px = max(sigma_yx_nm[1] / px_nm, 0.3)
+                r_y = int(np.ceil(3.0 * sigma_y_px))
+                r_x = int(np.ceil(3.0 * sigma_x_px))
+                px_col = (xv - x0) / px_nm
+                px_row = (yv - y0) / px_nm
+                for cx, cy in zip(px_col, px_row):
+                    c0 = int(round(cx)) - r_x
+                    c1 = int(round(cx)) + r_x + 1
+                    r0 = int(round(cy)) - r_y
+                    r1 = int(round(cy)) + r_y + 1
+                    dc0 = max(0, c0);  dc1 = min(n_bins_x, c1)
+                    dr0 = max(0, r0);  dr1 = min(n_bins_y, r1)
+                    if dc1 > dc0 and dr1 > dr0:
+                        kc = np.arange(dc0, dc1, dtype=np.float32) - cx
+                        kr = np.arange(dr0, dr1, dtype=np.float32) - cy
+                        gauss = np.exp(
+                            -0.5 * (
+                                kr[:, None] ** 2 / sigma_y_px ** 2
+                                + kc[None, :] ** 2 / sigma_x_px ** 2
+                            )
+                        )
+                        canvas[dr0:dr1, dc0:dc1] += gauss
+
+            else:
+                # Histogram render at viewport resolution
+                hist, _, _ = np.histogram2d(
+                    yv, xv,
+                    bins=[n_bins_y, n_bins_x],
+                    range=[[y0, y1], [x0, x1]],
+                )
+                sig_y_px = sigma_yx_nm[0] / px_nm
+                sig_x_px = sigma_yx_nm[1] / px_nm
+                if max(sig_y_px, sig_x_px) >= 0.3:
+                    hist = gaussian_filter(
+                        hist.astype(np.float32),
+                        sigma=(max(sig_y_px, 0.3), max(sig_x_px, 0.3)),
+                        mode="constant",
+                    )
+                canvas = hist.astype(np.float32, copy=False)
+
+            tiles.append(canvas)
+
+        if not tiles:
+            self._image_view.clear()
+            return
+
+        scalar = np.stack(tiles, axis=0).astype(np.float32, copy=False)
+        self._last_scalar_tile = scalar
+        self._last_tile_geometry = (x0, x1, y0, y1)
+
+        if self._auto_bc and scalar.shape[0] == 1:
+            levels = self._compute_auto_levels(scalar[0])
+            if levels is not None:
+                self._manual_levels = levels
+                for ch in self._channels:
+                    if ch["visible"]:
+                        ch["levels"] = None
+                        break
+                if self._bc_dialog is not None and self._bc_dialog.isVisible():
+                    self._bc_dialog.set_levels(*levels)
+
+        rgba = self._compose_rgba(scalar)
+        self._image_view.setImage(
+            rgba, autoRange=False, autoLevels=False,
+            pos=[x0, y0], scale=[px_nm, px_nm],
+        )
+
+        n_vis = len([c for c in self._channels if c["visible"]])
+        self._info_label.setText(
+            f"{self._dataset_dim_label}  |  {total_count:,} locs in view  |  {n_vis} ch  |  "
+            f"direct {px_nm:.2f} nm/px"
+        )
+        if self._bc_dialog is not None and self._bc_dialog.isVisible():
+            first = scalar[0] if scalar.size else np.zeros((1, 1))
+            self._bc_dialog.set_data(first)
 
     def _composite_loc_channel(
         self,
