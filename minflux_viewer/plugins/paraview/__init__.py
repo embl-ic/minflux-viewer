@@ -64,8 +64,12 @@ def open_in_paraview(state, parent=None) -> None:
         QMessageBox.critical(parent, "ParaView export error", str(exc))
         return
 
+    try:
+        export_count = int(ds.filter_mask.sum())
+    except Exception:
+        export_count = int(ds.prop.num_loc)
     state.log(
-        f"ParaView plugin: launching with {ds.prop.num_loc:,} localisations…",
+        f"ParaView plugin: launching with {export_count:,} filtered localisations…",
         "INFO",
     )
     try:
@@ -106,7 +110,7 @@ def open_in_paraview(state, parent=None) -> None:
                 "export",
                 f"Exported '{ds.name}' to VTP and opened in ParaView.",
                 vtp_path=str(vtp),
-                num_loc=int(ds.prop.num_loc),
+                num_loc=export_count,
             )
         except Exception:
             pass

@@ -663,6 +663,7 @@ class TestParaViewExport:
         # efo, tid, loc_x/y/z should all be there
         assert "efo" in names
         assert "tid" in names
+        assert "ftr" in names
 
     def test_filter_mask_applied(self, tmp_path):
         import xml.etree.ElementTree as ET
@@ -688,6 +689,9 @@ class TestParaViewExport:
         root = ET.parse(out).getroot()
         piece = root.find("./PolyData/Piece")
         assert int(piece.attrib["NumberOfPoints"]) == 20
+        ftr = root.find("./PolyData/Piece/PointData/DataArray[@Name='ftr']")
+        assert ftr is not None
+        assert [int(v) for v in ftr.text.split()] == [1] * 10 + [0] * 10
 
 
 # ---------------------------------------------------------------------------

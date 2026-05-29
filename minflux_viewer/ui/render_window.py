@@ -622,6 +622,8 @@ class RenderWindow(QWidget):
         self._has_depth: bool = False
         self._depth_axis_name: str = "Z"
         self._bounds_xy: tuple[float, float, float, float] = (0, 1, 0, 1)
+        self._fit_view_size: tuple[float, float] = (1.0, 1.0)
+        self._suppress_zoom_limit: bool = False
         self._bounds_depth: tuple[float, float] = (0, 0)
         self._depth_range: tuple[float, float] = (0, 0)
         self._depth_inclusive: tuple[bool, bool] = (True, True)
@@ -711,7 +713,6 @@ class RenderWindow(QWidget):
         self._view_box.setAspectLocked(True)
         self._view_box.invertY(False)
         self._view_box.sigRangeChanged.connect(self._on_range_changed)
-        self._image_view.wheelEvent = self._wheel_zoom  # type: ignore[assignment]
         self._image_view.ui.graphicsView.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu
         )
@@ -1005,11 +1006,17 @@ class RenderWindow(QWidget):
         self._depth = self._locs_nm[:, depth_idx]
 
         x, y = self._xy[:, 0], self._xy[:, 1]
-        pad_x = (x.max() - x.min()) * 0.02 if x.max() > x.min() else 1.0
-        pad_y = (y.max() - y.min()) * 0.02 if y.max() > y.min() else 1.0
+        x_min, x_max = float(x.min()), float(x.max())
+        y_min, y_max = float(y.min()), float(y.max())
+        if x_max <= x_min:
+            x_min -= 1.0
+            x_max += 1.0
+        if y_max <= y_min:
+            y_min -= 1.0
+            y_max += 1.0
         self._bounds_xy = (
-            float(x.min() - pad_x), float(x.max() + pad_x),
-            float(y.min() - pad_y), float(y.max() + pad_y),
+            x_min, x_max,
+            y_min, y_max,
         )
         for ch in self._channels:
             if not ch["visible"] or ch["dataset_idx"] == self._idx:
@@ -1057,21 +1064,39 @@ class RenderWindow(QWidget):
     def _fit_view(self) -> None:
         x0, x1, y0, y1 = self._bounds_xy
         self._set_zoom_limits()
-        self._view_box.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0)
+        self._suppress_zoom_limit = True
+        try:
+            self._view_box.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0)
+        finally:
+            self._suppress_zoom_limit = False
+        QTimer.singleShot(0, self._remember_fit_view_size)
 
-    # Maximum zoom-out as a multiple of the larger data dimension.
-    # At this limit the data occupies 1/(ZOOM_OUT_LIMIT) of the viewport
-    # on each axis (so 2× → 50% data, 50% margin on each side).
+    def _remember_fit_view_size(self) -> None:
+        """Store the aspect-adjusted fitted data view as the zoom-out baseline."""
+        try:
+            (x0, x1), (y0, y1) = self._view_box.viewRange()
+        except Exception:
+            bx0, bx1, by0, by1 = self._bounds_xy
+            self._fit_view_size = (max(float(bx1 - bx0), 1.0), max(float(by1 - by0), 1.0))
+            return
+        self._fit_view_size = (
+            max(float(x1 - x0), 1.0),
+            max(float(y1 - y0), 1.0),
+        )
+
+    # Maximum zoom-out as a multiple of the fitted data view. The fitted view
+    # may be aspect-adjusted by PyQtGraph, so this baseline avoids clipping
+    # data on wide/tall render windows.
     _ZOOM_OUT_LIMIT: float = 2.0
 
     def _set_zoom_limits(self) -> None:
-        """Clear ViewBox hard limits — zoom-out is enforced in _wheel_zoom.
+        """Clear ViewBox hard limits — zoom-out is enforced after range changes.
 
         ViewBox.setLimits(maxXRange, maxYRange) causes PyQtGraph to clamp
         the range by adjusting the center without knowing where the cursor
         is, which makes the view drift sideways while zooming out.
-        All range enforcement is handled manually in _wheel_zoom so that
-        cursor position is always respected.
+        We instead let PyQtGraph perform its cursor-centred zoom, then clamp
+        the resulting range in _on_range_changed.
         """
         try:
             self._view_box.setLimits(
@@ -2107,7 +2132,52 @@ class RenderWindow(QWidget):
         return float(sigma_y), float(sigma_x)
 
     def _on_range_changed(self, *_args) -> None:
+        if self._suppress_zoom_limit:
+            self._remember_fit_view_size()
+            self._schedule_render()
+            return
+        if self._enforce_zoom_out_limit():
+            return
         self._schedule_render()
+
+    def _enforce_zoom_out_limit(self) -> bool:
+        """Clamp over-zoomed view ranges after PyQtGraph updates the ViewBox."""
+        try:
+            (x0, x1), (y0, y1) = self._view_box.viewRange()
+        except Exception:
+            return False
+        w = float(x1 - x0)
+        h = float(y1 - y0)
+        if not np.isfinite(w) or not np.isfinite(h) or w <= 0.0 or h <= 0.0:
+            return False
+
+        fit_w, fit_h = self._fit_view_size
+        max_w = max(float(fit_w), 1.0) * self._ZOOM_OUT_LIMIT
+        max_h = max(float(fit_h), 1.0) * self._ZOOM_OUT_LIMIT
+        if w <= max_w and h <= max_h:
+            return False
+
+        aspect = max(w / h, 1e-12)
+        target_w = min(w, max_w)
+        target_h = target_w / aspect
+        if target_h > max_h:
+            target_h = max_h
+            target_w = target_h * aspect
+        bx0, bx1, by0, by1 = self._bounds_xy
+        dcx = (float(bx0) + float(bx1)) / 2.0
+        dcy = (float(by0) + float(by1)) / 2.0
+        blocker = QSignalBlocker(self._view_box)
+        try:
+            self._view_box.setRange(
+                xRange=(dcx - target_w / 2.0, dcx + target_w / 2.0),
+                yRange=(dcy - target_h / 2.0, dcy + target_h / 2.0),
+                padding=0,
+                update=True,
+            )
+        finally:
+            del blocker
+        self._schedule_render()
+        return True
 
     def _set_axes_visible(self, visible: bool) -> None:
         self._axis_visible = bool(visible)
@@ -2184,52 +2254,6 @@ class RenderWindow(QWidget):
         left = "[" if inclusive[0] else "("
         right = "]" if inclusive[1] else ")"
         return f"{left}{values[0]:.1f}, {values[1]:.1f}{right} nm"
-
-    def _wheel_zoom(self, event) -> None:
-        delta = event.angleDelta().y()
-        if delta == 0:
-            event.ignore()
-            return
-
-        factor = 0.85 if delta > 0 else 1.0 / 0.85
-        scene_pos = self._image_view.view.mapSceneToView(event.position())
-        (x0, x1), (y0, y1) = self._view_box.viewRange()
-        cx, cy = scene_pos.x(), scene_pos.y()
-        new_w = (x1 - x0) * factor
-        new_h = (y1 - y0) * factor
-
-        # --- zoom-out limit -----------------------------------------------
-        # Maximum viewport = _ZOOM_OUT_LIMIT × the larger data dimension.
-        # When the limit is reached, snap to the data center so there is
-        # an equal margin on every side (data occupies the middle 50%).
-        # We enforce this here rather than via ViewBox.setLimits because
-        # PyQtGraph's range clamping adjusts the center without considering
-        # the cursor position, causing the view to drift sideways.
-        bx0, bx1, by0, by1 = self._bounds_xy
-        data_extent = max(bx1 - bx0, by1 - by0, 1.0)
-        max_range = data_extent * self._ZOOM_OUT_LIMIT
-
-        if new_w >= max_range or new_h >= max_range:
-            dcx = (bx0 + bx1) / 2.0
-            dcy = (by0 + by1) / 2.0
-            half = max_range / 2.0
-            self._view_box.setRange(
-                xRange=(dcx - half, dcx + half),
-                yRange=(dcy - half, dcy + half),
-                padding=0, update=True,
-            )
-            event.accept()
-            return
-        # ------------------------------------------------------------------
-
-        fx = (cx - x0) / (x1 - x0) if x1 > x0 else 0.5
-        fy = (cy - y0) / (y1 - y0) if y1 > y0 else 0.5
-        self._view_box.setRange(
-            xRange=(cx - fx * new_w, cx - fx * new_w + new_w),
-            yRange=(cy - fy * new_h, cy - fy * new_h + new_h),
-            padding=0, update=True,
-        )
-        event.accept()
 
     # ------------------------------------------------------------------
     # Fiji-style active-dataset-follows-focus

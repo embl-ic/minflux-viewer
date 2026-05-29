@@ -12,8 +12,10 @@ Each localisation becomes one 3-D point. All numeric per-localisation
 attributes (``efo``, ``cfr``, ``dcr``, ``tid``, ``tim``, …) are attached
 as point scalar fields so ParaView can colour points by any of them.
 
-Only the currently active filter mask is exported — what the user sees
-in the viewer is what lands in ParaView.
+Only the currently active filter mask is exported by default — what the
+user sees in the viewer is what lands in ParaView.  The same mask is also
+written as a point scalar field named ``ftr`` so ParaView can display or
+filter by it explicitly when exporting all points.
 """
 
 from __future__ import annotations
@@ -70,6 +72,7 @@ def export_to_vtp(
 
     # Gather per-point scalar attributes (1-D numeric arrays only)
     scalar_attrs: dict[str, np.ndarray] = {}
+    scalar_attrs["ftr"] = np.asarray(dataset.filter_mask, dtype=np.uint8)[mask]
     for name in dataset.attr.keys():
         if name in ("ftr", "idx"):
             continue
