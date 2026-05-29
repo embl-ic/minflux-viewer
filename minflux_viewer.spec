@@ -65,30 +65,23 @@ hidden_imports = [
 # Modules to deliberately exclude (keeps the bundle smaller)
 # ---------------------------------------------------------------------------
 excludes = [
+    # tkinter — Qt app, never needs Tk
     "tkinter",
-    "unittest",
-    "xmlrpc",
-    "email",
-    "http",
-    "pydoc",
-    "doctest",
-    "difflib",
-    "ftplib",
-    "getpass",
-    "imaplib",
-    "ipaddress",
-    "smtplib",
-    "telnetlib",
-    "urllib.robotparser",
+    # Testing / dev tools — not needed at runtime
     "test",
     "tests",
     "pytest",
     "mypy",
     "ruff",
+    # Heavy optional packages not used by this application
     "IPython",
     "notebook",
     "jupyter",
     "cv2",
+    # NOTE: do NOT exclude stdlib modules (email, http, ipaddress, etc.).
+    # Many are imported indirectly through the stdlib chain at boot time
+    # (e.g. urllib.parse imports ipaddress; pathlib imports urllib.parse).
+    # Excluding them causes ModuleNotFoundError in PyInstaller runtime hooks.
 ]
 
 # ---------------------------------------------------------------------------
