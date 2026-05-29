@@ -88,7 +88,7 @@ excludes = [
 # Analysis
 # ---------------------------------------------------------------------------
 a = Analysis(
-    [str(ROOT / "minflux_viewer" / "__main__.py")],
+    [str(ROOT / "run_app.py")],
     pathex=[str(ROOT)],
     binaries=[],
     datas=datas,
