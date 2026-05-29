@@ -2099,7 +2099,7 @@ class RenderWindow(QWidget):
                 self._state,
                 self._idx,
                 sigma_nm_xyz=self._sigma_nm_xyz,
-                parent=None,
+                parent=self,
             )
             self._volume_window.destroyed.connect(lambda *_: setattr(self, "_volume_window", None))
         else:
@@ -2282,6 +2282,15 @@ class RenderWindow(QWidget):
         left = "[" if inclusive[0] else "("
         right = "]" if inclusive[1] else ")"
         return f"{left}{values[0]:.1f}, {values[1]:.1f}{right} nm"
+
+    def closeEvent(self, event) -> None:
+        if self._volume_window is not None:
+            try:
+                self._volume_window.close()
+            except Exception:
+                pass
+            self._volume_window = None
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------
     # Fiji-style active-dataset-follows-focus

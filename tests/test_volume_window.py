@@ -16,7 +16,8 @@ def test_make_volume_payload_caps_shape_and_returns_rgba() -> None:
 
     payload = make_volume_payload(
         locs,
-        voxel_nm=1.0,
+        xy_voxel_nm=1.0,
+        z_voxel_nm=2.0,
         max_dim=64,
         max_voxels=64 * 64 * 64,
         cmap_name="hot",
@@ -24,11 +25,16 @@ def test_make_volume_payload_caps_shape_and_returns_rgba() -> None:
     )
 
     assert payload.rgba.dtype == np.uint8
+    assert payload.scalar.dtype == np.float32
+    assert payload.norm.dtype == np.float32
     assert payload.rgba.shape == (*payload.counts, 4)
+    assert payload.scalar.shape == payload.counts
+    assert payload.norm.shape == payload.counts
     assert max(payload.counts) <= 64
     assert np.prod(payload.counts) <= 64 * 64 * 64
     assert payload.n_locs == 500
     assert payload.rgba[..., 3].max() > 0
+    assert payload.voxel_nm[2] >= payload.voxel_nm[0]
 
 
 def test_make_volume_payload_rejects_flat_z() -> None:
@@ -39,4 +45,24 @@ def test_make_volume_payload_rejects_flat_z() -> None:
     ])
 
     with pytest.raises(ValueError, match="3-D Z range"):
-        make_volume_payload(locs, voxel_nm=1.0, max_dim=64)
+        make_volume_payload(locs, xy_voxel_nm=1.0, z_voxel_nm=1.0, max_dim=64)
+
+
+def test_make_volume_payload_allows_high_max_dim_but_caps_total_voxels() -> None:
+    rng = np.random.default_rng(123)
+    locs = np.column_stack([
+        rng.uniform(0.0, 10_000.0, 1_000),
+        rng.uniform(0.0, 8_000.0, 1_000),
+        rng.uniform(0.0, 6_000.0, 1_000),
+    ])
+
+    payload = make_volume_payload(
+        locs,
+        xy_voxel_nm=1.0,
+        z_voxel_nm=1.0,
+        max_dim=1024,
+        max_voxels=8_000_000,
+    )
+
+    assert max(payload.counts) <= 1024
+    assert np.prod(payload.counts) <= 8_000_000
