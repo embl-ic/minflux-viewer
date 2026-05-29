@@ -1056,7 +1056,24 @@ class RenderWindow(QWidget):
 
     def _fit_view(self) -> None:
         x0, x1, y0, y1 = self._bounds_xy
+        self._set_zoom_limits()
         self._view_box.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0)
+
+    def _set_zoom_limits(self) -> None:
+        """Restrict zoom-out to 5× the data extent to prevent OOM crashes.
+
+        Extreme zoom-out causes _composite_loc_channel to allocate
+        enormous numpy arrays (canvas size = viewport_nm / px_nm).
+        ViewBox.setLimits caps the maximum viewable range so this cannot
+        happen regardless of how far the user scrolls out.
+        """
+        x0, x1, y0, y1 = self._bounds_xy
+        data_w = max(x1 - x0, 1.0)
+        data_h = max(y1 - y0, 1.0)
+        # Use the larger dimension for both axes so aspect lock never
+        # conflicts with the limit on the narrower axis.
+        max_range = max(data_w, data_h) * 5.0
+        self._view_box.setLimits(maxXRange=max_range, maxYRange=max_range)
 
     def _reset_view(self) -> None:
         """Reset orientation (XY), zoom, B&C levels, and depth to centre."""
@@ -1375,6 +1392,12 @@ class RenderWindow(QWidget):
             first = scalar[0] if scalar.size else np.zeros((1, 1))
             self._bc_dialog.set_data(first)
 
+    # Maximum canvas edge in pixels — prevents OOM when zoom limits are
+    # bypassed mid-scroll before pyqtgraph can enforce them.
+    _MAX_CANVAS_PX: int = 3000
+    # Maximum physical tiles per axis in one composite call.
+    _MAX_TILES_PER_AXIS: int = 64
+
     def _composite_loc_channel(
         self,
         ds_idx: int,
@@ -1390,8 +1413,8 @@ class RenderWindow(QWidget):
         px_nm: float,
     ) -> tuple[np.ndarray, list[TileKey]]:
         """Composite physical tiles into a viewport canvas; return missing keys."""
-        canvas_w = max(int(round((vp_x1 - vp_x0) / px_nm)), 1)
-        canvas_h = max(int(round((vp_y1 - vp_y0) / px_nm)), 1)
+        canvas_w = min(max(int(round((vp_x1 - vp_x0) / px_nm)), 1), self._MAX_CANVAS_PX)
+        canvas_h = min(max(int(round((vp_y1 - vp_y0) / px_nm)), 1), self._MAX_CANVAS_PX)
         canvas = np.zeros((canvas_h, canvas_w), dtype=np.float32)
         missing: list[TileKey] = []
 
@@ -1399,6 +1422,16 @@ class RenderWindow(QWidget):
         col1 = int(np.floor((vp_x1 - self._tile_grid_x0) / PHYSICAL_TILE_NM))
         row0 = int(np.floor((vp_y0 - self._tile_grid_y0) / PHYSICAL_TILE_NM))
         row1 = int(np.floor((vp_y1 - self._tile_grid_y0) / PHYSICAL_TILE_NM))
+
+        # Cap tile range so the nested loop can never stall the main thread.
+        if (col1 - col0) > self._MAX_TILES_PER_AXIS:
+            mid = (col0 + col1) // 2
+            col0 = mid - self._MAX_TILES_PER_AXIS // 2
+            col1 = mid + self._MAX_TILES_PER_AXIS // 2
+        if (row1 - row0) > self._MAX_TILES_PER_AXIS:
+            mid = (row0 + row1) // 2
+            row0 = mid - self._MAX_TILES_PER_AXIS // 2
+            row1 = mid + self._MAX_TILES_PER_AXIS // 2
 
         tile_px = render_tile_px(lod)
 
