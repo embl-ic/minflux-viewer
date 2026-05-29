@@ -1059,21 +1059,29 @@ class RenderWindow(QWidget):
         self._set_zoom_limits()
         self._view_box.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0)
 
-    def _set_zoom_limits(self) -> None:
-        """Restrict zoom-out to 5× the data extent to prevent OOM crashes.
+    # Maximum zoom-out as a multiple of the larger data dimension.
+    # At this limit the data occupies 1/(ZOOM_OUT_LIMIT) of the viewport
+    # on each axis (so 2× → 50% data, 50% margin on each side).
+    _ZOOM_OUT_LIMIT: float = 2.0
 
-        Extreme zoom-out causes _composite_loc_channel to allocate
-        enormous numpy arrays (canvas size = viewport_nm / px_nm).
-        ViewBox.setLimits caps the maximum viewable range so this cannot
-        happen regardless of how far the user scrolls out.
+    def _set_zoom_limits(self) -> None:
+        """Clear ViewBox hard limits — zoom-out is enforced in _wheel_zoom.
+
+        ViewBox.setLimits(maxXRange, maxYRange) causes PyQtGraph to clamp
+        the range by adjusting the center without knowing where the cursor
+        is, which makes the view drift sideways while zooming out.
+        All range enforcement is handled manually in _wheel_zoom so that
+        cursor position is always respected.
         """
-        x0, x1, y0, y1 = self._bounds_xy
-        data_w = max(x1 - x0, 1.0)
-        data_h = max(y1 - y0, 1.0)
-        # Use the larger dimension for both axes so aspect lock never
-        # conflicts with the limit on the narrower axis.
-        max_range = max(data_w, data_h) * 5.0
-        self._view_box.setLimits(maxXRange=max_range, maxYRange=max_range)
+        try:
+            self._view_box.setLimits(
+                xMin=None, xMax=None,
+                yMin=None, yMax=None,
+                maxXRange=None, maxYRange=None,
+                minXRange=None, minYRange=None,
+            )
+        except Exception:
+            pass
 
     def _reset_view(self) -> None:
         """Reset orientation (XY), zoom, B&C levels, and depth to centre."""
@@ -2182,12 +2190,38 @@ class RenderWindow(QWidget):
         if delta == 0:
             event.ignore()
             return
+
         factor = 0.85 if delta > 0 else 1.0 / 0.85
         scene_pos = self._image_view.view.mapSceneToView(event.position())
         (x0, x1), (y0, y1) = self._view_box.viewRange()
         cx, cy = scene_pos.x(), scene_pos.y()
         new_w = (x1 - x0) * factor
         new_h = (y1 - y0) * factor
+
+        # --- zoom-out limit -----------------------------------------------
+        # Maximum viewport = _ZOOM_OUT_LIMIT × the larger data dimension.
+        # When the limit is reached, snap to the data center so there is
+        # an equal margin on every side (data occupies the middle 50%).
+        # We enforce this here rather than via ViewBox.setLimits because
+        # PyQtGraph's range clamping adjusts the center without considering
+        # the cursor position, causing the view to drift sideways.
+        bx0, bx1, by0, by1 = self._bounds_xy
+        data_extent = max(bx1 - bx0, by1 - by0, 1.0)
+        max_range = data_extent * self._ZOOM_OUT_LIMIT
+
+        if new_w >= max_range or new_h >= max_range:
+            dcx = (bx0 + bx1) / 2.0
+            dcy = (by0 + by1) / 2.0
+            half = max_range / 2.0
+            self._view_box.setRange(
+                xRange=(dcx - half, dcx + half),
+                yRange=(dcy - half, dcy + half),
+                padding=0, update=True,
+            )
+            event.accept()
+            return
+        # ------------------------------------------------------------------
+
         fx = (cx - x0) / (x1 - x0) if x1 > x0 else 0.5
         fy = (cy - y0) / (y1 - y0) if y1 > y0 else 0.5
         self._view_box.setRange(
