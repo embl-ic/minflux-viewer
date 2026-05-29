@@ -221,13 +221,25 @@ class MainWindow(QMainWindow):
         )
         self.menuAnalyzeClustering.addAction(self.actionDbscan)
         self.menuAnalyzeClustering.addAction(self.actionKNearestNeighbour)
+
+        # Trace submenu — size estimation, anisotropy, trace viewer
+        self.menuAnalyzeTrace = QMenu("Trace", self)
+        self.actionTraceSize = QAction("Estimate Average Trace Size", self)
+        self.actionTraceSize.triggered.connect(self._run_trace_size)
+        self.actionTraceAnisotropy = QAction("Estimate Anisotropy", self)
+        self.actionTraceAnisotropy.triggered.connect(self._run_trace_anisotropy)
+        self.actionTraceViewerAnalyze = QAction("Trace Viewer", self)
+        self.actionTraceViewerAnalyze.triggered.connect(self._show_trace_viewer)
+        self.menuAnalyzeTrace.addAction(self.actionTraceSize)
+        self.menuAnalyzeTrace.addAction(self.actionTraceAnisotropy)
+        self.menuAnalyzeTrace.addSeparator()
+        self.menuAnalyzeTrace.addAction(self.actionTraceViewerAnalyze)
+
         # Tracking submenu — Phase 5 placeholders
         u.actionParticleTracking.triggered.connect(
             lambda: self._placeholder("Particle tracking", "Phase 5")
         )
-        u.actionTraceViewer.triggered.connect(
-            lambda: self._placeholder("Trace viewer", "Phase 5")
-        )
+        u.actionTraceViewer.triggered.connect(self._show_trace_viewer)
         u.actionMsdAnalysis.triggered.connect(
             lambda: self._placeholder("MSD analysis", "Phase 5")
         )
@@ -359,6 +371,7 @@ class MainWindow(QMainWindow):
         u.menuView.addAction(u.actionHistogram)
         u.menuView.addAction(u.actionScatter)
         u.menuView.addAction(u.actionRender)
+        u.menuView.addAction(u.actionTraceViewer)
         u.menuView.addSeparator()
         u.menuView.addAction(u.actionLog)
 
@@ -375,6 +388,7 @@ class MainWindow(QMainWindow):
         u.menuAnalysis.addAction(u.menuLocPrecision.menuAction())
         u.menuAnalysis.addAction(u.actionLocalDensity)
         u.menuAnalysis.addAction(self.menuAnalyzeClustering.menuAction())
+        u.menuAnalysis.addAction(self.menuAnalyzeTrace.menuAction())
         u.menuAnalysis.addAction(u.menuTracking.menuAction())
 
         self._shortcut_actions = {
@@ -401,7 +415,6 @@ class MainWindow(QMainWindow):
             u.actionSave,
             self.actionOpenSpreadsheet,
             self.actionOpenTiff,
-            u.actionRender,
             self.menuProcessChannel.menuAction(),
             self.actionChannelTool,
             self.actionChannelOverlay,
@@ -419,7 +432,6 @@ class MainWindow(QMainWindow):
             self.actionKNearestNeighbour,
             u.menuTracking.menuAction(),
             u.actionParticleTracking,
-            u.actionTraceViewer,
             u.actionMsdAnalysis,
             u.actionMemoryMonitor,
         ]
@@ -1203,6 +1215,32 @@ class MainWindow(QMainWindow):
             self._no_data_warning(); return
         from .. import analysis
         analysis.run_local_density(self, self._state)
+
+    # ------------------------------------------------------------------
+    # Trace analysis handlers
+    # ------------------------------------------------------------------
+
+    def _run_trace_size(self) -> None:
+        if self._state.active_dataset is None:
+            self._no_data_warning(); return
+        from ..analysis.trace_analysis import show_trace_size_dialog
+        show_trace_size_dialog(self, self._state.active_dataset, self._state)
+
+    def _run_trace_anisotropy(self) -> None:
+        if self._state.active_dataset is None:
+            self._no_data_warning(); return
+        from ..analysis.trace_analysis import show_anisotropy_dialog
+        show_anisotropy_dialog(self, self._state.active_dataset)
+
+    def _show_trace_viewer(self) -> None:
+        if self._state.active_dataset is None:
+            self._no_data_warning(); return
+        from .trace_viewer import TraceViewer
+        idx = self._state.active_idx
+        win = TraceViewer(self._state, dataset_idx=idx)
+        win.show()
+        win.raise_()
+        win.activateWindow()
 
     def _install_toolbar_icons(self) -> None:
         """Attach PNG icons to the toolbar QActions (item #5)."""
