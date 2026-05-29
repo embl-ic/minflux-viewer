@@ -659,6 +659,7 @@ class RenderWindow(QWidget):
         self._auto_bc: bool = True
         self._bc_dialog = None
         self._roi_overlay = None
+        self._volume_window = None
 
         self.setWindowTitle("Render")
         self.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
@@ -2041,9 +2042,13 @@ class RenderWindow(QWidget):
         for orientation in _ORIENTATIONS:
             action = view_menu.addAction(orientation)
             action.setCheckable(True)
-            action.setChecked(self._orientation == orientation)
-            action.setEnabled(orientation in _RENDER_ORIENTATIONS)
-            if orientation in _RENDER_ORIENTATIONS:
+            if orientation == "3D":
+                action.setChecked(self._volume_window is not None and self._volume_window.isVisible())
+                action.setEnabled(self._render_mode == "localizations" and self._has_depth)
+                action.triggered.connect(self._show_3d_volume_window)
+            else:
+                action.setChecked(self._orientation == orientation)
+                action.setEnabled(orientation in _RENDER_ORIENTATIONS)
                 action.triggered.connect(
                     lambda _checked=False, value=orientation: self._set_orientation(value)
                 )
@@ -2084,6 +2089,26 @@ class RenderWindow(QWidget):
     def _set_axis_visible_from_menu(self, checked: bool) -> None:
         self._set_axes_visible(bool(checked))
 
+    def _show_3d_volume_window(self) -> None:
+        if self._idx is None or not (0 <= self._idx < len(self._state.datasets)):
+            return
+        self._state.set_active(self._idx)
+        if self._volume_window is None:
+            from .volume_window import VolumeRenderWindow
+            self._volume_window = VolumeRenderWindow(
+                self._state,
+                self._idx,
+                sigma_nm_xyz=self._sigma_nm_xyz,
+                parent=None,
+            )
+            self._volume_window.destroyed.connect(lambda *_: setattr(self, "_volume_window", None))
+        else:
+            self._volume_window._sigma_nm_xyz = self._sigma_nm_xyz
+            self._volume_window.refresh_from_dataset()
+        self._volume_window.show()
+        self._volume_window.raise_()
+        self._volume_window.activateWindow()
+
     def _show_sigma_dialog(self) -> None:
         dialog = SigmaDialog(self._sigma_nm_xyz, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -2092,6 +2117,9 @@ class RenderWindow(QWidget):
         self._phys_tile_cache.clear()
         self._scheduler.cancel()
         self._schedule_render()
+        if self._volume_window is not None and self._volume_window.isVisible():
+            self._volume_window._sigma_nm_xyz = self._sigma_nm_xyz
+            self._volume_window.refresh_from_dataset()
 
     def _show_data_info_window(self) -> None:
         if self._idx is None or not (0 <= self._idx < len(self._state.datasets)):
@@ -2312,3 +2340,5 @@ class RenderWindow(QWidget):
                 self._refresh_depth_state()
             self._scheduler.cancel()
             self._schedule_render()
+            if self._volume_window is not None and self._volume_window.isVisible():
+                self._volume_window.refresh_from_dataset()
