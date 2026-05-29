@@ -10,25 +10,26 @@ from .utils import slug
 from .state import reset as reset_state, set_mfx_for, set_mbm_for
 
 # NOTE: ``specpy`` is an Abberior-supplied Windows-only binary wheel.
-# We import it lazily inside the functions that need it so that simply
-# importing this module works on every platform (Linux, macOS CI).
-# The plugin UI catches the resulting ImportError and shows a helpful
-# message telling the user to install the vendored wheel.
+# We import it lazily so this module loads on every platform.
+# The plugin UI catches ImportError and shows installation instructions.
 specpy = None  # populated on first call to _ensure_specpy()
 
 
 def _ensure_specpy():
-    """Import specpy on demand; raise a clearer error on failure."""
+    """Import specpy on demand; raise a user-readable error on failure."""
     global specpy
     if specpy is None:
         try:
             import specpy as _specpy
         except ImportError as exc:
             raise ImportError(
-                "The 'specpy' library is required to parse .msr files. "
-                "On Windows, install the bundled wheel:\n"
-                "  poetry run pip install vendor\\specpy-1.2.3-cp312-cp312-win_amd64.whl\n"
-                "See INSTALL_MSR.md for details."
+                "The 'specpy' library is required to parse .msr files.\n"
+                "specpy is not on PyPI — obtain the matching wheel from your\n"
+                "Imspector installation:\n"
+                "  C:\\Imspector\\Versions\\<ver>\\python\\specpy\\\n"
+                "Then install it:\n"
+                "  poetry run pip install <path-to-wheel>.whl\n"
+                "See INSTALL_MSR.md for full instructions."
             ) from exc
         specpy = _specpy
     return specpy

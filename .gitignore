@@ -32,9 +32,7 @@ htmlcov/
 *.asv
 *.m~
 
-# Vendor directory — contains bundled local wheels
-# These are intentionally committed so the repo is self-contained.
-# Do NOT add vendor/ to .gitignore.
-# Individual large binaries are tracked with Git LFS (see .gitattributes).
-!vendor/
-!vendor/**
+# Vendor / specpy wheels — proprietary Abberior binaries, never committed.
+# vendor/README.md is tracked (documentation); the .whl files are not.
+vendor/*.whl
+specpy-*/

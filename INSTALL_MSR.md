@@ -1,39 +1,54 @@
 # Enabling .msr file support
 
-`.msr` files require **specpy**, Abberior Instruments' Python SDK.
-It is a Windows-only binary (`cp312-cp312-win_amd64`) bundled in `vendor/`.
+Opening `.msr` raw acquisition files requires **specpy**, Abberior Instruments'
+Python SDK.  specpy is **not on PyPI** and is not bundled in this repository —
+it is a proprietary binary that Abberior distributes as part of Imspector.
 
-## Requirements
+## Step 1 — Find your specpy wheel
 
-| Requirement | Value |
-|-------------|-------|
-| OS | Windows 10 / 11 (64-bit) |
-| Python | **3.12.x** (must match `cp312`) |
-| numpy | **≥ 2.0** |
+On the Windows PC that runs Imspector, the wheels are at:
 
-> **Note:** If you installed the project with `poetry install`, Python 3.12
-> and numpy ≥ 2.0 are already satisfied — Poetry's constraint is
-> `python = ">=3.10,<3.13"` and numpy is pinned at `>=1.24`. If you are
-> on Python 3.10 or 3.11, the specpy wheel will not install; upgrade to
-> 3.12 first.
+```
+C:\Imspector\Versions\<your-imspector-version>\python\specpy\
+```
 
-## Install (one command)
+Each subfolder matches a Python × NumPy combination, for example:
 
-Open **PowerShell** inside the project directory and run:
+```
+SpecPy-Python3.12-NumPy2.0.0\
+    specpy-1.2.3-cp312-cp312-win_amd64.whl
+```
+
+Find the subfolder for **your Python version** (`cp312` = Python 3.12, etc.)
+and for **your NumPy major version** (1.x or 2.x).
+
+If you are unsure which versions you have:
 
 ```powershell
+poetry run python --version
+poetry run python -c "import numpy; print(numpy.__version__)"
+```
+
+## Step 2 — Install
+
+```powershell
+# Option A — install directly from the Imspector path
+poetry run pip install "C:\Imspector\Versions\<ver>\python\specpy\SpecPy-Python3.12-NumPy2.0.0\specpy-1.2.3-cp312-cp312-win_amd64.whl"
+
+# Option B — copy the wheel to vendor/ first, then install
+copy "C:\Imspector\...\specpy-1.2.3-cp312-cp312-win_amd64.whl" vendor\
 poetry run pip install vendor\specpy-1.2.3-cp312-cp312-win_amd64.whl
 ```
 
-That's it. No restart needed — the viewer detects specpy at runtime.
+No restart needed — the viewer detects specpy at runtime.
 
-## Verify
+## Step 3 — Verify
 
 ```powershell
 poetry run python -c "import specpy; print('specpy OK, version:', specpy.__version__)"
 ```
 
-Expected output:
+Expected:
 ```
 specpy OK, version: 1.2.3
 ```
@@ -44,25 +59,29 @@ specpy OK, version: 1.2.3
 poetry run pip uninstall specpy -y
 ```
 
+---
+
 ## Troubleshooting
 
-**`ERROR: specpy-1.2.3-cp312-cp312-win_amd64.whl is not a supported wheel
-on this platform`**
-You are not on Python 3.12. Check with `poetry run python --version`.
-If needed, tell Poetry to use a specific interpreter:
-```powershell
-poetry env use C:\Python312\python.exe
-poetry install
-poetry run pip install vendor\specpy-1.2.3-cp312-cp312-win_amd64.whl
-```
+**`ERROR: … is not a supported wheel on this platform`**
+The wheel's Python tag does not match your interpreter.
+Check `poetry run python --version` and pick the matching subfolder in the
+Imspector specpy directory.
 
 **`ImportError: DLL load failed while importing _specpy`**
-The Microsoft Visual C++ 2015-2022 Redistributable is not installed.
+The Microsoft Visual C++ 2015–2022 Redistributable is missing.
 Download and install it from:
-https://aka.ms/vs/17/release/vc_redist.x64.exe
-Then re-launch the viewer.
+<https://aka.ms/vs/17/release/vc_redist.x64.exe>
 
 **Opening `.msr` on Linux / macOS**
-specpy is Windows-only. The viewer will show an informative message and
-suggest exporting as `.mat` from Imspector instead. All other functionality
-(loading `.mat`, filtering, scatter plot, histogram, etc.) works normally.
+specpy is Windows-only.  The viewer shows an informative message and suggests
+exporting as `.mat` from Imspector instead.  All other functionality works
+normally on any platform.
+
+---
+
+## Note on redistribution
+
+specpy is proprietary software owned by Abberior Instruments GmbH.
+**Do not commit the `.whl` file to a public repository.**
+`vendor/*.whl` and `specpy-*/` are listed in `.gitignore` for this reason.

@@ -2176,14 +2176,14 @@ def msr_unavailable_message() -> str:
     return (
         "The Abberior <b>specpy</b> library is not installed.<br><br>"
         "Opening <tt>.msr</tt> files requires specpy — a Windows-only binary "
-        "distributed by Abberior Instruments.<br><br>"
-        "The wheel is bundled in the repository at:<br>"
-        "<tt>vendor/specpy-1.2.3-cp312-cp312-win_amd64.whl</tt><br><br>"
-        "To enable .msr support, run <b>one command</b> in PowerShell "
-        "from the project directory:<br><br>"
-        "<tt>poetry run pip install vendor\\specpy-1.2.3-cp312-cp312-win_amd64.whl</tt>"
+        "distributed by Abberior Instruments as part of Imspector.<br><br>"
+        "Find the matching wheel on your Imspector PC at:<br>"
+        "<tt>C:\\Imspector\\Versions\\&lt;ver&gt;\\python\\specpy\\</tt><br><br>"
+        "Then install it (use the subfolder that matches your Python and NumPy):<br><br>"
+        "<tt>poetry run pip install &lt;path-to-wheel&gt;.whl</tt>"
         "<br><br>"
-        "Requires: <b>Windows 64-bit, Python 3.12, numpy ≥ 2.0</b>.<br>"
+        "Requires: <b>Windows 64-bit</b> with a wheel matching your "
+        "Python and NumPy versions.<br>"
         "See <tt>INSTALL_MSR.md</tt> for full instructions and troubleshooting."
     )
 
