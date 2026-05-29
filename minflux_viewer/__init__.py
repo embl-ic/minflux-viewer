@@ -10,6 +10,10 @@ __institution__ = "EMBL Imaging Centre — Advanced Light Microscopy Service gro
 
 
 def resource_path(*parts: str) -> Path:
-    """Return ``<repo>/resources/<parts>`` as an absolute :class:`Path`."""
-    here = Path(__file__).resolve().parent.parent
-    return here.joinpath("resources", *parts)
+    """Return path to bundled resources; works in dev tree and frozen exe."""
+    import sys
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        base = Path(sys._MEIPASS)
+    else:
+        base = Path(__file__).resolve().parent.parent
+    return base.joinpath("resources", *parts)
