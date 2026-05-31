@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtCore import QEvent, QTimer, Qt
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
+    QKeySequenceEdit,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -39,7 +40,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QKeySequenceEdit,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -47,11 +47,10 @@ from PyQt6.QtWidgets import (
     QWidgetAction,
 )
 
+from .. import resource_path
 from ..core.app_state import AppState
 from ..core.loader import load_dataset
-from .. import resource_path
 from .data_window import DataWindow
-
 
 # ---------------------------------------------------------------------------
 # Supported file extensions for drag-and-drop and open dialogs
@@ -60,6 +59,15 @@ from .data_window import DataWindow
 _SUPPORTED_EXTS: tuple[str, ...] = (
     ".mat", ".npy", ".csv", ".tsv", ".xlsx", ".xlsm", ".msr", ".tif", ".tiff",
     ".json",
+)
+
+_ROI_TOOL_DEFS: tuple[tuple[str, str, str], ...] = (
+    ("Rectangle", "rectangle", "toolRect"),
+    ("Oval", "oval", "toolOval"),
+    ("Polygon", "polygon", "toolPolygon"),
+    ("Freehand", "freehand", "toolFreehand"),
+    ("Line", "line", "toolLine"),
+    ("Point", "point", "toolPoint"),
 )
 
 
@@ -116,6 +124,7 @@ class MainWindow(QMainWindow):
         self._memory_win    = None
         self._roi_manager_win = None
         self._shortcut_actions: dict[str, QAction] = {}
+        self._roi_tool_actions: dict[str, QAction] = {}
         self._window_cycle_index = -1
         # One render window per dataset: {dataset_idx: RenderWindow}
         self._render_windows: dict[int, "RenderWindow"] = {}
@@ -129,6 +138,17 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
         self._ui.toolbar.setWindowTitle("Main Toolbar")
         self._ui.toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self._ui.toolbar.setStyleSheet(
+            "QToolButton:checked {"
+            "  background: rgba(0, 120, 215, 0.18);"
+            "  border: 1px solid rgba(0, 120, 215, 0.95);"
+            "  border-radius: 4px;"
+            "  padding: 2px;"
+            "}"
+            "QToolButton:checked:hover {"
+            "  background: rgba(0, 120, 215, 0.26);"
+            "}"
+        )
 
         # Override the central widget with the live drop-target WelcomeWidget.
         # Designer cannot declare custom widget subclasses without a plugin;
@@ -283,20 +303,22 @@ class MainWindow(QMainWindow):
         u.toolLut.triggered.connect(self._show_lut)
         u.toolColor.triggered.connect(self._show_color_picker)
         self._roi_tool_group = QActionGroup(self)
-        self._roi_tool_group.setExclusive(True)
-        for action, tool in (
-            (u.toolRect, "rectangle"),
-            (u.toolOval, "oval"),
-            (u.toolPolygon, "polygon"),
-            (u.toolFreehand, "freehand"),
-            (u.toolLine, "line"),
-            (u.toolPoint, "point"),
-        ):
+        try:
+            self._roi_tool_group.setExclusionPolicy(
+                QActionGroup.ExclusionPolicy.ExclusiveOptional
+            )
+        except Exception:
+            self._roi_tool_group.setExclusive(False)
+        for _label, tool, attr in _ROI_TOOL_DEFS:
+            action = getattr(u, attr)
+            self._roi_tool_actions[tool] = action
             self._roi_tool_group.addAction(action)
             action.triggered.connect(lambda checked, t=tool: self._on_roi_tool(t, checked))
+        self._state.rois.tool_changed.connect(self._sync_roi_tool_actions)
 
         # Wire icon images for toolbar buttons
         self._install_toolbar_icons()
+        self._install_roi_tool_menus()
         self._configure_menus()
         self._mark_ai_unapproved_actions()
         self._apply_shortcuts()
@@ -733,7 +755,7 @@ class MainWindow(QMainWindow):
             return
         except Exception as data_exc:
             try:
-                from .filter_dialog import is_filter_json_file
+                from ..core.filter_io import is_filter_json_file
                 if is_filter_json_file(path):
                     self._load_filter_json(path)
                     return
@@ -831,7 +853,7 @@ class MainWindow(QMainWindow):
         else:
             self._filter_dlg.raise_()
             self._filter_dlg.activateWindow()
-        self._filter_dlg._load_json(path)
+        self._filter_dlg.load_filter_json(path)
 
     def _show_dataset_manager(self) -> None:
         from .dataset_manager import DatasetManager
@@ -842,9 +864,49 @@ class MainWindow(QMainWindow):
         self._roi_manager_win = _raise_or_create(self._roi_manager_win, RoiManagerWindow, self._state)
 
     def _on_roi_tool(self, tool: str, checked: bool) -> None:
-        self._state.rois.set_tool(tool if checked else None)
-        if checked and self._state.rois.active_adapter is None:
-            self._state.log("Select a render, scatter, or attribute plot window before drawing ROIs.", "WARN")
+        if checked:
+            self._activate_roi_tool(tool)
+        elif self._state.rois.active_tool == tool:
+            self._state.rois.set_tool(None)
+
+    def _activate_roi_tool(self, tool: str) -> None:
+        self._state.rois.set_tool(tool)
+        self._sync_roi_tool_actions(tool)
+        if self._state.rois.active_adapter is None:
+            self._state.log("Select a render, histogram, scatter, or attribute plot window before drawing ROIs.", "WARN")
+
+    def _sync_roi_tool_actions(self, tool: str = "") -> None:
+        active_tool = tool or self._state.rois.active_tool or ""
+        for name, action in self._roi_tool_actions.items():
+            blocked = action.blockSignals(True)
+            action.setChecked(name == active_tool)
+            action.blockSignals(blocked)
+
+    def _install_roi_tool_menus(self) -> None:
+        for _label, _tool, attr in _ROI_TOOL_DEFS:
+            action = getattr(self._ui, attr, None)
+            if action is None:
+                continue
+            button = self._ui.toolbar.widgetForAction(action)
+            if button is None:
+                continue
+            button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            button.customContextMenuRequested.connect(
+                lambda pos, widget=button: self._show_roi_tool_menu(widget, pos)
+            )
+
+    def _show_roi_tool_menu(self, widget: QWidget, pos) -> None:
+        menu = QMenu(widget)
+        active_tool = self._state.rois.active_tool
+        for label, tool, _attr in _ROI_TOOL_DEFS:
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(tool == active_tool)
+            action.triggered.connect(lambda _checked=False, t=tool: self._activate_roi_tool(t))
+        menu.addSeparator()
+        clear_action = menu.addAction("No ROI tool")
+        clear_action.triggered.connect(lambda: self._state.rois.set_tool(None))
+        menu.exec(widget.mapToGlobal(pos))
 
     def _show_log(self) -> None:
         """Open (or raise) the Log window — structured application events."""
@@ -987,7 +1049,8 @@ class MainWindow(QMainWindow):
         signal chain then auto-opens a new render window.
         """
         import copy
-        from ..core.dataset import MinfluxDataset, FileInfo
+
+        from ..core.dataset import FileInfo, MinfluxDataset
 
         src = self._state.active_dataset
         if src is None:
@@ -1080,14 +1143,92 @@ class MainWindow(QMainWindow):
         win = DataWindow(ds, idx, self._state)
         offset = idx * 22
         win.move(120 + offset, 600 - offset)
-        win.show()
         self._data_windows[idx] = win
         self._populate_recent_menu()
 
-        # Auto-open a render window for this dataset unless a batch importer
-        # will open one grouped render view after adding all channels.
-        if not getattr(self._state, "suspend_auto_render", False):
+        data_prefs = self._state.prefs.get("data", {})
+        if data_prefs.get("show_data_info", True):
+            win.show()
+
+        if data_prefs.get("show_attr_plot", False):
+            self._show_attr_plot()
+        if data_prefs.get("show_histogram", False):
+            self._show_histogram()
+        if data_prefs.get("show_scatter", False):
+            self._show_scatter()
+
+        # Auto-open a render window for this dataset only when requested,
+        # unless a batch importer will open one grouped render view.
+        if data_prefs.get("show_render", True) and not getattr(self._state, "suspend_auto_render", False):
             self._show_render(idx)
+        self._schedule_post_load_computations(idx)
+
+    def _schedule_post_load_computations(self, idx: int) -> None:
+        """Run optional one-time computed attributes after initial windows show."""
+        delay_ms = 450 + max(0, idx) * 100
+        QTimer.singleShot(delay_ms, lambda i=idx: self._run_post_load_computations(i))
+
+    def _run_post_load_computations(self, idx: int) -> None:
+        if not (0 <= idx < len(self._state.datasets)):
+            return
+        ds = self._state.datasets[idx]
+        data_prefs = self._state.prefs.get("data", {})
+
+        if data_prefs.get("compute_rimf", True) and "rimf" not in ds.derived:
+            try:
+                from ..analysis.trace_analysis import estimate_anisotropy
+                import numpy as np
+                loc_nm = np.asarray(ds.loc_nm, dtype=float)
+                tid = np.asarray(ds.attr.get("tid", np.arange(loc_nm.shape[0]))).ravel()
+                if loc_nm.shape[0] > 0 and loc_nm.shape[1] >= 3:
+                    rimf, sizes_x, sizes_y, sizes_z = estimate_anisotropy(loc_nm, tid)
+                    ds.cali.RIMF = float(rimf) if np.isfinite(rimf) else ds.cali.RIMF
+                    ds.derived["rimf"] = np.asarray([rimf], dtype=float)
+                    ds.derived["rimf_sizes_x"] = sizes_x
+                    ds.derived["rimf_sizes_y"] = sizes_y
+                    ds.derived["rimf_sizes_z"] = sizes_z
+                    self._state.log(f"Computed RIMF for '{ds.name}': {rimf:.4g}")
+            except Exception as exc:
+                self._state.log(f"RIMF computation skipped for '{ds.name}': {exc}", "WARN")
+
+        if data_prefs.get("compute_loc_prec", True) and "sigma_per_trace_nm" not in ds.derived:
+            try:
+                from ..analysis.localization_precision import stddev_per_trace
+                import numpy as np
+                loc_x = np.asarray(ds.attr.get("loc_x"))
+                loc_y = np.asarray(ds.attr.get("loc_y"))
+                loc_z = np.asarray(ds.attr.get("loc_z", np.zeros_like(loc_x)))
+                tid = np.asarray(ds.attr.get("tid", np.arange(loc_x.size)))
+                result = stddev_per_trace(np.column_stack([loc_x, loc_y, loc_z]), tid)
+                ds.attr["sigma_per_trace_nm"] = result["per_trace_sigma_xyz"]
+                ds.attr["sigma_trace_ids"] = result["trace_ids"]
+                ds.derived["sigma_per_trace_nm"] = result["per_trace_sigma_xyz"]
+                ds.derived["sigma_trace_ids"] = result["trace_ids"]
+                ds.cali.loc_precision = np.asarray(result["median_sigma_xyz"], dtype=float)
+                self._state.log(
+                    f"Computed localization precision for '{ds.name}' using StdDev per trace: "
+                    f"median sigma=({result['median_sigma_xyz'][0]:.3g}, "
+                    f"{result['median_sigma_xyz'][1]:.3g}, {result['median_sigma_xyz'][2]:.3g}) nm."
+                )
+            except Exception as exc:
+                self._state.log(f"Localization precision computation skipped for '{ds.name}': {exc}", "WARN")
+
+        if data_prefs.get("compute_local_density", True) and "den" not in ds.attr:
+            try:
+                from ..analysis.local_density import compute_local_density_for_dataset
+                density, method, detail = compute_local_density_for_dataset(ds, self._state.prefs)
+                ds.attr["den"] = density
+                ds.attr["local_density"] = density
+                ds.derived["den"] = density
+                ds.derived["local_density"] = density
+                for name in ("den", "local_density"):
+                    if name not in ds.prop.attr_names:
+                        ds.prop.attr_names.append(name)
+                self._state.log(
+                    f"Computed local density for '{ds.name}' using {method} ({detail})."
+                )
+            except Exception as exc:
+                self._state.log(f"Local density computation skipped for '{ds.name}': {exc}", "WARN")
 
     def _on_dataset_removed(self, idx: int) -> None:
         win = self._data_windows.pop(idx, None)
@@ -1167,8 +1308,8 @@ class MainWindow(QMainWindow):
 
     def _show_color_picker(self) -> None:
         """Toolbar Color button — pick a single colour for ROIs/render."""
-        from PyQt6.QtWidgets import QColorDialog
         from PyQt6.QtGui import QColor
+        from PyQt6.QtWidgets import QColorDialog
         current = self._state.prefs.get("plot", {}).get("roi_color", "Yellow")
         # Accept either a name like "Yellow" or a hex string
         c0 = QColor(current) if QColor(current).isValid() else QColor("yellow")
@@ -1245,6 +1386,7 @@ class MainWindow(QMainWindow):
     def _install_toolbar_icons(self) -> None:
         """Attach PNG icons to the toolbar QActions (item #5)."""
         from PyQt6.QtGui import QIcon
+
         from .. import resource_path
         icon_dir = resource_path("icons")
         mapping = {

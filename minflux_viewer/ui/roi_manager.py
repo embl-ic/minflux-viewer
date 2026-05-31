@@ -127,10 +127,17 @@ class RoiManagerWindow(QWidget):
         if len(selected) != 1:
             QMessageBox.information(self, "Update ROI", "Select exactly one ROI to update.")
             return
-        if adapter is None or adapter.current_record() is None:
-            QMessageBox.information(self, "Update ROI", "Draw a replacement ROI first.")
+        if adapter is None:
+            QMessageBox.information(self, "Update ROI", "Activate a compatible ROI window first.")
             return
-        record = adapter.replace_selected_from_draft()
+        record_for_update = getattr(adapter, "record_for_update", None)
+        if callable(record_for_update):
+            record = record_for_update(selected[0])
+        else:
+            record = adapter.replace_selected_from_draft() if adapter.current_record() is not None else None
+        if record is None:
+            QMessageBox.information(self, "Update ROI", "Select an ROI visible in the active compatible window, or draw a replacement ROI first.")
+            return
         record.name = selected[0].name
         self._store.update(selected[0].id, record)
 

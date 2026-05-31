@@ -45,9 +45,9 @@ DEFAULT_PREFS: dict = {
         "iter_load": "last",            # "last" | "all"
         "load_efc_cfr": True,
         "load_all_dcr": False,
-        "compute_rimf": False,
-        "compute_loc_prec": False,
-        "compute_local_density": False,
+        "compute_rimf": True,
+        "compute_loc_prec": True,
+        "compute_local_density": True,
         "local_density_radius": 100,
         "local_density_dimensions": 2,
         "local_density_method": "kdtree",
@@ -59,10 +59,10 @@ DEFAULT_PREFS: dict = {
         "min_z_range_nm": 5.0,
         # auto-open windows on load:
         "show_data_info": True,
-        "show_attr_plot": True,
+        "show_attr_plot": False,
         "show_scatter": False,
         "show_histogram": False,
-        "show_render": False,
+        "show_render": True,
     },
     "plot": {
         "rimf_value": 0.67,
@@ -102,6 +102,9 @@ DEFAULT_PREFS: dict = {
     "attributes": {
         "enabled": [
             "itr", "tid", "tim", "vld", "loc", "efo", "cfr", "dcr",
+        ],
+        "computed": [
+            "idx", "nLoc", "tim_trace", "dt", "dst", "spd", "den",
         ],
     },
     "mbm_handling": {
@@ -163,6 +166,19 @@ def _migrate_prefs(prefs: dict) -> dict:
         shortcuts["attribute_plot"] = "Ctrl+1"
     if shortcuts.get("scatter_plot") == "Ctrl+1":
         shortcuts["scatter_plot"] = "Ctrl+3"
+    attrs = prefs.setdefault("attributes", {})
+    attrs.setdefault("computed", ["idx", "nLoc", "tim_trace", "dt", "dst", "spd", "den"])
+
+    migrations = prefs.setdefault("_migrations", {})
+    if not migrations.get("v021_compute_show_defaults"):
+        data = prefs.setdefault("data", {})
+        data["compute_rimf"] = True
+        data["compute_loc_prec"] = True
+        data["compute_local_density"] = True
+        data["show_data_info"] = True
+        data["show_attr_plot"] = False
+        data["show_render"] = True
+        migrations["v021_compute_show_defaults"] = True
     return prefs
 
 

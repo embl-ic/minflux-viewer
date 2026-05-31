@@ -105,6 +105,7 @@ def compute_local_density_for_dataset(ds, prefs: dict) -> tuple[np.ndarray, str,
         method=method,
         voxel_size_nm=voxel_nm,
         smooth_sigma=smooth_sigma,
+        use_filter=False,
     )[:3]
 
 
@@ -116,10 +117,15 @@ def compute_local_density(
     method: str,
     voxel_size_nm: float | None = None,
     smooth_sigma: float = 1.0,
+    use_filter: bool = True,
 ) -> tuple[np.ndarray, str, str, np.ndarray, tuple[np.ndarray, np.ndarray]]:
     """Compute local density and a 2D density image for display."""
-    mask = np.asarray(ds.filter_mask, dtype=bool)
     points = np.asarray(ds.loc_nm, dtype=float)
+    mask = (
+        np.asarray(ds.filter_mask, dtype=bool)
+        if use_filter
+        else np.ones(points.shape[0], dtype=bool)
+    )
     valid = mask & np.isfinite(points).all(axis=1)
     density_full = np.full(points.shape[0], np.nan, dtype=float)
     active_points = points[valid, : max(2, min(int(dimensions), 3))]
@@ -199,10 +205,13 @@ def run_local_density(parent, state) -> None:
         QMessageBox.critical(parent, "Local Density", str(exc))
         return
 
+    ds.attr["den"] = density
     ds.attr["local_density"] = density
+    ds.derived["den"] = density
     ds.derived["local_density"] = density
-    if "local_density" not in ds.prop.attr_names:
-        ds.prop.attr_names.append("local_density")
+    for name in ("den", "local_density"):
+        if name not in ds.prop.attr_names:
+            ds.prop.attr_names.append(name)
 
     finite = density[np.isfinite(density)]
     msg = (

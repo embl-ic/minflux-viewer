@@ -24,6 +24,8 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.app_state import AppState
+from ..core.attributes import plot_attribute_names
+from ..core.roi_selection import rectangle_mask
 
 
 class AttributeWindow(QWidget):
@@ -34,6 +36,7 @@ class AttributeWindow(QWidget):
     def __init__(self, state: AppState, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._state = state
+        self._view_state_key = "attribute_plot_state"
 
         self.setWindowTitle("Attribute Plot")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -126,11 +129,8 @@ class AttributeWindow(QWidget):
 
         self.setWindowTitle(f"Attribute Plot  —  {ds.name}")
 
-        numeric = [
-            k for k in ds.prop.attr_names
-            if np.issubdtype(np.asarray(ds.attr[k]).dtype, np.number)
-            and np.asarray(ds.attr[k]).ndim == 1
-        ]
+        numeric = plot_attribute_names(ds, self._state.prefs)
+        saved = ds.state.get(self._view_state_key, {})
 
         for combo in (self._x_combo, self._y_combo):
             old = combo.currentText()
@@ -141,12 +141,23 @@ class AttributeWindow(QWidget):
                 combo.setCurrentText(old)
             combo.blockSignals(False)
 
-        # Sensible defaults
-        if "idx" in numeric:
+        x_default = saved.get("x", "idx")
+        y_default = saved.get("y", "efo")
+        self._lines_chk.blockSignals(True)
+        self._filter_chk.blockSignals(True)
+        self._lines_chk.setChecked(bool(saved.get("lines", False)))
+        self._filter_chk.setChecked(bool(saved.get("filtered_only", True)))
+        self._lines_chk.blockSignals(False)
+        self._filter_chk.blockSignals(False)
+        if x_default in numeric:
+            self._x_combo.setCurrentText(x_default)
+        elif "idx" in numeric:
             self._x_combo.setCurrentText("idx")
         elif self._x_combo.currentText() == "" and "tim" in numeric:
             self._x_combo.setCurrentText("tim")
-        if "efo" in numeric:
+        if y_default in numeric:
+            self._y_combo.setCurrentText(y_default)
+        elif "efo" in numeric:
             self._y_combo.setCurrentText("efo")
 
         self._draw()
@@ -160,6 +171,12 @@ class AttributeWindow(QWidget):
         y_name = self._y_combo.currentText()
         if not x_name or not y_name:
             return
+        ds.state[self._view_state_key] = {
+            "x": x_name,
+            "y": y_name,
+            "lines": self._lines_chk.isChecked(),
+            "filtered_only": self._filter_chk.isChecked(),
+        }
 
         ftr = ds.filter_mask if self._filter_chk.isChecked() else np.ones(ds.prop.num_loc, bool)
 
@@ -190,6 +207,40 @@ class AttributeWindow(QWidget):
         self._plot.setLabel("bottom", x_name)
         self._plot.setLabel("left", y_name)
         self._info.setText(f"{n:,} points")
+
+    def compute_roi_selection(self, record):
+        if record.type != "rectangle":
+            return None
+        ds = self._state.active_dataset
+        if ds is None:
+            return None
+        x_name = self._x_combo.currentText()
+        y_name = self._y_combo.currentText()
+        if not x_name or not y_name:
+            return None
+        x = np.asarray(ds.attr.get(x_name, np.empty(0))).ravel().astype(float)
+        y = np.asarray(ds.attr.get(y_name, np.empty(0))).ravel().astype(float)
+        n = min(x.size, y.size, ds.prop.num_loc)
+        if n == 0:
+            return None
+        base = np.ones(n, dtype=bool)
+        if self._filter_chk.isChecked():
+            ftr = np.asarray(ds.filter_mask, dtype=bool).ravel()
+            if ftr.size == n:
+                base = ftr.copy()
+        mask = rectangle_mask(x[:n], y[:n], record, base_mask=base)
+        if mask.size != ds.prop.num_loc:
+            full = np.zeros(ds.prop.num_loc, dtype=bool)
+            full[:mask.size] = mask
+            mask = full
+        context = {
+            "source_view": "attribute",
+            "dataset_idx": self._state.active_idx,
+            "x_attr": x_name,
+            "y_attr": y_name,
+            "filtered_only": self._filter_chk.isChecked(),
+        }
+        return ds, mask, context
 
     # ------------------------------------------------------------------
     # Slots

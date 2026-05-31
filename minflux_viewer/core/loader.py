@@ -48,6 +48,8 @@ from .dataset import (
     build_localization_dataset,
 )
 
+SPATIAL_COORD_FIELDS = {"loc", "lnc", "ext"}
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -111,7 +113,7 @@ def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
     prop = _compute_properties(attrs, num_loc, num_itr, prefs=prefs)
 
     # 5. Derived per-localisation attributes
-    attrs = _add_derived_attributes(attrs, prop)
+    attrs = _add_derived_attributes(attrs, prop, prefs=prefs)
     prop.attr_names = attrs.keys()
 
     # 6. Calibration defaults (populated further by the analysis functions)
@@ -244,9 +246,11 @@ def _parse_m2410(raw: dict) -> tuple[AttrStore, int, int]:
     Field layout in this format:
     * ``itr`` is a flat integer array of per-localisation iteration indices.
     * Most fields are scalar per localisation — shape (N,) or (1, N).
-    * ``loc`` (and sometimes ``lnc``) are xyz arrays — shape (N, 3) or (N, 2).
-    * Some exports include ``ext`` as an xyz array; others as a scalar.
-      We detect structurally from the shape, not by field name.
+    * ``loc`` (and sometimes ``lnc``/``ext``) are xyz arrays — shape (N, 3)
+      or (N, 2). Only known spatial coordinate fields are split into
+      ``_x/_y/_z`` columns.
+    * ``dcr`` may be stored as (N, 1) or (N, 2); for (N, 2), the first
+      column is the channel-ratio value used by the viewer.
     """
     # "itr" is always present and always scalar-per-loc in m2410
     itr_raw = np.asarray(raw["itr"])
@@ -292,22 +296,18 @@ def _parse_m2410(raw: dict) -> tuple[AttrStore, int, int]:
         else:
             continue
 
-        # Classify by trailing-dimension size, not by name
-        #   (N, 1)     → scalar per loc
-        #   (N, 3)     → xyz
-        #   (N, 2)     → xy only (rare)
+        # Classify by semantic field name first. Only spatial coordinates are
+        # split into x/y/z; non-spatial N x 2 fields such as dcr stay scalar.
         n_cols = arr2.shape[1] if arr2.ndim == 2 else 0
 
         sub = arr2[mask]
 
-        if n_cols == 3:
+        if key in SPATIAL_COORD_FIELDS and n_cols in (2, 3):
             attrs[f"{key}_x"] = sub[:, 0].ravel()
             attrs[f"{key}_y"] = sub[:, 1].ravel()
-            attrs[f"{key}_z"] = sub[:, 2].ravel()
-        elif n_cols == 2:
-            attrs[f"{key}_x"] = sub[:, 0].ravel()
-            attrs[f"{key}_y"] = sub[:, 1].ravel()
-            attrs[f"{key}_z"] = np.zeros(num_loc)
+            attrs[f"{key}_z"] = sub[:, 2].ravel() if n_cols == 3 else np.zeros(num_loc)
+        elif key == "dcr" and n_cols > 1:
+            attrs[key] = sub[:, 0].ravel()
         else:
             attrs[key] = sub.ravel() if n_cols == 1 else sub
 
@@ -423,8 +423,8 @@ def _parse_m2205_unwrapped(
         else:
             continue
 
-        # ── xyz (3-D arrays) ─────────────────────────────────────────
-        if arr.ndim == 3 and arr.shape[-1] in (2, 3):
+        # ── spatial coordinate arrays ────────────────────────────────
+        if key in SPATIAL_COORD_FIELDS and arr.ndim == 3 and arr.shape[-1] in (2, 3):
             if arr.shape[1] == num_itr:
                 sub = arr[vld, iter_last, :]
             else:
@@ -438,8 +438,8 @@ def _parse_m2205_unwrapped(
             )
             continue
 
-        # ── xyz (2-D arrays, single iteration): (N, 3) ───────────────
-        if arr.ndim == 2 and arr.shape[1] in (2, 3) and arr.shape[1] != num_itr:
+        # ── spatial coordinate arrays, single iteration: (N, 2/3) ───
+        if key in SPATIAL_COORD_FIELDS and arr.ndim == 2 and arr.shape[1] in (2, 3) and arr.shape[1] != num_itr:
             sub = arr[vld, :]
             n_cols = sub.shape[1]
             attrs[f"{key}_x"] = sub[:, 0].ravel()
@@ -447,6 +447,11 @@ def _parse_m2205_unwrapped(
             attrs[f"{key}_z"] = (
                 sub[:, 2].ravel() if n_cols == 3 else np.zeros(num_loc_vld)
             )
+            continue
+
+        # ── Detection channel ratio: use first column if stored as N x 2.
+        if key == "dcr" and arr.ndim == 2 and arr.shape[0] == num_loc and arr.shape[1] > 1:
+            attrs[key] = arr[vld, 0].ravel()
             continue
 
         # ── Per-iteration attributes: (num_loc, num_itr) ─────────────
@@ -518,14 +523,15 @@ def _compute_properties(
     return prop
 
 
-def _add_derived_attributes(attrs: AttrStore, prop: DataProp) -> AttrStore:
+def _add_derived_attributes(attrs: AttrStore, prop: DataProp, prefs: dict | None = None) -> AttrStore:
     """
     Port of ``compute_extra_property.m`` — appends:
 
-    ``itr`` (1-based), ``dt``, ``dst``, ``spd``, ``nLoc``, ``tim_trace``,
-    ``ftr``, ``idx``.
+    ``itr`` (1-based), optional computed attributes, and always ``ftr``.
     """
     n = prop.num_loc
+    attr_prefs = (prefs or {}).get("attributes", {}) if prefs else {}
+    compute = set(attr_prefs.get("computed", ["idx", "nLoc", "tim_trace", "dt", "dst", "spd", "den"]) or [])
 
     # Make iteration 1-based (MATLAB convention kept for user display)
     if "itr" in attrs:
@@ -537,35 +543,58 @@ def _add_derived_attributes(attrs: AttrStore, prop: DataProp) -> AttrStore:
     trace_change = np.diff(tid) != 0   # indices where trace ID changes
 
     # Time interval (dt)
-    dt            = np.diff(tim)
-    dt[trace_change] = 0.0
-    attrs["dt"]   = np.concatenate([[0.0], dt])
+    dt = None
+    if {"dt", "spd"} & compute:
+        dt = np.diff(tim)
+        dt[trace_change] = 0.0
+        attrs["dt"] = np.concatenate([[0.0], dt])
 
     # Travel distance (dst) and speed (spd)
-    lx = np.asarray(attrs.get("loc_x", np.zeros(n))).ravel()
-    ly = np.asarray(attrs.get("loc_y", np.zeros(n))).ravel()
-    lz = np.asarray(attrs.get("loc_z", np.zeros(n))).ravel()
-    dloc = np.diff(np.column_stack([lx, ly, lz]), axis=0)
-    dst  = np.linalg.norm(dloc, axis=1)
-    dst[trace_change] = 0.0
-    attrs["dst"]  = np.concatenate([[0.0], dst])
+    if {"dst", "spd"} & compute:
+        lx = np.asarray(attrs.get("loc_x", np.zeros(n))).ravel()
+        ly = np.asarray(attrs.get("loc_y", np.zeros(n))).ravel()
+        lz = np.asarray(attrs.get("loc_z", np.zeros(n))).ravel()
+        dloc = np.diff(np.column_stack([lx, ly, lz]), axis=0)
+        dst = np.linalg.norm(dloc, axis=1)
+        dst[trace_change] = 0.0
+        attrs["dst"] = np.concatenate([[0.0], dst])
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        attrs["spd"] = np.where(attrs["dt"] > 0, attrs["dst"] / attrs["dt"], 0.0)
+    if "spd" in compute:
+        if "dt" not in attrs:
+            dt = np.diff(tim)
+            dt[trace_change] = 0.0
+            attrs["dt"] = np.concatenate([[0.0], dt])
+        if "dst" not in attrs:
+            lx = np.asarray(attrs.get("loc_x", np.zeros(n))).ravel()
+            ly = np.asarray(attrs.get("loc_y", np.zeros(n))).ravel()
+            lz = np.asarray(attrs.get("loc_z", np.zeros(n))).ravel()
+            dloc = np.diff(np.column_stack([lx, ly, lz]), axis=0)
+            dst = np.linalg.norm(dloc, axis=1)
+            dst[trace_change] = 0.0
+            attrs["dst"] = np.concatenate([[0.0], dst])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            attrs["spd"] = np.where(attrs["dt"] > 0, attrs["dst"] / attrs["dt"], 0.0)
+        if "dt" not in compute:
+            attrs.pop("dt", None)
+        if "dst" not in compute:
+            attrs.pop("dst", None)
 
     # Localization count per trace (per-loc expanded)
-    attrs["nLoc"] = np.repeat(prop.num_loc_per_trace, prop.num_loc_per_trace)
+    if "nLoc" in compute:
+        attrs["nLoc"] = np.repeat(prop.num_loc_per_trace, prop.num_loc_per_trace)
 
     # Relative time within each trace
-    t_start      = tim[prop.trace_idx[:, 0]]
-    t_min        = np.repeat(t_start, prop.num_loc_per_trace)
-    attrs["tim_trace"] = tim - t_min
+    if "tim_trace" in compute:
+        t_start = tim[prop.trace_idx[:, 0]]
+        t_min = np.repeat(t_start, prop.num_loc_per_trace)
+        attrs["tim_trace"] = tim - t_min
 
     # Filter mask (all pass by default)
     attrs["ftr"]  = np.ones(n, dtype=bool)
 
     # 1-based index
-    attrs["idx"]  = np.arange(1, n + 1, dtype=np.uint32)
+    if "idx" in compute:
+        attrs["idx"] = np.arange(1, n + 1, dtype=np.uint32)
 
     return attrs
 
@@ -615,6 +644,8 @@ def load_from_mfx_array(
         Application preferences dict.
     """
     prefs = prefs or {}
+    data_prefs = prefs.get("data", {}) or {}
+    load_all_itr = data_prefs.get("iter_load", "last") == "all"
 
     file_info = FileInfo(
         name=name,
@@ -630,11 +661,9 @@ def load_from_mfx_array(
     field_names = list(getattr(mfx.dtype, "names", []) or [])
     num_raw = int(mfx.shape[0])
 
-    _XYZ = {"loc", "lnc", "ext"}
-
     for field_name in field_names:
         val = mfx[field_name]
-        if field_name in _XYZ:
+        if field_name in SPATIAL_COORD_FIELDS:
             # (N, 3) xyz arrays — split into _x/_y/_z
             arr = np.asarray(val)
             if arr.ndim == 1:
@@ -644,6 +673,8 @@ def load_from_mfx_array(
             attrs[f"{field_name}_z"] = arr[:, 2].ravel() if arr.shape[1] > 2 else np.zeros(len(arr))
         elif field_name == "dcr":
             arr = np.asarray(val)
+            if arr.ndim > 1 and arr.shape[0] != num_raw and arr.shape[1] == num_raw:
+                arr = arr.T
             attrs[field_name] = arr[:, 0].ravel() if arr.ndim > 1 else arr.ravel()
         else:
             arr = np.asarray(val)
@@ -664,17 +695,29 @@ def load_from_mfx_array(
         loc_z = np.asarray(attrs.get("loc_z", np.zeros(num_raw)), dtype=float).ravel()
         valid_mask &= np.isfinite(loc_z)
 
+    itr_arr = attrs.get("itr", None)
+    num_itr = 1
+    if itr_arr is not None:
+        try:
+            itr_raw = np.asarray(itr_arr).ravel()
+            valid_itr = itr_raw[valid_mask]
+            if valid_itr.size:
+                last_itr = int(np.nanmax(valid_itr))
+                num_itr = last_itr + 1
+                if not load_all_itr:
+                    valid_mask &= itr_raw == last_itr
+        except Exception:
+            pass
+
     for key, val in list(attrs.items()):
         arr = np.asarray(val)
         if arr.ndim >= 1 and arr.shape[0] == num_raw:
             attrs[key] = arr[valid_mask]
 
     num_loc = int(valid_mask.sum())
-    num_itr_arr = attrs.get("itr", None)
-    num_itr = int(np.nanmax(num_itr_arr) + 1) if (num_itr_arr is not None and np.asarray(num_itr_arr).size) else 1
 
     prop = _compute_properties(attrs, num_loc, num_itr, prefs=prefs)
-    attrs = _add_derived_attributes(attrs, prop)
+    attrs = _add_derived_attributes(attrs, prop, prefs=prefs)
     prop.attr_names = attrs.keys()
 
     cali = Calibration()
@@ -755,7 +798,7 @@ def load_npy(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     })
 
     prop = _compute_properties(attrs, n, 1, prefs=prefs)
-    attrs = _add_derived_attributes(attrs, prop)
+    attrs = _add_derived_attributes(attrs, prop, prefs=prefs)
     prop.attr_names = attrs.keys()
 
     return MinfluxDataset(
@@ -891,7 +934,7 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     attrs = AttrStore(data)
 
     prop = _compute_properties(attrs, n, 1, prefs=prefs)
-    attrs = _add_derived_attributes(attrs, prop)
+    attrs = _add_derived_attributes(attrs, prop, prefs=prefs)
     prop.attr_names = attrs.keys()
 
     return MinfluxDataset(
@@ -1002,7 +1045,7 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     )
 
     prop = _compute_properties(attrs, n, num_itr, prefs=prefs)
-    attrs = _add_derived_attributes(attrs, prop)
+    attrs = _add_derived_attributes(attrs, prop, prefs=prefs)
     prop.attr_names = attrs.keys()
 
     return MinfluxDataset(

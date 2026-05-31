@@ -25,6 +25,8 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.app_state import AppState
+from ..core.attributes import plot_attribute_names
+from ..core.roi_selection import rectangle_bounds, value_range_mask
 
 _TRACE_AGG_MODES = [
     "trace mean",
@@ -48,6 +50,8 @@ class HistogramWindow(QWidget):
         self._auto_bin_width: float | None = None
         self._resetting_plot = False
         self._last_log_warning_key: tuple | None = None
+        self._roi_overlay = None
+        self._view_state_key = "histogram_plot_state"
 
         self.setWindowTitle("Histogram")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -110,6 +114,14 @@ class HistogramWindow(QWidget):
 
         self._hist_item = pg.BarGraphItem(x=[], height=[], width=1, brush="steelblue")
         self._plot.addItem(self._hist_item)
+        from .roi_overlay import RoiOverlayController
+        self._roi_overlay = RoiOverlayController(
+            self._state.rois,
+            self,
+            self._plot,
+            self._plot.getPlotItem(),
+            coordinate_space="plot",
+        )
         root.addWidget(self._plot)
 
         self._info_label = QLabel("")
@@ -125,22 +137,36 @@ class HistogramWindow(QWidget):
 
         self.setWindowTitle(f"Histogram  —  {ds.name}")
         self._populate_agg_modes()
+        saved = ds.state.get(self._view_state_key, {})
 
         old = self._attr_combo.currentText()
         self._attr_combo.blockSignals(True)
         self._attr_combo.clear()
-        numeric = [
-            k for k in ds.prop.attr_names
-            if k not in ("ftr", "idx")
-            and np.issubdtype(np.asarray(ds.attr[k]).dtype, np.number)
-            and np.asarray(ds.attr[k]).ndim == 1
-        ]
+        numeric = plot_attribute_names(ds, self._state.prefs, exclude=("ftr", "idx"))
         self._attr_combo.addItems(numeric)
-        if old in numeric:
+        attr_default = saved.get("attribute", old)
+        if attr_default in numeric:
+            self._attr_combo.setCurrentText(attr_default)
+        elif old in numeric:
             self._attr_combo.setCurrentText(old)
-        elif "efo" in numeric:
-            self._attr_combo.setCurrentText("efo")
+        elif "cfr" in numeric:
+            self._attr_combo.setCurrentText("cfr")
         self._attr_combo.blockSignals(False)
+
+        self._agg_combo.blockSignals(True)
+        agg_default = saved.get("aggregation", "per loc")
+        if self._agg_combo.findText(agg_default) >= 0:
+            self._agg_combo.setCurrentText(agg_default)
+        else:
+            self._agg_combo.setCurrentText("per loc")
+        self._agg_combo.blockSignals(False)
+
+        self._zero_chk.blockSignals(True)
+        self._log_chk.blockSignals(True)
+        self._zero_chk.setChecked(bool(saved.get("hide_zeros", False)))
+        self._log_chk.setChecked(bool(saved.get("log_data", False)))
+        self._zero_chk.blockSignals(False)
+        self._log_chk.blockSignals(False)
 
         self._auto_bin_width = None
         self._draw()
@@ -162,6 +188,12 @@ class HistogramWindow(QWidget):
 
         attr_name = self._attr_combo.currentText()
         agg_mode = self._agg_combo.currentText()
+        ds.state[self._view_state_key] = {
+            "attribute": attr_name,
+            "aggregation": agg_mode,
+            "hide_zeros": self._zero_chk.isChecked(),
+            "log_data": self._log_chk.isChecked(),
+        }
         raw = np.asarray(ds.attr.get(attr_name, np.empty(0))).ravel().astype(float)
         if raw.size == 0:
             return
@@ -205,6 +237,97 @@ class HistogramWindow(QWidget):
             f"{int(ds.filter_mask.sum()):,} / {ds.prop.num_loc:,} localisations  |  "
             f"{vals.size:,} histogram values  |  bin size {bin_width:.6g}"
         )
+
+    def normalize_roi_record(self, record):
+        """Histograms treat rectangle ROIs as x-range bands."""
+        if record.type != "rectangle":
+            return record
+        try:
+            (x0, x1), (_y0, _y1) = self._plot.getPlotItem().vb.viewRange()
+        except Exception:
+            return record
+        bounds = rectangle_bounds(record)
+        if bounds is None:
+            return record
+        rx0, rx1, _ry0, _ry1 = bounds
+        y0, y1 = _y0, _y1
+        record.geometry = {"bounds": [rx0, y0, rx1 - rx0, y1 - y0]}
+        record.context = {**record.context, "histogram_band": True, "view_x_range": [x0, x1]}
+        return record
+
+    def compute_roi_selection(self, record):
+        if record.type != "rectangle":
+            return None
+        ds = self._state.active_dataset
+        bounds = rectangle_bounds(record)
+        if ds is None or bounds is None:
+            return None
+        attr_name = self._attr_combo.currentText()
+        agg_mode = self._agg_combo.currentText()
+        raw = np.asarray(ds.attr.get(attr_name, np.empty(0))).ravel().astype(float)
+        if raw.size == 0:
+            return None
+
+        lo, hi = bounds[0], bounds[1]
+        if agg_mode == "per loc":
+            mask = self._per_loc_histogram_mask(ds, raw, lo, hi)
+        else:
+            mask = self._trace_histogram_mask(ds, raw, agg_mode, lo, hi)
+        context = {
+            "source_view": "histogram",
+            "dataset_idx": self._state.active_idx,
+            "attribute": attr_name,
+            "aggregation": agg_mode,
+            "x_range": [lo, hi],
+            "log_data": self._log_chk.isChecked(),
+            "hide_zeros": self._zero_chk.isChecked(),
+        }
+        return ds, mask, context
+
+    def _per_loc_histogram_mask(self, ds, raw: np.ndarray, lo: float, hi: float) -> np.ndarray:
+        n = min(raw.size, ds.prop.num_loc)
+        values = raw[:n].astype(float, copy=True)
+        base = np.asarray(ds.filter_mask, dtype=bool).ravel()
+        if base.size != n:
+            base = np.ones(n, dtype=bool)
+        display_mask = base & np.isfinite(values)
+        if self._log_chk.isChecked():
+            positive = values > 0.0
+            display_mask &= positive
+            values = np.where(positive, np.log(values), np.nan)
+        if self._zero_chk.isChecked():
+            display_mask &= values != 0.0
+        mask = value_range_mask(values, lo, hi, base_mask=display_mask)
+        if mask.size != ds.prop.num_loc:
+            full = np.zeros(ds.prop.num_loc, dtype=bool)
+            full[:mask.size] = mask
+            mask = full
+        return mask
+
+    def _trace_histogram_mask(self, ds, raw: np.ndarray, agg_mode: str, lo: float, hi: float) -> np.ndarray:
+        vals = self._aggregate(raw, ds.filter_mask, agg_mode, ds).astype(float, copy=True)
+        display_mask = np.isfinite(vals)
+        if self._log_chk.isChecked():
+            positive = vals > 0.0
+            display_mask &= positive
+            vals = np.where(positive, np.log(vals), np.nan)
+        if self._zero_chk.isChecked():
+            display_mask &= vals != 0.0
+        selected_traces = value_range_mask(vals, lo, hi, base_mask=display_mask)
+        mask = np.zeros(ds.prop.num_loc, dtype=bool)
+        trace_idx = np.asarray(ds.prop.trace_idx, dtype=int)
+        for trace_id in np.flatnonzero(selected_traces):
+            if trace_id >= trace_idx.shape[0]:
+                continue
+            start, stop = trace_idx[trace_id]
+            start = max(int(start), 0)
+            stop = min(int(stop), ds.prop.num_loc - 1)
+            if stop >= start:
+                mask[start : stop + 1] = True
+        ftr = np.asarray(ds.filter_mask, dtype=bool).ravel()
+        if ftr.size == mask.size:
+            mask &= ftr
+        return mask
 
     def _warn_log_filtered_values(
         self,
@@ -298,3 +421,15 @@ class HistogramWindow(QWidget):
     def _on_filter_changed(self, idx: int) -> None:
         if idx == self._state.active_idx:
             self._reset_for_new_data()
+
+    def focusInEvent(self, event) -> None:
+        if self._roi_overlay is not None:
+            self._roi_overlay.activate()
+        super().focusInEvent(event)
+
+    def changeEvent(self, event) -> None:
+        from PyQt6.QtCore import QEvent
+        if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            if self._roi_overlay is not None:
+                self._roi_overlay.activate()
+        super().changeEvent(event)

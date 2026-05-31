@@ -14,7 +14,6 @@ Filters can be saved to / loaded from JSON (same format as the MATLAB app).
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +41,11 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.app_state import AppState
+from ..core.filter_io import (
+    is_filter_json_file,
+    load_filter_json as load_filter_json_file,
+    save_filter_json as save_filter_json_file,
+)
 
 _AGG_MODES = ["per loc", "trace mean", "trace stdev", "trace max", "trace min", "trace range"]
 
@@ -142,7 +146,7 @@ class FilterDialog(QDialog):
         bar.addWidget(save_btn)
 
         load_btn = QPushButton("Load JSON…")
-        load_btn.clicked.connect(self._load_json)
+        load_btn.clicked.connect(lambda _checked=False: self.load_filter_json())
         bar.addWidget(load_btn)
 
         root.addLayout(bar)
@@ -343,11 +347,14 @@ class FilterDialog(QDialog):
                 "min":       lo.value() if isinstance(lo, QDoubleSpinBox) else 0.0,
                 "max":       hi.value() if isinstance(hi, QDoubleSpinBox) else 1.0,
             })
-        with open(path, "w") as f:
-            json.dump(rows, f, indent=2)
+        try:
+            save_filter_json_file(path, rows)
+        except Exception as exc:
+            QMessageBox.critical(self, "Save error", str(exc))
+            return
         self._info.setText(f"Saved: {Path(path).name}")
 
-    def _load_json(self, path: str | None = None) -> None:
+    def load_filter_json(self, path: str | None = None) -> None:
         """Load a JSON filter file and APPEND its rows to the table.
 
         If *path* is None a file-open dialog is shown.  Existing rows are
@@ -361,17 +368,9 @@ class FilterDialog(QDialog):
         if not path:
             return
         try:
-            with open(path) as f:
-                rows = json.load(f)
+            rows = load_filter_json_file(path)
         except Exception as exc:
             QMessageBox.critical(self, "Load error", str(exc))
-            return
-        if not is_filter_json_payload(rows):
-            QMessageBox.critical(
-                self,
-                "Load error",
-                f"'{Path(path).name}' is not a MINFLUX Viewer filter preset.",
-            )
             return
 
         added = 0
@@ -414,7 +413,7 @@ class FilterDialog(QDialog):
         for url in event.mimeData().urls():
             path = url.toLocalFile()
             if path.lower().endswith(".json"):
-                self._load_json(path)
+                self.load_filter_json(path)
         event.acceptProposedAction()
 
     # ------------------------------------------------------------------
@@ -436,35 +435,6 @@ def _make_spin(value: float) -> QDoubleSpinBox:
     spin.setValue(value)
     spin.setSingleStep(abs(value) * 0.01 if value != 0 else 0.01)
     return spin
-
-
-def is_filter_json_file(path: str) -> bool:
-    """Return True only for JSON files shaped like saved filter rows."""
-    try:
-        with open(path, encoding="utf-8") as f:
-            payload = json.load(f)
-    except Exception:
-        return False
-    return is_filter_json_payload(payload)
-
-
-def is_filter_json_payload(payload) -> bool:
-    """Validate the lightweight filter-preset JSON schema."""
-    if not isinstance(payload, list):
-        return False
-    if not payload:
-        return True
-    filter_keys = {"apply", "attribute", "value_as", "min", "max"}
-    data_keys = {"loc", "lnc", "ext", "tid", "tim", "itr", "vld", "efo", "cfr", "dcr"}
-    for row in payload:
-        if not isinstance(row, dict):
-            return False
-        keys = set(row.keys())
-        if keys & data_keys:
-            return False
-        if not keys & filter_keys:
-            return False
-    return True
 
 
 def _compute_mask(

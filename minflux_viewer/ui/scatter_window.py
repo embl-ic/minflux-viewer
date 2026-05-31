@@ -34,7 +34,8 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.app_state import AppState
-
+from ..core.attributes import plot_attribute_names
+from ..core.roi_selection import rectangle_mask
 
 # ---------------------------------------------------------------------------
 # Helpers — colormap loading shared with render_window
@@ -103,6 +104,8 @@ def _load_cmap(name: str) -> pg.ColorMap:
 # ---------------------------------------------------------------------------
 
 _AXIS_OPTIONS = ["XY", "XZ", "YZ", "3D"]
+_MAX_DISPLAY_POINTS_2D = 100_000
+_MAX_DISPLAY_POINTS_3D = 150_000
 
 
 class ScatterWindow(QWidget):
@@ -119,6 +122,14 @@ class ScatterWindow(QWidget):
         self._lut_dialog = None
         self._lut_invert = False
         self._roi_overlay = None
+        self._view_state_key = "scatter_plot_state"
+        self._cached_dataset_idx: int | None = None
+        self._cached_locs_nm: np.ndarray | None = None
+        self._color_cache_key: tuple | None = None
+        self._color_cache: dict | None = None
+        self._brush_lut_key: tuple | None = None
+        self._brush_lut: list | None = None
+        self._rgba_lut: np.ndarray | None = None
 
         self.setWindowTitle("Scatter Plot")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -153,13 +164,13 @@ class ScatterWindow(QWidget):
         bar.addWidget(QLabel("Colormap:"))
         self._cmap_combo = QComboBox()
         self._cmap_combo.addItems(["glasbey", "jet", "HiLo", "parula", "turbo", "hot", "gray"])
-        self._cmap_combo.setCurrentText("glasbey")
+        self._cmap_combo.setCurrentText("jet")
         self._cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
         bar.addWidget(self._cmap_combo)
 
-        self._white_bg_check = QCheckBox("white background")
-        self._white_bg_check.toggled.connect(self._on_background_changed)
-        bar.addWidget(self._white_bg_check)
+        self._black_bg_check = QCheckBox("black background")
+        self._black_bg_check.toggled.connect(self._on_background_changed)
+        bar.addWidget(self._black_bg_check)
 
         bar.addWidget(QLabel("Axis:"))
         self._axis_combo = QComboBox()
@@ -183,7 +194,7 @@ class ScatterWindow(QWidget):
 
         # ── 2D plot widget ─────────────────────────────────────────
         pg.setConfigOptions(antialias=False)
-        self._plot_2d = pg.PlotWidget(background="k")
+        self._plot_2d = pg.PlotWidget(background="w")
         self._plot_2d.setAspectLocked(True)
         self._plot_2d.showGrid(x=True, y=True, alpha=0.2)
         self._scatter_2d = pg.ScatterPlotItem(
@@ -191,7 +202,7 @@ class ScatterWindow(QWidget):
         )
         self._plot_2d.addItem(self._scatter_2d)
 
-        self._cmap = _load_cmap("glasbey")
+        self._cmap = _load_cmap("jet")
         self._colorbar = pg.ColorBarItem(
             colorMap=self._cmap, label="", interactive=False,
         )
@@ -228,7 +239,7 @@ class ScatterWindow(QWidget):
             return
 
         view = gl.GLViewWidget()
-        view.setBackgroundColor("w" if self._white_bg_check.isChecked() else "k")
+        view.setBackgroundColor("k" if self._black_bg_check.isChecked() else "w")
 
         # Reference grid in the XY plane
         grid = gl.GLGridItem()
@@ -248,11 +259,14 @@ class ScatterWindow(QWidget):
         self._3d_scatter = scatter
         self._stack.addWidget(view)
 
-    def _on_background_changed(self, white: bool) -> None:
-        self._plot_2d.setBackground("w" if white else "k")
-        if self._3d_view is not None:
-            self._3d_view.setBackgroundColor("w" if white else "k")
+    def _on_background_changed(self, black: bool) -> None:
+        self._apply_background(black)
         self._update_color()
+
+    def _apply_background(self, black: bool) -> None:
+        self._plot_2d.setBackground("k" if black else "w")
+        if self._3d_view is not None:
+            self._3d_view.setBackgroundColor("k" if black else "w")
 
     # ------------------------------------------------------------------
     # Slots & lifecycle
@@ -260,6 +274,7 @@ class ScatterWindow(QWidget):
 
     def _on_axis_changed(self, _text: str) -> None:
         """Switch between 2D and 3D mode and re-draw."""
+        self._save_view_state()
         is_3d = self._axis_combo.currentText() == "3D"
         if is_3d:
             self._ensure_3d_built()
@@ -274,19 +289,20 @@ class ScatterWindow(QWidget):
     def _on_cmap_changed(self, name: str) -> None:
         self._cmap = _load_cmap(name)
         self._colorbar.setColorMap(self._cmap)
+        self._invalidate_color_cache()
         self._update_color()
 
     def _update_color(self) -> None:
-        ds = self._state.active_dataset
-        if ds is None:
-            return
-        self._draw(ds.loc_nm, ds.filter_mask, ds)
+        self._redraw_current(save_state=True)
 
     def _on_filter_changed(self, idx: int) -> None:
         if idx == self._state.active_idx:
-            self._refresh()
+            self._redraw_current(save_state=False)
 
     def _on_active_changed(self, _idx: int) -> None:
+        self._cached_dataset_idx = None
+        self._cached_locs_nm = None
+        self._invalidate_color_cache()
         self._refresh()
 
     def _reset_view(self) -> None:
@@ -300,7 +316,7 @@ class ScatterWindow(QWidget):
         ds = self._state.active_dataset
         if ds is None or self._3d_view is None:
             return
-        locs = ds.loc_nm[ds.filter_mask]
+        locs = self._current_locs(ds)[ds.filter_mask]
         if locs.shape[0] == 0:
             return
         centre = locs.mean(axis=0)
@@ -322,30 +338,89 @@ class ScatterWindow(QWidget):
             return
 
         self.setWindowTitle(f"Scatter Plot  —  {ds.name}")
+        saved = ds.state.get(self._view_state_key, {})
+
+        self._axis_combo.blockSignals(True)
+        axis_default = saved.get("axis", "XY")
+        if self._axis_combo.findText(axis_default) >= 0:
+            self._axis_combo.setCurrentText(axis_default)
+        self._axis_combo.blockSignals(False)
+        if self._axis_combo.currentText() == "3D":
+            self._ensure_3d_built()
+            if self._3d_view is not None:
+                self._stack.setCurrentWidget(self._3d_view)
+                self._colorbar.setVisible(False)
+        else:
+            self._stack.setCurrentWidget(self._plot_2d)
+            self._colorbar.setVisible(True)
+
+        self._cmap_combo.blockSignals(True)
+        cmap_default = saved.get("colormap", "jet")
+        if self._cmap_combo.findText(cmap_default) >= 0:
+            self._cmap_combo.setCurrentText(cmap_default)
+        else:
+            self._cmap_combo.setCurrentText("jet")
+        self._cmap_combo.blockSignals(False)
+        self._cmap = _load_cmap(self._cmap_combo.currentText())
+        self._colorbar.setColorMap(self._cmap)
+
+        self._black_bg_check.blockSignals(True)
+        self._black_bg_check.setChecked(bool(saved.get("black_background", False)))
+        self._black_bg_check.blockSignals(False)
+        self._apply_background(self._black_bg_check.isChecked())
 
         # Populate colour-by combo (preserve selection if possible)
         old = self._cbar_combo.currentText()
         self._cbar_combo.blockSignals(True)
         self._cbar_combo.clear()
-        numeric_attrs = [
-            k for k in ds.prop.attr_names
-            if k not in ("ftr", "idx")
-            and np.issubdtype(np.asarray(ds.attr[k]).dtype, np.number)
-            and ds.attr[k].ndim == 1
-        ]
+        numeric_attrs = plot_attribute_names(ds, self._state.prefs, exclude=("ftr", "idx"))
         self._cbar_combo.addItems(["(density)"] + numeric_attrs)
-        if old in numeric_attrs or old == "(density)":
+        color_default = saved.get("color_by", old or "tid")
+        if color_default in numeric_attrs or color_default == "(density)":
+            self._cbar_combo.setCurrentText(color_default)
+        elif old in numeric_attrs or old == "(density)":
             self._cbar_combo.setCurrentText(old)
+        elif "tid" in numeric_attrs:
+            self._cbar_combo.setCurrentText("tid")
         self._cbar_combo.blockSignals(False)
 
-        self._draw(ds.loc_nm, ds.filter_mask, ds)
+        self._redraw_current(save_state=True)
 
-    def _draw(self, locs: np.ndarray, ftr: np.ndarray, ds) -> None:
+    def _redraw_current(self, *, save_state: bool) -> None:
+        ds = self._state.active_dataset
+        if ds is None:
+            return
+        self._draw(self._current_locs(ds), ds.filter_mask, ds, save_state=save_state)
+
+    def _current_locs(self, ds) -> np.ndarray:
+        idx = self._state.active_idx
+        if self._cached_dataset_idx != idx or self._cached_locs_nm is None:
+            locs = np.asarray(ds.loc_nm, dtype=float)
+            if locs.ndim == 2 and locs.shape[1] == 2:
+                locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
+            self._cached_dataset_idx = idx
+            self._cached_locs_nm = locs
+        return self._cached_locs_nm
+
+    def _draw(self, locs: np.ndarray, ftr: np.ndarray, ds, *, save_state: bool = True) -> None:
+        if save_state:
+            self._save_view_state(ds)
         is_3d = self._axis_combo.currentText() == "3D"
         if is_3d:
             self._draw_3d(locs, ftr, ds)
         else:
             self._draw_2d(locs, ftr, ds)
+
+    def _save_view_state(self, ds=None) -> None:
+        ds = ds or self._state.active_dataset
+        if ds is None:
+            return
+        ds.state[self._view_state_key] = {
+            "color_by": self._cbar_combo.currentText(),
+            "colormap": self._cmap_combo.currentText(),
+            "black_background": self._black_bg_check.isChecked(),
+            "axis": self._axis_combo.currentText(),
+        }
 
     # -- 2D path -----------------------------------------------------
 
@@ -357,21 +432,23 @@ class ScatterWindow(QWidget):
                     "YZ": ("Y (nm)", "Z (nm)")}
         ci, cj = col_map[axis]
 
-        x = locs[ftr, ci]
-        y = locs[ftr, cj]
-        n = x.size
-        if n == 0:
+        indices = self._visible_indices(ftr, locs.shape[0], _MAX_DISPLAY_POINTS_2D)
+        n_visible = int(np.count_nonzero(np.asarray(ftr, dtype=bool)))
+        n_display = indices.size
+        if n_display == 0:
             self._scatter_2d.setData([], [])
             self._info_label.setText("No localisations pass the current filter.")
             return
 
-        c_vals, c_label = self._color_values(x, y, None, ds, ftr)
+        x = locs[indices, ci]
+        y = locs[indices, cj]
+        c_vals, color_bins, c_label, vmin, vmax = self._color_bins_for_points(x, y, None, ds, indices)
         self._last_color_values = np.asarray(c_vals, dtype=float)
-        rgba, vmin, vmax = self._map_colors(c_vals)
+        brushes = self._brushes_for_bins(color_bins)
 
         self._scatter_2d.setData(
             x=x, y=y,
-            brush=[pg.mkBrush(c) for c in rgba],
+            brush=brushes,
             pen=None, size=2,
         )
 
@@ -382,9 +459,14 @@ class ScatterWindow(QWidget):
         self._plot_2d.setLabel("bottom", ax_x)
         self._plot_2d.setLabel("left", ax_y)
 
+        display_note = (
+            f"showing {n_display:,} / {n_visible:,} passing"
+            if n_display < n_visible
+            else f"{n_visible:,}"
+        )
         self._info_label.setText(
-            f"{n:,} / {ds.prop.num_loc:,} localisations  "
-            f"({100*n/ds.prop.num_loc:.1f} %)  |  axis: {axis}  |  "
+            f"{display_note} / {ds.prop.num_loc:,} localisations  "
+            f"({100*n_visible/ds.prop.num_loc:.1f} %)  |  axis: {axis}  |  "
             f"colour: {c_label}"
         )
 
@@ -394,23 +476,18 @@ class ScatterWindow(QWidget):
         if self._3d_view is None:
             return  # PyOpenGL not installed
 
-        x, y, z = locs[ftr, 0], locs[ftr, 1], locs[ftr, 2]
-        n = x.size
-        if n == 0:
+        indices = self._visible_indices(ftr, locs.shape[0], _MAX_DISPLAY_POINTS_3D)
+        n_visible = int(np.count_nonzero(np.asarray(ftr, dtype=bool)))
+        n_display = indices.size
+        if n_display == 0:
             self._3d_scatter.setData(pos=np.empty((0, 3)))
             self._info_label.setText("No localisations pass the current filter.")
             return
 
-        c_vals, c_label = self._color_values(x, y, z, ds, ftr)
+        x, y, z = locs[indices, 0], locs[indices, 1], locs[indices, 2]
+        c_vals, color_bins, c_label, vmin, vmax = self._color_bins_for_points(x, y, z, ds, indices)
         self._last_color_values = np.asarray(c_vals, dtype=float)
-        rgba_qcolor, vmin, vmax = self._map_colors(c_vals)
-        # GLScatterPlotItem needs (N, 4) float RGBA in [0, 1]
-        rgba = np.empty((n, 4), dtype=np.float32)
-        for i, qc in enumerate(rgba_qcolor):
-            rgba[i, 0] = qc.redF()
-            rgba[i, 1] = qc.greenF()
-            rgba[i, 2] = qc.blueF()
-            rgba[i, 3] = qc.alphaF()
+        rgba = self._rgba_for_bins(color_bins)
 
         pos = np.column_stack([x, y, z]).astype(np.float32)
         self._3d_scatter.setData(pos=pos, color=rgba, size=2.0)
@@ -420,41 +497,134 @@ class ScatterWindow(QWidget):
             self._reset_3d_camera()
             self._3d_camera_initialised = True
 
+        display_note = (
+            f"showing {n_display:,} / {n_visible:,} passing"
+            if n_display < n_visible
+            else f"{n_visible:,}"
+        )
         self._info_label.setText(
-            f"{n:,} / {ds.prop.num_loc:,} localisations  "
-            f"({100*n/ds.prop.num_loc:.1f} %)  |  axis: 3D  |  "
+            f"{display_note} / {ds.prop.num_loc:,} localisations  "
+            f"({100*n_visible/ds.prop.num_loc:.1f} %)  |  axis: 3D  |  "
             f"colour: {c_label} ∈ [{vmin:.3g}, {vmax:.3g}]"
         )
 
+    @staticmethod
+    def _visible_indices(ftr: np.ndarray, total: int, max_points: int) -> np.ndarray:
+        mask = np.asarray(ftr, dtype=bool).ravel()
+        if mask.size != total:
+            mask = np.ones(total, dtype=bool)
+        indices = np.flatnonzero(mask)
+        if indices.size > max_points:
+            step = int(np.ceil(indices.size / max_points))
+            indices = indices[::step]
+        return indices
+
     # -- shared colour helpers --------------------------------------
 
-    def _color_values(
+    def _color_bins_for_points(
         self, x: np.ndarray, y: np.ndarray, z: np.ndarray | None,
-        ds, ftr: np.ndarray,
-    ) -> tuple[np.ndarray, str]:
-        """Return (per-point colour value, human label)."""
+        ds, indices: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, str, float, float]:
+        """Return values, uint8 color bins, label, and display levels."""
         c_name = self._cbar_combo.currentText()
         if c_name == "(density)" or c_name not in ds.attr:
             if z is None:
                 from ..utils.filters import fast_density_2d
-                return fast_density_2d(x, y), "density"
-            from ..utils.filters import fast_density_3d
-            return fast_density_3d(x, y, z), "density"
-        return np.asarray(ds.attr[c_name])[ftr].astype(float), c_name
+                values = fast_density_2d(x, y)
+            else:
+                from ..utils.filters import fast_density_3d
+                values = fast_density_3d(x, y, z)
+            bins, vmin, vmax = self._map_values_to_bins(values)
+            return values, bins, "density", vmin, vmax
 
-    def _map_colors(
-        self, c_vals: np.ndarray
-    ) -> tuple[list, float, float]:
-        """Robust normalise + colormap → list of QColor."""
-        if self._manual_color_levels is not None:
+        cache = self._color_cache_for_dataset(ds, c_name)
+        if cache is None:
+            values = np.zeros(indices.size, dtype=float)
+            bins, vmin, vmax = self._map_values_to_bins(values)
+            return values, bins, c_name, vmin, vmax
+        return (
+            cache["values"][indices],
+            cache["bins"][indices],
+            c_name,
+            cache["vmin"],
+            cache["vmax"],
+        )
+
+    def _color_cache_for_dataset(self, ds, c_name: str) -> dict | None:
+        key = (
+            self._state.active_idx,
+            c_name,
+            self._cmap_combo.currentText(),
+            self._lut_invert,
+            self._manual_color_levels,
+            id(self._cmap),
+            ds.prop.num_loc,
+        )
+        if self._color_cache_key == key:
+            return self._color_cache
+
+        values = np.asarray(ds.attr.get(c_name, np.empty(0))).ravel().astype(float)
+        if values.size != ds.prop.num_loc:
+            self._color_cache_key = key
+            self._color_cache = None
+            return None
+
+        bins, vmin, vmax = self._map_values_to_bins(values)
+        self._color_cache_key = key
+        self._color_cache = {
+            "values": values,
+            "bins": bins,
+            "vmin": vmin,
+            "vmax": vmax,
+        }
+        return self._color_cache
+
+    def _map_values_to_bins(self, c_vals: np.ndarray) -> tuple[np.ndarray, float, float]:
+        """Robust normalise values into 256 LUT indices."""
+        c_vals = np.asarray(c_vals, dtype=float)
+        finite = np.asarray(c_vals, dtype=float)
+        finite = finite[np.isfinite(finite)]
+        if finite.size == 0:
+            c_vals = np.zeros_like(c_vals, dtype=float)
+            vmin, vmax = 0.0, 1.0
+        elif self._manual_color_levels is not None:
             vmin, vmax = self._manual_color_levels
         else:
-            vmin, vmax = np.nanpercentile(c_vals, [1, 99])
+            vmin, vmax = np.nanpercentile(finite, [1, 99])
         if vmax <= vmin:
             vmax = vmin + 1.0
         normed = np.clip((c_vals - vmin) / (vmax - vmin), 0, 1)
-        rgba = self._cmap.mapToQColor(normed)
-        return rgba, float(vmin), float(vmax)
+        normed = np.nan_to_num(normed, nan=0.0, posinf=1.0, neginf=0.0)
+        bins = np.rint(normed * 255.0).astype(np.uint8)
+        return bins, float(vmin), float(vmax)
+
+    def _ensure_color_luts(self) -> None:
+        key = (self._cmap_combo.currentText(), self._lut_invert, id(self._cmap))
+        if self._brush_lut_key == key and self._brush_lut is not None and self._rgba_lut is not None:
+            return
+        qcolors = self._cmap.mapToQColor(np.linspace(0.0, 1.0, 256))
+        self._brush_lut = [pg.mkBrush(c) for c in qcolors]
+        self._rgba_lut = np.asarray(
+            [[c.redF(), c.greenF(), c.blueF(), c.alphaF()] for c in qcolors],
+            dtype=np.float32,
+        )
+        self._brush_lut_key = key
+
+    def _brushes_for_bins(self, bins: np.ndarray) -> list:
+        self._ensure_color_luts()
+        lut = self._brush_lut or []
+        return [lut[int(i)] for i in np.asarray(bins, dtype=np.uint8)]
+
+    def _rgba_for_bins(self, bins: np.ndarray) -> np.ndarray:
+        self._ensure_color_luts()
+        lut = self._rgba_lut
+        if lut is None:
+            return np.empty((0, 4), dtype=np.float32)
+        return lut[np.asarray(bins, dtype=np.uint8)]
+
+    def _invalidate_color_cache(self) -> None:
+        self._color_cache_key = None
+        self._color_cache = None
 
     def open_lut_dialog(self) -> None:
         vals = np.asarray(self._last_color_values, dtype=float)
@@ -495,8 +665,40 @@ class ScatterWindow(QWidget):
         self._lut_dialog.raise_()
         self._lut_dialog.activateWindow()
 
+    def compute_roi_selection(self, record):
+        if record.type != "rectangle" or self._axis_combo.currentText() == "3D":
+            return None
+        ds = self._state.active_dataset
+        if ds is None:
+            return None
+        locs = np.asarray(ds.loc_nm, dtype=float)
+        if locs.ndim != 2 or locs.shape[1] < 2:
+            return None
+        if locs.shape[1] == 2:
+            locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
+
+        axis = self._axis_combo.currentText()
+        col_map = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
+        if axis not in col_map:
+            return None
+        ci, cj = col_map[axis]
+        base = np.asarray(ds.filter_mask, dtype=bool)
+        if base.shape[0] != locs.shape[0]:
+            base = np.ones(locs.shape[0], dtype=bool)
+        base &= np.all(np.isfinite(locs[:, :3]), axis=1)
+        mask = rectangle_mask(locs[:, ci], locs[:, cj], record, base_mask=base)
+        context = {
+            "source_view": "scatter",
+            "dataset_idx": self._state.active_idx,
+            "axis": axis,
+            "x_axis": "XYZ"[ci],
+            "y_axis": "XYZ"[cj],
+        }
+        return ds, mask, context
+
     def _on_lut_levels_changed(self, lo: float, hi: float) -> None:
         self._manual_color_levels = (float(lo), float(hi))
+        self._invalidate_color_cache()
         self._update_color()
 
     def _on_lut_cmap_changed(self, name: str, invert: bool) -> None:
@@ -509,6 +711,7 @@ class ScatterWindow(QWidget):
             self._cmap_combo.blockSignals(False)
         self._cmap = make_colormap(name, invert=self._lut_invert)
         self._colorbar.setColorMap(self._cmap)
+        self._invalidate_color_cache()
         self._update_color()
 
     def _on_lut_invert_changed(self, invert: bool) -> None:

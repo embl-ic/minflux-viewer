@@ -52,8 +52,8 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMenu,
     QPushButton,
-    QSizePolicy,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -61,18 +61,18 @@ from scipy.ndimage import affine_transform, gaussian_filter, zoom
 
 from .. import resource_path
 from ..core.app_state import AppState
+from ..core.roi_selection import rectangle_mask
 from ..core.spatial_grid import SpatialGrid
 from .render_config import (
-    PHYSICAL_TILE_NM,
-    PER_LOC_SWITCH_COUNT,
     DIRECT_RENDER_THRESHOLD_NM,
+    PER_LOC_SWITCH_COUNT,
+    PHYSICAL_TILE_NM,
     actual_pixel_size_nm,
     lod_for_pixel_size,
     render_tile_px,
 )
-from .tile_cache import PhysicalTileCache, TileKey
 from .render_scheduler import RenderScheduler
-
+from .tile_cache import PhysicalTileCache, TileKey
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -2282,6 +2282,61 @@ class RenderWindow(QWidget):
         left = "[" if inclusive[0] else "("
         right = "]" if inclusive[1] else ")"
         return f"{left}{values[0]:.1f}, {values[1]:.1f}{right} nm"
+
+    def compute_roi_selection(self, record):
+        if record.type != "rectangle" or self._idx is None:
+            return None
+        if not (0 <= self._idx < len(self._state.datasets)):
+            return None
+        ds = self._state.datasets[self._idx]
+        locs = self._raw_render_locs(ds)
+        if locs.shape[0] == 0:
+            return None
+
+        if self._orientation == "XY":
+            axes, depth_axis, depth_name = (0, 1), 2, "Z"
+        elif self._orientation == "XZ":
+            axes, depth_axis, depth_name = (0, 2), 1, "Y"
+        elif self._orientation == "YZ":
+            axes, depth_axis, depth_name = (1, 2), 0, "X"
+        else:
+            return None
+
+        base = np.asarray(ds.filter_mask, dtype=bool)
+        if base.shape[0] != locs.shape[0]:
+            base = np.ones(locs.shape[0], dtype=bool)
+        base &= np.all(np.isfinite(locs[:, :3]), axis=1)
+        if self._has_depth and not self._all_depth_check.isChecked():
+            lo, hi = self._depth_range
+            left_inc, right_inc = self._depth_inclusive
+            depth = locs[:, depth_axis]
+            lo_mask = depth >= lo if left_inc else depth > lo
+            hi_mask = depth <= hi if right_inc else depth < hi
+            base &= lo_mask & hi_mask
+
+        mask = rectangle_mask(locs[:, axes[0]], locs[:, axes[1]], record, base_mask=base)
+        context = {
+            "source_view": "render",
+            "dataset_idx": self._idx,
+            "orientation": self._orientation,
+            "x_axis": "XYZ"[axes[0]],
+            "y_axis": "XYZ"[axes[1]],
+            "depth_axis": depth_name,
+            "depth_range": list(self._depth_range) if self._has_depth and not self._all_depth_check.isChecked() else None,
+            "depth_inclusive": list(self._depth_inclusive),
+        }
+        return ds, mask, context
+
+    def _raw_render_locs(self, ds) -> np.ndarray:
+        try:
+            locs = np.asarray(ds.loc_nm, dtype=np.float64)
+        except Exception:
+            return np.empty((0, 3), dtype=np.float64)
+        if locs.ndim != 2 or locs.shape[1] < 2:
+            return np.empty((0, 3), dtype=np.float64)
+        if locs.shape[1] == 2:
+            locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=np.float64)])
+        return self._apply_dataset_render_transform(ds, locs[:, :3])
 
     def closeEvent(self, event) -> None:
         if self._volume_window is not None:

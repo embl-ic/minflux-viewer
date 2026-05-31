@@ -14,10 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QPointF, pyqtSignal
 from PyQt6.QtGui import QPainterPath, QPolygonF
-from PyQt6.QtCore import QPointF
-
 
 ROI_TYPES = {"rectangle", "oval", "polygon", "freehand", "line", "point"}
 
@@ -34,6 +32,11 @@ class RoiRecord:
     line_width: float = 1.5
     visible: bool = True
     label_visible: bool = True
+    source_view: str = ""
+    context: dict[str, Any] = field(default_factory=dict)
+    mask_key: str = ""
+    selected_count: int | None = None
+    selection_dirty: bool = True
 
     @classmethod
     def create(
@@ -248,7 +251,7 @@ def record_to_points(record: RoiRecord) -> np.ndarray:
 
 
 def record_to_imagej(record: RoiRecord):
-    from roifile import ImagejRoi, ROI_TYPE
+    from roifile import ROI_TYPE, ImagejRoi
     if record.type == "rectangle":
         x, y, w, h = _bounds(record.geometry)
         return ImagejRoi(roitype=ROI_TYPE.RECT, left=int(round(x)), top=int(round(y)), right=int(round(x + w)), bottom=int(round(y + h)), name=record.name)

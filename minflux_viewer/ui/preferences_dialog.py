@@ -81,6 +81,16 @@ _ATTRIBUTE_ORDER = [
     "gvy", "lcx", "lcy", "lcz", "sky", "tic", "gri", "xyz", "str",
 ]
 
+_COMPUTED_ATTRIBUTE_INFO = [
+    ("idx", "index of data points"),
+    ("nLoc", "number of localization in trace"),
+    ("tim_trace", "time stamp zeroed at each trace starts"),
+    ("dt", "time interval, from last measurement in the same trace"),
+    ("dst", "distance travelled, from last measurement in the same trace"),
+    ("spd", "instantaneous speed at current data point, as dst / dt"),
+    ("den", "local density at data point"),
+]
+
 _SHORTCUT_LABELS = {
     "close_window": "Close current window",
     "show_info": "Show info",
@@ -521,7 +531,11 @@ class PreferencesDialog(QDialog):
         outer = QWidget()
         root = QVBoxLayout(outer)
         root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
         self._attribute_checks: dict[str, QCheckBox] = {}
+        self._computed_attribute_checks: dict[str, QCheckBox] = {}
+
+        root.addWidget(self._section_label("Load raw MINFLUX attributes:"))
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -536,6 +550,17 @@ class PreferencesDialog(QDialog):
             grid.addWidget(cb, i // cols, i % cols)
         scroll.setWidget(panel)
         root.addWidget(scroll)
+
+        root.addWidget(self._section_label("Compute additional attributes:"))
+        computed_panel = QWidget()
+        computed_layout = QVBoxLayout(computed_panel)
+        computed_layout.setContentsMargins(4, 0, 4, 0)
+        computed_layout.setSpacing(4)
+        for name, description in _COMPUTED_ATTRIBUTE_INFO:
+            cb = QCheckBox(f"{name}: {description}")
+            self._computed_attribute_checks[name] = cb
+            computed_layout.addWidget(cb)
+        root.addWidget(computed_panel)
         return outer
 
     def _build_mbm_tab(self) -> QWidget:
@@ -713,6 +738,9 @@ class PreferencesDialog(QDialog):
         enabled_attrs = set(a.get("enabled", []))
         for name, cb in self._attribute_checks.items():
             cb.setChecked(name in enabled_attrs)
+        computed_attrs = set(a.get("computed", [name for name, _ in _COMPUTED_ATTRIBUTE_INFO]))
+        for name, cb in self._computed_attribute_checks.items():
+            cb.setChecked(name in computed_attrs)
 
         self._mbm_only_used.setChecked(bool(m.get("only_used_for_drift_correction", False)))
         self._mbm_min_locs.setValue(int(m.get("minimum_localizations_per_bead", 10)))
@@ -794,6 +822,10 @@ class PreferencesDialog(QDialog):
         a["enabled"] = [
             name for name in _ATTRIBUTE_ORDER
             if self._attribute_checks[name].isChecked()
+        ]
+        a["computed"] = [
+            name for name, _description in _COMPUTED_ATTRIBUTE_INFO
+            if self._computed_attribute_checks[name].isChecked()
         ]
 
         m["only_used_for_drift_correction"] = bool(self._mbm_only_used.isChecked())
