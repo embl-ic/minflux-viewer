@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
 
 from .. import resource_path
 from ..core.app_state import AppState
+from .plot_format import plot_widget
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +122,7 @@ class TraceViewer(QWidget):
 
         # pyqtgraph scatter plot
         pg.setConfigOptions(antialias=True, imageAxisOrder="row-major")
-        self._plot = pg.PlotWidget()
+        self._plot = plot_widget(background="k")
         self._plot.setBackground("k")
         self._plot.setAspectLocked(True)
         self._plot.showGrid(x=True, y=True, alpha=0.2)

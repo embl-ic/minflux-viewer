@@ -12,10 +12,13 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -25,8 +28,9 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.app_state import AppState
-from ..core.attributes import plot_attribute_names
+from ..core.attributes import is_trace_wise_attribute, plot_attribute_names
 from ..core.roi_selection import rectangle_bounds, value_range_mask
+from .plot_format import plot_widget
 
 _TRACE_AGG_MODES = [
     "trace mean",
@@ -36,6 +40,33 @@ _TRACE_AGG_MODES = [
     "trace stdev",
     "trace range",
 ]
+
+_COLOR_NAMES = {
+    "yellow": QColor(255, 221, 0),
+    "red": QColor(220, 40, 40),
+    "green": QColor(0, 160, 0),
+    "cyan": QColor(0, 180, 220),
+    "magenta": QColor(210, 60, 210),
+    "white": QColor(255, 255, 255),
+    "black": QColor(0, 0, 0),
+}
+
+
+def _named_color(name: str) -> QColor:
+    return QColor(_COLOR_NAMES.get(name.strip().lower(), QColor(0, 160, 0)))
+
+
+def _format_filter_report_number(value: float) -> str:
+    if not np.isfinite(value):
+        return str(value)
+    if value == 0:
+        return "0.00"
+    abs_value = abs(value)
+    if 1e-2 <= abs_value < 1e4:
+        return f"{value:.2f}"
+    exponent = int(np.floor(np.log10(abs_value)))
+    mantissa = value / (10 ** exponent)
+    return f"{mantissa:.2f} x 10^{exponent}"
 
 
 class HistogramWindow(QWidget):
@@ -52,6 +83,12 @@ class HistogramWindow(QWidget):
         self._last_log_warning_key: tuple | None = None
         self._roi_overlay = None
         self._view_state_key = "histogram_plot_state"
+        self._filter_edit: dict | None = None
+        self._last_histogram_bounds: tuple[float, float, float, float] | None = None
+        self._original_auto_range = None
+        self._last_attr_name = ""
+        self._last_agg_mode = ""
+        self._last_log_data = False
 
         self.setWindowTitle("Histogram")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -75,12 +112,12 @@ class HistogramWindow(QWidget):
         bar.addWidget(QLabel("Attribute:"))
         self._attr_combo = QComboBox()
         self._attr_combo.setMinimumWidth(110)
-        self._attr_combo.currentTextChanged.connect(self._on_attr_changed)
+        self._attr_combo.currentTextChanged.connect(self._on_histogram_attribute_changed)
         bar.addWidget(self._attr_combo)
 
         bar.addWidget(QLabel("As:"))
         self._agg_combo = QComboBox()
-        self._agg_combo.currentTextChanged.connect(self._on_attr_changed)
+        self._agg_combo.currentTextChanged.connect(self._on_histogram_aggregation_changed)
         bar.addWidget(self._agg_combo)
 
         bar.addWidget(QLabel("Bin size:"))
@@ -91,12 +128,12 @@ class HistogramWindow(QWidget):
         bar.addWidget(self._bin_spin)
 
         self._zero_chk = QCheckBox("Hide zeros")
-        self._zero_chk.stateChanged.connect(self._on_attr_changed)
+        self._zero_chk.stateChanged.connect(self._on_histogram_display_changed)
         bar.addWidget(self._zero_chk)
 
         self._log_chk = QCheckBox("Log(data)")
         self._log_chk.setToolTip("Plot the histogram of natural log(data); values <= 0 are removed.")
-        self._log_chk.stateChanged.connect(self._on_attr_changed)
+        self._log_chk.stateChanged.connect(self._on_histogram_log_changed)
         bar.addWidget(self._log_chk)
 
         reset_btn = QPushButton("Reset")
@@ -107,10 +144,14 @@ class HistogramWindow(QWidget):
         root.addLayout(bar)
 
         pg.setConfigOptions(antialias=True)
-        self._plot = pg.PlotWidget(background="w")
+        self._plot = plot_widget(background="w")
         self._plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._plot.setLabel("left", "count")
         self._plot.showGrid(x=False, y=True, alpha=0.2)
+        view_box = self._plot.getPlotItem().vb
+        self._original_auto_range = view_box.autoRange
+        view_box.autoRange = lambda *args, **kwargs: self._fit_histogram_view()
+        view_box.sigRangeChanged.connect(lambda *_args: self._update_filter_edit_labels())
 
         self._hist_item = pg.BarGraphItem(x=[], height=[], width=1, brush="steelblue")
         self._plot.addItem(self._hist_item)
@@ -124,15 +165,22 @@ class HistogramWindow(QWidget):
         )
         root.addWidget(self._plot)
 
+        self._bottom_bar = QHBoxLayout()
         self._info_label = QLabel("")
         self._info_label.setStyleSheet("color: gray; font-size: 11px;")
-        root.addWidget(self._info_label)
+        self._bottom_bar.addWidget(self._info_label, stretch=1)
+        self._filter_add_btn = QPushButton("Add Filter")
+        self._filter_add_btn.setVisible(False)
+        self._filter_add_btn.clicked.connect(self._finish_filter_edit)
+        self._bottom_bar.addWidget(self._filter_add_btn)
+        root.addLayout(self._bottom_bar)
 
     def _refresh(self) -> None:
         ds = self._state.active_dataset
         if ds is None:
             self.setWindowTitle("Histogram")
             self._hist_item.setOpts(x=[], height=[], width=1)
+            self._last_histogram_bounds = None
             return
 
         self.setWindowTitle(f"Histogram  —  {ds.name}")
@@ -142,7 +190,14 @@ class HistogramWindow(QWidget):
         old = self._attr_combo.currentText()
         self._attr_combo.blockSignals(True)
         self._attr_combo.clear()
-        numeric = plot_attribute_names(ds, self._state.prefs, exclude=("ftr", "idx"))
+        numeric = plot_attribute_names(ds, self._state.prefs, exclude=("ftr",))
+        if not numeric:
+            numeric = [
+                key for key in ds.attr.keys()
+                if key != "ftr"
+                and np.asarray(ds.attr[key]).ndim == 1
+                and np.issubdtype(np.asarray(ds.attr[key]).dtype, np.number)
+            ]
         self._attr_combo.addItems(numeric)
         attr_default = saved.get("attribute", old)
         if attr_default in numeric:
@@ -160,6 +215,7 @@ class HistogramWindow(QWidget):
         else:
             self._agg_combo.setCurrentText("per loc")
         self._agg_combo.blockSignals(False)
+        self._enforce_trace_aggregation()
 
         self._zero_chk.blockSignals(True)
         self._log_chk.blockSignals(True)
@@ -181,12 +237,14 @@ class HistogramWindow(QWidget):
         self._agg_combo.setCurrentText(old if old in modes else "per loc")
         self._agg_combo.blockSignals(False)
 
-    def _draw(self) -> None:
+    def _draw(self, *, preserve_histogram_frame: bool = False) -> None:
         ds = self._state.active_dataset
         if ds is None or self._attr_combo.count() == 0:
             return
+        previous_bounds = self._last_histogram_bounds
 
         attr_name = self._attr_combo.currentText()
+        self._enforce_trace_aggregation()
         agg_mode = self._agg_combo.currentText()
         ds.state[self._view_state_key] = {
             "attribute": attr_name,
@@ -211,32 +269,103 @@ class HistogramWindow(QWidget):
         if self._zero_chk.isChecked():
             vals = vals[vals != 0.0]
         if vals.size == 0:
+            if preserve_histogram_frame and previous_bounds is not None:
+                bin_width = float(self._bin_spin.value())
+                edges = self._histogram_edges_from_frame(previous_bounds, bin_width)
+                counts = np.zeros(max(edges.size - 1, 0), dtype=int)
+                centers = 0.5 * (edges[:-1] + edges[1:])
+                width = edges[1] - edges[0] if edges.size > 1 else 1.0
+                self._hist_item.setOpts(x=centers, height=counts, width=width * 0.95)
+                self._last_histogram_bounds = previous_bounds
+                self._info_label.setText(
+                    f"{int(ds.filter_mask.sum()):,} / {ds.prop.num_loc:,} localisations  |  "
+                    f"0 histogram values  |  {attr_name} [{agg_mode}]  |  "
+                    f"bin size {bin_width:.6g}"
+                )
+                self._remember_histogram_controls()
+                self._fit_histogram_view()
+                self._update_filter_edit_labels()
+                return
             self._hist_item.setOpts(x=[], height=[], width=1)
+            self._last_histogram_bounds = None
             self._info_label.setText("No histogram values.")
             return
 
         self._vals = vals
-        if self._auto_bin_width is None:
+        if preserve_histogram_frame and previous_bounds is not None:
+            bin_width = float(self._bin_spin.value())
+        elif self._auto_bin_width is None:
             bin_width = self._default_bin_width(vals)
             self._set_bin_spin(bin_width)
         else:
             bin_width = float(self._bin_spin.value())
 
-        vmin, vmax = float(vals.min()), float(vals.max())
-        if vmax <= vmin:
-            vmax = vmin + max(bin_width, 1.0)
-        n_bins = max(1, min(int(np.ceil((vmax - vmin) / max(bin_width, 1e-12))), 4096))
-        counts, edges = np.histogram(vals, bins=n_bins)
+        data_vmin, data_vmax = float(vals.min()), float(vals.max())
+        if preserve_histogram_frame and previous_bounds is not None:
+            edges = self._histogram_edges_from_frame(previous_bounds, bin_width)
+            counts, edges = np.histogram(vals, bins=edges)
+        else:
+            vmin, vmax = data_vmin, data_vmax
+            if vmax <= vmin:
+                vmax = vmin + max(bin_width, 1.0)
+            n_bins = max(1, min(int(np.ceil((vmax - vmin) / max(bin_width, 1e-12))), 4096))
+            counts, edges = np.histogram(vals, bins=n_bins)
         centers = 0.5 * (edges[:-1] + edges[1:])
         width = edges[1] - edges[0]
 
         self._hist_item.setOpts(x=centers, height=counts, width=width * 0.95)
+        max_count = float(np.max(counts)) if counts.size else 1.0
+        if preserve_histogram_frame and previous_bounds is not None:
+            self._last_histogram_bounds = previous_bounds
+        else:
+            self._last_histogram_bounds = (
+                float(edges[0]),
+                float(edges[-1]),
+                0.0,
+                max(max_count, 1.0),
+            )
         x_label = f"log({attr_name})" if self._log_chk.isChecked() else attr_name
         self._plot.setLabel("bottom", f"{x_label}  [{agg_mode}]")
         self._info_label.setText(
             f"{int(ds.filter_mask.sum()):,} / {ds.prop.num_loc:,} localisations  |  "
-            f"{vals.size:,} histogram values  |  bin size {bin_width:.6g}"
+            f"{vals.size:,} histogram values  |  {attr_name} [{agg_mode}]  |  "
+            f"bin size {bin_width:.6g}  |  min {data_vmin:.6g}  |  max {data_vmax:.6g}"
         )
+        self._remember_histogram_controls()
+        self._fit_histogram_view()
+        self._update_filter_edit_labels()
+
+    def _fit_histogram_view(self) -> None:
+        """Show the complete histogram and any active filter bounds."""
+        bounds = self._last_histogram_bounds
+        if bounds is None:
+            if self._original_auto_range is not None:
+                self._original_auto_range()
+            return
+        x0, x1, y0, y1 = bounds
+        if not np.isfinite([x0, x1, y0, y1]).all():
+            return
+        if x1 <= x0:
+            pad = max(abs(x0) * 0.01, 1.0)
+            x0 -= pad
+            x1 += pad
+        y_top = max(y1, 1.0)
+        y_bottom = 0.0
+        if self._filter_edit:
+            region = self._filter_edit.get("region")
+            if region is not None:
+                lo, hi = region.getRegion()
+                x0 = min(x0, float(lo))
+                x1 = max(x1, float(hi))
+            y_pad = max(y_top * 0.01, 1.0)
+            y_bottom = -y_pad
+            y_top += y_pad
+        self._plot.getPlotItem().vb.setRange(
+            xRange=(x0, x1),
+            yRange=(y_bottom, y_top),
+            padding=0,
+        )
+        self._update_filter_edit_labels()
 
     def normalize_roi_record(self, record):
         """Histograms treat rectangle ROIs as x-range bands."""
@@ -386,6 +515,17 @@ class HistogramWindow(QWidget):
             width = float(np.ptp(vals)) / max(np.sqrt(vals.size), 1.0)
         return max(width, np.finfo(float).eps)
 
+    def _histogram_edges_from_frame(
+        self,
+        bounds: tuple[float, float, float, float],
+        bin_width: float,
+    ) -> np.ndarray:
+        x0, x1, _y0, _y1 = bounds
+        if not np.isfinite([x0, x1, bin_width]).all() or bin_width <= 0 or x1 <= x0:
+            return np.array([0.0, 1.0])
+        n_bins = max(1, min(int(np.ceil((x1 - x0) / max(bin_width, 1e-12))), 4096))
+        return np.linspace(float(x0), float(x1), n_bins + 1)
+
     def _set_bin_spin(self, value: float) -> None:
         self._bin_spin.blockSignals(True)
         self._bin_spin.setValue(float(value))
@@ -395,7 +535,7 @@ class HistogramWindow(QWidget):
     def _reset_histogram(self) -> None:
         self._auto_bin_width = None
         self._draw()
-        self._plot.autoRange()
+        self._fit_histogram_view()
 
     def _reset_for_new_data(self) -> None:
         if self._resetting_plot:
@@ -404,23 +544,343 @@ class HistogramWindow(QWidget):
         try:
             self._auto_bin_width = None
             self._draw()
-            self._plot.autoRange()
+            self._fit_histogram_view()
         finally:
             self._resetting_plot = False
+
+    def start_filter_edit(
+        self,
+        *,
+        attr: str,
+        mode: str,
+        lo: float,
+        hi: float,
+        on_accept,
+        restore_on_accept: bool = True,
+    ) -> None:
+        """Display and edit a filter range on top of this histogram."""
+        self._clear_filter_edit(restore=False)
+        self._filter_edit = {
+            "saved_state": dict((self._state.active_dataset.state.get(self._view_state_key, {}) if self._state.active_dataset else {})),
+            "on_accept": on_accept,
+            "restore_on_accept": restore_on_accept,
+        }
+        if self._attr_combo.findText(attr) >= 0:
+            self._attr_combo.setCurrentText(attr)
+        if self._agg_combo.findText(mode) >= 0:
+            self._agg_combo.setCurrentText(mode)
+        self._reset_for_new_data()
+
+        range_color, range_alpha, bounds_color = self._filter_style()
+        region = pg.LinearRegionItem(
+            values=(min(lo, hi), max(lo, hi)),
+            orientation="vertical",
+            brush=pg.mkBrush(range_color.red(), range_color.green(), range_color.blue(), range_alpha),
+            pen=pg.mkPen(bounds_color, width=4),
+            hoverPen=pg.mkPen(bounds_color, width=5),
+            movable=True,
+        )
+        region.setZValue(20)
+        self._plot.addItem(region)
+        report_label = pg.TextItem(
+            "",
+            color=bounds_color,
+            anchor=(1.0, 0.0),
+            fill=pg.mkBrush(255, 255, 255, 220),
+            border=pg.mkPen(bounds_color, width=1),
+        )
+        report_font = report_label.textItem.font()
+        report_font.setBold(True)
+        base_size = report_font.pointSizeF()
+        if base_size <= 0:
+            base_size = 10.0
+        report_font.setPointSizeF(base_size * 1.1)
+        report_label.textItem.setFont(report_font)
+        report_label.setZValue(21)
+        self._plot.addItem(report_label)
+        region.sigRegionChanged.connect(self._update_filter_edit_labels)
+        region.sigRegionChangeFinished.connect(self._on_filter_region_changed)
+        region.scene().sigMouseClicked.connect(self._on_filter_scene_clicked)
+        self._filter_edit.update({
+            "region": region,
+            "report_label": report_label,
+            "callback": on_accept,
+            "inclusive_min": True,
+            "inclusive_max": True,
+        })
+        self._filter_add_btn.setVisible(True)
+        self._fit_histogram_view()
+        self._update_filter_edit_labels()
+
+    def _on_filter_region_changed(self) -> None:
+        edit = self._filter_edit or {}
+        region = edit.get("region")
+        if region is None:
+            return
+        lo, hi = region.getRegion()
+        if hi < lo:
+            region.setRegion((hi, lo))
+        self._fit_histogram_view()
+        self._update_filter_edit_labels()
+
+    def _update_filter_edit_labels(self) -> None:
+        edit = self._filter_edit
+        if not edit:
+            return
+        region = edit.get("region")
+        report_label = edit.get("report_label")
+        if region is None or report_label is None:
+            return
+        lo, hi = region.getRegion()
+        try:
+            xrange, yrange = self._plot.getPlotItem().vb.viewRange()
+            x0, x1 = float(xrange[0]), float(xrange[1])
+            y0, y1 = float(yrange[0]), float(yrange[1])
+        except Exception:
+            x0, x1, y0, y1 = 0.0, 1.0, 0.0, 1.0
+        x_span = max(abs(x1 - x0), 1e-12)
+        y_span = max(abs(y1 - y0), 1e-12)
+        attr_name = self._attr_combo.currentText()
+        x_label = f"log({attr_name})" if self._log_chk.isChecked() else attr_name
+        report_label.setText(
+            f"filtering {x_label} as {self._agg_combo.currentText()}\n"
+            f"loc in filter {self._filter_count_text(lo, hi)}\n"
+            f"min: {_format_filter_report_number(float(lo))}\n"
+            f"max: {_format_filter_report_number(float(hi))}"
+        )
+        report_label.setPos(x1 - 0.02 * x_span, y1 - 0.03 * y_span)
+
+    def _filter_count_text(self, lo: float, hi: float) -> str:
+        ds = self._state.active_dataset
+        if ds is None:
+            return ""
+        attr_name = self._attr_combo.currentText()
+        agg_mode = self._agg_combo.currentText()
+        raw = np.asarray(ds.attr.get(attr_name, np.empty(0))).ravel().astype(float)
+        if raw.size == 0:
+            return f"0 / {ds.prop.num_loc:,}"
+        try:
+            if agg_mode == "per loc":
+                mask = self._per_loc_histogram_mask(ds, raw, lo, hi)
+            else:
+                mask = self._trace_histogram_mask(ds, raw, agg_mode, lo, hi)
+            selected = int(np.count_nonzero(mask))
+        except Exception:
+            selected = 0
+        return f"{selected:,} / {ds.prop.num_loc:,}"
+
+    def _filter_style(self) -> tuple[QColor, int, QColor]:
+        prefs = self._state.prefs.get("plot", {})
+        range_color = _named_color(str(prefs.get("filter_range_color", "Green")))
+        bounds_color = _named_color(str(prefs.get("filter_bounds_color", "Green")))
+        alpha = int(prefs.get("filter_range_alpha", 45))
+        return range_color, max(0, min(alpha, 255)), bounds_color
+
+    def _on_filter_scene_clicked(self, event) -> None:
+        if not event.double():
+            return
+        edit = self._filter_edit
+        if not edit:
+            return
+        region = edit.get("region")
+        if region is None:
+            return
+        pos = event.scenePos()
+        try:
+            view_pos = self._plot.getPlotItem().vb.mapSceneToView(pos)
+        except Exception:
+            return
+        lo, hi = region.getRegion()
+        span = max(abs(hi - lo), 1e-12)
+        if lo - 0.05 * span <= view_pos.x() <= hi + 0.05 * span:
+            event.accept()
+            self._show_filter_bounds_dialog()
+
+    def _show_filter_bounds_dialog(self) -> None:
+        edit = self._filter_edit
+        if not edit:
+            return
+        region = edit.get("region")
+        if region is None:
+            return
+        lo, hi = region.getRegion()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Filter bounds")
+        form = QFormLayout(dlg)
+        lo_spin = QDoubleSpinBox(dlg)
+        hi_spin = QDoubleSpinBox(dlg)
+        for spin, value in ((lo_spin, lo), (hi_spin, hi)):
+            spin.setDecimals(8)
+            spin.setRange(-1e15, 1e15)
+            spin.setValue(float(value))
+        lo_inc = QCheckBox("Inclusive", dlg)
+        hi_inc = QCheckBox("Inclusive", dlg)
+        lo_inc.setChecked(bool(edit.get("inclusive_min", True)))
+        hi_inc.setChecked(bool(edit.get("inclusive_max", True)))
+        form.addRow("Min", lo_spin)
+        form.addRow("Min bound", lo_inc)
+        form.addRow("Max", hi_spin)
+        form.addRow("Max bound", hi_inc)
+        buttons = QHBoxLayout()
+        ok = QPushButton("OK", dlg)
+        cancel = QPushButton("Cancel", dlg)
+        ok.clicked.connect(dlg.accept)
+        cancel.clicked.connect(dlg.reject)
+        buttons.addStretch()
+        buttons.addWidget(ok)
+        buttons.addWidget(cancel)
+        form.addRow(buttons)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_lo = min(lo_spin.value(), hi_spin.value())
+            new_hi = max(lo_spin.value(), hi_spin.value())
+            region.setRegion((new_lo, new_hi))
+            edit["inclusive_min"] = lo_inc.isChecked()
+            edit["inclusive_max"] = hi_inc.isChecked()
+            self._update_filter_edit_labels()
+
+    def _finish_filter_edit(self) -> None:
+        edit = self._filter_edit
+        if not edit:
+            return
+        region = edit.get("region")
+        callback = edit.get("callback")
+        lo, hi = region.getRegion() if region is not None else (0.0, 1.0)
+        inclusive_min = bool(edit.get("inclusive_min", True))
+        inclusive_max = bool(edit.get("inclusive_max", True))
+        self._clear_filter_edit(restore=bool(edit.get("restore_on_accept", True)))
+        if callable(callback):
+            callback(float(lo), float(hi), inclusive_min, inclusive_max)
+
+    def _clear_filter_edit(self, *, restore: bool) -> None:
+        edit = self._filter_edit
+        if not edit:
+            self._filter_add_btn.setVisible(False)
+            return
+        for key in ("region", "report_label"):
+            item = edit.get(key)
+            if item is not None:
+                try:
+                    self._plot.removeItem(item)
+                except Exception:
+                    pass
+        saved = edit.get("saved_state")
+        self._filter_edit = None
+        self._filter_add_btn.setVisible(False)
+        if restore and saved and self._state.active_dataset is not None:
+            self._state.active_dataset.state[self._view_state_key] = saved
+            self._refresh()
+        else:
+            self._fit_histogram_view()
 
     def _on_bin_changed(self) -> None:
         self._auto_bin_width = float(self._bin_spin.value())
         self._draw()
 
-    def _on_attr_changed(self) -> None:
+    def _on_histogram_attribute_changed(self, *_args) -> None:
+        self._enforce_trace_aggregation()
         self._reset_for_new_data()
+        if self._filter_edit:
+            self._reset_filter_region_to_current_data()
+            self._fit_histogram_view()
+        self._remember_histogram_controls()
+
+    def _on_histogram_log_changed(self, *_args) -> None:
+        old_log = bool(self._last_log_data)
+        new_log = self._log_chk.isChecked()
+        transformed = True
+        if self._filter_edit:
+            transformed = self._transform_filter_region_for_log_change(old_log, new_log)
+        self._enforce_trace_aggregation()
+        self._reset_for_new_data()
+        if self._filter_edit:
+            if not transformed:
+                self._reset_filter_region_to_current_data()
+            self._fit_histogram_view()
+        self._remember_histogram_controls()
+
+    def _on_histogram_aggregation_changed(self, *_args) -> None:
+        self._enforce_trace_aggregation()
+        self._reset_for_new_data()
+        if self._filter_edit and self._should_reset_filter_for_aggregation(self._agg_combo.currentText()):
+            self._reset_filter_region_to_current_data()
+            self._fit_histogram_view()
+        self._remember_histogram_controls()
+
+    def _on_histogram_display_changed(self, *_args) -> None:
+        self._enforce_trace_aggregation()
+        self._reset_for_new_data()
+        self._remember_histogram_controls()
+
+    def _remember_histogram_controls(self) -> None:
+        self._last_attr_name = self._attr_combo.currentText()
+        self._last_agg_mode = self._agg_combo.currentText()
+        self._last_log_data = self._log_chk.isChecked()
+
+    def _current_histogram_x_bounds(self) -> tuple[float, float] | None:
+        if self._last_histogram_bounds is None:
+            return None
+        x0, x1, _y0, _y1 = self._last_histogram_bounds
+        if not np.isfinite([x0, x1]).all() or x1 <= x0:
+            return None
+        return float(x0), float(x1)
+
+    def _reset_filter_region_to_current_data(self) -> None:
+        edit = self._filter_edit or {}
+        region = edit.get("region")
+        bounds = self._current_histogram_x_bounds()
+        if region is None or bounds is None:
+            return
+        region.setRegion(bounds)
+        self._update_filter_edit_labels()
+
+    def _transform_filter_region_for_log_change(self, old_log: bool, new_log: bool) -> bool:
+        if old_log == new_log:
+            return True
+        edit = self._filter_edit or {}
+        region = edit.get("region")
+        if region is None:
+            return True
+        lo, hi = region.getRegion()
+        lo, hi = float(lo), float(hi)
+        try:
+            if not old_log and new_log:
+                if lo <= 0.0 or hi <= 0.0:
+                    return False
+                region.setRegion((np.log(lo), np.log(hi)))
+            elif old_log and not new_log:
+                if max(lo, hi) > 700.0:
+                    return False
+                region.setRegion((np.exp(lo), np.exp(hi)))
+        except Exception:
+            return False
+        self._update_filter_edit_labels()
+        return True
+
+    def _should_reset_filter_for_aggregation(self, mode: str) -> bool:
+        return mode not in {"per loc", "trace mean", "trace median"}
+
+    def _enforce_trace_aggregation(self) -> None:
+        trace_wise = is_trace_wise_attribute(self._attr_combo.currentText())
+        self._agg_combo.blockSignals(True)
+        if trace_wise:
+            self._agg_combo.setCurrentText("trace mean")
+            self._agg_combo.setEnabled(False)
+            self._agg_combo.setToolTip("This is a track-level attribute expanded per localization; histogram uses trace mean.")
+        else:
+            self._agg_combo.setEnabled(True)
+            self._agg_combo.setToolTip("")
+        self._agg_combo.blockSignals(False)
 
     def _on_active_changed(self, _idx: int) -> None:
         self._refresh()
 
     def _on_filter_changed(self, idx: int) -> None:
         if idx == self._state.active_idx:
-            self._reset_for_new_data()
+            if self._filter_edit:
+                self._reset_for_new_data()
+            else:
+                self._draw(preserve_histogram_frame=True)
+                self._fit_histogram_view()
 
     def focusInEvent(self, event) -> None:
         if self._roi_overlay is not None:

@@ -88,6 +88,8 @@ def compute_filter_mask(
     trace_idx: np.ndarray,
     num_loc_per_trace: np.ndarray,
     num_traces: int,
+    lo_inclusive: bool = True,
+    hi_inclusive: bool = True,
 ) -> np.ndarray:
     """
     Return a per-localisation boolean mask for a single filter row.
@@ -114,8 +116,13 @@ def compute_filter_mask(
     """
     raw = np.asarray(raw, dtype=float).ravel()
 
+    def _in_bounds(values: np.ndarray) -> np.ndarray:
+        lo_mask = values >= lo if lo_inclusive else values > lo
+        hi_mask = values <= hi if hi_inclusive else values < hi
+        return lo_mask & hi_mask
+
     if mode == "per loc":
-        return (raw >= lo) & (raw <= hi)
+        return _in_bounds(raw)
 
     def _agg(fn) -> np.ndarray:
         return np.array([
@@ -134,9 +141,9 @@ def compute_filter_mask(
     elif mode == "trace range":
         agg = _agg(lambda a: float(np.nanmax(a)) - float(np.nanmin(a)))
     else:
-        return (raw >= lo) & (raw <= hi)
+        return _in_bounds(raw)
 
-    trace_pass = (agg >= lo) & (agg <= hi)
+    trace_pass = _in_bounds(agg)
     return np.repeat(trace_pass, num_loc_per_trace)
 
 

@@ -24,9 +24,8 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QHBoxLayout,
     QLabel,
-    QPushButton,
+    QMenu,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
@@ -36,6 +35,7 @@ from PyQt6.QtWidgets import (
 from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
 from ..core.roi_selection import rectangle_mask
+from .plot_format import plot_widget
 
 # ---------------------------------------------------------------------------
 # Helpers — colormap loading shared with render_window
@@ -130,6 +130,9 @@ class ScatterWindow(QWidget):
         self._brush_lut_key: tuple | None = None
         self._brush_lut: list | None = None
         self._rgba_lut: np.ndarray | None = None
+        self._3d_camera_initialised = False
+        self._last_axis_text = "XY"
+        self._last_2d_black_background = False
 
         self.setWindowTitle("Scatter Plot")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -151,39 +154,27 @@ class ScatterWindow(QWidget):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
-        # Toolbar row
-        bar = QHBoxLayout()
-        bar.setSpacing(8)
-
-        bar.addWidget(QLabel("Colour by:"))
-        self._cbar_combo = QComboBox()
+        # Headless controls. The user-facing controls live in the right-click
+        # menu, but QComboBox keeps the existing state/update code compact.
+        self._cbar_combo = QComboBox(self)
         self._cbar_combo.setMinimumWidth(120)
         self._cbar_combo.currentTextChanged.connect(self._update_color)
-        bar.addWidget(self._cbar_combo)
+        self._cbar_combo.hide()
 
-        bar.addWidget(QLabel("Colormap:"))
-        self._cmap_combo = QComboBox()
+        self._cmap_combo = QComboBox(self)
         self._cmap_combo.addItems(["glasbey", "jet", "HiLo", "parula", "turbo", "hot", "gray"])
         self._cmap_combo.setCurrentText("jet")
         self._cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
-        bar.addWidget(self._cmap_combo)
+        self._cmap_combo.hide()
 
-        self._black_bg_check = QCheckBox("black background")
+        self._black_bg_check = QCheckBox(self)
         self._black_bg_check.toggled.connect(self._on_background_changed)
-        bar.addWidget(self._black_bg_check)
+        self._black_bg_check.hide()
 
-        bar.addWidget(QLabel("Axis:"))
-        self._axis_combo = QComboBox()
+        self._axis_combo = QComboBox(self)
         self._axis_combo.addItems(_AXIS_OPTIONS)
         self._axis_combo.currentTextChanged.connect(self._on_axis_changed)
-        bar.addWidget(self._axis_combo)
-
-        self._reset_btn = QPushButton("Reset view")
-        self._reset_btn.clicked.connect(self._reset_view)
-        bar.addWidget(self._reset_btn)
-
-        bar.addStretch()
-        root.addLayout(bar)
+        self._axis_combo.hide()
 
         # Stacked widget — switches between 2D plot and 3D GL view
         self._stack = QStackedWidget()
@@ -194,7 +185,10 @@ class ScatterWindow(QWidget):
 
         # ── 2D plot widget ─────────────────────────────────────────
         pg.setConfigOptions(antialias=False)
-        self._plot_2d = pg.PlotWidget(background="w")
+        self._plot_2d = plot_widget(background="w")
+        self._plot_2d.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._plot_2d.customContextMenuRequested.connect(self._show_context_menu)
+        self._plot_2d.getPlotItem().getViewBox().setMenuEnabled(False)
         self._plot_2d.setAspectLocked(True)
         self._plot_2d.showGrid(x=True, y=True, alpha=0.2)
         self._scatter_2d = pg.ScatterPlotItem(
@@ -225,6 +219,11 @@ class ScatterWindow(QWidget):
         self._info_label.setStyleSheet("color: gray; font-size: 11px;")
         root.addWidget(self._info_label)
 
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
+        self._stack.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._stack.customContextMenuRequested.connect(self._show_context_menu)
+
     def _ensure_3d_built(self) -> None:
         """Construct the OpenGL widget on first 3D request."""
         if self._3d_view is not None:
@@ -239,6 +238,8 @@ class ScatterWindow(QWidget):
             return
 
         view = gl.GLViewWidget()
+        view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        view.customContextMenuRequested.connect(self._show_context_menu)
         view.setBackgroundColor("k" if self._black_bg_check.isChecked() else "w")
 
         # Reference grid in the XY plane
@@ -263,10 +264,56 @@ class ScatterWindow(QWidget):
         self._apply_background(black)
         self._update_color()
 
+    def _background_is_black(self) -> bool:
+        return self._black_bg_check.isChecked()
+
+    def _set_black_background(self, enabled: bool) -> None:
+        self._black_bg_check.setChecked(bool(enabled))
+
     def _apply_background(self, black: bool) -> None:
         self._plot_2d.setBackground("k" if black else "w")
         if self._3d_view is not None:
             self._3d_view.setBackgroundColor("k" if black else "w")
+
+    def _show_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+
+        colour_menu = menu.addMenu("Colour by")
+        for i in range(self._cbar_combo.count()):
+            text = self._cbar_combo.itemText(i)
+            action = colour_menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(text == self._cbar_combo.currentText())
+            action.triggered.connect(lambda _checked=False, value=text: self._cbar_combo.setCurrentText(value))
+
+        cmap_menu = menu.addMenu("Colormap")
+        for i in range(self._cmap_combo.count()):
+            text = self._cmap_combo.itemText(i)
+            action = cmap_menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(text == self._cmap_combo.currentText())
+            action.triggered.connect(lambda _checked=False, value=text: self._cmap_combo.setCurrentText(value))
+
+        bg_action = menu.addAction("Black background")
+        bg_action.setCheckable(True)
+        bg_action.setChecked(self._background_is_black())
+        bg_action.triggered.connect(self._set_black_background)
+
+        axis_menu = menu.addMenu("Axis")
+        for axis in _AXIS_OPTIONS:
+            action = axis_menu.addAction(axis)
+            action.setCheckable(True)
+            action.setChecked(axis == self._axis_combo.currentText())
+            action.triggered.connect(lambda _checked=False, value=axis: self._axis_combo.setCurrentText(value))
+
+        menu.addSeparator()
+        menu.addAction("Reset View", self._reset_view)
+
+        sender = self.sender()
+        if isinstance(sender, QWidget):
+            menu.exec(sender.mapToGlobal(pos))
+        else:
+            menu.exec(self.mapToGlobal(pos))
 
     # ------------------------------------------------------------------
     # Slots & lifecycle
@@ -274,16 +321,29 @@ class ScatterWindow(QWidget):
 
     def _on_axis_changed(self, _text: str) -> None:
         """Switch between 2D and 3D mode and re-draw."""
-        self._save_view_state()
-        is_3d = self._axis_combo.currentText() == "3D"
+        axis_text = self._axis_combo.currentText()
+        is_3d = axis_text == "3D"
         if is_3d:
+            if self._last_axis_text != "3D":
+                self._last_2d_black_background = self._black_bg_check.isChecked()
+            self._black_bg_check.blockSignals(True)
+            self._black_bg_check.setChecked(True)
+            self._black_bg_check.blockSignals(False)
             self._ensure_3d_built()
+            self._apply_background(True)
             if self._3d_view is not None:
                 self._stack.setCurrentWidget(self._3d_view)
                 self._colorbar.setVisible(False)
         else:
+            if self._last_axis_text == "3D":
+                self._black_bg_check.blockSignals(True)
+                self._black_bg_check.setChecked(self._last_2d_black_background)
+                self._black_bg_check.blockSignals(False)
+                self._apply_background(self._last_2d_black_background)
             self._stack.setCurrentWidget(self._plot_2d)
             self._colorbar.setVisible(True)
+        self._last_axis_text = axis_text
+        self._save_view_state()
         self._refresh()
 
     def _on_cmap_changed(self, name: str) -> None:
@@ -302,6 +362,7 @@ class ScatterWindow(QWidget):
     def _on_active_changed(self, _idx: int) -> None:
         self._cached_dataset_idx = None
         self._cached_locs_nm = None
+        self._3d_camera_initialised = False
         self._invalidate_color_cache()
         self._refresh()
 
@@ -311,16 +372,25 @@ class ScatterWindow(QWidget):
         else:
             self._plot_2d.autoRange()
 
-    def _reset_3d_camera(self) -> None:
+    def _reset_3d_camera(self, pos: np.ndarray | None = None) -> None:
         """Centre the 3D camera on the data."""
         ds = self._state.active_dataset
         if ds is None or self._3d_view is None:
             return
-        locs = self._current_locs(ds)[ds.filter_mask]
-        if locs.shape[0] == 0:
+        if pos is None:
+            indices = self._visible_indices(ds.filter_mask, self._current_locs(ds).shape[0], _MAX_DISPLAY_POINTS_3D)
+            pos = self._current_locs(ds)[indices, :3]
+        pos = np.asarray(pos, dtype=float)
+        if pos.ndim != 2 or pos.shape[1] < 3:
             return
-        centre = locs.mean(axis=0)
-        extent = float(np.linalg.norm(locs.max(axis=0) - locs.min(axis=0)))
+        pos = pos[np.all(np.isfinite(pos[:, :3]), axis=1), :3]
+        if pos.shape[0] == 0:
+            return
+        centre = pos.mean(axis=0)
+        span = pos.max(axis=0) - pos.min(axis=0)
+        extent = float(np.linalg.norm(span))
+        if not np.isfinite(extent) or extent <= 0:
+            extent = 100.0
         self._3d_view.opts["center"] = pg.Vector(*centre)
         self._3d_view.setCameraPosition(distance=max(extent * 1.5, 100.0))
 
@@ -345,8 +415,13 @@ class ScatterWindow(QWidget):
         if self._axis_combo.findText(axis_default) >= 0:
             self._axis_combo.setCurrentText(axis_default)
         self._axis_combo.blockSignals(False)
+        self._last_axis_text = self._axis_combo.currentText()
         if self._axis_combo.currentText() == "3D":
+            self._black_bg_check.blockSignals(True)
+            self._black_bg_check.setChecked(True)
+            self._black_bg_check.blockSignals(False)
             self._ensure_3d_built()
+            self._apply_background(True)
             if self._3d_view is not None:
                 self._stack.setCurrentWidget(self._3d_view)
                 self._colorbar.setVisible(False)
@@ -364,8 +439,11 @@ class ScatterWindow(QWidget):
         self._cmap = _load_cmap(self._cmap_combo.currentText())
         self._colorbar.setColorMap(self._cmap)
 
+        force_black_3d = self._axis_combo.currentText() == "3D"
         self._black_bg_check.blockSignals(True)
-        self._black_bg_check.setChecked(bool(saved.get("black_background", False)))
+        self._black_bg_check.setChecked(
+            True if force_black_3d else bool(saved.get("black_background", False))
+        )
         self._black_bg_check.blockSignals(False)
         self._apply_background(self._black_bg_check.isChecked())
 
@@ -478,23 +556,37 @@ class ScatterWindow(QWidget):
 
         indices = self._visible_indices(ftr, locs.shape[0], _MAX_DISPLAY_POINTS_3D)
         n_visible = int(np.count_nonzero(np.asarray(ftr, dtype=bool)))
-        n_display = indices.size
-        if n_display == 0:
+        raw_display = indices.size
+        if raw_display == 0:
             self._3d_scatter.setData(pos=np.empty((0, 3)))
             self._info_label.setText("No localisations pass the current filter.")
             return
 
-        x, y, z = locs[indices, 0], locs[indices, 1], locs[indices, 2]
+        pos = np.asarray(locs[indices, :3], dtype=float)
+        finite_mask = np.all(np.isfinite(pos), axis=1)
+        if not np.all(finite_mask):
+            indices = indices[finite_mask]
+            pos = pos[finite_mask]
+        n_display = indices.size
+        if n_display == 0:
+            self._3d_scatter.setData(pos=np.empty((0, 3)))
+            self._info_label.setText(
+                "No finite XYZ localisations pass the current filter for 3D display."
+            )
+            return
+
+        x, y, z = pos[:, 0], pos[:, 1], pos[:, 2]
         c_vals, color_bins, c_label, vmin, vmax = self._color_bins_for_points(x, y, z, ds, indices)
         self._last_color_values = np.asarray(c_vals, dtype=float)
-        rgba = self._rgba_for_bins(color_bins)
+        rgba = self._rgba_for_bins(color_bins, for_3d=True)
 
-        pos = np.column_stack([x, y, z]).astype(np.float32)
-        self._3d_scatter.setData(pos=pos, color=rgba, size=2.0)
+        pos = pos.astype(np.float32, copy=False)
+        point_size = 4.0 if not self._background_is_black() else 3.0
+        self._3d_scatter.setData(pos=pos, color=rgba, size=point_size, pxMode=True)
 
         # First-time camera setup
-        if not getattr(self, "_3d_camera_initialised", False):
-            self._reset_3d_camera()
+        if not self._3d_camera_initialised:
+            self._reset_3d_camera(pos)
             self._3d_camera_initialised = True
 
         display_note = (
@@ -615,12 +707,32 @@ class ScatterWindow(QWidget):
         lut = self._brush_lut or []
         return [lut[int(i)] for i in np.asarray(bins, dtype=np.uint8)]
 
-    def _rgba_for_bins(self, bins: np.ndarray) -> np.ndarray:
+    def _rgba_for_bins(self, bins: np.ndarray, *, for_3d: bool = False) -> np.ndarray:
         self._ensure_color_luts()
         lut = self._rgba_lut
         if lut is None:
             return np.empty((0, 4), dtype=np.float32)
-        return lut[np.asarray(bins, dtype=np.uint8)]
+        rgba = lut[np.asarray(bins, dtype=np.uint8)]
+        if for_3d:
+            rgba = rgba.copy()
+            # GL point sprites are tiny and can visually disappear when bright
+            # LUT colours blend over a white clear colour. Keep 2D colours exact,
+            # but darken only the too-bright 3D colours on white backgrounds.
+            if not self._background_is_black() and rgba.size:
+                rgb = rgba[:, :3]
+                luminance = (
+                    0.2126 * rgb[:, 0]
+                    + 0.7152 * rgb[:, 1]
+                    + 0.0722 * rgb[:, 2]
+                )
+                bright = luminance > 0.58
+                if np.any(bright):
+                    scale = np.clip(0.58 / luminance[bright], 0.55, 1.0)
+                    rgb[bright] *= scale[:, None]
+                rgba[:, 3] = 1.0
+            else:
+                rgba[:, 3] = np.maximum(rgba[:, 3], 0.9)
+        return rgba
 
     def _invalidate_color_cache(self) -> None:
         self._color_cache_key = None

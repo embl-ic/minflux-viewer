@@ -15,16 +15,20 @@ Help    — About
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QTimer, Qt
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
+    QColor,
     QDragEnterEvent,
     QDropEvent,
     QIcon,
     QKeySequence,
+    QShortcut,
+    QPalette,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -39,17 +43,18 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QProxyStyle,
     QPushButton,
+    QStyle,
+    QStyleOptionMenuItem,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
-    QWidgetAction,
 )
 
 from .. import resource_path
 from ..core.app_state import AppState
-from ..core.loader import load_dataset
 from .data_window import DataWindow
 
 # ---------------------------------------------------------------------------
@@ -71,36 +76,29 @@ _ROI_TOOL_DEFS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-class _GreyMenuAction(QWidgetAction):
-    """Clickable grey menu row backed by a normal QAction."""
+_AI_UNAPPROVED_MENU_TEXT = QColor("#404040")
 
-    def __init__(self, source: QAction, parent: QMenu) -> None:
-        super().__init__(parent)
-        self._source = source
-        self.setText(source.text())
-        self.setEnabled(source.isEnabled())
 
-    def createWidget(self, parent):  # noqa: N802 - Qt API
-        text = self._source.text().replace("&", "")
-        shortcut = self._source.shortcut().toString()
-        if shortcut:
-            text = f"{text}    {shortcut}"
-        btn = QPushButton(text, parent)
-        btn.setFlat(True)
-        btn.setEnabled(self._source.isEnabled())
-        btn.setStyleSheet(
-            "QPushButton { color: #555555; text-align: left; padding: 4px 28px 4px 6px; "
-            "border: 0; background: transparent; }"
-            "QPushButton:hover { background: palette(highlight); color: palette(highlighted-text); }"
-        )
-        btn.clicked.connect(self._trigger_source)
-        return btn
+class _AiMenuStyle(QProxyStyle):
+    """Draw unverified QAction text grey without replacing native menu rows."""
 
-    def _trigger_source(self) -> None:
-        self._source.trigger()
-        menu = self.parent()
-        if isinstance(menu, QMenu):
-            menu.close()
+    def drawControl(self, element, option, painter, widget=None):  # noqa: N802 - Qt API
+        if (
+            element == QStyle.ControlElement.CE_MenuItem
+            and isinstance(option, QStyleOptionMenuItem)
+            and isinstance(widget, QMenu)
+        ):
+            action = widget.actionAt(option.rect.center())
+            if action is not None and action.property("ai_unapproved"):
+                opt = QStyleOptionMenuItem(option)
+                for role in (
+                    QPalette.ColorRole.Text,
+                    QPalette.ColorRole.WindowText,
+                    QPalette.ColorRole.ButtonText,
+                ):
+                    opt.palette.setColor(role, _AI_UNAPPROVED_MENU_TEXT)
+                return super().drawControl(element, opt, painter, widget)
+        return super().drawControl(element, option, painter, widget)
 
 
 class MainWindow(QMainWindow):
@@ -117,7 +115,9 @@ class MainWindow(QMainWindow):
         self._scatter_win   = None
         self._histogram_win = None
         self._attr_win      = None
+        self._attr_3d_mpl_win = None
         self._filter_dlg    = None
+        self._filter_dlgs: dict[int | None, QWidget] = {}
         self._ds_manager    = None
         self._log_win       = None
         self._console_win   = None
@@ -125,6 +125,7 @@ class MainWindow(QMainWindow):
         self._roi_manager_win = None
         self._shortcut_actions: dict[str, QAction] = {}
         self._roi_tool_actions: dict[str, QAction] = {}
+        self._ai_menu_styles: list[_AiMenuStyle] = []
         self._window_cycle_index = -1
         # One render window per dataset: {dataset_idx: RenderWindow}
         self._render_windows: dict[int, "RenderWindow"] = {}
@@ -166,9 +167,6 @@ class MainWindow(QMainWindow):
 
         # Wire actions to handlers (previously spread across _build_menu/_toolbar)
         self._connect_actions()
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
         self._populate_recent_menu()
         self._populate_plugins_menu()
 
@@ -211,6 +209,8 @@ class MainWindow(QMainWindow):
         u.actionScatter.triggered.connect(self._show_scatter)
         u.actionHistogram.triggered.connect(self._show_histogram)
         u.actionAttributePlot.triggered.connect(self._show_attr_plot)
+        self.actionAttributePlot3DMatplotlib = QAction("Attribute Plot 3D (Matplotlib)", self)
+        self.actionAttributePlot3DMatplotlib.triggered.connect(self._show_attr_plot_3d_matplotlib)
         u.actionRender.triggered.connect(self._show_render)        # was Process > Render image
         u.actionShowInfo.triggered.connect(self._show_info_for_active)
         u.actionLog.triggered.connect(self._show_log)
@@ -279,11 +279,19 @@ class MainWindow(QMainWindow):
         self.actionChannelTool.triggered.connect(
             lambda: self._placeholder("Channel Tool", "a later implementation")
         )
+        self.actionChannelCombine = QAction("Combine...", self)
+        self.actionChannelCombine.triggered.connect(
+            lambda: self._placeholder("Channel Combine", "a later implementation")
+        )
+        self.actionChannelSplit = QAction("Split...", self)
+        self.actionChannelSplit.triggered.connect(self._split_active_channel_group)
         self.actionChannelOverlay = QAction("Overlay", self)
         self.actionChannelOverlay.triggered.connect(
             lambda: self._placeholder("Channel overlay", "a later implementation")
         )
         self.menuProcessChannel.addAction(self.actionChannelTool)
+        self.menuProcessChannel.addAction(self.actionChannelCombine)
+        self.menuProcessChannel.addAction(self.actionChannelSplit)
         self.menuProcessChannel.addAction(self.actionChannelOverlay)
 
         self.menuProcessRoi = QMenu("ROI", self)
@@ -341,6 +349,7 @@ class MainWindow(QMainWindow):
         u.actionHistogram.setText("Attribute Histogram")
         u.actionScatter.setText("Loc Scatter Plot")
         u.actionAttributePlot.setText("Attribute Plot")
+        self.actionAttributePlot3DMatplotlib.setText("Attribute Plot 3D (Matplotlib)")
         u.actionShowInfo.setText("Show Info...")
         u.actionRender.setText("Render")
         u.actionLog.setText("Log (Events)")
@@ -364,6 +373,8 @@ class MainWindow(QMainWindow):
         self.actionKNearestNeighbour.setText("K Nearest Neighbour")
         self.menuProcessChannel.setTitle("Channel...")
         self.actionChannelTool.setText("Channel Tool")
+        self.actionChannelCombine.setText("Combine...")
+        self.actionChannelSplit.setText("Split...")
         self.actionChannelOverlay.setText("Overlay")
         self.menuProcessRoi.setTitle("ROI")
         self.actionRoiManager.setText("ROI Manager")
@@ -390,6 +401,7 @@ class MainWindow(QMainWindow):
         u.menuView.addAction(u.actionShowInfo)
         u.menuView.addSeparator()
         u.menuView.addAction(u.actionAttributePlot)
+        u.menuView.addAction(self.actionAttributePlot3DMatplotlib)
         u.menuView.addAction(u.actionHistogram)
         u.menuView.addAction(u.actionScatter)
         u.menuView.addAction(u.actionRender)
@@ -439,6 +451,8 @@ class MainWindow(QMainWindow):
             self.actionOpenTiff,
             self.menuProcessChannel.menuAction(),
             self.actionChannelTool,
+            self.actionChannelCombine,
+            self.actionChannelSplit,
             self.actionChannelOverlay,
             self.menuProcessRoi.menuAction(),
             self.actionRoiManager,
@@ -456,11 +470,11 @@ class MainWindow(QMainWindow):
             u.actionParticleTracking,
             u.actionMsdAnalysis,
             u.actionMemoryMonitor,
+            self.actionAttributePlot3DMatplotlib,
         ]
         for action in actions:
             self._mark_action_ai_unapproved(action)
 
-        self._ai_menu_widget_actions = []
         for menu in (
             u.menuFile,
             u.menuView,
@@ -473,7 +487,7 @@ class MainWindow(QMainWindow):
             u.menuTracking,
             u.menuHelp,
         ):
-            self._replace_ai_actions_in_menu(menu, set(actions))
+            self._install_ai_menu_style(menu)
 
     def _mark_action_ai_unapproved(self, action: QAction) -> None:
         action.setProperty("ai_unapproved", True)
@@ -482,24 +496,122 @@ class MainWindow(QMainWindow):
         action.setStatusTip(f"{tip} {note}".strip() if tip else note)
         self.addAction(action)
 
-    def _replace_ai_actions_in_menu(self, menu: QMenu, marked: set[QAction]) -> None:
-        for action in list(menu.actions()):
-            if action not in marked:
-                continue
-            grey_action = _GreyMenuAction(action, menu)
-            menu.insertAction(action, grey_action)
-            menu.removeAction(action)
-            self._ai_menu_widget_actions.append(grey_action)
+    def _install_ai_menu_style(self, menu: QMenu) -> None:
+        """Keep menu rows native-aligned while painting unapproved actions grey."""
+        if menu.property("ai_menu_style_installed"):
+            return
+        style = _AiMenuStyle(menu.style())
+        style.setParent(menu)
+        menu.setStyle(style)
+        menu.setProperty("ai_menu_style_installed", True)
+        self._ai_menu_styles.append(style)
 
     def _apply_shortcuts(self) -> None:
         shortcuts = self._state.prefs.get("shortcuts", {})
         for key, action in self._shortcut_actions.items():
             seq = str(shortcuts.get(key, "") or "")
             action.setShortcut(QKeySequence(seq) if seq else QKeySequence())
-            action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+            action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
         self._ui.actionPreferences.setShortcut(QKeySequence())
         self._ui.actionQuit.setShortcut(QKeySequence("Ctrl+Q"))
-        self._ui.actionQuit.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._ui.actionQuit.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        self._install_window_shortcuts(self, include_action_commands=False)
+        self._refresh_owned_window_shortcuts()
+        conflicts = self._shortcut_conflicts()
+        if conflicts:
+            for seq, commands in conflicts.items():
+                self._state.log(
+                    f"Keyboard shortcut conflict: {seq} is assigned to {', '.join(commands)}.",
+                    "WARN",
+                )
+
+    def _shortcut_command_keys(self, *, include_action_commands: bool = True) -> tuple[str, ...]:
+        keys = (
+            "focus_main_window", "next_window", "previous_window",
+            "next_dataset", "previous_dataset", "close_window",
+        )
+        if include_action_commands:
+            keys = (*keys, *self._shortcut_actions.keys())
+        return keys
+
+    def _install_window_shortcuts(
+        self,
+        widget: QWidget | None,
+        *,
+        include_action_commands: bool = True,
+    ) -> None:
+        """Install/update menu shortcuts on a top-level viewer window."""
+        if widget is None:
+            return
+        shortcuts = getattr(widget, "_mfv_window_shortcuts", None)
+        if shortcuts is None:
+            shortcuts = {}
+            setattr(widget, "_mfv_window_shortcuts", shortcuts)
+        prefs = self._state.prefs.get("shortcuts", {})
+        active_commands = set(self._shortcut_command_keys(
+            include_action_commands=include_action_commands,
+        ))
+        for command, shortcut in list(shortcuts.items()):
+            if command not in active_commands:
+                shortcut.setEnabled(False)
+        for command in active_commands:
+            shortcut = shortcuts.get(command)
+            if shortcut is None:
+                shortcut = QShortcut(widget)
+                shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+                shortcut.activated.connect(lambda cmd=command: self._trigger_shortcut_command(cmd))
+                shortcuts[command] = shortcut
+            seq = str(prefs.get(command, "") or "")
+            shortcut.setKey(QKeySequence(seq) if seq else QKeySequence())
+            shortcut.setEnabled(bool(seq))
+
+    def _refresh_owned_window_shortcuts(self) -> None:
+        for widget in QApplication.topLevelWidgets():
+            if widget is self:
+                self._install_window_shortcuts(widget, include_action_commands=False)
+            elif getattr(widget, "TAG", None) in {
+                "render_window", "attribute_window", "histogram_window",
+                "scatter_window", "attribute_3d_matplotlib_window",
+            }:
+                self._install_window_shortcuts(widget)
+
+    def _trigger_shortcut_command(self, command: str) -> None:
+        focus = QApplication.focusWidget()
+        editing_text = isinstance(
+            focus,
+            (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QKeySequenceEdit),
+        )
+        has_modifier = bool(QApplication.keyboardModifiers().value & (
+            Qt.KeyboardModifier.ControlModifier.value
+            | Qt.KeyboardModifier.AltModifier.value
+            | Qt.KeyboardModifier.MetaModifier.value
+        ))
+        if command == "focus_main_window":
+            self._focus_main_window()
+            return
+        if command == "next_window":
+            self._cycle_windows(1)
+            return
+        if command == "previous_window":
+            self._cycle_windows(-1)
+            return
+        if command == "next_dataset":
+            self._cycle_dataset(1)
+            return
+        if command == "previous_dataset":
+            self._cycle_dataset(-1)
+            return
+        if command == "close_window":
+            if not editing_text:
+                self._close_current_child_window()
+            return
+        action = self._shortcut_actions.get(command)
+        if action is None:
+            return
+        if editing_text and not has_modifier:
+            return
+        if action.isEnabled():
+            action.trigger()
 
     def _shortcut_text(self, key: str) -> str:
         return str(self._state.prefs.get("shortcuts", {}).get(key, "") or "")
@@ -520,11 +632,31 @@ class MainWindow(QMainWindow):
         return QKeySequence(mods | key).toString(QKeySequence.SequenceFormat.PortableText)
 
     def eventFilter(self, obj, event) -> bool:
-        if event.type() != QEvent.Type.KeyPress:
+        if event.type() not in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
             return super().eventFilter(obj, event)
         seq = self._event_sequence_text(event)
         if not seq:
             return super().eventFilter(obj, event)
+        if event.type() == QEvent.Type.ShortcutOverride:
+            if self._shortcut_command_for_sequence(seq) is not None:
+                focus = QApplication.focusWidget()
+                editing_text = isinstance(
+                    focus,
+                    (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QKeySequenceEdit),
+                )
+                has_modifier = bool(event.modifiers().value & (
+                    Qt.KeyboardModifier.ControlModifier.value
+                    | Qt.KeyboardModifier.AltModifier.value
+                    | Qt.KeyboardModifier.MetaModifier.value
+                ))
+                if not (editing_text and not has_modifier):
+                    event.accept()
+                    return True
+            return super().eventFilter(obj, event)
+
+        return self._handle_shortcut_keypress(seq, event)
+
+    def _handle_shortcut_keypress(self, seq: str, event) -> bool:
         shortcuts = self._state.prefs.get("shortcuts", {})
         focus = QApplication.focusWidget()
         editing_text = isinstance(
@@ -539,6 +671,9 @@ class MainWindow(QMainWindow):
         if seq == shortcuts.get("next_window", ""):
             self._cycle_windows(1)
             return True
+        if seq == shortcuts.get("focus_main_window", ""):
+            self._focus_main_window()
+            return True
         if seq == shortcuts.get("previous_window", ""):
             self._cycle_windows(-1)
             return True
@@ -550,17 +685,49 @@ class MainWindow(QMainWindow):
             return True
         if seq == shortcuts.get("close_window", ""):
             if editing_text:
-                return super().eventFilter(obj, event)
+                return False
             self._close_current_child_window()
             return True
         for command, action in self._shortcut_actions.items():
             if seq and seq == shortcuts.get(command, ""):
                 if editing_text and not has_modifier:
-                    return super().eventFilter(obj, event)
+                    return False
                 if action.isEnabled():
                     action.trigger()
                     return True
-        return super().eventFilter(obj, event)
+        return False
+
+    def _shortcut_command_for_sequence(self, seq: str) -> str | None:
+        shortcuts = self._state.prefs.get("shortcuts", {})
+        for command in (
+            "focus_main_window", "next_window", "previous_window",
+            "next_dataset", "previous_dataset", "close_window",
+        ):
+            if seq and seq == shortcuts.get(command, ""):
+                return command
+        for command in self._shortcut_actions:
+            if seq and seq == shortcuts.get(command, ""):
+                return command
+        return None
+
+    def _shortcut_conflicts(self) -> dict[str, list[str]]:
+        shortcuts = self._state.prefs.get("shortcuts", {})
+        labels = {
+            "focus_main_window": "Focus main window",
+            "next_window": "Next window",
+            "previous_window": "Previous window",
+            "next_dataset": "Next dataset",
+            "previous_dataset": "Previous dataset",
+            "close_window": "Close current window",
+            **{key: action.text().replace("&", "") for key, action in self._shortcut_actions.items()},
+        }
+        by_seq: dict[str, list[str]] = {}
+        for key, label in labels.items():
+            seq = str(shortcuts.get(key, "") or "")
+            if not seq:
+                continue
+            by_seq.setdefault(seq, []).append(label)
+        return {seq: commands for seq, commands in by_seq.items() if len(commands) > 1}
 
 
 
@@ -687,6 +854,7 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"Loading {Path(path).name}…")
         self._state.log(f"Opening .mat: {path}", "INFO")
         try:
+            from ..core.loader import load_dataset
             dataset = load_dataset(path, prefs=self._state.prefs)
             self._state.add_dataset(dataset)
         except Exception as exc:
@@ -790,6 +958,7 @@ class MainWindow(QMainWindow):
         plugins.ensure_loaded()
         menu = self._ui.menuPlugins
         menu.clear()
+        self._install_ai_menu_style(menu)
 
         entries = plugins.available()
         if not entries:
@@ -809,13 +978,7 @@ class MainWindow(QMainWindow):
             )
             if entry.name == "Generate Method Text":
                 self._mark_action_ai_unapproved(act)
-                grey_action = _GreyMenuAction(act, menu)
-                if not hasattr(self, "_ai_menu_widget_actions"):
-                    self._ai_menu_widget_actions = []
-                self._ai_menu_widget_actions.append(grey_action)
-                menu.addAction(grey_action)
-            else:
-                menu.addAction(act)
+            menu.addAction(act)
 
     # ------------------------------------------------------------------
     # Tool windows  — open once, raise if already open
@@ -826,33 +989,59 @@ class MainWindow(QMainWindow):
             self._no_data_warning(); return
         from .scatter_window import ScatterWindow
         self._scatter_win = _raise_or_create(self._scatter_win, ScatterWindow, self._state)
+        self._install_window_shortcuts(self._scatter_win)
 
     def _show_histogram(self) -> None:
         if self._state.active_dataset is None:
             self._no_data_warning(); return
         from .histogram_window import HistogramWindow
         self._histogram_win = _raise_or_create(self._histogram_win, HistogramWindow, self._state)
+        self._install_window_shortcuts(self._histogram_win)
 
     def _show_attr_plot(self) -> None:
         if self._state.active_dataset is None:
             self._no_data_warning(); return
         from .attribute_window import AttributeWindow
         self._attr_win = _raise_or_create(self._attr_win, AttributeWindow, self._state)
+        self._install_window_shortcuts(self._attr_win)
 
-    def _show_filter(self) -> None:
+    def _show_attr_plot_3d_matplotlib(self) -> None:
         if self._state.active_dataset is None:
             self._no_data_warning(); return
+        from .attribute_3d_matplotlib_window import Attribute3DMatplotlibWindow
+        self._attr_3d_mpl_win = _raise_or_create(
+            self._attr_3d_mpl_win,
+            Attribute3DMatplotlibWindow,
+            self._state,
+        )
+        self._install_window_shortcuts(self._attr_3d_mpl_win)
+
+    def _show_filter(self) -> None:
         from .filter_dialog import FilterDialog
-        self._filter_dlg = _raise_or_create(self._filter_dlg, FilterDialog, self._state)
+        idx = self._state.active_idx
+        win = self._filter_dlgs.get(idx)
+        if win is not None:
+            try:
+                if not win.isHidden():
+                    win.show()
+                    win.raise_()
+                    win.activateWindow()
+                    self._filter_dlg = win
+                    return
+            except RuntimeError:
+                self._filter_dlgs.pop(idx, None)
+                win = None
+        win = FilterDialog(self._state, parent=self, dataset_idx=idx)
+        win.destroyed.connect(lambda _=None, key=idx: self._filter_dlgs.pop(key, None))
+        self._filter_dlgs[idx] = win
+        self._filter_dlg = win
+        win.show()
+        win.raise_()
+        win.activateWindow()
 
     def _load_filter_json(self, path: str) -> None:
         """Open (or raise) the filter dialog and append filters from a JSON file."""
-        from .filter_dialog import FilterDialog
-        if not isinstance(self._filter_dlg, FilterDialog) or not self._filter_dlg.isVisible():
-            self._filter_dlg = _raise_or_create(self._filter_dlg, FilterDialog, self._state)
-        else:
-            self._filter_dlg.raise_()
-            self._filter_dlg.activateWindow()
+        self._show_filter()
         self._filter_dlg.load_filter_json(path)
 
     def _show_dataset_manager(self) -> None:
@@ -963,6 +1152,15 @@ class MainWindow(QMainWindow):
             rwin._show_brightness_contrast()
             rwin.raise_()
 
+    def _focus_main_window(self) -> None:
+        """Restore, show, and raise the main data-viewer window."""
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
     def _viewer_windows(self) -> list[QWidget]:
         app = QApplication.instance()
         if app is None:
@@ -1031,6 +1229,79 @@ class MainWindow(QMainWindow):
         from .set_measurements_dialog import SetMeasurementsDialog
         SetMeasurementsDialog(self._state, parent=self).exec()
 
+    def _split_active_channel_group(self) -> None:
+        """
+        Split the active multi-channel render overlay into one render per dataset.
+
+        The dataset objects, transforms, metadata, dataset manager entries, and
+        data-info behaviour are left intact. Only the shared render-group key is
+        removed so future Render windows no longer auto-compose the channels.
+        """
+        active_idx = self._state.active_idx
+        if active_idx is None or not (0 <= active_idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+
+        active = self._state.datasets[active_idx]
+        group_id = active.state.get("render_group_id")
+        if not group_id:
+            QMessageBox.information(
+                self,
+                "Split channels",
+                "The active dataset is not part of a multi-channel render overlay.",
+            )
+            return
+
+        group_indices = [
+            idx for idx, ds in enumerate(self._state.datasets)
+            if ds.state.get("render_group_id") == group_id
+        ]
+        if len(group_indices) < 2:
+            QMessageBox.information(
+                self,
+                "Split channels",
+                "The active render group contains only one dataset.",
+            )
+            return
+
+        lut_by_idx = self._current_group_luts(group_indices)
+        fallback_luts = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray"]
+        for pos, idx in enumerate(group_indices):
+            ds = self._state.datasets[idx]
+            ds.state["render_channel_lut"] = lut_by_idx.get(idx, fallback_luts[pos % len(fallback_luts)])
+            ds.state.pop("render_group_id", None)
+            ds.metadata["render_split_from_group"] = group_id
+
+        for idx in group_indices:
+            win = self._render_windows.get(idx)
+            if win is not None:
+                try:
+                    win._refresh_from_dataset()
+                except Exception:
+                    pass
+
+        for idx in group_indices:
+            self._show_render(idx)
+        self._state.set_active(active_idx)
+        self._state.log(
+            f"Split channel overlay into {len(group_indices)} separate render view(s)."
+        )
+
+    def _current_group_luts(self, group_indices: list[int]) -> dict[int, str]:
+        """Return current render LUTs for group members, if a render is open."""
+        luts: dict[int, str] = {}
+        wanted = set(group_indices)
+        for win in list(self._render_windows.values()):
+            try:
+                channels = getattr(win, "_channels", [])
+            except RuntimeError:
+                continue
+            for ch in channels:
+                idx = ch.get("dataset_idx")
+                if idx in wanted and idx not in luts:
+                    luts[idx] = str(ch.get("lut") or "")
+        return {idx: lut for idx, lut in luts.items() if lut}
+
     def _show_memory_monitor(self) -> None:
         """Open (or raise) the memory monitor (Help → Monitor memory…)."""
         if getattr(self, "_memory_win", None) is None:
@@ -1064,12 +1335,14 @@ class MainWindow(QMainWindow):
             new_cali  = copy.deepcopy(getattr(src, "cali", None))
             new_channel = copy.deepcopy(getattr(src, "channel", None))
 
-            new_name = f"DUP_{src.file.name}"
+            new_name = self._next_duplicate_name(src.file.name)
+            timestamp = datetime.now().strftime("%Y-%b-%d, %H:%M:%S")
             new_file = FileInfo(
                 name=new_name,
                 folder=src.file.folder,
-                datetime=src.file.datetime,
+                datetime=timestamp,
                 raw_data=None,           # don't duplicate the heavy raw blob
+                recent_path=src.file.recent_path,
             )
 
             # Build kwargs only for attributes the dataclass actually has
@@ -1080,6 +1353,16 @@ class MainWindow(QMainWindow):
                 kwargs["channel"] = new_channel
 
             dup = MinfluxDataset(**kwargs)
+            dup.metadata.update(copy.deepcopy(src.metadata))
+            dup.state.update(copy.deepcopy(src.state))
+            for key in ("msr_source_path", "msr_dataset_key", "msr_dataset_name"):
+                dup.metadata.pop(key, None)
+            dup.state.pop("render_group_id", None)
+            dup.metadata["duplicated_from_dataset"] = src.file.name
+            dup.metadata["created_note"] = (
+                f"{timestamp}, duplicated from dataset: {src.file.name}"
+            )
+            dup.metadata["source_dataset_name"] = src.file.name
             # Copy filter mask so the duplicated dataset inherits the active view
             try:
                 dup.filter_mask = src.filter_mask.copy()
@@ -1101,6 +1384,14 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _next_duplicate_name(self, source_name: str) -> str:
+        """Return DUPn_<source_name>, counting previous duplicates of this source."""
+        existing_names = {ds.file.name for ds in self._state.datasets}
+        n = 1
+        while f"DUP{n}_{source_name}" in existing_names:
+            n += 1
+        return f"DUP{n}_{source_name}"
+
     def _show_render(self, dataset_idx: int | None = None) -> None:
         """
         Open (or raise) the render window for a dataset.
@@ -1114,13 +1405,20 @@ class MainWindow(QMainWindow):
             return
 
         win = self._render_windows.get(idx)
-        if win is not None and not win.isHidden():
+        if win is not None:
+            self._install_window_shortcuts(win)
+            try:
+                win._refresh_from_dataset()
+            except Exception:
+                pass
+            win.show()
             win.raise_()
             win.activateWindow()
             return
 
         from .render_window import RenderWindow
         win = RenderWindow(self._state, dataset_idx=idx)
+        self._install_window_shortcuts(win)
         win.destroyed.connect(
             lambda _=None, i=idx: self._render_windows.pop(i, None)
         )
@@ -1321,21 +1619,47 @@ class MainWindow(QMainWindow):
         self._state.log(f"ROI / single colour set to {c.name()}.")
 
     def _show_info_for_active(self) -> None:
-        """View → Show Info — open the data-info window for the active dataset."""
+        """View → Show Info — open data-info window(s) for the active dataset."""
         if self._state.active_dataset is None:
             self._no_data_warning(); return
-        idx = self._state.active_idx
-        # Reuse the per-dataset DataWindow that's already created on load
-        win = self._data_windows.get(idx)
-        if win is None:
-            from .data_window import DataWindow
-            win = DataWindow(self._state.datasets[idx], idx, self._state)
-            self._data_windows[idx] = win
-        ds = self._state.datasets[idx]
-        win.setWindowTitle(f"Info of {ds.file.name}")
-        win.show()
-        win.raise_()
-        win.activateWindow()
+        active_idx = self._state.active_idx
+        if active_idx is None:
+            return
+        indices = self._info_indices_for_active(active_idx)
+        active_win = None
+        for offset, idx in enumerate(indices):
+            win = self._data_windows.get(idx)
+            if win is None:
+                from .data_window import DataWindow
+                win = DataWindow(self._state.datasets[idx], idx, self._state)
+                self._data_windows[idx] = win
+            if offset:
+                win.move(self.x() + 120 + offset * 28, self.y() + 160 + offset * 28)
+            win.show()
+            win.raise_()
+            if idx == active_idx:
+                active_win = win
+        if active_win is not None:
+            active_win.raise_()
+            active_win.activateWindow()
+
+    def _info_indices_for_active(self, active_idx: int) -> list[int]:
+        """Show all members of an imported multi-channel MSR group together."""
+        try:
+            active = self._state.datasets[active_idx]
+        except Exception:
+            return []
+        group_id = active.state.get("render_group_id")
+        msr_source = active.metadata.get("msr_source_path")
+        if not group_id and not msr_source:
+            return [active_idx]
+        indices: list[int] = []
+        for idx, ds in enumerate(self._state.datasets):
+            if group_id and ds.state.get("render_group_id") == group_id:
+                indices.append(idx)
+            elif msr_source and ds.metadata.get("msr_source_path") == msr_source:
+                indices.append(idx)
+        return indices or [active_idx]
 
     def _loc_precision_frc(self) -> None:
         from .. import analysis
@@ -1445,6 +1769,12 @@ class MainWindow(QMainWindow):
         Behaviour is controlled by the pref ``file.close_paraview_on_exit``
         (default ``True``). Set it to ``False`` to let ParaView survive.
         """
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.removeEventFilter(self)
+            except Exception:
+                pass
         self._state.save_prefs()
         self._close_all_child_windows()
         close_paraview = bool(
@@ -1452,6 +1782,11 @@ class MainWindow(QMainWindow):
         )
         if close_paraview:
             self._terminate_paraview_processes()
+        try:
+            from .console_window import restore_redirection
+            restore_redirection()
+        except Exception:
+            pass
         super().closeEvent(event)
 
     # ------------------------------------------------------------------
@@ -1473,10 +1808,13 @@ class MainWindow(QMainWindow):
         for win in list(self._render_windows.values()):
             try: win.close()
             except Exception: pass
+        for win in list(self._filter_dlgs.values()):
+            try: win.close()
+            except Exception: pass
 
         # Singleton tool windows
         for attr in (
-            "_scatter_win", "_histogram_win", "_attr_win",
+            "_scatter_win", "_histogram_win", "_attr_win", "_attr_3d_mpl_win",
             "_filter_dlg",  "_ds_manager",
             "_log_win",     "_console_win", "_memory_win", "_roi_manager_win",
         ):

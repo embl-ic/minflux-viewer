@@ -80,7 +80,7 @@ class LogWindow(QWidget):
         self._autoscroll = True      # pause autoscroll when user scrolls up
 
         self.setWindowTitle("Log (events)")
-        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.Tool)
+        self.setWindowFlags(Qt.WindowType.Window)
         self.resize(700, 280)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)  # don't delete on close
 

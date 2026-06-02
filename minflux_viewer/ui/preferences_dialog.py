@@ -75,23 +75,27 @@ _ROI_COLORS = [
 ]
 
 _ATTRIBUTE_ORDER = [
-    "itr", "tid", "tim", "vld", "loc", "efo", "cfr", "dcr",
-    "lnc", "sqi", "sta", "thi", "bot", "eot", "fnl", "eco", "ecc",
-    "efc", "fbg", "act", "dmz", "dos", "eox", "eoy", "ext", "gvx",
-    "gvy", "lcx", "lcy", "lcz", "sky", "tic", "gri", "xyz", "str",
+    "vld", "itr", "tid", "loc",
+    "efo", "cfr", "dcr", "tim",
+    "sta", "fnl", "bot", "eot",
+    "gri", "thi", "sqi", "lnc",
+    "eco", "ecc", "efc", "fbg",
 ]
 
 _COMPUTED_ATTRIBUTE_INFO = [
-    ("idx", "index of data points"),
-    ("nLoc", "number of localization in trace"),
-    ("tim_trace", "time stamp zeroed at each trace starts"),
-    ("dt", "time interval, from last measurement in the same trace"),
-    ("dst", "distance travelled, from last measurement in the same trace"),
-    ("spd", "instantaneous speed at current data point, as dst / dt"),
+    ("idx", "index of localization data points"),
+    ("siz", "the number of localizations within a track"),
+    ("dst", "the distance between two adjacent localisations"),
+    ("dur", "the time between the first and last points of a track"),
+    ("len", "full sum of distance traversed, along the full length of the track"),
+    ("spd", "the distance between two points (in meters) divided by time between the two points (in seconds)"),
+    ("dt", "time interval from the previous localization in the same track"),
+    ("tim_trace", "time stamp zeroed at each track start"),
     ("den", "local density at data point"),
 ]
 
 _SHORTCUT_LABELS = {
+    "focus_main_window": "Focus main window",
     "close_window": "Close current window",
     "show_info": "Show info",
     "duplicate": "Duplicate",
@@ -180,7 +184,7 @@ class PreferencesDialog(QDialog):
 
         self._add_page("File", self._build_file_tab(), ["file"])
         self._add_page("Data", self._build_data_tab(), ["data"])
-        self._add_page("Plot", self._build_plot_tab(), ["plot"])
+        self._add_page("Appearance", self._build_plot_tab(), ["plot"])
         self._add_page("Plugin", self._build_plugin_tab(), ["plugin", "file"])
         self._add_page("Shortcuts", self._build_shortcuts_tab(), ["shortcuts"])
         self._add_page("Attributes", self._build_attributes_tab(), ["attributes"])
@@ -423,6 +427,24 @@ class PreferencesDialog(QDialog):
         self._roi_color_combo = QComboBox()
         self._roi_color_combo.addItems(_ROI_COLORS)
         form.addRow("ROI color", self._roi_color_combo)
+
+        filter_color_row = QHBoxLayout()
+        self._filter_range_color_combo = QComboBox()
+        self._filter_range_color_combo.addItems(_ROI_COLORS)
+        filter_color_row.addWidget(QLabel("Filter range color"))
+        filter_color_row.addWidget(self._filter_range_color_combo)
+        filter_color_row.addWidget(QLabel("transparency"))
+        self._filter_range_alpha = QSpinBox()
+        self._filter_range_alpha.setRange(0, 255)
+        self._filter_range_alpha.setToolTip("0 is fully transparent, 255 is fully opaque.")
+        self._filter_range_alpha.setMaximumWidth(70)
+        filter_color_row.addWidget(self._filter_range_alpha)
+        filter_color_row.addWidget(QLabel("Filter bounds color"))
+        self._filter_bounds_color_combo = QComboBox()
+        self._filter_bounds_color_combo.addItems(_ROI_COLORS)
+        filter_color_row.addWidget(self._filter_bounds_color_combo)
+        filter_color_row.addStretch()
+        form.addRow("Filter color", filter_color_row)
 
         hist_values = QHBoxLayout()
         self._hist_trace_mean = QCheckBox("trace mean")
@@ -718,6 +740,11 @@ class PreferencesDialog(QDialog):
                         _PLOT_CMAPS)
         self._set_combo(self._roi_color_combo, p.get("roi_color", "Yellow"),
                         _ROI_COLORS)
+        self._set_combo(self._filter_range_color_combo, p.get("filter_range_color", "Green"),
+                        _ROI_COLORS)
+        self._filter_range_alpha.setValue(int(p.get("filter_range_alpha", 45)))
+        self._set_combo(self._filter_bounds_color_combo, p.get("filter_bounds_color", "Green"),
+                        _ROI_COLORS)
         hist_values = set(p.get("histogram_values", ["trace mean"]))
         self._hist_trace_mean.setChecked("trace mean" in hist_values)
         self._hist_trace_median.setChecked("trace median" in hist_values)
@@ -738,7 +765,7 @@ class PreferencesDialog(QDialog):
         enabled_attrs = set(a.get("enabled", []))
         for name, cb in self._attribute_checks.items():
             cb.setChecked(name in enabled_attrs)
-        computed_attrs = set(a.get("computed", [name for name, _ in _COMPUTED_ATTRIBUTE_INFO]))
+        computed_attrs = {"siz" if name == "nLoc" else name for name in a.get("computed", [name for name, _ in _COMPUTED_ATTRIBUTE_INFO])}
         for name, cb in self._computed_attribute_checks.items():
             cb.setChecked(name in computed_attrs)
 
@@ -788,6 +815,9 @@ class PreferencesDialog(QDialog):
         p["render_cmap"] = self._render_cmap_combo.currentText()
         p["scatter_cmap"] = self._plot_cmap_combo.currentText()
         p["roi_color"] = self._roi_color_combo.currentText()
+        p["filter_range_color"] = self._filter_range_color_combo.currentText()
+        p["filter_range_alpha"] = int(self._filter_range_alpha.value())
+        p["filter_bounds_color"] = self._filter_bounds_color_combo.currentText()
         hist_values = []
         for name, cb in (
             ("trace mean", self._hist_trace_mean),

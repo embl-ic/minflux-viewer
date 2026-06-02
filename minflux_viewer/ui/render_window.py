@@ -665,7 +665,10 @@ class RenderWindow(QWidget):
         self.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
         self.setWindowFlags(Qt.WindowType.Window)
         self.resize(880, 920)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        # Keep pyqtgraph ImageView/ViewBox objects alive after close. On
+        # Windows, deleting them while more render windows are being created can
+        # crash inside pyqtgraph's ViewBox cleanup path.
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
@@ -692,7 +695,7 @@ class RenderWindow(QWidget):
         root.setSpacing(4)
 
         pg.setConfigOptions(antialias=False, imageAxisOrder="row-major")
-        self._image_view = pg.ImageView(view=pg.PlotItem())
+        self._image_view = pg.ImageView(view=pg.PlotItem(enableMenu=False))
         self._image_view.ui.histogram.hide()
         self._image_view.ui.roiBtn.hide()
         self._image_view.ui.menuBtn.hide()
@@ -838,12 +841,12 @@ class RenderWindow(QWidget):
                 "name": ds.name,
                 "kind": "image" if ds.image_data is not None and not ds.has_localizations else "localizations",
                 "visible": visible,
-                "lut": color_cycle[len(self._channels) % len(color_cycle)],
+                "lut": ds.state.get("render_channel_lut") or color_cycle[len(self._channels) % len(color_cycle)],
                 "levels": None,
                 "loc_transform": ds.state.get("render_transform_2d"),
                 "transform": previous_transforms.get(idx, {"dx_nm": 0.0, "dy_nm": 0.0, "angle": 0.0}),
             })
-        if len(self._channels) == 1:
+        if len(self._channels) == 1 and not self._state.datasets[self._channels[0]["dataset_idx"]].state.get("render_channel_lut"):
             self._channels[0]["lut"] = self._active_cmap
         if not self._channels and self._idx is not None:
             ds = self._state.datasets[self._idx]
@@ -852,7 +855,7 @@ class RenderWindow(QWidget):
                 "name": ds.name,
                 "kind": "localizations",
                 "visible": True,
-                "lut": "Red",
+                "lut": ds.state.get("render_channel_lut") or "Red",
                 "levels": None,
                 "loc_transform": ds.state.get("render_transform_2d"),
                 "transform": previous_transforms.get(self._idx, {"dx_nm": 0.0, "dy_nm": 0.0, "angle": 0.0}),
@@ -899,6 +902,11 @@ class RenderWindow(QWidget):
     def _on_channel_lut(self, ch_idx: int, lut: str) -> None:
         if 0 <= ch_idx < len(self._channels):
             self._channels[ch_idx]["lut"] = lut
+            try:
+                ds_idx = self._channels[ch_idx]["dataset_idx"]
+                self._state.datasets[ds_idx].state["render_channel_lut"] = lut
+            except Exception:
+                pass
             self._compose_from_cache()
 
     def _channel_locs(self, ch: dict) -> np.ndarray:

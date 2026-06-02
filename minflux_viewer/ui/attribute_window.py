@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
 from ..core.roi_selection import rectangle_mask
+from .plot_format import plot_widget
 
 
 class AttributeWindow(QWidget):
@@ -90,7 +91,7 @@ class AttributeWindow(QWidget):
 
         # ── Plot ─────────────────────────────────────────────────
         pg.setConfigOptions(antialias=True)
-        self._plot = pg.PlotWidget(background="w")
+        self._plot = plot_widget(background="w")
         self._plot.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )

@@ -70,6 +70,9 @@ DEFAULT_PREFS: dict = {
         "render_cmap": "hot",
         "scatter_cmap": "single color",
         "roi_color": "Yellow",
+        "filter_range_color": "Green",
+        "filter_range_alpha": 45,
+        "filter_bounds_color": "Green",
         "histogram_values": ["trace mean"],
     },
     "plugin": {
@@ -79,6 +82,7 @@ DEFAULT_PREFS: dict = {
         "msr_remember_last": True,
     },
     "shortcuts": {
+        "focus_main_window": "Shift+V",
         "close_window": "W",
         "show_info": "Ctrl+I",
         "duplicate": "Shift+D",
@@ -101,10 +105,10 @@ DEFAULT_PREFS: dict = {
     },
     "attributes": {
         "enabled": [
-            "itr", "tid", "tim", "vld", "loc", "efo", "cfr", "dcr",
+            "vld", "itr", "tid", "loc", "efo", "cfr", "dcr", "tim", "sta",
         ],
         "computed": [
-            "idx", "nLoc", "tim_trace", "dt", "dst", "spd", "den",
+            "idx", "siz", "dst", "dur", "len", "spd", "dt", "tim_trace", "den",
         ],
     },
     "mbm_handling": {
@@ -160,6 +164,7 @@ def _merge(saved: dict, defaults: dict) -> dict:
 def _migrate_prefs(prefs: dict) -> dict:
     """Move older built-in defaults to the current shortcut layout."""
     shortcuts = prefs.setdefault("shortcuts", {})
+    shortcuts.setdefault("focus_main_window", "Shift+V")
     if shortcuts.get("show_info") == "I":
         shortcuts["show_info"] = "Ctrl+I"
     if shortcuts.get("attribute_plot") == "Ctrl+3":
@@ -167,7 +172,16 @@ def _migrate_prefs(prefs: dict) -> dict:
     if shortcuts.get("scatter_plot") == "Ctrl+1":
         shortcuts["scatter_plot"] = "Ctrl+3"
     attrs = prefs.setdefault("attributes", {})
-    attrs.setdefault("computed", ["idx", "nLoc", "tim_trace", "dt", "dst", "spd", "den"])
+    attrs.setdefault("computed", ["idx", "siz", "dst", "dur", "len", "spd", "dt", "tim_trace", "den"])
+    enabled = list(attrs.get("enabled", []))
+    if "sta" not in enabled:
+        enabled.append("sta")
+    attrs["enabled"] = enabled
+    computed = ["siz" if name == "nLoc" else name for name in attrs.get("computed", [])]
+    for name in ("idx", "siz", "dst", "dur", "len", "spd", "dt", "tim_trace", "den"):
+        if name not in computed:
+            computed.append(name)
+    attrs["computed"] = computed
 
     migrations = prefs.setdefault("_migrations", {})
     if not migrations.get("v021_compute_show_defaults"):

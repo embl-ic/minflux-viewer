@@ -8,12 +8,24 @@ import numpy as np
 
 
 SPATIAL_VECTOR_ATTRIBUTES = {"loc", "lnc", "ext", "xyz"}
-DERIVED_ATTRIBUTE_NAMES = ("idx", "nLoc", "tim_trace", "dt", "dst", "spd", "den")
+RAW_ATTRIBUTE_NAMES = (
+    "vld", "itr", "tid", "loc",
+    "efo", "cfr", "dcr", "tim",
+    "sta", "fnl", "bot", "eot",
+    "gri", "thi", "sqi", "lnc",
+    "eco", "ecc", "efc", "fbg",
+)
+DERIVED_ATTRIBUTE_NAMES = (
+    "idx", "siz", "dst", "dur", "len", "spd", "dt", "tim_trace", "den",
+)
+LEGACY_DERIVED_ATTRIBUTE_ALIASES = {"nLoc": "siz"}
+TRACE_WISE_ATTRIBUTE_NAMES = {"siz", "dur", "len"}
 
 
 def enabled_attribute_names(prefs: dict) -> set[str]:
     """Return raw attribute names enabled in Preferences > Attributes."""
-    return set((prefs.get("attributes", {}) or {}).get("enabled", []) or [])
+    configured = set((prefs.get("attributes", {}) or {}).get("enabled", []) or [])
+    return configured & set(RAW_ATTRIBUTE_NAMES)
 
 
 def enabled_computed_attribute_names(prefs: dict) -> set[str]:
@@ -21,7 +33,12 @@ def enabled_computed_attribute_names(prefs: dict) -> set[str]:
     configured = (prefs.get("attributes", {}) or {}).get("computed", None)
     if configured is None:
         return set(DERIVED_ATTRIBUTE_NAMES)
-    return set(configured or [])
+    return {LEGACY_DERIVED_ATTRIBUTE_ALIASES.get(name, name) for name in (configured or [])}
+
+
+def is_trace_wise_attribute(name: str) -> bool:
+    """Return True for per-track attributes expanded onto localizations."""
+    return name in TRACE_WISE_ATTRIBUTE_NAMES
 
 
 def plot_attribute_names(

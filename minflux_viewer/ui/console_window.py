@@ -249,6 +249,8 @@ class ConsoleWindow(QWidget):
 # ---------------------------------------------------------------------------
 
 _installed = False
+_orig_stdout = None
+_orig_stderr = None
 
 
 def install_redirection() -> None:
@@ -259,13 +261,13 @@ def install_redirection() -> None:
     is created. Stdout is buffered until the Console is opened; stderr opens
     the Console automatically once a QApplication exists.
     """
-    global _installed
+    global _installed, _orig_stdout, _orig_stderr
     if _installed:
         return
     _installed = True
 
-    orig_stdout = sys.stdout
-    orig_stderr = sys.stderr
+    _orig_stdout = sys.stdout
+    _orig_stderr = sys.stderr
 
     def _push_stdout(data: str) -> None:
         ConsoleWindow.write_app_message(data, is_err=False)
@@ -273,5 +275,17 @@ def install_redirection() -> None:
     def _push_stderr(data: str) -> None:
         ConsoleWindow.write_app_message(data, is_err=True, show_on_error=True)
 
-    sys.stdout = _ConsoleCaptureStream(orig_stdout, _push_stdout)
-    sys.stderr = _ConsoleCaptureStream(orig_stderr, _push_stderr)
+    sys.stdout = _ConsoleCaptureStream(_orig_stdout, _push_stdout)
+    sys.stderr = _ConsoleCaptureStream(_orig_stderr, _push_stderr)
+
+
+def restore_redirection() -> None:
+    """Restore the original terminal streams during application shutdown."""
+    global _installed, _orig_stdout, _orig_stderr
+    if not _installed:
+        return
+    if _orig_stdout is not None:
+        sys.stdout = _orig_stdout
+    if _orig_stderr is not None:
+        sys.stderr = _orig_stderr
+    _installed = False

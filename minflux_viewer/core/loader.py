@@ -122,13 +122,17 @@ def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
     # 7. Channel
     channel = _build_channel(attrs, prop)
 
-    return MinfluxDataset(
+    dataset = MinfluxDataset(
         file=file_info,
         prop=prop,
         attr=attrs,
         cali=cali,
         channel=channel,
     )
+    dataset.metadata.update(_source_metadata_from_raw(raw, load_all_itr=load_all_itr))
+    dataset.metadata["valid_num_loc"] = int(prop.num_loc)
+    dataset.metadata["includes_invalid"] = False
+    return dataset
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +234,131 @@ def _parse_raw(
         )
 
     return None, 0, 0
+
+
+def _source_metadata_from_raw(raw: dict, *, load_all_itr: bool = False) -> dict[str, Any]:
+    """Best-effort metadata used by the dataset info dialog."""
+    version = _detect_raw_version(raw)
+    detail_map = {
+        "m2410": "m2410: all iteration value in N by 1 array",
+        "m2205": "m2205: iteration in N by M array, N: number of locs, M: number of iterations",
+        "legacy": "legacy: legacy version derived or older than m2205",
+        "unidentified": "unidentified version: unidentified minflux data version",
+    }
+    meta: dict[str, Any] = {
+        "source_version": version,
+        "source_version_detail": detail_map.get(version, detail_map["unidentified"]),
+        "raw_num_loc": _raw_localization_count(raw),
+        "raw_num_itr": _raw_iteration_count(raw),
+        "iteration_load_mode": "all" if load_all_itr else "last",
+    }
+    cfr_iter = _effective_iteration_column(raw, "cfr")
+    efc_iter = _effective_iteration_column(raw, "efc") or _effective_iteration_column(raw, "efo")
+    if cfr_iter is not None:
+        meta["cfr_iteration"] = cfr_iter
+    if efc_iter is not None:
+        meta["efc_iteration"] = efc_iter
+    return meta
+
+
+def _detect_raw_version(raw: dict) -> str:
+    itr_val = raw.get("itr")
+    if itr_val is None:
+        return "unidentified"
+    if isinstance(itr_val, np.ndarray) and np.issubdtype(itr_val.dtype, np.integer):
+        return "m2410"
+    if hasattr(itr_val, "_fieldnames") or isinstance(itr_val, dict):
+        return "m2205"
+    if "loc" in raw:
+        return "m2205"
+    return "legacy"
+
+
+def _raw_localization_count(raw: dict) -> int:
+    itr_val = raw.get("itr")
+    try:
+        if hasattr(itr_val, "_fieldnames"):
+            itr_val = _mat_struct_to_dict(itr_val)
+        if isinstance(itr_val, dict):
+            for key in ("itr", "loc", "vld"):
+                if key in itr_val:
+                    arr = np.asarray(itr_val[key])
+                    break
+            else:
+                return 0
+        else:
+            arr = np.asarray(itr_val)
+        if arr.ndim == 0:
+            return 0
+        if arr.ndim == 1:
+            return int(arr.shape[0])
+        if arr.ndim == 2:
+            if arr.shape[0] == 1:
+                return int(arr.shape[1])
+            return int(arr.shape[0])
+        return int(arr.shape[0])
+    except Exception:
+        return 0
+
+
+def _raw_iteration_count(raw: dict) -> int:
+    try:
+        itr_val = raw.get("itr")
+        if hasattr(itr_val, "_fieldnames"):
+            itr_val = _mat_struct_to_dict(itr_val)
+        if isinstance(itr_val, dict):
+            for key in ("itr", "loc"):
+                if key in itr_val:
+                    arr = np.asarray(itr_val[key])
+                    break
+            else:
+                return 1
+        else:
+            arr = np.asarray(itr_val)
+        if arr.ndim == 1:
+            if np.issubdtype(arr.dtype, np.integer):
+                valid = arr[np.isfinite(arr)] if np.issubdtype(arr.dtype, np.number) else arr
+                return int(np.nanmax(valid)) + 1 if valid.size else 1
+            return 1
+        if arr.ndim == 2:
+            if arr.shape[0] == 1 or arr.shape[1] == 1:
+                if np.issubdtype(arr.dtype, np.integer):
+                    flat = arr.ravel()
+                    return int(np.nanmax(flat)) + 1 if flat.size else 1
+                return 1
+            return int(arr.shape[1])
+        if arr.ndim == 3:
+            return int(arr.shape[1])
+    except Exception:
+        pass
+    return 1
+
+
+def _effective_iteration_column(raw: dict, field: str) -> int | None:
+    """Return the 1-based iteration column selected for CFR/EFC-like arrays."""
+    try:
+        itr_val = raw.get("itr")
+        merged = raw
+        if hasattr(itr_val, "_fieldnames"):
+            merged = {k: v for k, v in raw.items() if k != "itr"}
+            merged.update(_mat_struct_to_dict(itr_val))
+        elif isinstance(itr_val, dict):
+            merged = {k: v for k, v in raw.items() if k != "itr"}
+            merged.update(itr_val)
+        arr = np.asarray(merged.get(field))
+        itr_arr = np.asarray(merged.get("itr"))
+        if arr.ndim != 2 or itr_arr.ndim < 2:
+            return None
+        num_loc, num_itr = itr_arr.shape if itr_arr.shape[0] != 1 else (itr_arr.shape[1], 1)
+        if arr.shape[0] != num_loc and arr.shape[1] == num_loc:
+            arr = arr.T
+        if arr.shape[0] != num_loc or arr.shape[1] != num_itr:
+            return None
+        vld = np.asarray(merged.get("vld", np.ones(num_loc, bool)), dtype=bool).ravel()
+        col = int(np.argmax(np.nansum(np.abs(arr[vld, :]), axis=0)))
+        return col + 1
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +660,8 @@ def _add_derived_attributes(attrs: AttrStore, prop: DataProp, prefs: dict | None
     """
     n = prop.num_loc
     attr_prefs = (prefs or {}).get("attributes", {}) if prefs else {}
-    compute = set(attr_prefs.get("computed", ["idx", "nLoc", "tim_trace", "dt", "dst", "spd", "den"]) or [])
+    default_compute = ["idx", "siz", "dst", "dur", "len", "spd", "dt", "tim_trace", "den"]
+    compute = {"siz" if name == "nLoc" else name for name in (attr_prefs.get("computed", default_compute) or [])}
 
     # Make iteration 1-based (MATLAB convention kept for user display)
     if "itr" in attrs:
@@ -542,46 +672,72 @@ def _add_derived_attributes(attrs: AttrStore, prop: DataProp, prefs: dict | None
 
     trace_change = np.diff(tid) != 0   # indices where trace ID changes
 
-    # Time interval (dt)
-    dt = None
-    if {"dt", "spd"} & compute:
-        dt = np.diff(tim)
-        dt[trace_change] = 0.0
-        attrs["dt"] = np.concatenate([[0.0], dt])
+    dt_values = None
+    dst_values = None
 
-    # Travel distance (dst) and speed (spd)
-    if {"dst", "spd"} & compute:
+    if {"dt", "spd"} & compute:
+        dt = np.diff(tim) if n > 1 else np.empty(0, dtype=float)
+        if dt.size:
+            dt[trace_change] = 0.0
+        dt_values = np.concatenate([[0.0], dt]) if n else np.empty(0, dtype=float)
+        if "dt" in compute:
+            attrs["dt"] = dt_values
+
+    if {"dst", "spd", "len"} & compute:
         lx = np.asarray(attrs.get("loc_x", np.zeros(n))).ravel()
         ly = np.asarray(attrs.get("loc_y", np.zeros(n))).ravel()
         lz = np.asarray(attrs.get("loc_z", np.zeros(n))).ravel()
-        dloc = np.diff(np.column_stack([lx, ly, lz]), axis=0)
+        dloc = np.diff(np.column_stack([lx, ly, lz]), axis=0) if n > 1 else np.empty((0, 3))
         dst = np.linalg.norm(dloc, axis=1)
-        dst[trace_change] = 0.0
-        attrs["dst"] = np.concatenate([[0.0], dst])
+        if dst.size:
+            dst[trace_change] = 0.0
+        dst_values = np.concatenate([[0.0], dst]) if n else np.empty(0, dtype=float)
+        if "dst" in compute:
+            attrs["dst"] = dst_values
 
     if "spd" in compute:
-        if "dt" not in attrs:
-            dt = np.diff(tim)
-            dt[trace_change] = 0.0
-            attrs["dt"] = np.concatenate([[0.0], dt])
-        if "dst" not in attrs:
+        if dt_values is None:
+            dt = np.diff(tim) if n > 1 else np.empty(0, dtype=float)
+            if dt.size:
+                dt[trace_change] = 0.0
+            dt_values = np.concatenate([[0.0], dt]) if n else np.empty(0, dtype=float)
+        if dst_values is None:
             lx = np.asarray(attrs.get("loc_x", np.zeros(n))).ravel()
             ly = np.asarray(attrs.get("loc_y", np.zeros(n))).ravel()
             lz = np.asarray(attrs.get("loc_z", np.zeros(n))).ravel()
-            dloc = np.diff(np.column_stack([lx, ly, lz]), axis=0)
+            dloc = np.diff(np.column_stack([lx, ly, lz]), axis=0) if n > 1 else np.empty((0, 3))
             dst = np.linalg.norm(dloc, axis=1)
-            dst[trace_change] = 0.0
-            attrs["dst"] = np.concatenate([[0.0], dst])
+            if dst.size:
+                dst[trace_change] = 0.0
+            dst_values = np.concatenate([[0.0], dst]) if n else np.empty(0, dtype=float)
         with np.errstate(divide="ignore", invalid="ignore"):
-            attrs["spd"] = np.where(attrs["dt"] > 0, attrs["dst"] / attrs["dt"], 0.0)
-        if "dt" not in compute:
-            attrs.pop("dt", None)
-        if "dst" not in compute:
-            attrs.pop("dst", None)
+            attrs["spd"] = np.where(dt_values > 0, dst_values / dt_values, 0.0)
 
-    # Localization count per trace (per-loc expanded)
-    if "nLoc" in compute:
-        attrs["nLoc"] = np.repeat(prop.num_loc_per_trace, prop.num_loc_per_trace)
+    if "siz" in compute:
+        attrs["siz"] = np.repeat(prop.num_loc_per_trace, prop.num_loc_per_trace)
+
+    if "dur" in compute:
+        durations = np.zeros(prop.num_traces, dtype=float)
+        for i, (start, stop) in enumerate(np.asarray(prop.trace_idx, dtype=int)):
+            if 0 <= start <= stop < tim.size:
+                durations[i] = float(tim[stop] - tim[start])
+        attrs["dur"] = np.repeat(durations, prop.num_loc_per_trace)
+
+    if "len" in compute:
+        if dst_values is None:
+            lx = np.asarray(attrs.get("loc_x", np.zeros(n))).ravel()
+            ly = np.asarray(attrs.get("loc_y", np.zeros(n))).ravel()
+            lz = np.asarray(attrs.get("loc_z", np.zeros(n))).ravel()
+            dloc = np.diff(np.column_stack([lx, ly, lz]), axis=0) if n > 1 else np.empty((0, 3))
+            dst = np.linalg.norm(dloc, axis=1)
+            if dst.size:
+                dst[trace_change] = 0.0
+            dst_values = np.concatenate([[0.0], dst]) if n else np.empty(0, dtype=float)
+        lengths = np.zeros(prop.num_traces, dtype=float)
+        for i, (start, stop) in enumerate(np.asarray(prop.trace_idx, dtype=int)):
+            if 0 <= start <= stop < dst_values.size:
+                lengths[i] = float(np.nansum(dst_values[start : stop + 1]))
+        attrs["len"] = np.repeat(lengths, prop.num_loc_per_trace)
 
     # Relative time within each trace
     if "tim_trace" in compute:
@@ -723,13 +879,25 @@ def load_from_mfx_array(
     cali = Calibration()
     channel = _build_channel(attrs, prop)
 
-    return MinfluxDataset(
+    dataset = MinfluxDataset(
         file=file_info,
         prop=prop,
         attr=attrs,
         cali=cali,
         channel=channel,
     )
+    dataset.metadata.update(
+        {
+            "source_version": "m2410",
+            "source_version_detail": "m2410: all iteration value in N by 1 array",
+            "raw_num_loc": int(num_raw),
+            "valid_num_loc": int(prop.num_loc),
+            "raw_num_itr": int(num_itr),
+            "iteration_load_mode": "all" if load_all_itr else "last",
+            "includes_invalid": False,
+        }
+    )
+    return dataset
 
 
 # ---------------------------------------------------------------------------

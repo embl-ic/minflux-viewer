@@ -1807,6 +1807,15 @@ class MsrReaderDialog(QWidget):
             raise ValueError(f"Could not find bead points (`grd/mbm/points`) for reference channel {ref_name}.")
 
         transforms: dict[str, dict] = {}
+        transforms[ref_name] = {
+            "reference_channel": ref_name,
+            "moving_channel": ref_name,
+            "matrix_3x3": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            "translation_nm": [0.0, 0.0],
+            "rotation_2x2": [[1.0, 0.0], [0.0, 1.0]],
+            "matched_bead_count": 0,
+            "rmse_xy_nm": 0.0,
+        }
         for moving_name in selected[1:]:
             moving_mbm = MFSTATE.mbm_map.get(moving_name)
             if moving_mbm is None:
@@ -2113,7 +2122,7 @@ class MsrReaderDialog(QWidget):
                             continue
                     else:
                         mfx_to_load = mfx
-                    display_name = f"{msr_path.stem} / {key}" if msr_path.stem else key
+                    display_name = f"{msr_path.name} | {key}" if msr_path.name else key
                     dataset = load_from_mfx_array(
                         mfx=mfx_to_load,
                         name=display_name,
@@ -2125,17 +2134,23 @@ class MsrReaderDialog(QWidget):
                     dataset.state["render_group_id"] = render_group_id
                     dataset.metadata["msr_source_path"] = str(msr_path)
                     dataset.metadata["msr_dataset_key"] = key
+                    dataset.metadata["msr_dataset_name"] = key
                     if key in viewer_transforms:
-                        dataset.state["render_transform_2d"] = viewer_transforms[key]
-                        dataset.metadata["render_transform_2d"] = viewer_transforms[key]
+                        transform = viewer_transforms[key]
+                        dataset.state["render_transform_2d"] = transform
+                        dataset.metadata["render_transform_2d"] = transform
+                        dataset.metadata["transformed"] = bool(transform.get("moving_channel") != transform.get("reference_channel"))
                     idx = self._state.add_dataset(dataset)
                     loaded = self._state.datasets[idx]
                     loaded.state["render_group_id"] = render_group_id
                     loaded.metadata["msr_source_path"] = str(msr_path)
                     loaded.metadata["msr_dataset_key"] = key
+                    loaded.metadata["msr_dataset_name"] = key
                     if key in viewer_transforms:
-                        loaded.state["render_transform_2d"] = viewer_transforms[key]
-                        loaded.metadata["render_transform_2d"] = viewer_transforms[key]
+                        transform = viewer_transforms[key]
+                        loaded.state["render_transform_2d"] = transform
+                        loaded.metadata["render_transform_2d"] = transform
+                        loaded.metadata["transformed"] = bool(transform.get("moving_channel") != transform.get("reference_channel"))
                     imported_indices.append(idx)
                     imported.append(key)
                     self.log(f"[viewer] '{key}' → {loaded.prop.num_loc:,} loc")
