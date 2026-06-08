@@ -74,9 +74,10 @@ class HistogramWindow(QWidget):
 
     TAG = "histogram_window"
 
-    def __init__(self, state: AppState, parent: QWidget | None = None) -> None:
+    def __init__(self, state: AppState, parent: QWidget | None = None, *, dataset_idx: int | None = None) -> None:
         super().__init__(parent)
         self._state = state
+        self._dataset_idx = dataset_idx if dataset_idx is not None else state.active_idx
         self._vals: np.ndarray = np.empty(0)
         self._auto_bin_width: float | None = None
         self._resetting_plot = False
@@ -98,8 +99,18 @@ class HistogramWindow(QWidget):
         self._build_ui()
         self._refresh()
 
-        state.active_changed.connect(self._on_active_changed)
         state.filter_changed.connect(self._on_filter_changed)
+
+    @property
+    def dataset_idx(self) -> int | None:
+        return self._dataset_idx
+
+    def _dataset(self):
+        if self._dataset_idx is None:
+            return None
+        if not (0 <= self._dataset_idx < len(self._state.datasets)):
+            return None
+        return self._state.datasets[self._dataset_idx]
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -148,7 +159,13 @@ class HistogramWindow(QWidget):
         self._plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._plot.setLabel("left", "count")
         self._plot.showGrid(x=False, y=True, alpha=0.2)
+        self._plot.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self._plot.getPlotItem().setMenuEnabled(False)
         view_box = self._plot.getPlotItem().vb
+        try:
+            view_box.setMenuEnabled(False)
+        except Exception:
+            pass
         self._original_auto_range = view_box.autoRange
         view_box.autoRange = lambda *args, **kwargs: self._fit_histogram_view()
         view_box.sigRangeChanged.connect(lambda *_args: self._update_filter_edit_labels())
@@ -169,14 +186,22 @@ class HistogramWindow(QWidget):
         self._info_label = QLabel("")
         self._info_label.setStyleSheet("color: gray; font-size: 11px;")
         self._bottom_bar.addWidget(self._info_label, stretch=1)
-        self._filter_add_btn = QPushButton("Add Filter")
-        self._filter_add_btn.setVisible(False)
-        self._filter_add_btn.clicked.connect(self._finish_filter_edit)
-        self._bottom_bar.addWidget(self._filter_add_btn)
+        self._filter_update_btn = QPushButton("Update Filter")
+        self._filter_update_btn.setVisible(False)
+        self._filter_update_btn.clicked.connect(self._update_filter_edit)
+        self._bottom_bar.addWidget(self._filter_update_btn)
+        self._filter_finish_btn = QPushButton("Finish Edit")
+        self._filter_finish_btn.setVisible(False)
+        self._filter_finish_btn.clicked.connect(self._finish_filter_edit)
+        self._bottom_bar.addWidget(self._filter_finish_btn)
+        self._filter_cancel_btn = QPushButton("Cancel Edit")
+        self._filter_cancel_btn.setVisible(False)
+        self._filter_cancel_btn.clicked.connect(self._cancel_filter_edit)
+        self._bottom_bar.addWidget(self._filter_cancel_btn)
         root.addLayout(self._bottom_bar)
 
     def _refresh(self) -> None:
-        ds = self._state.active_dataset
+        ds = self._dataset()
         if ds is None:
             self.setWindowTitle("Histogram")
             self._hist_item.setOpts(x=[], height=[], width=1)
@@ -238,7 +263,7 @@ class HistogramWindow(QWidget):
         self._agg_combo.blockSignals(False)
 
     def _draw(self, *, preserve_histogram_frame: bool = False) -> None:
-        ds = self._state.active_dataset
+        ds = self._dataset()
         if ds is None or self._attr_combo.count() == 0:
             return
         previous_bounds = self._last_histogram_bounds
@@ -387,7 +412,7 @@ class HistogramWindow(QWidget):
     def compute_roi_selection(self, record):
         if record.type != "rectangle":
             return None
-        ds = self._state.active_dataset
+        ds = self._dataset()
         bounds = rectangle_bounds(record)
         if ds is None or bounds is None:
             return None
@@ -404,7 +429,7 @@ class HistogramWindow(QWidget):
             mask = self._trace_histogram_mask(ds, raw, agg_mode, lo, hi)
         context = {
             "source_view": "histogram",
-            "dataset_idx": self._state.active_idx,
+            "dataset_idx": self._dataset_idx,
             "attribute": attr_name,
             "aggregation": agg_mode,
             "x_range": [lo, hi],
@@ -466,7 +491,7 @@ class HistogramWindow(QWidget):
         removed: int,
         total: int,
     ) -> None:
-        key = (self._state.active_idx, dataset_name, attr_name, agg_mode, removed, total)
+        key = (self._dataset_idx, dataset_name, attr_name, agg_mode, removed, total)
         if key == self._last_log_warning_key:
             return
         self._last_log_warning_key = key
@@ -555,15 +580,22 @@ class HistogramWindow(QWidget):
         mode: str,
         lo: float,
         hi: float,
-        on_accept,
-        restore_on_accept: bool = True,
+        on_update=None,
+        on_finish=None,
+        on_cancel=None,
+        restore_view_on_finish: bool = True,
+        restore_view_on_cancel: bool = True,
     ) -> None:
         """Display and edit a filter range on top of this histogram."""
         self._clear_filter_edit(restore=False)
+        ds = self._dataset()
         self._filter_edit = {
-            "saved_state": dict((self._state.active_dataset.state.get(self._view_state_key, {}) if self._state.active_dataset else {})),
-            "on_accept": on_accept,
-            "restore_on_accept": restore_on_accept,
+            "saved_state": dict((ds.state.get(self._view_state_key, {}) if ds is not None else {})),
+            "on_update": on_update,
+            "on_finish": on_finish,
+            "on_cancel": on_cancel,
+            "restore_view_on_finish": restore_view_on_finish,
+            "restore_view_on_cancel": restore_view_on_cancel,
         }
         if self._attr_combo.findText(attr) >= 0:
             self._attr_combo.setCurrentText(attr)
@@ -604,11 +636,10 @@ class HistogramWindow(QWidget):
         self._filter_edit.update({
             "region": region,
             "report_label": report_label,
-            "callback": on_accept,
             "inclusive_min": True,
             "inclusive_max": True,
         })
-        self._filter_add_btn.setVisible(True)
+        self._set_filter_edit_buttons_visible(True)
         self._fit_histogram_view()
         self._update_filter_edit_labels()
 
@@ -651,7 +682,7 @@ class HistogramWindow(QWidget):
         report_label.setPos(x1 - 0.02 * x_span, y1 - 0.03 * y_span)
 
     def _filter_count_text(self, lo: float, hi: float) -> str:
-        ds = self._state.active_dataset
+        ds = self._dataset()
         if ds is None:
             return ""
         attr_name = self._attr_combo.currentText()
@@ -678,6 +709,8 @@ class HistogramWindow(QWidget):
 
     def _on_filter_scene_clicked(self, event) -> None:
         if not event.double():
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
             return
         edit = self._filter_edit
         if not edit:
@@ -738,23 +771,49 @@ class HistogramWindow(QWidget):
             edit["inclusive_max"] = hi_inc.isChecked()
             self._update_filter_edit_labels()
 
+    def _current_filter_edit_values(self) -> tuple[float, float, bool, bool]:
+        edit = self._filter_edit
+        if not edit:
+            return 0.0, 1.0, True, True
+        region = edit.get("region")
+        lo, hi = region.getRegion() if region is not None else (0.0, 1.0)
+        return float(lo), float(hi), bool(edit.get("inclusive_min", True)), bool(edit.get("inclusive_max", True))
+
+    def _update_filter_edit(self) -> None:
+        edit = self._filter_edit
+        if not edit:
+            return
+        callback = edit.get("on_update")
+        if callable(callback):
+            callback(*self._current_filter_edit_values())
+
     def _finish_filter_edit(self) -> None:
         edit = self._filter_edit
         if not edit:
             return
-        region = edit.get("region")
-        callback = edit.get("callback")
-        lo, hi = region.getRegion() if region is not None else (0.0, 1.0)
-        inclusive_min = bool(edit.get("inclusive_min", True))
-        inclusive_max = bool(edit.get("inclusive_max", True))
-        self._clear_filter_edit(restore=bool(edit.get("restore_on_accept", True)))
+        callback = edit.get("on_finish")
+        values = self._current_filter_edit_values()
+        self._clear_filter_edit(restore=bool(edit.get("restore_view_on_finish", True)))
         if callable(callback):
-            callback(float(lo), float(hi), inclusive_min, inclusive_max)
+            callback(*values)
+
+    def _cancel_filter_edit(self) -> None:
+        edit = self._filter_edit
+        if not edit:
+            return
+        callback = edit.get("on_cancel")
+        self._clear_filter_edit(restore=bool(edit.get("restore_view_on_cancel", True)))
+        if callable(callback):
+            callback()
+
+    def _set_filter_edit_buttons_visible(self, visible: bool) -> None:
+        for btn in (self._filter_update_btn, self._filter_finish_btn, self._filter_cancel_btn):
+            btn.setVisible(visible)
 
     def _clear_filter_edit(self, *, restore: bool) -> None:
         edit = self._filter_edit
         if not edit:
-            self._filter_add_btn.setVisible(False)
+            self._set_filter_edit_buttons_visible(False)
             return
         for key in ("region", "report_label"):
             item = edit.get(key)
@@ -765,9 +824,10 @@ class HistogramWindow(QWidget):
                     pass
         saved = edit.get("saved_state")
         self._filter_edit = None
-        self._filter_add_btn.setVisible(False)
-        if restore and saved and self._state.active_dataset is not None:
-            self._state.active_dataset.state[self._view_state_key] = saved
+        self._set_filter_edit_buttons_visible(False)
+        ds = self._dataset()
+        if restore and saved and ds is not None:
+            ds.state[self._view_state_key] = saved
             self._refresh()
         else:
             self._fit_histogram_view()
@@ -871,11 +931,8 @@ class HistogramWindow(QWidget):
             self._agg_combo.setToolTip("")
         self._agg_combo.blockSignals(False)
 
-    def _on_active_changed(self, _idx: int) -> None:
-        self._refresh()
-
     def _on_filter_changed(self, idx: int) -> None:
-        if idx == self._state.active_idx:
+        if idx == self._dataset_idx:
             if self._filter_edit:
                 self._reset_for_new_data()
             else:
@@ -883,6 +940,8 @@ class HistogramWindow(QWidget):
                 self._fit_histogram_view()
 
     def focusInEvent(self, event) -> None:
+        if self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets):
+            self._state.set_active(self._dataset_idx)
         if self._roi_overlay is not None:
             self._roi_overlay.activate()
         super().focusInEvent(event)
@@ -890,6 +949,8 @@ class HistogramWindow(QWidget):
     def changeEvent(self, event) -> None:
         from PyQt6.QtCore import QEvent
         if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            if self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets):
+                self._state.set_active(self._dataset_idx)
             if self._roi_overlay is not None:
                 self._roi_overlay.activate()
         super().changeEvent(event)

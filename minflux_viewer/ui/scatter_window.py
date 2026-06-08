@@ -24,8 +24,10 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QHBoxLayout,
     QLabel,
     QMenu,
+    QScrollArea,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
@@ -34,6 +36,7 @@ from PyQt6.QtWidgets import (
 
 from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
+from ..core.overlay import CHANNEL_LUTS, PURE_COLOR_RGB, apply_display_transform_nm, overlay_members
 from ..core.roi_selection import rectangle_mask
 from .plot_format import plot_widget
 
@@ -113,9 +116,10 @@ class ScatterWindow(QWidget):
 
     TAG = "scatter_window"
 
-    def __init__(self, state: AppState, parent: QWidget | None = None) -> None:
+    def __init__(self, state: AppState, parent: QWidget | None = None, *, dataset_idx: int | None = None) -> None:
         super().__init__(parent)
         self._state = state
+        self._dataset_idx = dataset_idx if dataset_idx is not None else state.active_idx
         self._3d_view = None         # built lazily on first 3D switch
         self._manual_color_levels: tuple[float, float] | None = None
         self._last_color_values: np.ndarray = np.empty(0)
@@ -133,6 +137,8 @@ class ScatterWindow(QWidget):
         self._3d_camera_initialised = False
         self._last_axis_text = "XY"
         self._last_2d_black_background = False
+        self._channels: list[dict] = []
+        self._channel_rows: list[tuple[QLabel, QComboBox]] = []
 
         self.setWindowTitle("Scatter Plot")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -143,7 +149,17 @@ class ScatterWindow(QWidget):
         self._refresh()
 
         state.filter_changed.connect(self._on_filter_changed)
-        state.active_changed.connect(self._on_active_changed)
+
+    @property
+    def dataset_idx(self) -> int | None:
+        return self._dataset_idx
+
+    def _dataset(self):
+        if self._dataset_idx is None:
+            return None
+        if not (0 <= self._dataset_idx < len(self._state.datasets)):
+            return None
+        return self._state.datasets[self._dataset_idx]
 
     # ------------------------------------------------------------------
     # UI
@@ -213,6 +229,16 @@ class ScatterWindow(QWidget):
             coordinate_space="plot",
         )
         # 3D view added lazily by _ensure_3d_built()
+
+        self._channel_area = QScrollArea()
+        self._channel_area.setWidgetResizable(True)
+        self._channel_area.setMaximumHeight(110)
+        self._channel_widget = QWidget()
+        self._channel_layout = QVBoxLayout(self._channel_widget)
+        self._channel_layout.setContentsMargins(4, 4, 4, 4)
+        self._channel_layout.setSpacing(2)
+        self._channel_area.setWidget(self._channel_widget)
+        root.addWidget(self._channel_area)
 
         # Status line
         self._info_label = QLabel("")
@@ -356,15 +382,8 @@ class ScatterWindow(QWidget):
         self._redraw_current(save_state=True)
 
     def _on_filter_changed(self, idx: int) -> None:
-        if idx == self._state.active_idx:
+        if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
             self._redraw_current(save_state=False)
-
-    def _on_active_changed(self, _idx: int) -> None:
-        self._cached_dataset_idx = None
-        self._cached_locs_nm = None
-        self._3d_camera_initialised = False
-        self._invalidate_color_cache()
-        self._refresh()
 
     def _reset_view(self) -> None:
         if self._axis_combo.currentText() == "3D" and self._3d_view is not None:
@@ -374,7 +393,7 @@ class ScatterWindow(QWidget):
 
     def _reset_3d_camera(self, pos: np.ndarray | None = None) -> None:
         """Centre the 3D camera on the data."""
-        ds = self._state.active_dataset
+        ds = self._dataset()
         if ds is None or self._3d_view is None:
             return
         if pos is None:
@@ -394,12 +413,89 @@ class ScatterWindow(QWidget):
         self._3d_view.opts["center"] = pg.Vector(*centre)
         self._3d_view.setCameraPosition(distance=max(extent * 1.5, 100.0))
 
+    def _build_channels(self) -> None:
+        previous = {
+            ch.get("dataset_idx"): {"visible": ch.get("visible", True), "lut": ch.get("lut")}
+            for ch in self._channels
+        }
+        self._channels = []
+        if self._dataset_idx is None:
+            return
+        for pos, (idx, ds) in enumerate(overlay_members(self._state, self._dataset_idx)):
+            prev = previous.get(idx, {})
+            self._channels.append({
+                "dataset_idx": idx,
+                "name": ds.name,
+                "visible": bool(prev.get("visible", True)),
+                "lut": prev.get("lut") or ds.state.get("overlay_lut") or ds.state.get("render_channel_lut") or CHANNEL_LUTS[pos % len(CHANNEL_LUTS)],
+            })
+
+    def _rebuild_channel_ui(self) -> None:
+        while self._channel_layout.count():
+            item = self._channel_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._channel_rows = []
+        for ch_idx, ch in enumerate(self._channels):
+            row = QWidget()
+            row.mousePressEvent = lambda event, i=ch_idx, r=row: self._on_channel_row_pressed(r, event, i)
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(0, 0, 0, 0)
+            vis_cb = QCheckBox()
+            vis_cb.setChecked(bool(ch["visible"]))
+            vis_cb.toggled.connect(lambda checked, i=ch_idx: self._on_channel_visible(i, checked))
+            lay.addWidget(vis_cb)
+            name_lbl = QLabel(f"{ch_idx + 1}: {ch['name']}")
+            lay.addWidget(name_lbl, stretch=1)
+            lut = QComboBox()
+            lut.addItems(CHANNEL_LUTS)
+            lut.setCurrentText(str(ch["lut"]))
+            lut.currentTextChanged.connect(lambda text, i=ch_idx: self._on_channel_lut(i, text))
+            lay.addWidget(lut)
+            self._channel_layout.addWidget(row)
+            self._channel_rows.append((name_lbl, lut))
+        self._channel_area.setVisible(len(self._channels) > 1)
+
+    def _on_channel_row_pressed(self, row: QWidget, event, ch_idx: int) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and 0 <= ch_idx < len(self._channels):
+            ds_idx = self._channels[ch_idx]["dataset_idx"]
+            if 0 <= ds_idx < len(self._state.datasets):
+                self._dataset_idx = ds_idx
+                self._state.set_active(ds_idx)
+                self._update_overlay_title()
+        QWidget.mousePressEvent(row, event)
+
+    def _on_channel_visible(self, ch_idx: int, visible: bool) -> None:
+        if 0 <= ch_idx < len(self._channels):
+            self._channels[ch_idx]["visible"] = bool(visible)
+            self._redraw_current(save_state=False)
+
+    def _on_channel_lut(self, ch_idx: int, lut: str) -> None:
+        if 0 <= ch_idx < len(self._channels):
+            self._channels[ch_idx]["lut"] = lut
+            ds_idx = self._channels[ch_idx]["dataset_idx"]
+            if 0 <= ds_idx < len(self._state.datasets):
+                self._state.datasets[ds_idx].state["render_channel_lut"] = lut
+                self._state.datasets[ds_idx].state["overlay_lut"] = lut
+            self._redraw_current(save_state=False)
+
+    def _update_overlay_title(self) -> None:
+        ds = self._dataset()
+        if ds is None:
+            return
+        overlay_idx = ds.state.get("overlay_index")
+        if overlay_idx and len(self._channels) > 1:
+            self.setWindowTitle(f"Scatter Plot (overlay {overlay_idx}) - {ds.name}")
+        else:
+            self.setWindowTitle(f"Scatter Plot  -  {ds.name}")
+
     # ------------------------------------------------------------------
     # Drawing — dispatches to 2D or 3D path
     # ------------------------------------------------------------------
 
     def _refresh(self) -> None:
-        ds = self._state.active_dataset
+        ds = self._dataset()
         if ds is None:
             self._scatter_2d.setData([], [])
             if self._3d_view is not None:
@@ -407,7 +503,9 @@ class ScatterWindow(QWidget):
             self.setWindowTitle("Scatter Plot")
             return
 
-        self.setWindowTitle(f"Scatter Plot  —  {ds.name}")
+        self._build_channels()
+        self._rebuild_channel_ui()
+        self._update_overlay_title()
         saved = ds.state.get(self._view_state_key, {})
 
         self._axis_combo.blockSignals(True)
@@ -465,20 +563,128 @@ class ScatterWindow(QWidget):
         self._redraw_current(save_state=True)
 
     def _redraw_current(self, *, save_state: bool) -> None:
-        ds = self._state.active_dataset
+        ds = self._dataset()
         if ds is None:
+            return
+        if len(self._channels) > 1:
+            self._draw_overlay(save_state=save_state)
             return
         self._draw(self._current_locs(ds), ds.filter_mask, ds, save_state=save_state)
 
     def _current_locs(self, ds) -> np.ndarray:
-        idx = self._state.active_idx
+        idx = self._dataset_idx
         if self._cached_dataset_idx != idx or self._cached_locs_nm is None:
             locs = np.asarray(ds.loc_nm, dtype=float)
             if locs.ndim == 2 and locs.shape[1] == 2:
                 locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
+            locs = apply_display_transform_nm(
+                locs,
+                ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"),
+            )
             self._cached_dataset_idx = idx
             self._cached_locs_nm = locs
         return self._cached_locs_nm
+
+    def _locs_for_dataset(self, ds) -> np.ndarray:
+        locs = np.asarray(ds.loc_nm, dtype=float)
+        if locs.ndim == 2 and locs.shape[1] == 2:
+            locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
+        return apply_display_transform_nm(
+            locs,
+            ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"),
+        )
+
+    def _lut_color(self, lut: str, alpha: int = 190) -> tuple[int, int, int, int]:
+        if lut in PURE_COLOR_RGB:
+            r, g, b = PURE_COLOR_RGB[lut]
+            return int(r), int(g), int(b), int(alpha)
+        try:
+            cmap = _load_cmap(lut)
+            color = cmap.map(np.array([0.72]), mode="byte")[0]
+            return int(color[0]), int(color[1]), int(color[2]), int(alpha)
+        except Exception:
+            return 180, 180, 180, int(alpha)
+
+    def _draw_overlay(self, *, save_state: bool) -> None:
+        ds_active = self._dataset()
+        if ds_active is not None and save_state:
+            self._save_view_state(ds_active)
+        axis = self._axis_combo.currentText()
+        col_map = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
+        if axis == "3D":
+            self._draw_overlay_3d()
+            return
+        ci, cj = col_map.get(axis, (0, 1))
+        xs: list[np.ndarray] = []
+        ys: list[np.ndarray] = []
+        brushes: list = []
+        total = 0
+        for ch in self._channels:
+            if not ch.get("visible", True):
+                continue
+            ds = self._state.datasets[ch["dataset_idx"]]
+            locs = self._locs_for_dataset(ds)
+            if locs.ndim != 2 or locs.shape[1] < 3:
+                continue
+            mask = np.asarray(ds.filter_mask, dtype=bool)
+            if mask.shape[0] != locs.shape[0]:
+                mask = np.ones(locs.shape[0], dtype=bool)
+            mask &= np.all(np.isfinite(locs[:, :3]), axis=1)
+            indices = self._visible_indices(mask, locs.shape[0], max(1, _MAX_DISPLAY_POINTS_2D // max(len(self._channels), 1)))
+            if indices.size == 0:
+                continue
+            x = locs[indices, ci]
+            y = locs[indices, cj]
+            xs.append(x)
+            ys.append(y)
+            color = self._lut_color(str(ch.get("lut", "Gray")))
+            brushes.extend([pg.mkBrush(*color)] * indices.size)
+            total += int(np.count_nonzero(mask))
+        if not xs:
+            self._scatter_2d.setData([], [])
+            self._info_label.setText("No localisations pass the current filters.")
+            return
+        self._scatter_2d.setData(x=np.concatenate(xs), y=np.concatenate(ys), brush=brushes, pen=None, size=2)
+        self._plot_2d.setLabel("bottom", "XYZ"[ci] + " (nm)")
+        self._plot_2d.setLabel("left", "XYZ"[cj] + " (nm)")
+        self._colorbar.setVisible(False)
+        self._info_label.setText(f"{total:,} filtered localisations across {len([c for c in self._channels if c.get('visible', True)])} channel(s)")
+
+    def _draw_overlay_3d(self) -> None:
+        self._ensure_3d_built()
+        if self._3d_view is None:
+            return
+        pos_parts: list[np.ndarray] = []
+        rgba_parts: list[np.ndarray] = []
+        total = 0
+        for ch in self._channels:
+            if not ch.get("visible", True):
+                continue
+            ds = self._state.datasets[ch["dataset_idx"]]
+            locs = self._locs_for_dataset(ds)
+            mask = np.asarray(ds.filter_mask, dtype=bool)
+            if mask.shape[0] != locs.shape[0]:
+                mask = np.ones(locs.shape[0], dtype=bool)
+            mask &= np.all(np.isfinite(locs[:, :3]), axis=1)
+            indices = self._visible_indices(mask, locs.shape[0], max(1, _MAX_DISPLAY_POINTS_3D // max(len(self._channels), 1)))
+            if indices.size == 0:
+                continue
+            pos_parts.append(locs[indices, :3])
+            r, g, b, a = self._lut_color(str(ch.get("lut", "Gray")), alpha=220)
+            rgba = np.tile(np.array([[r / 255.0, g / 255.0, b / 255.0, a / 255.0]], dtype=np.float32), (indices.size, 1))
+            rgba_parts.append(rgba)
+            total += int(np.count_nonzero(mask))
+        if not pos_parts:
+            self._3d_scatter.setData(pos=np.empty((0, 3)))
+            self._info_label.setText("No finite XYZ localisations pass the current filters for 3D display.")
+            return
+        pos = np.vstack(pos_parts).astype(np.float32, copy=False)
+        rgba = np.vstack(rgba_parts).astype(np.float32, copy=False)
+        self._3d_scatter.setData(pos=pos, color=rgba, size=3.0, pxMode=True)
+        if not self._3d_camera_initialised:
+            self._reset_3d_camera(pos)
+            self._3d_camera_initialised = True
+        self._info_label.setText(f"{total:,} filtered localisations across {len([c for c in self._channels if c.get('visible', True)])} channel(s)")
 
     def _draw(self, locs: np.ndarray, ftr: np.ndarray, ds, *, save_state: bool = True) -> None:
         if save_state:
@@ -490,7 +696,7 @@ class ScatterWindow(QWidget):
             self._draw_2d(locs, ftr, ds)
 
     def _save_view_state(self, ds=None) -> None:
-        ds = ds or self._state.active_dataset
+        ds = ds or self._dataset()
         if ds is None:
             return
         ds.state[self._view_state_key] = {
@@ -644,7 +850,7 @@ class ScatterWindow(QWidget):
 
     def _color_cache_for_dataset(self, ds, c_name: str) -> dict | None:
         key = (
-            self._state.active_idx,
+            self._dataset_idx,
             c_name,
             self._cmap_combo.currentText(),
             self._lut_invert,
@@ -780,10 +986,10 @@ class ScatterWindow(QWidget):
     def compute_roi_selection(self, record):
         if record.type != "rectangle" or self._axis_combo.currentText() == "3D":
             return None
-        ds = self._state.active_dataset
+        ds = self._dataset()
         if ds is None:
             return None
-        locs = np.asarray(ds.loc_nm, dtype=float)
+        locs = self._current_locs(ds)
         if locs.ndim != 2 or locs.shape[1] < 2:
             return None
         if locs.shape[1] == 2:
@@ -801,7 +1007,7 @@ class ScatterWindow(QWidget):
         mask = rectangle_mask(locs[:, ci], locs[:, cj], record, base_mask=base)
         context = {
             "source_view": "scatter",
-            "dataset_idx": self._state.active_idx,
+            "dataset_idx": self._dataset_idx,
             "axis": axis,
             "x_axis": "XYZ"[ci],
             "y_axis": "XYZ"[cj],
@@ -830,6 +1036,8 @@ class ScatterWindow(QWidget):
         self._on_lut_cmap_changed(self._cmap_combo.currentText(), invert)
 
     def focusInEvent(self, event) -> None:
+        if self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets):
+            self._state.set_active(self._dataset_idx)
         if self._roi_overlay is not None and self._axis_combo.currentText() != "3D":
             self._roi_overlay.activate()
         super().focusInEvent(event)
@@ -837,6 +1045,8 @@ class ScatterWindow(QWidget):
     def changeEvent(self, event) -> None:
         from PyQt6.QtCore import QEvent
         if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            if self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets):
+                self._state.set_active(self._dataset_idx)
             if self._roi_overlay is not None and self._axis_combo.currentText() != "3D":
                 self._roi_overlay.activate()
         super().changeEvent(event)

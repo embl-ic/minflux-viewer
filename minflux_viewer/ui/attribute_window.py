@@ -34,9 +34,10 @@ class AttributeWindow(QWidget):
 
     TAG = "attribute_window"
 
-    def __init__(self, state: AppState, parent: QWidget | None = None) -> None:
+    def __init__(self, state: AppState, parent: QWidget | None = None, *, dataset_idx: int | None = None) -> None:
         super().__init__(parent)
         self._state = state
+        self._dataset_idx = dataset_idx if dataset_idx is not None else state.active_idx
         self._view_state_key = "attribute_plot_state"
 
         self.setWindowTitle("Attribute Plot")
@@ -48,8 +49,18 @@ class AttributeWindow(QWidget):
         self._build_ui()
         self._refresh()
 
-        state.active_changed.connect(self._on_active_changed)
         state.filter_changed.connect(self._on_filter_changed)
+
+    @property
+    def dataset_idx(self) -> int | None:
+        return self._dataset_idx
+
+    def _dataset(self):
+        if self._dataset_idx is None:
+            return None
+        if not (0 <= self._dataset_idx < len(self._state.datasets)):
+            return None
+        return self._state.datasets[self._dataset_idx]
 
     # ------------------------------------------------------------------
     # UI
@@ -96,6 +107,12 @@ class AttributeWindow(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self._plot.showGrid(x=True, y=True, alpha=0.2)
+        self._plot.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self._plot.getPlotItem().setMenuEnabled(False)
+        try:
+            self._plot.getPlotItem().vb.setMenuEnabled(False)
+        except Exception:
+            pass
 
         self._curve  = self._plot.plot(pen=pg.mkPen("steelblue", width=1))
         self._points = pg.ScatterPlotItem(size=3, pen=None, brush="steelblue")
@@ -121,7 +138,7 @@ class AttributeWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _refresh(self) -> None:
-        ds = self._state.active_dataset
+        ds = self._dataset()
         if ds is None:
             self.setWindowTitle("Attribute Plot")
             self._curve.setData([], [])
@@ -164,7 +181,7 @@ class AttributeWindow(QWidget):
         self._draw()
 
     def _draw(self) -> None:
-        ds = self._state.active_dataset
+        ds = self._dataset()
         if ds is None or self._x_combo.count() == 0:
             return
 
@@ -212,7 +229,7 @@ class AttributeWindow(QWidget):
     def compute_roi_selection(self, record):
         if record.type != "rectangle":
             return None
-        ds = self._state.active_dataset
+        ds = self._dataset()
         if ds is None:
             return None
         x_name = self._x_combo.currentText()
@@ -236,7 +253,7 @@ class AttributeWindow(QWidget):
             mask = full
         context = {
             "source_view": "attribute",
-            "dataset_idx": self._state.active_idx,
+            "dataset_idx": self._dataset_idx,
             "x_attr": x_name,
             "y_attr": y_name,
             "filtered_only": self._filter_chk.isChecked(),
@@ -247,14 +264,13 @@ class AttributeWindow(QWidget):
     # Slots
     # ------------------------------------------------------------------
 
-    def _on_active_changed(self, _idx: int) -> None:
-        self._refresh()
-
     def _on_filter_changed(self, idx: int) -> None:
-        if idx == self._state.active_idx:
+        if idx == self._dataset_idx:
             self._draw()
 
     def focusInEvent(self, event) -> None:
+        if self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets):
+            self._state.set_active(self._dataset_idx)
         if self._roi_overlay is not None:
             self._roi_overlay.activate()
         super().focusInEvent(event)
@@ -262,6 +278,8 @@ class AttributeWindow(QWidget):
     def changeEvent(self, event) -> None:
         from PyQt6.QtCore import QEvent
         if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            if self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets):
+                self._state.set_active(self._dataset_idx)
             if self._roi_overlay is not None:
                 self._roi_overlay.activate()
         super().changeEvent(event)

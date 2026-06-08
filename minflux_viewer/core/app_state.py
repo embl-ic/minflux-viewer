@@ -92,16 +92,18 @@ DEFAULT_PREFS: dict = {
         "next_dataset": "Ctrl+Tab",
         "previous_dataset": "Ctrl+Shift+Tab",
         "open": "Ctrl+O",
-        "open_msr": "Ctrl+Shift+O",
+        "open_msr": "",
         "open_spreadsheet": "",
         "open_tiff": "",
         "save": "Ctrl+S",
         "render": "Ctrl+R",
+        "brightness_contrast": "Shift+C",
         "attribute_plot": "Ctrl+1",
         "attribute_histogram": "Ctrl+2",
         "scatter_plot": "Ctrl+3",
         "log": "Ctrl+L",
         "console": "Ctrl+Shift+L",
+        "preferences": "Shift+P",
     },
     "attributes": {
         "enabled": [
@@ -165,6 +167,10 @@ def _migrate_prefs(prefs: dict) -> dict:
     """Move older built-in defaults to the current shortcut layout."""
     shortcuts = prefs.setdefault("shortcuts", {})
     shortcuts.setdefault("focus_main_window", "Shift+V")
+    if shortcuts.get("open_msr") == "Ctrl+Shift+O":
+        shortcuts["open_msr"] = ""
+    shortcuts.setdefault("brightness_contrast", "Shift+C")
+    shortcuts.setdefault("preferences", "Shift+P")
     if shortcuts.get("show_info") == "I":
         shortcuts["show_info"] = "Ctrl+I"
     if shortcuts.get("attribute_plot") == "Ctrl+3":

@@ -111,10 +111,13 @@ class MainWindow(QMainWindow):
         self._state = state
         self._data_windows: dict[int, DataWindow] = {}
 
-        # One instance of each tool window (None = not yet opened)
-        self._scatter_win   = None
-        self._histogram_win = None
-        self._attr_win      = None
+        # One reusable plot window per dataset.
+        self._scatter_windows: dict[int, QWidget] = {}
+        self._histogram_windows: dict[int, QWidget] = {}
+        self._attr_windows: dict[int, QWidget] = {}
+        self._scatter_win   = None       # compatibility alias: most recently raised
+        self._histogram_win = None       # compatibility alias: most recently raised
+        self._attr_win      = None       # compatibility alias: most recently raised
         self._attr_3d_mpl_win = None
         self._filter_dlg    = None
         self._filter_dlgs: dict[int | None, QWidget] = {}
@@ -129,6 +132,8 @@ class MainWindow(QMainWindow):
         self._window_cycle_index = -1
         # One render window per dataset: {dataset_idx: RenderWindow}
         self._render_windows: dict[int, "RenderWindow"] = {}
+        self._last_channel_combine_settings: dict | None = None
+        self._next_overlay_index = 1
         # ParaView subprocesses spawned by this session — terminated on exit
         self._paraview_procs: list = []
 
@@ -280,9 +285,7 @@ class MainWindow(QMainWindow):
             lambda: self._placeholder("Channel Tool", "a later implementation")
         )
         self.actionChannelCombine = QAction("Combine...", self)
-        self.actionChannelCombine.triggered.connect(
-            lambda: self._placeholder("Channel Combine", "a later implementation")
-        )
+        self.actionChannelCombine.triggered.connect(self._show_channel_combine)
         self.actionChannelSplit = QAction("Split...", self)
         self.actionChannelSplit.triggered.connect(self._split_active_channel_group)
         self.actionChannelOverlay = QAction("Overlay", self)
@@ -435,12 +438,21 @@ class MainWindow(QMainWindow):
             "duplicate": u.actionDuplicate,
             "show_info": u.actionShowInfo,
             "render": u.actionRender,
+            "brightness_contrast": u.actionBrightnessContrast,
             "attribute_plot": u.actionAttributePlot,
             "attribute_histogram": u.actionHistogram,
             "scatter_plot": u.actionScatter,
             "log": u.actionLog,
             "console": u.actionConsole,
+            "preferences": u.actionPreferences,
         }
+
+        # ApplicationShortcut so Shift+V reaches the main window from every
+        # window in the app (filter dialogs, dataset manager, child UIs, etc.)
+        # without needing per-window installation.
+        self._app_shortcut_focus = QShortcut(self)
+        self._app_shortcut_focus.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._app_shortcut_focus.activated.connect(self._focus_main_window)
 
     def _mark_ai_unapproved_actions(self) -> None:
         """Visually separate AI-generated/unapproved actions from approved UI."""
@@ -512,9 +524,11 @@ class MainWindow(QMainWindow):
             seq = str(shortcuts.get(key, "") or "")
             action.setShortcut(QKeySequence(seq) if seq else QKeySequence())
             action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
-        self._ui.actionPreferences.setShortcut(QKeySequence())
         self._ui.actionQuit.setShortcut(QKeySequence("Ctrl+Q"))
         self._ui.actionQuit.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        seq = str(shortcuts.get("focus_main_window", "") or "")
+        self._app_shortcut_focus.setKey(QKeySequence(seq) if seq else QKeySequence())
+        self._app_shortcut_focus.setEnabled(bool(seq))
         self._install_window_shortcuts(self, include_action_commands=False)
         self._refresh_owned_window_shortcuts()
         conflicts = self._shortcut_conflicts()
@@ -527,7 +541,7 @@ class MainWindow(QMainWindow):
 
     def _shortcut_command_keys(self, *, include_action_commands: bool = True) -> tuple[str, ...]:
         keys = (
-            "focus_main_window", "next_window", "previous_window",
+            "next_window", "previous_window",
             "next_dataset", "previous_dataset", "close_window",
         )
         if include_action_commands:
@@ -608,8 +622,10 @@ class MainWindow(QMainWindow):
         action = self._shortcut_actions.get(command)
         if action is None:
             return
-        if editing_text and not has_modifier:
+        if editing_text and not has_modifier and not self._shortcut_allowed_in_editing(command):
             return
+        if command == "filter":
+            self._set_active_from_focused_dataset_window()
         if action.isEnabled():
             action.trigger()
 
@@ -638,7 +654,8 @@ class MainWindow(QMainWindow):
         if not seq:
             return super().eventFilter(obj, event)
         if event.type() == QEvent.Type.ShortcutOverride:
-            if self._shortcut_command_for_sequence(seq) is not None:
+            command = self._shortcut_command_for_sequence(seq)
+            if command is not None:
                 focus = QApplication.focusWidget()
                 editing_text = isinstance(
                     focus,
@@ -649,7 +666,7 @@ class MainWindow(QMainWindow):
                     | Qt.KeyboardModifier.AltModifier.value
                     | Qt.KeyboardModifier.MetaModifier.value
                 ))
-                if not (editing_text and not has_modifier):
+                if not (editing_text and not has_modifier) or self._shortcut_allowed_in_editing(command):
                     event.accept()
                     return True
             return super().eventFilter(obj, event)
@@ -690,8 +707,10 @@ class MainWindow(QMainWindow):
             return True
         for command, action in self._shortcut_actions.items():
             if seq and seq == shortcuts.get(command, ""):
-                if editing_text and not has_modifier:
+                if editing_text and not has_modifier and not self._shortcut_allowed_in_editing(command):
                     return False
+                if command == "filter":
+                    self._set_active_from_focused_dataset_window()
                 if action.isEnabled():
                     action.trigger()
                     return True
@@ -728,6 +747,34 @@ class MainWindow(QMainWindow):
                 continue
             by_seq.setdefault(seq, []).append(label)
         return {seq: commands for seq, commands in by_seq.items() if len(commands) > 1}
+
+    def _shortcut_allowed_in_editing(self, command: str) -> bool:
+        active = QApplication.activeWindow()
+        tag = getattr(active, "TAG", None)
+        if command == "filter":
+            return tag in {"histogram_window", "attribute_window"}
+        if command == "brightness_contrast":
+            return tag == "render_window"
+        return False
+
+    def _set_active_from_focused_dataset_window(self) -> None:
+        """Use the focused dataset-owned plot/view when a shortcut targets data."""
+        focus = QApplication.focusWidget()
+        candidates: list[QWidget | None] = [QApplication.activeWindow(), focus]
+        if focus is not None:
+            parent = focus.parentWidget()
+            while parent is not None:
+                candidates.append(parent)
+                parent = parent.parentWidget()
+        for widget in candidates:
+            idx = getattr(widget, "dataset_idx", None)
+            if idx is None:
+                idx = getattr(widget, "_dataset_idx", None)
+            if idx is None:
+                idx = getattr(widget, "_idx", None)
+            if type(idx) is int and 0 <= idx < len(self._state.datasets):
+                self._state.set_active(idx)
+                return
 
 
 
@@ -984,26 +1031,59 @@ class MainWindow(QMainWindow):
     # Tool windows  — open once, raise if already open
     # ------------------------------------------------------------------
 
-    def _show_scatter(self) -> None:
+    def _show_scatter(self, dataset_idx: int | None = None):
         if self._state.active_dataset is None:
             self._no_data_warning(); return
         from .scatter_window import ScatterWindow
-        self._scatter_win = _raise_or_create(self._scatter_win, ScatterWindow, self._state)
-        self._install_window_shortcuts(self._scatter_win)
+        idx = dataset_idx if type(dataset_idx) is int else self._state.active_idx
+        if idx is None:
+            return None
+        win = self._scatter_windows.get(idx)
+        if win is None:
+            win = ScatterWindow(self._state, dataset_idx=idx)
+            win.destroyed.connect(lambda _=None, i=idx: self._scatter_windows.pop(i, None))
+            self._scatter_windows[idx] = win
+        self._scatter_win = win
+        self._install_window_shortcuts(win)
+        win.show(); win.raise_(); win.activateWindow()
+        self._notify_view_state_changed()
+        return win
 
-    def _show_histogram(self) -> None:
+    def _show_histogram(self, dataset_idx: int | None = None):
         if self._state.active_dataset is None:
             self._no_data_warning(); return
         from .histogram_window import HistogramWindow
-        self._histogram_win = _raise_or_create(self._histogram_win, HistogramWindow, self._state)
-        self._install_window_shortcuts(self._histogram_win)
+        idx = dataset_idx if type(dataset_idx) is int else self._state.active_idx
+        if idx is None:
+            return None
+        win = self._histogram_windows.get(idx)
+        if win is None:
+            win = HistogramWindow(self._state, dataset_idx=idx)
+            win.destroyed.connect(lambda _=None, i=idx: self._histogram_windows.pop(i, None))
+            self._histogram_windows[idx] = win
+        self._histogram_win = win
+        self._install_window_shortcuts(win)
+        win.show(); win.raise_(); win.activateWindow()
+        self._notify_view_state_changed()
+        return win
 
-    def _show_attr_plot(self) -> None:
+    def _show_attr_plot(self, dataset_idx: int | None = None):
         if self._state.active_dataset is None:
             self._no_data_warning(); return
         from .attribute_window import AttributeWindow
-        self._attr_win = _raise_or_create(self._attr_win, AttributeWindow, self._state)
-        self._install_window_shortcuts(self._attr_win)
+        idx = dataset_idx if type(dataset_idx) is int else self._state.active_idx
+        if idx is None:
+            return None
+        win = self._attr_windows.get(idx)
+        if win is None:
+            win = AttributeWindow(self._state, dataset_idx=idx)
+            win.destroyed.connect(lambda _=None, i=idx: self._attr_windows.pop(i, None))
+            self._attr_windows[idx] = win
+        self._attr_win = win
+        self._install_window_shortcuts(win)
+        win.show(); win.raise_(); win.activateWindow()
+        self._notify_view_state_changed()
+        return win
 
     def _show_attr_plot_3d_matplotlib(self) -> None:
         if self._state.active_dataset is None:
@@ -1027,7 +1107,8 @@ class MainWindow(QMainWindow):
                     win.raise_()
                     win.activateWindow()
                     self._filter_dlg = win
-                    return
+                    self._notify_view_state_changed()
+                    return win
             except RuntimeError:
                 self._filter_dlgs.pop(idx, None)
                 win = None
@@ -1038,6 +1119,8 @@ class MainWindow(QMainWindow):
         win.show()
         win.raise_()
         win.activateWindow()
+        self._notify_view_state_changed()
+        return win
 
     def _load_filter_json(self, path: str) -> None:
         """Open (or raise) the filter dialog and append filters from a JSON file."""
@@ -1046,11 +1129,57 @@ class MainWindow(QMainWindow):
 
     def _show_dataset_manager(self) -> None:
         from .dataset_manager import DatasetManager
-        self._ds_manager = _raise_or_create(self._ds_manager, DatasetManager, self._state)
+        if self._ds_manager is None:
+            self._ds_manager = DatasetManager(self._state, parent=self)
+            self._ds_manager.destroyed.connect(lambda _=None: setattr(self, "_ds_manager", None))
+        self._ds_manager.show()
+        self._ds_manager.raise_()
+        self._ds_manager.activateWindow()
+        self._notify_view_state_changed()
 
     def _show_roi_manager(self) -> None:
         from .roi_manager import RoiManagerWindow
         self._roi_manager_win = _raise_or_create(self._roi_manager_win, RoiManagerWindow, self._state)
+
+    def _notify_view_state_changed(self) -> None:
+        mgr = getattr(self, "_ds_manager", None)
+        if mgr is not None and hasattr(mgr, "refresh_views"):
+            try:
+                mgr.refresh_views()
+            except RuntimeError:
+                self._ds_manager = None
+
+    def dataset_view_status(self, idx: int) -> str:
+        if not (0 <= idx < len(self._state.datasets)):
+            return "None"
+        ds = self._state.datasets[idx]
+        group_id = ds.state.get("overlay_id") or ds.state.get("render_group_id")
+        if group_id:
+            overlay_idx = ds.state.get("overlay_index")
+            visible_overlay = False
+            for win in list(self._render_windows.values()) + list(self._scatter_windows.values()):
+                try:
+                    channels = getattr(win, "_channels", None)
+                    if channels and any(ch.get("dataset_idx") == idx and ch.get("visible", True) for ch in channels):
+                        visible_overlay = True
+                        break
+                except RuntimeError:
+                    continue
+            if visible_overlay or any(
+                getattr(other, "state", {}).get("overlay_id") == group_id
+                for other in self._state.datasets
+            ):
+                return f"Overlay {overlay_idx}" if overlay_idx else "Overlay"
+        own_maps = (self._render_windows, self._scatter_windows, self._histogram_windows, self._attr_windows, self._filter_dlgs)
+        for mapping in own_maps:
+            win = mapping.get(idx)
+            if win is not None:
+                try:
+                    if win.isVisible():
+                        return "Own"
+                except RuntimeError:
+                    pass
+        return "None"
 
     def _on_roi_tool(self, tool: str, checked: bool) -> None:
         if checked:
@@ -1243,7 +1372,7 @@ class MainWindow(QMainWindow):
             return
 
         active = self._state.datasets[active_idx]
-        group_id = active.state.get("render_group_id")
+        group_id = active.state.get("overlay_id") or active.state.get("render_group_id")
         if not group_id:
             QMessageBox.information(
                 self,
@@ -1254,7 +1383,7 @@ class MainWindow(QMainWindow):
 
         group_indices = [
             idx for idx, ds in enumerate(self._state.datasets)
-            if ds.state.get("render_group_id") == group_id
+            if (ds.state.get("overlay_id") or ds.state.get("render_group_id")) == group_id
         ]
         if len(group_indices) < 2:
             QMessageBox.information(
@@ -1269,7 +1398,12 @@ class MainWindow(QMainWindow):
         for pos, idx in enumerate(group_indices):
             ds = self._state.datasets[idx]
             ds.state["render_channel_lut"] = lut_by_idx.get(idx, fallback_luts[pos % len(fallback_luts)])
+            ds.state.pop("overlay_id", None)
+            ds.state.pop("overlay_index", None)
+            ds.state.pop("overlay_order", None)
+            ds.state.pop("overlay_transform", None)
             ds.state.pop("render_group_id", None)
+            ds.state.pop("render_transform_2d", None)
             ds.metadata["render_split_from_group"] = group_id
 
         for idx in group_indices:
@@ -1357,7 +1491,9 @@ class MainWindow(QMainWindow):
             dup.state.update(copy.deepcopy(src.state))
             for key in ("msr_source_path", "msr_dataset_key", "msr_dataset_name"):
                 dup.metadata.pop(key, None)
-            dup.state.pop("render_group_id", None)
+            for key in ("overlay_id", "overlay_index", "overlay_order", "overlay_transform", "render_group_id", "render_transform_2d"):
+                dup.state.pop(key, None)
+                dup.metadata.pop(key, None)
             dup.metadata["duplicated_from_dataset"] = src.file.name
             dup.metadata["created_note"] = (
                 f"{timestamp}, duplicated from dataset: {src.file.name}"
@@ -1385,14 +1521,124 @@ class MainWindow(QMainWindow):
             pass
 
     def _next_duplicate_name(self, source_name: str) -> str:
-        """Return DUPn_<source_name>, counting previous duplicates of this source."""
+        """Return DUP_<source_name>, with numbering only when needed."""
         existing_names = {ds.file.name for ds in self._state.datasets}
-        n = 1
-        while f"DUP{n}_{source_name}" in existing_names:
+        base = f"DUP_{source_name}"
+        if base not in existing_names:
+            return base
+        n = 2
+        while f"DUP_{n}_{source_name}" in existing_names:
             n += 1
-        return f"DUP{n}_{source_name}"
+        return f"DUP_{n}_{source_name}"
 
-    def _show_render(self, dataset_idx: int | None = None) -> None:
+    def _duplicate_dataset_for_overlay(self, src_idx: int, timestamp: str) -> int:
+        import copy
+
+        from ..core.dataset import FileInfo, MinfluxDataset
+
+        src = self._state.datasets[src_idx]
+        new_attrs = copy.deepcopy(src.attr)
+        new_components = copy.deepcopy(src.components)
+        if getattr(new_components, "mfx", None) is not None:
+            new_components.mfx.attrs = new_attrs
+        dup = MinfluxDataset(
+            file=FileInfo(
+                name=self._next_duplicate_name(src.file.name),
+                folder=src.file.folder,
+                datetime=timestamp,
+                raw_data=None,
+                recent_path=src.file.recent_path,
+            ),
+            prop=copy.deepcopy(src.prop),
+            attr=new_attrs,
+            cali=copy.deepcopy(src.cali),
+            channel=copy.deepcopy(src.channel),
+            components=new_components,
+        )
+        dup.file.datetime = timestamp
+        dup.metadata.update(copy.deepcopy(src.metadata))
+        dup.state.update(copy.deepcopy(src.state))
+        for key in (
+            "overlay_id", "overlay_index", "overlay_order", "overlay_transform",
+            "render_group_id", "render_transform_2d",
+        ):
+            dup.state.pop(key, None)
+            dup.metadata.pop(key, None)
+        dup.metadata["duplicated_from_dataset"] = src.file.name
+        dup.metadata["created_note"] = f"{timestamp}, duplicated for channel overlay."
+        return self._state.add_dataset(dup)
+
+    def _show_channel_combine(self) -> None:
+        if len(self._state.datasets) < 2:
+            QMessageBox.information(self, "Combine datasets", "Load at least two datasets before combining channels.")
+            return
+        from .channel_combine_dialog import ChannelCombineDialog
+        from ..core.overlay import OverlayMemberSpec, build_overlay_transforms
+        import uuid
+
+        dlg = ChannelCombineDialog(
+            self._state,
+            previous=self._last_channel_combine_settings,
+            parent=self,
+        )
+        result = dlg.exec()
+        self._last_channel_combine_settings = dlg.session_state()
+        if result != QDialog.DialogCode.Accepted:
+            return
+        rows = dlg.selected_rows()
+        if len(rows) < 2:
+            QMessageBox.warning(self, "Combine datasets", "Select at least two datasets to combine.")
+            return
+
+        timestamp = datetime.now().strftime("%Y-%b-%d, %H:%M:%S")
+        keep_source = dlg.keep_source_check.isChecked()
+        previous_suspend = getattr(self._state, "suspend_auto_render", False)
+        self._state.suspend_auto_render = True
+        try:
+            overlay_rows = []
+            for row in rows:
+                idx = int(row["dataset_idx"])
+                if keep_source:
+                    idx = self._duplicate_dataset_for_overlay(idx, timestamp)
+                overlay_rows.append({"dataset_idx": idx, "order": int(row["order"]), "lut": row["lut"]})
+        finally:
+            self._state.suspend_auto_render = previous_suspend
+
+        overlay_index = self._next_overlay_index
+        self._next_overlay_index += 1
+        overlay_id = f"overlay:{overlay_index}:{uuid.uuid4().hex}"
+        specs = [
+            OverlayMemberSpec(dataset_idx=row["dataset_idx"], order=pos + 1, lut=row["lut"])
+            for pos, row in enumerate(sorted(overlay_rows, key=lambda item: (item["order"], item["dataset_idx"])))
+        ]
+        transforms = build_overlay_transforms(
+            state=self._state,
+            members=specs,
+            overlay_id=overlay_id,
+            overlay_index=overlay_index,
+            alignment_mode=dlg.align_combo.currentText(),
+        )
+        for spec in specs:
+            ds = self._state.datasets[spec.dataset_idx]
+            transform = transforms[spec.dataset_idx]
+            ds.state["overlay_id"] = overlay_id
+            ds.state["render_group_id"] = overlay_id
+            ds.state["overlay_index"] = overlay_index
+            ds.state["overlay_order"] = spec.order
+            ds.state["overlay_lut"] = spec.lut
+            ds.state["render_channel_lut"] = spec.lut
+            ds.state["overlay_transform"] = transform
+            ds.state["render_transform_2d"] = transform
+            ds.metadata["overlay_id"] = overlay_id
+            ds.metadata["overlay_index"] = overlay_index
+            ds.metadata["overlay_alignment_mode"] = dlg.align_combo.currentText()
+        anchor_idx = specs[0].dataset_idx
+        self._state.set_active(anchor_idx)
+        self._show_render(anchor_idx)
+        self._notify_view_state_changed()
+        self._state.log(f"Created overlay {overlay_index} with {len(specs)} dataset(s).")
+
+    def _show_render(self, dataset_idx: int | None = None):
         """
         Open (or raise) the render window for a dataset.
         Defaults to the active dataset.
@@ -1400,7 +1646,7 @@ class MainWindow(QMainWindow):
         if self._state.active_dataset is None:
             self._no_data_warning()
             return
-        idx = dataset_idx if dataset_idx is not None else self._state.active_idx
+        idx = dataset_idx if type(dataset_idx) is int else self._state.active_idx
         if idx is None:
             return
 
@@ -1414,7 +1660,8 @@ class MainWindow(QMainWindow):
             win.show()
             win.raise_()
             win.activateWindow()
-            return
+            self._notify_view_state_changed()
+            return win
 
         from .render_window import RenderWindow
         win = RenderWindow(self._state, dataset_idx=idx)
@@ -1424,6 +1671,8 @@ class MainWindow(QMainWindow):
         )
         self._render_windows[idx] = win
         win.show()
+        self._notify_view_state_changed()
+        return win
 
     # ------------------------------------------------------------------
     # ParaView
@@ -1449,11 +1698,11 @@ class MainWindow(QMainWindow):
             win.show()
 
         if data_prefs.get("show_attr_plot", False):
-            self._show_attr_plot()
+            self._show_attr_plot(idx)
         if data_prefs.get("show_histogram", False):
-            self._show_histogram()
+            self._show_histogram(idx)
         if data_prefs.get("show_scatter", False):
-            self._show_scatter()
+            self._show_scatter(idx)
 
         # Auto-open a render window for this dataset only when requested,
         # unless a batch importer will open one grouped render view.
@@ -1529,15 +1778,36 @@ class MainWindow(QMainWindow):
                 self._state.log(f"Local density computation skipped for '{ds.name}': {exc}", "WARN")
 
     def _on_dataset_removed(self, idx: int) -> None:
-        win = self._data_windows.pop(idx, None)
-        if win is not None:
-            win.close()
-            win.deleteLater()
+        for mapping in (
+            self._data_windows,
+            self._render_windows,
+            self._scatter_windows,
+            self._histogram_windows,
+            self._attr_windows,
+            self._filter_dlgs,
+        ):
+            win = mapping.pop(idx, None)
+            if win is not None:
+                try:
+                    win.close()
+                    win.deleteLater()
+                except Exception:
+                    pass
+            self._reindex_window_map_after_remove(mapping, idx)
+        self._notify_view_state_changed()
 
-        rwin = self._render_windows.pop(idx, None)
-        if rwin is not None:
-            rwin.close()
-            rwin.deleteLater()
+    def _reindex_window_map_after_remove(self, mapping: dict[int, QWidget], removed_idx: int) -> None:
+        moved = {}
+        for key, win in list(mapping.items()):
+            new_key = key - 1 if key > removed_idx else key
+            if new_key != key:
+                mapping.pop(key, None)
+                moved[new_key] = win
+                if hasattr(win, "_idx"):
+                    setattr(win, "_idx", new_key)
+                if hasattr(win, "_dataset_idx"):
+                    setattr(win, "_dataset_idx", new_key)
+        mapping.update(moved)
 
     def _on_active_changed(self, idx: int) -> None:
         ds = self._state.datasets[idx]
@@ -1649,13 +1919,13 @@ class MainWindow(QMainWindow):
             active = self._state.datasets[active_idx]
         except Exception:
             return []
-        group_id = active.state.get("render_group_id")
+        group_id = active.state.get("overlay_id") or active.state.get("render_group_id")
         msr_source = active.metadata.get("msr_source_path")
         if not group_id and not msr_source:
             return [active_idx]
         indices: list[int] = []
         for idx, ds in enumerate(self._state.datasets):
-            if group_id and ds.state.get("render_group_id") == group_id:
+            if group_id and (ds.state.get("overlay_id") or ds.state.get("render_group_id")) == group_id:
                 indices.append(idx)
             elif msr_source and ds.metadata.get("msr_source_path") == msr_source:
                 indices.append(idx)
@@ -1808,13 +2078,17 @@ class MainWindow(QMainWindow):
         for win in list(self._render_windows.values()):
             try: win.close()
             except Exception: pass
+        for mapping in (self._scatter_windows, self._histogram_windows, self._attr_windows):
+            for win in list(mapping.values()):
+                try: win.close()
+                except Exception: pass
         for win in list(self._filter_dlgs.values()):
             try: win.close()
             except Exception: pass
 
         # Singleton tool windows
         for attr in (
-            "_scatter_win", "_histogram_win", "_attr_win", "_attr_3d_mpl_win",
+            "_attr_3d_mpl_win",
             "_filter_dlg",  "_ds_manager",
             "_log_win",     "_console_win", "_memory_win", "_roi_manager_win",
         ):

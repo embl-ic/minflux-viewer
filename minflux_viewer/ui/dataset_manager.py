@@ -4,7 +4,7 @@ minflux_viewer.ui.dataset_manager
 Dataset manager dialog — port of ``dialog_info.mlapp``.
 
 A table listing all loaded datasets with columns:
-  Active | Name | Dims | Locs | Traces | Loaded
+  Active | Name | Dims | Locs | Traces | Loaded | View
 
 Supports selecting the active dataset, removing datasets, and shows a
 summary row at the bottom.
@@ -37,7 +37,8 @@ _COL_DIMS    = 2
 _COL_LOCS    = 3
 _COL_TRACES  = 4
 _COL_LOADED  = 5
-_NCOLS       = 6
+_COL_VIEW    = 6
+_NCOLS       = 7
 
 
 class DatasetManager(QDialog):
@@ -74,7 +75,7 @@ class DatasetManager(QDialog):
         # ── Table ─────────────────────────────────────────────────
         self._table = QTableWidget(0, _NCOLS)
         self._table.setHorizontalHeaderLabels(
-            ["Active", "Name", "Dims", "Locs", "Traces", "Loaded"]
+            ["Active", "Name", "Dims", "Locs", "Traces", "Loaded", "View"]
         )
         hh = self._table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -85,6 +86,7 @@ class DatasetManager(QDialog):
         self._table.setColumnWidth(_COL_LOCS,    80)
         self._table.setColumnWidth(_COL_TRACES,  72)
         self._table.setColumnWidth(_COL_LOADED, 160)
+        self._table.setColumnWidth(_COL_VIEW,    90)
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -138,6 +140,7 @@ class DatasetManager(QDialog):
             (f"{ds.prop.num_loc:,}",      Qt.AlignmentFlag.AlignRight),
             (f"{ds.prop.num_traces:,}",   Qt.AlignmentFlag.AlignRight),
             (ds.file.datetime or "—",     Qt.AlignmentFlag.AlignLeft),
+            (self._view_text(idx),         Qt.AlignmentFlag.AlignCenter),
         ]
         for col, (text, align) in enumerate(items):
             item = QTableWidgetItem(text)
@@ -161,9 +164,21 @@ class DatasetManager(QDialog):
         for col in range(1, _NCOLS):
             it = self._table.item(row, col)
             if it:
+                if col == _COL_VIEW:
+                    it.setText(self._view_text(idx))
                 font = it.font()
                 font.setBold(is_active)
                 it.setFont(font)
+
+    def _view_text(self, idx: int) -> str:
+        provider = getattr(self.parent(), "dataset_view_status", None)
+        if callable(provider):
+            return provider(idx)
+        return "None"
+
+    def refresh_views(self) -> None:
+        for row in range(self._table.rowCount()):
+            self._refresh_row(row, row)
 
     def _update_info(self) -> None:
         n = len(self._state.datasets)

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 __author__  = "Ziqiang Huang"
 __email__   = "ziqiang.huang@embl.de"
 __license__ = "MIT"

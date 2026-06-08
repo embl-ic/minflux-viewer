@@ -110,11 +110,13 @@ _SHORTCUT_LABELS = {
     "open_tiff": "Open .tif file",
     "save": "Save processed data",
     "render": "Render",
+    "brightness_contrast": "Brightness / Contrast",
     "attribute_plot": "Attribute Plot",
     "attribute_histogram": "Attribute Histogram",
     "scatter_plot": "Loc Scatter Plot",
     "log": "Log",
     "console": "Console",
+    "preferences": "Preferences",
 }
 
 

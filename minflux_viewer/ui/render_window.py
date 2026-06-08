@@ -61,6 +61,7 @@ from scipy.ndimage import affine_transform, gaussian_filter, zoom
 
 from .. import resource_path
 from ..core.app_state import AppState
+from ..core.overlay import apply_display_transform_nm, dataset_group_id, transform_key
 from ..core.roi_selection import rectangle_mask
 from ..core.spatial_grid import SpatialGrid
 from .render_config import (
@@ -85,6 +86,9 @@ _ORIENTATIONS  = ["XY", "XZ", "YZ", "3D"]
 _RENDER_ORIENTATIONS = {"XY", "XZ", "YZ"}
 _PURE_COLOR_LUTS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"]
 _CHANNEL_LUTS  = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray", *_COLORMAPS]
+_IMAGEJ_AUTO_THRESHOLD = 5000
+_IMAGEJ_AUTO_RESET_THRESHOLD = 10
+_IMAGEJ_AUTO_HIST_BINS = 256
 _CHANNEL_COLORS = {
     "Red": (1.0, 0.0, 0.0),
     "Green": (0.0, 1.0, 0.0),
@@ -637,7 +641,7 @@ class RenderWindow(QWidget):
         self._axis_visible: bool = False
         self._sigma_nm_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._channels: list[dict] = []
-        self._channel_rows: list[tuple[QCheckBox, QComboBox]] = []
+        self._channel_rows: list[tuple[QLabel, QComboBox]] = []
 
         # Pyramid render pipeline state
         self._phys_tile_cache: PhysicalTileCache = PhysicalTileCache()
@@ -657,6 +661,7 @@ class RenderWindow(QWidget):
         # Manual levels override (set by B&C). None → pyqtgraph autoLevels.
         self._manual_levels: tuple[float, float] | None = None
         self._auto_bc: bool = True
+        self._bc_auto_threshold: int = 0
         self._bc_dialog = None
         self._roi_overlay = None
         self._volume_window = None
@@ -793,6 +798,7 @@ class RenderWindow(QWidget):
         self._dataset_dim_label = f"{ds.prop.num_dim}D"
         self._build_channels()
         self._rebuild_channel_ui()
+        self._update_overlay_title()
         self._scheduler.cancel()
 
         if ds.image_data is not None and not ds.has_localizations:
@@ -828,11 +834,11 @@ class RenderWindow(QWidget):
         active_group = None
         if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
             ds0 = self._state.datasets[self._idx]
-            active_group = ds0.state.get("render_group_id")
+            active_group = dataset_group_id(ds0)
         for idx, ds in enumerate(self._state.datasets):
             if not (ds.has_localizations or ds.image_data is not None):
                 continue
-            same_group = active_group is not None and ds.state.get("render_group_id") == active_group
+            same_group = active_group is not None and dataset_group_id(ds) == active_group
             if idx != self._idx and not same_group:
                 continue
             visible = idx == self._idx or same_group
@@ -843,7 +849,7 @@ class RenderWindow(QWidget):
                 "visible": visible,
                 "lut": ds.state.get("render_channel_lut") or color_cycle[len(self._channels) % len(color_cycle)],
                 "levels": None,
-                "loc_transform": ds.state.get("render_transform_2d"),
+                "loc_transform": ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"),
                 "transform": previous_transforms.get(idx, {"dx_nm": 0.0, "dy_nm": 0.0, "angle": 0.0}),
             })
         if len(self._channels) == 1 and not self._state.datasets[self._channels[0]["dataset_idx"]].state.get("render_channel_lut"):
@@ -857,7 +863,7 @@ class RenderWindow(QWidget):
                 "visible": True,
                 "lut": ds.state.get("render_channel_lut") or "Red",
                 "levels": None,
-                "loc_transform": ds.state.get("render_transform_2d"),
+                "loc_transform": ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"),
                 "transform": previous_transforms.get(self._idx, {"dx_nm": 0.0, "dy_nm": 0.0, "angle": 0.0}),
             })
 
@@ -878,10 +884,13 @@ class RenderWindow(QWidget):
             row = QWidget()
             lay = QHBoxLayout(row)
             lay.setContentsMargins(0, 0, 0, 0)
-            cb = QCheckBox(f"{ch_idx + 1}: {ch['name']}")
-            cb.setChecked(bool(ch["visible"]))
-            cb.toggled.connect(lambda checked, i=ch_idx: self._on_channel_visible(i, checked))
-            lay.addWidget(cb, stretch=1)
+            row.mousePressEvent = lambda event, i=ch_idx, r=row: self._on_channel_row_pressed(r, event, i)
+            vis_cb = QCheckBox()
+            vis_cb.setChecked(bool(ch["visible"]))
+            vis_cb.toggled.connect(lambda checked, i=ch_idx: self._on_channel_visible(i, checked))
+            lay.addWidget(vis_cb)
+            name_lbl = QLabel(f"{ch_idx + 1}: {ch['name']}")
+            lay.addWidget(name_lbl, stretch=1)
             lut = QComboBox()
             lut.addItems(_CHANNEL_LUTS)
             lut.setCurrentText(ch["lut"])
@@ -891,8 +900,27 @@ class RenderWindow(QWidget):
             align_btn.clicked.connect(lambda _checked=False, i=ch_idx: self._manual_align_channel(i))
             lay.addWidget(align_btn)
             self._channel_layout.addWidget(row)
-            self._channel_rows.append((cb, lut))
+            self._channel_rows.append((name_lbl, lut))
         self._channel_area.setVisible(len(self._channels) > 1)
+
+    def _on_channel_row_pressed(self, row: QWidget, event, ch_idx: int) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and 0 <= ch_idx < len(self._channels):
+            ds_idx = self._channels[ch_idx].get("dataset_idx")
+            if ds_idx is not None and 0 <= ds_idx < len(self._state.datasets):
+                self._idx = ds_idx
+                self._state.set_active(ds_idx)
+                self._update_overlay_title()
+        QWidget.mousePressEvent(row, event)
+
+    def _update_overlay_title(self) -> None:
+        if self._idx is None or not (0 <= self._idx < len(self._state.datasets)):
+            return
+        ds = self._state.datasets[self._idx]
+        overlay_idx = ds.state.get("overlay_index")
+        if overlay_idx and len(self._channels) > 1:
+            self.setWindowTitle(f"Overlay {overlay_idx} - {ds.name}")
+        else:
+            self.setWindowTitle(ds.name)
 
     def _on_channel_visible(self, ch_idx: int, visible: bool) -> None:
         if 0 <= ch_idx < len(self._channels):
@@ -930,19 +958,10 @@ class RenderWindow(QWidget):
         return self._apply_dataset_render_transform(ds, locs)
 
     def _apply_dataset_render_transform(self, ds, locs: np.ndarray) -> np.ndarray:
-        transform = ds.state.get("render_transform_2d")
+        transform = ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
         if not transform:
             return locs
-        try:
-            matrix = np.asarray(transform.get("matrix_3x3"), dtype=np.float64)
-        except Exception:
-            return locs
-        if matrix.shape != (3, 3) or locs.size == 0:
-            return locs
-        out = locs.copy()
-        xy_h = np.column_stack([out[:, :2], np.ones(out.shape[0], dtype=np.float64)])
-        out[:, :2] = (matrix @ xy_h.T).T[:, :2]
-        return out
+        return apply_display_transform_nm(locs, transform)
 
     def _oriented_locs(self, ds) -> np.ndarray:
         locs = self._dataset_locs(ds)
@@ -1121,6 +1140,7 @@ class RenderWindow(QWidget):
         """Reset orientation (XY), zoom, B&C levels, and depth to centre."""
         self._manual_levels = None
         self._auto_bc = True
+        self._bc_auto_threshold = 0
         if self._bc_dialog is not None:
             self._bc_dialog.set_auto_state(True)
         if self._render_mode == "image":
@@ -1796,14 +1816,7 @@ class RenderWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _channel_loc_transform_key(self, ch: dict) -> tuple:
-        transform = ch.get("loc_transform") or {}
-        matrix = transform.get("matrix_3x3") if isinstance(transform, dict) else None
-        if matrix is None:
-            return ()
-        arr = np.asarray(matrix, dtype=np.float64)
-        if arr.shape != (3, 3):
-            return ()
-        return tuple(np.round(arr.ravel(), 6).tolist())
+        return transform_key(ch.get("loc_transform"))
 
     def _image_tile(self, ds, x0, x1, y0, y1, h, w) -> np.ndarray:
         image = self._prepare_image_payload(ds.image_data)
@@ -1881,19 +1894,69 @@ class RenderWindow(QWidget):
     # Brightness & Contrast
     # ------------------------------------------------------------------
 
-    def _compute_auto_levels(self, hist: np.ndarray) -> tuple[float, float] | None:
-        """Fiji-style auto levels with 0.35% saturated pixels."""
+    def _compute_auto_levels(
+        self,
+        hist: np.ndarray,
+        *,
+        advance_auto_threshold: bool = False,
+    ) -> tuple[float, float] | None:
+        """ImageJ/Fiji-style auto levels with repeated-press contrast boost."""
         values = np.asarray(hist, dtype=float).ravel()
         values = values[np.isfinite(values)]
         if values.size < 10:
             return None
-        lo, hi = np.percentile(values, [0.175, 99.825])
+        data_min = float(values.min())
+        data_max = float(values.max())
+        if data_max <= data_min:
+            return (data_min, data_min + 1.0)
+
+        if advance_auto_threshold:
+            if self._bc_auto_threshold < _IMAGEJ_AUTO_RESET_THRESHOLD:
+                self._bc_auto_threshold = _IMAGEJ_AUTO_THRESHOLD
+            else:
+                self._bc_auto_threshold //= 2
+
+        auto_threshold = self._bc_auto_threshold
+        if auto_threshold < _IMAGEJ_AUTO_RESET_THRESHOLD:
+            auto_threshold = _IMAGEJ_AUTO_THRESHOLD
+
+        histogram, _edges = np.histogram(
+            values,
+            bins=_IMAGEJ_AUTO_HIST_BINS,
+            range=(data_min, data_max),
+        )
+        pixel_count = int(values.size)
+        limit = pixel_count // 10
+        threshold = pixel_count // int(auto_threshold)
+
+        found = False
+        i = -1
+        while not found and i < _IMAGEJ_AUTO_HIST_BINS - 1:
+            i += 1
+            count = int(histogram[i])
+            if count > limit:
+                count = 0
+            found = count > threshold
+        hmin = i
+
+        found = False
+        i = _IMAGEJ_AUTO_HIST_BINS
+        while not found and i > 0:
+            i -= 1
+            count = int(histogram[i])
+            if count > limit:
+                count = 0
+            found = count > threshold
+        hmax = i
+
+        if hmax < hmin:
+            return (data_min, data_max)
+
+        bin_size = (data_max - data_min) / float(_IMAGEJ_AUTO_HIST_BINS)
+        lo = data_min + hmin * bin_size
+        hi = data_min + hmax * bin_size
         if hi <= lo:
-            nonzero = values[values > 0.0]
-            if nonzero.size < 10:
-                return (float(values.min()), float(values.max() + 1.0))
-            lo = 0.0
-            hi = float(np.percentile(nonzero, 99.65))
+            lo, hi = data_min, data_max
         if hi <= lo:
             hi = lo + 1.0
         return (float(lo), float(hi))
@@ -1925,6 +1988,7 @@ class RenderWindow(QWidget):
             self._auto_bc = False
             if self._bc_dialog is not None:
                 self._bc_dialog.set_auto_state(False)
+        self._bc_auto_threshold = 0
         self._manual_levels = (lo, hi)
         target = next((i for i, ch in enumerate(self._channels) if ch["visible"]), 0)
         if 0 <= target < len(self._channels):
@@ -1935,7 +1999,7 @@ class RenderWindow(QWidget):
         img = self._bc_pixels()
         if img is None:
             return
-        levels = self._compute_auto_levels(img)
+        levels = self._compute_auto_levels(img, advance_auto_threshold=True)
         if levels is None:
             return
         self._auto_bc = True
@@ -1961,6 +2025,7 @@ class RenderWindow(QWidget):
         levels = (float(values.min()), float(values.max() if values.max() > values.min() else values.min() + 1.0))
         self._manual_levels = levels
         self._auto_bc = False
+        self._bc_auto_threshold = 0
         for ch in self._channels:
             if ch["visible"]:
                 ch["levels"] = levels
@@ -2074,7 +2139,14 @@ class RenderWindow(QWidget):
             action.setChecked(self._active_channel_lut() == name)
             action.triggered.connect(lambda _checked=False, value=name: self._on_cmap_changed(value))
 
-        menu.addAction("Brightness/Contrast", self._show_brightness_contrast)
+        bc_action = menu.addAction("Brightness/Contrast", self._show_brightness_contrast)
+        bc_shortcut = str(self._state.prefs.get("shortcuts", {}).get("brightness_contrast", "") or "")
+        if bc_shortcut:
+            bc_action.setShortcut(QKeySequence(bc_shortcut))
+            try:
+                bc_action.setShortcutVisibleInContextMenu(True)
+            except Exception:
+                pass
         menu.addAction("Sigma", self._show_sigma_dialog)
 
         axis_action = menu.addAction("Axis")

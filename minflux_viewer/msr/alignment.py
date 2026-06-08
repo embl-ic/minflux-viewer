@@ -27,7 +27,9 @@ class ChannelAlignmentResult:
     channel2_counts: np.ndarray
     rotation: np.ndarray
     translation: np.ndarray
+    z_translation: float
     matrix_3x3: np.ndarray
+    matrix_4x4: np.ndarray
     rmse: float
 
 
@@ -99,6 +101,18 @@ def apply_rigid_transform_2d(points: np.ndarray, matrix_3x3: np.ndarray) -> np.n
     return out
 
 
+def apply_homogeneous_transform(points: np.ndarray, matrix_4x4: np.ndarray) -> np.ndarray:
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] < 2:
+        raise ValueError("points must have shape (N, 2+) to apply a display transform")
+    out = pts.copy()
+    if out.shape[1] < 3:
+        out = np.column_stack([out[:, :2], np.zeros(out.shape[0], dtype=np.float64)])
+    xyz_h = np.concatenate([out[:, :3], np.ones((out.shape[0], 1), dtype=np.float64)], axis=1)
+    out[:, :3] = (matrix_4x4 @ xyz_h.T).T[:, :3]
+    return out
+
+
 def align_channels_from_arrays(
     channel1_name: str,
     channel1_points: np.ndarray,
@@ -118,7 +132,20 @@ def align_channels_from_arrays(
     rotation, translation, matrix_3x3, rmse = compute_rigid_transform_2d(
         channel2_xyz[:, :2], channel1_xyz[:, :2]
     )
-    channel2_aligned_xyz = apply_rigid_transform_2d(channel2_xyz, matrix_3x3)
+    xy_aligned = apply_rigid_transform_2d(channel2_xyz, matrix_3x3)
+    z_translation = 0.0
+    if (
+        np.any(np.isfinite(channel1_xyz[:, 2]))
+        and np.any(np.isfinite(channel2_xyz[:, 2]))
+        and (np.nanmax(np.abs(channel1_xyz[:, 2])) > 0 or np.nanmax(np.abs(channel2_xyz[:, 2])) > 0)
+    ):
+        z_translation = float(np.nanmedian(channel1_xyz[:, 2] - channel2_xyz[:, 2]))
+    matrix_4x4 = np.eye(4, dtype=np.float64)
+    matrix_4x4[:2, :2] = rotation
+    matrix_4x4[:2, 3] = translation
+    matrix_4x4[2, 3] = z_translation
+    channel2_aligned_xyz = xy_aligned
+    channel2_aligned_xyz[:, 2] = channel2_aligned_xyz[:, 2] + z_translation
     return ChannelAlignmentResult(
         channel1_name=channel1_name,
         channel2_name=channel2_name,
@@ -130,6 +157,8 @@ def align_channels_from_arrays(
         channel2_counts=channel2_counts,
         rotation=rotation,
         translation=translation,
+        z_translation=z_translation,
         matrix_3x3=matrix_3x3,
+        matrix_4x4=matrix_4x4,
         rmse=rmse,
     )

@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -44,6 +44,7 @@ from ..core.app_state import AppState
 from ..core.attributes import is_trace_wise_attribute, plot_attribute_names
 from ..core.filter_io import (
     is_filter_json_file,
+    is_filter_json_payload,
     load_filter_json as load_filter_json_file,
     save_filter_json as save_filter_json_file,
 )
@@ -57,8 +58,27 @@ _COL_ATTR    = 1
 _COL_MODE    = 2
 _COL_MIN     = 3
 _COL_MAX     = 4
-_COL_DELETE  = 5
-_NCOLS       = 6
+_COL_DISPLAY = 5
+_COL_DELETE  = 6
+_NCOLS       = 7
+
+
+class _RowDblClickFilter(QObject):
+    """Forward left-double-click on any cell widget to _display_filter(row)."""
+
+    def __init__(self, dialog: "FilterDialog", row: int) -> None:
+        super().__init__(dialog)
+        self._dialog = dialog
+        self._row = row
+
+    def eventFilter(self, obj, event) -> bool:
+        if (
+            event.type() == QEvent.Type.MouseButtonDblClick
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._dialog._display_filter(self._row)
+            return True
+        return False
 
 
 class FilterDialog(QDialog):
@@ -125,11 +145,12 @@ class FilterDialog(QDialog):
         # ── Filter table ──────────────────────────────────────────
         self._table = QTableWidget(0, _NCOLS)
         self._table.setHorizontalHeaderLabels(
-            ["On", "Attribute", "Mode", "Min", "Max", ""]
+            ["On", "Attribute", "Mode", "Min", "Max", "", ""]
         )
         hh = self._table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(_COL_ENABLED, QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(_COL_DISPLAY, QHeaderView.ResizeMode.Fixed)
         hh.setSectionResizeMode(_COL_DELETE,  QHeaderView.ResizeMode.Fixed)
         hh.setStretchLastSection(False)
         self._table.setColumnWidth(_COL_ENABLED, 36)
@@ -137,6 +158,7 @@ class FilterDialog(QDialog):
         self._table.setColumnWidth(_COL_MODE,   130)
         self._table.setColumnWidth(_COL_MIN,    130)
         self._table.setColumnWidth(_COL_MAX,    130)
+        self._table.setColumnWidth(_COL_DISPLAY, 36)
         self._table.setColumnWidth(_COL_DELETE,  36)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.verticalHeader().setVisible(False)
@@ -267,6 +289,15 @@ class FilterDialog(QDialog):
         self._table.setCellWidget(row, _COL_MIN, min_spin)
         self._table.setCellWidget(row, _COL_MAX, max_spin)
 
+        # Eye / display-in-histogram button
+        eye_btn = QPushButton("👁")
+        eye_btn.setFixedWidth(30)
+        eye_btn.setToolTip("Show this filter in the histogram")
+        eye_btn.setAutoDefault(False)
+        eye_btn.setDefault(False)
+        eye_btn.clicked.connect(lambda _, r=row: self._display_filter(r))
+        self._table.setCellWidget(row, _COL_DISPLAY, eye_btn)
+
         # Delete button
         del_btn = QPushButton("✕")
         del_btn.setFixedWidth(30)
@@ -274,6 +305,11 @@ class FilterDialog(QDialog):
         del_btn.setDefault(False)
         del_btn.clicked.connect(lambda _, r=row: self._delete_row(r))
         self._table.setCellWidget(row, _COL_DELETE, del_btn)
+
+        # Left-double-click on any cell widget → display this filter in histogram
+        dbl_filt = _RowDblClickFilter(self, row)
+        for w in (chk, attr_combo, mode_combo, min_spin, max_spin, eye_btn, del_btn):
+            w.installEventFilter(dbl_filt)
 
         self._enforce_trace_mode(row)
         if auto_range:
@@ -402,37 +438,65 @@ class FilterDialog(QDialog):
             self._state.set_active(self._dataset_idx)
         main = self._main_window()
         hist = None
-        restore_histogram = True
+        histogram_existed = False
         if main is not None:
-            existing_hist = getattr(main, "_histogram_win", None)
-            restore_histogram = existing_hist is not None and existing_hist.isVisible()
-            main._show_histogram()
-            hist = getattr(main, "_histogram_win", None)
+            existing_hist = getattr(main, "_histogram_windows", {}).get(self._dataset_idx)
+            histogram_existed = existing_hist is not None and existing_hist.isVisible()
+            hist = main._show_histogram(self._dataset_idx)
         if hist is None:
             from .histogram_window import HistogramWindow
-            hist = HistogramWindow(self._state)
+            hist = HistogramWindow(self._state, dataset_idx=self._dataset_idx)
             hist.show()
         hist.show()
         hist.raise_()
         hist.activateWindow()
 
-        def accept(lo: float, hi: float, _lo_inc: bool = True, _hi_inc: bool = True) -> None:
+        enabled_chk = self._table.cellWidget(row, _COL_ENABLED)
+        snapshot = {
+            "enabled": enabled_chk.isChecked() if isinstance(enabled_chk, QCheckBox) else False,
+            "attr": attr_combo.currentText(),
+            "mode": mode_combo.currentText(),
+            "lo": float(min_spin.value()),
+            "hi": float(max_spin.value()),
+            "lo_inc": bool(min_spin.property("inclusive") if min_spin.property("inclusive") is not None else True),
+            "hi_inc": bool(max_spin.property("inclusive") if max_spin.property("inclusive") is not None else True),
+            "mask": ds.filter_mask.copy(),
+        }
+
+        def write_values(lo: float, hi: float, _lo_inc: bool = True, _hi_inc: bool = True) -> None:
             min_spin.setValue(min(lo, hi))
             max_spin.setValue(max(lo, hi))
             min_spin.setProperty("inclusive", bool(_lo_inc))
             max_spin.setProperty("inclusive", bool(_hi_inc))
             self._table.resizeColumnsToContents()
             chk = self._table.cellWidget(row, _COL_ENABLED)
-            if isinstance(chk, QCheckBox) and chk.isChecked():
-                self._apply_all()
+            if isinstance(chk, QCheckBox):
+                chk.setChecked(True)
+            self._apply_all()
+
+        def cancel() -> None:
+            attr_combo.setCurrentText(snapshot["attr"])
+            mode_combo.setCurrentText(snapshot["mode"])
+            min_spin.setValue(snapshot["lo"])
+            max_spin.setValue(snapshot["hi"])
+            min_spin.setProperty("inclusive", snapshot["lo_inc"])
+            max_spin.setProperty("inclusive", snapshot["hi_inc"])
+            if isinstance(enabled_chk, QCheckBox):
+                enabled_chk.setChecked(snapshot["enabled"])
+            ds.filter_mask = snapshot["mask"]
+            self._state.notify_filter_changed(self._dataset_idx)
+            self._update_info()
 
         hist.start_filter_edit(
             attr=attr_combo.currentText(),
             mode=mode_combo.currentText(),
             lo=min_spin.value(),
             hi=max_spin.value(),
-            on_accept=accept,
-            restore_on_accept=restore_histogram,
+            on_update=write_values,
+            on_finish=write_values,
+            on_cancel=cancel,
+            restore_view_on_finish=histogram_existed,
+            restore_view_on_cancel=histogram_existed,
         )
 
     def _main_window(self):

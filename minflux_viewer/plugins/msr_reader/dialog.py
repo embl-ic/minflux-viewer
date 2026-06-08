@@ -49,6 +49,24 @@ def _is_numeric_dtype(dt) -> bool:
         return False
 
 
+class _StateLogAdapter:
+    """Callable log adapter used by the MSR parser and older tests."""
+
+    def __init__(self, state) -> None:
+        self._state = state
+
+    def __call__(self, message: str) -> None:
+        text = str(message)
+        lowered = text.lower().lstrip()
+        if lowered.startswith("[error]") or lowered.startswith("error"):
+            level = "ERROR"
+        elif lowered.startswith("[warn]") or lowered.startswith("warn"):
+            level = "WARN"
+        else:
+            level = "INFO"
+        self._state.log(text, level)
+
+
 class JsonViewDialog(QDialog):
     def __init__(self, title: str, data, parent=None):
         super().__init__(parent)
@@ -1811,7 +1829,9 @@ class MsrReaderDialog(QWidget):
             "reference_channel": ref_name,
             "moving_channel": ref_name,
             "matrix_3x3": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            "matrix_4x4": [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
             "translation_nm": [0.0, 0.0],
+            "z_translation_nm": 0.0,
             "rotation_2x2": [[1.0, 0.0], [0.0, 1.0]],
             "matched_bead_count": 0,
             "rmse_xy_nm": 0.0,
@@ -1825,7 +1845,9 @@ class MsrReaderDialog(QWidget):
                 "reference_channel": ref_name,
                 "moving_channel": moving_name,
                 "matrix_3x3": result.matrix_3x3.tolist(),
+                "matrix_4x4": result.matrix_4x4.tolist(),
                 "translation_nm": result.translation.tolist(),
+                "z_translation_nm": float(result.z_translation),
                 "rotation_2x2": result.rotation.tolist(),
                 "matched_bead_count": int(result.bead_ids.size),
                 "rmse_xy_nm": float(result.rmse),
@@ -2083,6 +2105,14 @@ class MsrReaderDialog(QWidget):
         imported_indices = []
         errors = []
         render_group_id = f"msr:{msr_path.resolve() if str(msr_path) else 'memory'}:{uuid.uuid4().hex}"
+        overlay_index = 1
+        parent = self.parent()
+        if parent is not None:
+            try:
+                overlay_index = int(getattr(parent, "_next_overlay_index", 1))
+                setattr(parent, "_next_overlay_index", overlay_index + 1)
+            except Exception:
+                overlay_index = 1
         viewer_transforms: dict[str, dict] = {}
         if self._ask_viewer_channel_alignment(import_plan):
             try:
@@ -2131,24 +2161,49 @@ class MsrReaderDialog(QWidget):
                         recent_path=str(msr_path),
                         prefs=self._state.prefs,
                     )
+                    from ...core.dataset import AttributeComponent
+                    dataset.state["overlay_id"] = render_group_id
                     dataset.state["render_group_id"] = render_group_id
+                    dataset.state["overlay_index"] = overlay_index
+                    dataset.state["overlay_order"] = len(imported_indices) + 1
+                    dataset.state["overlay_lut"] = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"][len(imported_indices) % 6]
+                    dataset.state["render_channel_lut"] = dataset.state["overlay_lut"]
                     dataset.metadata["msr_source_path"] = str(msr_path)
                     dataset.metadata["msr_dataset_key"] = key
                     dataset.metadata["msr_dataset_name"] = key
+                    dataset.metadata["overlay_id"] = render_group_id
+                    dataset.metadata["overlay_index"] = overlay_index
+                    if key in MFSTATE.mbm_map:
+                        dataset.mbm = AttributeComponent({"points": MFSTATE.mbm_map[key]})
+                        dataset.metadata["mbm_points"] = MFSTATE.mbm_map[key]
                     if key in viewer_transforms:
                         transform = viewer_transforms[key]
+                        dataset.state["overlay_transform"] = transform
                         dataset.state["render_transform_2d"] = transform
+                        dataset.metadata["overlay_transform"] = transform
                         dataset.metadata["render_transform_2d"] = transform
                         dataset.metadata["transformed"] = bool(transform.get("moving_channel") != transform.get("reference_channel"))
                     idx = self._state.add_dataset(dataset)
                     loaded = self._state.datasets[idx]
+                    loaded.state["overlay_id"] = render_group_id
                     loaded.state["render_group_id"] = render_group_id
+                    loaded.state["overlay_index"] = overlay_index
+                    loaded.state["overlay_order"] = len(imported_indices) + 1
+                    loaded.state["overlay_lut"] = dataset.state.get("overlay_lut")
+                    loaded.state["render_channel_lut"] = loaded.state["overlay_lut"]
                     loaded.metadata["msr_source_path"] = str(msr_path)
                     loaded.metadata["msr_dataset_key"] = key
                     loaded.metadata["msr_dataset_name"] = key
+                    loaded.metadata["overlay_id"] = render_group_id
+                    loaded.metadata["overlay_index"] = overlay_index
+                    if key in MFSTATE.mbm_map:
+                        loaded.mbm = AttributeComponent({"points": MFSTATE.mbm_map[key]})
+                        loaded.metadata["mbm_points"] = MFSTATE.mbm_map[key]
                     if key in viewer_transforms:
                         transform = viewer_transforms[key]
+                        loaded.state["overlay_transform"] = transform
                         loaded.state["render_transform_2d"] = transform
+                        loaded.metadata["overlay_transform"] = transform
                         loaded.metadata["render_transform_2d"] = transform
                         loaded.metadata["transformed"] = bool(transform.get("moving_channel") != transform.get("reference_channel"))
                     imported_indices.append(idx)
@@ -2173,6 +2228,7 @@ class MsrReaderDialog(QWidget):
                 if existing is not None and hasattr(existing, "_refresh_from_dataset"):
                     existing._refresh_from_dataset()
                 parent._show_render(imported_indices[0])
+            self.close()
 
 
 # ---------------------------------------------------------------------------
