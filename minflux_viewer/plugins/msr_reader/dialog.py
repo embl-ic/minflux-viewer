@@ -540,6 +540,60 @@ class FieldDialog(QDialog):
         return out
 
 
+class ViewerAlignmentDialog(QDialog):
+    def __init__(self, selected: list[str], mbm_available: bool, mbm_reason: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Open in MINFLUX viewer")
+        self.resize(520, 180)
+
+        layout = QVBoxLayout(self)
+        label = QLabel(
+            "This MSR file contains multiple datasets.\n"
+            "Choose how to align them when opening as a multi-channel render overlay."
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        if selected:
+            ref = selected[0]
+            channels = ", ".join(selected[1:]) if len(selected) > 1 else ""
+            detail = f"Reference dataset: {ref}"
+            if channels:
+                detail += f"\nMoving dataset(s): {channels}"
+            detail_label = QLabel(detail)
+            detail_label.setWordWrap(True)
+            layout.addWidget(detail_label)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("align with:"))
+        self.align_combo = QComboBox(self)
+        if mbm_available:
+            self.align_combo.addItems(["mbm info", "stage origin", "data centroid"])
+        else:
+            self.align_combo.addItems(["stage origin", "data centroid", "mbm info"])
+            idx = self.align_combo.findText("mbm info")
+            if idx >= 0:
+                item = getattr(self.align_combo.model(), "item", lambda *_: None)(idx)
+                if item is not None:
+                    item.setEnabled(False)
+        row.addWidget(self.align_combo, 1)
+        layout.addLayout(row)
+
+        if not mbm_available and mbm_reason:
+            note = QLabel(f"mbm info unavailable: {mbm_reason}")
+            note.setWordWrap(True)
+            note.setStyleSheet("color: #666;")
+            layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def alignment_mode(self) -> str:
+        return self.align_combo.currentText().strip().lower()
+
+
 class AlignmentPlotWindow(QDialog):
     def __init__(self, results, parent=None):
         super().__init__(parent)
@@ -1229,8 +1283,10 @@ class MsrReaderDialog(QWidget):
             kind = "struct" if sub.get("children") else sub.get("kind", "field")
             shape = sub.get("logical_shape") or str(sub.get("shape") or ())
             dtype = sub.get("dtype", "")
-            item = QTreeWidgetItem([text, kind, shape, dtype])
             fullpath = f"{path_prefix}/{text}" if path_prefix else text
+            if sub.get("children") and fullpath == "mfx/itr":
+                dtype = "Structured per-iteration MINFLUX table"
+            item = QTreeWidgetItem([text, kind, shape, dtype])
             self._set_item_tooltip(item, sub.get("description") or describe_path(fullpath, is_array=False))
             parent_item.addChild(item)
             self.fullpath_by_item[self._item_id(item)] = fullpath
@@ -1268,13 +1324,20 @@ class MsrReaderDialog(QWidget):
         arch = zarr.open(zroot, mode="r")
         if path in arch:
             return np.asarray(arch[path])
-        if "/" in path:
-            parent, field = path.rsplit("/", 1)
-            if parent in arch:
-                arr = arch[parent]
-                names = getattr(arr.dtype, "names", None)
-                if names and field in names:
-                    return np.asarray(arr[field])
+
+        parts = [part for part in path.split("/") if part]
+        for split_at in range(len(parts) - 1, 0, -1):
+            parent = "/".join(parts[:split_at])
+            if parent not in arch:
+                continue
+
+            data = np.asarray(arch[parent])
+            for field in parts[split_at:]:
+                names = getattr(data.dtype, "names", None)
+                if not names or field not in names:
+                    raise KeyError(f"field not found: {parent}/{'/'.join(parts[split_at:])}")
+                data = data[field]
+            return np.asarray(data)
         raise KeyError(f"path not found: {path}")
 
     def _resolve_context_array(self, item=None):
@@ -1787,60 +1850,216 @@ class MsrReaderDialog(QWidget):
             return plan
         return {key: None for key in all_keys}
 
-    def _ask_viewer_channel_alignment(self, import_plan: dict[str, set[str] | None]) -> bool:
-        if self.parsed.get("mode") != "modern":
-            return False
-        selected = [
+    def _viewer_selected_dataset_names(self, import_plan: dict[str, set[str] | None]) -> list[str]:
+        return [
             ds.get("display_name") or ds.get("did") or "dataset"
             for ds in self.parsed.get("datasets", [])
             if (ds.get("display_name") or ds.get("did") or "dataset") in import_plan
         ]
-        if len(selected) < 2:
-            return False
-        answer = QMessageBox.question(
-            self,
-            "Open in MINFLUX viewer",
-            "Apply 2D channel alignment while opening these datasets?\n\n"
-            "The alignment uses bead positions from grd/mbm/points and stores a render transform "
-            "on the moving datasets. Raw localization attributes are not modified.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        return answer == QMessageBox.StandardButton.Yes
 
-    def _viewer_channel_alignment_transforms(self, import_plan: dict[str, set[str] | None]) -> dict[str, dict]:
+    def _viewer_zroot_for_dataset_name(self, name: str) -> str | None:
+        for ds in self.parsed.get("datasets", []) or []:
+            key = ds.get("display_name") or ds.get("did") or "dataset"
+            if key == name:
+                return ds.get("zroot")
+        return None
+
+    def _ask_viewer_channel_alignment(self, import_plan: dict[str, set[str] | None]) -> str | None:
+        if self.parsed.get("mode") != "modern":
+            return None
+        selected = self._viewer_selected_dataset_names(import_plan)
+        if len(selected) < 2:
+            return None
+        mbm_available, mbm_reason = self._viewer_mbm_alignment_available(selected)
+        dlg = ViewerAlignmentDialog(selected, mbm_available, mbm_reason, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self.log("[viewer align] cancelled; opening without transforms")
+            return None
+        mode = dlg.alignment_mode()
+        self.log(f"[viewer align] selected mode: {mode}")
+        return mode
+
+    def _viewer_mbm_alignment_available(self, selected: list[str]) -> tuple[bool, str]:
+        from ...msr import state as MFSTATE
+        from ...msr.alignment import extract_bead_summaries
+
+        if len(selected) < 2:
+            return False, "fewer than two selected datasets"
+        ref_name = selected[0]
+        ref_mbm = MFSTATE.mbm_map.get(ref_name)
+        if ref_mbm is None:
+            return False, f"no bead points for reference dataset {ref_name}"
+        is_3d = any(self._viewer_dataset_looks_3d(name) for name in selected)
+        min_beads = 4 if is_3d else 3
+        try:
+            ref_ids = set(extract_bead_summaries(ref_mbm))
+        except Exception as exc:
+            return False, f"reference bead points are not parseable ({exc})"
+        ref_used = self._viewer_used_bead_gri_for_dataset(ref_name)
+        if ref_used is not None:
+            ref_ids &= ref_used
+            if not ref_ids:
+                return False, f"reference dataset {ref_name} has no metadata-marked used beads"
+        if len(ref_ids) < min_beads:
+            return False, f"reference dataset has {len(ref_ids)} usable bead(s); need at least {min_beads}"
+        for moving_name in selected[1:]:
+            moving_mbm = MFSTATE.mbm_map.get(moving_name)
+            if moving_mbm is None:
+                return False, f"no bead points for {moving_name}"
+            try:
+                moving_ids = set(extract_bead_summaries(moving_mbm))
+            except Exception as exc:
+                return False, f"bead points for {moving_name} are not parseable ({exc})"
+            moving_used = self._viewer_used_bead_gri_for_dataset(moving_name)
+            if moving_used is not None:
+                moving_ids &= moving_used
+                if not moving_ids:
+                    return False, f"{moving_name} has no metadata-marked used beads"
+            matched = len(ref_ids & moving_ids)
+            if matched < min_beads:
+                return False, f"{moving_name} has {matched} usable bead(s) matching the reference; need at least {min_beads}"
+        return True, ""
+
+    def _viewer_used_bead_gri_for_dataset(self, name: str) -> set[int] | None:
+        zroot = self._viewer_zroot_for_dataset_name(name)
+        if not zroot:
+            return None
+        mbm_attrs = self._read_zarr_attrs_safe(zroot, "mbm") or self._read_zarr_attrs_safe(zroot, "grd/mbm")
+        points_attrs = self._read_zarr_attrs_safe(zroot, "grd/mbm/points")
+
+        used_names = self._extract_used_bead_names(mbm_attrs)
+        name_to_gri, used_gri_from_points = self._extract_point_metadata_beads(points_attrs)
+        if used_names and name_to_gri:
+            used_gri = {name_to_gri[name] for name in used_names if name in name_to_gri}
+            missing = sorted(name for name in used_names if name not in name_to_gri)
+            if missing:
+                preview = ", ".join(missing[:5])
+                suffix = "..." if len(missing) > 5 else ""
+                self.log(f"[viewer align] {name}: {len(missing)} used bead name(s) not mapped to gri: {preview}{suffix}")
+            if used_gri:
+                self.log(f"[viewer align] {name}: using {len(used_gri)} metadata-marked used bead(s)")
+                return used_gri
+        if used_gri_from_points:
+            self.log(f"[viewer align] {name}: using {len(used_gri_from_points)} bead(s) marked used in points metadata")
+            return used_gri_from_points
+        return None
+
+    def _read_zarr_attrs_safe(self, zroot: str, path: str) -> dict:
+        try:
+            from ...msr.io import read_zarr_attrs
+
+            attrs = read_zarr_attrs(zroot, path)
+            return attrs if isinstance(attrs, dict) else {}
+        except Exception:
+            return {}
+
+    def _extract_used_bead_names(self, attrs: dict) -> set[str]:
+        if not isinstance(attrs, dict):
+            return set()
+        used = attrs.get("used")
+        if not isinstance(used, (list, tuple, set)):
+            return set()
+        return {str(name).strip() for name in used if str(name).strip()}
+
+    def _extract_point_metadata_beads(self, attrs: dict) -> tuple[dict[str, int], set[int]]:
+        name_to_gri: dict[str, int] = {}
+        used_gri: set[int] = set()
+
+        def visit(node) -> None:
+            if isinstance(node, dict):
+                if "name" in node and "gri" in node:
+                    try:
+                        gri = int(node.get("gri"))
+                    except Exception:
+                        gri = None
+                    name = str(node.get("name", "")).strip()
+                    if gri is not None and name:
+                        name_to_gri[name] = gri
+                        if bool(node.get("used", False)):
+                            used_gri.add(gri)
+                for value in node.values():
+                    visit(value)
+            elif isinstance(node, (list, tuple)):
+                for value in node:
+                    visit(value)
+
+        visit(attrs)
+        return name_to_gri, used_gri
+
+    def _filter_mbm_points_to_used_beads(self, name: str, points) -> np.ndarray:
+        arr = np.asarray(points)
+        used_gri = self._viewer_used_bead_gri_for_dataset(name)
+        if used_gri is None:
+            return arr
+        names = set(getattr(getattr(arr, "dtype", None), "names", ()) or ())
+        if "gri" not in names:
+            return arr
+        mask = np.isin(np.asarray(arr["gri"], dtype=np.uint32), np.asarray(sorted(used_gri), dtype=np.uint32))
+        filtered = arr[mask]
+        self.log(f"[viewer align] {name}: filtered mbm points to {len(filtered)} row(s) from used bead metadata")
+        return filtered
+
+    def _viewer_dataset_looks_3d(self, name: str) -> bool:
+        from ...msr import state as MFSTATE
+
+        mfx = MFSTATE.mfx_map.get(name)
+        try:
+            from ...core.loader import _normalize_mfx_attrs
+
+            data_prefs = (self._state.prefs if self._state is not None else {}).get("data", {}) or {}
+            attrs, num_raw, _num_itr, _version, _detail = _normalize_mfx_attrs(
+                mfx,
+                load_all_itr=data_prefs.get("iter_load", "last") == "all",
+            )
+            loc_z = np.asarray(attrs.get("loc_z", np.zeros(num_raw)), dtype=np.float64)
+            finite = np.isfinite(loc_z)
+            if np.any(finite) and np.nanmax(np.abs(loc_z[finite])) > 1e-12:
+                return True
+        except Exception:
+            pass
+        mbm = MFSTATE.mbm_map.get(name)
+        try:
+            names = set(getattr(getattr(mbm, "dtype", None), "names", ()) or ())
+            if "xyz" in names:
+                xyz = np.asarray(mbm["xyz"], dtype=np.float64)
+                if xyz.ndim >= 2 and xyz.shape[-1] >= 3:
+                    z = xyz[..., 2]
+                    finite = np.isfinite(z)
+                    return bool(np.any(finite) and np.nanmax(np.abs(z[finite])) > 1e-12)
+        except Exception:
+            pass
+        return False
+
+    def _viewer_channel_alignment_transforms(self, import_plan: dict[str, set[str] | None], mode: str) -> dict[str, dict]:
         from ...msr import state as MFSTATE
         from ...msr.alignment import align_channels_from_arrays
 
-        selected = [
-            ds.get("display_name") or ds.get("did") or "dataset"
-            for ds in self.parsed.get("datasets", [])
-            if (ds.get("display_name") or ds.get("did") or "dataset") in import_plan
-        ]
+        selected = self._viewer_selected_dataset_names(import_plan)
         if len(selected) < 2:
+            return {}
+        if mode in {"stage origin", "data centroid"}:
+            return self._viewer_fallback_alignment_transforms(selected, mode)
+        if mode != "mbm info":
             return {}
         ref_name = selected[0]
         ref_mbm = MFSTATE.mbm_map.get(ref_name)
         if ref_mbm is None:
             raise ValueError(f"Could not find bead points (`grd/mbm/points`) for reference channel {ref_name}.")
+        ref_mbm_for_alignment = self._filter_mbm_points_to_used_beads(ref_name, ref_mbm)
 
         transforms: dict[str, dict] = {}
-        transforms[ref_name] = {
-            "reference_channel": ref_name,
-            "moving_channel": ref_name,
-            "matrix_3x3": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            "matrix_4x4": [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
-            "translation_nm": [0.0, 0.0],
-            "z_translation_nm": 0.0,
-            "rotation_2x2": [[1.0, 0.0], [0.0, 1.0]],
-            "matched_bead_count": 0,
-            "rmse_xy_nm": 0.0,
-        }
+        transforms[ref_name] = self._viewer_transform_record(
+            ref_name,
+            ref_name,
+            np.eye(4, dtype=np.float64),
+            method="reference identity",
+        )
         for moving_name in selected[1:]:
             moving_mbm = MFSTATE.mbm_map.get(moving_name)
             if moving_mbm is None:
                 raise ValueError(f"Could not find bead points (`grd/mbm/points`) for {moving_name}.")
-            result = align_channels_from_arrays(ref_name, ref_mbm, moving_name, moving_mbm)
+            moving_mbm_for_alignment = self._filter_mbm_points_to_used_beads(moving_name, moving_mbm)
+            result = align_channels_from_arrays(ref_name, ref_mbm_for_alignment, moving_name, moving_mbm_for_alignment)
             transforms[moving_name] = {
                 "reference_channel": ref_name,
                 "moving_channel": moving_name,
@@ -1851,6 +2070,7 @@ class MsrReaderDialog(QWidget):
                 "rotation_2x2": result.rotation.tolist(),
                 "matched_bead_count": int(result.bead_ids.size),
                 "rmse_xy_nm": float(result.rmse),
+                "method": "mbm xy rigid plus z translation",
             }
             self.log(
                 f"[viewer align] {moving_name} -> {ref_name}; matched {result.bead_ids.size} beads; "
@@ -1858,6 +2078,94 @@ class MsrReaderDialog(QWidget):
                 f"rmse_xy_nm={result.rmse:.3f}"
             )
         return transforms
+
+    def _ask_viewer_alignment_fallback(self, reason: str) -> str | None:
+        box = QMessageBox(self)
+        box.setWindowTitle("Open in MINFLUX viewer")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText("Bead-based channel alignment is not available for this MSR file.")
+        box.setInformativeText(
+            f"{reason}\n\n"
+            "Choose a fallback alignment method for the viewer overlay:"
+        )
+        stage_button = box.addButton("Stage origin", QMessageBox.ButtonRole.AcceptRole)
+        centroid_button = box.addButton("Data centroid", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is stage_button:
+            self.log("[viewer align] using fallback: stage origin")
+            return "stage origin"
+        if clicked is centroid_button:
+            self.log("[viewer align] using fallback: data centroid")
+            return "data centroid"
+        self.log("[viewer align] fallback alignment cancelled; opening without transforms")
+        return None
+
+    def _viewer_fallback_alignment_transforms(self, selected: list[str], mode: str) -> dict[str, dict]:
+        from ...msr import state as MFSTATE
+
+        if not selected:
+            return {}
+        ref_name = selected[0]
+        ref_centroid = self._mfx_centroid_nm(MFSTATE.mfx_map.get(ref_name))
+        transforms: dict[str, dict] = {}
+        for name in selected:
+            matrix = np.eye(4, dtype=np.float64)
+            if name != ref_name and mode == "data centroid":
+                moving_centroid = self._mfx_centroid_nm(MFSTATE.mfx_map.get(name))
+                matrix[:3, 3] = ref_centroid - moving_centroid
+            method = "stage origin" if mode == "stage origin" else "median localization centroid"
+            transforms[name] = self._viewer_transform_record(ref_name, name, matrix, method=method)
+            t = matrix[:3, 3]
+            self.log(
+                f"[viewer align] fallback {name} -> {ref_name}; method={method}; "
+                f"translation_nm=({t[0]:.3f}, {t[1]:.3f})"
+            )
+        return transforms
+
+    def _viewer_transform_record(self, ref_name: str, moving_name: str, matrix_4x4: np.ndarray, *, method: str) -> dict:
+        matrix = np.asarray(matrix_4x4, dtype=np.float64)
+        matrix_3x3 = np.eye(3, dtype=np.float64)
+        matrix_3x3[:2, :2] = matrix[:2, :2]
+        matrix_3x3[:2, 2] = matrix[:2, 3]
+        return {
+            "reference_channel": ref_name,
+            "moving_channel": moving_name,
+            "matrix_3x3": matrix_3x3.tolist(),
+            "matrix_4x4": matrix.tolist(),
+            "translation_nm": matrix[:2, 3].astype(float).tolist(),
+            "z_translation_nm": float(matrix[2, 3]),
+            "rotation_2x2": matrix[:2, :2].astype(float).tolist(),
+            "matched_bead_count": 0,
+            "rmse_xy_nm": 0.0,
+            "method": method,
+        }
+
+    def _mfx_centroid_nm(self, mfx) -> np.ndarray:
+        if mfx is None:
+            return np.zeros(3, dtype=np.float64)
+        try:
+            from ...core.loader import _normalize_mfx_attrs
+
+            data_prefs = (self._state.prefs if self._state is not None else {}).get("data", {}) or {}
+            attrs, num_raw, _num_itr, _version, _detail = _normalize_mfx_attrs(
+                mfx,
+                load_all_itr=data_prefs.get("iter_load", "last") == "all",
+            )
+            loc_x = np.asarray(attrs.get("loc_x", np.full(num_raw, np.nan)), dtype=np.float64).ravel()
+            loc_y = np.asarray(attrs.get("loc_y", np.full(num_raw, np.nan)), dtype=np.float64).ravel()
+            loc_z = np.asarray(attrs.get("loc_z", np.zeros_like(loc_x)), dtype=np.float64).ravel()
+            mask = np.isfinite(loc_x) & np.isfinite(loc_y) & np.isfinite(loc_z)
+            if "vld" in attrs:
+                vld = np.asarray(attrs["vld"], dtype=bool).ravel()
+                if vld.size == mask.size:
+                    mask &= vld
+            if not np.any(mask):
+                return np.zeros(3, dtype=np.float64)
+            return np.nanmedian(np.column_stack([loc_x[mask], loc_y[mask], loc_z[mask]]) * 1e9, axis=0)
+        except Exception:
+            return np.zeros(3, dtype=np.float64)
 
     # ------------------------------------------------------------------
     # Alignment
@@ -2114,9 +2422,10 @@ class MsrReaderDialog(QWidget):
             except Exception:
                 overlay_index = 1
         viewer_transforms: dict[str, dict] = {}
-        if self._ask_viewer_channel_alignment(import_plan):
+        alignment_mode = self._ask_viewer_channel_alignment(import_plan)
+        if alignment_mode:
             try:
-                viewer_transforms = self._viewer_channel_alignment_transforms(import_plan)
+                viewer_transforms = self._viewer_channel_alignment_transforms(import_plan, alignment_mode)
             except Exception as exc:
                 self.log(f"[viewer align] failed: {exc}")
                 QMessageBox.warning(

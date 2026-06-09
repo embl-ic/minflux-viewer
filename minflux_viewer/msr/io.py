@@ -117,9 +117,9 @@ def _dtype_fields_tree(dt: np.dtype, n_rows: int):
             "shape": subshape,
             "logical_shape": _logical_shape_str_for_field(n_rows, subshape),
         }
-        if getattr(sub_dt, "names", None):          # nested struct
+        if getattr(base, "names", None):            # nested struct or structured subarray
             node["kind"] = "struct"
-            node["children"] = _dtype_fields_tree(sub_dt, n_rows)
+            node["children"] = _dtype_fields_tree(base, n_rows)
         else:
             node["kind"] = "field"
         out.append(node)

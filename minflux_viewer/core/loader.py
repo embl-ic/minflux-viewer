@@ -219,15 +219,21 @@ def _parse_raw(
 
     itr_val = raw["itr"]
 
-    # m2410: flat integer array of per-localisation iteration indices
-    if isinstance(itr_val, np.ndarray) and np.issubdtype(itr_val.dtype, np.integer):
-        return _parse_m2410(raw)
-
-    # m2205: nested struct inside itr
+    # m2205: nested struct inside itr (MATLAB struct or already-dict)
     if hasattr(itr_val, "_fieldnames") or isinstance(itr_val, dict):
         return _parse_m2205(raw, load_all_itr=load_all_itr, load_efc_cfr=load_efc_cfr)
 
-    # m2205-unwrapped: loc already at top level, itr is numeric
+    if isinstance(itr_val, np.ndarray) and np.issubdtype(itr_val.dtype, np.integer):
+        # m2410: flat 1-D integer array — one iteration index per localization event.
+        # Legacy .mat (m2205 flat): itr is 2-D (nLoc × nItr).  Check dimensionality
+        # after squeezing out any size-1 axes; (N,1) and (1,N) are still 1-D.
+        if np.squeeze(itr_val).ndim <= 1:
+            return _parse_m2410(raw)
+        # 2-D integer itr with loc at top level → m2205 flat format
+        if "loc" in raw:
+            return _parse_m2205_unwrapped(raw, load_all_itr=load_all_itr, load_efc_cfr=load_efc_cfr)
+
+    # m2205-unwrapped: loc already at top level, itr is numeric (float or other)
     if "loc" in raw:
         return _parse_m2205_unwrapped(
             raw, load_all_itr=load_all_itr, load_efc_cfr=load_efc_cfr
@@ -266,7 +272,9 @@ def _detect_raw_version(raw: dict) -> str:
     if itr_val is None:
         return "unidentified"
     if isinstance(itr_val, np.ndarray) and np.issubdtype(itr_val.dtype, np.integer):
-        return "m2410"
+        # 1-D (or squeezable to 1-D) integer itr → m2410 flat format.
+        # 2-D integer itr (nLoc × nItr) → legacy .mat m2205 flat format.
+        return "m2410" if np.squeeze(itr_val).ndim <= 1 else "m2205"
     if hasattr(itr_val, "_fieldnames") or isinstance(itr_val, dict):
         return "m2205"
     if "loc" in raw:
@@ -361,6 +369,24 @@ def _effective_iteration_column(raw: dict, field: str) -> int | None:
         return None
 
 
+def _dcr_is_two_channel(arr: np.ndarray, sample: int = 500) -> bool:
+    """
+    Heuristic: return True when a (N, 2) dcr array holds m2410-style
+    two-channel ratios ch1/(ch1+ch2) and ch2/(ch1+ch2).
+
+    In that format each row sums to 1.0 (within floating-point tolerance).
+    In legacy m2205 format with exactly 2 iterations the same (N, 2) shape
+    arises, but the two columns are independent per-iteration ratios that
+    generally do NOT sum to 1.
+    """
+    n = min(sample, arr.shape[0])
+    row_sums = arr[:n, 0] + arr[:n, 1]
+    finite = np.isfinite(row_sums)
+    if not finite.any():
+        return False
+    return bool(np.all(np.abs(row_sums[finite] - 1.0) < 1e-6))
+
+
 # ---------------------------------------------------------------------------
 # m2410 parser
 # ---------------------------------------------------------------------------
@@ -400,8 +426,10 @@ def _parse_m2410(raw: dict) -> tuple[AttrStore, int, int]:
     for key, val in raw.items():
         arr = np.asarray(val)
 
-        # Skip scalars, empty containers, and the HDF5 "#refs#" placeholder
-        if arr.ndim == 0 or arr.size == 0 or key == "#refs#":
+        # Skip scalars, empty containers, the HDF5 "#refs#" placeholder,
+        # and tic (obsolete raw FPGA-tick timestamp — tim already provides
+        # calibrated seconds, so tic is redundant and often large).
+        if arr.ndim == 0 or arr.size == 0 or key in ("#refs#", "tic"):
             continue
 
         # Flatten to canonical (N, …) shape where N == n_raw
@@ -511,8 +539,9 @@ def _parse_m2205_unwrapped(
     for key, val in raw.items():
         arr = np.asarray(val)
 
-        # Skip scalars, empty containers, and the HDF5 "#refs#" placeholder
-        if arr.ndim == 0 or arr.size == 0 or key == "#refs#":
+        # Skip scalars, empty containers, the HDF5 "#refs#" placeholder,
+        # and tic (obsolete raw FPGA-tick timestamp — redundant with tim).
+        if arr.ndim == 0 or arr.size == 0 or key in ("#refs#", "tic"):
             continue
 
         # Cast numeric fields to float (keep integer fields as-is)
@@ -578,10 +607,19 @@ def _parse_m2205_unwrapped(
             )
             continue
 
-        # ── Detection channel ratio: use first column if stored as N x 2.
-        if key == "dcr" and arr.ndim == 2 and arr.shape[0] == num_loc and arr.shape[1] > 1:
-            attrs[key] = arr[vld, 0].ravel()
-            continue
+        # ── Detection channel ratio ─────────────────────────────────────
+        # m2410-style: (N, 2) with ch1/(ch1+ch2) and ch2/(ch1+ch2) — rows
+        # sum to 1.0; take the first column.
+        # m2205-style: (N, num_itr) single-channel ratio per iteration —
+        # rows do NOT sum to 1.0 in general; fall through to per-iteration.
+        # When num_itr != 2 shape alone is enough.  When num_itr == 2 the
+        # shapes are identical, so we sample up to 500 rows and check whether
+        # the two columns sum to 1.0 to decide.
+        if key == "dcr" and arr.ndim == 2 and arr.shape[0] == num_loc:
+            if arr.shape[1] == 2 and (num_itr != 2 or _dcr_is_two_channel(arr)):
+                attrs[key] = arr[vld, 0].ravel()
+                continue
+            # else: fall through to per-iteration handling below
 
         # ── Per-iteration attributes: (num_loc, num_itr) ─────────────
         if arr.ndim == 2 and arr.shape[1] == num_itr:
@@ -770,6 +808,117 @@ def _build_channel(attrs: AttrStore, prop: DataProp) -> Channel:
 # MSR path: build MinfluxDataset directly from a structured mfx numpy array
 # ---------------------------------------------------------------------------
 
+def _dtype_base_and_shape(dt: np.dtype) -> tuple[np.dtype, tuple]:
+    return getattr(dt, "base", dt), tuple(getattr(dt, "shape", ()) or ())
+
+
+def _add_mfx_attr(attrs: AttrStore, field_name: str, val: np.ndarray, num_raw: int) -> None:
+    if field_name in SPATIAL_COORD_FIELDS:
+        arr = np.asarray(val)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        attrs[f"{field_name}_x"] = arr[:, 0].ravel()
+        attrs[f"{field_name}_y"] = arr[:, 1].ravel() if arr.shape[1] > 1 else np.zeros(len(arr))
+        attrs[f"{field_name}_z"] = arr[:, 2].ravel() if arr.shape[1] > 2 else np.zeros(len(arr))
+    elif field_name == "dcr":
+        arr = np.asarray(val)
+        if arr.ndim > 1 and arr.shape[0] != num_raw and arr.shape[1] == num_raw:
+            arr = arr.T
+        attrs[field_name] = arr[:, 0].ravel() if arr.ndim > 1 else arr.ravel()
+    else:
+        arr = np.asarray(val)
+        attrs[field_name] = arr.ravel() if arr.ndim == 1 else arr
+
+
+def _is_legacy_nested_itr_mfx(mfx: np.ndarray) -> bool:
+    fields = getattr(getattr(mfx, "dtype", None), "fields", None) or {}
+    if "itr" not in fields:
+        return False
+    itr_dt = fields["itr"][0]
+    base, subshape = _dtype_base_and_shape(itr_dt)
+    return bool(subshape and getattr(base, "names", None))
+
+
+def _iteration_count(values: np.ndarray, fallback: int) -> int:
+    try:
+        finite = np.asarray(values, dtype=float)
+        finite = finite[np.isfinite(finite)]
+        if finite.size:
+            return max(int(np.unique(finite).size), 1)
+    except Exception:
+        pass
+    return max(int(fallback), 1)
+
+
+def _normalize_mfx_attrs(
+    mfx: np.ndarray,
+    *,
+    load_all_itr: bool,
+) -> tuple[AttrStore, int, int, str, str]:
+    """Normalize modern flat or legacy nested-iteration mfx tables."""
+    attrs = AttrStore()
+    field_names = list(getattr(mfx.dtype, "names", []) or [])
+    num_measurements = int(mfx.shape[0])
+
+    if _is_legacy_nested_itr_mfx(mfx):
+        itr_dt = mfx.dtype.fields["itr"][0]
+        itr_base, itr_shape = _dtype_base_and_shape(itr_dt)
+        num_itr_slots = int(itr_shape[0]) if itr_shape else 1
+        nested = mfx["itr"]
+        nested_names = list(getattr(itr_base, "names", []) or [])
+        try:
+            itr_values = np.asarray(nested["itr"])
+        except Exception:
+            itr_values = np.tile(np.arange(num_itr_slots), (num_measurements, 1))
+        num_itr = _iteration_count(itr_values, num_itr_slots)
+
+        if load_all_itr:
+            select_mask = np.ones((num_measurements, num_itr_slots), dtype=bool)
+        else:
+            try:
+                valid_itr_values = np.asarray(itr_values, dtype=float)
+                last_itr = np.nanmax(valid_itr_values)
+                select_mask = valid_itr_values == last_itr
+                if not np.any(select_mask):
+                    select_mask = np.zeros((num_measurements, num_itr_slots), dtype=bool)
+                    select_mask[:, -1] = True
+            except Exception:
+                select_mask = np.zeros((num_measurements, num_itr_slots), dtype=bool)
+                select_mask[:, -1] = True
+        flat_select = select_mask.ravel()
+
+        for nested_name in nested_names:
+            val = np.asarray(nested[nested_name])
+            if val.shape[:2] != select_mask.shape:
+                continue
+            selected = val[select_mask]
+            _add_mfx_attr(attrs, nested_name, selected, int(selected.shape[0]))
+
+        for field_name in field_names:
+            if field_name == "itr" or field_name in nested_names:
+                continue
+            val = np.asarray(mfx[field_name])
+            if val.ndim >= 1 and val.shape[0] == num_measurements:
+                repeated = np.repeat(val, num_itr_slots, axis=0)
+                selected = repeated[flat_select]
+                _add_mfx_attr(attrs, field_name, selected, int(selected.shape[0]))
+
+        num_raw = int(np.count_nonzero(select_mask))
+        detail = "legacy nested iteration table: per-iteration values stored in mfx.itr"
+        return attrs, num_raw, num_itr, "legacy", detail
+
+    # The mfx array is in m2410-style flat format (already flattened per-loc).
+    for field_name in field_names:
+        val = mfx[field_name]
+        _add_mfx_attr(attrs, field_name, val, num_measurements)
+    return (
+        attrs,
+        num_measurements,
+        1,
+        "m2410",
+        "m2410: all iteration value in N by 1 array",
+    )
+
 def load_from_mfx_array(
     mfx: "np.ndarray",
     name: str,
@@ -811,30 +960,10 @@ def load_from_mfx_array(
         recent_path=recent_path,
     )
 
-    # Convert structured array fields into the AttrStore that our pipeline expects.
-    # The mfx array is in m2410-style flat format (already flattened per-loc).
-    attrs = AttrStore()
-    field_names = list(getattr(mfx.dtype, "names", []) or [])
-    num_raw = int(mfx.shape[0])
-
-    for field_name in field_names:
-        val = mfx[field_name]
-        if field_name in SPATIAL_COORD_FIELDS:
-            # (N, 3) xyz arrays — split into _x/_y/_z
-            arr = np.asarray(val)
-            if arr.ndim == 1:
-                arr = arr.reshape(-1, 1)
-            attrs[f"{field_name}_x"] = arr[:, 0].ravel()
-            attrs[f"{field_name}_y"] = arr[:, 1].ravel() if arr.shape[1] > 1 else np.zeros(len(arr))
-            attrs[f"{field_name}_z"] = arr[:, 2].ravel() if arr.shape[1] > 2 else np.zeros(len(arr))
-        elif field_name == "dcr":
-            arr = np.asarray(val)
-            if arr.ndim > 1 and arr.shape[0] != num_raw and arr.shape[1] == num_raw:
-                arr = arr.T
-            attrs[field_name] = arr[:, 0].ravel() if arr.ndim > 1 else arr.ravel()
-        else:
-            arr = np.asarray(val)
-            attrs[field_name] = arr.ravel() if arr.ndim == 1 else arr
+    attrs, num_raw, detected_num_itr, source_version, source_version_detail = _normalize_mfx_attrs(
+        mfx,
+        load_all_itr=load_all_itr,
+    )
 
     valid_mask = np.ones(num_raw, dtype=bool)
     if "vld" in attrs:
@@ -852,14 +981,15 @@ def load_from_mfx_array(
         valid_mask &= np.isfinite(loc_z)
 
     itr_arr = attrs.get("itr", None)
-    num_itr = 1
+    num_itr = max(int(detected_num_itr), 1)
     if itr_arr is not None:
         try:
             itr_raw = np.asarray(itr_arr).ravel()
             valid_itr = itr_raw[valid_mask]
             if valid_itr.size:
                 last_itr = int(np.nanmax(valid_itr))
-                num_itr = last_itr + 1
+                if source_version != "legacy":
+                    num_itr = last_itr + 1
                 if not load_all_itr:
                     valid_mask &= itr_raw == last_itr
         except Exception:
@@ -888,9 +1018,9 @@ def load_from_mfx_array(
     )
     dataset.metadata.update(
         {
-            "source_version": "m2410",
-            "source_version_detail": "m2410: all iteration value in N by 1 array",
-            "raw_num_loc": int(num_raw),
+            "source_version": source_version,
+            "source_version_detail": source_version_detail,
+            "raw_num_loc": int(mfx.shape[0]),
             "valid_num_loc": int(prop.num_loc),
             "raw_num_itr": int(num_itr),
             "iteration_load_mode": "all" if load_all_itr else "last",

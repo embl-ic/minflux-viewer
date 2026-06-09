@@ -2144,7 +2144,7 @@ class RenderWindow(QWidget):
         if bc_shortcut:
             bc_action.setShortcut(QKeySequence(bc_shortcut))
             try:
-                bc_action.setShortcutVisibleInContextMenu(True)
+                bc_action.setShortcutVisibleInContextMenu(False)
             except Exception:
                 pass
         menu.addAction("Sigma", self._show_sigma_dialog)

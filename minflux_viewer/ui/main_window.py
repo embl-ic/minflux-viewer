@@ -203,6 +203,14 @@ class MainWindow(QMainWindow):
         self.actionOpenTiff.triggered.connect(self._open_tiff_dialog)
         u.actionSave.triggered.connect(self._save_data)
         u.actionQuit.triggered.connect(self.close)
+        self.actionClose = QAction("Close", self)
+        self.actionClose.setShortcut(QKeySequence("Ctrl+W"))
+        self.actionClose.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.actionClose.triggered.connect(self._close_active_dataset)
+        self.actionCloseAll = QAction("Close All", self)
+        self.actionCloseAll.setShortcut(QKeySequence("Ctrl+Shift+W"))
+        self.actionCloseAll.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.actionCloseAll.triggered.connect(self._close_all_datasets)
 
         # Edit menu
         u.actionDatasetManager.triggered.connect(self._show_dataset_manager)
@@ -398,6 +406,9 @@ class MainWindow(QMainWindow):
         u.menuFile.addSeparator()
         u.menuFile.addAction(u.actionSave)
         u.menuFile.addSeparator()
+        u.menuFile.addAction(self.actionClose)
+        u.menuFile.addAction(self.actionCloseAll)
+        u.menuFile.addSeparator()
         u.menuFile.addAction(u.actionQuit)
 
         u.menuView.clear()
@@ -525,7 +536,7 @@ class MainWindow(QMainWindow):
             action.setShortcut(QKeySequence(seq) if seq else QKeySequence())
             action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
         self._ui.actionQuit.setShortcut(QKeySequence("Ctrl+Q"))
-        self._ui.actionQuit.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        self._ui.actionQuit.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         seq = str(shortcuts.get("focus_main_window", "") or "")
         self._app_shortcut_focus.setKey(QKeySequence(seq) if seq else QKeySequence())
         self._app_shortcut_focus.setEnabled(bool(seq))
@@ -1336,9 +1347,17 @@ class MainWindow(QMainWindow):
 
     def _close_current_child_window(self) -> None:
         active = QApplication.activeWindow()
-        if active is None or active is self:
+        if active is not None and active is not self:
+            active.close()
             return
-        active.close()
+        # Fallback: use the top-level ancestor of the current focus widget.
+        # QApplication.activeWindow() can lag on Windows when a window is shown
+        # programmatically without an explicit user click.
+        focus = QApplication.focusWidget()
+        if focus is not None:
+            top = focus.window()
+            if top is not None and top is not self:
+                top.close()
 
     # ------------------------------------------------------------------
     # Preferences, memory monitor, duplicate
@@ -1444,6 +1463,73 @@ class MainWindow(QMainWindow):
         self._memory_win.show()
         self._memory_win.raise_()
         self._memory_win.activateWindow()
+
+    def _close_active_dataset(self) -> None:
+        from ..core.overlay import dataset_group_id
+
+        # For multi-channel overlay views (render/scatter with multiple channels),
+        # honour the active dataset that the user selected in the channel panel.
+        # For standalone single-dataset windows, resolve active from the focused window.
+        active_win = QApplication.activeWindow()
+        is_multichannel = len(getattr(active_win, "_channels", None) or []) > 1
+        if not is_multichannel:
+            self._set_active_from_focused_dataset_window()
+
+        idx = self._state.active_idx
+        if idx is None:
+            return
+
+        ds = self._state.datasets[idx]
+        group_id = dataset_group_id(ds)
+
+        if group_id:
+            remaining = [
+                i for i, d in enumerate(self._state.datasets)
+                if i != idx and dataset_group_id(d) == group_id
+            ]
+            # Last surviving member: strip overlay state so it renders standalone
+            if len(remaining) == 1:
+                survivor = self._state.datasets[remaining[0]]
+                for key in (
+                    "overlay_id", "render_group_id", "overlay_index",
+                    "overlay_order", "overlay_lut", "overlay_transform",
+                    "render_transform_2d",
+                ):
+                    survivor.state.pop(key, None)
+
+        self._state.remove_dataset(idx)
+
+        if self._state.active_idx is None:
+            self.setWindowTitle(self.APP_NAME)
+
+        # Refresh open render/scatter overlay windows so their channel lists
+        # reflect the removal (indices have shifted after remove_dataset).
+        if group_id:
+            self._refresh_overlay_windows()
+
+    def _refresh_overlay_windows(self) -> None:
+        """Rebuild channel lists and re-render open render/scatter overlay windows."""
+        for win in list(self._render_windows.values()):
+            try:
+                win._build_channels()
+                win._rebuild_channel_ui()
+                win._rebuild_all_grids()
+                win._schedule_render()
+            except Exception:
+                pass
+        for win in list(self._scatter_windows.values()):
+            try:
+                win._refresh()
+            except Exception:
+                pass
+
+    def _close_all_datasets(self) -> None:
+        n = len(self._state.datasets)
+        if n == 0:
+            return
+        for idx in range(n - 1, -1, -1):
+            self._state.remove_dataset(idx)
+        self.setWindowTitle(self.APP_NAME)
 
     def _duplicate_active_dataset(self) -> None:
         """
