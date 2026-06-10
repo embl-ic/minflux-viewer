@@ -286,6 +286,9 @@ class PreferencesDialog(QDialog):
         load_row.addStretch()
         root.addLayout(load_row)
 
+        self._only_valid = QCheckBox("only valid localizations (vld check)")
+        root.addLayout(self._indent(self._only_valid))
+
         self._load_efc_cfr = QCheckBox("effective CFR and EFC iteration")
         self._load_all_dcr = QCheckBox("all DCR iteration for channel separation")
         # The screenshot shows the two EFC/DCR checkboxes indented under Load
@@ -714,6 +717,7 @@ class PreferencesDialog(QDialog):
 
         # Data
         self._iter_load.setCurrentText(str(d.get("iter_load", "last")))
+        self._only_valid.setChecked(bool(d.get("only_valid_locs", True)))
         self._load_efc_cfr.setChecked(bool(d.get("load_efc_cfr", True)))
         self._load_all_dcr.setChecked(bool(d.get("load_all_dcr", False)))
         self._enforce_z.setChecked(bool(d.get("enforce_min_z_range", True)))
@@ -793,6 +797,7 @@ class PreferencesDialog(QDialog):
 
         # Data
         d["iter_load"] = self._iter_load.currentText()
+        d["only_valid_locs"] = bool(self._only_valid.isChecked())
         d["load_efc_cfr"] = bool(self._load_efc_cfr.isChecked())
         d["load_all_dcr"] = bool(self._load_all_dcr.isChecked())
         d["enforce_min_z_range"] = bool(self._enforce_z.isChecked())

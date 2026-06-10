@@ -84,6 +84,7 @@ def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
     load_all_itr    = data_prefs.get("iter_load", "last") == "all"
     load_efc_cfr    = data_prefs.get("load_efc_cfr", True)
     load_all_dcr    = data_prefs.get("load_all_dcr", True)
+    only_valid      = data_prefs.get("only_valid_locs", True)
 
     # 1. Read the raw .mat file
     raw = _load_mat(path)
@@ -93,6 +94,7 @@ def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
         raw,
         load_all_itr=load_all_itr,
         load_efc_cfr=load_efc_cfr,
+        only_valid=only_valid,
     )
     if attrs is None:
         raise ValueError(
@@ -206,6 +208,7 @@ def _parse_raw(
     raw: dict,
     load_all_itr: bool = False,
     load_efc_cfr: bool = True,
+    only_valid: bool = True,
 ) -> tuple[AttrStore | None, int, int]:
     """
     Detect which MINFLUX format ``raw`` uses and call the appropriate parser.
@@ -221,22 +224,24 @@ def _parse_raw(
 
     # m2205: nested struct inside itr (MATLAB struct or already-dict)
     if hasattr(itr_val, "_fieldnames") or isinstance(itr_val, dict):
-        return _parse_m2205(raw, load_all_itr=load_all_itr, load_efc_cfr=load_efc_cfr)
+        return _parse_m2205(raw, load_all_itr=load_all_itr, load_efc_cfr=load_efc_cfr,
+                            only_valid=only_valid)
 
     if isinstance(itr_val, np.ndarray) and np.issubdtype(itr_val.dtype, np.integer):
         # m2410: flat 1-D integer array — one iteration index per localization event.
         # Legacy .mat (m2205 flat): itr is 2-D (nLoc × nItr).  Check dimensionality
         # after squeezing out any size-1 axes; (N,1) and (1,N) are still 1-D.
         if np.squeeze(itr_val).ndim <= 1:
-            return _parse_m2410(raw)
+            return _parse_m2410(raw, only_valid=only_valid)
         # 2-D integer itr with loc at top level → m2205 flat format
         if "loc" in raw:
-            return _parse_m2205_unwrapped(raw, load_all_itr=load_all_itr, load_efc_cfr=load_efc_cfr)
+            return _parse_m2205_unwrapped(raw, load_all_itr=load_all_itr,
+                                          load_efc_cfr=load_efc_cfr, only_valid=only_valid)
 
     # m2205-unwrapped: loc already at top level, itr is numeric (float or other)
     if "loc" in raw:
         return _parse_m2205_unwrapped(
-            raw, load_all_itr=load_all_itr, load_efc_cfr=load_efc_cfr
+            raw, load_all_itr=load_all_itr, load_efc_cfr=load_efc_cfr, only_valid=only_valid,
         )
 
     return None, 0, 0
@@ -391,7 +396,7 @@ def _dcr_is_two_channel(arr: np.ndarray, sample: int = 500) -> bool:
 # m2410 parser
 # ---------------------------------------------------------------------------
 
-def _parse_m2410(raw: dict) -> tuple[AttrStore, int, int]:
+def _parse_m2410(raw: dict, *, only_valid: bool = True) -> tuple[AttrStore, int, int]:
     """
     Flat Abberior m2410 format.
 
@@ -412,9 +417,12 @@ def _parse_m2410(raw: dict) -> tuple[AttrStore, int, int]:
     itr     = itr_raw.ravel()   # handles (N,), (1, N), and (N, 1)
     n_raw   = itr.size
 
-    vld     = np.asarray(
-        raw.get("vld", np.ones(n_raw, dtype=bool)), dtype=bool,
-    ).ravel()
+    if only_valid:
+        vld = np.asarray(
+            raw.get("vld", np.ones(n_raw, dtype=bool)), dtype=bool,
+        ).ravel()
+    else:
+        vld = np.ones(n_raw, dtype=bool)
     max_itr = int(itr[vld].max()) if vld.any() else 0
     num_itr = max_itr + 1
 
@@ -479,6 +487,7 @@ def _parse_m2205(
     raw: dict,
     load_all_itr: bool = False,
     load_efc_cfr: bool = True,
+    only_valid: bool = True,
 ) -> tuple[AttrStore, int, int]:
     """
     Nested Abberior m2205 format.  Unwraps the ``.itr`` sub-struct then
@@ -497,7 +506,7 @@ def _parse_m2205(
     merged.pop("mbm", None)     # remove reference-point field
 
     return _parse_m2205_unwrapped(
-        merged, load_all_itr=load_all_itr, load_efc_cfr=load_efc_cfr
+        merged, load_all_itr=load_all_itr, load_efc_cfr=load_efc_cfr, only_valid=only_valid,
     )
 
 
@@ -509,6 +518,7 @@ def _parse_m2205_unwrapped(
     raw: dict,
     load_all_itr: bool = False,
     load_efc_cfr: bool = True,
+    only_valid: bool = True,
 ) -> tuple[AttrStore, int, int]:
     """
     Already-unwrapped m2205 variant.
@@ -530,7 +540,10 @@ def _parse_m2205_unwrapped(
     else:
         num_loc, num_itr = itr_arr.shape
 
-    vld          = np.asarray(raw.get("vld", np.ones(num_loc, bool)), dtype=bool).ravel()
+    if only_valid:
+        vld = np.asarray(raw.get("vld", np.ones(num_loc, bool)), dtype=bool).ravel()
+    else:
+        vld = np.ones(num_loc, dtype=bool)
     num_loc_vld  = int(vld.sum())
     iter_last    = num_itr - 1
 
@@ -951,6 +964,7 @@ def load_from_mfx_array(
     prefs = prefs or {}
     data_prefs = prefs.get("data", {}) or {}
     load_all_itr = data_prefs.get("iter_load", "last") == "all"
+    only_valid   = data_prefs.get("only_valid_locs", True)
 
     file_info = FileInfo(
         name=name,
@@ -966,7 +980,7 @@ def load_from_mfx_array(
     )
 
     valid_mask = np.ones(num_raw, dtype=bool)
-    if "vld" in attrs:
+    if only_valid and "vld" in attrs:
         try:
             valid_mask &= np.asarray(attrs["vld"], dtype=bool).ravel()
         except Exception:
@@ -1259,6 +1273,11 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
+    prefs = prefs or {}
+    data_prefs   = prefs.get("data", {}) or {}
+    only_valid   = data_prefs.get("only_valid_locs", True)
+    load_all_itr = data_prefs.get("iter_load", "last") == "all"
+
     with open(path, encoding="utf-8") as f:
         payload = json.load(f)
 
@@ -1270,9 +1289,25 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
 
     loc_m = _json_coordinate_array_m(records)
     valid = np.isfinite(loc_m).all(axis=1)
-    vld = _json_values(records, "vld")
-    if vld is not None:
-        valid &= np.asarray([bool(v) for v in vld], dtype=bool)
+
+    # vld filter — mirrors _parse_m2410 behaviour
+    if only_valid:
+        vld = _json_values(records, "vld")
+        if vld is not None:
+            valid &= np.asarray([bool(v) for v in vld], dtype=bool)
+
+    # Iteration filter — keep only the last (highest) iteration, same as _parse_m2410.
+    # The JSON file is flat m2410-style: one record per localization event, so records
+    # with itr < max_itr are intermediate measurements that the other loaders discard.
+    if not load_all_itr:
+        itr_values = _json_values(records, "itr")
+        if itr_values is not None:
+            itr_arr = np.asarray(
+                [0 if v is None else int(v) for v in itr_values], dtype=np.int32
+            )
+            if valid.any():
+                max_itr = int(itr_arr[valid].max())
+                valid &= (itr_arr == max_itr)
 
     if not np.any(valid):
         raise ValueError(f"'{path.name}' contains no valid finite localizations.")
