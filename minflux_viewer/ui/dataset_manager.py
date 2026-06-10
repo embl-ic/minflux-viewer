@@ -35,10 +35,11 @@ _COL_ACTIVE  = 0
 _COL_NAME    = 1
 _COL_DIMS    = 2
 _COL_LOCS    = 3
-_COL_TRACES  = 4
-_COL_LOADED  = 5
-_COL_VIEW    = 6
-_NCOLS       = 7
+_COL_ITR     = 4
+_COL_TRACES  = 5
+_COL_LOADED  = 6
+_COL_VIEW    = 7
+_NCOLS       = 8
 
 
 class DatasetManager(QDialog):
@@ -53,7 +54,7 @@ class DatasetManager(QDialog):
         self.setWindowFlags(
             Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint
         )
-        self.resize(680, 240)
+        self.resize(800, 240)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
         self._build_ui()
@@ -75,7 +76,7 @@ class DatasetManager(QDialog):
         # ── Table ─────────────────────────────────────────────────
         self._table = QTableWidget(0, _NCOLS)
         self._table.setHorizontalHeaderLabels(
-            ["Active", "Name", "Dims", "Locs", "Traces", "Loaded", "View"]
+            ["Active", "Name", "Dims", "Locs", "Itr", "Traces", "Loaded", "View"]
         )
         hh = self._table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -84,6 +85,7 @@ class DatasetManager(QDialog):
         self._table.setColumnWidth(_COL_NAME,   200)
         self._table.setColumnWidth(_COL_DIMS,    52)
         self._table.setColumnWidth(_COL_LOCS,    80)
+        self._table.setColumnWidth(_COL_ITR,     72)
         self._table.setColumnWidth(_COL_TRACES,  72)
         self._table.setColumnWidth(_COL_LOADED, 160)
         self._table.setColumnWidth(_COL_VIEW,    90)
@@ -138,6 +140,7 @@ class DatasetManager(QDialog):
             (ds.file.name,                Qt.AlignmentFlag.AlignLeft),
             (f"{ds.prop.num_dim}D",       Qt.AlignmentFlag.AlignCenter),
             (f"{ds.prop.num_loc:,}",      Qt.AlignmentFlag.AlignRight),
+            (self._itr_text(ds),          Qt.AlignmentFlag.AlignCenter),
             (f"{ds.prop.num_traces:,}",   Qt.AlignmentFlag.AlignRight),
             (ds.file.datetime or "—",     Qt.AlignmentFlag.AlignLeft),
             (self._view_text(idx),         Qt.AlignmentFlag.AlignCenter),
@@ -169,6 +172,14 @@ class DatasetManager(QDialog):
                 font = it.font()
                 font.setBold(is_active)
                 it.setFont(font)
+
+    def _itr_text(self, ds) -> str:
+        total = max(1, int(ds.metadata.get("raw_num_itr", ds.prop.num_itr or 1)))
+        mode  = str(ds.metadata.get("iteration_load_mode", "")).lower()
+        if not mode:
+            mode = "last"
+        prefix = "all" if mode == "all" else "last"
+        return f"{prefix}/{total}"
 
     def _view_text(self, idx: int) -> str:
         provider = getattr(self.parent(), "dataset_view_status", None)

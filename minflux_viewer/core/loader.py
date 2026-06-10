@@ -89,7 +89,10 @@ def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
     # 1. Read the raw .mat file
     raw = _load_mat(path)
 
-    # 2. Detect format and parse into an AttrStore
+    # 2. Build mfx_raw — all iterations, all measurements, no filtering
+    mfx_raw_store = _build_mfx_raw_from_raw(raw)
+
+    # 3. Detect format and parse into an AttrStore (filtered working set)
     attrs, num_loc, num_itr = _parse_raw(
         raw,
         load_all_itr=load_all_itr,
@@ -102,13 +105,13 @@ def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
             "Check that it contains an 'itr' field."
         )
 
-    # 3. File metadata
+    # 4. File metadata (raw_data cleared — mfx_raw supersedes it)
     mtime = path.stat().st_mtime
     file_info = FileInfo(
         name=path.name,
         folder=str(path.parent),
         datetime=datetime.fromtimestamp(mtime).strftime("%Y-%b-%d, %H:%M:%S"),
-        raw_data=raw,
+        raw_data=None,
     )
 
     # 4. Derived scalar properties (trace structure, dimensionality)
@@ -134,6 +137,7 @@ def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
     dataset.metadata.update(_source_metadata_from_raw(raw, load_all_itr=load_all_itr))
     dataset.metadata["valid_num_loc"] = int(prop.num_loc)
     dataset.metadata["includes_invalid"] = False
+    dataset.components.mfx_raw = mfx_raw_store
     return dataset
 
 
@@ -656,6 +660,324 @@ def _parse_m2205_unwrapped(
 
 
 # ---------------------------------------------------------------------------
+# mfx_raw builders — all-iteration, all-vld, no filtering
+# ---------------------------------------------------------------------------
+
+def _build_mfx_raw_m2410(raw: dict) -> "AttrStore":
+    """
+    Build flat all-itr, all-vld mfx_raw from m2410 raw dict.
+
+    Mirrors _parse_m2410 structure but applies no vld/itr mask.
+    Spatial coordinates are split into _x/_y/_z. Two-column dcr keeps
+    both channels as dcr_0 and dcr_1 plus dcr (primary).
+    """
+    itr_raw = np.asarray(raw["itr"])
+    n_raw   = itr_raw.ravel().size
+    mfx     = AttrStore()
+
+    for key, val in raw.items():
+        arr = np.asarray(val)
+        if arr.ndim == 0 or arr.size == 0 or key in ("#refs#", "tic"):
+            continue
+
+        if arr.ndim == 1:
+            if arr.shape[0] != n_raw:
+                continue
+            arr2 = arr.reshape(n_raw, 1)
+        elif arr.ndim == 2:
+            if arr.shape[0] == n_raw:
+                arr2 = arr
+            elif arr.shape[1] == n_raw:
+                arr2 = arr.T
+            else:
+                continue
+        elif arr.ndim == 3:
+            if arr.shape[0] == n_raw:
+                arr2 = arr[:, -1, :]
+            else:
+                continue
+        else:
+            continue
+
+        n_cols = arr2.shape[1]
+
+        if key in SPATIAL_COORD_FIELDS and n_cols in (2, 3):
+            mfx[f"{key}_x"] = arr2[:, 0].ravel()
+            mfx[f"{key}_y"] = arr2[:, 1].ravel()
+            mfx[f"{key}_z"] = arr2[:, 2].ravel() if n_cols == 3 else np.zeros(n_raw)
+        elif key == "dcr" and n_cols > 1:
+            mfx["dcr"] = arr2[:, 0].ravel()
+            for c in range(n_cols):
+                mfx[f"dcr_{c}"] = arr2[:, c].ravel()
+        else:
+            mfx[key] = arr2.ravel() if n_cols == 1 else arr2
+
+    return mfx
+
+
+def _build_mfx_raw_m2205_unwrapped(merged: dict, n_loc: int, n_itr: int) -> "AttrStore":
+    """
+    Build flat all-itr, all-vld mfx_raw from m2205 (unwrapped) format.
+
+    Row ordering matches C-contiguous (num_loc × num_itr) reshape:
+    [loc_0_itr_0, loc_0_itr_1, ..., loc_1_itr_0, ...].
+
+    Scalar-per-loc fields are np.repeat'd n_itr times.
+    Per-iteration (n_loc, n_itr) fields are .ravel()'d.
+    Spatial (n_loc, n_itr, 3) fields are reshaped to (n_total, 3).
+    The synthetic ``itr`` column is np.tile(0…n_itr-1, n_loc).
+    """
+    n_total = n_loc * n_itr
+    mfx     = AttrStore()
+
+    for key, val in merged.items():
+        arr = np.asarray(val)
+        if arr.ndim == 0 or arr.size == 0 or key in ("#refs#", "tic", "itr"):
+            continue
+        if np.issubdtype(arr.dtype, np.floating):
+            arr = arr.astype(float, copy=False)
+
+        # Normalize leading axis to n_loc
+        if arr.ndim == 1:
+            if arr.shape[0] != n_loc:
+                continue
+        elif arr.ndim == 2:
+            if arr.shape[0] == n_loc:
+                pass
+            elif arr.shape[1] == n_loc:
+                arr = arr.T
+            else:
+                continue
+        elif arr.ndim == 3:
+            if arr.shape[0] == n_loc and arr.shape[-1] in (2, 3):
+                pass
+            elif arr.shape[-1] == n_loc and arr.shape[0] in (2, 3):
+                arr = np.moveaxis(arr, (0, -1), (-1, 0))
+            else:
+                continue
+        else:
+            continue
+
+        # Spatial (n_loc, n_itr, 2/3)
+        if key in SPATIAL_COORD_FIELDS and arr.ndim == 3 and arr.shape[-1] in (2, 3):
+            if arr.shape[1] == n_itr:
+                flat = arr.reshape(n_total, arr.shape[2])
+            else:
+                # single-iteration xyz, interleave-repeat for all itr
+                sub = arr[:, -1, :]
+                flat = sub[np.repeat(np.arange(n_loc), n_itr), :]
+            mfx[f"{key}_x"] = flat[:, 0]
+            mfx[f"{key}_y"] = flat[:, 1]
+            mfx[f"{key}_z"] = flat[:, 2] if arr.shape[-1] == 3 else np.zeros(n_total)
+            continue
+
+        # Spatial (n_loc, 2/3), not per-iteration
+        if key in SPATIAL_COORD_FIELDS and arr.ndim == 2 and arr.shape[1] in (2, 3) and arr.shape[1] != n_itr:
+            sub = arr[np.repeat(np.arange(n_loc), n_itr), :]
+            mfx[f"{key}_x"] = sub[:, 0]
+            mfx[f"{key}_y"] = sub[:, 1]
+            mfx[f"{key}_z"] = sub[:, 2] if arr.shape[1] == 3 else np.zeros(n_total)
+            continue
+
+        # DCR: two-channel vs per-iteration
+        if key == "dcr" and arr.ndim == 2 and arr.shape[0] == n_loc:
+            if arr.shape[1] == 2 and (n_itr != 2 or _dcr_is_two_channel(arr)):
+                mfx["dcr"]   = np.repeat(arr[:, 0], n_itr)
+                mfx["dcr_0"] = np.repeat(arr[:, 0], n_itr)
+                mfx["dcr_1"] = np.repeat(arr[:, 1], n_itr)
+                continue
+            if arr.shape[1] == n_itr:
+                mfx["dcr"] = arr.ravel()
+                continue
+
+        # Per-iteration (n_loc, n_itr)
+        if arr.ndim == 2 and arr.shape[1] == n_itr:
+            mfx[key] = arr.ravel()
+            continue
+
+        # Scalar per loc
+        if arr.ndim == 1:
+            mfx[key] = np.repeat(arr, n_itr)
+        else:
+            mfx[key] = arr[np.repeat(np.arange(n_loc), n_itr), :]
+
+    # Synthetic 0-indexed itr column for consistency across formats
+    mfx["itr"] = np.tile(np.arange(n_itr, dtype=np.int16), n_loc)
+    return mfx
+
+
+def _build_mfx_raw_from_raw(raw: dict) -> "AttrStore":
+    """Format-dispatch: build mfx_raw from a loaded .mat raw dict."""
+    if "itr" not in raw:
+        return AttrStore()
+
+    itr_val = raw["itr"]
+
+    # m2205 nested struct
+    if hasattr(itr_val, "_fieldnames") or isinstance(itr_val, dict):
+        itr_dict = _mat_struct_to_dict(itr_val) if hasattr(itr_val, "_fieldnames") else itr_val
+        merged = {k: v for k, v in raw.items() if k != "itr"}
+        merged.update(itr_dict)
+        merged.pop("mbm", None)
+        itr_arr = np.asarray(merged.get("itr", np.array([])))
+        if itr_arr.ndim == 2:
+            if itr_arr.shape[0] == 1:
+                n_loc, n_itr = int(itr_arr.shape[1]), 1
+            else:
+                n_loc, n_itr = int(itr_arr.shape[0]), int(itr_arr.shape[1])
+        elif itr_arr.ndim == 1:
+            n_loc, n_itr = int(itr_arr.shape[0]), 1
+        else:
+            return AttrStore()
+        return _build_mfx_raw_m2205_unwrapped(merged, n_loc, n_itr)
+
+    if isinstance(itr_val, np.ndarray) and np.issubdtype(itr_val.dtype, np.integer):
+        if np.squeeze(itr_val).ndim <= 1:
+            return _build_mfx_raw_m2410(raw)
+        # 2-D integer itr → m2205-flat with loc at top level
+        if "loc" in raw:
+            itr_arr = np.asarray(itr_val)
+            if itr_arr.shape[0] == 1:
+                n_loc, n_itr = int(itr_arr.shape[1]), 1
+            else:
+                n_loc, n_itr = int(itr_arr.shape[0]), int(itr_arr.shape[1])
+            return _build_mfx_raw_m2205_unwrapped(raw, n_loc, n_itr)
+
+    # m2205-unwrapped with float/other itr at top level
+    if "loc" in raw:
+        itr_arr = np.asarray(itr_val)
+        if itr_arr.ndim == 1:
+            n_loc, n_itr = int(itr_arr.shape[0]), 1
+        elif itr_arr.shape[0] == 1:
+            n_loc, n_itr = int(itr_arr.shape[1]), 1
+        else:
+            n_loc, n_itr = int(itr_arr.shape[0]), int(itr_arr.shape[1])
+        return _build_mfx_raw_m2205_unwrapped(raw, n_loc, n_itr)
+
+    return AttrStore()
+
+
+def _build_mfx_raw_from_json_records(records: list) -> "AttrStore":
+    """Build mfx_raw from ALL JSON records (no vld/itr filtering)."""
+    n = len(records)
+    if n == 0:
+        return AttrStore()
+    mfx = AttrStore()
+
+    try:
+        loc_m = _json_coordinate_array_m(records)
+    except Exception:
+        return AttrStore()
+    mfx["loc_x"] = loc_m[:, 0]
+    mfx["loc_y"] = loc_m[:, 1]
+    mfx["loc_z"] = loc_m[:, 2]
+
+    keys = sorted({key for record in records for key in record.keys()})
+    vector_xyz_keys = {"loc", "lnc", "ext"}
+    coordinate_aliases = {
+        "x", "y", "z", "xnm", "ynm", "znm",
+        "x_nm", "y_nm", "z_nm",
+        "loc_x", "loc_y", "loc_z",
+        "loc_x_nm", "loc_y_nm", "loc_z_nm",
+    }
+
+    for key in keys:
+        if key in coordinate_aliases:
+            continue
+        values = _json_values(records, key)
+        if values is None:
+            continue
+
+        if key in vector_xyz_keys:
+            arr_m = _json_vector_array(values, width=3)
+            if arr_m is None:
+                continue
+            mfx[f"{key}_x"] = arr_m[:, 0]
+            mfx[f"{key}_y"] = arr_m[:, 1]
+            mfx[f"{key}_z"] = arr_m[:, 2] if arr_m.shape[1] > 2 else np.zeros(n)
+            continue
+
+        vector = _json_vector_array(values)
+        if vector is not None:
+            if key == "dcr":
+                mfx["dcr"] = vector[:, 0]
+                for col in range(vector.shape[1]):
+                    mfx[f"dcr_{col}"] = vector[:, col]
+            elif vector.shape[1] in (2, 3):
+                mfx[f"{key}_x"] = vector[:, 0]
+                mfx[f"{key}_y"] = vector[:, 1]
+                mfx[f"{key}_z"] = vector[:, 2] if vector.shape[1] > 2 else np.zeros(n)
+            continue
+
+        scalar = _json_scalar_array(values)
+        if scalar is not None and scalar.shape[0] == n:
+            mfx[key] = scalar
+
+    if "tid" not in mfx:
+        mfx["tid"] = np.arange(n, dtype=np.int32)
+    if "tim" not in mfx:
+        mfx["tim"] = np.zeros(n, dtype=float)
+    if "itr" not in mfx:
+        mfx["itr"] = np.zeros(n, dtype=np.int16)
+    if "vld" not in mfx:
+        mfx["vld"] = np.ones(n, dtype=bool)
+    return mfx
+
+
+def mfx_get(
+    ds: "MinfluxDataset",
+    attr: str,
+    *,
+    itr: "str | int" = "last",
+    vld_only: bool = True,
+) -> "np.ndarray | None":
+    """
+    Retrieve an attribute from a dataset's raw mfx store.
+
+    Parameters
+    ----------
+    ds :
+        Dataset to query.
+    attr :
+        Attribute name, e.g. ``"efo"``, ``"cfr"``, ``"loc_x"``.
+    itr :
+        ``"last"`` — final iteration only (default).
+        ``"all"``  — all iterations pooled.
+        ``int``    — specific 0-based iteration index.
+    vld_only :
+        When True, return only rows where ``vld`` is True.
+    """
+    raw = getattr(ds, "mfx_raw", None)
+    if raw is None or len(raw) == 0:
+        val = ds.attr.get(attr)
+        return np.asarray(val) if val is not None else None
+
+    arr = raw.get(attr)
+    if arr is None:
+        return None
+    arr = np.asarray(arr)
+    if arr.ndim == 0 or arr.size == 0:
+        return arr
+
+    n       = arr.shape[0]
+    itr_col = np.asarray(raw.get("itr", np.zeros(n, int))).ravel()
+    vld_col = np.asarray(raw.get("vld", np.ones(n, bool)), dtype=bool).ravel()
+    base    = vld_col if vld_only else np.ones(n, bool)
+
+    if itr == "last":
+        max_i = int(itr_col[base].max()) if base.any() else 0
+        mask  = base & (itr_col == max_i)
+    elif itr == "all":
+        mask = base
+    elif isinstance(itr, int):
+        mask = base & (itr_col == itr)
+    else:
+        mask = base
+
+    return arr[mask] if arr.ndim == 1 else arr[mask, :]
+
+
+# ---------------------------------------------------------------------------
 # Derived properties
 # ---------------------------------------------------------------------------
 
@@ -974,6 +1296,16 @@ def load_from_mfx_array(
         recent_path=recent_path,
     )
 
+    # Build mfx_raw: all iterations, no vld filtering
+    attrs_all, num_raw_all, _, _, _ = _normalize_mfx_attrs(mfx, load_all_itr=True)
+    mfx_raw_store = AttrStore()
+    for _k, _v in attrs_all.items():
+        mfx_raw_store[_k] = np.asarray(_v)
+    if "vld" not in mfx_raw_store:
+        mfx_raw_store["vld"] = np.ones(num_raw_all, dtype=bool)
+    if "itr" not in mfx_raw_store:
+        mfx_raw_store["itr"] = np.zeros(num_raw_all, dtype=np.int16)
+
     attrs, num_raw, detected_num_itr, source_version, source_version_detail = _normalize_mfx_attrs(
         mfx,
         load_all_itr=load_all_itr,
@@ -1041,6 +1373,7 @@ def load_from_mfx_array(
             "includes_invalid": False,
         }
     )
+    dataset.components.mfx_raw = mfx_raw_store
     return dataset
 
 
@@ -1113,13 +1446,31 @@ def load_npy(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     attrs = _add_derived_attributes(attrs, prop, prefs=prefs)
     prop.attr_names = attrs.keys()
 
-    return MinfluxDataset(
+    mfx_raw_store = AttrStore({
+        "loc_x": arr[:, 0].ravel(),
+        "loc_y": arr[:, 1].ravel(),
+        "loc_z": arr[:, 2].ravel() if ndim == 3 else np.zeros(n),
+        "tid":   np.arange(n, dtype=np.int32),
+        "tim":   np.zeros(n),
+        "itr":   np.zeros(n, dtype=np.int16),
+        "vld":   np.ones(n, dtype=bool),
+    })
+
+    ds = MinfluxDataset(
         file=file_info,
         prop=prop,
         attr=attrs,
         cali=Calibration(),
         channel=Channel(),
     )
+    ds.metadata.update({
+        "source_version": "plain_array",
+        "raw_num_loc": n,
+        "raw_num_itr": 1,
+        "iteration_load_mode": "last",
+    })
+    ds.components.mfx_raw = mfx_raw_store
+    return ds
 
 
 # ---------------------------------------------------------------------------
@@ -1287,6 +1638,17 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
             f"'{path.name}' is not recognised as MINFLUX localization JSON."
         )
 
+    # Build mfx_raw from ALL records (no vld/itr filtering)
+    mfx_raw_store = _build_mfx_raw_from_json_records(records)
+
+    # Compute raw iteration count before filtering
+    _itr_all_vals = _json_values(records, "itr")
+    if _itr_all_vals is not None:
+        _itr_all_arr = np.asarray([0 if v is None else int(v) for v in _itr_all_vals], dtype=np.int32)
+        _raw_num_itr = int(_itr_all_arr.max()) + 1 if _itr_all_arr.size else 1
+    else:
+        _raw_num_itr = 1
+
     loc_m = _json_coordinate_array_m(records)
     valid = np.isfinite(loc_m).all(axis=1)
 
@@ -1381,7 +1743,7 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     attrs = _add_derived_attributes(attrs, prop, prefs=prefs)
     prop.attr_names = attrs.keys()
 
-    return MinfluxDataset(
+    ds = MinfluxDataset(
         file=FileInfo(
             name=path.name,
             folder=str(path.parent),
@@ -1394,6 +1756,16 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
         cali=Calibration(),
         channel=_build_channel(attrs, prop),
     )
+    ds.metadata.update({
+        "source_version": "json",
+        "raw_num_loc": len(records),
+        "valid_num_loc": int(prop.num_loc),
+        "raw_num_itr": _raw_num_itr,
+        "iteration_load_mode": "all" if load_all_itr else "last",
+        "includes_invalid": False,
+    })
+    ds.components.mfx_raw = mfx_raw_store
+    return ds
 
 
 def _extract_json_records(payload: Any) -> list[dict] | None:

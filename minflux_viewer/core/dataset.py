@@ -150,6 +150,7 @@ class DatasetComponents:
     metadata: dict[str, Any] = field(default_factory=dict)
     derived: AttrStore = field(default_factory=AttrStore)
     state: dict[str, Any] = field(default_factory=dict)
+    mfx_raw: AttrStore = field(default_factory=AttrStore)
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +304,11 @@ class MinfluxDataset:
     @property
     def derived(self) -> AttrStore:
         return self.components.derived
+
+    @property
+    def mfx_raw(self) -> AttrStore:
+        """All-iteration, all-measurement raw localization store (no vld/itr filtering)."""
+        return self.components.mfx_raw
 
     @property
     def state(self) -> dict[str, Any]:
