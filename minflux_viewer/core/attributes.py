@@ -63,7 +63,7 @@ def plot_attribute_names(
         if name in exclude_set:
             continue
         arr = np.asarray(dataset.attr[name])
-        if numeric_only and not np.issubdtype(arr.dtype, np.number):
+        if numeric_only and arr.dtype.kind not in ("b", "i", "u", "f", "c"):
             continue
         if one_dimensional_only and arr.ndim != 1:
             continue
