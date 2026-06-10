@@ -379,6 +379,7 @@ class FilterDialog(QDialog):
             return
 
         mask = np.ones(ds.prop.num_loc, dtype=bool)
+        specs: list[dict] = []
 
         for row in range(self._table.rowCount()):
             chk  = self._table.cellWidget(row, _COL_ENABLED)
@@ -402,9 +403,19 @@ class FilterDialog(QDialog):
             if attr not in ds.attr:
                 continue
 
+            # Persist the spec so it can be re-evaluated against the raw
+            # all-iteration store (Stage B iteration/validity browsing).
+            specs.append({
+                "attribute": attr, "mode": mode,
+                "lo": float(lo), "hi": float(hi),
+                "lo_inc": lo_inc, "hi_inc": hi_inc,
+            })
+
             raw  = np.asarray(ds.attr[attr]).ravel().astype(float)
             row_mask = _compute_mask(raw, mode, lo, hi, ds, lo_inc, hi_inc)
             mask &= row_mask
+
+        ds.state["filter_specs"] = specs
 
         self._applying = True
         ds.filter_mask = mask
@@ -420,6 +431,7 @@ class FilterDialog(QDialog):
         ds = self._dataset()
         if ds is None:
             return
+        ds.state["filter_specs"] = []
         ds.filter_mask = np.ones(ds.prop.num_loc, dtype=bool)
         self._state.notify_filter_changed(self._dataset_idx)
         self._info.setText("All filters reset.")

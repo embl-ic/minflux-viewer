@@ -982,6 +982,59 @@ def mfx_get(
     return arr[mask] if arr.ndim == 1 else arr[mask, :]
 
 
+def mfx_filter_mask(
+    ds: "MinfluxDataset",
+    *,
+    itr: "str | int" = "last",
+    vld_only: bool = True,
+) -> "tuple[np.ndarray, list[str]] | None":
+    """Re-evaluate the dataset's persisted filter specs over a raw-store selection.
+
+    The dataset's active filters are stored as re-evaluable specs in
+    ``ds.state["filter_specs"]`` (attribute, mode, bounds). This re-applies
+    them against :func:`mfx_get` rows for the given ``itr``/``vld_only``
+    selection, so the same logical filter extends to any iteration and to
+    invalid localizations.
+
+    Returns
+    -------
+    (mask, unevaluable) or None
+        ``mask`` is a boolean array aligned with ``mfx_get(ds, <attr>, itr=itr,
+        vld_only=vld_only)``. ``unevaluable`` lists attribute names of specs that
+        could not be evaluated on the raw store (e.g. derived attributes such as
+        ``den`` that have no per-iteration values). Returns ``None`` when the
+        dataset has no raw store.
+    """
+    from ..utils.filters import raw_spec_mask
+
+    tid_sel = mfx_get(ds, "tid", itr=itr, vld_only=vld_only)
+    if tid_sel is None:
+        return None
+    tid_sel = np.asarray(tid_sel).ravel()
+    n = tid_sel.shape[0]
+
+    specs = ds.state.get("filter_specs") or []
+    mask = np.ones(n, dtype=bool)
+    unevaluable: list[str] = []
+    for spec in specs:
+        attr = spec.get("attribute", "")
+        vals = mfx_get(ds, attr, itr=itr, vld_only=vld_only)
+        if vals is None or np.asarray(vals).ravel().shape[0] != n:
+            if attr and attr not in unevaluable:
+                unevaluable.append(attr)
+            continue
+        mask &= raw_spec_mask(
+            np.asarray(vals).ravel(),
+            tid_sel,
+            spec.get("mode", "per loc"),
+            float(spec.get("lo", -np.inf)),
+            float(spec.get("hi", np.inf)),
+            bool(spec.get("lo_inc", True)),
+            bool(spec.get("hi_inc", True)),
+        )
+    return mask, unevaluable
+
+
 # ---------------------------------------------------------------------------
 # Derived properties
 # ---------------------------------------------------------------------------

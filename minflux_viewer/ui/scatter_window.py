@@ -46,6 +46,20 @@ from .plot_format import plot_widget
 
 def _load_cmap(name: str) -> pg.ColorMap:
     """Load a colormap, trying pyqtgraph → matplotlib → colorcet → CET-L3."""
+    if name.startswith("solid:"):
+        color_part = name[6:]  # e.g. "Red", "custom:#ff8800"
+        if color_part.startswith("custom:"):
+            hex_str = color_part[7:]
+            try:
+                r = int(hex_str[1:3], 16)
+                g = int(hex_str[3:5], 16)
+                b = int(hex_str[5:7], 16)
+            except (ValueError, IndexError):
+                r, g, b = 128, 128, 128
+        else:
+            r, g, b = _SOLID_COLOR_RGB.get(color_part, (128, 128, 128))
+        rgba = np.array([[r, g, b, 255], [r, g, b, 255]], dtype=np.ubyte)
+        return pg.ColorMap(np.array([0.0, 1.0]), rgba)
     key = name.lower().replace(" ", "_")
     if key == "glasbey":
         try:
@@ -109,6 +123,20 @@ def _load_cmap(name: str) -> pg.ColorMap:
 _AXIS_OPTIONS = ["XY", "XZ", "YZ", "3D"]
 _MAX_DISPLAY_POINTS_2D = 100_000
 _MAX_DISPLAY_POINTS_3D = 150_000
+
+_SOLID_COLOR_NAMES = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Black", "White", "Gray"]
+_SOLID_COLOR_RGB: dict[str, tuple[int, int, int]] = {
+    "Red":     (220,  40,  40),
+    "Green":   ( 20, 170,  70),
+    "Blue":    ( 50,  90, 230),
+    "Cyan":    (  0, 170, 190),
+    "Magenta": (190,  50, 190),
+    "Yellow":  (210, 170,  20),
+    "Black":   (  0,   0,   0),
+    "White":   (255, 255, 255),
+    "Gray":    (120, 120, 120),
+}
+_NAMED_CMAPS = ["glasbey", "jet", "HiLo", "parula", "turbo", "hot"]
 
 
 class ScatterWindow(QWidget):
@@ -178,7 +206,8 @@ class ScatterWindow(QWidget):
         self._cbar_combo.hide()
 
         self._cmap_combo = QComboBox(self)
-        self._cmap_combo.addItems(["glasbey", "jet", "HiLo", "parula", "turbo", "hot", "gray"])
+        self._cmap_combo.setEditable(True)
+        self._cmap_combo.addItems(_NAMED_CMAPS)
         self._cmap_combo.setCurrentText("jet")
         self._cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
         self._cmap_combo.hide()
@@ -296,6 +325,12 @@ class ScatterWindow(QWidget):
     def _set_black_background(self, enabled: bool) -> None:
         self._black_bg_check.setChecked(bool(enabled))
 
+    def _pick_solid_color(self) -> None:
+        from PyQt6.QtWidgets import QColorDialog
+        color = QColorDialog.getColor(parent=self)
+        if color.isValid():
+            self._cmap_combo.setCurrentText(f"solid:custom:{color.name()}")
+
     def _apply_background(self, black: bool) -> None:
         self._plot_2d.setBackground("k" if black else "w")
         if self._3d_view is not None:
@@ -310,15 +345,27 @@ class ScatterWindow(QWidget):
             action = colour_menu.addAction(text)
             action.setCheckable(True)
             action.setChecked(text == self._cbar_combo.currentText())
-            action.triggered.connect(lambda _checked=False, value=text: self._cbar_combo.setCurrentText(value))
+            action.triggered.connect(lambda _=False, value=text: self._cbar_combo.setCurrentText(value))
 
         cmap_menu = menu.addMenu("Colormap")
-        for i in range(self._cmap_combo.count()):
-            text = self._cmap_combo.itemText(i)
+        current_cmap = self._cmap_combo.currentText()
+        for text in _NAMED_CMAPS:
             action = cmap_menu.addAction(text)
             action.setCheckable(True)
-            action.setChecked(text == self._cmap_combo.currentText())
-            action.triggered.connect(lambda _checked=False, value=text: self._cmap_combo.setCurrentText(value))
+            action.setChecked(text == current_cmap)
+            action.triggered.connect(lambda _=False, v=text: self._cmap_combo.setCurrentText(v))
+        cmap_menu.addSeparator()
+        solid_menu = cmap_menu.addMenu("Solid color")
+        for color_name in _SOLID_COLOR_NAMES:
+            action = solid_menu.addAction(color_name)
+            action.setCheckable(True)
+            action.setChecked(current_cmap == f"solid:{color_name}")
+            action.triggered.connect(lambda _=False, cn=color_name: self._cmap_combo.setCurrentText(f"solid:{cn}"))
+        solid_menu.addSeparator()
+        custom_action = solid_menu.addAction("Custom...")
+        custom_action.setCheckable(True)
+        custom_action.setChecked(current_cmap.startswith("solid:custom:"))
+        custom_action.triggered.connect(self._pick_solid_color)
 
         bg_action = menu.addAction("Black background")
         bg_action.setCheckable(True)
@@ -359,7 +406,6 @@ class ScatterWindow(QWidget):
             self._apply_background(True)
             if self._3d_view is not None:
                 self._stack.setCurrentWidget(self._3d_view)
-                self._colorbar.setVisible(False)
         else:
             if self._last_axis_text == "3D":
                 self._black_bg_check.blockSignals(True)
@@ -367,7 +413,7 @@ class ScatterWindow(QWidget):
                 self._black_bg_check.blockSignals(False)
                 self._apply_background(self._last_2d_black_background)
             self._stack.setCurrentWidget(self._plot_2d)
-            self._colorbar.setVisible(True)
+        self._update_colorbar_visibility()
         self._last_axis_text = axis_text
         self._save_view_state()
         self._refresh()
@@ -375,8 +421,15 @@ class ScatterWindow(QWidget):
     def _on_cmap_changed(self, name: str) -> None:
         self._cmap = _load_cmap(name)
         self._colorbar.setColorMap(self._cmap)
+        self._update_colorbar_visibility()
         self._invalidate_color_cache()
         self._update_color()
+
+    def _update_colorbar_visibility(self) -> None:
+        is_3d = self._axis_combo.currentText() == "3D"
+        is_solid = self._cmap_combo.currentText().startswith("solid:")
+        is_overlay = len(self._channels) > 1
+        self._colorbar.setVisible(not is_3d and not is_solid and not is_overlay)
 
     def _update_color(self) -> None:
         self._redraw_current(save_state=True)
@@ -522,17 +575,14 @@ class ScatterWindow(QWidget):
             self._apply_background(True)
             if self._3d_view is not None:
                 self._stack.setCurrentWidget(self._3d_view)
-                self._colorbar.setVisible(False)
         else:
             self._stack.setCurrentWidget(self._plot_2d)
-            self._colorbar.setVisible(True)
+        self._update_colorbar_visibility()
 
         self._cmap_combo.blockSignals(True)
-        cmap_default = saved.get("colormap", "jet")
-        if self._cmap_combo.findText(cmap_default) >= 0:
-            self._cmap_combo.setCurrentText(cmap_default)
-        else:
-            self._cmap_combo.setCurrentText("jet")
+        prefs_cmap = self._state.prefs.get("plot", {}).get("scatter_cmap", "jet")
+        cmap_default = saved.get("colormap") or prefs_cmap
+        self._cmap_combo.setCurrentText(cmap_default)
         self._cmap_combo.blockSignals(False)
         self._cmap = _load_cmap(self._cmap_combo.currentText())
         self._colorbar.setColorMap(self._cmap)
@@ -550,12 +600,15 @@ class ScatterWindow(QWidget):
         self._cbar_combo.blockSignals(True)
         self._cbar_combo.clear()
         numeric_attrs = plot_attribute_names(ds, self._state.prefs, exclude=("ftr", "idx"))
-        self._cbar_combo.addItems(["(density)"] + numeric_attrs)
-        color_default = saved.get("color_by", old or "tid")
-        if color_default in numeric_attrs or color_default == "(density)":
+        self._cbar_combo.addItems(numeric_attrs)
+        prefs_color_by = self._state.prefs.get("plot", {}).get("scatter_color_by", "tid")
+        color_default = saved.get("color_by") or old or prefs_color_by
+        if color_default in numeric_attrs:
             self._cbar_combo.setCurrentText(color_default)
-        elif old in numeric_attrs or old == "(density)":
+        elif old in numeric_attrs:
             self._cbar_combo.setCurrentText(old)
+        elif prefs_color_by in numeric_attrs:
+            self._cbar_combo.setCurrentText(prefs_color_by)
         elif "tid" in numeric_attrs:
             self._cbar_combo.setCurrentText("tid")
         self._cbar_combo.blockSignals(False)
@@ -825,15 +878,11 @@ class ScatterWindow(QWidget):
     ) -> tuple[np.ndarray, np.ndarray, str, float, float]:
         """Return values, uint8 color bins, label, and display levels."""
         c_name = self._cbar_combo.currentText()
-        if c_name == "(density)" or c_name not in ds.attr:
-            if z is None:
-                from ..utils.filters import fast_density_2d
-                values = fast_density_2d(x, y)
-            else:
-                from ..utils.filters import fast_density_3d
-                values = fast_density_3d(x, y, z)
+        if c_name not in ds.attr:
+            n = indices.size
+            values = np.zeros(n, dtype=float)
             bins, vmin, vmax = self._map_values_to_bins(values)
-            return values, bins, "density", vmin, vmax
+            return values, bins, c_name, vmin, vmax
 
         cache = self._color_cache_for_dataset(ds, c_name)
         if cache is None:
@@ -1022,13 +1071,12 @@ class ScatterWindow(QWidget):
     def _on_lut_cmap_changed(self, name: str, invert: bool) -> None:
         from .lut_dialog import make_colormap
         self._lut_invert = bool(invert)
-        idx = self._cmap_combo.findText(name)
-        if idx >= 0:
-            self._cmap_combo.blockSignals(True)
-            self._cmap_combo.setCurrentIndex(idx)
-            self._cmap_combo.blockSignals(False)
+        self._cmap_combo.blockSignals(True)
+        self._cmap_combo.setCurrentText(name)
+        self._cmap_combo.blockSignals(False)
         self._cmap = make_colormap(name, invert=self._lut_invert)
         self._colorbar.setColorMap(self._cmap)
+        self._update_colorbar_visibility()
         self._invalidate_color_cache()
         self._update_color()
 
