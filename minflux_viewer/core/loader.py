@@ -236,7 +236,7 @@ def _parse_raw(
         # Legacy .mat (m2205 flat): itr is 2-D (nLoc × nItr).  Check dimensionality
         # after squeezing out any size-1 axes; (N,1) and (1,N) are still 1-D.
         if np.squeeze(itr_val).ndim <= 1:
-            return _parse_m2410(raw, only_valid=only_valid)
+            return _parse_m2410(raw, only_valid=only_valid, load_all_itr=load_all_itr)
         # 2-D integer itr with loc at top level → m2205 flat format
         if "loc" in raw:
             return _parse_m2205_unwrapped(raw, load_all_itr=load_all_itr,
@@ -400,12 +400,17 @@ def _dcr_is_two_channel(arr: np.ndarray, sample: int = 500) -> bool:
 # m2410 parser
 # ---------------------------------------------------------------------------
 
-def _parse_m2410(raw: dict, *, only_valid: bool = True) -> tuple[AttrStore, int, int]:
+def _parse_m2410(
+    raw: dict,
+    *,
+    only_valid: bool = True,
+    load_all_itr: bool = False,
+) -> tuple[AttrStore, int, int]:
     """
     Flat Abberior m2410 format.
 
-    Only the last (maximum) iteration index is kept; localizations at
-    earlier iterations are discarded.
+    When ``load_all_itr`` is False (default), only the last (maximum)
+    iteration index is kept. When True, all vld-passing rows are kept.
 
     Field layout in this format:
     * ``itr`` is a flat integer array of per-localisation iteration indices.
@@ -430,7 +435,7 @@ def _parse_m2410(raw: dict, *, only_valid: bool = True) -> tuple[AttrStore, int,
     max_itr = int(itr[vld].max()) if vld.any() else 0
     num_itr = max_itr + 1
 
-    mask    = vld & (itr == max_itr)
+    mask = vld if load_all_itr else vld & (itr == max_itr)
     num_loc = int(mask.sum())
 
     attrs   = AttrStore()
