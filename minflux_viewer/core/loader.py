@@ -929,6 +929,54 @@ def _build_mfx_raw_from_json_records(records: list) -> "AttrStore":
     return mfx
 
 
+# Derived attributes computed from the (last-iteration) localization position,
+# sequence, or trace. They have no genuine per-iteration value; in non-default
+# iteration views they are broadcast from the last-valid result (deferred — see
+# the Stage B redesign notes in the project notes). ``idx`` is handled separately as a
+# synthetic positional index.
+_DERIVED_BROADCAST_ATTRS = frozenset(
+    {"den", "dst", "spd", "dt", "tim_trace", "siz", "dur", "len"}
+)
+
+
+def _mfx_raw_len(raw: "AttrStore") -> int:
+    """Number of rows in the flattened raw store (0 if empty)."""
+    arr = raw.get("itr")
+    if arr is None:
+        for key in raw.keys():
+            arr = raw.get(key)
+            break
+    return int(np.asarray(arr).shape[0]) if arr is not None else 0
+
+
+def mfx_row_mask(
+    raw: "AttrStore",
+    *,
+    itr: "str | int" = "last",
+    vld_only: bool = True,
+) -> "np.ndarray | None":
+    """Boolean row selection over the flattened raw store for one (itr, vld_only).
+
+    Rows are the m2410-style flat ``(localization, iteration)`` events. ``itr``
+    is ``"last"`` (final valid iteration), ``"all"`` (every iteration), or a
+    0-based iteration index. Returns ``None`` when the store is empty.
+    """
+    n = _mfx_raw_len(raw)
+    if n == 0:
+        return None
+    itr_col = np.asarray(raw.get("itr", np.zeros(n, int))).ravel()
+    vld_col = np.asarray(raw.get("vld", np.ones(n, bool)), dtype=bool).ravel()
+    base = vld_col if vld_only else np.ones(n, bool)
+    if itr == "last":
+        max_i = int(itr_col[base].max()) if base.any() else 0
+        return base & (itr_col == max_i)
+    if itr == "all":
+        return base
+    if isinstance(itr, (int, np.integer)):
+        return base & (itr_col == int(itr))
+    return base
+
+
 def mfx_get(
     ds: "MinfluxDataset",
     attr: str,
@@ -944,18 +992,34 @@ def mfx_get(
     ds :
         Dataset to query.
     attr :
-        Attribute name, e.g. ``"efo"``, ``"cfr"``, ``"loc_x"``.
+        Attribute name, e.g. ``"efo"``, ``"cfr"``, ``"loc_x"``, ``"idx"``.
     itr :
         ``"last"`` — final iteration only (default).
         ``"all"``  — all iterations pooled.
         ``int``    — specific 0-based iteration index.
     vld_only :
         When True, return only rows where ``vld`` is True.
+
+    Notes
+    -----
+    ``idx`` is synthetic: the **1-based flattened row position** of each selected
+    row (``all`` → ``1,2,3,…``; ``last`` → ``n_itr, 2·n_itr,…``). Derived
+    attributes that have no per-iteration value (``den``, ``dst``, ``spd``, …)
+    return ``None`` here for non-default selections — broadcasting them from the
+    last-valid result is a deferred increment.
     """
     raw = getattr(ds, "mfx_raw", None)
     if raw is None or len(raw) == 0:
         val = ds.attr.get(attr)
         return np.asarray(val) if val is not None else None
+
+    mask = mfx_row_mask(raw, itr=itr, vld_only=vld_only)
+    if mask is None:
+        return None
+
+    # Synthetic 1-based flattened index of the selected rows.
+    if attr == "idx":
+        return np.flatnonzero(mask).astype(np.int64) + 1
 
     arr = raw.get(attr)
     if arr is None:
@@ -963,21 +1027,6 @@ def mfx_get(
     arr = np.asarray(arr)
     if arr.ndim == 0 or arr.size == 0:
         return arr
-
-    n       = arr.shape[0]
-    itr_col = np.asarray(raw.get("itr", np.zeros(n, int))).ravel()
-    vld_col = np.asarray(raw.get("vld", np.ones(n, bool)), dtype=bool).ravel()
-    base    = vld_col if vld_only else np.ones(n, bool)
-
-    if itr == "last":
-        max_i = int(itr_col[base].max()) if base.any() else 0
-        mask  = base & (itr_col == max_i)
-    elif itr == "all":
-        mask = base
-    elif isinstance(itr, int):
-        mask = base & (itr_col == itr)
-    else:
-        mask = base
 
     return arr[mask] if arr.ndim == 1 else arr[mask, :]
 
