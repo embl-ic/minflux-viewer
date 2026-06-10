@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 
 from ..core.app_state import AppState
 from ..core.attributes import is_trace_wise_attribute, plot_attribute_names
+from ..core.iteration import iteration_labels, ordinal, parse_iteration_label
 from ..core.loader import mfx_filter_mask, mfx_get
 from ..core.roi_selection import rectangle_bounds, value_range_mask
 from .plot_format import plot_widget
@@ -143,9 +144,10 @@ class HistogramWindow(QWidget):
         self._agg_combo.currentTextChanged.connect(self._on_histogram_aggregation_changed)
         bar.addWidget(self._agg_combo)
 
-        bar.addWidget(QLabel("Iter:"))
+        self._iter_label = QLabel("Iter:")
+        bar.addWidget(self._iter_label)
         self._iter_combo = QComboBox()
-        self._iter_combo.setMinimumWidth(64)
+        self._iter_combo.setMinimumWidth(96)
         self._iter_combo.currentTextChanged.connect(self._on_histogram_selection_changed)
         bar.addWidget(self._iter_combo)
 
@@ -269,13 +271,18 @@ class HistogramWindow(QWidget):
         self._agg_combo.blockSignals(False)
         self._enforce_trace_aggregation()
 
-        iter_opts = self._iter_options(ds)
+        iter_opts = self._iter_labels(ds)
         self._iter_combo.blockSignals(True)
         self._iter_combo.clear()
         self._iter_combo.addItems(iter_opts)
-        iter_default = str(saved.get("iter", "last"))
-        self._iter_combo.setCurrentText(iter_default if iter_default in iter_opts else "last")
+        default_label = self._default_iter_label(ds)
+        saved_label = str(saved.get("iter", "") or "")
+        self._iter_combo.setCurrentText(saved_label if saved_label in iter_opts else default_label)
         self._iter_combo.blockSignals(False)
+        # Nothing to browse for single-iteration data.
+        has_iters = bool(iter_opts)
+        self._iter_combo.setVisible(has_iters)
+        self._iter_label.setVisible(has_iters)
 
         self._zero_chk.blockSignals(True)
         self._log_chk.blockSignals(True)
@@ -308,26 +315,21 @@ class HistogramWindow(QWidget):
     def _num_itr(ds) -> int:
         return max(1, int(ds.metadata.get("raw_num_itr", ds.prop.num_itr or 1)))
 
-    def _iter_options(self, ds) -> list[str]:
-        n_itr = self._num_itr(ds)
-        opts = ["last"]
-        if n_itr > 1:
-            opts.append("all")
-            opts += [str(k) for k in range(n_itr)]
-        return opts
+    def _iter_labels(self, ds) -> list[str]:
+        return iteration_labels(self._num_itr(ds))
 
-    def _iter_selector(self):
-        text = self._iter_combo.currentText() or "last"
-        if text in ("last", "all"):
-            return text
-        try:
-            return int(text)
-        except ValueError:
-            return "last"
+    def _default_iter_label(self, ds) -> str:
+        labels = self._iter_labels(ds)
+        return f"last ({ordinal(self._num_itr(ds))})" if labels else ""
+
+    def _selection(self) -> tuple:
+        """Return (itr_selector, render_mode) for the current label."""
+        return parse_iteration_label(self._iter_combo.currentText())
 
     def _is_raw_mode(self) -> bool:
-        """True when the view shows a non-final iteration or includes invalid locs."""
-        return self._iter_selector() != "last" or not self._valid_chk.isChecked()
+        """True unless the view is the default last-iteration, valid, single series."""
+        itr_sel, render = self._selection()
+        return not (itr_sel == "last" and render == "single" and self._valid_chk.isChecked())
 
     def _clear_raw_items(self) -> None:
         for item in self._raw_items:
@@ -342,6 +344,12 @@ class HistogramWindow(QWidget):
             except Exception:
                 pass
             self._raw_legend = None
+        # PlotItem caches its legend; clearing the attribute is required or a
+        # later addLegend() returns the detached (invisible) old one.
+        try:
+            self._plot.getPlotItem().legend = None
+        except Exception:
+            pass
 
     def _raw_values(self, ds, attr_name: str, sel, vld_only: bool, agg_mode: str):
         """Return histogram values + unevaluable filter attrs for one iteration."""
@@ -383,7 +391,7 @@ class HistogramWindow(QWidget):
         attr_name = self._attr_combo.currentText()
         self._enforce_trace_aggregation()
         agg_mode = self._agg_combo.currentText()
-        sel = self._iter_selector()
+        itr_sel, render = self._selection()
         vld_only = self._valid_chk.isChecked()
 
         ds.state[self._view_state_key] = {
@@ -391,31 +399,83 @@ class HistogramWindow(QWidget):
             "aggregation": agg_mode,
             "hide_zeros": self._zero_chk.isChecked(),
             "log_data": self._log_chk.isChecked(),
-            "iter": self._iter_combo.currentText() or "last",
+            "iter": self._iter_combo.currentText() or "",
             "valid_only": vld_only,
         }
 
-        self._hist_item.setOpts(x=[], height=[], width=1)
         self._clear_raw_items()
 
-        # Gather per-series values (one series unless 'all').
-        if sel == "all":
-            n_itr = self._num_itr(ds)
-            selectors = list(range(n_itr))
-        else:
-            selectors = [sel]
-
-        probe = mfx_get(ds, attr_name, itr=selectors[0], vld_only=vld_only)
-        if probe is None:
+        # Derived attrs (den/dst/...) have no per-iteration value.
+        probe_sel = 0 if render == "stacked" else itr_sel
+        if mfx_get(ds, attr_name, itr=probe_sel, vld_only=vld_only) is None:
+            self._hist_item.setOpts(x=[], height=[], width=1)
             self._last_histogram_bounds = None
-            self._info_label.setText(f"{attr_name} has no per-iteration values.")
+            self._info_label.setText(
+                f"{attr_name} has no per-iteration values (computed from the last valid iteration)."
+            )
             self._fit_histogram_view()
             return
 
+        if render == "stacked":
+            self._draw_stacked_histogram(ds, attr_name, agg_mode, vld_only)
+        else:
+            self._draw_single_raw_histogram(ds, attr_name, agg_mode, itr_sel, vld_only, render)
+
+    def _bin_edges_for(self, vals: np.ndarray) -> tuple[np.ndarray, float]:
+        bin_width = (
+            float(self._bin_spin.value())
+            if self._auto_bin_width is not None
+            else self._default_bin_width(vals)
+        )
+        if self._auto_bin_width is None:
+            self._set_bin_spin(bin_width)
+        vmin, vmax = float(vals.min()), float(vals.max())
+        if vmax <= vmin:
+            vmax = vmin + max(bin_width, 1.0)
+        n_bins = max(1, min(int(np.ceil((vmax - vmin) / max(bin_width, 1e-12))), 4096))
+        return np.linspace(vmin, vmax, n_bins + 1), bin_width
+
+    def _draw_single_raw_histogram(self, ds, attr_name, agg_mode, itr_sel, vld_only, render) -> None:
+        """One filled-bar series — same look as the default view, different rows."""
+        sel = "all" if render == "flatten" else itr_sel
+        vals, uneval = self._raw_values(ds, attr_name, sel, vld_only, agg_mode)
+        vals = self._transform_hist_values(vals)
+        if vals.size == 0:
+            self._hist_item.setOpts(x=[], height=[], width=1)
+            self._last_histogram_bounds = None
+            self._info_label.setText("No histogram values for this selection.")
+            self._fit_histogram_view()
+            return
+
+        edges, bin_width = self._bin_edges_for(vals)
+        counts, edges = np.histogram(vals, bins=edges)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        width = edges[1] - edges[0]
+        self._hist_item.setOpts(x=centers, height=counts, width=width * 0.95, brush="steelblue")
+        max_count = float(counts.max()) if counts.size else 1.0
+        self._last_histogram_bounds = (float(edges[0]), float(edges[-1]), 0.0, max(max_count, 1.0))
+
+        x_label = f"log({attr_name})" if self._log_chk.isChecked() else attr_name
+        self._plot.setLabel("bottom", f"{x_label}  [{agg_mode}]")
+        sel_label = self._iter_combo.currentText()
+        note = f"{vals.size:,} values  |  {sel_label}  |  {attr_name} [{agg_mode}]  |  bin {bin_width:.6g}"
+        if not vld_only:
+            note += "  |  incl. invalid"
+        if uneval:
+            note += f"  |  filter on {', '.join(uneval)} not applied"
+        self._info_label.setText(note)
+        self._remember_histogram_controls()
+        self._fit_histogram_view()
+
+    def _draw_stacked_histogram(self, ds, attr_name, agg_mode, vld_only) -> None:
+        """One transparent filled step-histogram per iteration, with a legend."""
+        n_itr = self._num_itr(ds)
+        self._hist_item.setOpts(x=[], height=[], width=1)   # hide the single-series bars
+
         series: list[tuple[int, np.ndarray]] = []
         uneval: list[str] = []
-        for k in selectors:
-            vals, un = self._raw_values(ds, attr_name, k if sel == "all" else sel, vld_only, agg_mode)
+        for k in range(n_itr):
+            vals, un = self._raw_values(ds, attr_name, k, vld_only, agg_mode)
             uneval = un or uneval
             vals = self._transform_hist_values(vals)
             if vals.size:
@@ -427,42 +487,33 @@ class HistogramWindow(QWidget):
             self._fit_histogram_view()
             return
 
-        # Shared bin edges across all series.
         pooled = np.concatenate([v for _k, v in series])
-        bin_width = float(self._bin_spin.value()) if self._auto_bin_width is not None else self._default_bin_width(pooled)
-        if self._auto_bin_width is None:
-            self._set_bin_spin(bin_width)
-        vmin, vmax = float(pooled.min()), float(pooled.max())
-        if vmax <= vmin:
-            vmax = vmin + max(bin_width, 1.0)
-        n_bins = max(1, min(int(np.ceil((vmax - vmin) / max(bin_width, 1e-12))), 4096))
-        edges = np.linspace(vmin, vmax, n_bins + 1)
-        centers = 0.5 * (edges[:-1] + edges[1:])
+        edges, bin_width = self._bin_edges_for(pooled)
 
+        # More overlaid iterations -> more transparent so overlaps stay readable.
+        alpha = int(np.clip(round(255.0 / max(len(series), 1) * 1.4), 45, 200))
+        self._raw_legend = self._plot.addLegend(offset=(-10, 10))
         max_count = 1.0
-        multi = sel == "all"
-        if multi:
-            self._raw_legend = self._plot.addLegend(offset=(-10, 10))
         for k, vals in series:
             counts, _ = np.histogram(vals, bins=edges)
             max_count = max(max_count, float(counts.max()) if counts.size else 1.0)
-            color = _iter_color(k) if multi else (70, 130, 180)
-            curve = pg.PlotCurveItem(
-                x=edges, y=counts, stepMode="center",
-                pen=pg.mkPen(color, width=2),
+            r, g, b = _iter_color(k)
+            # self._plot.plot(name=...) registers a legend sample reliably.
+            item = self._plot.plot(
+                edges, counts, stepMode="center", fillLevel=0,
+                brush=(r, g, b, alpha), pen=pg.mkPen(r, g, b, width=1),
+                name=ordinal(k + 1),
             )
-            self._plot.addItem(curve)
-            self._raw_items.append(curve)
-            if multi and self._raw_legend is not None:
-                self._raw_legend.addItem(curve, f"itr {k}")
+            self._raw_items.append(item)
 
         self._last_histogram_bounds = (float(edges[0]), float(edges[-1]), 0.0, max(max_count, 1.0))
         x_label = f"log({attr_name})" if self._log_chk.isChecked() else attr_name
         self._plot.setLabel("bottom", f"{x_label}  [{agg_mode}]")
-
-        sel_label = "all iters" if multi else (f"itr {sel}" if sel != "last" else "last")
         total = int(sum(v.size for _k, v in series))
-        note = f"{total:,} values  |  {sel_label}  |  {attr_name} [{agg_mode}]  |  bin {bin_width:.6g}"
+        note = (
+            f"{total:,} values across {len(series)} iterations  |  all [stacked]  |  "
+            f"{attr_name} [{agg_mode}]  |  bin {bin_width:.6g}"
+        )
         if not vld_only:
             note += "  |  incl. invalid"
         if uneval:
@@ -499,7 +550,7 @@ class HistogramWindow(QWidget):
             "aggregation": agg_mode,
             "hide_zeros": self._zero_chk.isChecked(),
             "log_data": self._log_chk.isChecked(),
-            "iter": "last",
+            "iter": self._iter_combo.currentText() or "",
             "valid_only": True,
         }
         raw = np.asarray(ds.attr.get(attr_name, np.empty(0))).ravel().astype(float)
@@ -822,7 +873,9 @@ class HistogramWindow(QWidget):
         if self._is_raw_mode():
             self._iter_combo.blockSignals(True)
             self._valid_chk.blockSignals(True)
-            self._iter_combo.setCurrentText("last")
+            ds0 = self._dataset()
+            if ds0 is not None:
+                self._iter_combo.setCurrentText(self._default_iter_label(ds0))
             self._valid_chk.setChecked(True)
             self._iter_combo.blockSignals(False)
             self._valid_chk.blockSignals(False)
