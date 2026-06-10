@@ -704,7 +704,8 @@ class HistogramWindow(QWidget):
         prefs = self._state.prefs.get("plot", {})
         range_color = _named_color(str(prefs.get("filter_range_color", "Green")))
         bounds_color = _named_color(str(prefs.get("filter_bounds_color", "Green")))
-        alpha = int(prefs.get("filter_range_alpha", 45))
+        alpha_pct = int(prefs.get("filter_range_alpha", 45))
+        alpha = round(alpha_pct * 255 / 100)
         return range_color, max(0, min(alpha, 255)), bounds_color
 
     def _on_filter_scene_clicked(self, event) -> None:

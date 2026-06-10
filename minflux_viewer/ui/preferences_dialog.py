@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QFrame,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -65,10 +66,14 @@ _RENDER_CMAPS = [
     "Turbo", "Gray",
 ]
 
-_PLOT_CMAPS = [
+_ATTR_CMAPS = [
     "single color", "Viridis", "Inferno", "Magma", "Plasma",
     "Hot", "Gray",
 ]
+
+_SCATTER_CMAPS = ["glasbey", "jet", "HiLo", "parula", "turbo", "hot"]
+
+_SCATTER_COLOR_BY_OPTIONS = ["tid", "efo", "cfr", "dcr", "den", "vld", "itr", "eco", "ecc"]
 
 _ROI_COLORS = [
     "Yellow", "Red", "Green", "Cyan", "Magenta", "White", "Black",
@@ -315,9 +320,26 @@ class PreferencesDialog(QDialog):
 
         # Compute section
         root.addWidget(self._section_label("Compute:"))
-        self._compute_rimf     = QCheckBox("RIMF value (Z scaling factor)")
+
+        rimf_row = QHBoxLayout()
+        rimf_row.addSpacing(18)
+        self._compute_rimf = QCheckBox("RIMF value (Z scaling factor)")
+        rimf_row.addWidget(self._compute_rimf)
+        self._use_fixed_rimf = QCheckBox("use fixed value")
+        rimf_row.addWidget(self._use_fixed_rimf)
+        self._rimf_spin = QDoubleSpinBox()
+        self._rimf_spin.setRange(0.0, 10.0)
+        self._rimf_spin.setDecimals(2)
+        self._rimf_spin.setSingleStep(0.01)
+        self._rimf_spin.setMaximumWidth(80)
+        rimf_row.addWidget(self._rimf_spin)
+        rimf_row.addStretch()
+        root.addLayout(rimf_row)
+
+        self._compute_rimf.toggled.connect(self._on_compute_rimf_toggled)
+        self._use_fixed_rimf.toggled.connect(self._on_use_fixed_rimf_toggled)
+
         self._compute_loc_prec = QCheckBox("Localization Precision")
-        root.addLayout(self._indent(self._compute_rimf))
         root.addLayout(self._indent(self._compute_loc_prec))
 
         density_row = QHBoxLayout()
@@ -394,21 +416,14 @@ class PreferencesDialog(QDialog):
     def _build_plot_tab(self) -> QWidget:
         w = QWidget()
         root = QVBoxLayout(w)
-        root.setContentsMargins(20, 24, 20, 20)
+        root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
 
-        root.addWidget(self._section_label("Default parameters:"))
-
-        form = QFormLayout()
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(10)
-
-        self._rimf_spin = QDoubleSpinBox()
-        self._rimf_spin.setRange(0.0, 10.0)
-        self._rimf_spin.setDecimals(2)
-        self._rimf_spin.setSingleStep(0.01)
-        self._rimf_spin.setMaximumWidth(120)
-        form.addRow("RIMF", self._rimf_spin)
+        # ── Render View ──────────────────────────────────────────────
+        grp_render = QGroupBox("Render View")
+        form_render = QFormLayout(grp_render)
+        form_render.setHorizontalSpacing(12)
+        form_render.setVerticalSpacing(6)
 
         pixel_row = QHBoxLayout()
         self._px_spin = QDoubleSpinBox()
@@ -419,37 +434,46 @@ class PreferencesDialog(QDialog):
         pixel_row.addWidget(self._px_spin)
         pixel_row.addWidget(QLabel("nm"))
         pixel_row.addStretch()
-        form.addRow("render pixel size", pixel_row)
+        form_render.addRow("Pixel size", pixel_row)
 
         self._render_cmap_combo = QComboBox()
         self._render_cmap_combo.addItems(_RENDER_CMAPS)
-        form.addRow("render colormap", self._render_cmap_combo)
+        form_render.addRow("Colormap", self._render_cmap_combo)
+
+        root.addWidget(grp_render)
+
+        # ── Scatter Plot ─────────────────────────────────────────────
+        grp_scatter = QGroupBox("Scatter Plot")
+        form_scatter = QFormLayout(grp_scatter)
+        form_scatter.setHorizontalSpacing(12)
+        form_scatter.setVerticalSpacing(6)
+
+        self._scatter_color_by_combo = QComboBox()
+        self._scatter_color_by_combo.addItems(_SCATTER_COLOR_BY_OPTIONS)
+        form_scatter.addRow("Colour by", self._scatter_color_by_combo)
+
+        self._scatter_cmap_combo = QComboBox()
+        self._scatter_cmap_combo.addItems(_SCATTER_CMAPS)
+        form_scatter.addRow("Colormap", self._scatter_cmap_combo)
+
+        root.addWidget(grp_scatter)
+
+        # ── Attribute Plot ───────────────────────────────────────────
+        grp_attr = QGroupBox("Attribute Plot")
+        form_attr = QFormLayout(grp_attr)
+        form_attr.setHorizontalSpacing(12)
+        form_attr.setVerticalSpacing(6)
 
         self._plot_cmap_combo = QComboBox()
-        self._plot_cmap_combo.addItems(_PLOT_CMAPS)
-        form.addRow("Plot colormap", self._plot_cmap_combo)
+        self._plot_cmap_combo.addItems(_ATTR_CMAPS)
+        form_attr.addRow("Colormap", self._plot_cmap_combo)
 
-        self._roi_color_combo = QComboBox()
-        self._roi_color_combo.addItems(_ROI_COLORS)
-        form.addRow("ROI color", self._roi_color_combo)
+        root.addWidget(grp_attr)
 
-        filter_color_row = QHBoxLayout()
-        self._filter_range_color_combo = QComboBox()
-        self._filter_range_color_combo.addItems(_ROI_COLORS)
-        filter_color_row.addWidget(QLabel("Filter range color"))
-        filter_color_row.addWidget(self._filter_range_color_combo)
-        filter_color_row.addWidget(QLabel("transparency"))
-        self._filter_range_alpha = QSpinBox()
-        self._filter_range_alpha.setRange(0, 255)
-        self._filter_range_alpha.setToolTip("0 is fully transparent, 255 is fully opaque.")
-        self._filter_range_alpha.setMaximumWidth(70)
-        filter_color_row.addWidget(self._filter_range_alpha)
-        filter_color_row.addWidget(QLabel("Filter bounds color"))
-        self._filter_bounds_color_combo = QComboBox()
-        self._filter_bounds_color_combo.addItems(_ROI_COLORS)
-        filter_color_row.addWidget(self._filter_bounds_color_combo)
-        filter_color_row.addStretch()
-        form.addRow("Filter color", filter_color_row)
+        # ── Histogram Plot ───────────────────────────────────────────
+        grp_hist = QGroupBox("Histogram Plot")
+        hist_layout = QVBoxLayout(grp_hist)
+        hist_layout.setSpacing(4)
 
         hist_values = QHBoxLayout()
         self._hist_trace_mean = QCheckBox("trace mean")
@@ -464,9 +488,84 @@ class PreferencesDialog(QDialog):
         ):
             hist_values.addWidget(cb)
         hist_values.addStretch()
-        form.addRow("Histogram values", hist_values)
+        hist_layout.addLayout(hist_values)
 
-        root.addLayout(form)
+        root.addWidget(grp_hist)
+
+        # ── Filter ───────────────────────────────────────────────────
+        grp_filter = QGroupBox("Filter")
+        form_filter = QFormLayout(grp_filter)
+        form_filter.setHorizontalSpacing(12)
+        form_filter.setVerticalSpacing(6)
+
+        range_row = QHBoxLayout()
+        self._filter_range_color_combo = QComboBox()
+        self._filter_range_color_combo.addItems(_ROI_COLORS)
+        range_row.addWidget(self._filter_range_color_combo)
+        range_row.addWidget(QLabel("transparency"))
+        self._filter_range_alpha = QSpinBox()
+        self._filter_range_alpha.setRange(0, 100)
+        self._filter_range_alpha.setToolTip("Filter fill opacity as percentage (0 = transparent, 100 = opaque).")
+        self._filter_range_alpha.setMaximumWidth(55)
+        self._filter_range_alpha.setSuffix(" %")
+        range_row.addWidget(self._filter_range_alpha)
+        range_row.addStretch()
+        form_filter.addRow("Range color", range_row)
+
+        bounds_row = QHBoxLayout()
+        self._filter_bounds_color_combo = QComboBox()
+        self._filter_bounds_color_combo.addItems(_ROI_COLORS)
+        bounds_row.addWidget(self._filter_bounds_color_combo)
+        bounds_row.addWidget(QLabel("size"))
+        self._filter_bounds_size = QSpinBox()
+        self._filter_bounds_size.setRange(1, 10)
+        self._filter_bounds_size.setMaximumWidth(55)
+        bounds_row.addWidget(self._filter_bounds_size)
+        bounds_row.addWidget(QLabel("px"))
+        bounds_row.addStretch()
+        form_filter.addRow("Bounds color", bounds_row)
+
+        root.addWidget(grp_filter)
+
+        # ── ROI ──────────────────────────────────────────────────────
+        grp_roi = QGroupBox("ROI")
+        form_roi = QFormLayout(grp_roi)
+        form_roi.setHorizontalSpacing(12)
+        form_roi.setVerticalSpacing(6)
+
+        roi_color_row = QHBoxLayout()
+        self._roi_color_combo = QComboBox()
+        self._roi_color_combo.addItems(_ROI_COLORS)
+        roi_color_row.addWidget(self._roi_color_combo)
+        roi_color_row.addWidget(QLabel("transparency"))
+        self._roi_transparency = QSpinBox()
+        self._roi_transparency.setRange(0, 100)
+        self._roi_transparency.setMaximumWidth(55)
+        self._roi_transparency.setSuffix(" %")
+        roi_color_row.addWidget(self._roi_transparency)
+        roi_color_row.addStretch()
+        form_roi.addRow("Color", roi_color_row)
+
+        edge_row = QHBoxLayout()
+        self._roi_edge_size = QSpinBox()
+        self._roi_edge_size.setRange(1, 10)
+        self._roi_edge_size.setMaximumWidth(55)
+        edge_row.addWidget(self._roi_edge_size)
+        edge_row.addWidget(QLabel("px"))
+        edge_row.addStretch()
+        form_roi.addRow("Edge size", edge_row)
+
+        widget_row = QHBoxLayout()
+        self._roi_edit_widget_size = QSpinBox()
+        self._roi_edit_widget_size.setRange(4, 32)
+        self._roi_edit_widget_size.setMaximumWidth(55)
+        widget_row.addWidget(self._roi_edit_widget_size)
+        widget_row.addWidget(QLabel("px"))
+        widget_row.addStretch()
+        form_roi.addRow("Edit widget size", widget_row)
+
+        root.addWidget(grp_roi)
+
         root.addStretch()
         return w
 
@@ -698,6 +797,20 @@ class PreferencesDialog(QDialog):
         if path:
             self._msr_temp_edit.setText(path)
 
+    def _on_compute_rimf_toggled(self, checked: bool) -> None:
+        if checked:
+            self._use_fixed_rimf.blockSignals(True)
+            self._use_fixed_rimf.setChecked(False)
+            self._use_fixed_rimf.blockSignals(False)
+            self._rimf_spin.setEnabled(False)
+
+    def _on_use_fixed_rimf_toggled(self, checked: bool) -> None:
+        if checked:
+            self._compute_rimf.blockSignals(True)
+            self._compute_rimf.setChecked(False)
+            self._compute_rimf.blockSignals(False)
+        self._rimf_spin.setEnabled(checked)
+
     # ------------------------------------------------------------------
     # Data flow — draft ↔ widgets ↔ prefs
     # ------------------------------------------------------------------
@@ -723,7 +836,12 @@ class PreferencesDialog(QDialog):
         self._enforce_z.setChecked(bool(d.get("enforce_min_z_range", True)))
         self._min_z_spin.setValue(float(d.get("min_z_range_nm", 5.0)))
         self._min_z_spin.setEnabled(self._enforce_z.isChecked())
-        self._compute_rimf.setChecked(bool(d.get("compute_rimf", False)))
+        compute_rimf = bool(d.get("compute_rimf", False))
+        use_fixed = bool(p.get("use_fixed_rimf", False))
+        self._compute_rimf.setChecked(compute_rimf)
+        self._use_fixed_rimf.setChecked(use_fixed)
+        self._rimf_spin.setValue(float(p.get("rimf_value", 0.67)))
+        self._rimf_spin.setEnabled(use_fixed)
         self._compute_loc_prec.setChecked(bool(d.get("compute_loc_prec", False)))
         self._compute_density.setChecked(bool(d.get("compute_local_density", False)))
         self._density_radius.setValue(float(d.get("local_density_radius", 100)))
@@ -738,19 +856,22 @@ class PreferencesDialog(QDialog):
         self._show_render.setChecked(bool(d.get("show_render", False)))
 
         # Plot
-        self._rimf_spin.setValue(float(p.get("rimf_value", 0.67)))
         self._px_spin.setValue(float(p.get("render_pixel_size", 2)))
-        self._set_combo(self._render_cmap_combo, p.get("render_cmap", "Hot"),
-                        _RENDER_CMAPS)
-        self._set_combo(self._plot_cmap_combo, p.get("scatter_cmap", "single color"),
-                        _PLOT_CMAPS)
-        self._set_combo(self._roi_color_combo, p.get("roi_color", "Yellow"),
-                        _ROI_COLORS)
+        self._set_combo(self._render_cmap_combo, p.get("render_cmap", "Hot"), _RENDER_CMAPS)
+        self._set_combo(self._scatter_color_by_combo, p.get("scatter_color_by", "tid"),
+                        _SCATTER_COLOR_BY_OPTIONS)
+        self._set_combo(self._scatter_cmap_combo, p.get("scatter_cmap", "jet"), _SCATTER_CMAPS)
+        self._set_combo(self._plot_cmap_combo, p.get("attr_cmap", "single color"), _ATTR_CMAPS)
+        self._set_combo(self._roi_color_combo, p.get("roi_color", "Yellow"), _ROI_COLORS)
+        self._roi_transparency.setValue(int(p.get("roi_transparency", 50)))
+        self._roi_edge_size.setValue(int(p.get("roi_edge_size", 1)))
+        self._roi_edit_widget_size.setValue(int(p.get("roi_edit_widget_size", 8)))
         self._set_combo(self._filter_range_color_combo, p.get("filter_range_color", "Green"),
                         _ROI_COLORS)
         self._filter_range_alpha.setValue(int(p.get("filter_range_alpha", 45)))
         self._set_combo(self._filter_bounds_color_combo, p.get("filter_bounds_color", "Green"),
                         _ROI_COLORS)
+        self._filter_bounds_size.setValue(int(p.get("filter_bounds_size", 1)))
         hist_values = set(p.get("histogram_values", ["trace mean"]))
         self._hist_trace_mean.setChecked("trace mean" in hist_values)
         self._hist_trace_median.setChecked("trace median" in hist_values)
@@ -803,6 +924,8 @@ class PreferencesDialog(QDialog):
         d["enforce_min_z_range"] = bool(self._enforce_z.isChecked())
         d["min_z_range_nm"] = float(self._min_z_spin.value())
         d["compute_rimf"] = bool(self._compute_rimf.isChecked())
+        p["use_fixed_rimf"] = bool(self._use_fixed_rimf.isChecked())
+        p["rimf_value"] = float(self._rimf_spin.value())
         d["compute_loc_prec"] = bool(self._compute_loc_prec.isChecked())
         d["compute_local_density"] = bool(self._compute_density.isChecked())
         d["local_density_radius"] = float(self._density_radius.value())
@@ -817,14 +940,19 @@ class PreferencesDialog(QDialog):
         d["show_render"] = bool(self._show_render.isChecked())
 
         # Plot
-        p["rimf_value"] = float(self._rimf_spin.value())
         p["render_pixel_size"] = float(self._px_spin.value())
         p["render_cmap"] = self._render_cmap_combo.currentText()
-        p["scatter_cmap"] = self._plot_cmap_combo.currentText()
+        p["scatter_color_by"] = self._scatter_color_by_combo.currentText()
+        p["scatter_cmap"] = self._scatter_cmap_combo.currentText()
+        p["attr_cmap"] = self._plot_cmap_combo.currentText()
         p["roi_color"] = self._roi_color_combo.currentText()
+        p["roi_transparency"] = int(self._roi_transparency.value())
+        p["roi_edge_size"] = int(self._roi_edge_size.value())
+        p["roi_edit_widget_size"] = int(self._roi_edit_widget_size.value())
         p["filter_range_color"] = self._filter_range_color_combo.currentText()
         p["filter_range_alpha"] = int(self._filter_range_alpha.value())
         p["filter_bounds_color"] = self._filter_bounds_color_combo.currentText()
+        p["filter_bounds_size"] = int(self._filter_bounds_size.value())
         hist_values = []
         for name, cb in (
             ("trace mean", self._hist_trace_mean),
