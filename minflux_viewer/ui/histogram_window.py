@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
 from ..core.app_state import AppState
 from ..core.attributes import is_trace_wise_attribute, plot_attribute_names
 from ..core.iteration import iteration_labels, ordinal, parse_iteration_label
-from ..core.loader import mfx_filter_mask, mfx_get
+from ..core.loader import attr_matches_last_valid, mfx_filter_mask, mfx_get
 from ..core.roi_selection import rectangle_bounds, value_range_mask
 from .plot_format import plot_widget
 
@@ -327,9 +327,17 @@ class HistogramWindow(QWidget):
         return parse_iteration_label(self._iter_combo.currentText())
 
     def _is_raw_mode(self) -> bool:
-        """True unless the view is the default last-iteration, valid, single series."""
+        """True unless the view is the default last-iteration, valid, single series.
+
+        The default (ds.attr) path is only valid when ds.attr actually is the
+        last-valid materialization; for all-iteration loads, even a ``last``
+        selection must come from the raw store.
+        """
         itr_sel, render = self._selection()
-        return not (itr_sel == "last" and render == "single" and self._valid_chk.isChecked())
+        if not (itr_sel == "last" and render == "single" and self._valid_chk.isChecked()):
+            return True
+        ds = self._dataset()
+        return ds is not None and not attr_matches_last_valid(ds)
 
     def _clear_raw_items(self) -> None:
         for item in self._raw_items:

@@ -1084,6 +1084,24 @@ def mfx_filter_mask(
     return mask, unevaluable
 
 
+def attr_matches_last_valid(ds: "MinfluxDataset") -> bool:
+    """True when ``ds.attr`` is the last-iteration, valid-only materialization.
+
+    This holds for the common ``iter_load="last"`` case, where the default plot
+    path (``ds.attr`` + ``ds.filter_mask``) equals the ``last`` iteration
+    selection. It is False when the dataset was loaded with all iterations
+    (``iter_load="all"``) or invalid localizations, so a ``last`` view must be
+    taken from the raw store instead of ``ds.attr``.
+    """
+    raw = getattr(ds, "mfx_raw", None)
+    if raw is None or len(raw) == 0:
+        return True
+    mask = mfx_row_mask(raw, itr="last", vld_only=True)
+    if mask is None:
+        return True
+    return int(mask.sum()) == int(getattr(ds.prop, "num_loc", 0))
+
+
 # ---------------------------------------------------------------------------
 # Derived properties
 # ---------------------------------------------------------------------------

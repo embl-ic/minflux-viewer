@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
 from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
 from ..core.iteration import iteration_labels, ordinal, parse_iteration_label
-from ..core.loader import mfx_filter_mask, mfx_get
+from ..core.loader import attr_matches_last_valid, mfx_filter_mask, mfx_get
 from ..core.roi_selection import rectangle_mask
 from .plot_format import plot_widget
 
@@ -292,8 +292,10 @@ class AttributeWindow(QWidget):
         Default selection (last + valid) uses the materialized ``ds.attr`` store
         so derived attributes (den, dst, ...) plot as before. Other selections
         use the raw store, where only raw attributes + ``idx`` are available.
+        The ds.attr path is valid only when ds.attr is the last-valid
+        materialization (``iter_load="last"``).
         """
-        default = (sel == "last" and vld_only)
+        default = (sel == "last" and vld_only and attr_matches_last_valid(ds))
         missing: list[str] = []
 
         x = self._axis_values(ds, x_name, sel, vld_only, default)
@@ -402,7 +404,9 @@ class AttributeWindow(QWidget):
         # store. It cannot be mapped when the view shows a different iteration
         # or includes invalid localizations.
         itr_sel, render = self._selection()
-        if itr_sel != "last" or render != "single" or not self._valid_chk.isChecked():
+        if (itr_sel != "last" or render != "single"
+                or not self._valid_chk.isChecked()
+                or not attr_matches_last_valid(ds)):
             return None
         x_name = self._x_combo.currentText()
         y_name = self._y_combo.currentText()
