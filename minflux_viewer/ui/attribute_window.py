@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
+from ..core.iteration import iteration_labels, ordinal, parse_iteration_label
 from ..core.loader import mfx_filter_mask, mfx_get
 from ..core.roi_selection import rectangle_mask
 from .plot_format import plot_widget
@@ -99,9 +100,10 @@ class AttributeWindow(QWidget):
         self._y_combo.currentTextChanged.connect(self._draw)
         bar.addWidget(self._y_combo)
 
-        bar.addWidget(QLabel("Iter:"))
+        self._iter_label = QLabel("Iter:")
+        bar.addWidget(self._iter_label)
         self._iter_combo = QComboBox()
-        self._iter_combo.setMinimumWidth(70)
+        self._iter_combo.setMinimumWidth(96)
         self._iter_combo.currentTextChanged.connect(self._draw)
         bar.addWidget(self._iter_combo)
 
@@ -183,14 +185,18 @@ class AttributeWindow(QWidget):
                 combo.setCurrentText(old)
             combo.blockSignals(False)
 
-        # Iteration dropdown: last / all / 0..n_itr-1
-        iter_opts = self._iter_options(ds)
+        # Iteration dropdown: 1st … last (Nth) · all [flatten] · all [stacked]
+        iter_opts = self._iter_labels(ds)
         self._iter_combo.blockSignals(True)
         self._iter_combo.clear()
         self._iter_combo.addItems(iter_opts)
-        iter_default = str(saved.get("iter", "last"))
-        self._iter_combo.setCurrentText(iter_default if iter_default in iter_opts else "last")
+        default_label = self._default_iter_label(ds)
+        saved_label = str(saved.get("iter", "") or "")
+        self._iter_combo.setCurrentText(saved_label if saved_label in iter_opts else default_label)
         self._iter_combo.blockSignals(False)
+        has_iters = bool(iter_opts)
+        self._iter_combo.setVisible(has_iters)
+        self._iter_label.setVisible(has_iters)
 
         x_default = saved.get("x", "idx")
         y_default = saved.get("y", "efo")
@@ -224,23 +230,16 @@ class AttributeWindow(QWidget):
     def _num_itr(ds) -> int:
         return max(1, int(ds.metadata.get("raw_num_itr", ds.prop.num_itr or 1)))
 
-    def _iter_options(self, ds) -> list[str]:
-        n_itr = self._num_itr(ds)
-        opts = ["last"]
-        if n_itr > 1:
-            opts.append("all")
-            opts += [str(k) for k in range(n_itr)]
-        return opts
+    def _iter_labels(self, ds) -> list[str]:
+        return iteration_labels(self._num_itr(ds))
 
-    def _iter_selector(self):
-        """Return the current iteration selector: 'last', 'all', or int."""
-        text = self._iter_combo.currentText() or "last"
-        if text in ("last", "all"):
-            return text
-        try:
-            return int(text)
-        except ValueError:
-            return "last"
+    def _default_iter_label(self, ds) -> str:
+        labels = self._iter_labels(ds)
+        return f"last ({ordinal(self._num_itr(ds))})" if labels else ""
+
+    def _selection(self) -> tuple:
+        """Return (itr_selector, render_mode) for the current label."""
+        return parse_iteration_label(self._iter_combo.currentText())
 
     def _clear_series(self) -> None:
         for curve, scatter in self._series_items:
@@ -253,68 +252,85 @@ class AttributeWindow(QWidget):
             except Exception:
                 pass
             self._legend = None
+        # PlotItem caches its legend; clear it or a later addLegend() returns
+        # the detached (invisible) old one.
+        try:
+            self._plot.getPlotItem().legend = None
+        except Exception:
+            pass
 
     def _add_series(self, x, y, color, *, use_lines: bool, name: str | None = None):
-        curve = self._plot.plot(pen=pg.mkPen(color, width=1) if use_lines else None)
+        # self._plot.plot(name=...) registers a legend sample reliably.
+        curve = self._plot.plot(
+            x if use_lines else [], y if use_lines else [],
+            pen=pg.mkPen(color, width=1) if use_lines else None,
+            name=name if use_lines else None,
+        )
         scatter = pg.ScatterPlotItem(size=3, pen=None, brush=pg.mkBrush(*color))
+        scatter.setData([] if use_lines else x, [] if use_lines else y)
         self._plot.addItem(scatter)
-        if use_lines:
-            curve.setData(x, y)
-            scatter.setData([], [])
-        else:
-            curve.setData([], [])
-            scatter.setData(x, y)
         self._series_items.append((curve, scatter))
-        if name is not None and self._legend is not None:
+        if name is not None and not use_lines and self._legend is not None:
             self._legend.addItem(scatter, name)
 
-    def _series_data(self, ds, x_name, y_name, sel, vld_only, filtered_only):
-        """Return downsampled (x, y, n_total, unevaluable) for one iteration selector.
+    def _axis_values(self, ds, name, sel, vld_only, default):
+        """Values for one axis. ``idx`` is always the synthetic flattened index;
+        other attributes use ds.attr in the default view, raw store otherwise."""
+        if name == "idx":
+            v = mfx_get(ds, "idx",
+                        itr="last" if default else sel,
+                        vld_only=True if default else vld_only)
+        elif default:
+            v = ds.attr.get(name)
+        else:
+            v = mfx_get(ds, name, itr=sel, vld_only=vld_only)
+        return None if v is None else np.asarray(v).ravel().astype(float)
 
-        The default selection (last iteration + valid only) uses the
-        materialized ``ds.attr`` store, so derived attributes (idx, den, ...)
-        plot exactly as before. Other selections use the raw all-iteration
-        store, where derived attributes have no per-iteration values.
+    def _series_data(self, ds, x_name, y_name, sel, vld_only, filtered_only):
+        """Return downsampled (x, y, n_total, missing) for one iteration selector.
+
+        Default selection (last + valid) uses the materialized ``ds.attr`` store
+        so derived attributes (den, dst, ...) plot as before. Other selections
+        use the raw store, where only raw attributes + ``idx`` are available.
         """
         default = (sel == "last" and vld_only)
-        unevaluable: list[str] = []
+        missing: list[str] = []
 
-        if default:
-            x = np.asarray(ds.attr.get(x_name, np.empty(0))).ravel().astype(float)
-            y = np.asarray(ds.attr.get(y_name, np.empty(0))).ravel().astype(float)
-            n = min(x.size, y.size)
-            x, y = x[:n], y[:n]
-            if filtered_only and n:
+        x = self._axis_values(ds, x_name, sel, vld_only, default)
+        y = self._axis_values(ds, y_name, sel, vld_only, default)
+        if x is None or y is None:
+            return np.empty(0), np.empty(0), 0, [a for a, v in ((x_name, x), (y_name, y)) if v is None]
+
+        # Keep idx aligned to the other axis if their lengths disagree
+        # (only happens in non-default load modes).
+        if x.size != y.size:
+            if x_name == "idx" and y.size:
+                x = np.arange(1, y.size + 1, dtype=float)
+            elif y_name == "idx" and x.size:
+                y = np.arange(1, x.size + 1, dtype=float)
+        n = min(x.size, y.size)
+        x, y = x[:n], y[:n]
+
+        if filtered_only and n:
+            if default:
                 fmask = np.asarray(ds.filter_mask, dtype=bool).ravel()
                 if fmask.shape[0] == n:
                     x, y = x[fmask], y[fmask]
                     n = x.size
-        else:
-            xv = mfx_get(ds, x_name, itr=sel, vld_only=vld_only)
-            yv = mfx_get(ds, y_name, itr=sel, vld_only=vld_only)
-            if xv is None or yv is None:
-                # Derived attribute without per-iteration values.
-                missing = [a for a, v in ((x_name, xv), (y_name, yv)) if v is None]
-                return np.empty(0), np.empty(0), 0, missing
-            x = np.asarray(xv).ravel().astype(float)
-            y = np.asarray(yv).ravel().astype(float)
-            n = min(x.size, y.size)
-            x, y = x[:n], y[:n]
-            if filtered_only and n:
+            else:
                 res = mfx_filter_mask(ds, itr=sel, vld_only=vld_only)
                 if res is not None:
-                    fmask, unevaluable = res
+                    fmask, missing = res
                     if fmask.shape[0] == n:
                         x, y = x[fmask], y[fmask]
                         n = x.size
 
         if n == 0:
-            return np.empty(0), np.empty(0), 0, unevaluable
-        # Downsample for rendering performance.
+            return np.empty(0), np.empty(0), 0, missing
         if n > 50_000:
             step = n // 50_000
-            return x[::step], y[::step], n, unevaluable
-        return x, y, n, unevaluable
+            return x[::step], y[::step], n, missing
+        return x, y, n, missing
 
     def _draw(self) -> None:
         ds = self._dataset()
@@ -326,7 +342,7 @@ class AttributeWindow(QWidget):
         if not x_name or not y_name:
             return
 
-        sel = self._iter_selector()
+        itr_sel, render = self._selection()
         vld_only = self._valid_chk.isChecked()
         filtered_only = self._filter_chk.isChecked()
         use_lines = self._lines_chk.isChecked()
@@ -336,36 +352,38 @@ class AttributeWindow(QWidget):
             "y": y_name,
             "lines": use_lines,
             "filtered_only": filtered_only,
-            "iter": self._iter_combo.currentText() or "last",
+            "iter": self._iter_combo.currentText() or "",
             "valid_only": vld_only,
         }
 
         self._clear_series()
 
-        if sel == "all":
+        if render == "stacked":
             n_itr = self._num_itr(ds)
             self._legend = self._plot.addLegend(offset=(-10, 10))
             total = 0
-            uneval: list[str] = []
+            missing: list[str] = []
             for k in range(n_itr):
-                x, y, n, un = self._series_data(ds, x_name, y_name, k, vld_only, filtered_only)
-                uneval = un or uneval
+                x, y, n, miss = self._series_data(ds, x_name, y_name, k, vld_only, filtered_only)
+                missing = miss or missing
                 total += n
                 if n:
-                    self._add_series(x, y, _iter_color(k), use_lines=use_lines, name=f"itr {k}")
-            note = f"{total:,} points across {n_itr} iterations"
+                    self._add_series(x, y, _iter_color(k), use_lines=use_lines, name=ordinal(k + 1))
+            note = f"{total:,} points across {n_itr} iterations  |  all [stacked]"
         else:
-            x, y, n, uneval = self._series_data(ds, x_name, y_name, sel, vld_only, filtered_only)
+            # "single" (last / k-th) and "flatten" are one blue series.
+            sel = "all" if render == "flatten" else itr_sel
+            x, y, n, missing = self._series_data(ds, x_name, y_name, sel, vld_only, filtered_only)
             if n:
                 self._add_series(x, y, (70, 130, 180), use_lines=use_lines)
-            sel_label = "last" if sel == "last" else f"itr {sel}"
+            sel_label = self._iter_combo.currentText() or "last"
             note = f"{n:,} points  |  {sel_label}"
 
         self._plot.setLabel("bottom", x_name)
         self._plot.setLabel("left", y_name)
-        if uneval:
-            axis_missing = [a for a in uneval if a in (x_name, y_name)]
-            filter_missing = [a for a in uneval if a not in (x_name, y_name)]
+        if missing:
+            axis_missing = [a for a in missing if a in (x_name, y_name)]
+            filter_missing = [a for a in missing if a not in (x_name, y_name)]
             if axis_missing:
                 note += f"  |  {', '.join(axis_missing)} has no per-iteration values"
             if filter_missing:
@@ -383,7 +401,8 @@ class AttributeWindow(QWidget):
         # ROI selection maps back onto the materialized (last-iteration, valid)
         # store. It cannot be mapped when the view shows a different iteration
         # or includes invalid localizations.
-        if self._iter_selector() != "last" or not self._valid_chk.isChecked():
+        itr_sel, render = self._selection()
+        if itr_sel != "last" or render != "single" or not self._valid_chk.isChecked():
             return None
         x_name = self._x_combo.currentText()
         y_name = self._y_combo.currentText()
