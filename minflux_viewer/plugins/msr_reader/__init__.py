@@ -19,7 +19,7 @@ from .. import PluginEntry, register
 def _launch(state, parent=None) -> None:
     # Import lazily so importing the plugin package does not pull in Qt
     # machinery until the user actually opens the dialog.
-    from .dialog import MsrReaderDialog
+    from .msr_reader_dialog import MsrReaderDialog
     dlg = MsrReaderDialog(state, parent=parent)
     dlg.show()
     # Store on the parent so it survives the scope of this function;

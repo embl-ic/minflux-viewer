@@ -126,6 +126,7 @@ class MainWindow(QMainWindow):
         self._console_win   = None
         self._memory_win    = None
         self._roi_manager_win = None
+        self._script_editor_win = None
         self._shortcut_actions: dict[str, QAction] = {}
         self._roi_tool_actions: dict[str, QAction] = {}
         self._ai_menu_styles: list[_AiMenuStyle] = []
@@ -174,6 +175,7 @@ class MainWindow(QMainWindow):
         self._connect_actions()
         self._populate_recent_menu()
         self._populate_plugins_menu()
+        self._bind_scripting_api()
 
         # React to application-state changes
         state.dataset_added.connect(self._on_dataset_added)
@@ -1038,9 +1040,28 @@ class MainWindow(QMainWindow):
                 self._mark_action_ai_unapproved(act)
             menu.addAction(act)
 
+    def _bind_scripting_api(self) -> None:
+        """Expose this viewer instance through the runtime ``mfv`` module."""
+        try:
+            from ..scripting import install_runtime_module
+
+            self._state.mfv.bind_main_window(self)
+            install_runtime_module(self._state.mfv)
+        except Exception as exc:
+            self._state.log(f"Could not initialize scripting API: {exc}", "WARN")
+
     # ------------------------------------------------------------------
     # Tool windows  — open once, raise if already open
     # ------------------------------------------------------------------
+
+    def _show_script_editor(self) -> None:
+        from .script_editor_window import ScriptEditorWindow
+
+        if self._script_editor_win is None:
+            self._script_editor_win = ScriptEditorWindow(self._state, parent=self)
+        self._script_editor_win.show()
+        self._script_editor_win.raise_()
+        self._script_editor_win.activateWindow()
 
     def _show_scatter(self, dataset_idx: int | None = None):
         if self._state.active_dataset is None:
@@ -2171,16 +2192,25 @@ class MainWindow(QMainWindow):
         for win in list(self._filter_dlgs.values()):
             try: win.close()
             except Exception: pass
+        try:
+            self._state.mfv.close_windows()
+        except Exception:
+            pass
 
         # Singleton tool windows
         for attr in (
             "_attr_3d_mpl_win",
             "_filter_dlg",  "_ds_manager",
             "_log_win",     "_console_win", "_memory_win", "_roi_manager_win",
+            "_script_editor_win",
         ):
             w = getattr(self, attr, None)
             if w is not None:
-                try: w.close()
+                try:
+                    if hasattr(w, "force_close"):
+                        w.force_close()
+                    else:
+                        w.close()
                 except Exception: pass
 
         # Plugin dialogs that stashed themselves on the main window
