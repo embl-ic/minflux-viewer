@@ -20,6 +20,8 @@ poetry.lock        # keep if you want reproducible installs, remove to let users
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+# sandboxed pytest tmp_path basetemp (pytest-of-*)
+.tmp/
 
 # IDE
 .vscode/
