@@ -46,14 +46,17 @@ class DatasetManager(QDialog):
     """Non-modal dialog listing all loaded datasets."""
 
     def __init__(self, state: AppState, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+        # Non-owned top-level window: passing the main window as the QWidget
+        # parent (with the Qt.Window flag) makes the OS pin this above its owner
+        # in Z-order. Keep the main window only as an explicit owner reference
+        # (lifetime is held by MainWindow._ds_manager).
+        super().__init__(None)
+        self._owner   = parent
         self._state   = state
         self._updating = False
 
         self.setWindowTitle("Dataset manager")
-        self.setWindowFlags(
-            Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint
-        )
+        self.setWindowFlags(Qt.WindowType.Window)
         self.resize(800, 240)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
@@ -185,7 +188,7 @@ class DatasetManager(QDialog):
         return f"{prefix}/{total}"
 
     def _view_text(self, idx: int) -> str:
-        provider = getattr(self.parent(), "dataset_view_status", None)
+        provider = getattr(self._owner, "dataset_view_status", None)
         if callable(provider):
             return provider(idx)
         return "None"
@@ -233,7 +236,7 @@ class DatasetManager(QDialog):
         if index.column() == _COL_DIMS and int(getattr(ds.prop, "num_dim", 2)) >= 3:
             try:
                 from ..analysis.trace_analysis import show_anisotropy_dialog
-                owner = self.parent() if isinstance(self.parent(), QWidget) else self
+                owner = self._owner if isinstance(self._owner, QWidget) else self
                 show_anisotropy_dialog(owner, ds, self._state)
             except Exception as exc:
                 self._state.log(f"Estimate anisotropy failed: {exc}", "ERROR")
