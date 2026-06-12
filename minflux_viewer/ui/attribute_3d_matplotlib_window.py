@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 
 from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
+from ..core.loader import attr_values_1d
 
 _MAX_MPL_POINTS = 50_000
 
@@ -159,9 +160,10 @@ class Attribute3DMatplotlibWindow(QWidget):
         }
 
         ftr = ds.filter_mask if self._filter_chk.isChecked() else np.ones(ds.prop.num_loc, dtype=bool)
-        x = np.asarray(ds.attr.get(x_name, np.empty(0))).ravel().astype(float)
-        y = np.asarray(ds.attr.get(y_name, np.empty(0))).ravel().astype(float)
-        z = np.asarray(ds.attr.get(z_name, np.empty(0))).ravel().astype(float)
+        def _vals(name):
+            v = attr_values_1d(ds, name)
+            return np.empty(0) if v is None else np.asarray(v).ravel().astype(float)
+        x, y, z = _vals(x_name), _vals(y_name), _vals(z_name)
         n = min(x.size, y.size, z.size, ftr.size)
         if n == 0:
             return

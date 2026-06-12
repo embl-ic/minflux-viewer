@@ -70,6 +70,8 @@ class DataWindow(QWidget):
 
         # Track active-dataset changes so we can update the title / button
         state.active_changed.connect(self._refresh)
+        # Refresh info values (e.g. RIMF) when this dataset's calibration changes
+        state.calibration_changed.connect(self._on_calibration_changed)
 
     # ------------------------------------------------------------------
     # UI
@@ -103,6 +105,7 @@ class DataWindow(QWidget):
         row += 1
 
         # ── Info rows ───────────────────────────────────────────────
+        self._value_labels: dict[str, QLabel] = {}
         info_rows = _info_rows(ds)
         for label, value in info_rows:
             key_lbl = QLabel(label)
@@ -113,6 +116,7 @@ class DataWindow(QWidget):
             val_lbl.setStyleSheet("font-size: 11px;")
             layout.addWidget(key_lbl, row, 0)
             layout.addWidget(val_lbl, row, 1)
+            self._value_labels[label] = val_lbl
             row += 1
 
         # ── Spacer ──────────────────────────────────────────────────
@@ -148,6 +152,16 @@ class DataWindow(QWidget):
             if 0 <= self._idx < len(self._state.datasets):
                 self._state.set_active(self._idx)
         super().changeEvent(event)
+
+    def _on_calibration_changed(self, idx: int) -> None:
+        """Refresh info values (e.g. the RIMF row) for this dataset."""
+        if idx != self._idx or not (0 <= self._idx < len(self._state.datasets)):
+            return
+        ds = self._state.datasets[self._idx]
+        for label, value in _info_rows(ds):
+            lbl = self._value_labels.get(label)
+            if lbl is not None:
+                lbl.setText(value)
 
     def _refresh(self, active_idx: int | None) -> None:
         """Update the window title and button state."""
@@ -217,8 +231,12 @@ def _created_text(ds: MinfluxDataset) -> str:
 def _locs_row(ds: MinfluxDataset) -> tuple[str, str]:
     valid = int(ds.metadata.get("valid_num_loc", ds.prop.num_loc))
     total = int(ds.metadata.get("raw_num_loc", ds.metadata.get("overall_num_loc", valid)))
-    includes_invalid = bool(ds.metadata.get("includes_invalid")) or valid >= total
-    if includes_invalid:
+    loaded = int(ds.prop.num_loc)
+    if bool(ds.metadata.get("includes_invalid")):
+        # only_valid_locs=False: loaded rows may be a subset of the raw file
+        # (e.g. last-iteration rows only), so report the loaded count.
+        return "Locs (with invalid)", f"{loaded:,} ({valid:,} valid)"
+    if valid >= total:
         return "Locs (with invalid)", f"{total:,}"
     return "Locs (valid)", f"{valid:,} / {total:,}"
 
@@ -246,12 +264,32 @@ def _iterations_text(ds: MinfluxDataset) -> str:
     return "  |  ".join(parts)
 
 
+def _rimf_source_label(source: str) -> tuple[str, bool]:
+    """Map a RIMF provenance source to (display label, is_calculated)."""
+    s = (source or "").lower()
+    if s.startswith("auto (estimate"):
+        return "calculated, anisotropy plugin", True
+    if s.startswith("auto (out of range"):
+        return "calculated out of range, reset to 1", False
+    if s.startswith("manual"):
+        return "manual, anisotropy plugin", False
+    if s.startswith("fixed"):
+        return "fixed, Preference/Data", False
+    return "", False
+
+
 def _dims_text(ds: MinfluxDataset) -> str:
     dims = f"{int(ds.prop.num_dim)}D"
-    if int(ds.prop.num_dim) >= 3:
-        rimf = float(getattr(ds.cali, "RIMF", 1.0) or 1.0)
-        return f"{dims}  |  RIMF = {rimf:.1f}"
-    return dims
+    if int(ds.prop.num_dim) < 3:
+        return dims
+    rimf = float(getattr(ds.cali, "RIMF", 1.0) or 1.0)
+    source = str((ds.metadata.get("rimf_provenance") or {}).get("source", "") or "")
+    label, calculated = _rimf_source_label(source)
+    # A calculated in-range value keeps 4 decimals; manual / fixed / any 1.0
+    # use 2 decimals (e.g. "1.00").
+    value_txt = f"{rimf:.4f}" if (calculated and rimf != 1.0) else f"{rimf:.2f}"
+    suffix = f" ({label})" if label else ""
+    return f"{dims}  |  RIMF = {value_txt}{suffix}"
 
 
 def _version_text(ds: MinfluxDataset) -> str:

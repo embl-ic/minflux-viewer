@@ -8,6 +8,10 @@ Labels are **1-based** (``1st``, ``2nd``, …, ``last (Nth)``) plus the two pool
 modes ``all [flatten]`` and ``all [stacked]``. Internally iterations are 0-based
 in ``mfx_raw``; the last iteration uses the semantic ``"last"`` selector so it
 tracks the true final valid iteration per localization.
+
+The fixed dropdown order — for every viewer that offers an iteration selector —
+is: ``last (Nth)``, ``all [flatten]``, ``all [stacked]``, then the individual
+iterations counting down (``(N-1)th`` … ``2nd``, ``1st``).
 """
 
 from __future__ import annotations
@@ -35,9 +39,8 @@ def iteration_labels(n_itr: int) -> list[str]:
     """
     if n_itr <= 1:
         return []
-    labels = [ordinal(i) for i in range(1, n_itr)]      # 1st … (N-1)th
-    labels.append(f"last ({ordinal(n_itr)})")           # last (Nth)
-    labels += [FLATTEN_LABEL, STACKED_LABEL]
+    labels = [f"last ({ordinal(n_itr)})", FLATTEN_LABEL, STACKED_LABEL]
+    labels += [ordinal(i) for i in range(n_itr - 1, 0, -1)]   # (N-1)th … 1st
     return labels
 
 

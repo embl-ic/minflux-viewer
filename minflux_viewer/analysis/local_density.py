@@ -81,6 +81,76 @@ def local_density_histogram_2d(
     return values[x_bin, y_bin].astype(float)
 
 
+def _density_values(
+    points_nm: np.ndarray,
+    select: np.ndarray,
+    *,
+    dimensions: int,
+    radius_nm: float,
+    method: str,
+    voxel_size_nm: float | None = None,
+    smooth_sigma: float = 1.0,
+) -> tuple[np.ndarray, str, str, np.ndarray]:
+    """Method dispatch shared by the dataset and points-level entry points.
+
+    Returns ``(density_full, method_label, detail, valid)`` where
+    ``density_full`` is aligned to ``points_nm`` rows (NaN outside ``valid``).
+    """
+    points = np.asarray(points_nm, dtype=float)
+    valid = np.asarray(select, dtype=bool) & np.isfinite(points).all(axis=1)
+    density_full = np.full(points.shape[0], np.nan, dtype=float)
+    active_points = points[valid, : max(2, min(int(dimensions), 3))]
+    method_key = str(method).lower()
+    voxel_nm = float(voxel_size_nm if voxel_size_nm is not None else radius_nm)
+
+    if method_key in {"histogram", "histogram_2d", "2d histogram"}:
+        if int(dimensions) != 2:
+            raise NotImplementedError("Histogram local density is currently implemented for 2D only.")
+        values = local_density_histogram_2d(
+            active_points,
+            voxel_size_nm=voxel_nm,
+            smooth_sigma=smooth_sigma,
+        )
+        method_label = "2D histogram"
+        detail = f"voxel={voxel_nm:g} nm, sigma={smooth_sigma:g}"
+    else:
+        values = local_density_kdtree(active_points, radius_nm)
+        method_label = f"{int(dimensions)}D KD-tree range search"
+        detail = f"radius={radius_nm:g} nm"
+
+    density_full[valid] = values
+    return density_full, method_label, detail, valid
+
+
+def compute_local_density_for_points(
+    points_nm: np.ndarray, prefs: dict, *, dimensions: int,
+) -> tuple[np.ndarray, str, str]:
+    """Preference-driven local density for an arbitrary (N, 3) nm point array.
+
+    Same method/radius/voxel preferences as
+    :func:`compute_local_density_for_dataset`, but for coordinates that are not
+    a dataset's materialized store (e.g. the last-valid selection of the raw
+    iteration store).
+    """
+    data_prefs = prefs.get("data", {}) if prefs else {}
+    points = np.asarray(points_nm, dtype=float)
+    density_full, method_label, detail, _ = _density_values(
+        points,
+        np.ones(points.shape[0], dtype=bool),
+        dimensions=int(dimensions),
+        radius_nm=float(data_prefs.get("local_density_radius", 100.0)),
+        method=str(data_prefs.get("local_density_method", "kdtree")).lower(),
+        voxel_size_nm=float(
+            data_prefs.get(
+                "local_density_voxel_size",
+                data_prefs.get("local_density_radius", 100.0),
+            )
+        ),
+        smooth_sigma=float(data_prefs.get("local_density_smooth_sigma", 1.0)),
+    )
+    return density_full, method_label, detail
+
+
 def compute_local_density_for_dataset(ds, prefs: dict) -> tuple[np.ndarray, str, str]:
     """
     Compute local density for the filtered localizations of ``ds``.
@@ -126,29 +196,17 @@ def compute_local_density(
         if use_filter
         else np.ones(points.shape[0], dtype=bool)
     )
-    valid = mask & np.isfinite(points).all(axis=1)
-    density_full = np.full(points.shape[0], np.nan, dtype=float)
-    active_points = points[valid, : max(2, min(int(dimensions), 3))]
-    method_key = str(method).lower()
     voxel_nm = float(voxel_size_nm if voxel_size_nm is not None else radius_nm)
-
-    if method_key in {"histogram", "histogram_2d", "2d histogram"}:
-        if int(dimensions) != 2:
-            raise NotImplementedError("Histogram local density is currently implemented for 2D only.")
-        values = local_density_histogram_2d(
-            active_points,
-            voxel_size_nm=voxel_nm,
-            smooth_sigma=smooth_sigma,
-        )
-        method_label = "2D histogram"
-        detail = f"voxel={voxel_nm:g} nm, sigma={smooth_sigma:g}"
-    else:
-        values = local_density_kdtree(active_points, radius_nm)
-        method_label = f"{int(dimensions)}D KD-tree range search"
-        detail = f"radius={radius_nm:g} nm"
-
-    density_full[valid] = values
-    image, edges = density_image_xy(points[valid], values, pixel_size_nm=voxel_nm)
+    density_full, method_label, detail, valid = _density_values(
+        points,
+        mask,
+        dimensions=dimensions,
+        radius_nm=radius_nm,
+        method=method,
+        voxel_size_nm=voxel_nm,
+        smooth_sigma=smooth_sigma,
+    )
+    image, edges = density_image_xy(points[valid], density_full[valid], pixel_size_nm=voxel_nm)
     return density_full, method_label, detail, image, edges
 
 

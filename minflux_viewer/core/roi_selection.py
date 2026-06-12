@@ -112,7 +112,53 @@ def store_roi_mask(
         "key": key,
         "name": record.name,
         "type": record.type,
+        "stroke_color": record.stroke_color,
         "selected_count": record.selected_count,
         "context": record.context,
     }
     return key
+
+
+def active_roi_mask(
+    dataset,
+    *,
+    selected_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+    include_active_draft: bool = True,
+) -> np.ndarray | None:
+    """Return the union of currently active ROI masks for one dataset.
+
+    Draft ROIs are stored under ``active_roi_draft_id`` while persistent ROIs
+    are highlighted only when selected in the ROI Manager. The returned mask is
+    aligned to the dataset's localization rows.
+    """
+    wanted = set(selected_ids or [])
+    if include_active_draft:
+        draft_id = dataset.state.get("active_roi_draft_id")
+        if draft_id:
+            wanted.add(str(draft_id))
+    if not wanted:
+        return None
+    meta_by_id = dataset.state.get(ROI_MASKS_STATE_KEY, {})
+    masks: list[np.ndarray] = []
+    target_len = int(getattr(getattr(dataset, "prop", None), "num_loc", 0) or 0)
+    for roi_id in wanted:
+        meta = meta_by_id.get(roi_id)
+        key = meta.get("key") if isinstance(meta, dict) else None
+        if not key:
+            continue
+        arr = dataset.derived.get(key)
+        if arr is None:
+            continue
+        mask = np.asarray(arr, dtype=bool).ravel()
+        if target_len and mask.size != target_len:
+            fixed = np.zeros(target_len, dtype=bool)
+            fixed[: min(target_len, mask.size)] = mask[: min(target_len, mask.size)]
+            mask = fixed
+        masks.append(mask)
+    if not masks:
+        return None
+    out = masks[0].copy()
+    for mask in masks[1:]:
+        if mask.size == out.size:
+            out |= mask
+    return out

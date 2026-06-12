@@ -183,7 +183,12 @@ class RoiManagerWindow(QWidget):
         if not records:
             QMessageBox.information(self, "Save ROI set", "No ROIs to save.")
             return
-        default_filter = "ImageJ RoiSet (*.zip)" if len(records) > 1 else "ImageJ ROI (*.roi)"
+        has_non_pixel = any(r.coordinate_space != "pixel" for r in records)
+        default_filter = (
+            "Native ROI set (*.json)"
+            if has_non_pixel
+            else ("ImageJ RoiSet (*.zip)" if len(records) > 1 else "ImageJ ROI (*.roi)")
+        )
         path, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Save ROI set",
@@ -201,16 +206,14 @@ class RoiManagerWindow(QWidget):
                 path_obj = path_obj.with_suffix(".roi")
             else:
                 path_obj = path_obj.with_suffix(".zip")
-        if path_obj.suffix.lower() in {".roi", ".zip"} and any(r.coordinate_space != "pixel" for r in records):
-            reply = QMessageBox.warning(
+        if path_obj.suffix.lower() in {".roi", ".zip"} and has_non_pixel:
+            QMessageBox.warning(
                 self,
                 "ImageJ ROI export",
-                "Some ROIs are in plot coordinates, not ImageJ pixel coordinates. "
-                "Use native JSON for exact round-trip, or continue to write the current coordinates.",
-                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                "Some ROIs are in plot/attribute coordinates, not ImageJ pixel coordinates. "
+                "Please save them as a native JSON ROI set for exact round-trip.",
             )
-            if reply != QMessageBox.StandardButton.Ok:
-                return
+            return
         try:
             self._store.save(path_obj, records)
             self._state.log(f"Saved {len(records)} ROI(s) to {path_obj.name}.")

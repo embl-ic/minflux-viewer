@@ -145,6 +145,7 @@ class DatasetManager(QDialog):
             (ds.file.datetime or "—",     Qt.AlignmentFlag.AlignLeft),
             (self._view_text(idx),         Qt.AlignmentFlag.AlignCenter),
         ]
+        is_3d = int(getattr(ds.prop, "num_dim", 2)) >= 3
         for col, (text, align) in enumerate(items):
             item = QTableWidgetItem(text)
             item.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
@@ -152,6 +153,8 @@ class DatasetManager(QDialog):
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
+            if col == _COL_DIMS and is_3d:
+                item.setToolTip("Double-click to estimate anisotropy / set RIMF")
             self._table.setItem(row, col, item)
 
     def _refresh_row(self, row: int, idx: int) -> None:
@@ -219,7 +222,21 @@ class DatasetManager(QDialog):
     # ------------------------------------------------------------------
 
     def _on_double_click(self, index) -> None:
-        self._state.set_active(index.row())
+        row = index.row()
+        if not (0 <= row < len(self._state.datasets)):
+            return
+        ds = self._state.datasets[row]
+        self._state.set_active(row)
+        # Double-clicking the "Dims" cell of a 3-D dataset opens the Estimate
+        # Anisotropy Factor (RIMF) dialog — same as Analyze > Trace > Estimate
+        # Anisotropy — so the user can review / manually set and apply RIMF.
+        if index.column() == _COL_DIMS and int(getattr(ds.prop, "num_dim", 2)) >= 3:
+            try:
+                from ..analysis.trace_analysis import show_anisotropy_dialog
+                owner = self.parent() if isinstance(self.parent(), QWidget) else self
+                show_anisotropy_dialog(owner, ds, self._state)
+            except Exception as exc:
+                self._state.log(f"Estimate anisotropy failed: {exc}", "ERROR")
 
     def _on_dataset_added(self, idx: int) -> None:
         ds = self._state.datasets[idx]

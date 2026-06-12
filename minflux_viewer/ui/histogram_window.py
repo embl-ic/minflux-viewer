@@ -28,10 +28,16 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.app_state import AppState
-from ..core.attributes import is_trace_wise_attribute, plot_attribute_names
+from ..core.attributes import (
+    aggregation_description,
+    attribute_description,
+    is_trace_wise_attribute,
+    plot_attribute_names,
+)
 from ..core.iteration import iteration_labels, ordinal, parse_iteration_label
-from ..core.loader import attr_matches_last_valid, mfx_filter_mask, mfx_get
+from ..core.loader import attr_matches_selection, attr_values_1d, mfx_filter_mask, mfx_get
 from ..core.roi_selection import rectangle_bounds, value_range_mask
+from .filter_dialog import SmartBoundsSpinBox, _filter_spinner_values
 from .plot_format import plot_widget
 
 # Distinct per-iteration colours for the "all iterations" overlay.
@@ -137,11 +143,17 @@ class HistogramWindow(QWidget):
         self._attr_combo = QComboBox()
         self._attr_combo.setMinimumWidth(110)
         self._attr_combo.currentTextChanged.connect(self._on_histogram_attribute_changed)
+        self._attr_combo.currentTextChanged.connect(
+            lambda text: self._attr_combo.setToolTip(attribute_description(text))
+        )
         bar.addWidget(self._attr_combo)
 
         bar.addWidget(QLabel("As:"))
         self._agg_combo = QComboBox()
         self._agg_combo.currentTextChanged.connect(self._on_histogram_aggregation_changed)
+        self._agg_combo.currentTextChanged.connect(
+            lambda text: self._agg_combo.setToolTip(aggregation_description(text))
+        )
         bar.addWidget(self._agg_combo)
 
         self._iter_label = QLabel("Iter:")
@@ -165,6 +177,7 @@ class HistogramWindow(QWidget):
         bar.addWidget(self._bin_spin)
 
         self._zero_chk = QCheckBox("Hide zeros")
+        self._zero_chk.setToolTip("Hide zero value bin (useful when 0 is dominant in data).")
         self._zero_chk.stateChanged.connect(self._on_histogram_display_changed)
         bar.addWidget(self._zero_chk)
 
@@ -253,6 +266,7 @@ class HistogramWindow(QWidget):
                 and np.issubdtype(np.asarray(ds.attr[key]).dtype, np.number)
             ]
         self._attr_combo.addItems(numeric)
+        self._apply_attribute_combo_tooltips(self._attr_combo)
         attr_default = saved.get("attribute", old)
         if attr_default in numeric:
             self._attr_combo.setCurrentText(attr_default)
@@ -261,6 +275,7 @@ class HistogramWindow(QWidget):
         elif "cfr" in numeric:
             self._attr_combo.setCurrentText("cfr")
         self._attr_combo.blockSignals(False)
+        self._attr_combo.setToolTip(attribute_description(self._attr_combo.currentText()))
 
         self._agg_combo.blockSignals(True)
         agg_default = saved.get("aggregation", "per loc")
@@ -269,6 +284,7 @@ class HistogramWindow(QWidget):
         else:
             self._agg_combo.setCurrentText("per loc")
         self._agg_combo.blockSignals(False)
+        self._agg_combo.setToolTip(aggregation_description(self._agg_combo.currentText()))
         self._enforce_trace_aggregation()
 
         iter_opts = self._iter_labels(ds)
@@ -304,8 +320,17 @@ class HistogramWindow(QWidget):
         self._agg_combo.blockSignals(True)
         self._agg_combo.clear()
         self._agg_combo.addItems(modes)
+        self._apply_aggregation_combo_tooltips(self._agg_combo)
         self._agg_combo.setCurrentText(old if old in modes else "per loc")
         self._agg_combo.blockSignals(False)
+
+    def _apply_attribute_combo_tooltips(self, combo: QComboBox) -> None:
+        for i in range(combo.count()):
+            combo.setItemData(i, attribute_description(combo.itemText(i)), Qt.ItemDataRole.ToolTipRole)
+
+    def _apply_aggregation_combo_tooltips(self, combo: QComboBox) -> None:
+        for i in range(combo.count()):
+            combo.setItemData(i, aggregation_description(combo.itemText(i)), Qt.ItemDataRole.ToolTipRole)
 
     # ------------------------------------------------------------------
     # Iteration / validity (Stage B) helpers
@@ -327,17 +352,22 @@ class HistogramWindow(QWidget):
         return parse_iteration_label(self._iter_combo.currentText())
 
     def _is_raw_mode(self) -> bool:
-        """True unless the view is the default last-iteration, valid, single series.
+        """True unless the view is the ``last`` single series whose rows ARE
+        the materialized store.
 
-        The default (ds.attr) path is only valid when ds.attr actually is the
-        last-valid materialization; for all-iteration loads, even a ``last``
-        selection must come from the raw store.
+        The default (ds.attr) path requires ds.attr row alignment with the
+        current selection: last+valid for normal loads, last+all-validity for
+        ``only_valid_locs=False`` loads (so filter-edit/ROI work there too).
+        For all-iteration loads even a ``last`` selection must come from the
+        raw store.
         """
         itr_sel, render = self._selection()
-        if not (itr_sel == "last" and render == "single" and self._valid_chk.isChecked()):
+        if not (itr_sel == "last" and render == "single"):
             return True
         ds = self._dataset()
-        return ds is not None and not attr_matches_last_valid(ds)
+        return ds is not None and not attr_matches_selection(
+            ds, itr="last", vld_only=self._valid_chk.isChecked(),
+        )
 
     def _clear_raw_items(self) -> None:
         for item in self._raw_items:
@@ -561,7 +591,8 @@ class HistogramWindow(QWidget):
             "iter": self._iter_combo.currentText() or "",
             "valid_only": True,
         }
-        raw = np.asarray(ds.attr.get(attr_name, np.empty(0))).ravel().astype(float)
+        raw = attr_values_1d(ds, attr_name)
+        raw = np.empty(0) if raw is None else np.asarray(raw).ravel().astype(float)
         if raw.size == 0:
             return
 
@@ -706,7 +737,8 @@ class HistogramWindow(QWidget):
             return None
         attr_name = self._attr_combo.currentText()
         agg_mode = self._agg_combo.currentText()
-        raw = np.asarray(ds.attr.get(attr_name, np.empty(0))).ravel().astype(float)
+        raw = attr_values_1d(ds, attr_name)
+        raw = np.empty(0) if raw is None else np.asarray(raw).ravel().astype(float)
         if raw.size == 0:
             return None
 
@@ -889,19 +921,22 @@ class HistogramWindow(QWidget):
             self._valid_chk.blockSignals(False)
             self._clear_raw_items()
         ds = self._dataset()
+        saved_state = dict((ds.state.get(self._view_state_key, {}) if ds is not None else {}))
+        if self._attr_combo.findText(attr) >= 0:
+            self._attr_combo.setCurrentText(attr)
+        if self._agg_combo.findText(mode) >= 0:
+            self._agg_combo.setCurrentText(mode)
+        self._reset_for_new_data()
         self._filter_edit = {
-            "saved_state": dict((ds.state.get(self._view_state_key, {}) if ds is not None else {})),
+            "saved_state": saved_state,
+            "attr": attr,
+            "mode": mode,
             "on_update": on_update,
             "on_finish": on_finish,
             "on_cancel": on_cancel,
             "restore_view_on_finish": restore_view_on_finish,
             "restore_view_on_cancel": restore_view_on_cancel,
         }
-        if self._attr_combo.findText(attr) >= 0:
-            self._attr_combo.setCurrentText(attr)
-        if self._agg_combo.findText(mode) >= 0:
-            self._agg_combo.setCurrentText(mode)
-        self._reset_for_new_data()
 
         range_color, range_alpha, bounds_color = self._filter_style()
         region = pg.LinearRegionItem(
@@ -987,7 +1022,8 @@ class HistogramWindow(QWidget):
             return ""
         attr_name = self._attr_combo.currentText()
         agg_mode = self._agg_combo.currentText()
-        raw = np.asarray(ds.attr.get(attr_name, np.empty(0))).ravel().astype(float)
+        raw = attr_values_1d(ds, attr_name)
+        raw = np.empty(0) if raw is None else np.asarray(raw).ravel().astype(float)
         if raw.size == 0:
             return f"0 / {ds.prop.num_loc:,}"
         try:
@@ -1041,12 +1077,23 @@ class HistogramWindow(QWidget):
         dlg = QDialog(self)
         dlg.setWindowTitle("Filter bounds")
         form = QFormLayout(dlg)
-        lo_spin = QDoubleSpinBox(dlg)
-        hi_spin = QDoubleSpinBox(dlg)
+        lo_spin = SmartBoundsSpinBox(dlg)
+        hi_spin = SmartBoundsSpinBox(dlg)
+        ds = self._dataset()
+        attr = str(edit.get("attr", self._attr_combo.currentText()))
+        mode = str(edit.get("mode", self._agg_combo.currentText()))
+        values = None
+        data_min = None
+        data_max = None
+        if ds is not None and attr in ds.attr:
+            values, range_values = _filter_spinner_values(ds, attr, mode)
+            finite = range_values.astype(float, copy=False)
+            finite = finite[np.isfinite(finite)]
+            if finite.size:
+                data_min = float(np.nanmin(finite))
+                data_max = float(np.nanmax(finite))
         for spin, value in ((lo_spin, lo), (hi_spin, hi)):
-            spin.setDecimals(8)
-            spin.setRange(-1e15, 1e15)
-            spin.setValue(float(value))
+            spin.configure(value=float(value), values=values, data_min=data_min, data_max=data_max, mode=mode)
         lo_inc = QCheckBox("Inclusive", dlg)
         hi_inc = QCheckBox("Inclusive", dlg)
         lo_inc.setChecked(bool(edit.get("inclusive_min", True)))

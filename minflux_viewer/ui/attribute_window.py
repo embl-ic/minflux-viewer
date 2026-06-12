@@ -18,15 +18,17 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
+    QMenu,
+    QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from ..core.app_state import AppState
-from ..core.attributes import plot_attribute_names
+from ..core.attributes import attribute_description, plot_attribute_names
 from ..core.iteration import iteration_labels, ordinal, parse_iteration_label
-from ..core.loader import attr_matches_last_valid, mfx_filter_mask, mfx_get
+from ..core.loader import attr_matches_selection, attr_values_1d, mfx_filter_mask, mfx_get
 from ..core.roi_selection import rectangle_mask
 from .plot_format import plot_widget
 
@@ -52,6 +54,12 @@ class AttributeWindow(QWidget):
         self._state = state
         self._dataset_idx = dataset_idx if dataset_idx is not None else state.active_idx
         self._view_state_key = "attribute_plot_state"
+        self._zoom_active = False
+        self._zoom_mode = "unconstrained"
+        self._zoom_preview = None
+        self._zoom_drag_start = None
+        self._view_box = None
+        self._original_mouse_drag_event = None
 
         self.setWindowTitle("Attribute Plot")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -92,12 +100,18 @@ class AttributeWindow(QWidget):
         self._x_combo = QComboBox()
         self._x_combo.setMinimumWidth(100)
         self._x_combo.currentTextChanged.connect(self._draw)
+        self._x_combo.currentTextChanged.connect(
+            lambda text: self._x_combo.setToolTip(attribute_description(text))
+        )
         bar.addWidget(self._x_combo)
 
         bar.addWidget(QLabel("Y:"))
         self._y_combo = QComboBox()
         self._y_combo.setMinimumWidth(100)
         self._y_combo.currentTextChanged.connect(self._draw)
+        self._y_combo.currentTextChanged.connect(
+            lambda text: self._y_combo.setToolTip(attribute_description(text))
+        )
         bar.addWidget(self._y_combo)
 
         self._iter_label = QLabel("Iter:")
@@ -124,6 +138,14 @@ class AttributeWindow(QWidget):
         bar.addWidget(self._filter_chk)
 
         bar.addStretch()
+
+        self._zoom_btn = QPushButton("zoom")
+        self._zoom_btn.setCheckable(True)
+        self._zoom_btn.setToolTip("Left-click to enable plot zoom. Right-click to choose the zoom mode.")
+        self._zoom_btn.toggled.connect(self._set_zoom_active)
+        self._zoom_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._zoom_btn.customContextMenuRequested.connect(self._show_zoom_menu)
+        bar.addWidget(self._zoom_btn)
         root.addLayout(bar)
 
         # ── Plot ─────────────────────────────────────────────────
@@ -135,10 +157,13 @@ class AttributeWindow(QWidget):
         self._plot.showGrid(x=True, y=True, alpha=0.2)
         self._plot.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self._plot.getPlotItem().setMenuEnabled(False)
+        self._view_box = self._plot.getPlotItem().vb
         try:
-            self._plot.getPlotItem().vb.setMenuEnabled(False)
+            self._view_box.setMenuEnabled(False)
         except Exception:
             pass
+        self._original_mouse_drag_event = self._view_box.mouseDragEvent
+        self._view_box.mouseDragEvent = self._zoom_mouse_drag_event
 
         # Series items are (curve, scatter) pairs, created on demand so the
         # "all iterations" overlay can show one coloured series per iteration.
@@ -181,11 +206,12 @@ class AttributeWindow(QWidget):
             combo.blockSignals(True)
             combo.clear()
             combo.addItems(numeric)
+            self._apply_attribute_combo_tooltips(combo)
             if old in numeric:
                 combo.setCurrentText(old)
             combo.blockSignals(False)
 
-        # Iteration dropdown: 1st … last (Nth) · all [flatten] · all [stacked]
+        # Iteration dropdown: last (Nth) · all [flatten] · all [stacked] · (N-1)th … 1st
         iter_opts = self._iter_labels(ds)
         self._iter_combo.blockSignals(True)
         self._iter_combo.clear()
@@ -219,8 +245,15 @@ class AttributeWindow(QWidget):
             self._y_combo.setCurrentText(y_default)
         elif "efo" in numeric:
             self._y_combo.setCurrentText("efo")
+        self._x_combo.setToolTip(attribute_description(self._x_combo.currentText()))
+        self._y_combo.setToolTip(attribute_description(self._y_combo.currentText()))
 
         self._draw()
+
+    @staticmethod
+    def _apply_attribute_combo_tooltips(combo: QComboBox) -> None:
+        for i in range(combo.count()):
+            combo.setItemData(i, attribute_description(combo.itemText(i)), Qt.ItemDataRole.ToolTipRole)
 
     # ------------------------------------------------------------------
     # Iteration / validity helpers
@@ -273,15 +306,119 @@ class AttributeWindow(QWidget):
         if name is not None and not use_lines and self._legend is not None:
             self._legend.addItem(scatter, name)
 
+    # ------------------------------------------------------------------
+    # Zoom tool
+    # ------------------------------------------------------------------
+
+    def _set_zoom_active(self, active: bool) -> None:
+        self._zoom_active = bool(active)
+        self._zoom_btn.setText(f"zoom: {self._zoom_mode}" if active else "zoom")
+        self._clear_zoom_preview()
+
+    def _show_zoom_menu(self, pos) -> None:
+        menu = QMenu(self)
+        for mode, label in (
+            ("unconstrained", "unconstrained"),
+            ("horizontal", "horizontal only"),
+            ("vertical", "vertical only"),
+        ):
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self._zoom_mode == mode)
+            action.triggered.connect(lambda _checked=False, value=mode: self._set_zoom_mode(value))
+        menu.exec(self._zoom_btn.mapToGlobal(pos))
+
+    def _set_zoom_mode(self, mode: str) -> None:
+        if mode not in {"unconstrained", "horizontal", "vertical"}:
+            return
+        self._zoom_mode = mode
+        if self._zoom_active:
+            self._zoom_btn.setText(f"zoom: {self._zoom_mode}")
+        self._clear_zoom_preview()
+
+    def _zoom_mouse_drag_event(self, event, axis=None) -> None:
+        if not self._zoom_active or event.button() != Qt.MouseButton.LeftButton:
+            self._original_mouse_drag_event(event, axis=axis)
+            return
+        event.accept()
+        if event.isStart():
+            self._zoom_drag_start = self._view_box.mapSceneToView(
+                event.buttonDownScenePos(Qt.MouseButton.LeftButton)
+            )
+            self._clear_zoom_preview()
+            self._zoom_preview = pg.PlotDataItem(
+                pen=pg.mkPen((30, 120, 220), width=1.5, style=Qt.PenStyle.DashLine)
+            )
+            self._plot.addItem(self._zoom_preview)
+        if self._zoom_drag_start is None:
+            return
+        current = self._view_box.mapSceneToView(event.scenePos())
+        self._update_zoom_preview(self._zoom_drag_start, current)
+        if event.isFinish():
+            self._apply_zoom_drag(self._zoom_drag_start, current)
+            self._zoom_drag_start = None
+            self._clear_zoom_preview()
+
+    def _update_zoom_preview(self, start, current) -> None:
+        if self._zoom_preview is None:
+            return
+        x0, x1 = float(start.x()), float(current.x())
+        y0, y1 = float(start.y()), float(current.y())
+        (vx0, vx1), (vy0, vy1) = self._view_box.viewRange()
+        if self._zoom_mode == "horizontal":
+            ymid = (vy0 + vy1) / 2.0
+            cap = (vy1 - vy0) * 0.08
+            self._zoom_preview.setData(
+                [x0, x1, np.nan, x0, x0, np.nan, x1, x1],
+                [ymid, ymid, np.nan, ymid - cap, ymid + cap, np.nan, ymid - cap, ymid + cap],
+            )
+        elif self._zoom_mode == "vertical":
+            xmid = (vx0 + vx1) / 2.0
+            cap = (vx1 - vx0) * 0.08
+            self._zoom_preview.setData(
+                [xmid, xmid, np.nan, xmid - cap, xmid + cap, np.nan, xmid - cap, xmid + cap],
+                [y0, y1, np.nan, y0, y0, np.nan, y1, y1],
+            )
+        else:
+            self._zoom_preview.setData(
+                [x0, x1, x1, x0, x0],
+                [y0, y0, y1, y1, y0],
+            )
+
+    def _apply_zoom_drag(self, start, current) -> None:
+        x0, x1 = sorted((float(start.x()), float(current.x())))
+        y0, y1 = sorted((float(start.y()), float(current.y())))
+        (vx0, vx1), (vy0, vy1) = self._view_box.viewRange()
+        min_dx = abs(vx1 - vx0) * 1e-6
+        min_dy = abs(vy1 - vy0) * 1e-6
+        if self._zoom_mode == "horizontal":
+            if (x1 - x0) > min_dx:
+                self._view_box.setRange(xRange=(x0, x1), yRange=(vy0, vy1), padding=0.0)
+        elif self._zoom_mode == "vertical":
+            if (y1 - y0) > min_dy:
+                self._view_box.setRange(xRange=(vx0, vx1), yRange=(y0, y1), padding=0.0)
+        elif (x1 - x0) > min_dx and (y1 - y0) > min_dy:
+            self._view_box.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0.0)
+
+    def _clear_zoom_preview(self) -> None:
+        if self._zoom_preview is not None:
+            try:
+                self._plot.removeItem(self._zoom_preview)
+            except Exception:
+                pass
+            self._zoom_preview = None
+
     def _axis_values(self, ds, name, sel, vld_only, default):
         """Values for one axis. ``idx`` is always the synthetic flattened index;
         other attributes use ds.attr in the default view, raw store otherwise."""
         if name == "idx":
-            v = mfx_get(ds, "idx",
-                        itr="last" if default else sel,
-                        vld_only=True if default else vld_only)
+            # In the default view (sel == "last", vld_only == the loaded
+            # validity) this is exactly the materialized rows' index.
+            v = mfx_get(ds, "idx", itr=sel, vld_only=vld_only)
         elif default:
-            v = ds.attr.get(name)
+            # attr_values_1d falls back to the raw store for per-iteration
+            # columns kept 2-D in ds.attr (m2205 iter_load="all").
+            v = attr_values_1d(ds, name)
         else:
             v = mfx_get(ds, name, itr=sel, vld_only=vld_only)
         return None if v is None else np.asarray(v).ravel().astype(float)
@@ -295,7 +432,7 @@ class AttributeWindow(QWidget):
         The ds.attr path is valid only when ds.attr is the last-valid
         materialization (``iter_load="last"``).
         """
-        default = (sel == "last" and vld_only and attr_matches_last_valid(ds))
+        default = (sel == "last" and attr_matches_selection(ds, itr="last", vld_only=vld_only))
         missing: list[str] = []
 
         x = self._axis_values(ds, x_name, sel, vld_only, default)
@@ -405,15 +542,19 @@ class AttributeWindow(QWidget):
         # or includes invalid localizations.
         itr_sel, render = self._selection()
         if (itr_sel != "last" or render != "single"
-                or not self._valid_chk.isChecked()
-                or not attr_matches_last_valid(ds)):
+                or not attr_matches_selection(
+                    ds, itr="last", vld_only=self._valid_chk.isChecked())):
             return None
         x_name = self._x_combo.currentText()
         y_name = self._y_combo.currentText()
         if not x_name or not y_name:
             return None
-        x = np.asarray(ds.attr.get(x_name, np.empty(0))).ravel().astype(float)
-        y = np.asarray(ds.attr.get(y_name, np.empty(0))).ravel().astype(float)
+        x = attr_values_1d(ds, x_name)
+        y = attr_values_1d(ds, y_name)
+        if x is None or y is None:
+            return None
+        x = np.asarray(x).ravel().astype(float)
+        y = np.asarray(y).ravel().astype(float)
         n = min(x.size, y.size, ds.prop.num_loc)
         if n == 0:
             return None

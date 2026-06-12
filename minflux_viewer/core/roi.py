@@ -251,6 +251,11 @@ def record_to_points(record: RoiRecord) -> np.ndarray:
 
 
 def record_to_imagej(record: RoiRecord):
+    if record.coordinate_space != "pixel":
+        raise ValueError(
+            "ImageJ ROI export requires pixel-coordinate ROIs. "
+            "Use native JSON for plot/attribute-coordinate ROIs."
+        )
     from roifile import ROI_TYPE, ImagejRoi
     if record.type == "rectangle":
         x, y, w, h = _bounds(record.geometry)

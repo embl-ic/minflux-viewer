@@ -61,8 +61,14 @@ from scipy.ndimage import affine_transform, gaussian_filter, zoom
 
 from .. import resource_path
 from ..core.app_state import AppState
-from ..core.overlay import apply_display_transform_nm, dataset_group_id, transform_key
-from ..core.roi_selection import rectangle_mask
+from ..core.overlay import (
+    apply_display_transform_nm,
+    dataset_group_id,
+    identity_matrix4,
+    matrix4_to_xy3,
+    transform_key,
+)
+from ..core.roi_selection import active_roi_mask, rectangle_mask
 from ..core.spatial_grid import SpatialGrid
 from .render_config import (
     DIRECT_RENDER_THRESHOLD_NM,
@@ -526,6 +532,10 @@ class ManualAlignDialog(QDialog):
 
         self._update_status()
 
+    def accept(self) -> None:
+        self._render_window._apply_manual_channel_transform(self._ch_idx)
+        super().accept()
+
     def keyPressEvent(self, event) -> None:
         transform = self._render_window._channels[self._ch_idx]["transform"]
         step = float(self._move_spin.value())
@@ -579,9 +589,11 @@ class ManualAlignDialog(QDialog):
         pixel_size_nm = self._render_window._current_render_pixel_size_nm()
         dx_px = float(transform.get("dx_nm", 0.0)) / pixel_size_nm
         dy_px = float(transform.get("dy_nm", 0.0)) / pixel_size_nm
+        axis0, axis1 = self._render_window._orientation_axes(self._render_window._orientation)
+        axis_names = "XYZ"
         self._status.setText(
-            f"Current transform: dx={dx_px:.3f} px, "
-            f"dy={dy_px:.3f} px, rotation={transform['angle']:.3f} deg"
+            f"Current transform: d{axis_names[axis0]}={dx_px:.3f} px, "
+            f"d{axis_names[axis1]}={dy_px:.3f} px, rotation={transform['angle']:.3f} deg"
         )
 
     def _ensure_world_transform(self) -> None:
@@ -664,6 +676,7 @@ class RenderWindow(QWidget):
         self._bc_auto_threshold: int = 0
         self._bc_dialog = None
         self._roi_overlay = None
+        self._roi_highlight_item = None
         self._volume_window = None
 
         self.setWindowTitle("Render")
@@ -688,6 +701,11 @@ class RenderWindow(QWidget):
 
         state.active_changed.connect(self._on_active_changed)
         state.filter_changed.connect(self._on_filter_changed)
+        # RIMF / z-scaling change: re-pull loc_nm and re-render (same as a
+        # filter change — it busts tile caches and refreshes depth).
+        state.calibration_changed.connect(self._on_filter_changed)
+        state.roi_selection_changed.connect(self._on_roi_selection_changed)
+        state.rois.selection_changed.connect(self._redraw_roi_highlight)
         self._scheduler.tile_ready.connect(self._on_tile_ready)
 
     # ------------------------------------------------------------------
@@ -731,6 +749,12 @@ class RenderWindow(QWidget):
         self._set_axes_visible(False)
 
         root.addWidget(self._image_view, stretch=1)
+        self._roi_highlight_item = pg.ScatterPlotItem(
+            size=7,
+            pen=pg.mkPen(255, 210, 0, 235, width=1.6),
+            brush=pg.mkBrush(255, 230, 0, 65),
+        )
+        self._image_view.view.addItem(self._roi_highlight_item)
         from .roi_overlay import RoiOverlayController
         self._roi_overlay = RoiOverlayController(
             self._state.rois,
@@ -804,8 +828,8 @@ class RenderWindow(QWidget):
         if ds.image_data is not None and not ds.has_localizations:
             self._render_mode = "image"
             self._locs_nm = self._xy = self._depth = None
+            self._configure_image_depth(ds.image_data)
             self._image_data = self._prepare_image_payload(ds.image_data)
-            self._depth_row.setVisible(False)
             self._bounds_xy = self._image_bounds(ds, self._image_data)
             self._fit_view()
             self._schedule_render()
@@ -872,6 +896,99 @@ class RenderWindow(QWidget):
             return
         dialog = ManualAlignDialog(self, ch_idx)
         dialog.exec()
+
+    def _apply_manual_channel_transform(self, ch_idx: int) -> None:
+        if not (0 <= ch_idx < len(self._channels)):
+            return
+        ch = self._channels[ch_idx]
+        ds_idx = ch.get("dataset_idx")
+        if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
+            return
+        ds = self._state.datasets[ds_idx]
+        manual = self._manual_transform_matrix(ch.get("transform") or {})
+        base_transform = ch.get("loc_transform") or ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
+        base = self._transform_matrix4(base_transform)
+        matrix = manual @ base
+        record = self._updated_transform_record(base_transform, matrix)
+        ds.state["overlay_transform"] = record
+        ds.state["render_transform_2d"] = record
+        ch["loc_transform"] = record
+        ch["transform"] = {"dx_nm": 0.0, "dy_nm": 0.0, "angle": 0.0}
+        self._rebuild_all_grids()
+        self._phys_tile_cache.clear()
+        self._scheduler.cancel()
+        self._schedule_render()
+
+    def _manual_transform_matrix(self, transform: dict) -> np.ndarray:
+        matrix = identity_matrix4()
+        orientation = self._orientation
+        axes = self._orientation_axes(orientation)
+        dx_nm = float(transform.get("dx_nm", 0.0))
+        dy_nm = float(transform.get("dy_nm", 0.0))
+        angle = float(transform.get("angle", 0.0))
+
+        translation = np.zeros(3, dtype=np.float64)
+        translation[axes[0]] = dx_nm
+        translation[axes[1]] = dy_nm
+
+        anchor = np.zeros(3, dtype=np.float64)
+        anchor[axes[0]] = float(transform.get("anchor_x_nm", 0.0))
+        anchor[axes[1]] = float(transform.get("anchor_y_nm", 0.0))
+
+        rot = identity_matrix4()
+        if abs(angle) > 1e-12:
+            theta = np.deg2rad(angle)
+            c, s = float(np.cos(theta)), float(np.sin(theta))
+            a0, a1 = axes
+            rot[a0, a0] = c
+            rot[a0, a1] = -s
+            rot[a1, a0] = s
+            rot[a1, a1] = c
+
+        to_anchor = identity_matrix4()
+        to_anchor[:3, 3] = -anchor
+        from_anchor = identity_matrix4()
+        from_anchor[:3, 3] = anchor + translation
+        matrix = from_anchor @ rot @ to_anchor
+        return matrix
+
+    def _transform_matrix4(self, transform: dict | None) -> np.ndarray:
+        if isinstance(transform, dict):
+            matrix_4 = transform.get("matrix_4x4")
+            if matrix_4 is not None:
+                arr = np.asarray(matrix_4, dtype=np.float64)
+                if arr.shape == (4, 4):
+                    return arr
+            matrix_3 = transform.get("matrix_3x3")
+            if matrix_3 is not None:
+                arr = np.asarray(matrix_3, dtype=np.float64)
+                if arr.shape == (3, 3):
+                    out = identity_matrix4()
+                    out[:2, :2] = arr[:2, :2]
+                    out[:2, 3] = arr[:2, 2]
+                    return out
+        return identity_matrix4()
+
+    def _updated_transform_record(self, previous: dict | None, matrix: np.ndarray) -> dict:
+        record = dict(previous or {})
+        record["matrix_4x4"] = np.asarray(matrix, dtype=np.float64).tolist()
+        record["matrix_3x3"] = matrix4_to_xy3(matrix).tolist()
+        record["alignment_mode"] = record.get("alignment_mode") or "manual"
+        provenance = dict(record.get("provenance") or {})
+        provenance["manual_alignment"] = {
+            "orientation": self._orientation,
+            "method": "keyboard translation/rotation",
+        }
+        record["provenance"] = provenance
+        return record
+
+    @staticmethod
+    def _orientation_axes(orientation: str) -> tuple[int, int]:
+        if orientation == "XZ":
+            return (0, 2)
+        if orientation == "YZ":
+            return (1, 2)
+        return (0, 1)
 
     def _rebuild_channel_ui(self) -> None:
         while self._channel_layout.count():
@@ -982,13 +1099,83 @@ class RenderWindow(QWidget):
         return (ox, ox + width * sx, oy, oy + height * sy)
 
     def _prepare_image_payload(self, image: np.ndarray) -> np.ndarray:
-        arr = np.asarray(image, dtype=np.float64)
+        arr = np.asarray(image)
         if arr.ndim == 2:
+            return arr.astype(np.float64, copy=False)
+        if self._image_is_color_2d(arr):
             return arr
+        if self._image_is_stack(arr):
+            return self._project_image_stack(arr)
         if arr.ndim >= 3:
             axes = tuple(range(arr.ndim - 2))
-            return np.nanmax(arr, axis=axes)
+            return np.nanmax(arr.astype(np.float64, copy=False), axis=axes)
         raise ValueError("Image payload must be at least 2D")
+
+    @staticmethod
+    def _image_is_color_2d(image: np.ndarray) -> bool:
+        return image.ndim == 3 and image.shape[-1] in (3, 4)
+
+    @classmethod
+    def _image_is_stack(cls, image: np.ndarray) -> bool:
+        return (
+            (image.ndim == 3 and not cls._image_is_color_2d(image))
+            or (image.ndim == 4 and image.shape[-1] in (3, 4))
+        )
+
+    @classmethod
+    def _image_depth_count(cls, image: np.ndarray) -> int:
+        arr = np.asarray(image)
+        return int(arr.shape[0]) if cls._image_is_stack(arr) else 1
+
+    def _project_image_stack(self, image: np.ndarray) -> np.ndarray:
+        arr = np.asarray(image)
+        depth = self._image_depth_count(arr)
+        if depth <= 1:
+            return np.asarray(arr[0] if arr.ndim >= 3 else arr, dtype=np.float64)
+        if self._all_depth_check.isChecked() or not self._has_depth:
+            selected = arr
+        else:
+            lo, hi = sorted(self._depth_range)
+            slice_numbers = np.arange(1, depth + 1, dtype=float)
+            left_inc, right_inc = self._depth_inclusive
+            lo_mask = slice_numbers >= lo if left_inc else slice_numbers > lo
+            hi_mask = slice_numbers <= hi if right_inc else slice_numbers < hi
+            mask = lo_mask & hi_mask
+            if not np.any(mask):
+                center = int(np.clip(round((lo + hi) / 2.0), 1, depth))
+                mask[center - 1] = True
+            selected = arr[mask]
+        if selected.shape[0] == 1:
+            return selected[0]
+        return np.nanmax(selected.astype(np.float64, copy=False), axis=0)
+
+    def _configure_image_depth(self, image: np.ndarray) -> None:
+        depth = self._image_depth_count(image)
+        if depth <= 1:
+            self._has_depth = False
+            self._bounds_depth = (0.0, 0.0)
+            self._depth_range = (0.0, 0.0)
+            self._depth_axis_name = "Z"
+            self._depth_row.setVisible(False)
+            self._update_depth_label()
+            return
+        self._has_depth = True
+        self._bounds_depth = (1.0, float(depth))
+        self._depth_axis_name = "Slice"
+        self._depth_scroll_step_nm = 1.0
+        self._depth_reverse_scroll = False
+        self._depth_slider.set_limits(*self._bounds_depth, reset_range=True)
+        self._depth_slider.set_scroll_options(self._depth_scroll_step_nm, self._depth_reverse_scroll)
+        self._depth_row.setVisible(True)
+        self._depth_axis_label.setText("Z:")
+        self._depth_slider.setEnabled(not self._all_depth_check.isChecked())
+        if not self._all_depth_check.isChecked():
+            self._set_default_depth_range()
+        else:
+            self._depth_range = self._bounds_depth
+            self._depth_inclusive = (True, True)
+            self._depth_range_initialized = False
+        self._update_depth_label()
 
     def _show_image_dataset(self, ds, *, fit_view: bool = False) -> None:
         if self._image_data is None:
@@ -1005,13 +1192,16 @@ class RenderWindow(QWidget):
             pos=[ox, oy],
             scale=[sx, sy],
         )
+        self._clear_roi_highlight()
         if self._manual_levels is not None:
             self._image_view.setLevels(*self._manual_levels)
         self._on_cmap_changed(self._active_cmap)
         if fit_view:
             self._fit_view()
+        depth = self._image_depth_count(ds.image_data)
+        stack_note = f"  |  {depth} slices" if depth > 1 else ""
         self._info_label.setText(
-            f"{self._dataset_dim_label} image  |  {width} × {height} px  |  "
+            f"{self._dataset_dim_label} image{stack_note}  |  {width} × {height} px  |  "
             f"px=({sx:.1f}, {sy:.1f}) nm"
         )
 
@@ -1250,6 +1440,7 @@ class RenderWindow(QWidget):
             rgba, autoRange=False, autoLevels=False,
             pos=[x0, y0], scale=[px_nm, px_nm],
         )
+        self._redraw_roi_highlight()
 
         self._pending_tile_keys = set(all_missing)
 
@@ -1297,6 +1488,7 @@ class RenderWindow(QWidget):
         if self._idx is None or self._image_data is None:
             return
         ds = self._state.datasets[self._idx]
+        self._image_data = self._prepare_image_payload(ds.image_data)
         self._show_image_dataset(ds)
 
     def _render_direct(
@@ -1444,6 +1636,7 @@ class RenderWindow(QWidget):
             rgba, autoRange=False, autoLevels=False,
             pos=[x0, y0], scale=[px_nm, px_nm],
         )
+        self._redraw_roi_highlight()
 
         n_vis = len([c for c in self._channels if c["visible"]])
         self._info_label.setText(
@@ -1596,6 +1789,7 @@ class RenderWindow(QWidget):
             rgba, autoRange=False, autoLevels=False,
             pos=[x0, y0], scale=[px_nm, px_nm],
         )
+        self._redraw_roi_highlight()
 
         pending = len(self._pending_tile_keys)
         n_vis = len([c for c in self._channels if c["visible"]])
@@ -1711,6 +1905,7 @@ class RenderWindow(QWidget):
             pos=[x0, y0],
             scale=[px_nm, px_nm],
         )
+        self._redraw_roi_highlight()
 
     def _current_render_pixel_size_nm(self) -> float:
         if self._last_px_nm and self._last_px_nm > 0:
@@ -1768,7 +1963,7 @@ class RenderWindow(QWidget):
         shift = np.array([dx_nm, dy_nm], dtype=np.float64)
         matrix = world_to_tile @ inv_rot_world @ tile_to_world
         offset = world_to_tile @ (inv_rot_world @ (world_origin - anchor - shift) + anchor - world_origin)
-        return affine_transform(
+        out = affine_transform(
             tile,
             matrix,
             offset=offset,
@@ -1778,18 +1973,30 @@ class RenderWindow(QWidget):
             cval=0.0,
             prefilter=True,
         ).astype(np.float32, copy=False)
+        out[~np.isfinite(out)] = 0.0
+        out[out < 0.0] = 0.0
+        vmax = float(np.nanmax(out)) if out.size else 0.0
+        if vmax > 0.0:
+            out[out < vmax * 1e-6] = 0.0
+        return out
 
     def _normalized_tile(self, tile: np.ndarray, ch: dict) -> np.ndarray:
+        if tile.size == 0 or not np.any(np.isfinite(tile)):
+            return np.zeros(tile.shape, dtype=np.float32)
+        positive = np.isfinite(tile) & (tile > 0.0)
+        if not np.any(positive):
+            return np.zeros(tile.shape, dtype=np.float32)
         levels = ch.get("levels")
         if levels is None:
-            levels = self._manual_levels if len(self._channels) == 1 else self._compute_auto_levels(tile)
+            levels = self._manual_levels if len(self._channels) == 1 else self._compute_auto_levels(tile[positive])
         if levels is None:
-            lo, hi = float(np.nanmin(tile)), float(np.nanmax(tile))
+            lo, hi = float(np.nanmin(tile[positive])), float(np.nanmax(tile[positive]))
             if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
                 hi = lo + 1.0
         else:
             lo, hi = levels
-        norm = (tile.astype(np.float32, copy=False) - float(lo)) / max(float(hi) - float(lo), 1e-12)
+        safe = np.nan_to_num(tile.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
+        norm = (safe - float(lo)) / max(float(hi) - float(lo), 1e-12)
         return np.clip(norm, 0.0, 1.0)
 
     def _map_norm_to_rgb(self, norm: np.ndarray, lut: str) -> np.ndarray:
@@ -2313,6 +2520,14 @@ class RenderWindow(QWidget):
 
     def _set_default_depth_range(self) -> None:
         d_lo, d_hi = self._bounds_depth
+        if self._render_mode == "image":
+            center = float(round((d_lo + d_hi) / 2.0))
+            lo = hi = min(max(center, d_lo), d_hi)
+            self._depth_range = (lo, hi)
+            self._depth_inclusive = (True, True)
+            self._depth_range_initialized = True
+            self._depth_slider.set_range(lo, hi)
+            return
         width = max((d_hi - d_lo) / 10.0, 0.0)
         center = (d_lo + d_hi) / 2.0
         lo = max(d_lo, center - width / 2.0)
@@ -2361,7 +2576,108 @@ class RenderWindow(QWidget):
     ) -> str:
         left = "[" if inclusive[0] else "("
         right = "]" if inclusive[1] else ")"
+        if self._render_mode == "image" and self._depth_axis_name == "Slice":
+            lo, hi = int(round(values[0])), int(round(values[1]))
+            if lo == hi:
+                return f"slice {lo}"
+            return f"slices {left}{lo}, {hi}{right}"
         return f"{left}{values[0]:.1f}, {values[1]:.1f}{right} nm"
+
+    def _clear_roi_highlight(self) -> None:
+        if self._roi_highlight_item is not None:
+            self._roi_highlight_item.setData([], [])
+
+    def _roi_masks_for_dataset(self, ds) -> list[tuple[object, np.ndarray]]:
+        records = [r for r in self._state.rois.records if r.id in set(self._state.rois.selected_ids)]
+        draft_id = ds.state.get("active_roi_draft_id")
+        if draft_id:
+            draft_meta = ds.state.get("roi_masks", {}).get(draft_id, {})
+            draft_record = next((r for r in records if r.id == draft_id), None)
+            if draft_record is None and isinstance(draft_meta, dict):
+                draft_record = type("_RoiHighlight", (), {
+                    "id": draft_id,
+                    "stroke_color": draft_meta.get("stroke_color", "#ffff00"),
+                })()
+            if draft_record is not None and all(r.id != draft_id for r in records):
+                records.append(draft_record)
+        out: list[tuple[object, np.ndarray]] = []
+        ftr = np.asarray(ds.filter_mask, dtype=bool).ravel()
+        for record in records:
+            mask = active_roi_mask(ds, selected_ids=[record.id], include_active_draft=False)
+            if mask is None and record.id == draft_id:
+                mask = active_roi_mask(ds, selected_ids=[], include_active_draft=True)
+            if mask is None:
+                continue
+            mask = np.asarray(mask, dtype=bool).ravel()
+            if ftr.size == mask.size:
+                mask &= ftr
+            out.append((record, mask))
+        return out
+
+    @staticmethod
+    def _roi_highlight_brushes(record, count: int) -> list:
+        color = pg.mkColor(getattr(record, "stroke_color", "#ffff00") or "#ffff00")
+        fill = pg.mkColor(color)
+        fill.setAlpha(75)
+        return [pg.mkBrush(fill)] * int(count)
+
+    def _redraw_roi_highlight(self) -> None:
+        if self._roi_highlight_item is None or self._render_mode == "image":
+            self._clear_roi_highlight()
+            return
+        if self._orientation == "XY":
+            axes, depth_axis = (0, 1), 2
+        elif self._orientation == "XZ":
+            axes, depth_axis = (0, 2), 1
+        elif self._orientation == "YZ":
+            axes, depth_axis = (1, 2), 0
+        else:
+            self._clear_roi_highlight()
+            return
+
+        xs: list[np.ndarray] = []
+        ys: list[np.ndarray] = []
+        brushes: list = []
+        channels = self._channels or [{"dataset_idx": self._idx, "visible": True, "kind": "localizations"}]
+        per_channel_max = max(1, 200_000 // max(len(channels), 1))
+        for ch in channels:
+            if not ch.get("visible", True) or ch.get("kind") == "image":
+                continue
+            ds_idx = ch.get("dataset_idx")
+            if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
+                continue
+            ds = self._state.datasets[ds_idx]
+            locs = self._raw_render_locs(ds)
+            if locs.shape[0] == 0:
+                continue
+            for record, mask in self._roi_masks_for_dataset(ds):
+                n = min(mask.size, locs.shape[0])
+                visible = mask[:n] & np.all(np.isfinite(locs[:n, :3]), axis=1)
+                if self._has_depth and not self._all_depth_check.isChecked():
+                    lo, hi = self._depth_range
+                    left_inc, right_inc = self._depth_inclusive
+                    depth = locs[:n, depth_axis]
+                    lo_mask = depth >= lo if left_inc else depth > lo
+                    hi_mask = depth <= hi if right_inc else depth < hi
+                    visible &= lo_mask & hi_mask
+                indices = np.flatnonzero(visible)
+                if indices.size > per_channel_max:
+                    step = int(np.ceil(indices.size / per_channel_max))
+                    indices = indices[::step]
+                if indices.size:
+                    xs.append(locs[indices, axes[0]])
+                    ys.append(locs[indices, axes[1]])
+                    brushes.extend(self._roi_highlight_brushes(record, indices.size))
+        if not xs:
+            self._clear_roi_highlight()
+            return
+        self._roi_highlight_item.setData(
+            x=np.concatenate(xs),
+            y=np.concatenate(ys),
+            brush=brushes,
+            pen=None,
+            size=7,
+        )
 
     def compute_roi_selection(self, record):
         if record.type != "rectangle" or self._idx is None:
@@ -2486,3 +2802,7 @@ class RenderWindow(QWidget):
             self._schedule_render()
             if self._volume_window is not None and self._volume_window.isVisible():
                 self._volume_window.refresh_from_dataset()
+
+    def _on_roi_selection_changed(self, idx: int) -> None:
+        if any(ch["dataset_idx"] == idx for ch in self._channels):
+            self._redraw_roi_highlight()
