@@ -411,10 +411,13 @@ class MainWindow(QMainWindow):
         u.menuFile.addAction(self.actionClose)
         u.menuFile.addAction(self.actionCloseAll)
         u.menuFile.addSeparator()
+        u.menuFile.addAction(u.actionPreferences)
+        u.menuFile.addSeparator()
         u.menuFile.addAction(u.actionQuit)
 
         u.menuView.clear()
         u.menuView.addAction(u.actionShowInfo)
+        u.menuView.addAction(u.actionDatasetManager)
         u.menuView.addSeparator()
         u.menuView.addAction(u.actionAttributePlot)
         u.menuView.addAction(self.actionAttributePlot3DMatplotlib)
@@ -458,6 +461,7 @@ class MainWindow(QMainWindow):
             "log": u.actionLog,
             "console": u.actionConsole,
             "preferences": u.actionPreferences,
+            "dataset_manager": u.actionDatasetManager,
         }
 
         # ApplicationShortcut so Shift+V reaches the main window from every
@@ -536,7 +540,10 @@ class MainWindow(QMainWindow):
         for key, action in self._shortcut_actions.items():
             seq = str(shortcuts.get(key, "") or "")
             action.setShortcut(QKeySequence(seq) if seq else QKeySequence())
-            action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+            # WindowShortcut: fires when the main window is the active window
+            # (WidgetShortcut required the widget itself to hold focus, which
+            # menu actions almost never do — so the shortcuts never triggered).
+            action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         self._ui.actionQuit.setShortcut(QKeySequence("Ctrl+Q"))
         self._ui.actionQuit.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         seq = str(shortcuts.get("focus_main_window", "") or "")
@@ -1829,21 +1836,57 @@ class MainWindow(QMainWindow):
         data_prefs = self._state.prefs.get("data", {})
 
         if data_prefs.get("compute_rimf", True) and "rimf" not in ds.derived:
-            try:
-                from ..analysis.trace_analysis import estimate_anisotropy
-                import numpy as np
-                loc_nm = np.asarray(ds.loc_nm, dtype=float)
-                tid = np.asarray(ds.attr.get("tid", np.arange(loc_nm.shape[0]))).ravel()
-                if loc_nm.shape[0] > 0 and loc_nm.shape[1] >= 3:
-                    rimf, sizes_x, sizes_y, sizes_z = estimate_anisotropy(loc_nm, tid)
-                    ds.cali.RIMF = float(rimf) if np.isfinite(rimf) else ds.cali.RIMF
-                    ds.derived["rimf"] = np.asarray([rimf], dtype=float)
-                    ds.derived["rimf_sizes_x"] = sizes_x
-                    ds.derived["rimf_sizes_y"] = sizes_y
-                    ds.derived["rimf_sizes_z"] = sizes_z
-                    self._state.log(f"Computed RIMF for '{ds.name}': {rimf:.4g}")
-            except Exception as exc:
-                self._state.log(f"RIMF computation skipped for '{ds.name}': {exc}", "WARN")
+            import numpy as np
+            plot_prefs = self._state.prefs.get("plot", {})
+            if ds.prop.num_dim < 3:
+                # 2D data: Z is all zero, so anisotropy estimation is moot.
+                # RIMF = 1.0 keeps the Z scaling a no-op and stays consistent
+                # with the 3D pipeline without spending the computation.
+                ds.set_rimf(1.0, source="2D (no z correction)")
+                ds.derived["rimf"] = np.asarray([1.0], dtype=float)
+                self._state.log(f"RIMF for '{ds.name}': 1.0 (2D dataset, computation skipped).")
+            elif plot_prefs.get("use_fixed_rimf", False):
+                # Manual override: apply the fixed preference value instead of
+                # estimating. Tracked as a 'fixed' provenance source.
+                fixed = float(plot_prefs.get("rimf_value", 1.0))
+                ds.set_rimf(fixed, source="fixed (preference)")
+                ds.derived["rimf"] = np.asarray([fixed], dtype=float)
+                self._state.log(f"RIMF for '{ds.name}': {fixed:.4g} (fixed preference value).")
+            else:
+                # compute_rimf checked: run the same anisotropy estimation as the
+                # plugin (raw last-valid z, never the RIMF-corrected loc_nm).
+                value = None
+                try:
+                    from ..analysis.trace_analysis import estimate_anisotropy_for_dataset
+                    res = estimate_anisotropy_for_dataset(ds)
+                    if res is not None and np.isfinite(res["rimf"]):
+                        value = float(res["rimf"])
+                        # Apply only when in the physically expected window;
+                        # otherwise treat as failed and reset to 1.0 below.
+                        if 0.5 <= value <= 1.0:
+                            ds.set_rimf(value, source="auto (estimate anisotropy)")
+                            ds.derived["rimf"] = np.asarray([value], dtype=float)
+                            ds.derived["rimf_sizes_x"] = res["x"].sizes
+                            ds.derived["rimf_sizes_y"] = res["y"].sizes
+                            ds.derived["rimf_sizes_z"] = res["z"].sizes
+                            self._state.log(
+                                f"Computed RIMF for '{ds.name}': {value:.4g} (raw last-valid z)"
+                            )
+                except Exception as exc:
+                    self._state.log(f"RIMF estimation failed for '{ds.name}': {exc}", "WARN")
+                if "rimf" not in ds.derived:
+                    # Out of [0.5, 1.0] or estimation failed → reset to 1.0.
+                    ds.set_rimf(1.0, source="auto (out of range → 1.0)")
+                    ds.derived["rimf"] = np.asarray([1.0], dtype=float)
+                    shown = f"{value:.4g}" if value is not None else "failed"
+                    self._state.log(
+                        f"RIMF for '{ds.name}': estimate {shown} outside [0.5, 1.0] — reset to 1.0.",
+                        "WARN",
+                    )
+            # This runs after the dataset's windows are shown, so notify the
+            # views to reflect the freshly-applied RIMF (data-info RIMF text,
+            # render/scatter z-scaling).
+            self._state.notify_calibration_changed(idx)
 
         if data_prefs.get("compute_loc_prec", True) and "sigma_per_trace_nm" not in ds.derived:
             try:
@@ -1883,6 +1926,46 @@ class MainWindow(QMainWindow):
                 )
             except Exception as exc:
                 self._state.log(f"Local density computation skipped for '{ds.name}': {exc}", "WARN")
+
+        # For all-iteration loads ds.attr is not the last-valid materialization;
+        # compute density at the last-valid selection too so mfx_get can
+        # broadcast `den` across iteration views (matches an iter_load="last"
+        # load of the same file).
+        if (
+            data_prefs.get("compute_local_density", True)
+            and len(ds.components.derived_last)
+            and "den" not in ds.components.derived_last
+        ):
+            try:
+                import numpy as np
+
+                from ..analysis.local_density import compute_local_density_for_points
+                from ..core.loader import mfx_get
+                x = mfx_get(ds, "loc_x", itr="last")
+                y = mfx_get(ds, "loc_y", itr="last")
+                z = mfx_get(ds, "loc_z", itr="last")
+                if x is not None and y is not None:
+                    if z is None:
+                        z = np.zeros_like(np.asarray(x, dtype=float))
+                    points_nm = np.column_stack([
+                        np.asarray(x, dtype=float) * 1e9,
+                        np.asarray(y, dtype=float) * 1e9,
+                        np.asarray(z, dtype=float) * 1e9 * ds.cali.RIMF,
+                    ])
+                    dims = int(data_prefs.get(
+                        "local_density_dimensions", 3 if ds.prop.num_dim == 3 else 2,
+                    ))
+                    density, method, detail = compute_local_density_for_points(
+                        points_nm, self._state.prefs, dimensions=dims,
+                    )
+                    ds.components.derived_last["den"] = density
+                    self._state.log(
+                        f"Computed last-valid local density for '{ds.name}' using {method} ({detail})."
+                    )
+            except Exception as exc:
+                self._state.log(
+                    f"Last-valid local density computation skipped for '{ds.name}': {exc}", "WARN",
+                )
 
     def _on_dataset_removed(self, idx: int) -> None:
         for mapping in (
@@ -2072,7 +2155,7 @@ class MainWindow(QMainWindow):
         if self._state.active_dataset is None:
             self._no_data_warning(); return
         from ..analysis.trace_analysis import show_anisotropy_dialog
-        show_anisotropy_dialog(self, self._state.active_dataset)
+        show_anisotropy_dialog(self, self._state.active_dataset, self._state)
 
     def _show_trace_viewer(self) -> None:
         if self._state.active_dataset is None:
@@ -2219,6 +2302,13 @@ class MainWindow(QMainWindow):
         if w is not None:
             try: w.close()
             except Exception: pass
+
+        # Modeless analysis/plugin windows retained via ui/modeless.py
+        try:
+            from .modeless import close_modeless
+            close_modeless(self)
+        except Exception:
+            pass
 
     def _terminate_paraview_processes(self) -> None:
         """

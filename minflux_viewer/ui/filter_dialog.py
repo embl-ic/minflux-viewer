@@ -15,10 +15,11 @@ Filters can be saved to / loaded from JSON (same format as the MATLAB app).
 from __future__ import annotations
 
 from pathlib import Path
+import math
 
 import numpy as np
-from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -42,6 +43,7 @@ from PyQt6.QtWidgets import (
 
 from ..core.app_state import AppState
 from ..core.attributes import is_trace_wise_attribute, plot_attribute_names
+from ..core.loader import attr_values_1d
 from ..core.filter_io import (
     is_filter_json_file,
     is_filter_json_payload,
@@ -63,22 +65,117 @@ _COL_DELETE  = 6
 _NCOLS       = 7
 
 
-class _RowDblClickFilter(QObject):
-    """Forward left-double-click on any cell widget to _display_filter(row)."""
+class SmartBoundsSpinBox(QDoubleSpinBox):
+    """Filter-bound spin box with data-type-aware display and stepping."""
 
-    def __init__(self, dialog: "FilterDialog", row: int) -> None:
-        super().__init__(dialog)
-        self._dialog = dialog
-        self._row = row
+    _SCI_LOW = 1e-3
+    _SCI_HIGH = 1e6
 
-    def eventFilter(self, obj, event) -> bool:
-        if (
-            event.type() == QEvent.Type.MouseButtonDblClick
-            and event.button() == Qt.MouseButton.LeftButton
-        ):
-            self._dialog._display_filter(self._row)
-            return True
-        return False
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._kind = "float"
+        self._data_min = 0.0
+        self._data_max = 1.0
+        self.setRange(-1e15, 1e15)
+        self.configure(value=0.0, values=None, mode="per loc")
+
+    def configure(
+        self,
+        *,
+        value: float | None = None,
+        values: np.ndarray | None = None,
+        data_min: float | None = None,
+        data_max: float | None = None,
+        mode: str = "per loc",
+    ) -> None:
+        if values is not None:
+            arr = np.asarray(values)
+            finite = arr[np.isfinite(arr.astype(float, copy=False))] if arr.size else np.asarray([], dtype=float)
+            if finite.size:
+                data_min = float(np.nanmin(finite.astype(float, copy=False)))
+                data_max = float(np.nanmax(finite.astype(float, copy=False)))
+            self._kind = self._infer_kind(arr, mode)
+        else:
+            self._kind = "float" if mode in {"trace mean", "trace stdev", "trace range"} else self._kind
+
+        if data_min is not None:
+            self._data_min = float(data_min)
+        if data_max is not None:
+            self._data_max = float(data_max)
+        lo, hi = sorted((self._data_min, self._data_max))
+        span = max(abs(hi - lo), abs(lo), abs(hi), 1.0)
+        self.setRange(lo - span, hi + span)
+        self._apply_display_rules()
+        if value is not None:
+            self.setValue(float(value))
+        self.setSingleStep(self._smart_step())
+
+    def textFromValue(self, value: float) -> str:  # noqa: N802 - Qt API
+        if self._kind == "bool":
+            return str(int(round(max(0.0, min(1.0, value)))))
+        if self._kind == "int":
+            return str(int(round(value)))
+        return self._format_float(float(value))
+
+    def valueFromText(self, text: str) -> float:  # noqa: N802 - Qt API
+        text = text.strip().replace(",", "")
+        try:
+            if self._kind in {"bool", "int"}:
+                return float(int(round(float(text))))
+            return float(text)
+        except Exception:
+            return float(self.value())
+
+    def stepBy(self, steps: int) -> None:  # noqa: N802 - Qt API
+        value = float(self.value()) + int(steps) * float(self.singleStep())
+        if self._kind == "bool":
+            value = max(0.0, min(1.0, round(value)))
+        elif self._kind == "int":
+            value = round(value)
+        self.setValue(value)
+
+    def _apply_display_rules(self) -> None:
+        if self._kind == "bool":
+            self.setDecimals(0)
+            self.setRange(0.0, 1.0)
+        elif self._kind == "int":
+            self.setDecimals(0)
+        else:
+            # Keep enough decimals internally for metre-scale values while
+            # textFromValue controls the visible representation.
+            self.setDecimals(12)
+
+    def _smart_step(self) -> float:
+        if self._kind == "bool":
+            return 1.0
+        lo, hi = sorted((float(self._data_min), float(self._data_max)))
+        span = abs(hi - lo)
+        if not math.isfinite(span) or span <= 0.0:
+            span = max(abs(float(self.value())), abs(lo), abs(hi), 1.0)
+        exponent = math.floor(math.log10(span)) - 1 if span > 0.0 else -2
+        step = 10.0 ** exponent
+        if self._kind == "int":
+            return float(max(1, int(round(step))))
+        return float(step)
+
+    @classmethod
+    def _infer_kind(cls, values: np.ndarray, mode: str) -> str:
+        if mode in {"trace mean", "trace median", "trace stdev", "trace range"}:
+            return "float"
+        if values.dtype.kind == "b":
+            return "bool"
+        if values.dtype.kind in {"i", "u"} and mode in {"per loc", "trace min", "trace max"}:
+            return "int"
+        return "float"
+
+    @classmethod
+    def _format_float(cls, value: float) -> str:
+        if not math.isfinite(value):
+            return str(value)
+        abs_value = abs(value)
+        if abs_value != 0.0 and (abs_value < cls._SCI_LOW or abs_value >= cls._SCI_HIGH):
+            return f"{value:.3e}"
+        return f"{value:.3f}"
 
 
 class FilterDialog(QDialog):
@@ -105,9 +202,11 @@ class FilterDialog(QDialog):
         self._apply_timer = QTimer(self)
         self._apply_timer.setSingleShot(True)
         self._apply_timer.timeout.connect(self._apply_all)
+        self._view_shortcuts: dict[str, QShortcut] = {}
 
         self._build_ui()
         self._populate_attr_lists()
+        self._install_view_shortcuts()
 
         # Accept JSON filter files dropped anywhere on the dialog.
         # The table widget must not intercept drops, or they won't reach here.
@@ -127,6 +226,115 @@ class FilterDialog(QDialog):
         if not (0 <= self._dataset_idx < len(self._state.datasets)):
             return None
         return self._state.datasets[self._dataset_idx]
+
+    def _install_view_shortcuts(self) -> None:
+        """Open plot/render windows for the dataset owned by this filter dialog."""
+        defaults = {
+            "attribute_plot": "Ctrl+1",
+            "attribute_histogram": "Ctrl+2",
+            "scatter_plot": "Ctrl+3",
+            "render": "Ctrl+R",
+            "dataset_manager": "Ctrl+D",
+        }
+        shortcuts = self._state.prefs.get("shortcuts", {})
+        for command, fallback in defaults.items():
+            seq = str(shortcuts.get(command, fallback) or fallback)
+            shortcut = QShortcut(QKeySequence(seq), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(lambda cmd=command: self._open_associated_view(cmd))
+            self._view_shortcuts[command] = shortcut
+
+    def _open_associated_view(self, command: str) -> None:
+        idx = self._dataset_idx
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
+            return
+        main = self._main_window()
+        if main is None:
+            return
+        self._state.set_active(idx)
+        if command == "dataset_manager":
+            main._show_dataset_manager()
+            return
+        if command == "attribute_plot":
+            win = main._show_attr_plot(idx)
+        elif command == "attribute_histogram":
+            win = main._show_histogram(idx)
+        elif command == "scatter_plot":
+            win = self._show_overlay_aware_window(
+                main,
+                idx,
+                window_attr="_scatter_windows",
+                show_method="_show_scatter",
+            )
+        elif command == "render":
+            win = self._show_overlay_aware_window(
+                main,
+                idx,
+                window_attr="_render_windows",
+                show_method="_show_render",
+            )
+        else:
+            return
+        if win is not None:
+            try:
+                win.show()
+                win.raise_()
+                win.activateWindow()
+            except Exception:
+                pass
+
+    def _show_overlay_aware_window(self, main, idx: int, *, window_attr: str, show_method: str):
+        group_indices = self._overlay_group_indices(idx)
+        if len(group_indices) <= 1:
+            return getattr(main, show_method)(idx)
+
+        win = self._find_group_window(main, group_indices, idx, window_attr)
+        if win is None:
+            win = getattr(main, show_method)(group_indices[0])
+        self._activate_window_channel(win, idx)
+        return win
+
+    def _overlay_group_indices(self, idx: int) -> list[int]:
+        try:
+            from ..core.overlay import overlay_members
+
+            members = overlay_members(self._state, idx)
+        except Exception:
+            members = []
+        return [int(member_idx) for member_idx, _ds in members] or [idx]
+
+    def _find_group_window(self, main, group_indices: list[int], target_idx: int, window_attr: str):
+        group_set = set(group_indices)
+        mapping = getattr(main, window_attr, {})
+        for win in list(mapping.values()):
+            try:
+                channels = getattr(win, "_channels", None) or []
+                if any(ch.get("dataset_idx") == target_idx for ch in channels):
+                    return win
+                win_idx = getattr(win, "_idx", getattr(win, "_dataset_idx", None))
+                if type(win_idx) is int and win_idx in group_set:
+                    return win
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+        return None
+
+    def _activate_window_channel(self, win, idx: int) -> None:
+        if win is None or not (0 <= idx < len(self._state.datasets)):
+            return
+        try:
+            channels = getattr(win, "_channels", None) or []
+            if any(ch.get("dataset_idx") == idx for ch in channels):
+                if hasattr(win, "_idx"):
+                    win._idx = idx
+                if hasattr(win, "_dataset_idx"):
+                    win._dataset_idx = idx
+                self._state.set_active(idx)
+                if hasattr(win, "_update_overlay_title"):
+                    win._update_overlay_title()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # UI
@@ -163,7 +371,6 @@ class FilterDialog(QDialog):
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.verticalHeader().setVisible(False)
         self._table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._table.cellDoubleClicked.connect(lambda row, _col: self._display_filter(row))
         root.addWidget(self._table)
 
         # ── Button row ────────────────────────────────────────────
@@ -306,14 +513,11 @@ class FilterDialog(QDialog):
         del_btn.clicked.connect(lambda _, r=row: self._delete_row(r))
         self._table.setCellWidget(row, _COL_DELETE, del_btn)
 
-        # Left-double-click on any cell widget → display this filter in histogram
-        dbl_filt = _RowDblClickFilter(self, row)
-        for w in (chk, attr_combo, mode_combo, min_spin, max_spin, eye_btn, del_btn):
-            w.installEventFilter(dbl_filt)
-
         self._enforce_trace_mode(row)
         if auto_range:
             self._auto_fill_range(attr_combo.currentText(), row)
+        else:
+            self._configure_row_spinners(row, keep_values=True)
         self._table.resizeColumnsToContents()
 
     def _on_row_attr_changed(self, attr: str, row: int) -> None:
@@ -323,6 +527,7 @@ class FilterDialog(QDialog):
 
     def _on_row_mode_changed(self, row: int) -> None:
         self._enforce_trace_mode(row)
+        self._configure_row_spinners(row, keep_values=True)
 
     def _enforce_trace_mode(self, row: int) -> None:
         attr_combo = self._table.cellWidget(row, _COL_ATTR)
@@ -340,6 +545,40 @@ class FilterDialog(QDialog):
             mode_combo.setToolTip("")
         mode_combo.blockSignals(False)
 
+    def _configure_row_spinners(self, row: int, *, keep_values: bool) -> None:
+        ds = self._dataset()
+        attr_combo = self._table.cellWidget(row, _COL_ATTR)
+        mode_combo = self._table.cellWidget(row, _COL_MODE)
+        min_spin = self._table.cellWidget(row, _COL_MIN)
+        max_spin = self._table.cellWidget(row, _COL_MAX)
+        if ds is None or not isinstance(attr_combo, QComboBox) or not isinstance(mode_combo, QComboBox):
+            return
+        if not isinstance(min_spin, SmartBoundsSpinBox) or not isinstance(max_spin, SmartBoundsSpinBox):
+            return
+        attr = attr_combo.currentText()
+        if attr not in ds.attr:
+            return
+        raw_values, range_values = _filter_spinner_values(ds, attr, mode_combo.currentText())
+        if raw_values.size == 0 or range_values.size == 0:
+            return
+        vals_float = range_values.astype(float, copy=False)
+        finite = vals_float[np.isfinite(vals_float)]
+        if finite.size == 0:
+            return
+        data_min = float(np.nanmin(finite))
+        data_max = float(np.nanmax(finite))
+        mode = mode_combo.currentText()
+        for spin, fallback in ((min_spin, data_min), (max_spin, data_max)):
+            spin.blockSignals(True)
+            spin.configure(
+                value=float(spin.value()) if keep_values else fallback,
+                values=raw_values,
+                data_min=data_min,
+                data_max=data_max,
+                mode=mode,
+            )
+            spin.blockSignals(False)
+
     def _delete_row(self, row: int) -> None:
         self._table.removeRow(row)
         self._apply_all()  # views update immediately when a row is removed
@@ -349,8 +588,14 @@ class FilterDialog(QDialog):
         ds = self._dataset()
         if ds is None or attr not in ds.attr:
             return
-        vals = np.asarray(ds.attr[attr]).ravel().astype(float)
-        lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
+        mode_combo = self._table.cellWidget(row, _COL_MODE)
+        mode = mode_combo.currentText() if isinstance(mode_combo, QComboBox) else "per loc"
+        raw_vals, range_vals = _filter_spinner_values(ds, attr, mode)
+        finite = range_vals.astype(float, copy=False)
+        finite = finite[np.isfinite(finite)]
+        if finite.size == 0:
+            return
+        lo, hi = float(np.nanmin(finite)), float(np.nanmax(finite))
 
         if row is None:
             # Find the row that triggered this (by sender)
@@ -363,10 +608,9 @@ class FilterDialog(QDialog):
 
         for col, val in ((_COL_MIN, lo), (_COL_MAX, hi)):
             spin = self._table.cellWidget(row, col)
-            if isinstance(spin, QDoubleSpinBox):
+            if isinstance(spin, SmartBoundsSpinBox):
                 spin.blockSignals(True)
-                spin.setRange(lo - abs(lo), hi + abs(hi) + 1)
-                spin.setValue(val)
+                spin.configure(value=val, values=raw_vals, data_min=lo, data_max=hi, mode=mode)
                 spin.blockSignals(False)
 
     # ------------------------------------------------------------------
@@ -379,6 +623,7 @@ class FilterDialog(QDialog):
             return
 
         mask = np.ones(ds.prop.num_loc, dtype=bool)
+        specs: list[dict] = []
 
         for row in range(self._table.rowCount()):
             chk  = self._table.cellWidget(row, _COL_ENABLED)
@@ -402,9 +647,24 @@ class FilterDialog(QDialog):
             if attr not in ds.attr:
                 continue
 
-            raw  = np.asarray(ds.attr[attr]).ravel().astype(float)
+            # Persist the spec so it can be re-evaluated against the raw
+            # all-iteration store (Stage B iteration/validity browsing).
+            specs.append({
+                "attribute": attr, "mode": mode,
+                "lo": float(lo), "hi": float(hi),
+                "lo_inc": lo_inc, "hi_inc": hi_inc,
+            })
+
+            raw = attr_values_1d(ds, attr)
+            if raw is None:
+                # No per-loc 1-D representation; the persisted spec still
+                # applies on the raw store in the plot windows.
+                continue
+            raw = np.asarray(raw).ravel().astype(float)
             row_mask = _compute_mask(raw, mode, lo, hi, ds, lo_inc, hi_inc)
             mask &= row_mask
+
+        ds.state["filter_specs"] = specs
 
         self._applying = True
         ds.filter_mask = mask
@@ -420,6 +680,7 @@ class FilterDialog(QDialog):
         ds = self._dataset()
         if ds is None:
             return
+        ds.state["filter_specs"] = []
         ds.filter_mask = np.ones(ds.prop.num_loc, dtype=bool)
         self._state.notify_filter_changed(self._dataset_idx)
         self._info.setText("All filters reset.")
@@ -432,7 +693,7 @@ class FilterDialog(QDialog):
         mode_combo = self._table.cellWidget(row, _COL_MODE)
         min_spin = self._table.cellWidget(row, _COL_MIN)
         max_spin = self._table.cellWidget(row, _COL_MAX)
-        if not all(isinstance(w, (QComboBox, QDoubleSpinBox)) for w in (attr_combo, mode_combo, min_spin, max_spin)):
+        if not all(isinstance(w, (QComboBox, SmartBoundsSpinBox)) for w in (attr_combo, mode_combo, min_spin, max_spin)):
             return
         if self._dataset_idx is not None:
             self._state.set_active(self._dataset_idx)
@@ -618,12 +879,9 @@ class FilterDialog(QDialog):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_spin(value: float) -> QDoubleSpinBox:
-    spin = QDoubleSpinBox()
-    spin.setDecimals(4)
-    spin.setRange(-1e15, 1e15)
-    spin.setValue(value)
-    spin.setSingleStep(abs(value) * 0.01 if value != 0 else 0.01)
+def _make_spin(value: float) -> SmartBoundsSpinBox:
+    spin = SmartBoundsSpinBox()
+    spin.configure(value=value, data_min=value, data_max=value, mode="per loc")
     return spin
 
 
@@ -639,6 +897,37 @@ def _prioritize_filter_attrs(attrs: list[str]) -> list[str]:
             ordered.append(name)
             seen.add(name)
     return ordered
+
+
+def _filter_spinner_values(ds, attr: str, mode: str) -> tuple[np.ndarray, np.ndarray]:
+    raw = attr_values_1d(ds, attr)
+    raw = np.empty(0) if raw is None else np.asarray(raw).ravel()
+    if raw.size == 0 or mode == "per loc":
+        return raw, raw
+    raw_float = raw.astype(float, copy=False)
+    trace_idx = np.asarray(getattr(ds.prop, "trace_idx", np.empty((0, 2))), dtype=int)
+    num_traces = int(getattr(ds.prop, "num_traces", 0) or trace_idx.shape[0])
+    if trace_idx.ndim != 2 or trace_idx.shape[1] < 2 or num_traces <= 0:
+        return raw, raw
+    fn = {
+        "trace mean": np.nanmean,
+        "trace median": np.nanmedian,
+        "trace min": np.nanmin,
+        "trace max": np.nanmax,
+        "trace stdev": np.nanstd,
+        "trace range": lambda a: float(np.nanmax(a)) - float(np.nanmin(a)),
+    }.get(mode)
+    if fn is None:
+        return raw, raw
+    values: list[float] = []
+    with np.errstate(all="ignore"):
+        for start, stop in trace_idx[:num_traces]:
+            start_i = max(0, int(start))
+            stop_i = min(int(stop), raw_float.size - 1)
+            if stop_i < start_i:
+                continue
+            values.append(float(fn(raw_float[start_i:stop_i + 1])))
+    return raw, np.asarray(values, dtype=float)
 
 
 def _compute_mask(

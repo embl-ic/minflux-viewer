@@ -147,6 +147,117 @@ def compute_filter_mask(
     return np.repeat(trace_pass, num_loc_per_trace)
 
 
+def raw_spec_mask(
+    vals: np.ndarray,
+    tid: np.ndarray,
+    mode: str,
+    lo: float,
+    hi: float,
+    lo_inclusive: bool = True,
+    hi_inclusive: bool = True,
+) -> np.ndarray:
+    """Boolean mask for a single filter spec over an arbitrary row selection.
+
+    Unlike :func:`compute_filter_mask`, this does not assume contiguous
+    trace blocks — trace grouping is derived from *tid* on the fly. This lets
+    a persisted filter spec be re-evaluated against the raw all-iteration
+    store (where each trace has ``n_itr`` rows per localisation).
+
+    Parameters
+    ----------
+    vals:
+        1-D float array of the spec's attribute, length = N (the selection).
+    tid:
+        1-D trace-id array, same length as *vals*.
+    mode:
+        One of :data:`AGG_MODES`.
+    lo, hi, lo_inclusive, hi_inclusive:
+        Filter bounds.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask, length N. NaN values fail the bounds test (numpy
+        comparisons with NaN yield False), matching the "empty -> excluded"
+        convention.
+    """
+    vals = np.asarray(vals, dtype=float).ravel()
+
+    def _in_bounds(values: np.ndarray) -> np.ndarray:
+        lo_mask = values >= lo if lo_inclusive else values > lo
+        hi_mask = values <= hi if hi_inclusive else values < hi
+        return lo_mask & hi_mask
+
+    if mode == "per loc":
+        return _in_bounds(vals)
+
+    tid = np.asarray(tid).ravel()
+    if tid.shape[0] != vals.shape[0] or vals.size == 0:
+        return _in_bounds(vals)
+
+    # Group by trace id without assuming contiguity.
+    order = np.argsort(tid, kind="stable")
+    sorted_tid = tid[order]
+    sorted_vals = vals[order]
+    boundaries = np.flatnonzero(np.diff(sorted_tid)) + 1
+    starts = np.concatenate([[0], boundaries])
+    ends = np.concatenate([boundaries, [sorted_tid.size]])
+    counts = ends - starts
+
+    fn = {
+        "trace mean":  np.nanmean,
+        "trace stdev": np.nanstd,
+        "trace max":   np.nanmax,
+        "trace min":   np.nanmin,
+        "trace range": lambda a: float(np.nanmax(a)) - float(np.nanmin(a)),
+    }.get(mode)
+    if fn is None:
+        return _in_bounds(vals)
+
+    with np.errstate(all="ignore"):
+        agg = np.array([fn(sorted_vals[s:e]) for s, e in zip(starts, ends)])
+    trace_pass = _in_bounds(agg)
+    sorted_mask = np.repeat(trace_pass, counts)
+    out = np.empty(sorted_tid.size, dtype=bool)
+    out[order] = sorted_mask
+    return out
+
+
+def raw_trace_aggregate(vals: np.ndarray, tid: np.ndarray, mode: str) -> np.ndarray:
+    """One value per trace for an arbitrary (non-contiguous) row selection.
+
+    Mirrors the histogram's trace aggregation but derives trace groups from
+    *tid* instead of assuming contiguous trace blocks, so it works on the raw
+    all-iteration store. Returns *vals* unchanged for ``"per loc"``.
+    """
+    vals = np.asarray(vals, dtype=float).ravel()
+    if mode == "per loc":
+        return vals
+    tid = np.asarray(tid).ravel()
+    if tid.shape[0] != vals.shape[0] or vals.size == 0:
+        return vals
+
+    order = np.argsort(tid, kind="stable")
+    sorted_vals = vals[order]
+    sorted_tid = tid[order]
+    boundaries = np.flatnonzero(np.diff(sorted_tid)) + 1
+    starts = np.concatenate([[0], boundaries])
+    ends = np.concatenate([boundaries, [sorted_tid.size]])
+
+    fn = {
+        "trace mean":   np.nanmean,
+        "trace median": np.nanmedian,
+        "trace min":    np.nanmin,
+        "trace max":    np.nanmax,
+        "trace stdev":  np.nanstd,
+        "trace range":  lambda a: float(np.nanmax(a)) - float(np.nanmin(a)),
+    }.get(mode)
+    if fn is None:
+        return vals
+    with np.errstate(all="ignore"):
+        return np.array([fn(sorted_vals[s:e]) for s, e in zip(starts, ends)])
+
+
 def fast_density_2d(x: np.ndarray, y: np.ndarray, bins: int = 256) -> np.ndarray:
     """
     Fast 2-D histogram-based density estimate.

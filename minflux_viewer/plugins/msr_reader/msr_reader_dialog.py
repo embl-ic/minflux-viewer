@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -67,23 +68,241 @@ class _StateLogAdapter:
         self._state.log(text, level)
 
 
+def _json_compact(node):
+    """Readability transform for specpy's XML-derived metadata dicts.
+
+    Imspector OME metadata packs every XML element as a single-item list of
+    dicts whose attributes are named keys and whose child content sits under
+    an empty-string key. This unwraps single-element lists and hoists the
+    ``""`` content next to the attributes, so ``{"Name": [{"": "x"}]}``
+    reads as ``Name: x``. Generic JSON without those patterns passes through
+    unchanged.
+    """
+    if isinstance(node, dict):
+        if set(node.keys()) == {""}:
+            return _json_compact(node[""])
+        merged = {k: _json_compact(v) for k, v in node.items() if k != ""}
+        if "" in node:
+            content = _json_compact(node[""])
+            if isinstance(content, dict):
+                for key, val in content.items():
+                    merged[key if key not in merged else f"{key} (content)"] = val
+            else:
+                merged["(text)" if "(text)" not in merged else "(text content)"] = content
+        return merged
+    if isinstance(node, (list, tuple)):
+        items = [_json_compact(v) for v in node]
+        return items[0] if len(items) == 1 else items
+    return node
+
+
+def _json_type_name(value) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "str"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, (list, tuple)):
+        return "list"
+    return type(value).__name__
+
+
+def _json_leaf_text(value) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _populate_metadata_items(parent_item, node, *, _budget: list[int] | None = None) -> None:
+    """Hierarchical key/value items for (compacted) JSON metadata in the
+    main reader tree.
+
+    Main-tree columns are reused as: leaf -> "key: value" | type;
+    container -> key | object/list | item count. ``_budget`` caps the total
+    number of created items so a pathological metadata blob cannot freeze
+    the tree.
+    """
+    if _budget is None:
+        _budget = [5000]
+    pairs = node.items() if isinstance(node, dict) else ((f"[{i}]", v) for i, v in enumerate(node))
+    for key, value in pairs:
+        if _budget[0] <= 0:
+            parent_item.addChild(QTreeWidgetItem(["… (truncated)", "", "", ""]))
+            return
+        _budget[0] -= 1
+        if isinstance(value, (dict, list, tuple)):
+            n = len(value)
+            count = f"{n} key{'s' if n != 1 else ''}" if isinstance(value, dict) else f"{n} item{'s' if n != 1 else ''}"
+            item = QTreeWidgetItem([str(key), _json_type_name(value), count, ""])
+            parent_item.addChild(item)
+            _populate_metadata_items(item, value, _budget=_budget)
+        else:
+            item = QTreeWidgetItem([f"{key}: {_json_leaf_text(value)}", _json_type_name(value), "", ""])
+            item.setToolTip(0, f"{key} = {_json_leaf_text(value)}")
+            parent_item.addChild(item)
+
+
 class JsonViewDialog(QDialog):
+    """Browsable JSON / metadata viewer.
+
+    Tree tab: key | value | type columns with a filter box, compact-view
+    toggle (unwraps specpy's XML packing), expand/collapse, and copy actions.
+    Raw tab: the plain ``json.dumps`` text as before.
+    """
+
     def __init__(self, title: str, data, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(900, 680)
+        self._data = data
 
         layout = QVBoxLayout(self)
-        edit = QPlainTextEdit(self)
-        edit.setReadOnly(True)
-        edit.setPlainText(json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True, default=str))
-        layout.addWidget(edit)
+
+        bar = QHBoxLayout()
+        self._filter_edit = QLineEdit(self)
+        self._filter_edit.setPlaceholderText("Filter keys and values…")
+        self._filter_edit.setClearButtonEnabled(True)
+        self._filter_edit.textChanged.connect(self._apply_filter)
+        bar.addWidget(self._filter_edit, 1)
+        self._compact_chk = QCheckBox("Compact", self)
+        self._compact_chk.setChecked(True)
+        self._compact_chk.setToolTip(
+            "Unwrap single-element lists and XML content wrappers for readability."
+        )
+        self._compact_chk.toggled.connect(self._rebuild)
+        bar.addWidget(self._compact_chk)
+        expand_btn = QPushButton("Expand all", self)
+        expand_btn.clicked.connect(lambda: self.tree.expandAll())
+        bar.addWidget(expand_btn)
+        collapse_btn = QPushButton("Collapse all", self)
+        collapse_btn.clicked.connect(lambda: self.tree.collapseAll())
+        bar.addWidget(collapse_btn)
+        layout.addLayout(bar)
+
+        self._tabs = QTabWidget(self)
+        self.tree = QTreeWidget(self)
+        self.tree.setColumnCount(3)
+        self.tree.setHeaderLabels(["Key", "Value", "Type"])
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_tree_menu)
+        self._tabs.addTab(self.tree, "Tree")
+        self._raw_edit = QPlainTextEdit(self)
+        self._raw_edit.setReadOnly(True)
+        self._raw_edit.setPlainText(self._dumps(data))
+        self._tabs.addTab(self._raw_edit, "Raw JSON")
+        layout.addWidget(self._tabs, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        copy_btn = buttons.addButton("Copy JSON", QDialogButtonBox.ButtonRole.ActionRole)
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self._dumps(self._data)))
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
         buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.close)
         layout.addWidget(buttons)
+
+        self._rebuild()
+
+    @staticmethod
+    def _dumps(data) -> str:
+        return json.dumps(data, indent=2, ensure_ascii=False, default=str)
+
+    def _display_data(self):
+        return _json_compact(self._data) if self._compact_chk.isChecked() else self._data
+
+    def _rebuild(self) -> None:
+        self.tree.clear()
+        data = self._display_data()
+        root = self.tree.invisibleRootItem()
+        if isinstance(data, (dict, list, tuple)):
+            self._populate(root, data, path="")
+        else:
+            self._add_leaf(root, "(value)", data, path="")
+        self.tree.expandToDepth(2)
+        for col in range(3):
+            self.tree.resizeColumnToContents(col)
+        self.tree.setColumnWidth(0, min(self.tree.columnWidth(0), 380))
+        self._apply_filter(self._filter_edit.text())
+
+    def _populate(self, parent, node, path: str) -> None:
+        if isinstance(node, dict):
+            pairs = node.items()
+        else:
+            pairs = ((f"[{i}]", v) for i, v in enumerate(node))
+        for key, value in pairs:
+            child_path = f"{path}/{key}" if path else str(key)
+            if isinstance(value, (dict, list, tuple)):
+                n = len(value)
+                summary = f"{{{n} key{'s' if n != 1 else ''}}}" if isinstance(value, dict) else f"[{n} item{'s' if n != 1 else ''}]"
+                item = QTreeWidgetItem([str(key), summary, _json_type_name(value)])
+                item.setForeground(1, Qt.GlobalColor.gray)
+                item.setForeground(2, Qt.GlobalColor.gray)
+                item.setData(0, Qt.ItemDataRole.UserRole, child_path)
+                item.setData(0, Qt.ItemDataRole.UserRole + 1, value)
+                parent.addChild(item)
+                self._populate(item, value, child_path)
+            else:
+                self._add_leaf(parent, str(key), value, child_path)
+
+    def _add_leaf(self, parent, key: str, value, path: str) -> None:
+        item = QTreeWidgetItem([key, _json_leaf_text(value), _json_type_name(value)])
+        item.setForeground(2, Qt.GlobalColor.gray)
+        item.setToolTip(1, _json_leaf_text(value))
+        item.setData(0, Qt.ItemDataRole.UserRole, path)
+        item.setData(0, Qt.ItemDataRole.UserRole + 1, value)
+        parent.addChild(item)
+
+    # -- filtering ------------------------------------------------------
+
+    def _apply_filter(self, text: str) -> None:
+        needle = (text or "").strip().lower()
+
+        def visit(item) -> bool:
+            self_match = bool(needle) and (
+                needle in item.text(0).lower() or needle in item.text(1).lower()
+            )
+            child_match = False
+            for i in range(item.childCount()):
+                if visit(item.child(i)):
+                    child_match = True
+            visible = not needle or self_match or child_match
+            item.setHidden(not visible)
+            if needle and child_match:
+                item.setExpanded(True)
+            return self_match or child_match
+
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            visit(root.child(i))
+
+    # -- context menu ---------------------------------------------------
+
+    def _show_tree_menu(self, pos) -> None:
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+        menu = QMenu(self)
+        copy_key = menu.addAction("Copy key")
+        copy_value = menu.addAction("Copy value")
+        copy_path = menu.addAction("Copy path")
+        action = menu.exec(self.tree.viewport().mapToGlobal(pos))
+        if action is copy_key:
+            QApplication.clipboard().setText(item.text(0))
+        elif action is copy_value:
+            value = item.data(0, Qt.ItemDataRole.UserRole + 1)
+            text = self._dumps(value) if isinstance(value, (dict, list, tuple)) else _json_leaf_text(value)
+            QApplication.clipboard().setText(text)
+        elif action is copy_path:
+            QApplication.clipboard().setText(str(item.data(0, Qt.ItemDataRole.UserRole) or ""))
 
 
 class ArrayPreviewDialog(QDialog):
@@ -540,11 +759,25 @@ class FieldDialog(QDialog):
         return out
 
 
+# Sentinel: user cancelled the alignment dialog -> abort the whole
+# "Open in MINFLUX viewer" action (distinct from None = "not applicable").
+_ALIGN_CANCELLED = object()
+
+
 class ViewerAlignmentDialog(QDialog):
-    def __init__(self, selected: list[str], mbm_available: bool, mbm_reason: str = "", parent=None):
+    """Choose the reference dataset and alignment mode for a multi-channel open.
+
+    ``mbm_check(ref_name) -> (available, reason)`` re-evaluates bead-based
+    alignment availability whenever the reference choice changes — matched
+    bead counts depend on which dataset is the reference. Cancelling this
+    dialog aborts the whole "Open in MINFLUX viewer" action.
+    """
+
+    def __init__(self, selected: list[str], mbm_check, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Open in MINFLUX viewer")
         self.resize(520, 180)
+        self._mbm_check = mbm_check
 
         layout = QVBoxLayout(self)
         label = QLabel(
@@ -554,44 +787,59 @@ class ViewerAlignmentDialog(QDialog):
         label.setWordWrap(True)
         layout.addWidget(label)
 
-        if selected:
-            ref = selected[0]
-            channels = ", ".join(selected[1:]) if len(selected) > 1 else ""
-            detail = f"Reference dataset: {ref}"
-            if channels:
-                detail += f"\nMoving dataset(s): {channels}"
-            detail_label = QLabel(detail)
-            detail_label.setWordWrap(True)
-            layout.addWidget(detail_label)
+        ref_row = QHBoxLayout()
+        ref_row.addWidget(QLabel("Reference dataset:"))
+        self.ref_combo = QComboBox(self)
+        self.ref_combo.addItems(selected)
+        self.ref_combo.setCurrentIndex(0)
+        self.ref_combo.currentTextChanged.connect(self._on_reference_changed)
+        ref_row.addWidget(self.ref_combo, 1)
+        layout.addLayout(ref_row)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("align with:"))
         self.align_combo = QComboBox(self)
-        if mbm_available:
-            self.align_combo.addItems(["mbm info", "stage origin", "data centroid"])
-        else:
-            self.align_combo.addItems(["stage origin", "data centroid", "mbm info"])
-            idx = self.align_combo.findText("mbm info")
-            if idx >= 0:
-                item = getattr(self.align_combo.model(), "item", lambda *_: None)(idx)
-                if item is not None:
-                    item.setEnabled(False)
+        self.align_combo.addItems(["mbm info", "stage origin", "data centroid"])
         row.addWidget(self.align_combo, 1)
         layout.addLayout(row)
 
-        if not mbm_available and mbm_reason:
-            note = QLabel(f"mbm info unavailable: {mbm_reason}")
-            note.setWordWrap(True)
-            note.setStyleSheet("color: #666;")
-            layout.addWidget(note)
+        self._mbm_note = QLabel("")
+        self._mbm_note.setWordWrap(True)
+        self._mbm_note.setStyleSheet("color: #666;")
+        self._mbm_note.setVisible(False)
+        layout.addWidget(self._mbm_note)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        self._on_reference_changed(self.ref_combo.currentText())
+
+    def _on_reference_changed(self, ref_name: str) -> None:
+        try:
+            available, reason = self._mbm_check(ref_name)
+        except Exception as exc:
+            available, reason = False, str(exc)
+        idx = self.align_combo.findText("mbm info")
+        item = getattr(self.align_combo.model(), "item", lambda *_: None)(idx) if idx >= 0 else None
+        if item is not None:
+            item.setEnabled(bool(available))
+        if available:
+            # "mbm info" is the first item, so it is the default when usable;
+            # do not override an explicit user choice on reference changes.
+            self._mbm_note.setVisible(False)
+        else:
+            if self.align_combo.currentText() == "mbm info":
+                self.align_combo.setCurrentText("stage origin")
+            self._mbm_note.setText(f"mbm info unavailable: {reason}" if reason else "mbm info unavailable")
+            self._mbm_note.setVisible(True)
+
     def alignment_mode(self) -> str:
         return self.align_combo.currentText().strip().lower()
+
+    def reference_dataset(self) -> str:
+        return self.ref_combo.currentText()
 
 
 class AlignmentPlotWindow(QDialog):
@@ -812,7 +1060,14 @@ class MsrReaderDialog(QWidget):
         msr_path: str | None = None,
         parent: QWidget | None = None,
     ):
-        super().__init__(parent)
+        # Deliberately a NON-owned top-level window: passing the main window as
+        # the QWidget parent (with the Qt.Window flag) makes the OS keep this
+        # dialog permanently above its owner in Z-order, so it sits in front of
+        # every viewer window. The viewer plot windows avoid this by having no
+        # parent; mirror that here and keep an explicit owner reference for the
+        # few main-window lookups below (``self._owner``).
+        super().__init__(None)
+        self._owner = parent
         self.setWindowTitle("MINFLUX .msr Reader & Converter")
         self.setWindowFlags(Qt.WindowType.Window)
         self.resize(980, 860)
@@ -1256,10 +1511,15 @@ class MsrReaderDialog(QWidget):
                 item = QTreeWidgetItem([f"- Series {int(s.get('index', 0)) + 1}: {name}", "", s.get("shape_str", ""), s.get("dtype", "")])
                 series_root.addChild(item)
             meta_item = QTreeWidgetItem(["<metadata>", "", "", ""])
+            self._set_item_tooltip(
+                meta_item,
+                "OME metadata of this legacy MSR file. Right-click > Show metadata "
+                "opens it in a searchable JSON viewer.",
+            )
             root_item.addChild(meta_item)
             if isinstance(meta, dict):
-                for line in json.dumps(meta, indent=2, sort_keys=True, default=str).splitlines()[:800]:
-                    meta_item.addChild(QTreeWidgetItem([line, "", "", ""]))
+                self.nodeinfo[self._item_id(meta_item)] = {"type": "legacy_metadata", "data": meta}
+                _populate_metadata_items(meta_item, _json_compact(meta))
             else:
                 meta_item.addChild(QTreeWidgetItem(["(metadata unavailable)", "", "", ""]))
 
@@ -1486,8 +1746,20 @@ class MsrReaderDialog(QWidget):
             return zroot, self.fullpath_by_item.get(self._item_id(item), "") or ""
         return None, None
 
+    def _legacy_metadata_of(self, item):
+        """The parsed legacy OME metadata dict if *item* is (inside) the
+        ``<metadata>`` node of a legacy file, else None."""
+        while item is not None:
+            info = self.nodeinfo.get(self._item_id(item), {})
+            if info.get("type") == "legacy_metadata":
+                return info.get("data")
+            item = item.parent()
+        return None
+
     def _can_show_metadata(self, item) -> bool:
         from ...msr.io import read_zarr_attrs
+        if self._legacy_metadata_of(item) is not None:
+            return True
         zroot, path = self._node_metadata_target(item)
         if not zroot:
             return False
@@ -1499,7 +1771,16 @@ class MsrReaderDialog(QWidget):
     def _ctx_show_metadata(self):
         from ...msr.io import read_zarr_attrs
         shown = 0
+        legacy_shown = False
         for item in self._selected_items():
+            legacy_meta = self._legacy_metadata_of(item)
+            if legacy_meta is not None:
+                if not legacy_shown:
+                    name = Path(self.parsed.get("msr", "")).name or "legacy file"
+                    self._show_child_dialog(JsonViewDialog(f"Metadata: {name}", legacy_meta, self))
+                    legacy_shown = True
+                    shown += 1
+                continue
             zroot, path = self._node_metadata_target(item)
             if not zroot:
                 continue
@@ -1864,20 +2145,32 @@ class MsrReaderDialog(QWidget):
                 return ds.get("zroot")
         return None
 
-    def _ask_viewer_channel_alignment(self, import_plan: dict[str, set[str] | None]) -> str | None:
+    def _ask_viewer_channel_alignment(self, import_plan: dict[str, set[str] | None]):
+        """Ask for reference dataset + alignment mode.
+
+        Returns ``(mode, ref_name)``, ``None`` when no alignment question
+        applies (legacy file or fewer than two datasets), or
+        ``_ALIGN_CANCELLED`` when the user cancelled — which must abort the
+        whole open, not just skip the transforms.
+        """
         if self.parsed.get("mode") != "modern":
             return None
         selected = self._viewer_selected_dataset_names(import_plan)
         if len(selected) < 2:
             return None
-        mbm_available, mbm_reason = self._viewer_mbm_alignment_available(selected)
-        dlg = ViewerAlignmentDialog(selected, mbm_available, mbm_reason, self)
+
+        def mbm_check(ref_name: str) -> tuple[bool, str]:
+            ordered = [ref_name] + [n for n in selected if n != ref_name]
+            return self._viewer_mbm_alignment_available(ordered)
+
+        dlg = ViewerAlignmentDialog(selected, mbm_check, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
-            self.log("[viewer align] cancelled; opening without transforms")
-            return None
+            self.log("[viewer align] cancelled; open aborted")
+            return _ALIGN_CANCELLED
         mode = dlg.alignment_mode()
-        self.log(f"[viewer align] selected mode: {mode}")
-        return mode
+        ref_name = dlg.reference_dataset()
+        self.log(f"[viewer align] selected mode: {mode}; reference: {ref_name}")
+        return mode, ref_name
 
     def _viewer_mbm_alignment_available(self, selected: list[str]) -> tuple[bool, str]:
         from ...msr import state as MFSTATE
@@ -2030,13 +2323,22 @@ class MsrReaderDialog(QWidget):
             pass
         return False
 
-    def _viewer_channel_alignment_transforms(self, import_plan: dict[str, set[str] | None], mode: str) -> dict[str, dict]:
+    def _viewer_channel_alignment_transforms(
+        self,
+        import_plan: dict[str, set[str] | None],
+        mode: str,
+        ref_name: str | None = None,
+    ) -> dict[str, dict]:
         from ...msr import state as MFSTATE
         from ...msr.alignment import align_channels_from_arrays
 
         selected = self._viewer_selected_dataset_names(import_plan)
         if len(selected) < 2:
             return {}
+        # The reference leads the list; both the mbm and fallback paths treat
+        # selected[0] as the reference channel.
+        if ref_name and ref_name in selected:
+            selected = [ref_name] + [name for name in selected if name != ref_name]
         if mode in {"stage origin", "data centroid"}:
             return self._viewer_fallback_alignment_transforms(selected, mode)
         if mode != "mbm info":
@@ -2414,7 +2716,7 @@ class MsrReaderDialog(QWidget):
         errors = []
         render_group_id = f"msr:{msr_path.resolve() if str(msr_path) else 'memory'}:{uuid.uuid4().hex}"
         overlay_index = 1
-        parent = self.parent()
+        parent = self._owner
         if parent is not None:
             try:
                 overlay_index = int(getattr(parent, "_next_overlay_index", 1))
@@ -2422,10 +2724,16 @@ class MsrReaderDialog(QWidget):
             except Exception:
                 overlay_index = 1
         viewer_transforms: dict[str, dict] = {}
-        alignment_mode = self._ask_viewer_channel_alignment(import_plan)
-        if alignment_mode:
+        align_choice = self._ask_viewer_channel_alignment(import_plan)
+        if align_choice is _ALIGN_CANCELLED:
+            self.log("[viewer] open in viewer aborted by user")
+            return
+        if align_choice:
+            alignment_mode, reference_name = align_choice
             try:
-                viewer_transforms = self._viewer_channel_alignment_transforms(import_plan, alignment_mode)
+                viewer_transforms = self._viewer_channel_alignment_transforms(
+                    import_plan, alignment_mode, reference_name,
+                )
             except Exception as exc:
                 self.log(f"[viewer align] failed: {exc}")
                 QMessageBox.warning(
@@ -2531,7 +2839,7 @@ class MsrReaderDialog(QWidget):
             )
         if imported:
             self.log(f"[viewer] imported {len(imported)} dataset(s): {', '.join(imported)}")
-            parent = self.parent()
+            parent = self._owner
             if parent is not None and hasattr(parent, "_show_render") and imported_indices:
                 existing = getattr(parent, "_render_windows", {}).get(imported_indices[0])
                 if existing is not None and hasattr(existing, "_refresh_from_dataset"):
@@ -2578,6 +2886,11 @@ def open_msr(
         QMessageBox.warning(parent, "specpy not available", msr_unavailable_message())
         return
     dlg = MsrReaderDialog(state=state, msr_path=msr_path, parent=parent)
+    # The dialog is an unowned top-level window (so it does not sit permanently
+    # in front of the viewer); keep a reference on the owner so it is not
+    # garbage-collected once this function returns.
+    if parent is not None:
+        parent._plugin_msr_reader_dialog = dlg
     dlg.show()
     dlg.raise_()
     dlg.activateWindow()

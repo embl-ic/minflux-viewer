@@ -447,6 +447,10 @@ class RoiOverlayController(QObject):
         if record.id not in persisted_ids:
             self._replace_active_draft_mask(dataset, record.id, persisted_ids)
         store_roi_mask(dataset, record, mask, context=context)
+        idx = context.get("dataset_idx") if isinstance(context, dict) else None
+        notify = getattr(getattr(self.owner, "_state", None), "notify_roi_selection_changed", None)
+        if callable(notify):
+            notify(idx if isinstance(idx, int) else None)
         if record.id in persisted_ids:
             self.store.changed.emit()
 
@@ -568,6 +572,10 @@ class RoiOverlayController(QObject):
             dataset.derived.pop(key, None)
         if dataset.state.get("active_roi_draft_id") == record.id:
             dataset.state.pop("active_roi_draft_id", None)
+        idx = record.context.get("dataset_idx") if isinstance(record.context, dict) else None
+        notify = getattr(getattr(self.owner, "_state", None), "notify_roi_selection_changed", None)
+        if callable(notify):
+            notify(idx if isinstance(idx, int) else None)
 
     def _dataset_for_record(self, record: RoiRecord):
         idx = record.context.get("dataset_idx") if isinstance(record.context, dict) else None

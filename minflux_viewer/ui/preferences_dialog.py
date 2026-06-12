@@ -79,6 +79,12 @@ _ROI_COLORS = [
     "Yellow", "Red", "Green", "Cyan", "Magenta", "White", "Black",
 ]
 
+_MBM_TRANSFORM_TYPES = [
+    "rigid XY + translational Z",
+    "translational XYZ",
+    "rigid XYZ",
+]
+
 _ATTRIBUTE_ORDER = [
     "vld", "itr", "tid", "loc",
     "efo", "cfr", "dcr", "tim",
@@ -90,7 +96,7 @@ _ATTRIBUTE_ORDER = [
 _COMPUTED_ATTRIBUTE_INFO = [
     ("idx", "index of localization data points"),
     ("siz", "the number of localizations within a track"),
-    ("dst", "the distance between two adjacent localisations"),
+    ("dst", "the distance between two adjacent localizations"),
     ("dur", "the time between the first and last points of a track"),
     ("len", "full sum of distance traversed, along the full length of the track"),
     ("spd", "the distance between two points (in meters) divided by time between the two points (in seconds)"),
@@ -103,6 +109,7 @@ _SHORTCUT_LABELS = {
     "focus_main_window": "Focus main window",
     "close_window": "Close current window",
     "show_info": "Show info",
+    "dataset_manager": "Dataset Manager",
     "duplicate": "Duplicate",
     "filter": "Filter",
     "next_window": "Next window",
@@ -125,6 +132,31 @@ _SHORTCUT_LABELS = {
 }
 
 
+def _specpy_status() -> tuple[str, bool]:
+    """Return ``(message, installed)`` describing Abberior specpy availability."""
+    try:
+        import specpy  # noqa: F401
+        ver = str(getattr(specpy, "__version__", "") or "").strip()
+        return (f"specpy {ver} detected." if ver else "specpy detected."), True
+    except Exception:
+        return (
+            "specpy not installed — MSR import is unavailable. "
+            "See INSTALL_MSR.md to install the matching wheel.",
+            False,
+        )
+
+
+class _NoWheelComboBox(QComboBox):
+    """Combo box that ignores mouse-wheel scrolling.
+
+    Prevents the wheel from silently changing the selection while the user is
+    scrolling a list or page (e.g. the Shortcuts command column).
+    """
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
+        event.ignore()
+
+
 class PreferencesDialog(QDialog):
     """Category-based editor for :data:`AppState.prefs`."""
 
@@ -137,7 +169,9 @@ class PreferencesDialog(QDialog):
 
         self.setWindowTitle("Preferences")
         self.setModal(True)
-        self.resize(780, 540)
+        # Tall enough that the longest page (Shortcuts) fits without resizing.
+        self.resize(820, 760)
+        self.setMinimumSize(720, 560)
 
         self._build_ui()
         self._load_draft_into_widgets()
@@ -263,10 +297,17 @@ class PreferencesDialog(QDialog):
 
         self._files_in_history = QSpinBox()
         self._files_in_history.setRange(0, 100)
+        self._files_in_history.setMinimumWidth(70)
         form.addRow("Files in history", self._files_in_history)
 
         self._keep_last_folder = QCheckBox("current data folder as the default folder")
         form.addRow("", self._keep_last_folder)
+
+        self._confirm_overwrite = QCheckBox("confirm before overwriting an existing file")
+        form.addRow("", self._confirm_overwrite)
+
+        self._close_paraview = QCheckBox("close ParaView when exiting the application")
+        form.addRow("", self._close_paraview)
 
         return w
 
@@ -308,7 +349,7 @@ class PreferencesDialog(QDialog):
         self._min_z_spin = QDoubleSpinBox()
         self._min_z_spin.setRange(0.0, 10000.0)
         self._min_z_spin.setDecimals(2)
-        self._min_z_spin.setMaximumWidth(70)
+        self._min_z_spin.setMinimumWidth(88)
         z_row.addWidget(self._min_z_spin)
         z_row.addWidget(QLabel("nm"))
         z_row.addStretch()
@@ -323,15 +364,19 @@ class PreferencesDialog(QDialog):
 
         rimf_row = QHBoxLayout()
         rimf_row.addSpacing(18)
-        self._compute_rimf = QCheckBox("RIMF value (Z scaling factor)")
+        self._compute_rimf = QCheckBox("RIMF (refractive index mismatch factor)")
+        self._compute_rimf.setToolTip(
+            "Estimate the RIMF z-scaling factor on load (from the raw last-valid z "
+            "via anisotropy estimation), or tick 'use fixed value' to apply a set value."
+        )
         rimf_row.addWidget(self._compute_rimf)
         self._use_fixed_rimf = QCheckBox("use fixed value")
         rimf_row.addWidget(self._use_fixed_rimf)
         self._rimf_spin = QDoubleSpinBox()
         self._rimf_spin.setRange(0.0, 10.0)
-        self._rimf_spin.setDecimals(2)
+        self._rimf_spin.setDecimals(4)
         self._rimf_spin.setSingleStep(0.01)
-        self._rimf_spin.setMaximumWidth(80)
+        self._rimf_spin.setMaximumWidth(90)
         rimf_row.addWidget(self._rimf_spin)
         rimf_row.addStretch()
         root.addLayout(rimf_row)
@@ -349,7 +394,7 @@ class PreferencesDialog(QDialog):
         self._density_radius = QDoubleSpinBox()
         self._density_radius.setRange(0.0, 100000.0)
         self._density_radius.setDecimals(0)
-        self._density_radius.setMaximumWidth(80)
+        self._density_radius.setMinimumWidth(90)
         density_row.addWidget(self._density_radius)
         density_row.addWidget(QLabel("nm"))
         density_row.addStretch()
@@ -361,22 +406,30 @@ class PreferencesDialog(QDialog):
         self._density_method = QComboBox()
         self._density_method.addItem("KD-tree range search", "kdtree")
         self._density_method.addItem("2D histogram", "histogram_2d")
+        self._density_method.setMinimumWidth(170)
         density_method_row.addWidget(self._density_method)
-        density_method_row.addWidget(QLabel("histogram voxel"))
+        density_method_row.addStretch()
+        root.addLayout(density_method_row)
+
+        # Histogram-method parameters on their own row so nothing is clipped.
+        density_hist_row = QHBoxLayout()
+        density_hist_row.addSpacing(36)
+        density_hist_row.addWidget(QLabel("histogram voxel"))
         self._density_voxel = QDoubleSpinBox()
         self._density_voxel.setRange(0.1, 100000.0)
         self._density_voxel.setDecimals(1)
-        self._density_voxel.setMaximumWidth(80)
-        density_method_row.addWidget(self._density_voxel)
-        density_method_row.addWidget(QLabel("nm"))
-        density_method_row.addWidget(QLabel("sigma"))
+        self._density_voxel.setMinimumWidth(90)
+        density_hist_row.addWidget(self._density_voxel)
+        density_hist_row.addWidget(QLabel("nm"))
+        density_hist_row.addSpacing(18)
+        density_hist_row.addWidget(QLabel("smoothing sigma"))
         self._density_sigma = QDoubleSpinBox()
         self._density_sigma.setRange(0.0, 100.0)
         self._density_sigma.setDecimals(2)
-        self._density_sigma.setMaximumWidth(70)
-        density_method_row.addWidget(self._density_sigma)
-        density_method_row.addStretch()
-        root.addLayout(density_method_row)
+        self._density_sigma.setMinimumWidth(88)
+        density_hist_row.addWidget(self._density_sigma)
+        density_hist_row.addStretch()
+        root.addLayout(density_hist_row)
 
         root.addSpacing(6)
 
@@ -450,7 +503,7 @@ class PreferencesDialog(QDialog):
 
         self._scatter_color_by_combo = QComboBox()
         self._scatter_color_by_combo.addItems(_SCATTER_COLOR_BY_OPTIONS)
-        form_scatter.addRow("Colour by", self._scatter_color_by_combo)
+        form_scatter.addRow("Color by", self._scatter_color_by_combo)
 
         self._scatter_cmap_combo = QComboBox()
         self._scatter_cmap_combo.addItems(_SCATTER_CMAPS)
@@ -506,7 +559,7 @@ class PreferencesDialog(QDialog):
         self._filter_range_alpha = QSpinBox()
         self._filter_range_alpha.setRange(0, 100)
         self._filter_range_alpha.setToolTip("Filter fill opacity as percentage (0 = transparent, 100 = opaque).")
-        self._filter_range_alpha.setMaximumWidth(55)
+        self._filter_range_alpha.setMinimumWidth(74)
         self._filter_range_alpha.setSuffix(" %")
         range_row.addWidget(self._filter_range_alpha)
         range_row.addStretch()
@@ -519,7 +572,7 @@ class PreferencesDialog(QDialog):
         bounds_row.addWidget(QLabel("size"))
         self._filter_bounds_size = QSpinBox()
         self._filter_bounds_size.setRange(1, 10)
-        self._filter_bounds_size.setMaximumWidth(55)
+        self._filter_bounds_size.setMinimumWidth(62)
         bounds_row.addWidget(self._filter_bounds_size)
         bounds_row.addWidget(QLabel("px"))
         bounds_row.addStretch()
@@ -540,7 +593,7 @@ class PreferencesDialog(QDialog):
         roi_color_row.addWidget(QLabel("transparency"))
         self._roi_transparency = QSpinBox()
         self._roi_transparency.setRange(0, 100)
-        self._roi_transparency.setMaximumWidth(55)
+        self._roi_transparency.setMinimumWidth(74)
         self._roi_transparency.setSuffix(" %")
         roi_color_row.addWidget(self._roi_transparency)
         roi_color_row.addStretch()
@@ -549,7 +602,7 @@ class PreferencesDialog(QDialog):
         edge_row = QHBoxLayout()
         self._roi_edge_size = QSpinBox()
         self._roi_edge_size.setRange(1, 10)
-        self._roi_edge_size.setMaximumWidth(55)
+        self._roi_edge_size.setMinimumWidth(62)
         edge_row.addWidget(self._roi_edge_size)
         edge_row.addWidget(QLabel("px"))
         edge_row.addStretch()
@@ -558,7 +611,7 @@ class PreferencesDialog(QDialog):
         widget_row = QHBoxLayout()
         self._roi_edit_widget_size = QSpinBox()
         self._roi_edit_widget_size.setRange(4, 32)
-        self._roi_edit_widget_size.setMaximumWidth(55)
+        self._roi_edit_widget_size.setMinimumWidth(62)
         widget_row.addWidget(self._roi_edit_widget_size)
         widget_row.addWidget(QLabel("px"))
         widget_row.addStretch()
@@ -585,6 +638,14 @@ class PreferencesDialog(QDialog):
 
         root.addSpacing(8)
         root.addWidget(self._section_label("MSR Reader plugin:"))
+
+        status_text, installed = _specpy_status()
+        specpy_lbl = QLabel(status_text)
+        specpy_lbl.setWordWrap(True)
+        specpy_lbl.setStyleSheet(
+            f"color: {'#2a8a4a' if installed else '#a66'}; font-size: 11px;"
+        )
+        root.addLayout(self._indent(specpy_lbl, px=12))
 
         self._msr_temp_edit, tmp_row = self._browse_row(
             self._browse_msr_temp, file_mode=False,
@@ -632,7 +693,7 @@ class PreferencesDialog(QDialog):
         row = self._shortcut_table.rowCount()
         self._shortcut_table.insertRow(row)
 
-        command_combo = QComboBox()
+        command_combo = _NoWheelComboBox()
         for key, label in _SHORTCUT_LABELS.items():
             command_combo.addItem(label, key)
         if command:
@@ -725,7 +786,7 @@ class PreferencesDialog(QDialog):
         transform_row = QHBoxLayout()
         transform_row.addWidget(QLabel("expect"))
         self._mbm_transform_type = QComboBox()
-        self._mbm_transform_type.addItems(["rigid", "translational"])
+        self._mbm_transform_type.addItems(_MBM_TRANSFORM_TYPES)
         transform_row.addWidget(self._mbm_transform_type)
         transform_row.addWidget(QLabel("transform for channel alignment"))
         transform_row.addStretch()
@@ -827,6 +888,8 @@ class PreferencesDialog(QDialog):
         # File
         self._files_in_history.setValue(int(f.get("num_file_history", 5)))
         self._keep_last_folder.setChecked(bool(f.get("keep_last_folder", True)))
+        self._confirm_overwrite.setChecked(bool(f.get("confirm_overwrite", True)))
+        self._close_paraview.setChecked(bool(f.get("close_paraview_on_exit", True)))
 
         # Data
         self._iter_load.setCurrentText(str(d.get("iter_load", "last")))
@@ -900,7 +963,7 @@ class PreferencesDialog(QDialog):
         self._mbm_min_locs.setValue(int(m.get("minimum_localizations_per_bead", 10)))
         self._set_combo(self._mbm_average_method, m.get("average_method", "median"), ["mean", "median"])
         self._mbm_average_count.setValue(int(m.get("average_occurrence_count", 10)))
-        self._set_combo(self._mbm_transform_type, m.get("transform_type", "rigid"), ["rigid", "translational"])
+        self._set_combo(self._mbm_transform_type, m.get("transform_type", _MBM_TRANSFORM_TYPES[0]), _MBM_TRANSFORM_TYPES)
         self._set_combo(self._mbm_align_to, m.get("align_to_channel", "first"), ["first", "last"])
 
     def _apply_widgets_to_draft(self) -> None:
@@ -915,6 +978,8 @@ class PreferencesDialog(QDialog):
         # File
         f["num_file_history"] = int(self._files_in_history.value())
         f["keep_last_folder"] = bool(self._keep_last_folder.isChecked())
+        f["confirm_overwrite"] = bool(self._confirm_overwrite.isChecked())
+        f["close_paraview_on_exit"] = bool(self._close_paraview.isChecked())
 
         # Data
         d["iter_load"] = self._iter_load.currentText()

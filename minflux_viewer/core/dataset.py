@@ -151,6 +151,12 @@ class DatasetComponents:
     derived: AttrStore = field(default_factory=AttrStore)
     state: dict[str, Any] = field(default_factory=dict)
     mfx_raw: AttrStore = field(default_factory=AttrStore)
+    # Derived attributes (dt, dst, spd, siz, dur, len, tim_trace, den, …)
+    # computed at the last-valid selection of mfx_raw, aligned to
+    # mfx_row_mask(itr="last", vld_only=True) rows. Populated when ds.attr is
+    # NOT the last-valid materialization (iter_load="all"), so mfx_get can
+    # broadcast them onto any iteration selection.
+    derived_last: AttrStore = field(default_factory=AttrStore)
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +317,11 @@ class MinfluxDataset:
         return self.components.mfx_raw
 
     @property
+    def derived_last(self) -> AttrStore:
+        """Derived attributes at the last-valid selection of ``mfx_raw``."""
+        return self.components.derived_last
+
+    @property
     def state(self) -> dict[str, Any]:
         return self.components.state
 
@@ -318,6 +329,13 @@ class MinfluxDataset:
     def loc_nm(self) -> np.ndarray:
         """
         (N, 3) array of localizations in **nanometres**, RIMF-corrected on Z.
+
+        RIMF is applied here as a **view only**: the stored raw ``loc_z`` is
+        never modified, so this property can be read any number of times — and
+        RIMF re-set freely via :meth:`set_rimf` — without ever double-applying
+        the correction. Code that needs the **raw, uncorrected** z (e.g.
+        anisotropy / RIMF estimation) must NOT read this property; read
+        ``loc_z`` (or ``mfx_get(ds, "loc_z", ...)``) and scale by ``1e9``.
         """
         if "loc_x_nm" in self.attr or "loc_y_nm" in self.attr or "loc_z_nm" in self.attr:
             x = np.asarray(self.attr.get("loc_x_nm", np.empty(0)), dtype=float)
@@ -329,6 +347,51 @@ class MinfluxDataset:
         y = np.asarray(self.attr.get("loc_y", np.empty(0)), dtype=float) * 1e9
         z = np.asarray(self.attr.get("loc_z", np.empty(0)), dtype=float) * 1e9 * self.cali.RIMF
         return np.column_stack([x, y, z])
+
+    @property
+    def rimf_provenance(self) -> dict[str, Any]:
+        """How the current RIMF value was set: ``{value, source, history}``.
+
+        ``applied_as_view`` is always True — RIMF only re-scales the z *view*
+        (:attr:`loc_nm`); the raw ``loc_z`` is never RIMF-baked.
+        """
+        return self.metadata.get("rimf_provenance", {
+            "value": float(getattr(self.cali, "RIMF", 1.0) or 1.0),
+            "source": "default",
+            "applied_as_view": True,
+            "history": [],
+        })
+
+    def set_rimf(self, value: float, *, source: str = "manual") -> float:
+        """Set the RIMF z-scaling factor and record its provenance.
+
+        RIMF is applied to z only as a display view (see :attr:`loc_nm`); the
+        raw ``loc_z`` in ``attr``/``mfx_raw`` is never modified, so RIMF can be
+        re-set any number of times without ever double-correcting the raw data
+        — the latest value simply re-scales the view. ``source`` (e.g.
+        ``"auto"``, ``"manual"``, ``"fixed"``, ``"2D"``) is appended to the
+        change history in ``metadata["rimf_provenance"]``.
+        """
+        value = float(value)
+        prov = self.metadata.get("rimf_provenance")
+        if prov is None:
+            prov = {
+                "value": float(getattr(self.cali, "RIMF", 1.0) or 1.0),
+                "source": "default",
+                "applied_as_view": True,
+                "history": [],
+            }
+            self.metadata["rimf_provenance"] = prov
+        self.cali.RIMF = value
+        prov["value"] = value
+        prov["source"] = str(source)
+        prov["applied_as_view"] = True
+        prov["history"].append({
+            "value": value,
+            "source": str(source),
+            "time": datetime.now().isoformat(timespec="seconds"),
+        })
+        return value
 
     @property
     def has_localizations(self) -> bool:
@@ -483,7 +546,20 @@ def build_image_dataset(
         for key, value in attrs.items():
             data[key] = np.asarray(value)
     attr_store = AttrStore(data)
-    prop = DataProp(num_loc=0, num_itr=0, num_dim=2, num_traces=0, attr_names=attr_store.keys())
+    arr = np.asarray(image)
+    is_color_2d = arr.ndim == 3 and arr.shape[-1] in (3, 4)
+    is_stack = (
+        (arr.ndim == 3 and not is_color_2d)
+        or (arr.ndim == 4 and arr.shape[-1] in (3, 4))
+    )
+    stack_depth = int(arr.shape[0]) if is_stack else 1
+    prop = DataProp(
+        num_loc=0,
+        num_itr=0,
+        num_dim=3 if stack_depth > 1 else 2,
+        num_traces=0,
+        attr_names=attr_store.keys(),
+    )
     return MinfluxDataset(
         file=FileInfo(
             name=name,

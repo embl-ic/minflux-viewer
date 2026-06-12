@@ -36,8 +36,9 @@ from PyQt6.QtWidgets import (
 
 from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
+from ..core.loader import attr_values_1d
 from ..core.overlay import CHANNEL_LUTS, PURE_COLOR_RGB, apply_display_transform_nm, overlay_members
-from ..core.roi_selection import rectangle_mask
+from ..core.roi_selection import active_roi_mask, rectangle_mask
 from .plot_format import plot_widget
 
 # ---------------------------------------------------------------------------
@@ -167,6 +168,8 @@ class ScatterWindow(QWidget):
         self._last_2d_black_background = False
         self._channels: list[dict] = []
         self._channel_rows: list[tuple[QLabel, QComboBox]] = []
+        self._roi_highlight_2d = None
+        self._roi_highlight_3d = None
 
         self.setWindowTitle("Scatter Plot")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -177,6 +180,9 @@ class ScatterWindow(QWidget):
         self._refresh()
 
         state.filter_changed.connect(self._on_filter_changed)
+        state.calibration_changed.connect(self._on_calibration_changed)
+        state.roi_selection_changed.connect(self._on_roi_selection_changed)
+        state.rois.selection_changed.connect(self._redraw_roi_highlight)
 
     @property
     def dataset_idx(self) -> int | None:
@@ -240,6 +246,12 @@ class ScatterWindow(QWidget):
             size=2, pen=None, brush=pg.mkBrush(200, 200, 200, 180),
         )
         self._plot_2d.addItem(self._scatter_2d)
+        self._roi_highlight_2d = pg.ScatterPlotItem(
+            size=7,
+            pen=pg.mkPen(255, 210, 0, 230, width=1.5),
+            brush=pg.mkBrush(255, 230, 0, 70),
+        )
+        self._plot_2d.addItem(self._roi_highlight_2d)
 
         self._cmap = _load_cmap("jet")
         self._colorbar = pg.ColorBarItem(
@@ -310,9 +322,12 @@ class ScatterWindow(QWidget):
 
         scatter = gl.GLScatterPlotItem(pxMode=True, size=2.0)
         view.addItem(scatter)
+        roi_scatter = gl.GLScatterPlotItem(pxMode=True, size=7.0)
+        view.addItem(roi_scatter)
 
         self._3d_view    = view
         self._3d_scatter = scatter
+        self._roi_highlight_3d = roi_scatter
         self._stack.addWidget(view)
 
     def _on_background_changed(self, black: bool) -> None:
@@ -437,6 +452,18 @@ class ScatterWindow(QWidget):
     def _on_filter_changed(self, idx: int) -> None:
         if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
             self._redraw_current(save_state=False)
+
+    def _on_calibration_changed(self, idx: int) -> None:
+        # RIMF / z-scaling changed: the cached loc_nm (keyed only by dataset
+        # index) is now stale on z — invalidate it before redrawing.
+        if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
+            self._cached_dataset_idx = None
+            self._cached_locs_nm = None
+            self._redraw_current(save_state=False)
+
+    def _on_roi_selection_changed(self, idx: int) -> None:
+        if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
+            self._redraw_roi_highlight()
 
     def _reset_view(self) -> None:
         if self._axis_combo.currentText() == "3D" and self._3d_view is not None:
@@ -621,8 +648,10 @@ class ScatterWindow(QWidget):
             return
         if len(self._channels) > 1:
             self._draw_overlay(save_state=save_state)
+            self._redraw_roi_highlight()
             return
         self._draw(self._current_locs(ds), ds.filter_mask, ds, save_state=save_state)
+        self._redraw_roi_highlight()
 
     def _current_locs(self, ds) -> np.ndarray:
         idx = self._dataset_idx
@@ -646,6 +675,137 @@ class ScatterWindow(QWidget):
             locs,
             ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"),
         )
+
+    def _roi_masks_for_dataset(self, ds) -> list[tuple[object, np.ndarray]]:
+        records = [r for r in self._state.rois.records if r.id in set(self._state.rois.selected_ids)]
+        draft_id = ds.state.get("active_roi_draft_id")
+        if draft_id:
+            draft_meta = ds.state.get("roi_masks", {}).get(draft_id, {})
+            draft_record = next((r for r in records if r.id == draft_id), None)
+            if draft_record is None and isinstance(draft_meta, dict):
+                draft_record = type("_RoiHighlight", (), {
+                    "id": draft_id,
+                    "stroke_color": draft_meta.get("stroke_color", "#ffff00"),
+                })()
+            if draft_record is not None and all(r.id != draft_id for r in records):
+                records.append(draft_record)
+        out: list[tuple[object, np.ndarray]] = []
+        ftr = np.asarray(ds.filter_mask, dtype=bool).ravel()
+        for record in records:
+            mask = active_roi_mask(ds, selected_ids=[record.id], include_active_draft=False)
+            if mask is None and record.id == draft_id:
+                mask = active_roi_mask(ds, selected_ids=[], include_active_draft=True)
+            if mask is None:
+                continue
+            mask = np.asarray(mask, dtype=bool).ravel()
+            if ftr.size == mask.size:
+                mask &= ftr
+            out.append((record, mask))
+        return out
+
+    @staticmethod
+    def _roi_highlight_brushes(record, count: int) -> list:
+        color = pg.mkColor(getattr(record, "stroke_color", "#ffff00") or "#ffff00")
+        fill = pg.mkColor(color)
+        fill.setAlpha(75)
+        return [pg.mkBrush(fill)] * int(count)
+
+    @staticmethod
+    def _roi_highlight_rgba(record, count: int, alpha: float = 0.95) -> np.ndarray:
+        color = pg.mkColor(getattr(record, "stroke_color", "#ffff00") or "#ffff00")
+        rgba = np.array(
+            [[color.redF(), color.greenF(), color.blueF(), float(alpha)]],
+            dtype=np.float32,
+        )
+        return np.tile(rgba, (int(count), 1))
+
+    def _clear_roi_highlight(self) -> None:
+        if self._roi_highlight_2d is not None:
+            self._roi_highlight_2d.setData([], [])
+        if self._roi_highlight_3d is not None:
+            self._roi_highlight_3d.setData(pos=np.empty((0, 3), dtype=np.float32))
+
+    def _redraw_roi_highlight(self) -> None:
+        if self._axis_combo.currentText() == "3D":
+            self._redraw_roi_highlight_3d()
+        else:
+            self._redraw_roi_highlight_2d()
+
+    def _redraw_roi_highlight_2d(self) -> None:
+        if self._roi_highlight_2d is None:
+            return
+        axis = self._axis_combo.currentText()
+        col_map = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
+        if axis not in col_map:
+            self._clear_roi_highlight()
+            return
+        ci, cj = col_map[axis]
+        xs: list[np.ndarray] = []
+        ys: list[np.ndarray] = []
+        brushes: list = []
+        channels = self._channels or [{"dataset_idx": self._dataset_idx, "visible": True}]
+        per_channel_max = max(1, _MAX_DISPLAY_POINTS_2D // max(len(channels), 1))
+        for ch in channels:
+            if not ch.get("visible", True):
+                continue
+            ds_idx = ch.get("dataset_idx")
+            if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
+                continue
+            ds = self._state.datasets[ds_idx]
+            locs = self._locs_for_dataset(ds)
+            if locs.ndim != 2 or locs.shape[0] == 0:
+                continue
+            for record, mask in self._roi_masks_for_dataset(ds):
+                n = min(mask.size, locs.shape[0])
+                if n == 0:
+                    continue
+                visible = mask[:n] & np.all(np.isfinite(locs[:n, :3]), axis=1)
+                indices = self._visible_indices(visible, n, per_channel_max)
+                if indices.size:
+                    xs.append(locs[indices, ci])
+                    ys.append(locs[indices, cj])
+                    brushes.extend(self._roi_highlight_brushes(record, indices.size))
+        if not xs:
+            self._roi_highlight_2d.setData([], [])
+            return
+        self._roi_highlight_2d.setData(
+            x=np.concatenate(xs),
+            y=np.concatenate(ys),
+            brush=brushes,
+            pen=None,
+            size=7,
+        )
+
+    def _redraw_roi_highlight_3d(self) -> None:
+        if self._roi_highlight_3d is None:
+            return
+        parts: list[np.ndarray] = []
+        colors: list[np.ndarray] = []
+        channels = self._channels or [{"dataset_idx": self._dataset_idx, "visible": True}]
+        per_channel_max = max(1, _MAX_DISPLAY_POINTS_3D // max(len(channels), 1))
+        for ch in channels:
+            if not ch.get("visible", True):
+                continue
+            ds_idx = ch.get("dataset_idx")
+            if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
+                continue
+            ds = self._state.datasets[ds_idx]
+            locs = self._locs_for_dataset(ds)
+            if locs.ndim != 2 or locs.shape[0] == 0:
+                continue
+            for record, mask in self._roi_masks_for_dataset(ds):
+                n = min(mask.size, locs.shape[0])
+                visible = mask[:n] & np.all(np.isfinite(locs[:n, :3]), axis=1)
+                indices = self._visible_indices(visible, n, per_channel_max)
+                if indices.size:
+                    parts.append(locs[indices, :3])
+                    colors.append(self._roi_highlight_rgba(record, indices.size))
+        if not parts:
+            self._roi_highlight_3d.setData(pos=np.empty((0, 3), dtype=np.float32))
+            return
+        pos = np.vstack(parts).astype(np.float32, copy=False)
+        rgba = np.vstack(colors).astype(np.float32, copy=False)
+        self._roi_highlight_3d.setData(pos=pos, color=rgba, size=7.0, pxMode=True)
 
     def _lut_color(self, lut: str, alpha: int = 190) -> tuple[int, int, int, int]:
         if lut in PURE_COLOR_RGB:
@@ -910,7 +1070,8 @@ class ScatterWindow(QWidget):
         if self._color_cache_key == key:
             return self._color_cache
 
-        values = np.asarray(ds.attr.get(c_name, np.empty(0))).ravel().astype(float)
+        values = attr_values_1d(ds, c_name)
+        values = np.empty(0) if values is None else np.asarray(values).ravel().astype(float)
         if values.size != ds.prop.num_loc:
             self._color_cache_key = key
             self._color_cache = None

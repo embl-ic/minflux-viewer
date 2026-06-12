@@ -38,6 +38,7 @@ DEFAULT_PREFS: dict = {
         "keep_last_folder": True,
         "default_folder": str(Path.home()),
         "recent_files": [],
+        "confirm_overwrite": True,
         "close_paraview_on_exit": True,
         "paraview_path": "",
     },
@@ -110,6 +111,7 @@ DEFAULT_PREFS: dict = {
         "log": "Ctrl+L",
         "console": "Ctrl+Shift+L",
         "preferences": "Shift+P",
+        "dataset_manager": "Ctrl+D",
     },
     "attributes": {
         "enabled": [
@@ -124,7 +126,7 @@ DEFAULT_PREFS: dict = {
         "minimum_localizations_per_bead": 10,
         "average_method": "median",
         "average_occurrence_count": 10,
-        "transform_type": "rigid",
+        "transform_type": "rigid XY + translational Z",
         "align_to_channel": "first",
     },
     "measurements": {
@@ -177,6 +179,7 @@ def _migrate_prefs(prefs: dict) -> dict:
         shortcuts["open_msr"] = ""
     shortcuts.setdefault("brightness_contrast", "Shift+C")
     shortcuts.setdefault("preferences", "Shift+P")
+    shortcuts.setdefault("dataset_manager", "Ctrl+D")
     if shortcuts.get("show_info") == "I":
         shortcuts["show_info"] = "Ctrl+I"
     if shortcuts.get("attribute_plot") == "Ctrl+3":
@@ -226,6 +229,8 @@ class AppState(QObject):
         Emitted when the active dataset changes; carries the new index.
     filter_changed(int)
         Emitted when ``dataset[idx].filter_mask`` is modified.
+    roi_selection_changed(int)
+        Emitted when a dataset's cached ROI selection mask is modified.
     status_message(str)
         Short text for the main-window status bar.
     """
@@ -234,6 +239,8 @@ class AppState(QObject):
     dataset_removed = pyqtSignal(int)
     active_changed  = pyqtSignal(int)
     filter_changed  = pyqtSignal(int)
+    calibration_changed = pyqtSignal(int)   # RIMF / z-scaling changed for a dataset
+    roi_selection_changed = pyqtSignal(int)
     status_message  = pyqtSignal(str)
     log_message     = pyqtSignal(str, str)  # (message, level)
 
@@ -365,6 +372,21 @@ class AppState(QObject):
             idx = self._active_idx
         if idx is not None:
             self.filter_changed.emit(idx)
+
+    def notify_roi_selection_changed(self, idx: int | None = None) -> None:
+        """Notify views that cached ROI selection masks changed."""
+        if idx is None:
+            idx = self._active_idx
+        if idx is not None:
+            self.roi_selection_changed.emit(idx)
+
+    def notify_calibration_changed(self, idx: int | None = None) -> None:
+        """Notify views that a dataset's calibration (RIMF / z-scaling) changed
+        so geometry-dependent displays re-pull the RIMF-corrected coordinates."""
+        if idx is None:
+            idx = self._active_idx
+        if idx is not None:
+            self.calibration_changed.emit(idx)
 
     def log(self, message: str, level: str = "INFO") -> None:
         """

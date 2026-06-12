@@ -135,9 +135,14 @@ def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
         channel=channel,
     )
     dataset.metadata.update(_source_metadata_from_raw(raw, load_all_itr=load_all_itr))
-    dataset.metadata["valid_num_loc"] = int(prop.num_loc)
-    dataset.metadata["includes_invalid"] = False
+    dataset.metadata["valid_num_loc"] = _attrs_valid_count(attrs, prop.num_loc)
+    dataset.metadata["includes_invalid"] = _attrs_include_invalid(attrs)
     dataset.components.mfx_raw = mfx_raw_store
+    # ds.attr is not the last-valid materialization (all-iteration and/or
+    # invalid-inclusive load): precompute the derived attributes at last-valid
+    # so mfx_get can broadcast them to any selection.
+    if not attr_matches_last_valid(dataset):
+        dataset.components.derived_last = _derived_last_from_raw(mfx_raw_store, num_itr, prefs)
     return dataset
 
 
@@ -800,11 +805,13 @@ def _build_mfx_raw_m2205_unwrapped(merged: dict, n_loc: int, n_itr: int) -> "Att
             mfx[key] = arr.ravel()
             continue
 
-        # Scalar per loc
+        # Scalar per loc (MATLAB column vectors arrive as (n_loc, 1) — keep
+        # scalar columns 1-D in the raw store)
         if arr.ndim == 1:
             mfx[key] = np.repeat(arr, n_itr)
         else:
-            mfx[key] = arr[np.repeat(np.arange(n_loc), n_itr), :]
+            sub = arr[np.repeat(np.arange(n_loc), n_itr), :]
+            mfx[key] = sub.ravel() if sub.ndim == 2 and sub.shape[1] == 1 else sub
 
     # Synthetic 0-indexed itr column for consistency across formats
     mfx["itr"] = np.tile(np.arange(n_itr, dtype=np.int16), n_loc)
@@ -929,6 +936,161 @@ def _build_mfx_raw_from_json_records(records: list) -> "AttrStore":
     return mfx
 
 
+# Derived attributes computed from the (last-iteration) localization position,
+# sequence, or trace. They have no genuine per-iteration value; in non-default
+# iteration views each localization's last-valid value is duplicated across all
+# of its raw rows (see :func:`mfx_get`). ``idx`` is handled separately as a
+# synthetic positional index.
+_DERIVED_BROADCAST_ATTRS = frozenset(
+    {"den", "dst", "spd", "dt", "tim_trace", "siz", "dur", "len"}
+)
+
+
+def _mfx_raw_len(raw: "AttrStore") -> int:
+    """Number of rows in the flattened raw store (0 if empty)."""
+    arr = raw.get("itr")
+    if arr is None:
+        for key in raw.keys():
+            arr = raw.get(key)
+            break
+    return int(np.asarray(arr).shape[0]) if arr is not None else 0
+
+
+def _raw_loc_id(raw: "AttrStore") -> "np.ndarray | None":
+    """Per-row localization-group id over the flattened raw store (cached).
+
+    A group is the set of raw rows belonging to one localization: its
+    (possibly partial) iteration ladder up to the final row. A new group
+    starts whenever the trace id changes or the iteration index fails to
+    increase within a trace. This single rule covers m2205-style fixed
+    ``n_loc × n_itr`` grids, m2410 flat event streams (variable iterations
+    per localization, traces interleaved in time, repeated final-iteration
+    rows in tracking sequences), and single-iteration stores. Computed once
+    and cached in the store as ``loc_id``.
+    """
+    cached = raw.get("loc_id")
+    if cached is not None:
+        return np.asarray(cached).ravel()
+    n = _mfx_raw_len(raw)
+    if n == 0:
+        return None
+    itr = np.asarray(raw.get("itr", np.zeros(n, dtype=np.int64))).ravel().astype(np.int64)
+    tid_arr = raw.get("tid")
+    if tid_arr is None:
+        # No trace ids: groups are contiguous strictly-increasing itr runs.
+        loc_id = np.cumsum(np.r_[True, np.diff(itr) <= 0]) - 1
+    else:
+        tid = np.asarray(tid_arr).ravel()
+        order = np.argsort(tid, kind="stable")  # stable: keeps row order per trace
+        itr_s, tid_s = itr[order], tid[order]
+        new_s = np.r_[True, (tid_s[1:] != tid_s[:-1]) | (np.diff(itr_s) <= 0)]
+        loc_id = np.empty(n, dtype=np.int64)
+        loc_id[order] = np.cumsum(new_s) - 1
+    raw["loc_id"] = loc_id
+    return loc_id
+
+
+def _derived_last_from_raw(
+    raw: "AttrStore", num_itr: int, prefs: dict | None,
+) -> "AttrStore":
+    """Compute broadcastable derived attributes at the last-valid selection.
+
+    Re-materializes ``loc``/``tid``/``tim`` from the raw store at
+    ``itr="last", vld_only=True`` and runs the same trace-structure +
+    derived-attribute pipeline as an ``iter_load="last"`` load, so the values
+    are identical regardless of the iteration load mode. The result is aligned
+    to ``mfx_row_mask(raw, itr="last", vld_only=True)`` rows. ``den`` is not
+    computed here — it is appended at dataset-add time where the density
+    preferences apply.
+    """
+    out = AttrStore()
+    mask = mfx_row_mask(raw, itr="last", vld_only=True)
+    if mask is None or not mask.any():
+        return out
+    n = int(mask.sum())
+    temp = AttrStore()
+    for key in ("loc_x", "loc_y", "loc_z", "tid", "tim"):
+        val = raw.get(key)
+        if val is not None:
+            arr = np.asarray(val)
+            if arr.ndim == 2 and arr.shape[1] == 1:
+                arr = arr.ravel()   # tolerate (n, 1) columns in older stores
+            if arr.ndim == 1 and arr.shape[0] == mask.size:
+                temp[key] = arr[mask]
+    if "loc_x" not in temp:
+        # No coordinates in the raw store — computing position-based derived
+        # attributes from zero-filled fallbacks would fabricate values.
+        return out
+    prop = _compute_properties(temp, n, num_itr, prefs=prefs)
+    temp = _add_derived_attributes(temp, prop, prefs=prefs)
+    for key in sorted(_DERIVED_BROADCAST_ATTRS):
+        val = temp.get(key)
+        if val is not None:
+            out[key] = np.asarray(val)
+    return out
+
+
+def mfx_row_mask(
+    raw: "AttrStore",
+    *,
+    itr: "str | int" = "last",
+    vld_only: bool = True,
+) -> "np.ndarray | None":
+    """Boolean row selection over the flattened raw store for one (itr, vld_only).
+
+    Rows are the m2410-style flat ``(localization, iteration)`` events. ``itr``
+    is ``"last"`` (final valid iteration), ``"all"`` (every iteration), or a
+    0-based iteration index. Returns ``None`` when the store is empty.
+    """
+    n = _mfx_raw_len(raw)
+    if n == 0:
+        return None
+    itr_col = np.asarray(raw.get("itr", np.zeros(n, int))).ravel()
+    vld_col = np.asarray(raw.get("vld", np.ones(n, bool)), dtype=bool).ravel()
+    base = vld_col if vld_only else np.ones(n, bool)
+    if itr == "last":
+        max_i = int(itr_col[base].max()) if base.any() else 0
+        return base & (itr_col == max_i)
+    if itr == "all":
+        return base
+    if isinstance(itr, (int, np.integer)):
+        return base & (itr_col == int(itr))
+    return base
+
+
+def _broadcast_derived(
+    ds: "MinfluxDataset",
+    attr: str,
+    raw: "AttrStore",
+    mask: np.ndarray,
+) -> "np.ndarray | None":
+    """Duplicate a derived attribute's per-localization (last-valid) values
+    onto the raw rows selected by ``mask``.
+
+    The source values are aligned to ``mfx_row_mask(itr="last",
+    vld_only=True)`` rows: ``ds.attr`` when that IS the materialization,
+    otherwise ``ds.components.derived_last``. Rows whose localization group has
+    no last-valid row (failed probes, traces that never reach the final
+    iteration) get NaN.
+    """
+    if attr_matches_last_valid(ds):
+        src = ds.attr.get(attr)
+    else:
+        src = ds.components.derived_last.get(attr)
+    if src is None:
+        return None
+    src = np.asarray(src).ravel()
+    last_mask = mfx_row_mask(raw, itr="last", vld_only=True)
+    if last_mask is None or src.shape[0] != int(last_mask.sum()):
+        return None
+    loc_id = _raw_loc_id(raw)
+    if loc_id is None:
+        return None
+    per_loc = np.full(int(loc_id.max()) + 1, np.nan)
+    per_loc[loc_id[last_mask]] = src.astype(float, copy=False)
+    return per_loc[loc_id[mask]]
+
+
 def mfx_get(
     ds: "MinfluxDataset",
     attr: str,
@@ -944,18 +1106,45 @@ def mfx_get(
     ds :
         Dataset to query.
     attr :
-        Attribute name, e.g. ``"efo"``, ``"cfr"``, ``"loc_x"``.
+        Attribute name, e.g. ``"efo"``, ``"cfr"``, ``"loc_x"``, ``"idx"``.
     itr :
         ``"last"`` — final iteration only (default).
         ``"all"``  — all iterations pooled.
         ``int``    — specific 0-based iteration index.
     vld_only :
         When True, return only rows where ``vld`` is True.
+
+    Notes
+    -----
+    ``idx`` is synthetic: the **1-based flattened row position** of each selected
+    row (``all`` → ``1,2,3,…``; ``last`` → ``n_itr, 2·n_itr,…``). Derived
+    attributes (``den``, ``dst``, ``spd``, …) have no per-iteration values:
+    each localization's last-valid value is duplicated across all of its raw
+    rows (NaN for rows whose localization has no last-valid materialization,
+    e.g. invalid probes). The per-localization source is ``ds.attr`` for
+    last-valid loads, else ``ds.components.derived_last``; ``None`` is returned
+    when neither holds the attribute.
     """
     raw = getattr(ds, "mfx_raw", None)
     if raw is None or len(raw) == 0:
         val = ds.attr.get(attr)
         return np.asarray(val) if val is not None else None
+
+    mask = mfx_row_mask(raw, itr=itr, vld_only=vld_only)
+    if mask is None:
+        return None
+
+    # Synthetic 1-based flattened index of the selected rows.
+    if attr == "idx":
+        return np.flatnonzero(mask).astype(np.int64) + 1
+
+    # Derived attributes: duplicate each localization's last-valid value
+    # across its iteration rows.
+    if attr in _DERIVED_BROADCAST_ATTRS:
+        if itr == "last" and vld_only and attr_matches_last_valid(ds):
+            val = ds.attr.get(attr)
+            return np.asarray(val) if val is not None else None
+        return _broadcast_derived(ds, attr, raw, mask)
 
     arr = raw.get(attr)
     if arr is None:
@@ -964,22 +1153,198 @@ def mfx_get(
     if arr.ndim == 0 or arr.size == 0:
         return arr
 
-    n       = arr.shape[0]
-    itr_col = np.asarray(raw.get("itr", np.zeros(n, int))).ravel()
-    vld_col = np.asarray(raw.get("vld", np.ones(n, bool)), dtype=bool).ravel()
-    base    = vld_col if vld_only else np.ones(n, bool)
-
-    if itr == "last":
-        max_i = int(itr_col[base].max()) if base.any() else 0
-        mask  = base & (itr_col == max_i)
-    elif itr == "all":
-        mask = base
-    elif isinstance(itr, int):
-        mask = base & (itr_col == itr)
-    else:
-        mask = base
-
     return arr[mask] if arr.ndim == 1 else arr[mask, :]
+
+
+def mfx_filter_mask(
+    ds: "MinfluxDataset",
+    *,
+    itr: "str | int" = "last",
+    vld_only: bool = True,
+) -> "tuple[np.ndarray, list[str]] | None":
+    """Re-evaluate the dataset's persisted filter specs over a raw-store selection.
+
+    The dataset's active filters are stored as re-evaluable specs in
+    ``ds.state["filter_specs"]`` (attribute, mode, bounds). This re-applies
+    them against :func:`mfx_get` rows for the given ``itr``/``vld_only``
+    selection, so the same logical filter extends to any iteration and to
+    invalid localizations.
+
+    Returns
+    -------
+    (mask, unevaluable) or None
+        ``mask`` is a boolean array aligned with ``mfx_get(ds, <attr>, itr=itr,
+        vld_only=vld_only)``. ``unevaluable`` lists attribute names of specs that
+        could not be evaluated on the raw store (e.g. derived attributes such as
+        ``den`` that have no per-iteration values). Returns ``None`` when the
+        dataset has no raw store.
+    """
+    from ..utils.filters import raw_spec_mask
+
+    tid_sel = mfx_get(ds, "tid", itr=itr, vld_only=vld_only)
+    if tid_sel is None:
+        return None
+    tid_sel = np.asarray(tid_sel).ravel()
+    n = tid_sel.shape[0]
+
+    specs = ds.state.get("filter_specs") or []
+    mask = np.ones(n, dtype=bool)
+    unevaluable: list[str] = []
+    for spec in specs:
+        attr = spec.get("attribute", "")
+        vals = mfx_get(ds, attr, itr=itr, vld_only=vld_only)
+        if vals is None or np.asarray(vals).ravel().shape[0] != n:
+            if attr and attr not in unevaluable:
+                unevaluable.append(attr)
+            continue
+        mask &= raw_spec_mask(
+            np.asarray(vals).ravel(),
+            tid_sel,
+            spec.get("mode", "per loc"),
+            float(spec.get("lo", -np.inf)),
+            float(spec.get("hi", np.inf)),
+            bool(spec.get("lo_inc", True)),
+            bool(spec.get("hi_inc", True)),
+        )
+    return mask, unevaluable
+
+
+def _attrs_include_invalid(attrs: "AttrStore") -> bool:
+    """True when the materialized store retains rows with ``vld == False``."""
+    vld = attrs.get("vld")
+    if vld is None:
+        return False
+    try:
+        return bool(np.any(~np.asarray(vld).astype(bool).ravel()))
+    except Exception:
+        return False
+
+
+def _attrs_valid_count(attrs: "AttrStore", fallback: int) -> int:
+    """Number of vld rows in the materialized store (= loaded rows when the
+    load was valid-only)."""
+    vld = attrs.get("vld")
+    if vld is None:
+        return int(fallback)
+    try:
+        return int(np.asarray(vld).astype(bool).ravel().sum())
+    except Exception:
+        return int(fallback)
+
+
+def attr_materialized_selection(ds: "MinfluxDataset") -> tuple[str, bool]:
+    """The raw-store selection ``(itr, vld_only)`` that ``ds.attr`` materializes.
+
+    Derived from the load metadata: ``iteration_load_mode`` ("last"/"all")
+    and ``includes_invalid`` (set when ``only_valid_locs=False`` actually
+    retained invalid rows).
+    """
+    mode = str(ds.metadata.get("iteration_load_mode", "last") or "last").lower()
+    itr_sel = "all" if mode == "all" else "last"
+    vld_only = not bool(ds.metadata.get("includes_invalid", False))
+    return itr_sel, vld_only
+
+
+def _selection_rows_match_attr(
+    ds: "MinfluxDataset", itr: "str | int", vld_only: bool,
+) -> bool:
+    """True when the raw-store selection's row count equals ``ds.attr`` rows."""
+    raw = getattr(ds, "mfx_raw", None)
+    if raw is None or len(raw) == 0:
+        return True
+    mask = mfx_row_mask(raw, itr=itr, vld_only=vld_only)
+    if mask is None:
+        return True
+    return int(mask.sum()) == int(getattr(ds.prop, "num_loc", 0))
+
+
+def _attr_row_selection(ds: "MinfluxDataset") -> "tuple[str, bool] | None":
+    """The raw-store selection whose rows align 1:1 with ``ds.attr`` rows.
+
+    Usually the materialized selection from the load metadata; m2205-style
+    ``iter_load="all"`` stores keep one row per localization (2-D
+    per-iteration columns), so their rows align with the ``last`` selection
+    instead. ``None`` when no candidate matches (no aligned raw view exists).
+    """
+    sel_itr, sel_vld = attr_materialized_selection(ds)
+    for cand_itr in dict.fromkeys((sel_itr, "last")):
+        if _selection_rows_match_attr(ds, cand_itr, sel_vld):
+            return cand_itr, sel_vld
+    return None
+
+
+def attr_matches_selection(
+    ds: "MinfluxDataset",
+    *,
+    itr: "str | int" = "last",
+    vld_only: bool = True,
+) -> bool:
+    """True when ``ds.attr`` rows ARE the given raw-store selection.
+
+    Generalizes :func:`attr_matches_last_valid` to any (iteration, validity)
+    selection, so the windows can use the materialized fast path (filter
+    edit, ROI selection) for whatever selection the dataset was loaded with —
+    e.g. ``("last", False)`` for an ``only_valid_locs=False`` load.
+    """
+    return _attr_row_selection(ds) == (itr, bool(vld_only))
+
+
+def attr_values_1d(ds: "MinfluxDataset", attr: str) -> "np.ndarray | None":
+    """1-D values of *attr* aligned to ``ds.attr`` rows.
+
+    Returns ``ds.attr[attr]`` when it is already 1-D — except for derived
+    attributes on non-last-valid materializations, which are read through the
+    :func:`mfx_get` broadcast so they show the same (last-valid) values in
+    every view. m2205-style ``iter_load="all"`` materializations keep
+    per-iteration columns 2-D (``n_loc × n_itr``); for those (and for attrs
+    absent from ``ds.attr``), fall back to the raw-store selection whose rows
+    align with ``ds.attr`` (:func:`_attr_row_selection`). Returns ``None``
+    when no aligned 1-D representation exists.
+    """
+    n_loc = int(getattr(ds.prop, "num_loc", 0))
+
+    # Derived attrs: keep the Stage B contract (same last-valid values in
+    # every view) on all-iteration / invalid-inclusive materializations.
+    if attr in _DERIVED_BROADCAST_ATTRS and not attr_matches_last_valid(ds):
+        rows = _attr_row_selection(ds)
+        if rows is None:
+            return None
+        vals = mfx_get(ds, attr, itr=rows[0], vld_only=rows[1])
+        if vals is not None:
+            arr = np.asarray(vals)
+            if arr.ndim == 1 and arr.shape[0] == n_loc:
+                return arr
+        return None
+
+    val = ds.attr.get(attr)
+    if val is not None:
+        arr = np.asarray(val)
+        if arr.ndim == 1:
+            return arr
+    rows = _attr_row_selection(ds)
+    if rows is not None:
+        vals = mfx_get(ds, attr, itr=rows[0], vld_only=rows[1])
+        if vals is not None and np.asarray(vals).ndim == 1:
+            return np.asarray(vals)
+    return None
+
+
+def attr_matches_last_valid(ds: "MinfluxDataset") -> bool:
+    """True when ``ds.attr`` is the last-iteration, valid-only materialization.
+
+    This holds for the common ``iter_load="last"`` case, where the default plot
+    path (``ds.attr`` + ``ds.filter_mask``) equals the ``last`` iteration
+    selection. It is False when the dataset was loaded with all iterations
+    (``iter_load="all"``) or invalid localizations, so a ``last`` view must be
+    taken from the raw store instead of ``ds.attr``.
+    """
+    raw = getattr(ds, "mfx_raw", None)
+    if raw is None or len(raw) == 0:
+        return True
+    mask = mfx_row_mask(raw, itr="last", vld_only=True)
+    if mask is None:
+        return True
+    return int(mask.sum()) == int(getattr(ds.prop, "num_loc", 0))
 
 
 # ---------------------------------------------------------------------------
@@ -1372,13 +1737,15 @@ def load_from_mfx_array(
             "source_version": source_version,
             "source_version_detail": source_version_detail,
             "raw_num_loc": int(mfx.shape[0]),
-            "valid_num_loc": int(prop.num_loc),
+            "valid_num_loc": _attrs_valid_count(attrs, prop.num_loc),
             "raw_num_itr": int(num_itr),
             "iteration_load_mode": "all" if load_all_itr else "last",
-            "includes_invalid": False,
+            "includes_invalid": _attrs_include_invalid(attrs),
         }
     )
     dataset.components.mfx_raw = mfx_raw_store
+    if not attr_matches_last_valid(dataset):
+        dataset.components.derived_last = _derived_last_from_raw(mfx_raw_store, num_itr, prefs)
     return dataset
 
 
@@ -1764,12 +2131,14 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     ds.metadata.update({
         "source_version": "json",
         "raw_num_loc": len(records),
-        "valid_num_loc": int(prop.num_loc),
+        "valid_num_loc": _attrs_valid_count(attrs, prop.num_loc),
         "raw_num_itr": _raw_num_itr,
         "iteration_load_mode": "all" if load_all_itr else "last",
-        "includes_invalid": False,
+        "includes_invalid": _attrs_include_invalid(attrs),
     })
     ds.components.mfx_raw = mfx_raw_store
+    if not attr_matches_last_valid(ds):
+        ds.components.derived_last = _derived_last_from_raw(mfx_raw_store, _raw_num_itr, prefs)
     return ds
 
 
@@ -1895,6 +2264,9 @@ def load_tiff(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
         raise ImportError("tifffile is required to load TIFF images.") from exc
 
     image = tifffile.imread(str(path))
+    arr = np.asarray(image)
+    is_color_2d = arr.ndim == 3 and arr.shape[-1] in (3, 4)
+    is_stack = (arr.ndim == 3 and not is_color_2d) or (arr.ndim == 4 and arr.shape[-1] in (3, 4))
     return build_image_dataset(
         name=path.name,
         folder=str(path.parent),
@@ -1903,4 +2275,9 @@ def load_tiff(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
         ),
         image=image,
         pixel_size_nm=1.0,
+        attrs={
+            "image_source_format": np.asarray("TIFF"),
+            "image_depth_count": np.asarray(arr.shape[0] if is_stack else 1, dtype=np.int32),
+            "image_shape": np.asarray(arr.shape, dtype=np.int64),
+        },
     )

@@ -28,9 +28,28 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.app_state import AppState
-from ..core.attributes import is_trace_wise_attribute, plot_attribute_names
+from ..core.attributes import (
+    aggregation_description,
+    attribute_description,
+    is_trace_wise_attribute,
+    plot_attribute_names,
+)
+from ..core.iteration import iteration_labels, ordinal, parse_iteration_label
+from ..core.loader import attr_matches_selection, attr_values_1d, mfx_filter_mask, mfx_get
 from ..core.roi_selection import rectangle_bounds, value_range_mask
+from .filter_dialog import SmartBoundsSpinBox, _filter_spinner_values
 from .plot_format import plot_widget
+
+# Distinct per-iteration colours for the "all iterations" overlay.
+_ITER_COLORS = [
+    (31, 119, 180), (255, 127, 14), (44, 160, 44), (214, 39, 40),
+    (148, 103, 189), (140, 86, 75), (227, 119, 194), (127, 127, 127),
+    (188, 189, 34), (23, 190, 207),
+]
+
+
+def _iter_color(k: int) -> tuple[int, int, int]:
+    return _ITER_COLORS[k % len(_ITER_COLORS)]
 
 _TRACE_AGG_MODES = [
     "trace mean",
@@ -124,12 +143,31 @@ class HistogramWindow(QWidget):
         self._attr_combo = QComboBox()
         self._attr_combo.setMinimumWidth(110)
         self._attr_combo.currentTextChanged.connect(self._on_histogram_attribute_changed)
+        self._attr_combo.currentTextChanged.connect(
+            lambda text: self._attr_combo.setToolTip(attribute_description(text))
+        )
         bar.addWidget(self._attr_combo)
 
         bar.addWidget(QLabel("As:"))
         self._agg_combo = QComboBox()
         self._agg_combo.currentTextChanged.connect(self._on_histogram_aggregation_changed)
+        self._agg_combo.currentTextChanged.connect(
+            lambda text: self._agg_combo.setToolTip(aggregation_description(text))
+        )
         bar.addWidget(self._agg_combo)
+
+        self._iter_label = QLabel("Iter:")
+        bar.addWidget(self._iter_label)
+        self._iter_combo = QComboBox()
+        self._iter_combo.setMinimumWidth(96)
+        self._iter_combo.currentTextChanged.connect(self._on_histogram_selection_changed)
+        bar.addWidget(self._iter_combo)
+
+        self._valid_chk = QCheckBox("Valid only")
+        self._valid_chk.setChecked(True)
+        self._valid_chk.setToolTip("Show only vld=True localizations. Uncheck to include invalid ones.")
+        self._valid_chk.stateChanged.connect(self._on_histogram_selection_changed)
+        bar.addWidget(self._valid_chk)
 
         bar.addWidget(QLabel("Bin size:"))
         self._bin_spin = QDoubleSpinBox()
@@ -139,6 +177,7 @@ class HistogramWindow(QWidget):
         bar.addWidget(self._bin_spin)
 
         self._zero_chk = QCheckBox("Hide zeros")
+        self._zero_chk.setToolTip("Hide zero value bin (useful when 0 is dominant in data).")
         self._zero_chk.stateChanged.connect(self._on_histogram_display_changed)
         bar.addWidget(self._zero_chk)
 
@@ -172,6 +211,9 @@ class HistogramWindow(QWidget):
 
         self._hist_item = pg.BarGraphItem(x=[], height=[], width=1, brush="steelblue")
         self._plot.addItem(self._hist_item)
+        # Per-iteration overlay curves for the raw "all iterations" view.
+        self._raw_items: list = []
+        self._raw_legend = None
         from .roi_overlay import RoiOverlayController
         self._roi_overlay = RoiOverlayController(
             self._state.rois,
@@ -224,6 +266,7 @@ class HistogramWindow(QWidget):
                 and np.issubdtype(np.asarray(ds.attr[key]).dtype, np.number)
             ]
         self._attr_combo.addItems(numeric)
+        self._apply_attribute_combo_tooltips(self._attr_combo)
         attr_default = saved.get("attribute", old)
         if attr_default in numeric:
             self._attr_combo.setCurrentText(attr_default)
@@ -232,6 +275,7 @@ class HistogramWindow(QWidget):
         elif "cfr" in numeric:
             self._attr_combo.setCurrentText("cfr")
         self._attr_combo.blockSignals(False)
+        self._attr_combo.setToolTip(attribute_description(self._attr_combo.currentText()))
 
         self._agg_combo.blockSignals(True)
         agg_default = saved.get("aggregation", "per loc")
@@ -240,14 +284,31 @@ class HistogramWindow(QWidget):
         else:
             self._agg_combo.setCurrentText("per loc")
         self._agg_combo.blockSignals(False)
+        self._agg_combo.setToolTip(aggregation_description(self._agg_combo.currentText()))
         self._enforce_trace_aggregation()
+
+        iter_opts = self._iter_labels(ds)
+        self._iter_combo.blockSignals(True)
+        self._iter_combo.clear()
+        self._iter_combo.addItems(iter_opts)
+        default_label = self._default_iter_label(ds)
+        saved_label = str(saved.get("iter", "") or "")
+        self._iter_combo.setCurrentText(saved_label if saved_label in iter_opts else default_label)
+        self._iter_combo.blockSignals(False)
+        # Nothing to browse for single-iteration data.
+        has_iters = bool(iter_opts)
+        self._iter_combo.setVisible(has_iters)
+        self._iter_label.setVisible(has_iters)
 
         self._zero_chk.blockSignals(True)
         self._log_chk.blockSignals(True)
+        self._valid_chk.blockSignals(True)
         self._zero_chk.setChecked(bool(saved.get("hide_zeros", False)))
         self._log_chk.setChecked(bool(saved.get("log_data", False)))
+        self._valid_chk.setChecked(bool(saved.get("valid_only", True)))
         self._zero_chk.blockSignals(False)
         self._log_chk.blockSignals(False)
+        self._valid_chk.blockSignals(False)
 
         self._auto_bin_width = None
         self._draw()
@@ -259,13 +320,264 @@ class HistogramWindow(QWidget):
         self._agg_combo.blockSignals(True)
         self._agg_combo.clear()
         self._agg_combo.addItems(modes)
+        self._apply_aggregation_combo_tooltips(self._agg_combo)
         self._agg_combo.setCurrentText(old if old in modes else "per loc")
         self._agg_combo.blockSignals(False)
+
+    def _apply_attribute_combo_tooltips(self, combo: QComboBox) -> None:
+        for i in range(combo.count()):
+            combo.setItemData(i, attribute_description(combo.itemText(i)), Qt.ItemDataRole.ToolTipRole)
+
+    def _apply_aggregation_combo_tooltips(self, combo: QComboBox) -> None:
+        for i in range(combo.count()):
+            combo.setItemData(i, aggregation_description(combo.itemText(i)), Qt.ItemDataRole.ToolTipRole)
+
+    # ------------------------------------------------------------------
+    # Iteration / validity (Stage B) helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _num_itr(ds) -> int:
+        return max(1, int(ds.metadata.get("raw_num_itr", ds.prop.num_itr or 1)))
+
+    def _iter_labels(self, ds) -> list[str]:
+        return iteration_labels(self._num_itr(ds))
+
+    def _default_iter_label(self, ds) -> str:
+        labels = self._iter_labels(ds)
+        return f"last ({ordinal(self._num_itr(ds))})" if labels else ""
+
+    def _selection(self) -> tuple:
+        """Return (itr_selector, render_mode) for the current label."""
+        return parse_iteration_label(self._iter_combo.currentText())
+
+    def _is_raw_mode(self) -> bool:
+        """True unless the view is the ``last`` single series whose rows ARE
+        the materialized store.
+
+        The default (ds.attr) path requires ds.attr row alignment with the
+        current selection: last+valid for normal loads, last+all-validity for
+        ``only_valid_locs=False`` loads (so filter-edit/ROI work there too).
+        For all-iteration loads even a ``last`` selection must come from the
+        raw store.
+        """
+        itr_sel, render = self._selection()
+        if not (itr_sel == "last" and render == "single"):
+            return True
+        ds = self._dataset()
+        return ds is not None and not attr_matches_selection(
+            ds, itr="last", vld_only=self._valid_chk.isChecked(),
+        )
+
+    def _clear_raw_items(self) -> None:
+        for item in self._raw_items:
+            try:
+                self._plot.removeItem(item)
+            except Exception:
+                pass
+        self._raw_items = []
+        if self._raw_legend is not None:
+            try:
+                self._raw_legend.scene().removeItem(self._raw_legend)
+            except Exception:
+                pass
+            self._raw_legend = None
+        # PlotItem caches its legend; clearing the attribute is required or a
+        # later addLegend() returns the detached (invisible) old one.
+        try:
+            self._plot.getPlotItem().legend = None
+        except Exception:
+            pass
+
+    def _raw_values(self, ds, attr_name: str, sel, vld_only: bool, agg_mode: str):
+        """Return histogram values + unevaluable filter attrs for one iteration."""
+        from ..utils.filters import raw_trace_aggregate
+        vals = mfx_get(ds, attr_name, itr=sel, vld_only=vld_only)
+        if vals is None:
+            return np.empty(0), []
+        vals = np.asarray(vals).ravel().astype(float)
+        unevaluable: list[str] = []
+        if agg_mode == "per loc":
+            res = mfx_filter_mask(ds, itr=sel, vld_only=vld_only)
+            if res is not None:
+                fmask, unevaluable = res
+                if fmask.shape[0] == vals.shape[0]:
+                    vals = vals[fmask]
+        else:
+            tid = mfx_get(ds, "tid", itr=sel, vld_only=vld_only)
+            vals = raw_trace_aggregate(vals, tid, agg_mode)
+        return vals, unevaluable
+
+    def _transform_hist_values(self, vals: np.ndarray) -> np.ndarray:
+        vals = np.asarray(vals, dtype=float)
+        vals = vals[np.isfinite(vals)]
+        if self._log_chk.isChecked():
+            vals = vals[vals > 0.0]
+            vals = np.log(vals)
+        if self._zero_chk.isChecked():
+            vals = vals[vals != 0.0]
+        return vals
+
+    def _draw_raw_mode(self) -> None:
+        ds = self._dataset()
+        if ds is None:
+            return
+        # Filter editing / ROI bands require the materialized store; not valid here.
+        if self._filter_edit:
+            self._clear_filter_edit(restore=False)
+
+        attr_name = self._attr_combo.currentText()
+        self._enforce_trace_aggregation()
+        agg_mode = self._agg_combo.currentText()
+        itr_sel, render = self._selection()
+        vld_only = self._valid_chk.isChecked()
+
+        ds.state[self._view_state_key] = {
+            "attribute": attr_name,
+            "aggregation": agg_mode,
+            "hide_zeros": self._zero_chk.isChecked(),
+            "log_data": self._log_chk.isChecked(),
+            "iter": self._iter_combo.currentText() or "",
+            "valid_only": vld_only,
+        }
+
+        self._clear_raw_items()
+
+        # Derived attrs (den/dst/...) have no per-iteration value.
+        probe_sel = 0 if render == "stacked" else itr_sel
+        if mfx_get(ds, attr_name, itr=probe_sel, vld_only=vld_only) is None:
+            self._hist_item.setOpts(x=[], height=[], width=1)
+            self._last_histogram_bounds = None
+            self._info_label.setText(
+                f"{attr_name} has no per-iteration values (computed from the last valid iteration)."
+            )
+            self._fit_histogram_view()
+            return
+
+        if render == "stacked":
+            self._draw_stacked_histogram(ds, attr_name, agg_mode, vld_only)
+        else:
+            self._draw_single_raw_histogram(ds, attr_name, agg_mode, itr_sel, vld_only, render)
+
+    def _bin_edges_for(self, vals: np.ndarray) -> tuple[np.ndarray, float]:
+        bin_width = (
+            float(self._bin_spin.value())
+            if self._auto_bin_width is not None
+            else self._default_bin_width(vals)
+        )
+        if self._auto_bin_width is None:
+            self._set_bin_spin(bin_width)
+        vmin, vmax = float(vals.min()), float(vals.max())
+        if vmax <= vmin:
+            vmax = vmin + max(bin_width, 1.0)
+        n_bins = max(1, min(int(np.ceil((vmax - vmin) / max(bin_width, 1e-12))), 4096))
+        return np.linspace(vmin, vmax, n_bins + 1), bin_width
+
+    def _draw_single_raw_histogram(self, ds, attr_name, agg_mode, itr_sel, vld_only, render) -> None:
+        """One filled-bar series — same look as the default view, different rows."""
+        sel = "all" if render == "flatten" else itr_sel
+        vals, uneval = self._raw_values(ds, attr_name, sel, vld_only, agg_mode)
+        vals = self._transform_hist_values(vals)
+        if vals.size == 0:
+            self._hist_item.setOpts(x=[], height=[], width=1)
+            self._last_histogram_bounds = None
+            self._info_label.setText("No histogram values for this selection.")
+            self._fit_histogram_view()
+            return
+
+        edges, bin_width = self._bin_edges_for(vals)
+        counts, edges = np.histogram(vals, bins=edges)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        width = edges[1] - edges[0]
+        self._hist_item.setOpts(x=centers, height=counts, width=width * 0.95, brush="steelblue")
+        max_count = float(counts.max()) if counts.size else 1.0
+        self._last_histogram_bounds = (float(edges[0]), float(edges[-1]), 0.0, max(max_count, 1.0))
+
+        x_label = f"log({attr_name})" if self._log_chk.isChecked() else attr_name
+        self._plot.setLabel("bottom", f"{x_label}  [{agg_mode}]")
+        sel_label = self._iter_combo.currentText()
+        note = f"{vals.size:,} values  |  {sel_label}  |  {attr_name} [{agg_mode}]  |  bin {bin_width:.6g}"
+        if not vld_only:
+            note += "  |  incl. invalid"
+        if uneval:
+            note += f"  |  filter on {', '.join(uneval)} not applied"
+        self._info_label.setText(note)
+        self._remember_histogram_controls()
+        self._fit_histogram_view()
+
+    def _draw_stacked_histogram(self, ds, attr_name, agg_mode, vld_only) -> None:
+        """One transparent filled step-histogram per iteration, with a legend."""
+        n_itr = self._num_itr(ds)
+        self._hist_item.setOpts(x=[], height=[], width=1)   # hide the single-series bars
+
+        series: list[tuple[int, np.ndarray]] = []
+        uneval: list[str] = []
+        for k in range(n_itr):
+            vals, un = self._raw_values(ds, attr_name, k, vld_only, agg_mode)
+            uneval = un or uneval
+            vals = self._transform_hist_values(vals)
+            if vals.size:
+                series.append((k, vals))
+
+        if not series:
+            self._last_histogram_bounds = None
+            self._info_label.setText("No histogram values for this selection.")
+            self._fit_histogram_view()
+            return
+
+        pooled = np.concatenate([v for _k, v in series])
+        edges, bin_width = self._bin_edges_for(pooled)
+
+        # More overlaid iterations -> more transparent so overlaps stay readable.
+        alpha = int(np.clip(round(255.0 / max(len(series), 1) * 1.4), 45, 200))
+        self._raw_legend = self._plot.addLegend(offset=(-10, 10))
+        max_count = 1.0
+        for k, vals in series:
+            counts, _ = np.histogram(vals, bins=edges)
+            max_count = max(max_count, float(counts.max()) if counts.size else 1.0)
+            r, g, b = _iter_color(k)
+            # self._plot.plot(name=...) registers a legend sample reliably.
+            item = self._plot.plot(
+                edges, counts, stepMode="center", fillLevel=0,
+                brush=(r, g, b, alpha), pen=pg.mkPen(r, g, b, width=1),
+                name=ordinal(k + 1),
+            )
+            self._raw_items.append(item)
+
+        self._last_histogram_bounds = (float(edges[0]), float(edges[-1]), 0.0, max(max_count, 1.0))
+        x_label = f"log({attr_name})" if self._log_chk.isChecked() else attr_name
+        self._plot.setLabel("bottom", f"{x_label}  [{agg_mode}]")
+        total = int(sum(v.size for _k, v in series))
+        note = (
+            f"{total:,} values across {len(series)} iterations  |  all [stacked]  |  "
+            f"{attr_name} [{agg_mode}]  |  bin {bin_width:.6g}"
+        )
+        if not vld_only:
+            note += "  |  incl. invalid"
+        if uneval:
+            note += f"  |  filter on {', '.join(uneval)} not applied"
+        self._info_label.setText(note)
+        self._remember_histogram_controls()
+        self._fit_histogram_view()
+
+    def _on_histogram_selection_changed(self, *_args) -> None:
+        self._auto_bin_width = None
+        self._reset_for_new_data()
+        self._remember_histogram_controls()
 
     def _draw(self, *, preserve_histogram_frame: bool = False) -> None:
         ds = self._dataset()
         if ds is None or self._attr_combo.count() == 0:
             return
+
+        # Raw-mode selection (non-final iteration or invalid included) takes a
+        # separate, additive path. The default (last + valid) path below is
+        # left byte-for-byte unchanged so filter-edit and ROI keep working.
+        if self._is_raw_mode():
+            self._draw_raw_mode()
+            return
+        self._clear_raw_items()
+
         previous_bounds = self._last_histogram_bounds
 
         attr_name = self._attr_combo.currentText()
@@ -276,8 +588,11 @@ class HistogramWindow(QWidget):
             "aggregation": agg_mode,
             "hide_zeros": self._zero_chk.isChecked(),
             "log_data": self._log_chk.isChecked(),
+            "iter": self._iter_combo.currentText() or "",
+            "valid_only": True,
         }
-        raw = np.asarray(ds.attr.get(attr_name, np.empty(0))).ravel().astype(float)
+        raw = attr_values_1d(ds, attr_name)
+        raw = np.empty(0) if raw is None else np.asarray(raw).ravel().astype(float)
         if raw.size == 0:
             return
 
@@ -412,13 +727,18 @@ class HistogramWindow(QWidget):
     def compute_roi_selection(self, record):
         if record.type != "rectangle":
             return None
+        # ROI bands map onto the materialized store; not defined for a raw
+        # (non-final iteration / invalid-included) view.
+        if self._is_raw_mode():
+            return None
         ds = self._dataset()
         bounds = rectangle_bounds(record)
         if ds is None or bounds is None:
             return None
         attr_name = self._attr_combo.currentText()
         agg_mode = self._agg_combo.currentText()
-        raw = np.asarray(ds.attr.get(attr_name, np.empty(0))).ravel().astype(float)
+        raw = attr_values_1d(ds, attr_name)
+        raw = np.empty(0) if raw is None else np.asarray(raw).ravel().astype(float)
         if raw.size == 0:
             return None
 
@@ -588,20 +908,35 @@ class HistogramWindow(QWidget):
     ) -> None:
         """Display and edit a filter range on top of this histogram."""
         self._clear_filter_edit(restore=False)
+        # Filter editing operates on the materialized (last-iteration, valid)
+        # store. Force the selection back to default if the user had switched.
+        if self._is_raw_mode():
+            self._iter_combo.blockSignals(True)
+            self._valid_chk.blockSignals(True)
+            ds0 = self._dataset()
+            if ds0 is not None:
+                self._iter_combo.setCurrentText(self._default_iter_label(ds0))
+            self._valid_chk.setChecked(True)
+            self._iter_combo.blockSignals(False)
+            self._valid_chk.blockSignals(False)
+            self._clear_raw_items()
         ds = self._dataset()
+        saved_state = dict((ds.state.get(self._view_state_key, {}) if ds is not None else {}))
+        if self._attr_combo.findText(attr) >= 0:
+            self._attr_combo.setCurrentText(attr)
+        if self._agg_combo.findText(mode) >= 0:
+            self._agg_combo.setCurrentText(mode)
+        self._reset_for_new_data()
         self._filter_edit = {
-            "saved_state": dict((ds.state.get(self._view_state_key, {}) if ds is not None else {})),
+            "saved_state": saved_state,
+            "attr": attr,
+            "mode": mode,
             "on_update": on_update,
             "on_finish": on_finish,
             "on_cancel": on_cancel,
             "restore_view_on_finish": restore_view_on_finish,
             "restore_view_on_cancel": restore_view_on_cancel,
         }
-        if self._attr_combo.findText(attr) >= 0:
-            self._attr_combo.setCurrentText(attr)
-        if self._agg_combo.findText(mode) >= 0:
-            self._agg_combo.setCurrentText(mode)
-        self._reset_for_new_data()
 
         range_color, range_alpha, bounds_color = self._filter_style()
         region = pg.LinearRegionItem(
@@ -687,7 +1022,8 @@ class HistogramWindow(QWidget):
             return ""
         attr_name = self._attr_combo.currentText()
         agg_mode = self._agg_combo.currentText()
-        raw = np.asarray(ds.attr.get(attr_name, np.empty(0))).ravel().astype(float)
+        raw = attr_values_1d(ds, attr_name)
+        raw = np.empty(0) if raw is None else np.asarray(raw).ravel().astype(float)
         if raw.size == 0:
             return f"0 / {ds.prop.num_loc:,}"
         try:
@@ -741,12 +1077,23 @@ class HistogramWindow(QWidget):
         dlg = QDialog(self)
         dlg.setWindowTitle("Filter bounds")
         form = QFormLayout(dlg)
-        lo_spin = QDoubleSpinBox(dlg)
-        hi_spin = QDoubleSpinBox(dlg)
+        lo_spin = SmartBoundsSpinBox(dlg)
+        hi_spin = SmartBoundsSpinBox(dlg)
+        ds = self._dataset()
+        attr = str(edit.get("attr", self._attr_combo.currentText()))
+        mode = str(edit.get("mode", self._agg_combo.currentText()))
+        values = None
+        data_min = None
+        data_max = None
+        if ds is not None and attr in ds.attr:
+            values, range_values = _filter_spinner_values(ds, attr, mode)
+            finite = range_values.astype(float, copy=False)
+            finite = finite[np.isfinite(finite)]
+            if finite.size:
+                data_min = float(np.nanmin(finite))
+                data_max = float(np.nanmax(finite))
         for spin, value in ((lo_spin, lo), (hi_spin, hi)):
-            spin.setDecimals(8)
-            spin.setRange(-1e15, 1e15)
-            spin.setValue(float(value))
+            spin.configure(value=float(value), values=values, data_min=data_min, data_max=data_max, mode=mode)
         lo_inc = QCheckBox("Inclusive", dlg)
         hi_inc = QCheckBox("Inclusive", dlg)
         lo_inc.setChecked(bool(edit.get("inclusive_min", True)))
