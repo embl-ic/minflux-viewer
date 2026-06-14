@@ -306,6 +306,7 @@ _DEFAULT_MODE = 3  # Gaussian fit (same default as MATLAB)
 
 # Per-axis plot colours (vivid on the dark plot background).
 _AXIS_COLORS = {"X": "#35d07f", "Y": "#4a90ff", "Z": "#ff5a5a"}  # green / blue / red
+_TRACE_SIZE_COLORS = {"XY": "#35d07f", "Z": "#ff5a5a", "XYZ": "#4a90ff"}  # green / red / blue
 
 
 def show_trace_size_dialog(parent: QWidget, ds, state) -> None:
@@ -338,9 +339,17 @@ def show_trace_size_dialog(parent: QWidget, ds, state) -> None:
         QMessageBox.warning(parent, "Trace size", "No valid traces found (all IDs are 0).")
         return
 
-    # --- compute ---
+    # --- compute (same log-distance method as the anisotropy plugin) ---
+    # XY  = lateral distance to the trace's XY centroid (loc x/y only).
+    # Z   = axial offset using the CALIBRATED z (ds.loc_nm already applied RIMF).
+    # XYZ = full 3-D Euclidean distance.
     try:
-        sizes, logdist = estimate_size_nd(loc, tid)
+        result = {
+            "xy":  estimate_size_nd_details(loc[:, [0, 1]], tid),
+            "z":   estimate_size_nd_details(loc[:, 2], tid),
+            "xyz": estimate_size_nd_details(loc[:, :3], tid),
+            "mode": _DEFAULT_MODE,
+        }
     except Exception as exc:
         QMessageBox.critical(parent, "Trace size", f"Computation failed:\n{exc}")
         return
@@ -348,7 +357,7 @@ def show_trace_size_dialog(parent: QWidget, ds, state) -> None:
     # Modeless result window (project convention for analysis output): does
     # not block the app and does not sit permanently in front of the viewers.
     from ..ui.modeless import show_modeless
-    show_modeless(_TraceSizeDialog(None, sizes, n_traces, loc.shape[0]), parent)
+    show_modeless(_TraceSizeDialog(None, result, n_traces, loc.shape[0]), parent)
 
 
 def raw_last_valid_loc_nm(ds) -> tuple[np.ndarray, np.ndarray] | None:
@@ -466,40 +475,84 @@ class _TraceSizeDialog(QDialog):
     def __init__(
         self,
         parent: QWidget,
-        sizes: np.ndarray,
+        result: dict,
         n_traces: int,
         n_locs: int,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Estimated Average Trace Size")
-        self.setMinimumWidth(340)
+        self.resize(980, 640)
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
 
-        info = QLabel(
-            f"<b>{n_traces}</b> traces &nbsp;|&nbsp; <b>{n_locs:,}</b> localisations"
-        )
+        mode = int(result.get("mode", _DEFAULT_MODE))
+        fit_xy, fit_z, fit_xyz = result["xy"], result["z"], result["xyz"]
+        size_xyz = float(fit_xyz.sizes[mode]) if mode < fit_xyz.sizes.size else np.nan
+
+        info = QLabel(f"<b>{n_traces}</b> traces &nbsp;|&nbsp; <b>{n_locs:,}</b> localizations")
         info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(info)
 
-        grp = QGroupBox("Size estimates  (3-D Euclidean radius, nm)")
-        form = QFormLayout(grp)
-        labels = [
-            ("Mean of log-distances",   sizes[0]),
-            ("Median of log-distances", sizes[1]),
-            ("Max histogram bin",       sizes[2]),
-            ("Gaussian fit peak",       sizes[3]),
-        ]
-        for text, val in labels:
-            lbl = QLabel(f"<b>{_nm(val)}</b>")
-            lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
-            form.addRow(text + ":", lbl)
+        headline = QLabel(
+            f"<span style='font-size:18px'><b>average trace size = {_nm(size_xyz)}</b></span>"
+            "<span style='color:gray'> &nbsp;(Gaussian fit, 3-D)</span>"
+        )
+        headline.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(headline)
+
+        # Per-mode size table — rows = modes, columns = XY / Z / XYZ.
+        grp = QGroupBox("Trace size per mode (nm) — Gaussian fit is the final value")
+        grid = QGridLayout(grp)
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(4)
+        for col, h in enumerate(("", "XY", "Z", "XYZ")):
+            lbl = QLabel(f"<b>{h}</b>")
+            lbl.setAlignment(
+                Qt.AlignmentFlag.AlignLeft if col == 0 else Qt.AlignmentFlag.AlignCenter
+            )
+            grid.addWidget(lbl, 0, col)
+        row_labels = ["Mean", "Median", "Max-bin", "Gaussian fit ★"]
+        for i, row_lbl in enumerate(row_labels):
+            bold = i == _DEFAULT_MODE
+            name = QLabel(f"<b>{row_lbl}:</b>" if bold else f"{row_lbl}:")
+            name.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            grid.addWidget(name, i + 1, 0)
+            cells = [_nm(fit_xy.sizes[i]), _nm(fit_z.sizes[i]), _nm(fit_xyz.sizes[i])]
+            for col, text in enumerate(cells, start=1):
+                cell = QLabel(f"<b>{text}</b>" if bold else text)
+                cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                grid.addWidget(cell, i + 1, col)
+        for col in range(1, 4):
+            grid.setColumnStretch(col, 1)
         root.addWidget(grp)
 
+        # Log-distance histograms with Gaussian fits — XY / Z / XYZ in one row.
+        try:
+            hist_group = QGroupBox("Log-distance histograms with Gaussian fits")
+            row = QHBoxLayout(hist_group)
+            row.setContentsMargins(8, 8, 8, 8)
+            for axis, fit in (("XY", fit_xy), ("Z", fit_z), ("XYZ", fit_xyz)):
+                row.addWidget(_anisotropy_hist_plot(axis, fit, _TRACE_SIZE_COLORS[axis], mode))
+            root.addWidget(hist_group, stretch=1)
+        except Exception as exc:
+            warn = QLabel(f"Histogram report could not be created: {exc}")
+            warn.setStyleSheet("color: #a66;")
+            root.addWidget(warn)
+
         note = QLabel(
-            "Distances are log-transformed before fitting — assumes a log-normal\n"
-            "distribution of intra-trace spread."
+            "d — each localization's offset from its trace centroid (Δ = coord − "
+            "centroid), in nm:<br>"
+            "&nbsp;&nbsp;XY — radial distance in the XY plane: d = √( Δx² + Δy² )<br>"
+            "&nbsp;&nbsp;Z — axial offset using the calibrated z (RIMF applied): "
+            "d = | Δz |<br>"
+            "&nbsp;&nbsp;XYZ — full 3-D Euclidean distance: "
+            "d = √( Δx² + Δy² + Δz² )<br>"
+            "size — peak of a log-normal fit to the distribution of d; "
+            "the Gaussian fit (★) is the reported value."
         )
+        note.setWordWrap(True)
         note.setStyleSheet("color: gray; font-size: 11px;")
         root.addWidget(note)
 
@@ -543,9 +596,9 @@ class _AnisotropyDialog(QDialog):
         )
         rimf_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         rimf_lbl.setToolTip(
-            "anisotropy factor = geomean(size_x, size_y) / size_z\n"
+            "anisotropy factor = geomean(σx, σy) / σz = √(σx·σy) / σz\n"
             "Applied as the RIMF (refractive index mismatch factor): "
-            "z_corrected = z * RIMF"
+            "z_corrected = z × RIMF"
         )
         root.addWidget(rimf_lbl)
 
@@ -616,16 +669,17 @@ class _AnisotropyDialog(QDialog):
         fit_note = ""
         if failed:
             fit_note = (
-                f"\nGaussian fit fallback used for: {', '.join(failed)} "
+                f"<br>Gaussian fit fallback used for: {', '.join(failed)} "
                 "(reported Gaussian value equals max-bin estimate)."
             )
         note = QLabel(
-            "distance — each localization's offset from its trace centroid, in "
-            "nanometre, for a given dimension (X, Y, or Z)\n"
-            "size — the peak of a log-normal fit to the distance distribution of all "
-            "localizations in the data\n"
-            "anisotropy factor — geomean(size_x, size_y) / size_z\n"
-            "\n"
+            "d — each localization's offset from its trace centroid along one axis "
+            "(d = | coord − centroid |), in nm, for X, Y, or Z<br>"
+            "size σ — peak of a log-normal fit to the distribution of d over all "
+            "localizations<br>"
+            "anisotropy factor — geomean(σ<sub>x</sub>, σ<sub>y</sub>) ∕ σ<sub>z</sub> "
+            "= √( σ<sub>x</sub> · σ<sub>y</sub> ) ∕ σ<sub>z</sub><br>"
+            "<br>"
             "Use the Gaussian-fit (★) estimate. The anisotropy factor is applied as the "
             "RIMF z-scaling factor."
             f"{fit_note}"
@@ -834,6 +888,56 @@ def _plot_size_marker(
         labelOpts={"position": 0.92, "color": color, "fill": (20, 20, 20, alpha)},
     )
     pw.addItem(line)
+
+
+def _value_hist_plot(
+    title: str,
+    values: np.ndarray,
+    color: str,
+    *,
+    marker: float | None = None,
+    marker_label: str | None = None,
+    x_label: str = "value (nm)",
+    y_label: str = "count",
+    n_bins: int = 40,
+):
+    """Anisotropy-style histogram panel of a value distribution (linear axis).
+
+    Used by reports that summarize a distribution with a single statistic
+    (e.g. localization precision = median per-trace sigma) rather than a
+    log-normal fit. Optionally draws a dashed marker at ``marker``. ``y_label``
+    must match what each row of ``values`` is (e.g. "traces" vs "localizations").
+    """
+    import pyqtgraph as pg
+
+    pw = pg.PlotWidget(background="#222")
+    pw.setMinimumHeight(230)
+    pw.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+    pw.showGrid(x=True, y=True, alpha=0.22)
+    pw.setTitle(title)
+    pw.setLabel("bottom", x_label)
+    pw.setLabel("left", y_label)
+
+    vals = np.asarray(values, dtype=float).ravel()
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return pw
+    counts, edges = np.histogram(vals, bins=n_bins)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    pw.plot(
+        centers, counts,
+        stepMode=False, fillLevel=0,
+        brush=pg.mkBrush(color + "66"), pen=pg.mkPen(color, width=1.2),
+    )
+    if marker is not None and np.isfinite(marker):
+        line = pg.InfiniteLine(
+            pos=float(marker), angle=90,
+            pen=pg.mkPen(color, width=1.4, style=Qt.PenStyle.DashLine),
+            label=marker_label or f"{marker:.2f} nm",
+            labelOpts={"position": 0.92, "color": color, "fill": (20, 20, 20, 220)},
+        )
+        pw.addItem(line)
+    return pw
 
 
 def _widget_from_layout(layout: QHBoxLayout) -> QWidget:

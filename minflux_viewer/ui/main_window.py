@@ -491,8 +491,6 @@ class MainWindow(QMainWindow):
             u.actionBatchFilter,
             self.actionMeasure,
             self.actionSetMeasurements,
-            u.actionLocPrecisionFrc,
-            u.actionLocPrecisionCrlb,
             self.actionDbscan,
             self.actionKNearestNeighbour,
             u.menuTracking.menuAction(),
@@ -511,7 +509,6 @@ class MainWindow(QMainWindow):
             self.menuProcessRoi,
             u.menuBatchProcessing,
             u.menuAnalysis,
-            u.menuLocPrecision,
             self.menuAnalyzeClustering,
             u.menuTracking,
             u.menuHelp,
@@ -2122,12 +2119,16 @@ class MainWindow(QMainWindow):
         return indices or [active_idx]
 
     def _loc_precision_frc(self) -> None:
+        if self._state.active_dataset is None:
+            self._no_data_warning(); return
         from .. import analysis
-        analysis.show_frc_info(self, self._state)
+        analysis.run_frc(self, self._state)
 
     def _loc_precision_crlb(self) -> None:
+        if self._state.active_dataset is None:
+            self._no_data_warning(); return
         from .. import analysis
-        analysis.show_crlb_info(self, self._state)
+        analysis.run_crlb(self, self._state)
 
     def _loc_precision_stddev(self) -> None:
         if self._state.active_dataset is None:
