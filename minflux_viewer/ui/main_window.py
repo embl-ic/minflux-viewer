@@ -798,17 +798,17 @@ class MainWindow(QMainWindow):
 
     def _open_dialog(self) -> None:
         default = self._state.prefs["file"].get("default_folder", str(Path.home()))
+        # Open… is for recognized MINFLUX data formats. Spreadsheets and TIFFs
+        # have their own File-menu entries; drag-drop still accepts everything.
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Open MINFLUX data",
             default,
-            "All supported formats (*.mat *.npy *.csv *.tsv *.xlsx *.xlsm *.msr *.tif *.tiff *.json);;"
+            "MINFLUX data (*.mat *.npy *.msr *.json);;"
             "MATLAB (*.mat);;"
             "NumPy (*.npy);;"
-            "Tables (*.csv *.tsv *.xlsx *.xlsm);;"
             "Imspector .msr (*.msr);;"
-            "TIFF image (*.tif *.tiff);;"
-            "MINFLUX JSON / filter preset (*.json);;"
+            "MINFLUX JSON (*.json);;"
             "All files (*)",
         )
         for p in paths:
