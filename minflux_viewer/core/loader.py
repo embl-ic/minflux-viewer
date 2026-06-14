@@ -50,6 +50,10 @@ from .dataset import (
 
 SPATIAL_COORD_FIELDS = {"loc", "lnc", "ext"}
 
+#: Canonical nm coordinate view name → underlying metres attribute. xnm/ynm/znm
+#: are exposed in the UI; loc_x/loc_y/loc_z (metres) are the hidden raw store.
+_COORD_NM_BASE = {"xnm": "loc_x", "ynm": "loc_y", "znm": "loc_z"}
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -1125,6 +1129,17 @@ def mfx_get(
     last-valid loads, else ``ds.components.derived_last``; ``None`` is returned
     when neither holds the attribute.
     """
+    # xnm/ynm/znm are the canonical nm coordinate views of the metres store.
+    if attr in _COORD_NM_BASE:
+        base = _COORD_NM_BASE[attr]
+        v = mfx_get(ds, base, itr=itr, vld_only=vld_only)
+        if v is None:
+            return None
+        v = np.asarray(v, dtype=float) * 1.0e9
+        if attr == "znm":
+            v = v * float(getattr(ds.cali, "RIMF", 1.0) or 1.0)
+        return v
+
     raw = getattr(ds, "mfx_raw", None)
     if raw is None or len(raw) == 0:
         val = ds.attr.get(attr)
@@ -1302,6 +1317,16 @@ def attr_values_1d(ds: "MinfluxDataset", attr: str) -> "np.ndarray | None":
     when no aligned 1-D representation exists.
     """
     n_loc = int(getattr(ds.prop, "num_loc", 0))
+
+    # xnm/ynm/znm: nm views of the metres loc_x/loc_y/loc_z store.
+    if attr in _COORD_NM_BASE:
+        v = attr_values_1d(ds, _COORD_NM_BASE[attr])
+        if v is None:
+            return None
+        v = np.asarray(v, dtype=float) * 1.0e9
+        if attr == "znm":
+            v = v * float(getattr(ds.cali, "RIMF", 1.0) or 1.0)
+        return v
 
     # Derived attrs: keep the Stage B contract (same last-valid values in
     # every view) on all-iteration / invalid-inclusive materializations.

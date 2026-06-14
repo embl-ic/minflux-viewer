@@ -89,10 +89,19 @@ def is_trace_wise_attribute(name: str) -> bool:
     return name in TRACE_WISE_ATTRIBUTE_NAMES
 
 
+_COORD_NM_DESCRIPTIONS = {
+    "xnm": "Localization X coordinate in nanometres.",
+    "ynm": "Localization Y coordinate in nanometres.",
+    "znm": "Localization Z coordinate in nanometres (RIMF-corrected view).",
+}
+
+
 def attribute_description(name: str) -> str:
     """Return the user-facing description for a raw or derived attribute."""
     if not name:
         return ""
+    if name in _COORD_NM_DESCRIPTIONS:
+        return _COORD_NM_DESCRIPTIONS[name]
     if name in DERIVED_ATTRIBUTE_DESCRIPTIONS:
         return DERIVED_ATTRIBUTE_DESCRIPTIONS[name]
     base = _base_attribute_name(name)
@@ -136,9 +145,15 @@ def plot_attribute_names(
             continue
         if one_dimensional_only and arr.ndim != 1 and not _raw_store_serves_1d(dataset, name):
             continue
-        names.append(name)
+        # Coordinates are exposed only as their nm views (xnm/ynm/znm); the
+        # metres loc_x/loc_y/loc_z store is hidden from the dropdowns.
+        names.append(COORD_DISPLAY_NAME.get(name, name))
 
     return names
+
+
+#: Stored metres coordinate → the nm view name shown in dropdowns/filters.
+COORD_DISPLAY_NAME = {"loc_x": "xnm", "loc_y": "ynm", "loc_z": "znm"}
 
 
 def _raw_store_serves_1d(dataset, name: str) -> bool:
