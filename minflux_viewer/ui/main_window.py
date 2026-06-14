@@ -976,12 +976,12 @@ class MainWindow(QMainWindow):
             self._state.log(
                 f"'{Path(path).name}': {ambiguity.reason} Opening the column "
                 "mapping dialog.", "INFO")
-            from .spreadsheet_import_dialog import SpreadsheetImportDialog
-            dlg = SpreadsheetImportDialog(path, parent=self)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
+            from .spreadsheet_import_dialog import open_mapping_dialog
+            dataset = open_mapping_dialog(ambiguity, parent=self)
+            if dataset is None:
                 self._status_label.setText("Spreadsheet import cancelled.")
                 return
-            self._state.add_dataset(dlg.build_dataset())
+            self._state.add_dataset(dataset)
         except Exception as exc:
             self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
             QMessageBox.critical(self, "Load error", str(exc))

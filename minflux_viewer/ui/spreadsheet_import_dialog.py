@@ -1,171 +1,210 @@
+"""
+Spreadsheet column-mapping dialog.
+
+Shown when :func:`minflux_viewer.core.spreadsheet_loader.auto_import` can't load
+a table unattended (ambiguous columns, or camera-pixel coordinates without a
+pixel size). The role combos, per-coordinate units, and pixel-size field are
+**pre-filled** from the loader's best guess, and the preview shows a handful of
+representative rows spanning the whole file.
+"""
+
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 
-import numpy as np
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
-    QWidget,
 )
 
-from ..core.dataset import build_localization_dataset
+from ..core.spreadsheet_loader import (
+    COORD_ROLES,
+    DEFAULT_PIXEL_SIZE_NM,
+    ROLES,
+    AutoImportAmbiguity,
+    SpreadsheetTable,
+    auto_import,
+    build_dataset_from_mapping,
+    guess_mapping,
+    guess_units,
+    read_table,
+    representative_row_indices,
+)
+
+# Role → (display label, required?)
+_ROLE_LABELS: dict[str, tuple[str, bool]] = {
+    "x": ("x (→ xnm)", True),
+    "y": ("y (→ ynm)", True),
+    "z": ("z (→ znm)", False),
+    "prec_xy": ("precision xy", False),
+    "prec_z": ("precision z", False),
+    "id": ("trace id (tid)", False),
+    "frame": ("frame / time", False),
+    "photons": ("photons", False),
+}
+# Display unit ↔ internal unit token.
+_UNIT_CHOICES = (("nm", "nm"), ("µm", "um"), ("mm", "mm"), ("m", "m"), ("pixel", "px"))
+_NONE = "<none>"
 
 
-def _read_spreadsheet(path: str) -> tuple[list[str], list[dict[str, object]]]:
-    file_path = Path(path)
-    ext = file_path.suffix.lower()
-    if ext in {".csv", ".tsv"}:
-        delimiter = "\t" if ext == ".tsv" else ","
-        with open(file_path, newline="", encoding="utf-8-sig") as fh:
-            reader = csv.DictReader(fh, delimiter=delimiter)
-            if reader.fieldnames is None:
-                raise ValueError("Spreadsheet has no header row.")
-            rows = list(reader)
-            return list(reader.fieldnames), rows
-    if ext in {".xlsx", ".xlsm"}:
-        try:
-            from openpyxl import load_workbook
-        except Exception as exc:
-            raise ImportError("openpyxl is required to open Excel spreadsheets.") from exc
-        wb = load_workbook(file_path, read_only=True, data_only=True)
-        ws = wb[wb.sheetnames[0]]
-        values = list(ws.iter_rows(values_only=True))
-        if not values:
-            raise ValueError("Spreadsheet is empty.")
-        headers = [str(v).strip() if v is not None else f"Column{i+1}" for i, v in enumerate(values[0])]
-        rows = []
-        for row in values[1:]:
-            rows.append({headers[i]: row[i] if i < len(row) else None for i in range(len(headers))})
-        return headers, rows
-    raise ValueError(f"Unsupported spreadsheet format: {ext}")
+class SpreadsheetMappingDialog(QDialog):
+    """Map spreadsheet columns to localization roles and build a dataset."""
 
-
-def _numeric_columns(headers: list[str], rows: list[dict[str, object]]) -> dict[str, np.ndarray]:
-    out: dict[str, np.ndarray] = {}
-    for header in headers:
-        vals = []
-        ok = True
-        for row in rows:
-            value = row.get(header, None)
-            if value in ("", None):
-                vals.append(np.nan)
-                continue
-            try:
-                vals.append(float(value))
-            except Exception:
-                ok = False
-                break
-        if ok:
-            out[header] = np.asarray(vals, dtype=float)
-    return out
-
-
-class SpreadsheetImportDialog(QDialog):
-    ATTRIBUTE_FIELDS = ["xnm", "ynm", "znm", "tid", "tim"]
-
-    def __init__(self, path: str, parent: QWidget | None = None) -> None:
+    def __init__(self, table: SpreadsheetTable,
+                 mapping: dict[str, str | None] | None = None,
+                 units: dict[str, str] | None = None,
+                 *, pixel_size_nm: float | None = None, parent=None) -> None:
         super().__init__(parent)
-        self._path = path
-        self._headers, self._rows = _read_spreadsheet(path)
-        self._numeric = _numeric_columns(self._headers, self._rows)
-        if not self._numeric:
-            raise ValueError("No numeric columns were found in the spreadsheet.")
-        self._combos: dict[str, QComboBox] = {}
+        self._table = table
+        self._mapping0 = mapping or guess_mapping(table)
+        self._units0 = units or guess_units(table, self._mapping0)
+        self._pixel0 = pixel_size_nm or DEFAULT_PIXEL_SIZE_NM
+        self._role_combos: dict[str, QComboBox] = {}
+        self._unit_combos: dict[str, QComboBox] = {}
 
-        self.setWindowTitle(f"Open spreadsheet data — {Path(path).name}")
-        self.resize(900, 560)
+        self.setWindowTitle(f"Open spreadsheet — {Path(table.path).name}")
+        self.resize(940, 620)
         self._build_ui()
+        self._update_pixel_enabled()
 
+    # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.addWidget(QLabel("Assign spreadsheet columns to viewer attributes. `xnm` and `ynm` are required."))
+        root.addWidget(QLabel(
+            f"<b>{self._table.n_rows:,}</b> rows · detected tool: "
+            f"<b>{self._table.detected_tool}</b>. Assign columns to roles "
+            "(<b>x</b> and <b>y</b> are required); coordinate units are pre-filled."))
 
-        form = QFormLayout()
-        options = ["<None>"] + list(self._numeric.keys())
-        defaults = {
-            "xnm": ["xnm", "x_nm", "x"],
-            "ynm": ["ynm", "y_nm", "y"],
-            "znm": ["znm", "z_nm", "z"],
-            "tid": ["tid", "trace_id"],
-            "tim": ["tim", "time"],
-        }
-        for field in self.ATTRIBUTE_FIELDS:
+        col_names = [c.name for c in self._table.numeric_columns()]
+        grp = QGroupBox("Column mapping")
+        grid = QGridLayout(grp)
+        grid.addWidget(QLabel("<b>role</b>"), 0, 0)
+        grid.addWidget(QLabel("<b>column</b>"), 0, 1)
+        grid.addWidget(QLabel("<b>unit</b>"), 0, 2)
+        for r, role in enumerate(ROLES, start=1):
+            label, required = _ROLE_LABELS[role]
+            grid.addWidget(QLabel(label + (" *" if required else "")), r, 0)
+
             combo = QComboBox()
-            combo.addItems(options)
-            for candidate in defaults.get(field, []):
-                idx = combo.findText(candidate)
-                if idx >= 0:
-                    combo.setCurrentIndex(idx)
-                    break
-            form.addRow(field, combo)
-            self._combos[field] = combo
-        root.addLayout(form)
+            combo.addItem(_NONE, None)
+            for name in col_names:
+                combo.addItem(name, name)
+            chosen = self._mapping0.get(role)
+            idx = combo.findData(chosen) if chosen else 0
+            combo.setCurrentIndex(max(0, idx))
+            grid.addWidget(combo, r, 1)
+            self._role_combos[role] = combo
 
-        root.addWidget(QLabel("Preview"))
-        table = QTableWidget()
-        preview_rows = min(8, len(self._rows))
-        table.setRowCount(preview_rows)
-        table.setColumnCount(len(self._headers))
-        table.setHorizontalHeaderLabels(self._headers)
-        for r in range(preview_rows):
-            for c, header in enumerate(self._headers):
-                table.setItem(r, c, QTableWidgetItem(str(self._rows[r].get(header, ""))))
-        root.addWidget(table, stretch=1)
+            if role in COORD_ROLES:
+                ucombo = QComboBox()
+                for disp, tok in _UNIT_CHOICES:
+                    ucombo.addItem(disp, tok)
+                uidx = ucombo.findData(self._units0.get(role, "nm"))
+                ucombo.setCurrentIndex(max(0, uidx))
+                ucombo.currentIndexChanged.connect(self._update_pixel_enabled)
+                grid.addWidget(ucombo, r, 2)
+                self._unit_combos[role] = ucombo
+        grid.setColumnStretch(1, 1)
+        root.addWidget(grp)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        # Pixel size (only relevant when a coordinate unit is 'pixel').
+        px_row = QHBoxLayout()
+        self._px_label = QLabel("pixel size (nm/px):")
+        px_row.addWidget(self._px_label)
+        self._px_spin = QDoubleSpinBox()
+        self._px_spin.setRange(0.1, 100000.0)
+        self._px_spin.setDecimals(2)
+        self._px_spin.setValue(self._pixel0)
+        px_row.addWidget(self._px_spin)
+        px_row.addStretch()
+        root.addLayout(px_row)
+
+        root.addWidget(QLabel("Preview (representative rows across the file):"))
+        root.addWidget(self._build_preview(), stretch=1)
+
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                              | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._on_accept)
+        bb.rejected.connect(self.reject)
+        self._buttons = bb
+        root.addWidget(bb)
+
+    def _build_preview(self) -> QTableWidget:
+        headers = self._table.headers
+        rows = representative_row_indices(self._table.n_rows)
+        table = QTableWidget(len(rows), len(headers) + 1)
+        table.setHorizontalHeaderLabels(["row"] + headers)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        col_by_name = {c.name: c for c in self._table.columns}
+        for vr, ri in enumerate(rows):
+            item = QTableWidgetItem(str(ri + 1))            # 1-based row number
+            item.setForeground(Qt.GlobalColor.gray)
+            table.setItem(vr, 0, item)
+            for c, h in enumerate(headers, start=1):
+                col = col_by_name.get(h)
+                val = ""
+                if col is not None and ri < col.values.size:
+                    v = col.values[ri]
+                    val = "" if v != v else (f"{v:.4g}" if col.numeric else str(v))
+                table.setItem(vr, c, QTableWidgetItem(val))
+        table.resizeColumnsToContents()
+        return table
+
+    def _update_pixel_enabled(self) -> None:
+        needs = any(cb.currentData() == "px" for cb in self._unit_combos.values())
+        self._px_label.setEnabled(needs)
+        self._px_spin.setEnabled(needs)
+
+    # -------------------------------------------------------------- result
+    def _current_mapping(self) -> dict[str, str | None]:
+        return {role: cb.currentData() for role, cb in self._role_combos.items()}
+
+    def _on_accept(self) -> None:
+        m = self._current_mapping()
+        if m.get("x") is None or m.get("y") is None:
+            QMessageBox.warning(self, "Open spreadsheet",
+                                "Please assign both the x and y columns.")
+            return
+        self.accept()
 
     def build_dataset(self):
-        selected = {field: combo.currentText() for field, combo in self._combos.items()}
-        if selected["xnm"] == "<None>" or selected["ynm"] == "<None>":
-            raise ValueError("Please assign both xnm and ynm columns.")
-
-        x_nm = self._numeric[selected["xnm"]]
-        y_nm = self._numeric[selected["ynm"]]
-        z_nm = self._numeric[selected["znm"]] if selected["znm"] != "<None>" else None
-
-        attrs = {}
-        for field in ("tid", "tim"):
-            if selected[field] != "<None>":
-                attrs[field] = self._numeric[selected[field]]
-        for header, arr in self._numeric.items():
-            if header not in selected.values():
-                attrs[header] = arr
-
-        return build_localization_dataset(
-            name=Path(self._path).name,
-            folder=str(Path(self._path).parent),
-            x_nm=x_nm,
-            y_nm=y_nm,
-            z_nm=z_nm,
-            attrs=attrs,
-        )
+        mapping = self._current_mapping()
+        units = {role: cb.currentData() for role, cb in self._unit_combos.items()}
+        pixel = float(self._px_spin.value()) if self._px_spin.isEnabled() else None
+        return build_dataset_from_mapping(
+            self._table, mapping, units=units, pixel_size_nm=pixel)
 
 
-def choose_spreadsheet_and_import(parent=None):
-    path, _ = QFileDialog.getOpenFileName(
-        parent,
-        "Open spreadsheet data",
-        "",
-        "Spreadsheet (*.csv *.tsv *.xlsx *.xlsm);;All files (*)",
-    )
-    if not path:
-        return None
-    dlg = SpreadsheetImportDialog(path, parent=parent)
+def open_mapping_dialog(ambiguity: AutoImportAmbiguity, parent=None):
+    """Show the mapping dialog for an :class:`AutoImportAmbiguity`; return a
+    dataset or ``None`` if cancelled."""
+    dlg = SpreadsheetMappingDialog(
+        ambiguity.table, ambiguity.mapping, ambiguity.units, parent=parent)
     if dlg.exec() != QDialog.DialogCode.Accepted:
         return None
     return dlg.build_dataset()
+
+
+def choose_spreadsheet_and_import(parent=None):
+    """File picker → auto-import, falling back to the mapping dialog."""
+    path, _ = QFileDialog.getOpenFileName(
+        parent, "Open spreadsheet data", "",
+        "Spreadsheet (*.csv *.tsv *.txt *.xlsx *.xlsm);;All files (*)")
+    if not path:
+        return None
+    dataset, ambiguity = auto_import(path)
+    if dataset is not None:
+        return dataset
+    return open_mapping_dialog(ambiguity, parent=parent)
