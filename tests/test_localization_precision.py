@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from minflux_viewer.analysis.localization_precision import (
+    FRC_DEFAULT_REPEATS,
     FRC_THRESHOLD,
     MIN_LOCS_PER_TRACE,
     crlb_precision,
@@ -103,7 +104,7 @@ def test_frc_per_localization_split():
     x, y, _ = _molecules(rng, sites, k=5, sigma_nm=6.0)
     r = frc_resolution(x, y, seed=5)
     assert r.mode == "localization"
-    assert r.n_repeats == 8                       # default FRC_DEFAULT_REPEATS
+    assert r.n_repeats == FRC_DEFAULT_REPEATS      # default repeat count
     assert r.n_points == r.n_locs
     assert np.isfinite(r.resolution_nm) and 0 < r.resolution_nm < 1000
 

@@ -37,6 +37,7 @@ follow-up work (export, plotting, journal entry).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import numpy as np
 from PyQt6.QtCore import Qt
@@ -196,10 +197,36 @@ def stddev_per_trace(
 # per-localization split can be optimistic, as repeated localizations correlate.)
 
 FRC_THRESHOLD: float = 1.0 / 7.0     # fixed 1/7 resolution criterion
-FRC_DEFAULT_REPEATS: int = 8         # average the curve over this many splits
+FRC_DEFAULT_REPEATS: int = 5         # average the curve over this many splits
 FRC_DEFAULT_IMAGE_PX: int = 1024     # minimum grid size when pixel is auto
-FRC_TARGET_PIXEL_NM: float = 1.0     # auto pixel target (grid grows to reach it)
+FRC_TARGET_PIXEL_NM: float = 2.0     # auto pixel target (grid grows to reach it)
 FRC_MAX_IMAGE_PX: int = 4096         # hard cap on grid size (FFT cost)
+
+
+def _rfft2(img: np.ndarray) -> np.ndarray:
+    """Real 2-D FFT — half the spectrum, ~2× faster than a full complex FFT.
+
+    Uses multithreaded ``scipy.fft`` when available, else NumPy.
+    """
+    try:
+        from scipy.fft import rfft2
+        return rfft2(img, workers=-1)
+    except Exception:                       # pragma: no cover - scipy present
+        return np.fft.rfft2(img)
+
+
+@lru_cache(maxsize=4)
+def _rfft_ring_index(n: int) -> tuple[np.ndarray, int]:
+    """Flattened integer ring index for an ``rfft2`` spectrum of an n×n image.
+
+    Depends only on the grid size, so it is built once and cached across calls
+    (and reused for every repeat) instead of being recomputed each time.
+    """
+    fy = np.round(np.fft.fftfreq(n) * n).astype(np.int32)[:, None]   # rows: −n/2..n/2
+    fx = np.arange(n // 2 + 1, dtype=np.int32)[None, :]              # rfft cols: 0..n/2
+    ring = np.round(np.sqrt(fy.astype(np.float32) ** 2
+                            + fx.astype(np.float32) ** 2)).astype(np.intp)
+    return ring.ravel(), n // 2
 
 
 @dataclass
@@ -219,24 +246,24 @@ class FRCResult:
     n_points: int = 0           # points fed to FRC (locs, or traces if combined)
 
 
-def _radial_frc(img1: np.ndarray, img2: np.ndarray) -> np.ndarray:
+def _radial_frc(img1: np.ndarray, img2: np.ndarray,
+                ring: np.ndarray, rmax: int) -> np.ndarray:
     """Ring-averaged Fourier correlation of two equally sized images.
 
-    Returns the FRC value per integer ring radius (index 0 = DC), i.e.
+        FRC(r) = Σ_ring Re{F1·conj(F2)} / sqrt(Σ_ring|F1|² · Σ_ring|F2|²)
 
-        FRC(r) = Σ_ring Re{F1·conj(F2)} / sqrt(Σ_ring|F1|² · Σ_ring|F2|²).
+    ``ring`` is the precomputed flat ring index for the ``rfft2`` spectrum
+    (see :func:`_rfft_ring_index`). Uses the real half-spectrum — the per-ring
+    sums halve in both numerator and denominator so the ratio is unchanged.
     """
-    n = img1.shape[0]
-    f1 = np.fft.fftshift(np.fft.fft2(img1))
-    f2 = np.fft.fftshift(np.fft.fft2(img2))
-    cy = cx = n // 2
-    yy, xx = np.indices((n, n))
-    r_int = np.round(np.hypot(xx - cx, yy - cy)).astype(int).ravel()
-    rmax = n // 2
-    num = np.bincount(r_int, weights=np.real(f1 * np.conj(f2)).ravel(), minlength=rmax + 1)
-    a1 = np.bincount(r_int, weights=(np.abs(f1) ** 2).ravel(), minlength=rmax + 1)
-    a2 = np.bincount(r_int, weights=(np.abs(f2) ** 2).ravel(), minlength=rmax + 1)
-    num, a1, a2 = num[: rmax + 1], a1[: rmax + 1], a2[: rmax + 1]
+    f1 = _rfft2(img1)
+    f2 = _rfft2(img2)
+    cross = (f1.real * f2.real + f1.imag * f2.imag).ravel()     # Re{F1·conj(F2)}
+    p1 = (f1.real * f1.real + f1.imag * f1.imag).ravel()        # |F1|²
+    p2 = (f2.real * f2.real + f2.imag * f2.imag).ravel()        # |F2|²
+    num = np.bincount(ring, weights=cross, minlength=rmax + 1)[: rmax + 1]
+    a1 = np.bincount(ring, weights=p1, minlength=rmax + 1)[: rmax + 1]
+    a2 = np.bincount(ring, weights=p2, minlength=rmax + 1)[: rmax + 1]
     denom = np.sqrt(a1 * a2)
     return np.where(denom > 0, num / denom, 0.0)
 
@@ -363,6 +390,8 @@ def frc_resolution(
         img, _, _ = np.histogram2d(y[mask], x[mask], bins=[edges_y, edges_x])
         return img                                  # no apodization (as in ref)
 
+    # The ring index depends only on the grid size — build it once, not per repeat.
+    ring, rmax = _rfft_ring_index(n_px)
     rng = np.random.default_rng(seed)
     curves: list[np.ndarray] = []
     for _ in range(max(1, repeats)):
@@ -370,7 +399,7 @@ def frc_resolution(
         ix = rng.random(n_points) < 0.5
         if ix.sum() < 2 or (~ix).sum() < 2:
             continue
-        curves.append(_radial_frc(_render(ix), _render(~ix)))
+        curves.append(_radial_frc(_render(ix), _render(~ix), ring, rmax))
 
     if not curves:
         return _fail("Could not form two non-empty halves for FRC.", pixel)
