@@ -679,13 +679,15 @@ def run_frc(parent, state) -> None:
     ds = state.active_dataset
     if ds is None:
         return
+    from ..core.dataset_kind import missing_reason, require
+    miss = require(ds, "loc")
+    if miss:
+        _show_info_dialog(parent, "FRC — Fourier Ring Correlation",
+                          f"This analysis requires {missing_reason(miss)}.")
+        return
 
     loc_x = ds.attr.get("loc_x")
     loc_y = ds.attr.get("loc_y")
-    if loc_x is None or loc_y is None:
-        _show_info_dialog(parent, "FRC — Fourier Ring Correlation",
-                          "Dataset has no x/y localization coordinates.")
-        return
 
     x = np.asarray(loc_x, dtype=float) * 1.0e9    # m → nm
     y = np.asarray(loc_y, dtype=float) * 1.0e9
@@ -716,6 +718,13 @@ def run_stddev_per_trace(parent, state) -> None:
     """Compute σ per trace for the active dataset and show a results dialog."""
     ds = state.active_dataset
     if ds is None:
+        return
+    from ..core.dataset_kind import missing_reason, require
+    miss = require(ds, "loc", "traces")
+    if miss:
+        _show_info_dialog(
+            parent, "Localization Precision — StdDev per trace",
+            f"This analysis requires {missing_reason(miss)}.")
         return
 
     loc_x = np.asarray(ds.attr.get("loc_x"))

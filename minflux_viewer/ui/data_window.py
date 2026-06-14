@@ -293,9 +293,14 @@ def _dims_text(ds: MinfluxDataset) -> str:
 
 
 def _version_text(ds: MinfluxDataset) -> str:
+    from ..core.dataset_kind import is_minflux
+    if not is_minflux(ds):
+        return "Non-MINFLUX data"
     version = str(ds.metadata.get("source_version", "")).lower()
     if version in {"m2410", "m2205", "legacy"}:
         return version
+    if version in {"csv", "spreadsheet", "imported", "plain_array", "json"}:
+        return "MINFLUX (imported)"
     return "unidentified"
 
 

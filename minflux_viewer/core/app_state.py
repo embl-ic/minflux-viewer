@@ -318,6 +318,22 @@ class AppState(QObject):
             f"Loaded: {dataset.name}  |  {dataset.prop.num_loc:,} loc  |  "
             f"{dataset.prop.num_traces:,} traces  |  {dataset.prop.num_dim}D"
         )
+        # Note MINFLUX kind + missing quality attributes (efo/cfr/dcr/fbg).
+        try:
+            from .dataset_kind import QUALITY_ATTRS, is_minflux
+            if not is_minflux(dataset):
+                self.log(
+                    f"'{dataset.name}' is a non-MINFLUX dataset (no trace id) — "
+                    "MINFLUX-specific analyses are disabled.", "WARN")
+            else:
+                missing = [a for a in QUALITY_ATTRS if dataset.attr.get(a) is None]
+                if missing:
+                    self.log(
+                        f"'{dataset.name}': MINFLUX quality attributes missing "
+                        f"({', '.join(missing)}) — quality filtering on these is "
+                        "unavailable.", "WARN")
+        except Exception:
+            pass
         # Record to processing journal for the methods-text generator
         try:
             self.journal.add(

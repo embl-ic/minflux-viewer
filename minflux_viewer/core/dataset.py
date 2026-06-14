@@ -218,7 +218,7 @@ class Channel:
 def _default_mfx_roles(attrs: AttrStore) -> dict[str, str]:
     roles: dict[str, str] = {}
     candidates = {
-        "position": ("loc", "loc_x", "loc_x_nm"),
+        "position": ("loc", "loc_x"),
         "track_id": ("tid",),
         "iteration": ("itr",),
         "valid": ("vld", "ftr"),
@@ -337,16 +337,26 @@ class MinfluxDataset:
         anisotropy / RIMF estimation) must NOT read this property; read
         ``loc_z`` (or ``mfx_get(ds, "loc_z", ...)``) and scale by ``1e9``.
         """
-        if "loc_x_nm" in self.attr or "loc_y_nm" in self.attr or "loc_z_nm" in self.attr:
-            x = np.asarray(self.attr.get("loc_x_nm", np.empty(0)), dtype=float)
-            y = np.asarray(self.attr.get("loc_y_nm", np.empty(0)), dtype=float)
-            z = np.asarray(self.attr.get("loc_z_nm", np.zeros_like(x)), dtype=float)
-            return np.column_stack([x, y, z])
-
         x = np.asarray(self.attr.get("loc_x", np.empty(0)), dtype=float) * 1e9
         y = np.asarray(self.attr.get("loc_y", np.empty(0)), dtype=float) * 1e9
         z = np.asarray(self.attr.get("loc_z", np.empty(0)), dtype=float) * 1e9 * self.cali.RIMF
         return np.column_stack([x, y, z])
+
+    @property
+    def xnm(self) -> np.ndarray:
+        """Localization x in **nanometres** (canonical coordinate view)."""
+        return np.asarray(self.attr.get("loc_x", np.empty(0)), dtype=float) * 1e9
+
+    @property
+    def ynm(self) -> np.ndarray:
+        """Localization y in **nanometres**."""
+        return np.asarray(self.attr.get("loc_y", np.empty(0)), dtype=float) * 1e9
+
+    @property
+    def znm(self) -> np.ndarray:
+        """Localization z in **nanometres**, RIMF-corrected (view only)."""
+        return (np.asarray(self.attr.get("loc_z", np.empty(0)), dtype=float)
+                * 1e9 * self.cali.RIMF)
 
     @property
     def rimf_provenance(self) -> dict[str, Any]:
@@ -395,12 +405,7 @@ class MinfluxDataset:
 
     @property
     def has_localizations(self) -> bool:
-        return (
-            "loc_x" in self.attr
-            or "loc_y" in self.attr
-            or "loc_x_nm" in self.attr
-            or "loc_y_nm" in self.attr
-        )
+        return "loc_x" in self.attr or "loc_y" in self.attr
 
     @property
     def image_data(self) -> np.ndarray | None:
@@ -461,14 +466,30 @@ def build_localization_dataset(
     datetime_str: str = "",
     attrs: dict[str, np.ndarray] | None = None,
     loc_precision_nm: np.ndarray | None = None,
+    tid: np.ndarray | None = None,
+    tim: np.ndarray | None = None,
+    is_minflux: bool | None = None,
+    source_version: str = "imported",
+    prefs: dict | None = None,
 ) -> MinfluxDataset:
-    """Create a dataset from generic localization coordinates in nanometres."""
+    """Canonical builder for generic localizations given in **nanometres**.
+
+    Coordinates are stored as canonical ``loc_x``/``loc_y``/``loc_z`` in
+    **metres** (z zero-filled when 2-D) and run through the same property +
+    derived-attribute pipeline as the native loaders, so the result renders,
+    filters, and runs the analyses like a native dataset.
+
+    ``tid`` is the trace id: pass the real one (→ MINFLUX-eligible) or leave
+    ``None`` to synthesise a 1..N index (→ non-MINFLUX). ``is_minflux`` defaults
+    to "a real tid was supplied". Sets ``metadata`` flags accordingly.
+    """
+    from .loader import _add_derived_attributes, _compute_properties
+
     x_nm = np.asarray(x_nm, dtype=float).ravel()
     y_nm = np.asarray(y_nm, dtype=float).ravel()
     if x_nm.shape != y_nm.shape:
         raise ValueError("x_nm and y_nm must have the same shape")
     n = int(x_nm.size)
-
     if z_nm is None:
         z_nm = np.zeros(n, dtype=float)
     else:
@@ -476,35 +497,38 @@ def build_localization_dataset(
         if z_nm.shape != x_nm.shape:
             raise ValueError("z_nm must have the same shape as x_nm/y_nm")
 
-    data = {
-        "loc_x_nm": x_nm,
-        "loc_y_nm": y_nm,
-        "loc_z_nm": z_nm,
-        "tid": np.arange(n, dtype=np.int32),
-        "tim": np.zeros(n, dtype=float),
+    has_real_tid = tid is not None
+    tid_arr = (np.arange(1, n + 1, dtype=np.int64)
+               if tid is None else np.asarray(tid).ravel())
+    tim_arr = np.zeros(n, dtype=float) if tim is None else np.asarray(tim, dtype=float).ravel()
+
+    data: dict[str, np.ndarray] = {
+        "loc_x": x_nm * 1.0e-9,        # canonical metres — single coordinate store
+        "loc_y": y_nm * 1.0e-9,
+        "loc_z": z_nm * 1.0e-9,
+        "tid": tid_arr,
+        "tim": tim_arr,
     }
+    if loc_precision_nm is not None:
+        data["loc_precision_xy"] = np.asarray(loc_precision_nm, dtype=float).ravel()
     if attrs:
         for key, value in attrs.items():
+            if key in data:
+                continue
             arr = np.asarray(value)
             if arr.ndim >= 1 and arr.shape[0] == n:
                 data[key] = arr
 
     attr_store = AttrStore(data)
-    num_dim = 3 if np.any(np.asarray(z_nm) != 0) else 2
-    trace_idx = np.column_stack([np.arange(n, dtype=int), np.arange(n, dtype=int)])
-    prop = DataProp(
-        num_loc=n,
-        num_itr=1,
-        num_dim=num_dim,
-        num_traces=n,
-        trace_idx=trace_idx,
-        num_loc_per_trace=np.ones(n, dtype=int),
-        attr_names=attr_store.keys(),
-    )
+    prop = _compute_properties(attr_store, n, 1, prefs=prefs or {})
+    attr_store = _add_derived_attributes(attr_store, prop, prefs=prefs or {})
+    prop.attr_names = attr_store.keys()
+
     cali = Calibration()
     if loc_precision_nm is not None:
         cali.loc_precision = np.asarray(loc_precision_nm, dtype=float)
-    return MinfluxDataset(
+
+    ds = MinfluxDataset(
         file=FileInfo(
             name=name,
             folder=folder,
@@ -515,6 +539,10 @@ def build_localization_dataset(
         cali=cali,
         channel=Channel(),
     )
+    ds.metadata["source_version"] = source_version
+    ds.metadata["is_minflux"] = bool(has_real_tid if is_minflux is None else is_minflux)
+    ds.metadata["has_real_tid"] = bool(has_real_tid)
+    return ds
 
 
 def build_image_dataset(

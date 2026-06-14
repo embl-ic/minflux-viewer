@@ -1921,12 +1921,17 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
 
     n = len(rows)
 
-    has_meter_xy = "loc_x" in data and "loc_y" in data
-    has_nm_xy = "loc_x_nm" in data and "loc_y_nm" in data
-    if not (has_meter_xy or has_nm_xy):
+    # Normalise any nm coordinate columns to the canonical metres store, so a
+    # dataset only ever carries one coordinate convention (loc_x/loc_y/loc_z).
+    for axis in ("x", "y", "z"):
+        nm_key, m_key = f"loc_{axis}_nm", f"loc_{axis}"
+        if nm_key in data and m_key not in data:
+            data[m_key] = data.pop(nm_key) * 1.0e-9
+
+    if "loc_x" not in data or "loc_y" not in data:
         raise ValueError(
-            f"'{path.name}' must contain either metre columns ('loc_x'/'x', 'loc_y'/'y') "
-            f"or nanometre columns ('xnm'/'x_nm', 'ynm'/'y_nm'). "
+            f"'{path.name}' must contain x/y localization columns "
+            f"('loc_x'/'x'/'xnm', 'loc_y'/'y'/'ynm'). "
             f"Found columns: {list(col_map.values())}"
         )
 
@@ -1938,31 +1943,11 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
         ),
     )
 
-    if has_nm_xy:
-        if "loc_z_nm" not in data:
-            data["loc_z_nm"] = np.zeros(n)
-        if "tid" not in data:
-            data["tid"] = np.arange(n, dtype=np.int32)
-        if "tim" not in data:
-            data["tim"] = np.zeros(n)
-        extra_attrs = {
-            k: v for k, v in data.items()
-            if k not in {"loc_x_nm", "loc_y_nm", "loc_z_nm"}
-        }
-        return build_localization_dataset(
-            name=path.name,
-            folder=str(path.parent),
-            datetime_str=file_info.datetime,
-            x_nm=data["loc_x_nm"],
-            y_nm=data["loc_y_nm"],
-            z_nm=data.get("loc_z_nm"),
-            attrs=extra_attrs,
-        )
-
     if "loc_z" not in data:
         data["loc_z"] = np.zeros(n)
-    if "tid" not in data:
-        data["tid"] = np.arange(n, dtype=np.int32)
+    has_real_tid = "tid" in data
+    if not has_real_tid:
+        data["tid"] = np.arange(1, n + 1, dtype=np.int64)
     if "tim" not in data:
         data["tim"] = np.zeros(n)
 
@@ -1972,13 +1957,17 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     attrs = _add_derived_attributes(attrs, prop, prefs=prefs)
     prop.attr_names = attrs.keys()
 
-    return MinfluxDataset(
+    ds = MinfluxDataset(
         file=file_info,
         prop=prop,
         attr=attrs,
         cali=Calibration(),
         channel=Channel(),
     )
+    ds.metadata["source_version"] = "csv"
+    ds.metadata["is_minflux"] = bool(has_real_tid)
+    ds.metadata["has_real_tid"] = bool(has_real_tid)
+    return ds
 
 
 def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":

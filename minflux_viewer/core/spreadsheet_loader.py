@@ -26,8 +26,7 @@ from __future__ import annotations
 
 import csv
 import re
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -374,10 +373,7 @@ def build_dataset_from_mapping(
     analyses all work. Precision/id/frame/photons map to attributes; remaining
     numeric columns are carried through under sanitised names.
     """
-    from .dataset import (
-        AttrStore, Calibration, Channel, FileInfo, MinfluxDataset,
-    )
-    from .loader import _add_derived_attributes, _compute_properties
+    from .dataset import build_localization_dataset
 
     units = units or guess_units(table, mapping)
     path = Path(table.path)
@@ -400,62 +396,43 @@ def build_dataset_from_mapping(
     z_nm = (_to_nm(cz.values[:n], units.get("z"), pixel_size_nm)
             if cz is not None else np.zeros(n))
 
-    data: dict[str, np.ndarray] = {
-        "loc_x": x_nm * 1.0e-9,
-        "loc_y": y_nm * 1.0e-9,
-        "loc_z": z_nm * 1.0e-9,
-    }
-
+    # tid from the id column (real → MINFLUX-eligible) and time from frame.
     cid = col("id")
-    data["tid"] = (np.asarray(cid.values[:n], dtype=float)
-                   if cid is not None else np.arange(n, dtype=np.int32))
+    tid = np.asarray(cid.values[:n]) if cid is not None else None
     cframe = col("frame")
-    if cframe is not None:
-        data["frame"] = np.asarray(cframe.values[:n], dtype=float)
-    data["tim"] = data.get("frame", np.zeros(n, dtype=float)).astype(float)
+    tim = np.asarray(cframe.values[:n], dtype=float) if cframe is not None else None
 
     # Precision is in the lateral coordinate unit unless it carries an explicit
     # bracket unit (e.g. ThunderSTORM "uncertainty_xy [nm]").
-    loc_prec_xy = None
+    extra: dict[str, np.ndarray] = {}
     cpxy = col("prec_xy")
+    loc_prec_xy = None
     if cpxy is not None:
         unit = bracket_unit(cpxy.name) or units.get("x")
         loc_prec_xy = _to_nm(cpxy.values[:n], unit, pixel_size_nm)
-        data["loc_precision_xy"] = loc_prec_xy
     cpz = col("prec_z")
     if cpz is not None:
         unit = bracket_unit(cpz.name) or units.get("z", units.get("x"))
-        data["loc_precision_z"] = _to_nm(cpz.values[:n], unit, pixel_size_nm)
+        extra["loc_precision_z"] = _to_nm(cpz.values[:n], unit, pixel_size_nm)
     cphot = col("photons")
     if cphot is not None:
-        data["photons"] = np.asarray(cphot.values[:n], dtype=float)
+        extra["photons"] = np.asarray(cphot.values[:n], dtype=float)
 
     # Carry through any remaining numeric columns under sanitised keys.
     mapped_names = {mapping.get(r) for r in ROLES}
-    taken = set(data.keys())
+    reserved = {"loc_x", "loc_y", "loc_z", "tid", "tim",
+                "loc_precision_xy", "loc_precision_z", "photons"}
+    taken = set(reserved)
     for c in table.columns:
         if not c.numeric or c.name in mapped_names:
             continue
         key = _safe_attr_key(c.name, taken)
         taken.add(key)
-        data[key] = np.asarray(c.values[:n], dtype=float)
+        extra[key] = np.asarray(c.values[:n], dtype=float)
 
-    attrs = AttrStore(data)
-    prop = _compute_properties(attrs, n, 1, prefs=prefs or {})
-    attrs = _add_derived_attributes(attrs, prop, prefs=prefs or {})
-    prop.attr_names = attrs.keys()
-
-    cali = Calibration()
-    if loc_prec_xy is not None:
-        cali.loc_precision = np.asarray(loc_prec_xy, dtype=float)
-
-    return MinfluxDataset(
-        file=FileInfo(
-            name=name, folder=folder,
-            datetime=datetime.now().strftime("%Y-%b-%d, %H:%M:%S"),
-        ),
-        prop=prop,
-        attr=attrs,
-        cali=cali,
-        channel=Channel(),
+    return build_localization_dataset(
+        name=name, folder=folder,
+        x_nm=x_nm, y_nm=y_nm, z_nm=z_nm,
+        attrs=extra, loc_precision_nm=loc_prec_xy,
+        tid=tid, tim=tim, source_version="spreadsheet", prefs=prefs,
     )
