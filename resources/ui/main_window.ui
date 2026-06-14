@@ -49,7 +49,6 @@
    <widget class="QMenu" name="menuFile">
     <property name="title"><string>&amp;File</string></property>
     <addaction name="actionOpen"/>
-    <addaction name="actionOpenMsr"/>
     <addaction name="menuOpenRecent"/>
     <addaction name="separator"/>
     <addaction name="actionSave"/>
@@ -164,10 +163,6 @@
   <action name="actionOpen">
    <property name="text"><string>&amp;Open…</string></property>
    <property name="shortcut"><string>Ctrl+O</string></property>
-  </action>
-  <action name="actionOpenMsr">
-   <property name="text"><string>Open &amp;.msr file…</string></property>
-   <property name="shortcut"><string>Ctrl+Shift+O</string></property>
   </action>
   <action name="actionSave">
    <property name="text"><string>&amp;Save processed data…</string></property>

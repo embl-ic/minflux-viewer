@@ -117,7 +117,6 @@ _SHORTCUT_LABELS = {
     "next_dataset": "Next dataset",
     "previous_dataset": "Previous dataset",
     "open": "Open",
-    "open_msr": "Open .msr file",
     "open_spreadsheet": "Open spreadsheet data",
     "open_tiff": "Open .tif file",
     "save": "Save processed data",

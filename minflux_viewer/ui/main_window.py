@@ -196,9 +196,9 @@ class MainWindow(QMainWindow):
         """Connect every QAction from the generated UI to its handler."""
         u = self._ui
 
-        # File menu
+        # File menu  (.msr opens via drag-drop / the Plugins > MSR Reader entry,
+        # so there is no dedicated File > "Open .msr" item.)
         u.actionOpen.triggered.connect(self._open_dialog)
-        u.actionOpenMsr.triggered.connect(self._open_msr_dialog)
         self.actionOpenSpreadsheet = QAction("Open spreadsheet data...", self)
         self.actionOpenSpreadsheet.triggered.connect(self._open_spreadsheet_dialog)
         self.actionOpenTiff = QAction("Open .tif file...", self)
@@ -352,7 +352,6 @@ class MainWindow(QMainWindow):
         u = self._ui
 
         u.actionOpen.setText("Open...")
-        u.actionOpenMsr.setText("Open .msr File...")
         u.actionSave.setText("Save Processed Data...")
         u.actionQuit.setText("Quit")
         u.actionDatasetManager.setText("Dataset Manager")
@@ -401,7 +400,6 @@ class MainWindow(QMainWindow):
 
         u.menuFile.clear()
         u.menuFile.addAction(u.actionOpen)
-        u.menuFile.addAction(u.actionOpenMsr)
         u.menuFile.addAction(self.actionOpenSpreadsheet)
         u.menuFile.addAction(self.actionOpenTiff)
         u.menuFile.addAction(u.menuOpenRecent.menuAction())
@@ -446,7 +444,6 @@ class MainWindow(QMainWindow):
 
         self._shortcut_actions = {
             "open": u.actionOpen,
-            "open_msr": u.actionOpenMsr,
             "open_spreadsheet": self.actionOpenSpreadsheet,
             "open_tiff": self.actionOpenTiff,
             "save": u.actionSave,
@@ -817,16 +814,8 @@ class MainWindow(QMainWindow):
         for p in paths:
             self._route_file(p)
 
-    def _open_msr_dialog(self, msr_path: str | None = None) -> None:
-        """Open the MSR import dialog for an .msr file."""
-        if msr_path is None:
-            default = self._state.prefs["file"].get("default_folder", str(Path.home()))
-            msr_path, _ = QFileDialog.getOpenFileName(
-                self,
-                "Open Abberior .msr file",
-                default,
-                "Imspector MINFLUX data (*.msr);;All files (*)",
-            )
+    def _open_msr_dialog(self, msr_path: str) -> None:
+        """Hand an ``.msr`` file to the MSR Reader plugin (drag-drop entry point)."""
         if not msr_path:
             return
         from .msr_import_dialog import open_msr
