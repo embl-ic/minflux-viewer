@@ -62,9 +62,24 @@ from .data_window import DataWindow
 # ---------------------------------------------------------------------------
 
 _SUPPORTED_EXTS: tuple[str, ...] = (
-    ".mat", ".npy", ".csv", ".tsv", ".xlsx", ".xlsm", ".msr", ".tif", ".tiff",
-    ".json",
+    ".mat", ".npy", ".csv", ".tsv", ".txt", ".xlsx", ".xlsm", ".msr",
+    ".tif", ".tiff", ".json",
 )
+
+#: File extension → canonical loader format.
+_EXT_TO_FMT: dict[str, str] = {
+    ".mat": "mat", ".npy": "npy",
+    ".csv": "spreadsheet", ".tsv": "spreadsheet", ".txt": "spreadsheet",
+    ".xlsx": "spreadsheet", ".xlsm": "spreadsheet",
+    ".msr": "msr", ".tif": "tiff", ".tiff": "tiff", ".json": "json",
+}
+#: Content-sniff result → canonical loader format (xlsx/delimited both → spreadsheet).
+_SNIFF_TO_FMT: dict[str, str] = {"xlsx": "spreadsheet", "delimited": "spreadsheet"}
+#: Canonical format → MainWindow loader method name.
+_FMT_LOADERS: dict[str, str] = {
+    "mat": "_load_mat", "npy": "_load_npy", "spreadsheet": "_load_spreadsheet",
+    "msr": "_open_msr_dialog", "tiff": "_load_tiff", "json": "_load_json",
+}
 
 _ROI_TOOL_DEFS: tuple[tuple[str, str, str], ...] = (
     ("Rectangle", "rectangle", "toolRect"),
@@ -850,26 +865,42 @@ class MainWindow(QMainWindow):
         p   = Path(path)
         ext = p.suffix.lower()
 
-        if ext == ".mat":
-            self._load_mat(path)
-        elif ext == ".npy":
-            self._load_npy(path)
-        elif ext in {".csv", ".tsv", ".txt", ".xlsx", ".xlsm"}:
-            self._load_spreadsheet(path)
-        elif ext == ".msr":
-            self._open_msr_dialog(path)
-        elif ext in {".tif", ".tiff"}:
-            self._load_tiff(path)
-        elif ext == ".json":
-            self._load_json(path)
+        from ..core.format_sniff import MAGIC_FORMATS, sniff_format
+        ext_fmt = _EXT_TO_FMT.get(ext)
+        raw = sniff_format(path)
+        sniffed = _SNIFF_TO_FMT.get(raw, raw)
+
+        # A binary magic number that disagrees with the extension wins (catches
+        # mislabelled files, e.g. a .json that is really a .npy). A known
+        # extension is otherwise trusted; an unknown extension falls back to the
+        # sniffed content (incl. text json/delimited).
+        if raw in MAGIC_FORMATS and sniffed != ext_fmt:
+            fmt = sniffed
+            self._state.log(
+                f"'{p.name}': extension '{ext or '(none)'}' but the content is "
+                f"{raw} — loading as {fmt}.", "WARN")
+        elif ext_fmt is not None:
+            fmt = ext_fmt
+        elif sniffed is not None:
+            fmt = sniffed
+            self._state.log(
+                f"'{p.name}': no usable extension — content looks like {raw}, "
+                f"loading as {fmt}.", "INFO")
         else:
+            fmt = None
+
+        loader = self._FMT_LOADERS.get(fmt) if fmt else None
+        if loader is None:
             msg = (
                 f"Unsupported file type: '{p.name}'  "
-                f"(extension '{ext or '(none)'}' is not recognised).  "
-                f"Supported formats: .mat, .npy, .csv, .tsv, .xlsx, .xlsm, .msr, .tif, .tiff, .json"
+                f"(extension '{ext or '(none)'}' unrecognised and content could "
+                f"not be identified).  Supported: .mat, .npy, .csv, .tsv, .txt, "
+                f".xlsx, .xlsm, .msr, .tif, .tiff, .json"
             )
             self._state.log(msg, "WARN")
             self._status_label.setText(f"Skipped: {p.name} (unsupported type)")
+            return
+        getattr(self, loader)(path)
 
     def _route_path(self, path: str) -> None:
         """
