@@ -32,6 +32,10 @@ if TYPE_CHECKING:
 # Defaults
 # ---------------------------------------------------------------------------
 
+#: How many recent files are remembered on disk (the menu shows only
+#: ``num_file_history`` of these). ~0.1-0.27 MB of paths — negligible.
+MAX_RECENT_REMEMBERED: int = 1000
+
 DEFAULT_PREFS: dict = {
     "file": {
         "num_file_history": 5,
@@ -450,8 +454,11 @@ class AppState(QObject):
         if path in recent:
             recent.remove(path)
         recent.insert(0, path)
-        limit = self.prefs["file"].get("num_file_history", 10)
-        self.prefs["file"]["recent_files"] = recent[:limit]
+        # Remember up to MAX_RECENT_REMEMBERED silently; the menu only shows
+        # ``num_file_history`` of them, so raising that preference later instantly
+        # repopulates from this store. Only successful loads reach add_dataset (the
+        # sole caller), so filter/ROI files never land here.
+        self.prefs["file"]["recent_files"] = recent[:MAX_RECENT_REMEMBERED]
         if self.prefs["file"].get("keep_last_folder", True):
             self.prefs["file"]["default_folder"] = str(path_obj.parent)
         self.save_prefs()

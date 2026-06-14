@@ -1022,11 +1022,24 @@ class MainWindow(QMainWindow):
     def _populate_recent_menu(self) -> None:
         self._recent_menu.clear()
         recent = self._state.prefs["file"].get("recent_files", [])
-        if not recent:
+        limit = int(self._state.prefs["file"].get("num_file_history", 5) or 5)
+        # The store keeps up to MAX_RECENT_REMEMBERED; show only the user's
+        # configured count, skipping entries that no longer exist on disk (kept
+        # in the store in case the file reappears, e.g. a remounted drive).
+        shown: list[str] = []
+        for path in recent:
+            try:
+                if Path(path).is_file():
+                    shown.append(path)
+            except (TypeError, ValueError):
+                continue
+            if len(shown) >= limit:
+                break
+        if not shown:
             a = self._recent_menu.addAction("(none)")
             a.setEnabled(False)
             return
-        for path in recent:
+        for path in shown:
             act = QAction(path, self)
             act.triggered.connect(lambda checked, p=path: self._route_file(p))
             self._recent_menu.addAction(act)
