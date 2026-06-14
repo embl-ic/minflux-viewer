@@ -865,9 +865,7 @@ class MainWindow(QMainWindow):
             self._load_mat(path)
         elif ext == ".npy":
             self._load_npy(path)
-        elif ext == ".csv":
-            self._load_csv(path)
-        elif ext in {".tsv", ".xlsx", ".xlsm"}:
+        elif ext in {".csv", ".tsv", ".txt", ".xlsx", ".xlsm"}:
             self._load_spreadsheet(path)
         elif ext == ".msr":
             self._open_msr_dialog(path)
@@ -939,21 +937,25 @@ class MainWindow(QMainWindow):
             self._status_label.setText("Load failed.")
 
     def _load_csv(self, path: str) -> None:
-        self._status_label.setText(f"Loading {Path(path).name}…")
-        self._state.log(f"Opening .csv: {path}", "INFO")
-        try:
-            from ..core.loader import load_csv
-            dataset = load_csv(path, prefs=self._state.prefs)
-            self._state.add_dataset(dataset)
-        except Exception as exc:
-            self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
-            QMessageBox.critical(self, "Load error", str(exc))
-            self._status_label.setText("Load failed.")
+        # CSV/TSV/TXT all go through the smart spreadsheet importer.
+        self._load_spreadsheet(path)
 
     def _load_spreadsheet(self, path: str) -> None:
         self._status_label.setText(f"Loading {Path(path).name}…")
         self._state.log(f"Opening spreadsheet: {path}", "INFO")
         try:
+            from ..core.spreadsheet_loader import auto_import
+            dataset, ambiguity = auto_import(path, prefs=self._state.prefs)
+            if dataset is not None:
+                self._state.log(
+                    f"Auto-mapped '{Path(path).name}' "
+                    f"({dataset.prop.num_loc:,} localizations).", "INFO")
+                self._state.add_dataset(dataset)
+                return
+            # Ambiguous columns → let the user map them manually.
+            self._state.log(
+                f"'{Path(path).name}': {ambiguity.reason} Opening the column "
+                "mapping dialog.", "INFO")
             from .spreadsheet_import_dialog import SpreadsheetImportDialog
             dlg = SpreadsheetImportDialog(path, parent=self)
             if dlg.exec() != QDialog.DialogCode.Accepted:

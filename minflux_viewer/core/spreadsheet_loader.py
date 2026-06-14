@@ -41,7 +41,7 @@ REQUIRED_ROLES: tuple[str, ...] = ("x", "y")
 COORD_ROLES: tuple[str, ...] = ("x", "y", "z")
 
 #: Length-unit → nanometre factor (``px`` handled separately via pixel size).
-_UNIT_TO_NM: dict[str, float] = {"nm": 1.0, "um": 1_000.0, "m": 1.0e9}
+_UNIT_TO_NM: dict[str, float] = {"nm": 1.0, "um": 1_000.0, "mm": 1.0e6, "m": 1.0e9}
 
 #: Default pixel size (nm/px) when a tool stores coordinates in camera pixels
 #: but no value is supplied (Picasso's typical EMCCD pixel).
@@ -309,6 +309,76 @@ def guess_units(table: SpreadsheetTable, mapping: dict[str, str | None]) -> dict
         col = table.by_name(mapping.get(axis))
         units[axis] = (col.unit if col and col.unit else tool_default)
     return units
+
+
+#: Spreads larger than this (in nm) flag a wrong length-unit guess (100 µm).
+SANE_MAX_SPREAD_NM: float = 1.0e5
+
+
+@dataclass
+class AutoImportAmbiguity:
+    """Returned by :func:`auto_import` when the table can't be loaded blindly."""
+    table: SpreadsheetTable
+    mapping: dict[str, str | None]
+    units: dict[str, str]
+    reason: str
+    needs_pixel_size: bool = False
+
+
+def _range_corrected_units(table, mapping, units):
+    """Step each coordinate's unit finer (m→mm→µm→nm) while its spread would
+    exceed ``SANE_MAX_SPREAD_NM`` — catches e.g. µm values mislabelled as nm."""
+    ladder = ("m", "mm", "um", "nm")
+    out = dict(units)
+    for axis in COORD_ROLES:
+        col = table.by_name(mapping.get(axis))
+        if col is None or out.get(axis) == "px":
+            continue
+        v = col.values[np.isfinite(col.values)]
+        if v.size == 0:
+            continue
+        u = out[axis] if out.get(axis) in _UNIT_TO_NM else "nm"
+        spread = float(np.ptp(v)) * _UNIT_TO_NM[u]
+        i = ladder.index(u) if u in ladder else len(ladder) - 1
+        while spread > SANE_MAX_SPREAD_NM and i < len(ladder) - 1:
+            i += 1
+            spread /= 1000.0
+            u = ladder[i]
+        out[axis] = u
+    return out
+
+
+def auto_import(path, *, prefs: dict | None = None, pixel_size_nm: float | None = None):
+    """Try to load a spreadsheet as a dataset with **no** user interaction.
+
+    Returns ``(dataset, None)`` on success, or ``(None, AutoImportAmbiguity)``
+    when the columns are too ambiguous and the mapping dialog should be shown
+    (no confident x/y, or pixel coordinates without a pixel size).
+    """
+    table = read_table(path)
+    mapping = guess_mapping(table)
+    units = guess_units(table, mapping)
+
+    if mapping.get("x") is None or mapping.get("y") is None:
+        return None, AutoImportAmbiguity(
+            table, mapping, units,
+            "Could not identify the x and y coordinate columns.")
+
+    units = _range_corrected_units(table, mapping, units)
+
+    needs_pixel = any(units.get(a) == "px" for a in COORD_ROLES if mapping.get(a))
+    px = pixel_size_nm
+    if needs_pixel and not px:
+        px = (prefs or {}).get("data", {}).get("pixel_size_nm") or None
+    if needs_pixel and not px:
+        return None, AutoImportAmbiguity(
+            table, mapping, units,
+            "Coordinates are in camera pixels — a pixel size (nm/px) is needed.",
+            needs_pixel_size=True)
+
+    ds = build_dataset_from_mapping(
+        table, mapping, units=units, pixel_size_nm=px, prefs=prefs)
+    return ds, None
 
 
 def representative_row_indices(n_rows: int, dense: int = 10) -> list[int]:

@@ -5,6 +5,7 @@ import pytest
 
 from minflux_viewer.core.spreadsheet_loader import (
     DEFAULT_PIXEL_SIZE_NM,
+    auto_import,
     bracket_unit,
     build_dataset_from_mapping,
     guess_mapping,
@@ -202,3 +203,41 @@ def test_unsupported_format_raises(tmp_path):
     p.write_text("nope", encoding="utf-8")
     with pytest.raises(ValueError, match="Unsupported"):
         read_table(str(p))
+
+
+# ---------------------------------------------------------------------------
+# auto_import — the no-dialog routing entry point
+# ---------------------------------------------------------------------------
+
+def test_auto_import_paren_nm(tmp_path):
+    # The exact human-friendly form that failed before: "x(nm)", "y(nm)".
+    p = _write(tmp_path / "u.csv", ["x(nm)", "y(nm)"],
+               [[100.0 + i, 200.0 + i] for i in range(50)])
+    ds, amb = auto_import(p)
+    assert ds is not None and amb is None
+    assert np.allclose(ds.xnm[:3], [100.0, 101.0, 102.0], atol=1e-3)
+    assert ds.attr.get("loc_x") is not None and ds.attr.get("loc_x_nm") is None
+
+
+def test_auto_import_micrometre_converts(tmp_path):
+    p = _write(tmp_path / "um.csv", ["x [um]", "y [um]"],
+               [[0.1 * i, 0.2 * i] for i in range(50)])
+    ds, _ = auto_import(p)
+    assert np.ptp(ds.xnm) == pytest.approx(0.1 * 49 * 1000.0, rel=1e-3)   # µm → nm
+
+
+def test_auto_import_pixels_need_size(tmp_path):
+    p = _write(tmp_path / "px.csv", ["x", "y", "lpx", "lpy"],
+               [[5.0, 6.0, 0.03, 0.03] for _ in range(50)])
+    ds, amb = auto_import(p)
+    assert ds is None and amb is not None and amb.needs_pixel_size
+    ds2, amb2 = auto_import(p, pixel_size_nm=100.0)
+    assert ds2 is not None and amb2 is None
+    assert np.allclose(ds2.xnm, 500.0)
+
+
+def test_auto_import_no_xy_is_ambiguous(tmp_path):
+    p = _write(tmp_path / "w.csv", ["foo", "bar"],
+               [[1.0 * i, 2.0 * i] for i in range(50)])
+    ds, amb = auto_import(p)
+    assert ds is None and "x and y" in amb.reason
