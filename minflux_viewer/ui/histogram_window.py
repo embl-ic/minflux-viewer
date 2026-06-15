@@ -938,9 +938,20 @@ class HistogramWindow(QWidget):
             "restore_view_on_cancel": restore_view_on_cancel,
         }
 
+        # The incoming bounds are real data values. When the histogram plots
+        # log(data) the region lives in log space, so place it at log(bounds).
+        region_lo, region_hi = float(min(lo, hi)), float(max(lo, hi))
+        if self._log_chk.isChecked():
+            if region_lo > 0.0 and region_hi > 0.0:
+                region_lo, region_hi = float(np.log(region_lo)), float(np.log(region_hi))
+            else:
+                fallback = self._filter_log_data_range()
+                if fallback is not None:
+                    region_lo, region_hi = fallback
+
         range_color, range_alpha, bounds_color = self._filter_style()
         region = pg.LinearRegionItem(
-            values=(min(lo, hi), max(lo, hi)),
+            values=(region_lo, region_hi),
             orientation="vertical",
             brush=pg.mkBrush(range_color.red(), range_color.green(), range_color.blue(), range_alpha),
             pen=pg.mkPen(bounds_color, width=4),
@@ -1119,13 +1130,37 @@ class HistogramWindow(QWidget):
             edit["inclusive_max"] = hi_inc.isChecked()
             self._update_filter_edit_labels()
 
+    def _filter_log_data_range(self) -> tuple[float, float] | None:
+        """log(min..max) of the current attribute's positive values, or None.
+
+        Used to place the filter region when the incoming real bounds can't be
+        log-transformed (non-positive) under the log(data) view.
+        """
+        ds = self._dataset()
+        if ds is None:
+            return None
+        raw = attr_values_1d(ds, self._attr_combo.currentText())
+        if raw is None:
+            return None
+        vals = np.asarray(raw).ravel().astype(float)
+        vals = vals[np.isfinite(vals) & (vals > 0.0)]
+        if vals.size == 0:
+            return None
+        return float(np.log(vals.min())), float(np.log(vals.max()))
+
     def _current_filter_edit_values(self) -> tuple[float, float, bool, bool]:
         edit = self._filter_edit
         if not edit:
             return 0.0, 1.0, True, True
         region = edit.get("region")
         lo, hi = region.getRegion() if region is not None else (0.0, 1.0)
-        return float(lo), float(hi), bool(edit.get("inclusive_min", True)), bool(edit.get("inclusive_max", True))
+        lo, hi = float(lo), float(hi)
+        if self._log_chk.isChecked():
+            # The histogram plots log(data), so the region bounds live in log
+            # space; convert back to real data values for the filter, which
+            # operates on the un-transformed data.
+            lo, hi = float(np.exp(lo)), float(np.exp(hi))
+        return lo, hi, bool(edit.get("inclusive_min", True)), bool(edit.get("inclusive_max", True))
 
     def _update_filter_edit(self) -> None:
         edit = self._filter_edit
