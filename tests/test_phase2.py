@@ -989,15 +989,15 @@ class TestPreferencesDialog:
         # Modify a couple of values
         state.prefs["data"]["min_z_range_nm"] = 17.5
         state.prefs["data"]["enforce_min_z_range"] = False
+        state.prefs["file"]["temp_folder"] = "/tmp/xyz"
         state.prefs["plugin"] = {
-            "msr_temp_folder": "/tmp/xyz",
             "msr_remember_last": False,
         }
         dlg = PreferencesDialog(state)
         # Widgets should reflect state
         assert dlg._min_z_spin.value() == 17.5
         assert not dlg._enforce_z.isChecked()
-        assert dlg._msr_temp_edit.text() == "/tmp/xyz"
+        assert dlg._temp_folder_edit.text() == "/tmp/xyz"   # now on the File tab
         assert not dlg._msr_remember.isChecked()
 
         # Change a value and apply

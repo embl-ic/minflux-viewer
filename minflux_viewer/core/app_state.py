@@ -45,6 +45,7 @@ DEFAULT_PREFS: dict = {
         "confirm_overwrite": True,
         "close_paraview_on_exit": True,
         "paraview_path": "",
+        "temp_folder": "",           # app-wide temp dir; empty = use system temp
     },
     "data": {
         "iter_load": "last",            # "last" | "all"
@@ -87,7 +88,6 @@ DEFAULT_PREFS: dict = {
         "histogram_values": ["trace mean"],
     },
     "plugin": {
-        "msr_temp_folder": "",       # empty = use system temp
         "msr_export_folder": "",
         "msr_last_open_folder": "",
         "msr_remember_last": True,

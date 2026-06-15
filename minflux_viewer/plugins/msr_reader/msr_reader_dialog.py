@@ -1092,7 +1092,7 @@ class MsrReaderDialog(QWidget):
             self.input_path_edit.setText(msr_path)
             self._last_input_dir = str(Path(msr_path).parent)
             self._save_settings()
-            self._start_parse_worker(msr_path, self.tmp_dir_edit.text().strip() or tempfile.gettempdir())
+            self._start_parse_worker(msr_path, self._temp_dir())
 
     # ------------------------------------------------------------------
     # Settings persistence
@@ -1101,10 +1101,18 @@ class MsrReaderDialog(QWidget):
     def _settings_path(self) -> Path:
         return Path.home() / ".minflux_viewer_msr_settings.json"
 
+    def _temp_dir(self) -> str:
+        """App-wide temp folder (Preferences > File > Temporary folder), else the
+        system temp dir. This is the single place a temp folder is defined."""
+        prefs = getattr(self._state, "prefs", None)
+        folder = ""
+        if isinstance(prefs, dict):
+            folder = str((prefs.get("file") or {}).get("temp_folder", "") or "").strip()
+        return folder or tempfile.gettempdir()
+
     def _load_settings(self, system_tmp: str) -> dict[str, Any]:
         path = self._settings_path()
         defaults = {
-            "tmp_dir": system_tmp,
             "out_dir": system_tmp,
             "last_input_dir": str(Path.home()),
             "preview_rows": 100,
@@ -1147,8 +1155,7 @@ class MsrReaderDialog(QWidget):
         elif not input_path:
             last_input_dir = getattr(self, "_last_input_dir", str(Path.home()))
         data = {
-            "tmp_dir": self.tmp_dir_edit.text().strip() or tempfile.gettempdir(),
-            "out_dir": self.out_dir_edit.text().strip() or self.tmp_dir_edit.text().strip() or tempfile.gettempdir(),
+            "out_dir": self.out_dir_edit.text().strip() or self._temp_dir(),
             "last_input_dir": last_input_dir,
             "preview_rows": int(self.preview_rows_spin.value()),
             "preview_all_rows": bool(self.preview_all_rows_check.isChecked()),
@@ -1207,9 +1214,6 @@ class MsrReaderDialog(QWidget):
         self.input_path_edit = QLineEdit()
         self._last_input_dir = settings.get("last_input_dir") or str(Path.home())
         root.addLayout(self._browse_row("MSR file or folder:", self.input_path_edit, self.browse_input))
-
-        self.tmp_dir_edit = QLineEdit(settings["tmp_dir"])
-        root.addLayout(self._browse_row("Temp directory (Zarr + caches):", self.tmp_dir_edit, self.browse_tmp))
 
         action_row = QHBoxLayout()
         self._parse_button = QPushButton("Parse MSR file")
@@ -1336,16 +1340,8 @@ class MsrReaderDialog(QWidget):
             self._last_input_dir = str(Path(path).parent if Path(path).is_file() else Path(path))
             self._save_settings()
 
-    def browse_tmp(self):
-        path = QFileDialog.getExistingDirectory(self, "Choose temp directory", self.tmp_dir_edit.text().strip() or tempfile.gettempdir())
-        if path:
-            self.tmp_dir_edit.setText(path)
-            if not self.out_dir_edit.text().strip():
-                self.out_dir_edit.setText(path)
-            self._save_settings()
-
     def browse_out(self):
-        path = QFileDialog.getExistingDirectory(self, "Choose output folder", self.out_dir_edit.text().strip() or self.tmp_dir_edit.text().strip() or tempfile.gettempdir())
+        path = QFileDialog.getExistingDirectory(self, "Choose output folder", self.out_dir_edit.text().strip() or self._temp_dir())
         if path:
             self.out_dir_edit.setText(path)
             self._save_settings()
@@ -1413,9 +1409,9 @@ class MsrReaderDialog(QWidget):
         self.datasetnode_info.clear()
 
         ipath = self.input_path_edit.text().strip()
-        tmp = self.tmp_dir_edit.text().strip()
-        if not ipath or not os.path.exists(ipath) or not tmp:
-            self.log("[error] set an input .msr (or folder) and a temp directory first.")
+        tmp = self._temp_dir()
+        if not ipath or not os.path.exists(ipath):
+            self.log("[error] set an input .msr file (or folder) first.")
             return
         msr = ipath if os.path.isfile(ipath) else next((str(p) for p in Path(ipath).glob("*.msr")), None)
         if not msr:
@@ -2507,7 +2503,7 @@ class MsrReaderDialog(QWidget):
     def _ensure_single_file_parsed(self) -> bool:
         from ...msr import pick_one_msr, parse_msr_general
         ipath = self.input_path_edit.text().strip()
-        tmp = self.tmp_dir_edit.text().strip()
+        tmp = self._temp_dir()
         if self.mode_folder.isChecked():
             QMessageBox.information(self, "Align channel", "Channel alignment is currently available only in single-file mode.")
             return False
@@ -2524,7 +2520,7 @@ class MsrReaderDialog(QWidget):
 
     def _channel_alignment_defaults(self):
         from ...msr import pick_one_msr
-        out_dir = Path(self.out_dir_edit.text().strip() or self.tmp_dir_edit.text().strip() or tempfile.gettempdir())
+        out_dir = Path(self.out_dir_edit.text().strip() or self._temp_dir())
         msr = pick_one_msr(self.input_path_edit.text().strip())
         stem = Path(msr).stem if msr else "channel_alignment"
         return {
@@ -2671,7 +2667,7 @@ class MsrReaderDialog(QWidget):
 
     def on_ok(self):
         self._save_settings()
-        out_dir = self.out_dir_edit.text().strip() or self.tmp_dir_edit.text().strip()
+        out_dir = self.out_dir_edit.text().strip() or self._temp_dir()
         if not out_dir:
             QMessageBox.critical(self, "Missing output", "Please set an output folder.")
             return
@@ -2690,7 +2686,7 @@ class MsrReaderDialog(QWidget):
         if not formats:
             QMessageBox.critical(self, "No formats", "Pick at least one export format.")
             return
-        tmp = self.tmp_dir_edit.text().strip()
+        tmp = self._temp_dir()
         ipath = self.input_path_edit.text().strip()
         if self.mode_folder.isChecked():
             from ...msr import parse_msr_general

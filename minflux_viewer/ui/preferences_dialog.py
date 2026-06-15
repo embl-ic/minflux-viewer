@@ -294,6 +294,16 @@ class PreferencesDialog(QDialog):
         self._close_paraview = QCheckBox("close ParaView when exiting the application")
         form.addRow("", self._close_paraview)
 
+        self._temp_folder_edit, temp_row = self._browse_row(
+            self._browse_temp_folder, file_mode=False,
+        )
+        self._temp_folder_edit.setPlaceholderText("(empty = system temp folder)")
+        self._temp_folder_edit.setToolTip(
+            "App-wide folder for any temporary files the application may write "
+            "(empty = system temp). This is the single place to set a temp folder."
+        )
+        form.addRow("Temporary folder", temp_row)
+
         return w
 
     # -- Data tab ----------------------------------------------------
@@ -624,13 +634,8 @@ class PreferencesDialog(QDialog):
         root.addSpacing(8)
         root.addWidget(self._section_label("MSR Reader plugin:"))
 
-        self._msr_temp_edit, tmp_row = self._browse_row(
-            self._browse_msr_temp, file_mode=False,
-        )
-        root.addLayout(self._form_row("Temporary folder", tmp_row))
-
         self._msr_remember = QCheckBox(
-            "remember last used folders (temp, export, and file-open)"
+            "remember last used folders (export and file-open)"
         )
         msr_row = QHBoxLayout()
         msr_row.addSpacing(12)
@@ -827,13 +832,13 @@ class PreferencesDialog(QDialog):
         if path:
             self._paraview_edit.setText(path)
 
-    def _browse_msr_temp(self) -> None:
-        start = self._msr_temp_edit.text().strip() or str(Path.home())
+    def _browse_temp_folder(self) -> None:
+        start = self._temp_folder_edit.text().strip() or str(Path.home())
         path = QFileDialog.getExistingDirectory(
-            self, "Choose temporary folder for parsed Zarr files", start,
+            self, "Choose temporary folder", start,
         )
         if path:
-            self._msr_temp_edit.setText(path)
+            self._temp_folder_edit.setText(path)
 
     def _on_compute_rimf_toggled(self, checked: bool) -> None:
         if checked:
@@ -920,9 +925,10 @@ class PreferencesDialog(QDialog):
         self._hist_trace_stdev.setChecked("trace stdev" in hist_values)
         self._hist_trace_range.setChecked("trace range" in hist_values)
 
+        self._temp_folder_edit.setText(f.get("temp_folder", ""))
+
         # Plugin
         self._paraview_edit.setText(f.get("paraview_path", ""))
-        self._msr_temp_edit.setText(g.get("msr_temp_folder", ""))
         self._msr_remember.setChecked(bool(g.get("msr_remember_last", True)))
 
         self._shortcut_table.setRowCount(0)
@@ -1008,9 +1014,10 @@ class PreferencesDialog(QDialog):
                 hist_values.append(name)
         p["histogram_values"] = hist_values or ["trace mean"]
 
+        f["temp_folder"] = self._temp_folder_edit.text().strip()
+
         # Plugin
         f["paraview_path"] = self._paraview_edit.text().strip()
-        g["msr_temp_folder"] = self._msr_temp_edit.text().strip()
         g["msr_remember_last"] = bool(self._msr_remember.isChecked())
 
         s.clear()
