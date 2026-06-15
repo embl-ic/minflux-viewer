@@ -98,6 +98,19 @@ def test_extract_keeps_only_zarr_subtree_with_slashes():
     assert set(store) == {".zgroup", "mfx/.zarray", "mfx/0"}     # 'sync\' dropped, '\'→'/'
 
 
+def test_extract_handles_forward_slash_keys_v3():
+    # Modern (container v3) files use '/' separators instead of '\'.
+    entries = [
+        ("sync/mfx/0", 0, b""),
+        ("zarr/.zgroup", 0, b'{"zarr_format":2}'),
+        ("zarr/mfx/.zarray", 0, b"x"),
+        ("zarr/mfx/0", 0, b"y"),
+        ("zarr/grd/mbm/points/0", 0, b"beads"),
+    ]
+    store = extract_zarr_store(_pack_mfxdta(entries, version=3))
+    assert set(store) == {".zgroup", "mfx/.zarray", "mfx/0", "grd/mbm/points/0"}
+
+
 def test_full_roundtrip_to_mfx_array(tmp_path):
     arr = _sample_mfx()
     zstore = _zarr_store_for(arr)

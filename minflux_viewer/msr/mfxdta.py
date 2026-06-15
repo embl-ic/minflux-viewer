@@ -32,8 +32,15 @@ Container byte layout (little-endian)::
             uint64 data_len
             bytes  data
 
-The archive contains two key subtrees: a zero-length ``sync\\…`` listing (an
-Imspector bookkeeping manifest, ignored) and the real ``zarr\\…`` store.
+The archive contains two key subtrees: a zero-length ``sync`` listing (an
+Imspector bookkeeping manifest, ignored) and the real ``zarr`` store. The key
+separator is version-dependent — ``\\`` in container v2 (early files), ``/`` in
+v3 (modern files) — so keys are normalised before use.
+
+Both early files (where ``minflux_datasets()`` is empty) and modern files
+embed an MFXDTA stack; the decoded ``mfx`` matches specpy's dataset exactly.
+This module needs no specpy — given the stack bytes (e.g. from ``specpy`` or
+the pure-Python ``msr-reader``'s ``OBFFile.read_stack``) it decodes locally.
 
 This module only decodes the container and reconstructs the zarr store; the
 decoded ``mfx`` array is consumed by the existing
@@ -50,8 +57,6 @@ import numpy as np
 
 #: Magic at the start of the OBF stack payload.
 MFXDTA_MAGIC = b"MFXDTA"
-#: Backslash-prefixed subtree that holds the real zarr store.
-_ZARR_PREFIX = "zarr\\"
 #: ``source_version`` label written onto datasets loaded from this format.
 SOURCE_FORMAT = "obf / mfxdta"
 
@@ -152,17 +157,18 @@ def parse_mfxdta_entries(blob: bytes) -> dict[str, bytes]:
 def extract_zarr_store(blob: bytes) -> dict[str, bytes]:
     """Return the embedded zarr store as ``{key: bytes}`` with ``/`` keys.
 
-    Only the real ``zarr\\…`` subtree is kept; the ``sync\\…`` manifest is
-    dropped. Backslash separators are converted to ``/`` so the result is a
-    standard zarr v2 key/value store.
+    Only the real ``zarr`` subtree is kept; the ``sync`` manifest is dropped.
+    The key separator differs by container version — ``\\`` in v2 (early
+    files), ``/`` in v3 (modern files) — so keys are normalised to ``/`` and
+    the result is a standard zarr v2 key/value store either way.
     """
     entries = parse_mfxdta_entries(blob)
-    store = {
-        key[len(_ZARR_PREFIX):].replace("\\", "/"): val
-        for key, val in entries.items()
-        if key.startswith(_ZARR_PREFIX)
-    }
-    if not any(k == "mfx/.zarray" or k.startswith("mfx/") for k in store):
+    store: dict[str, bytes] = {}
+    for key, val in entries.items():
+        norm = key.replace("\\", "/")
+        if norm.startswith("zarr/"):
+            store[norm[len("zarr/"):]] = val
+    if not any(k.startswith("mfx/") for k in store):
         raise ValueError("MFXDTA: no 'mfx' array found in embedded zarr store")
     return store
 
