@@ -793,7 +793,7 @@ class TestPlugins:
         _app = QApplication.instance() or QApplication(sys.argv)
 
         from minflux_viewer.core.app_state import AppState
-        from minflux_viewer.plugins.msr_reader.dialog import _StateLogAdapter
+        from minflux_viewer.plugins.msr_reader.msr_reader_dialog import _StateLogAdapter
 
         state = AppState()
         received = []
@@ -1017,11 +1017,11 @@ class TestPreferencesDialog:
         state.prefs["plot"]["rimf_value"] = 2.5
         dlg = PreferencesDialog(state)
 
-        # Switch to Data tab and reset — only Data values should reset
-        dlg._tabs.setCurrentIndex(1)   # Data
+        # Switch to the Data page and reset — only Data values should reset
+        dlg._page_list.setCurrentRow(1)   # File=0, Data=1
         dlg._reset_current_tab()
         assert dlg._draft["data"]["min_z_range_nm"] == DEFAULT_PREFS["data"]["min_z_range_nm"]
-        assert dlg._draft["plot"]["rimf_value"] == 2.5   # untouched
+        assert dlg._draft["plot"]["rimf_value"] == 2.5   # untouched (plot page)
 
 
 # ---------------------------------------------------------------------------

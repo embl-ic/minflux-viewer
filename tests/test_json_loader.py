@@ -43,15 +43,20 @@ def test_abberior_minflux_json_records_load(tmp_path):
 
     ds = load_json(path)
 
-    assert ds.prop.num_loc == 2
+    # The two valid records (tid=7, itr 0->1) are two iterations of ONE
+    # localization; the loader materializes the last valid iteration (itr=1)
+    # and drops the invalid record (tid=8). So one localization in one trace.
+    assert ds.prop.num_loc == 1
     assert ds.prop.num_traces == 1
+    assert ds.metadata.get("raw_num_loc") == 3      # 3 raw records read
+    assert ds.metadata.get("valid_num_loc") == 1
     assert "loc_x" in ds.attr
     assert "efo" in ds.attr
     assert "dcr" in ds.attr
     assert "dcr_1" in ds.attr
-    np.testing.assert_allclose(ds.loc_nm[:, :2], [[1.0, 2.0], [2.0, 3.0]])
-    np.testing.assert_array_equal(ds.attr["tid"], [7, 7])
-    np.testing.assert_allclose(ds.attr["dcr"], [0.4, 0.45])
+    np.testing.assert_allclose(ds.loc_nm[:, :2], [[2.0, 3.0]])   # last iteration
+    np.testing.assert_array_equal(ds.attr["tid"], [7])
+    np.testing.assert_allclose(ds.attr["dcr"], [0.45])
 
 
 def test_json_filter_discriminator_rejects_minflux_records():

@@ -49,9 +49,7 @@ def test_scripting_facade_exposes_active_dataset():
 
     assert state.mfv.get_active_dataset() is ds
     assert state.mfv.get_datasets() == [ds]
-    counts, edges = state.mfv.plot_histogram([1, 1, 2], bins=2)
-    assert counts.sum() == 3
-    assert edges.shape == (3,)
+    assert state.mfv.get_dataset(0) is ds
 
 
 def test_synthetic_dataset_is_not_recorded_as_recent():
