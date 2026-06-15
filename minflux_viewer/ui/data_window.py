@@ -296,14 +296,20 @@ def _version_text(ds: MinfluxDataset) -> str:
     from ..core.dataset_kind import is_minflux
     if not is_minflux(ds):
         return "Non-MINFLUX data"
+    # Data version is the structural format (m2410/m2205/legacy), detected from
+    # the mfx structure — independent of how the file was read.
     version = str(ds.metadata.get("source_version", "")).lower()
     if version in {"m2410", "m2205", "legacy"}:
-        return version
-    if version == "obf / mfxdta":
-        return "obf / mfxdta"
-    if version in {"csv", "spreadsheet", "imported", "plain_array", "json"}:
-        return "MINFLUX (imported)"
-    return "unidentified"
+        base = version
+    elif version in {"csv", "spreadsheet", "imported", "plain_array", "json"}:
+        base = "MINFLUX (imported)"
+    else:
+        base = "unidentified"
+    # The obf/mfxdta container (.msr embedded zarr) is the transport, orthogonal
+    # to the data version — show it alongside.
+    if str(ds.metadata.get("source_format", "")).lower() == "obf / mfxdta":
+        return f"{base} (obf / mfxdta)"
+    return base
 
 
 def _is_transformed(ds: MinfluxDataset) -> bool:
