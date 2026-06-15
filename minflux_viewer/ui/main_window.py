@@ -66,16 +66,7 @@ _SUPPORTED_EXTS: tuple[str, ...] = (
     ".tif", ".tiff", ".json",
 )
 
-#: File extension → canonical loader format.
-_EXT_TO_FMT: dict[str, str] = {
-    ".mat": "mat", ".npy": "npy",
-    ".csv": "spreadsheet", ".tsv": "spreadsheet", ".txt": "spreadsheet",
-    ".xlsx": "spreadsheet", ".xlsm": "spreadsheet",
-    ".msr": "msr", ".tif": "tiff", ".tiff": "tiff", ".json": "json",
-}
-#: Content-sniff result → canonical loader format (xlsx/delimited both → spreadsheet).
-_SNIFF_TO_FMT: dict[str, str] = {"xlsx": "spreadsheet", "delimited": "spreadsheet"}
-#: Canonical format → MainWindow loader method name.
+#: Canonical loader format (see core.format_sniff.resolve_format) → method name.
 _FMT_LOADERS: dict[str, str] = {
     "mat": "_load_mat", "npy": "_load_npy", "spreadsheet": "_load_spreadsheet",
     "msr": "_open_msr_dialog", "tiff": "_load_tiff", "json": "_load_json",
@@ -865,31 +856,12 @@ class MainWindow(QMainWindow):
         p   = Path(path)
         ext = p.suffix.lower()
 
-        from ..core.format_sniff import MAGIC_FORMATS, sniff_format
-        ext_fmt = _EXT_TO_FMT.get(ext)
-        raw = sniff_format(path)
-        sniffed = _SNIFF_TO_FMT.get(raw, raw)
+        from ..core.format_sniff import resolve_format
+        fmt, note = resolve_format(path)
+        if note:
+            self._state.log(f"'{p.name}': {note}.", "WARN")
 
-        # A binary magic number that disagrees with the extension wins (catches
-        # mislabelled files, e.g. a .json that is really a .npy). A known
-        # extension is otherwise trusted; an unknown extension falls back to the
-        # sniffed content (incl. text json/delimited).
-        if raw in MAGIC_FORMATS and sniffed != ext_fmt:
-            fmt = sniffed
-            self._state.log(
-                f"'{p.name}': extension '{ext or '(none)'}' but the content is "
-                f"{raw} — loading as {fmt}.", "WARN")
-        elif ext_fmt is not None:
-            fmt = ext_fmt
-        elif sniffed is not None:
-            fmt = sniffed
-            self._state.log(
-                f"'{p.name}': no usable extension — content looks like {raw}, "
-                f"loading as {fmt}.", "INFO")
-        else:
-            fmt = None
-
-        loader = self._FMT_LOADERS.get(fmt) if fmt else None
+        loader = _FMT_LOADERS.get(fmt) if fmt else None
         if loader is None:
             msg = (
                 f"Unsupported file type: '{p.name}'  "

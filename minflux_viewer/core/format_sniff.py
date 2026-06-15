@@ -24,6 +24,16 @@ from pathlib import Path
 #: Formats identified by an unambiguous binary magic number.
 MAGIC_FORMATS = frozenset({"npy", "mat", "xlsx", "tiff"})
 
+#: File extension → canonical loader format.
+EXT_TO_FMT: dict[str, str] = {
+    ".mat": "mat", ".npy": "npy",
+    ".csv": "spreadsheet", ".tsv": "spreadsheet", ".txt": "spreadsheet",
+    ".xlsx": "spreadsheet", ".xlsm": "spreadsheet",
+    ".msr": "msr", ".tif": "tiff", ".tiff": "tiff", ".json": "json",
+}
+#: Content-sniff result → canonical loader format (xlsx/delimited → spreadsheet).
+_SNIFF_TO_FMT: dict[str, str] = {"xlsx": "spreadsheet", "delimited": "spreadsheet"}
+
 
 def _looks_text(head: bytes) -> str | None:
     """Decode a header as UTF-8 text if it is plausibly text (few control bytes)."""
@@ -74,3 +84,28 @@ def sniff_format(path: str | Path) -> str | None:
     if first_line and any(d in first_line for d in (",", "\t", ";")):
         return "delimited"
     return None
+
+
+def resolve_format(path: str | Path) -> tuple[str | None, str]:
+    """Decide the canonical loader format for *path*, returning ``(fmt, note)``.
+
+    A binary magic number that disagrees with the extension wins (mislabelled
+    files, e.g. a ``.json`` that is really a ``.npy``); a known extension is
+    otherwise trusted; an unknown/missing extension falls back to the sniffed
+    content. ``note`` is a human-readable explanation when the extension was
+    overridden or absent, else ``""``. ``fmt`` is ``None`` when unidentifiable.
+    """
+    ext = Path(path).suffix.lower()
+    ext_fmt = EXT_TO_FMT.get(ext)
+    raw = sniff_format(path)
+    sniffed = _SNIFF_TO_FMT.get(raw, raw)
+
+    if raw in MAGIC_FORMATS and sniffed != ext_fmt:
+        return sniffed, (f"extension '{ext or '(none)'}' but the content is "
+                         f"{raw} — loading as {sniffed}")
+    if ext_fmt is not None:
+        return ext_fmt, ""
+    if sniffed is not None:
+        return sniffed, (f"no usable extension — content looks like {raw}, "
+                         f"loading as {sniffed}")
+    return None, ""
