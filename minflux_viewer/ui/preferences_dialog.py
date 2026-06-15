@@ -131,20 +131,6 @@ _SHORTCUT_LABELS = {
 }
 
 
-def _msr_reader_status() -> tuple[str, bool]:
-    """Return ``(message, installed)`` describing the ``.msr`` reader backend."""
-    try:
-        import msr_reader
-        ver = str(getattr(msr_reader, "__version__", "") or "").strip()
-        return (f"msr-reader {ver} detected." if ver else "msr-reader detected."), True
-    except Exception:
-        return (
-            "msr-reader not installed — .msr import is unavailable. "
-            "Install with: pip install msr-reader",
-            False,
-        )
-
-
 class _NoWheelComboBox(QComboBox):
     """Combo box that ignores mouse-wheel scrolling.
 
@@ -637,14 +623,6 @@ class PreferencesDialog(QDialog):
 
         root.addSpacing(8)
         root.addWidget(self._section_label("MSR Reader plugin:"))
-
-        status_text, installed = _msr_reader_status()
-        status_lbl = QLabel(status_text)
-        status_lbl.setWordWrap(True)
-        status_lbl.setStyleSheet(
-            f"color: {'#2a8a4a' if installed else '#a66'}; font-size: 11px;"
-        )
-        root.addLayout(self._indent(status_lbl, px=12))
 
         self._msr_temp_edit, tmp_row = self._browse_row(
             self._browse_msr_temp, file_mode=False,
