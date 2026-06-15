@@ -824,15 +824,19 @@ class TestMainWindowCleanup:
         self._app = QApplication.instance() or QApplication(sys.argv)
 
     def test_close_terminates_tracked_paraview_process(self):
-        import subprocess, time
+        import subprocess, sys, time
         from minflux_viewer.core.app_state import AppState
         from minflux_viewer.ui.main_window import MainWindow
 
         state = AppState()
+        # Pin the pref — AppState loads persisted QSettings, so a prior run (or
+        # the sibling test) may have saved close_paraview_on_exit=False.
+        state.prefs.setdefault("file", {})["close_paraview_on_exit"] = True
         w = MainWindow(state)
 
-        # Fake a ParaView subprocess — a long `sleep` stands in.
-        proc = subprocess.Popen(["sleep", "30"])
+        # Fake a ParaView subprocess — a long-running Python sleep (no reliance
+        # on a `sleep` binary, which doesn't exist on a clean Windows host).
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         w._paraview_procs.append(proc)
         assert proc.poll() is None   # still running
 
@@ -843,7 +847,7 @@ class TestMainWindowCleanup:
         assert proc.returncode != 0    # non-zero because killed
 
     def test_close_paraview_on_exit_pref_disables_termination(self):
-        import subprocess, time
+        import subprocess, sys, time
         from minflux_viewer.core.app_state import AppState
         from minflux_viewer.ui.main_window import MainWindow
 
@@ -851,7 +855,7 @@ class TestMainWindowCleanup:
         state.prefs.setdefault("file", {})["close_paraview_on_exit"] = False
         w = MainWindow(state)
 
-        proc = subprocess.Popen(["sleep", "5"])
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         w._paraview_procs.append(proc)
         w.close()
         time.sleep(0.3)
