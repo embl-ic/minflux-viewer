@@ -2790,6 +2790,19 @@ class MsrReaderDialog(QWidget):
                     dataset.metadata["msr_dataset_name"] = key
                     dataset.metadata["overlay_id"] = render_group_id
                     dataset.metadata["overlay_index"] = overlay_index
+                    # Early embedded-zarr ".msr" files: tag the recognised format
+                    # so it reads as MINFLUX (not bare "legacy"/non-MINFLUX).
+                    src_fmt = ds.get("source_format")
+                    if src_fmt:
+                        dataset.metadata["source_version"] = src_fmt
+                        dataset.metadata["source_version_detail"] = (
+                            "OBF .msr with an embedded zarr MINFLUX store "
+                            "(MFXDTA container)"
+                        )
+                        dataset.metadata["is_minflux"] = True
+                        dataset.metadata["has_real_tid"] = True
+                        if ds.get("mfxdta_version") is not None:
+                            dataset.metadata["mfxdta_version"] = ds.get("mfxdta_version")
                     if key in MFSTATE.mbm_map:
                         dataset.mbm = AttributeComponent({"points": MFSTATE.mbm_map[key]})
                         dataset.metadata["mbm_points"] = MFSTATE.mbm_map[key]

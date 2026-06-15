@@ -299,6 +299,8 @@ def _version_text(ds: MinfluxDataset) -> str:
     version = str(ds.metadata.get("source_version", "")).lower()
     if version in {"m2410", "m2205", "legacy"}:
         return version
+    if version == "obf / mfxdta":
+        return "obf / mfxdta"
     if version in {"csv", "spreadsheet", "imported", "plain_array", "json"}:
         return "MINFLUX (imported)"
     return "unidentified"

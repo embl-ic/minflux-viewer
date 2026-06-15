@@ -223,6 +223,14 @@ class GeneralMSRParser:
                 )
             return {"mode": "modern", "msr": str(msr_file), "datasets": datasets}
 
+        # Early "obf / mfxdta" files: no minflux_datasets(), but the MINFLUX data
+        # is embedded as a uint8 MFXDTA stack wrapping a zarr store. Unpack it to
+        # disk so the rest of the modern pipeline (tree, mfx_map, "Open in MINFLUX
+        # viewer") works unchanged.
+        mfxdta_result = self._parse_mfxdta(sf, msr_file, out_root, collect_zarr_fields, log)
+        if mfxdta_result is not None:
+            return mfxdta_result
+
         log("[parse] legacy/OBF-style file (no minflux_datasets)")
         try:
             meta = sf.metadata()
@@ -237,6 +245,70 @@ class GeneralMSRParser:
             "msr": str(msr_file),
             "metadata": meta,
             "legacy_series_tree": legacy_series_tree,
+        }
+
+    def _parse_mfxdta(self, sf, msr_file, out_root, collect_zarr_fields, log):
+        """Decode any embedded ``obf / mfxdta`` MINFLUX stacks (early format).
+
+        Returns a ``mode="modern"`` result dict (so the existing UI/open path is
+        reused) or ``None`` when the file has no MFXDTA stack. MBM/bead data is
+        intentionally skipped for this format.
+        """
+        from .mfxdta import (
+            SOURCE_FORMAT,
+            container_version,
+            extract_zarr_store,
+            find_mfxdta_stacks,
+            unpack_zarr_store_to_dir,
+        )
+
+        stacks = find_mfxdta_stacks(sf)
+        if not stacks:
+            return None
+
+        log(f"[parse] {SOURCE_FORMAT}: {len(stacks)} embedded MINFLUX dataset(s)")
+        datasets = []
+        for stack_idx, desc, blob in stacks:
+            key = str(desc)
+            zroot = out_root / slug(key) / "zarr"
+            try:
+                store = extract_zarr_store(blob)
+                unpack_zarr_store_to_dir(store, zroot)
+            except Exception as e:
+                log(f"  [warn] stack {stack_idx}: failed to unpack MFXDTA store: {e}")
+                continue
+            fields = collect_zarr_fields(str(zroot)) if zroot.is_dir() else []
+            try:
+                arch = zarr.open(str(zroot), mode="r")
+                if "mfx" in arch:
+                    arr = arch["mfx"][:]
+                    set_mfx_for(key, arr)
+                    log(f"    [mfx] loaded key='{key}' shape={arr.shape} dtype={arr.dtype}")
+                else:
+                    log(f"  [warn] stack {stack_idx}: no 'mfx' array after unpack")
+                    continue
+            except Exception as e:
+                log(f"    [warn] stack {stack_idx}: mfx load failed: {e}")
+                continue
+            datasets.append(
+                {
+                    "did": f"mfxdta:{stack_idx}",
+                    "display_name": desc,
+                    "zroot": str(zroot),
+                    "fields": fields,
+                    "source_format": SOURCE_FORMAT,
+                    "mfxdta_version": container_version(blob),
+                }
+            )
+
+        if not datasets:
+            log(f"[parse] {SOURCE_FORMAT} detected but nothing could be unpacked")
+            return None
+        return {
+            "mode": "modern",
+            "msr": str(msr_file),
+            "datasets": datasets,
+            "source_format": SOURCE_FORMAT,
         }
 
 
