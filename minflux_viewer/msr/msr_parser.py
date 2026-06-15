@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import numpy as np
 import zarr
@@ -10,6 +10,18 @@ from .utils import slug
 
 # specpy is Windows-only — imported lazily so this module loads everywhere.
 from .io import _ensure_specpy
+
+
+def _try_import_specpy():
+    """Return the specpy module, or ``None`` when it is unavailable.
+
+    specpy is the preferred (vendor reference) reader but is Windows-only; when
+    it is missing we fall back to the pure-Python ``msr-reader``.
+    """
+    try:
+        return _ensure_specpy()
+    except Exception:
+        return None
 
 
 def _logical_shape(n_rows: int, subshape: tuple) -> str:
@@ -96,70 +108,46 @@ class ModernMSRParser:
 
 
 class LegacyMSRParser:
-    @staticmethod
-    def _series_name_from_xml(xml_text: str) -> Optional[str]:
-        try:
-            import xml.etree.ElementTree as ET
+    """Image-series tree for OBF/legacy ``.msr`` files (no MINFLUX data).
 
-            root = ET.fromstring(xml_text)
-            for el in root.iter():
-                tag = el.tag.rsplit("}", 1)[-1].lower()
-                if tag == "name" and el.text:
-                    return el.text.strip()
-        except Exception:
-            pass
-        return None
+    Names, sizes and dtypes come straight from ``msr-reader``'s OBF stack
+    headers, so no hand-written XML/OME parsing is needed.
+    """
 
     @staticmethod
-    def _dtypes_from_metadata(meta) -> list[str]:
-        dtypes: list[str] = []
+    def _dtype_name(dtype_flags: int) -> str:
         try:
-            if not isinstance(meta, dict):
-                return dtypes
-            ome_list = meta.get("OME")
-            if not (isinstance(ome_list, list) and ome_list):
-                return dtypes
-            images = ((ome_list[0] or {}).get("") or {}).get("Image") or []
-            for img in images:
-                inner = img.get("") if isinstance(img, dict) else {}
-                pixels_list = inner.get("Pixels") or []
-                pxd = (pixels_list[0].get("") if pixels_list else {}) if isinstance(pixels_list[0], dict) else {}
-                dtypes.append(str(pxd.get("Type", "")))
-        except Exception:
-            pass
-        return dtypes
+            from msr_reader.obffile import _parse_dtype
 
-    def build_series_tree_entries(self, msr_file: str, meta) -> list[dict]:
+            return np.dtype(_parse_dtype(int(dtype_flags))[0]).name
+        except Exception:
+            return ""
+
+    def build_series_tree_entries(self, msr_file: str, meta=None) -> list[dict]:
         entries: list[dict] = []
-        dtype_by_idx = self._dtypes_from_metadata(meta)
         try:
             from msr_reader import OBFFile
         except Exception:
             return entries
 
         with OBFFile(msr_file) as obf:
-            shapes = getattr(obf, "shapes", [])
-            for i, sh in enumerate(shapes):
-                try:
-                    xml = obf.get_imspector_xml_metadata(i)
-                except Exception:
-                    xml = ""
-                xml_name = self._series_name_from_xml(xml)
-                shape_name = getattr(sh, "name", f"Series_{i+1}")
-                disp = (xml_name or shape_name or f"Series {i+1}").replace("_", " ")
-                sizes = getattr(sh, "sizes", None)
-                if isinstance(sizes, (list, tuple)) and len(sizes) >= 2:
-                    shape_str = f"{sizes[0]} x {sizes[1]}"
-                elif isinstance(sizes, (list, tuple)) and len(sizes) == 1:
-                    shape_str = f"{sizes[0]} x 1"
-                else:
-                    shape_str = str(sizes) if sizes is not None else ""
+            for i in range(obf.num_stacks):
+                header = obf.stack_headers[i]
+                sh = obf.shapes[i]
+                name = (
+                    getattr(header, "description", "")
+                    or getattr(header, "name", "")
+                    or getattr(sh, "name", "")
+                    or f"Series {i + 1}"
+                )
+                sizes = list(getattr(sh, "sizes", []) or [])
+                shape_str = " x ".join(str(s) for s in sizes) if sizes else ""
                 entries.append(
                     {
                         "index": i,
-                        "display_name": disp,
+                        "display_name": str(name).replace("_", " "),
                         "shape_str": shape_str,
-                        "dtype": dtype_by_idx[i] if i < len(dtype_by_idx) else "",
+                        "dtype": self._dtype_name(getattr(header, "dtype", 0)),
                     }
                 )
         return entries
@@ -177,7 +165,12 @@ class GeneralMSRParser:
         msr_path = Path(msr_file)
         out_root = Path(tmp_dir) / f"msr_{msr_path.stem}"
         out_root.mkdir(parents=True, exist_ok=True)
-        specpy = _ensure_specpy()
+
+        specpy = _try_import_specpy()
+        if specpy is None:
+            log("[parse] specpy unavailable — using pure-Python msr-reader")
+            return self._parse_with_msr_reader(msr_file, out_root, collect_zarr_fields, log)
+
         sf = specpy.File(str(msr_file), specpy.File.Read)
 
         try:
@@ -247,68 +240,103 @@ class GeneralMSRParser:
             "legacy_series_tree": legacy_series_tree,
         }
 
-    def _parse_mfxdta(self, sf, msr_file, out_root, collect_zarr_fields, log):
-        """Decode any embedded ``obf / mfxdta`` MINFLUX stacks (early format).
+    def _mfxdta_dataset_entry(self, stack_idx, desc, blob, out_root, collect_zarr_fields, log):
+        """Unpack one MFXDTA blob to a zarr store and return a modern-style
+        dataset dict (also registering its ``mfx`` array), or ``None`` on error.
 
-        Returns a ``mode="modern"`` result dict (so the existing UI/open path is
-        reused) or ``None`` when the file has no MFXDTA stack. MBM/bead data is
-        intentionally skipped for this format.
+        Shared by the specpy and msr-reader paths so the unpack/register logic
+        lives in exactly one place. MBM/bead data is intentionally skipped.
         """
         from .mfxdta import (
             SOURCE_FORMAT,
             container_version,
             extract_zarr_store,
-            find_mfxdta_stacks,
             unpack_zarr_store_to_dir,
         )
 
-        stacks = find_mfxdta_stacks(sf)
-        if not stacks:
+        key = str(desc)
+        zroot = out_root / slug(key) / "zarr"
+        try:
+            unpack_zarr_store_to_dir(extract_zarr_store(blob), zroot)
+        except Exception as e:
+            log(f"  [warn] stack {stack_idx}: failed to unpack MFXDTA store: {e}")
             return None
+        fields = collect_zarr_fields(str(zroot)) if zroot.is_dir() else []
+        try:
+            arch = zarr.open(str(zroot), mode="r")
+            if "mfx" not in arch:
+                log(f"  [warn] stack {stack_idx}: no 'mfx' array after unpack")
+                return None
+            arr = arch["mfx"][:]
+            set_mfx_for(key, arr)
+            log(f"    [mfx] loaded key='{key}' shape={arr.shape} dtype={arr.dtype}")
+        except Exception as e:
+            log(f"    [warn] stack {stack_idx}: mfx load failed: {e}")
+            return None
+        return {
+            "did": f"mfxdta:{stack_idx}",
+            "display_name": desc,
+            "zroot": str(zroot),
+            "fields": fields,
+            "source_format": SOURCE_FORMAT,
+            "mfxdta_version": container_version(blob),
+        }
 
-        log(f"[parse] {SOURCE_FORMAT}: {len(stacks)} embedded MINFLUX dataset(s)")
-        datasets = []
-        for stack_idx, desc, blob in stacks:
-            key = str(desc)
-            zroot = out_root / slug(key) / "zarr"
-            try:
-                store = extract_zarr_store(blob)
-                unpack_zarr_store_to_dir(store, zroot)
-            except Exception as e:
-                log(f"  [warn] stack {stack_idx}: failed to unpack MFXDTA store: {e}")
-                continue
-            fields = collect_zarr_fields(str(zroot)) if zroot.is_dir() else []
-            try:
-                arch = zarr.open(str(zroot), mode="r")
-                if "mfx" in arch:
-                    arr = arch["mfx"][:]
-                    set_mfx_for(key, arr)
-                    log(f"    [mfx] loaded key='{key}' shape={arr.shape} dtype={arr.dtype}")
-                else:
-                    log(f"  [warn] stack {stack_idx}: no 'mfx' array after unpack")
-                    continue
-            except Exception as e:
-                log(f"    [warn] stack {stack_idx}: mfx load failed: {e}")
-                continue
-            datasets.append(
-                {
-                    "did": f"mfxdta:{stack_idx}",
-                    "display_name": desc,
-                    "zroot": str(zroot),
-                    "fields": fields,
-                    "source_format": SOURCE_FORMAT,
-                    "mfxdta_version": container_version(blob),
-                }
-            )
+    def _mfxdta_result(self, stacks, msr_file, out_root, collect_zarr_fields, log):
+        """Build a ``mode="modern"`` result from MFXDTA ``(idx, desc, blob)``
+        stacks, or ``None`` when nothing could be unpacked."""
+        from .mfxdta import SOURCE_FORMAT
 
+        datasets = [
+            entry
+            for idx, desc, blob in stacks
+            if (entry := self._mfxdta_dataset_entry(
+                idx, desc, blob, out_root, collect_zarr_fields, log)) is not None
+        ]
         if not datasets:
-            log(f"[parse] {SOURCE_FORMAT} detected but nothing could be unpacked")
             return None
         return {
             "mode": "modern",
             "msr": str(msr_file),
             "datasets": datasets,
             "source_format": SOURCE_FORMAT,
+        }
+
+    def _parse_mfxdta(self, sf, msr_file, out_root, collect_zarr_fields, log):
+        """Decode embedded ``obf / mfxdta`` stacks via specpy (early format)."""
+        from .mfxdta import SOURCE_FORMAT, find_mfxdta_stacks
+
+        stacks = find_mfxdta_stacks(sf)
+        if not stacks:
+            return None
+        log(f"[parse] {SOURCE_FORMAT}: {len(stacks)} embedded MINFLUX dataset(s)")
+        result = self._mfxdta_result(stacks, msr_file, out_root, collect_zarr_fields, log)
+        if result is None:
+            log(f"[parse] {SOURCE_FORMAT} detected but nothing could be unpacked")
+        return result
+
+    def _parse_with_msr_reader(self, msr_file, out_root, collect_zarr_fields, log):
+        """Specpy-free parse via msr-reader: recover MINFLUX data from MFXDTA
+        stacks (early + modern), else build the legacy image-series tree."""
+        from .mfxdta import SOURCE_FORMAT, read_obf_mfxdta_stacks
+
+        try:
+            stacks = read_obf_mfxdta_stacks(msr_file)
+        except Exception as e:
+            log(f"[warn] msr-reader could not read stacks: {e}")
+            stacks = []
+        if stacks:
+            log(f"[parse] {SOURCE_FORMAT} (msr-reader): {len(stacks)} MINFLUX dataset(s)")
+            result = self._mfxdta_result(stacks, msr_file, out_root, collect_zarr_fields, log)
+            if result is not None:
+                return result
+
+        log("[parse] no MINFLUX data — building legacy image-series tree (msr-reader)")
+        return {
+            "mode": "legacy",
+            "msr": str(msr_file),
+            "metadata": None,
+            "legacy_series_tree": self.legacy.build_series_tree_entries(str(msr_file), meta=None),
         }
 
 

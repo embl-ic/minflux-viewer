@@ -219,3 +219,29 @@ def find_mfxdta_stacks(specpy_file) -> list[tuple[int, str, bytes]]:
             desc = f"minflux_{i}"
         out.append((i, str(desc), arr.tobytes()))
     return out
+
+
+def read_obf_mfxdta_stacks(msr_path) -> list[tuple[int, str, bytes]]:
+    """Specpy-free MFXDTA scan using the pure-Python ``msr-reader``.
+
+    Returns ``[(stack_index, description, blob_bytes), …]`` for every uint8
+    stack whose payload begins with ``MFXDTA``. The description comes from the
+    OBF stack header (``220601-132142_minflux`` in early files; empty in modern
+    multi-channel files, where a synthetic ``minflux_<idx>`` is used instead).
+    """
+    from msr_reader import OBFFile
+
+    out: list[tuple[int, str, bytes]] = []
+    with OBFFile(str(msr_path)) as f:
+        for i in range(f.num_stacks):
+            arr = np.ascontiguousarray(f.read_stack(i)).ravel()
+            if arr.dtype != np.uint8 or arr.size < 16:
+                continue
+            if arr[:6].tobytes() != MFXDTA_MAGIC:
+                continue
+            try:
+                desc = f.stack_headers[i].description or f"minflux_{i}"
+            except Exception:
+                desc = f"minflux_{i}"
+            out.append((i, str(desc), arr.tobytes()))
+    return out

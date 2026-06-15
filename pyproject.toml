@@ -31,22 +31,21 @@ zarr      = ">=2.17,<3.0"
 tifffile  = ">=2024.2"
 openpyxl  = ">=3.1"
 psutil    = ">=5.9"
+msr-reader = ">=0.2.1"   # pure-Python OBF/.msr reader → specpy-free .msr parsing
 
 # ---------------------------------------------------------------------------
-# Optional: specpy (Abberior's Windows-only SDK for reading .msr files)
-#
-# specpy is NOT listed here because it is a Windows-only binary wheel not
-# available on PyPI. It lives in:
+# .msr reading: msr-reader (above) is a pure-Python, cross-platform OBF reader
+# and is the default path on every platform. specpy (Abberior's Windows-only
+# SDK) is preferred when present (vendor reference reader, richer modern-file
+# metadata) but is NOT listed here — it is a Windows-only binary wheel not on
+# PyPI. It lives in:
 #   vendor/specpy-1.2.3-cp312-cp312-win_amd64.whl
-# and must be installed manually on Windows after `poetry install`:
+# and is installed manually on Windows after `poetry install`:
 #
 #   poetry run pip install vendor\specpy-1.2.3-cp312-cp312-win_amd64.whl
 #
-# All other MSR-related functionality (the Plugins → MSR Reader dialog,
-# the parse pipeline, the .vtp exporter) is available on every platform;
-# specpy is only needed for the actual .msr file parsing step.
-#
-# See INSTALL_MSR.md for full instructions and troubleshooting.
+# Without specpy, .msr files are read via msr-reader (early + modern MINFLUX
+# data is recovered from the embedded MFXDTA stacks). See INSTALL_MSR.md.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------

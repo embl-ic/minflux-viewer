@@ -615,6 +615,21 @@ python-dateutil = ">=2.7"
 dev = ["meson-python (>=0.13.1,<0.17.0)", "pybind11 (>=2.13.2,!=2.13.3)", "setuptools (>=64)", "setuptools_scm (>=7)"]
 
 [[package]]
+name = "msr-reader"
+version = "0.2.1"
+description = "Pure Python reader for MSR/OBF (Imspector) image data"
+optional = false
+python-versions = ">=3.7"
+groups = ["main"]
+files = [
+    {file = "msr_reader-0.2.1-py3-none-any.whl", hash = "sha256:f90165275888f83a55eed904bbb34da10f93d81b143231f7ffd5dc69eb240b31"},
+    {file = "msr_reader-0.2.1.tar.gz", hash = "sha256:ddebc49ac41beb5bbe4254077e17279fd5a0fddd156aacc6aed0598197a133cb"},
+]
+
+[package.dependencies]
+numpy = "*"
+
+[[package]]
 name = "mypy"
 version = "1.20.1"
 description = "Optional static typing for Python"
@@ -1431,4 +1446,4 @@ jupyter = ["ipytree (>=0.2.2)", "ipywidgets (>=8.0.0)", "notebook"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "95209e31555255d352ec9079748f5ef66b8a8d11c1f096064f266846bcd60634"
+content-hash = "e580592fbe54d89deabd65dba56d3753a347e21155f05e201c2629fe8d1caf4c"

@@ -19,9 +19,12 @@ Public API
 
 Platform note
 -------------
-The underlying ``specpy`` library is a **Windows-only** binary supplied by
-Abberior Instruments.  On other platforms ``parse_msr_general`` will raise
-an ``ImportError``; the UI layer handles this gracefully.
+Two readers back this package. ``specpy`` (Abberior's **Windows-only** SDK) is
+preferred when installed — it is the vendor reference and exposes the richest
+modern-file metadata. When specpy is unavailable (e.g. Linux/macOS), parsing
+falls back to the pure-Python, cross-platform ``msr-reader``: MINFLUX
+localizations are recovered from the embedded ``MFXDTA`` stacks (both early and
+modern files carry them), so ``parse_msr_general`` works on every platform.
 """
 
 from .io import parse_msr_general, pick_one_msr, collect_zarr_fields

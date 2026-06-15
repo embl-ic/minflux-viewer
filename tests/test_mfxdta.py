@@ -160,3 +160,26 @@ def test_real_msr_end_to_end():
     ds = load_from_mfx_array(mfx, name=desc, datetime_str="220601-132142")
     assert ds.prop.num_loc > 0
     assert ds.prop.num_dim == 3
+
+
+@pytest.mark.skipif(not _SAMPLE.exists(), reason="local sample .msr not present")
+def test_specpy_free_path_reads_early_file(tmp_path):
+    """The pure-Python msr-reader path recovers the same localizations."""
+    pytest.importorskip("msr_reader")
+    from minflux_viewer.msr.mfxdta import read_obf_mfxdta_stacks
+    from minflux_viewer.msr.msr_parser import GeneralMSRParser
+    from minflux_viewer.msr import state as MFSTATE
+
+    stacks = read_obf_mfxdta_stacks(_SAMPLE)
+    assert len(stacks) == 1
+    _idx, _desc, blob = stacks[0]
+    assert read_mfxdta_mfx(blob).shape[0] == 152434
+
+    # full specpy-free parse via the parser's msr-reader branch
+    res = GeneralMSRParser()._parse_with_msr_reader(
+        str(_SAMPLE), tmp_path, __import__(
+            "minflux_viewer.msr.io", fromlist=["collect_zarr_fields"]).collect_zarr_fields,
+        lambda *_: None)
+    assert res["mode"] == "modern"
+    assert res["source_format"] == "obf / mfxdta"
+    assert sum(v.shape[0] for v in MFSTATE.mfx_map.values()) == 152434
