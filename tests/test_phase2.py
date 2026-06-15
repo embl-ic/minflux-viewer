@@ -1023,6 +1023,22 @@ class TestPreferencesDialog:
         assert dlg._draft["data"]["min_z_range_nm"] == DEFAULT_PREFS["data"]["min_z_range_nm"]
         assert dlg._draft["plot"]["rimf_value"] == 2.5   # untouched (plot page)
 
+    def test_recent_files_dialog_remove_and_clear(self):
+        from minflux_viewer.ui.preferences_dialog import RecentFilesDialog
+
+        paths = [f"/data/f{i}.mat" for i in range(6)]
+        dlg = RecentFilesDialog(paths)
+        assert dlg.result_paths() == paths
+
+        # Ctrl/Shift-style multi-select then remove
+        for row in (0, 2, 4):
+            dlg._list.item(row).setSelected(True)
+        dlg._remove_selected()
+        assert dlg.result_paths() == ["/data/f1.mat", "/data/f3.mat", "/data/f5.mat"]
+
+        dlg._clear_all()
+        assert dlg.result_paths() == []
+
 
 # ---------------------------------------------------------------------------
 # Duplicate dataset

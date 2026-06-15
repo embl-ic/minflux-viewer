@@ -27,9 +27,11 @@ from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -140,6 +142,69 @@ class _NoWheelComboBox(QComboBox):
 
     def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
         event.ignore()
+
+
+class RecentFilesDialog(QDialog):
+    """Manage the remembered recent-files history.
+
+    Shows every remembered path (not just the few shown in the menu), supports
+    Ctrl/Shift multi-selection, and lets the user remove the selected entries or
+    clear all. The edited list is read back via :meth:`result_paths`.
+    """
+
+    def __init__(self, paths, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Recent files history")
+        self.resize(680, 440)
+
+        root = QVBoxLayout(self)
+        self._info = QLabel()
+        self._info.setWordWrap(True)
+        root.addWidget(self._info)
+
+        self._list = QListWidget()
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        for p in paths:
+            self._list.addItem(str(p))
+        root.addWidget(self._list, stretch=1)
+
+        actions = QHBoxLayout()
+        remove_btn = QPushButton("Remove selected")
+        remove_btn.clicked.connect(self._remove_selected)
+        clear_btn = QPushButton("Clear all")
+        clear_btn.clicked.connect(self._clear_all)
+        actions.addWidget(remove_btn)
+        actions.addWidget(clear_btn)
+        actions.addStretch(1)
+        root.addLayout(actions)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self._update_info()
+
+    def _remove_selected(self) -> None:
+        for item in self._list.selectedItems():
+            self._list.takeItem(self._list.row(item))
+        self._update_info()
+
+    def _clear_all(self) -> None:
+        self._list.clear()
+        self._update_info()
+
+    def _update_info(self) -> None:
+        self._info.setText(
+            f"<b>{self._list.count()}</b> remembered file(s). Select entries "
+            "(Ctrl/Shift for multiple) and <b>Remove selected</b>, or "
+            "<b>Clear all</b>. Changes apply when you click OK in Preferences."
+        )
+
+    def result_paths(self) -> list[str]:
+        return [self._list.item(i).text() for i in range(self._list.count())]
 
 
 class PreferencesDialog(QDialog):
@@ -284,6 +349,14 @@ class PreferencesDialog(QDialog):
         self._files_in_history.setRange(0, 100)
         self._files_in_history.setMinimumWidth(70)
         form.addRow("Files in history", self._files_in_history)
+
+        self._clear_history_btn = QPushButton("Clear file history…")
+        self._clear_history_btn.setToolTip(
+            "Review the full remembered recent-files list; remove selected "
+            "entries (Ctrl/Shift multi-select) or clear all."
+        )
+        self._clear_history_btn.clicked.connect(self._open_recent_files_manager)
+        form.addRow("Recent files", self._clear_history_btn)
 
         self._keep_last_folder = QCheckBox("current data folder as the default folder")
         form.addRow("", self._keep_last_folder)
@@ -839,6 +912,15 @@ class PreferencesDialog(QDialog):
         )
         if path:
             self._temp_folder_edit.setText(path)
+
+    def _open_recent_files_manager(self) -> None:
+        # Operate on the draft's full remembered list; the edit is committed with
+        # the rest of the prefs on Preferences OK (the main window then rebuilds
+        # the recent-files menu).
+        paths = list(self._draft.get("file", {}).get("recent_files", []) or [])
+        dlg = RecentFilesDialog(paths, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._draft.setdefault("file", {})["recent_files"] = dlg.result_paths()
 
     def _on_compute_rimf_toggled(self, checked: bool) -> None:
         if checked:

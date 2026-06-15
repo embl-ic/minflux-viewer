@@ -107,6 +107,17 @@ class _AiMenuStyle(QProxyStyle):
         return super().drawControl(element, option, painter, widget)
 
 
+class _ScrollableMenuStyle(QProxyStyle):
+    """Make an over-tall menu scroll (arrows at the top/bottom edges, which
+    auto-scroll on hover) instead of wrapping into multiple columns. Used for
+    the recent-files submenu so a long history stays navigable."""
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):  # noqa: N802 - Qt API
+        if hint == QStyle.StyleHint.SH_Menu_Scrollable:
+            return 1
+        return super().styleHint(hint, option, widget, returnData)
+
+
 class MainWindow(QMainWindow):
     """Top-level application window."""
 
@@ -176,6 +187,10 @@ class MainWindow(QMainWindow):
         # submenu empty — we expose it as self._recent_menu for compatibility
         # with _populate_recent_menu().
         self._recent_menu = self._ui.menuOpenRecent
+        # Scroll (don't wrap into columns) when the history is long.
+        # setStyle() doesn't take ownership, so keep a reference alive.
+        self._recent_menu_style = _ScrollableMenuStyle(self._recent_menu.style())
+        self._recent_menu.setStyle(self._recent_menu_style)
 
         # Wire actions to handlers (previously spread across _build_menu/_toolbar)
         self._connect_actions()
