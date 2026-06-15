@@ -1,6 +1,6 @@
 # minflux_msr/export.py
 from pathlib import Path
-from typing import Iterable, List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
 import numpy as np
 
@@ -181,8 +181,3 @@ def export_arrays(out_dir: str,
             "Use 'Fields included…' to export selected fields to CSV.")
 
     return written
-
-# ---------- optional: existing API (kept) ----------
-def export_selected_fields(zroot: str, did: str, paths: List[str], base: str, formats: List[str], log=print):
-    # (keep your previous implementation)
-    log("[todo] export_selected_fields: using your existing code path.")

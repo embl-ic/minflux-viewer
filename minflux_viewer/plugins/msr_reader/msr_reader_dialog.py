@@ -2099,6 +2099,11 @@ class MsrReaderDialog(QWidget):
                 mbm_sel = sel.get("mbm")
             mfx_sub = subset_struct(mfx_arr, mfx_sel)
             mbm_sub = subset_struct(mbm_arr, mbm_sel)
+            kept = (list(getattr(getattr(mfx_sub, "dtype", None), "names", []) or [])
+                    if mfx_sel is not None else "all")
+            self.log(f"[export] '{key}': mfx fields = "
+                     f"{', '.join(kept) if isinstance(kept, list) else kept}"
+                     + ("" if "zarr" not in formats else "  (.zarr writes the full store)"))
             if "mat" in formats:
                 save_mat(f"{key}_mfx", mfx_sub)
                 save_mat(f"{key}_mbm", mbm_sub)
