@@ -8,8 +8,10 @@ from .descriptions import describe_dtype, describe_path
 
 
 # -------- collect_zarr_fields --------
-def collect_zarr_fields(zroot: str) -> List[Dict[str, Any]]:
-    g = zarr.open(zroot, mode="r")
+def collect_zarr_fields(store) -> List[Dict[str, Any]]:
+    """Enumerate a zarr group's fields. *store* is anything ``zarr.open`` accepts
+    — a directory path or an in-memory ``{key: bytes}`` store."""
+    g = zarr.open(store, mode="r")
     out: List[Dict[str, Any]] = []
     def visitor(path, obj):
         if path == "":
@@ -41,8 +43,9 @@ def collect_zarr_fields(zroot: str) -> List[Dict[str, Any]]:
     out.sort(key=lambda d: d["path"])
     return out
 
-def read_zarr_attrs(zroot: str, path: str = "") -> dict:
-    arch = zarr.open(zroot, mode="r")
+def read_zarr_attrs(store, path: str = "") -> dict:
+    """Read a node's ``.zattrs``. *store* is a path or an in-memory zarr store."""
+    arch = zarr.open(store, mode="r")
     node = arch[path] if path else arch
     attrs = getattr(node, "attrs", None)
     if attrs is None:

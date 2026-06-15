@@ -1,11 +1,9 @@
-from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
 import zarr
 
 from .state import reset as reset_state, set_mfx_for, set_mbm_for
-from .utils import slug
 
 
 def _ome_metadata(msr_file: str) -> dict | None:
@@ -101,17 +99,20 @@ class GeneralMSRParser:
     def __init__(self):
         self.legacy = LegacyMSRParser()
 
-    def parse(self, msr_file: str, tmp_dir: str, log=print) -> Dict[str, Any]:
+    def parse(self, msr_file: str, tmp_dir=None, log=print) -> Dict[str, Any]:
         """Recover MINFLUX data from the embedded MFXDTA stacks (early single-
         channel + modern multi-channel). Files with no MINFLUX data fall back to
-        a legacy image-series tree."""
+        a legacy image-series tree.
+
+        Decoding is fully in-memory — each dataset's zarr store is kept as a
+        ``{key: bytes}`` dict, not written to disk (``tmp_dir`` is unused, kept
+        only for call-site compatibility). Writing a store to disk is now an
+        explicit ``.zarr`` export option, not a parse-time cache.
+        """
         from .io import collect_zarr_fields
         from .mfxdta import SOURCE_FORMAT, extract_did_label_map, read_obf_mfxdta_stacks
 
         reset_state()
-        msr_path = Path(msr_file)
-        out_root = Path(tmp_dir) / f"msr_{msr_path.stem}"
-        out_root.mkdir(parents=True, exist_ok=True)
 
         try:
             stacks = read_obf_mfxdta_stacks(msr_file)
@@ -126,7 +127,7 @@ class GeneralMSRParser:
                 entry
                 for idx, desc, blob in stacks
                 if (entry := self._mfxdta_dataset_entry(
-                    idx, desc, blob, out_root, collect_zarr_fields, label_map, log)) is not None
+                    idx, desc, blob, collect_zarr_fields, label_map, log)) is not None
             ]
             if datasets:
                 return {
@@ -135,7 +136,7 @@ class GeneralMSRParser:
                     "datasets": datasets,
                     "source_format": SOURCE_FORMAT,
                 }
-            log(f"[parse] {SOURCE_FORMAT} detected but nothing could be unpacked")
+            log(f"[parse] {SOURCE_FORMAT} detected but could not be decoded")
 
         log("[parse] no MINFLUX data — building legacy image-series tree")
         return {
@@ -145,32 +146,25 @@ class GeneralMSRParser:
             "legacy_series_tree": self.legacy.build_series_tree_entries(str(msr_file)),
         }
 
-    def _mfxdta_dataset_entry(
-        self, stack_idx, desc, blob, out_root, collect_zarr_fields, label_map, log
-    ):
-        """Unpack one MFXDTA blob to a zarr store, register its ``mfx`` (and any
-        ``grd/mbm/points`` beads), and return a modern-style dataset dict — or
-        ``None`` on error. Channel name = the file's did→label, else the stack
-        description, else a synthetic name."""
-        from .mfxdta import (
-            SOURCE_FORMAT,
-            container_version,
-            extract_zarr_store,
-            unpack_zarr_store_to_dir,
-        )
+    def _mfxdta_dataset_entry(self, stack_idx, desc, blob, collect_zarr_fields, label_map, log):
+        """Decode one MFXDTA blob to an in-memory zarr store, register its
+        ``mfx`` (and any ``grd/mbm/points`` beads), and return a modern-style
+        dataset dict — or ``None`` on error. ``zroot`` holds the in-memory store
+        (a ``{key: bytes}`` dict that ``zarr.open`` reads directly). Channel name
+        = the file's did→label, else the stack description, else a synthetic name.
+        """
+        from .mfxdta import SOURCE_FORMAT, container_version, extract_zarr_store
 
-        zroot = out_root / slug(str(desc) or f"minflux_{stack_idx}") / "zarr"
         try:
-            unpack_zarr_store_to_dir(extract_zarr_store(blob), zroot)
+            store = extract_zarr_store(blob)            # {key: bytes} — no disk
+            arch = zarr.open(store, mode="r")
         except Exception as e:
-            log(f"  [warn] stack {stack_idx}: failed to unpack MFXDTA store: {e}")
+            log(f"  [warn] stack {stack_idx}: failed to decode MFXDTA store: {e}")
             return None
-        fields = collect_zarr_fields(str(zroot)) if zroot.is_dir() else []
+        if "mfx" not in arch:
+            log(f"  [warn] stack {stack_idx}: no 'mfx' array in store")
+            return None
         try:
-            arch = zarr.open(str(zroot), mode="r")
-            if "mfx" not in arch:
-                log(f"  [warn] stack {stack_idx}: no 'mfx' array after unpack")
-                return None
             mfx_node = arch["mfx"]
             did = str(getattr(mfx_node, "attrs", {}).get("did", "") or "")
             name = label_map.get(did) or str(desc) or f"minflux_{stack_idx}"
@@ -188,8 +182,8 @@ class GeneralMSRParser:
         return {
             "did": did or f"mfxdta:{stack_idx}",
             "display_name": name,
-            "zroot": str(zroot),
-            "fields": fields,
+            "zroot": store,                             # in-memory zarr store
+            "fields": collect_zarr_fields(store),
             "source_format": SOURCE_FORMAT,
             "mfxdta_version": container_version(blob),
         }

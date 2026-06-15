@@ -1111,7 +1111,7 @@ class MsrReaderDialog(QWidget):
             "preview_all_rows": False,
             "mode_folder": False,
             "plot_new_window": True,
-            "formats": {"mat": True, "npy": False, "json": False, "csv": False},
+            "formats": {"mat": True, "npy": False, "json": False, "csv": False, "zarr": False},
             "field_selection": {},
         }
         try:
@@ -1159,6 +1159,7 @@ class MsrReaderDialog(QWidget):
                 "npy": bool(self.fmt_npy.isChecked()),
                 "json": bool(self.fmt_json.isChecked()),
                 "csv": bool(self.fmt_csv.isChecked()),
+                "zarr": bool(self.fmt_zarr.isChecked()),
             },
             "field_selection": clean_selection(self.field_selection),
         }
@@ -1259,15 +1260,22 @@ class MsrReaderDialog(QWidget):
         self.fmt_npy = QCheckBox("NumPy (.npy)")
         self.fmt_json = QCheckBox("JSON (.json)")
         self.fmt_csv = QCheckBox("(.csv)")
+        self.fmt_zarr = QCheckBox("Zarr (.zarr)")
+        self.fmt_zarr.setToolTip(
+            "Write the dataset's embedded zarr store to a .zarr directory "
+            "(the full MINFLUX container: mfx + beads)."
+        )
         formats = settings.get("formats") or {}
         self.fmt_mat.setChecked(bool(formats.get("mat", True)))
         self.fmt_npy.setChecked(bool(formats.get("npy", False)))
         self.fmt_json.setChecked(bool(formats.get("json", False)))
         self.fmt_csv.setChecked(bool(formats.get("csv", False)))
+        self.fmt_zarr.setChecked(bool(formats.get("zarr", False)))
         export_row.addWidget(self.fmt_mat)
         export_row.addWidget(self.fmt_npy)
         export_row.addWidget(self.fmt_json)
         export_row.addWidget(self.fmt_csv)
+        export_row.addWidget(self.fmt_zarr)
         export_row.addStretch(1)
         root.addLayout(export_row)
 
@@ -1986,8 +1994,24 @@ class MsrReaderDialog(QWidget):
         from ...msr import state as MFSTATE
         os.makedirs(out_dir, exist_ok=True)
 
+        # dataset display-name -> in-memory zarr store (for the .zarr export)
+        store_by_name = {
+            (ds.get("display_name") or ds.get("did") or "dataset"): ds.get("zroot")
+            for ds in (self.parsed.get("datasets") or [])
+        }
+
         def subset_struct(arr, names_sel):
             return self._subset_struct_fields(arr, names_sel)
+
+        def save_zarr(key: str):
+            from ...msr.mfxdta import unpack_zarr_store_to_dir
+            store = store_by_name.get(key)
+            if not store:
+                self.log(f"[zarr] skipping '{key}' (no embedded store).")
+                return None
+            path = Path(out_dir) / f"{key}.zarr"
+            unpack_zarr_store_to_dir(store, path)
+            self.log(f"[zarr] wrote {path}")
 
         def save_mat(fn_base: str, arr):
             if arr is None:
@@ -2087,6 +2111,8 @@ class MsrReaderDialog(QWidget):
             if "csv" in formats:
                 save_csv(f"{key}_mfx", mfx_sub)
                 save_csv(f"{key}_mbm", mbm_sub)
+            if "zarr" in formats:
+                save_zarr(key)
 
     def _find_msr_files(self, path_str: str):
         p = Path(path_str)
@@ -2654,6 +2680,8 @@ class MsrReaderDialog(QWidget):
             formats.append("json")
         if self.fmt_csv.isChecked():
             formats.append("csv")
+        if self.fmt_zarr.isChecked():
+            formats.append("zarr")
         if not formats:
             QMessageBox.critical(self, "No formats", "Pick at least one export format.")
             return

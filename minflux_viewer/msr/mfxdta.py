@@ -172,8 +172,10 @@ def extract_zarr_store(blob: bytes) -> dict[str, bytes]:
     return store
 
 
-def unpack_zarr_store_to_dir(store: dict[str, bytes], dest_dir) -> Path:
-    """Write a zarr key/value store to *dest_dir* as an on-disk DirectoryStore."""
+def unpack_zarr_store_to_dir(store, dest_dir) -> Path:
+    """Write an in-memory zarr key/value store to *dest_dir* as an on-disk
+    DirectoryStore. Used for the ``.zarr`` export option (parsing itself keeps
+    the store in memory). *store* is a ``{key: bytes}`` mapping."""
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
     for key, data in store.items():

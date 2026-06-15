@@ -162,3 +162,18 @@ def test_specpy_free_path_reads_early_file(tmp_path):
     assert res["mode"] == "modern"
     assert res["source_format"] == "obf / mfxdta"
     assert sum(v.shape[0] for v in MFSTATE.mfx_map.values()) == 152434
+
+    # parsing is in-memory: zroot is the store dict, nothing written to tmp_path
+    ds0 = res["datasets"][0]
+    assert isinstance(ds0["zroot"], dict)
+    assert not list(tmp_path.iterdir())            # no cache folder created
+
+    # the in-memory store drives the tree view and the .zarr export
+    import zarr
+    from minflux_viewer.msr.io import read_zarr_attrs
+    from minflux_viewer.msr.mfxdta import unpack_zarr_store_to_dir
+
+    assert zarr.open(ds0["zroot"], mode="r")["mfx"].shape[0] == 152434
+    assert "fld" in read_zarr_attrs(ds0["zroot"], "mfx")     # early-file mfx attrs
+    dest = unpack_zarr_store_to_dir(ds0["zroot"], tmp_path / "out.zarr")
+    assert zarr.open(str(dest), mode="r")["mfx"].shape[0] == 152434
