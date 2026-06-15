@@ -19,12 +19,10 @@ Public API
 
 Platform note
 -------------
-Two readers back this package. ``specpy`` (Abberior's **Windows-only** SDK) is
-preferred when installed — it is the vendor reference and exposes the richest
-modern-file metadata. When specpy is unavailable (e.g. Linux/macOS), parsing
-falls back to the pure-Python, cross-platform ``msr-reader``: MINFLUX
-localizations are recovered from the embedded ``MFXDTA`` stacks (both early and
-modern files carry them), so ``parse_msr_general`` works on every platform.
+Reading is fully cross-platform via the pure-Python ``msr-reader``; no Abberior
+``specpy`` SDK or Imspector install is required. MINFLUX localizations (early
+single-channel and modern multi-channel files alike) are recovered from the
+embedded ``MFXDTA`` stacks, so ``parse_msr_general`` works on every platform.
 """
 
 from .io import parse_msr_general, pick_one_msr, collect_zarr_fields

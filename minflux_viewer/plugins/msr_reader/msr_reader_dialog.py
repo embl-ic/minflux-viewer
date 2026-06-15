@@ -69,7 +69,7 @@ class _StateLogAdapter:
 
 
 def _json_compact(node):
-    """Readability transform for specpy's XML-derived metadata dicts.
+    """Readability transform for Imspector's XML-derived metadata dicts.
 
     Imspector OME metadata packs every XML element as a single-item list of
     dicts whose attributes are named keys and whose child content sits under
@@ -155,7 +155,7 @@ class JsonViewDialog(QDialog):
     """Browsable JSON / metadata viewer.
 
     Tree tab: key | value | type columns with a filter box, compact-view
-    toggle (unwraps specpy's XML packing), expand/collapse, and copy actions.
+    toggle (unwraps Imspector's XML packing), expand/collapse, and copy actions.
     Raw tab: the plain ``json.dumps`` text as before.
     """
 
@@ -2867,7 +2867,7 @@ class MsrReaderDialog(QWidget):
 
 def msr_available() -> bool:
     try:
-        import specpy  # noqa: F401
+        import msr_reader  # noqa: F401
         return True
     except Exception:
         return False
@@ -2875,17 +2875,10 @@ def msr_available() -> bool:
 
 def msr_unavailable_message() -> str:
     return (
-        "The Abberior <b>specpy</b> library is not installed.<br><br>"
-        "Opening <tt>.msr</tt> files requires specpy — a Windows-only binary "
-        "distributed by Abberior Instruments as part of Imspector.<br><br>"
-        "Find the matching wheel on your Imspector PC at:<br>"
-        "<tt>C:\\Imspector\\Versions\\&lt;ver&gt;\\python\\specpy\\</tt><br><br>"
-        "Then install it (use the subfolder that matches your Python and NumPy):<br><br>"
-        "<tt>poetry run pip install &lt;path-to-wheel&gt;.whl</tt>"
-        "<br><br>"
-        "Requires: <b>Windows 64-bit</b> with a wheel matching your "
-        "Python and NumPy versions.<br>"
-        "See <tt>INSTALL_MSR.md</tt> for full instructions and troubleshooting."
+        "The <b>msr-reader</b> library is not installed.<br><br>"
+        "Opening <tt>.msr</tt> files requires it. It is a pure-Python, "
+        "cross-platform dependency normally installed automatically:<br><br>"
+        "<tt>poetry install</tt>  (or)  <tt>pip install msr-reader</tt>"
     )
 
 
@@ -2896,7 +2889,7 @@ def open_msr(
 ) -> None:
     """Open the MSR reader dialog for *msr_path*."""
     if not msr_available():
-        QMessageBox.warning(parent, "specpy not available", msr_unavailable_message())
+        QMessageBox.warning(parent, "MSR reader not available", msr_unavailable_message())
         return
     dlg = MsrReaderDialog(state=state, msr_path=msr_path, parent=parent)
     # The dialog is an unowned top-level window (so it does not sit permanently

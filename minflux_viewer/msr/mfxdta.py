@@ -1,19 +1,18 @@
 """
 minflux_viewer.msr.mfxdta
 =========================
-Decoder for the **early Imspector ``.msr`` MINFLUX format** — internally named
+Decoder for the Imspector ``.msr`` MINFLUX storage format — internally named
 ``"obf / mfxdta"`` in this project.
 
-In these files ``specpy.File.minflux_datasets()`` returns nothing: the MINFLUX
-data is **not** exposed as a modern dataset. Instead it lives inside a regular
-1-D ``uint8`` OBF stack whose byte payload is a custom container with the magic
-``MFXDTA``. That container is a flat archive of a **zarr v2 DirectoryStore**
-(blosc/lz4-compressed chunks) holding the standard structured ``mfx`` array —
-identical to what the modern loader reads via ``zarr.open(...)["mfx"]``.
+In every ``.msr`` file the MINFLUX data lives inside a regular 1-D ``uint8`` OBF
+stack whose byte payload is a custom container with the magic ``MFXDTA``. That
+container is a flat archive of a **zarr v2 DirectoryStore** (blosc/lz4-compressed
+chunks) holding the standard structured ``mfx`` array. Early single-channel files
+carry one such stack; modern multi-channel files carry one per channel.
 
 Two layers, decoded here:
 
-    OBF stack (uint8, OMAS_BF_STACK — handled by specpy)
+    OBF stack (uint8, OMAS_BF_STACK — read by msr-reader)
       └─ MFXDTA container  (this module)
            └─ zarr v2 store (blosc/lz4 chunks)
                 └─ structured mfx array  → localizations
@@ -37,10 +36,8 @@ Imspector bookkeeping manifest, ignored) and the real ``zarr`` store. The key
 separator is version-dependent — ``\\`` in container v2 (early files), ``/`` in
 v3 (modern files) — so keys are normalised before use.
 
-Both early files (where ``minflux_datasets()`` is empty) and modern files
-embed an MFXDTA stack; the decoded ``mfx`` matches specpy's dataset exactly.
-This module needs no specpy — given the stack bytes (e.g. from ``specpy`` or
-the pure-Python ``msr-reader``'s ``OBFFile.read_stack``) it decodes locally.
+The decode is pure Python: the stack bytes come from the cross-platform
+``msr-reader`` (``OBFFile.read_stack``); no Abberior ``specpy`` SDK is needed.
 
 This module only decodes the container and reconstructs the zarr store; the
 decoded ``mfx`` array is consumed by the existing
@@ -50,6 +47,8 @@ channel alignment are intentionally **not** handled here.
 
 from __future__ import annotations
 
+import mmap
+import re
 import struct
 from pathlib import Path
 
@@ -192,32 +191,34 @@ def read_mfxdta_mfx(blob: bytes) -> np.ndarray:
     return zarr.open(zarr.storage.KVStore(store), mode="r")["mfx"][:]
 
 
-def find_mfxdta_stacks(specpy_file) -> list[tuple[int, str, bytes]]:
-    """Scan an open ``specpy.File`` for MFXDTA stacks.
+#: Matches the embedded ``{"did":"<uuid>","label":"<…>"}`` dataset descriptors.
+_DID_LABEL_RE = re.compile(
+    rb'"did"\s*:\s*"([0-9a-fA-F-]{36})"\s*,\s*"label"\s*:\s*"([^"]*)"'
+)
 
-    Returns ``[(stack_index, description, blob_bytes), …]`` for every stack
-    whose ``uint8`` payload begins with the ``MFXDTA`` magic.
+
+def extract_did_label_map(msr_path) -> dict[str, str]:
+    """Map each dataset ``did`` (UUID) → its human label.
+
+    Modern multi-channel ``.msr`` files embed ``{"did":…,"label":…}`` descriptors
+    (e.g. ``1_anti_ELYS_F2_Atto655_100pM``); each MFXDTA store records its ``did``
+    in ``mfx/.zattrs``, so the two can be joined to name channels without specpy.
+    Returns ``{}`` for early single-channel files (which carry no such labels).
     """
-    out: list[tuple[int, str, bytes]] = []
+    out: dict[str, str] = {}
     try:
-        n_stacks = int(specpy_file.number_of_stacks())
+        with open(msr_path, "rb") as fh:
+            mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
+            try:
+                for m in _DID_LABEL_RE.finditer(mm):
+                    out.setdefault(
+                        m.group(1).decode("ascii"),
+                        m.group(2).decode("utf-8", "replace"),
+                    )
+            finally:
+                mm.close()
     except Exception:
-        return out
-    for i in range(n_stacks):
-        try:
-            st = specpy_file.read(i)
-            arr = np.ascontiguousarray(st.data()).ravel()
-        except Exception:
-            continue
-        if arr.dtype != np.uint8 or arr.size < 16:
-            continue
-        if arr[:6].tobytes() != MFXDTA_MAGIC:
-            continue
-        try:
-            desc = st.description() or f"minflux_{i}"
-        except Exception:
-            desc = f"minflux_{i}"
-        out.append((i, str(desc), arr.tobytes()))
+        pass
     return out
 
 

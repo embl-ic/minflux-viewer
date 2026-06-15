@@ -49,8 +49,9 @@ hidden_imports = [
     # openpyxl
     "openpyxl",
     "openpyxl.cell._writer",
-    # specpy (Abberior Windows SDK — present in this venv)
-    "specpy",
+    # msr-reader (pure-Python OBF/.msr reader)
+    "msr_reader",
+    "msr_reader.obffile",
     # roifile
     "roifile",
     # psutil Windows backend

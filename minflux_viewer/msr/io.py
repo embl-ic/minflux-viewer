@@ -6,32 +6,8 @@ import zarr
 
 from .descriptions import describe_dtype, describe_path
 
-# NOTE: ``specpy`` is an Abberior-supplied Windows-only binary wheel.
-# We import it lazily so this module loads on every platform.
-# The plugin UI catches ImportError and shows installation instructions.
-specpy = None  # populated on first call to _ensure_specpy()
 
-
-def _ensure_specpy():
-    """Import specpy on demand; raise a user-readable error on failure."""
-    global specpy
-    if specpy is None:
-        try:
-            import specpy as _specpy
-        except ImportError as exc:
-            raise ImportError(
-                "The 'specpy' library is required to parse .msr files.\n"
-                "specpy is not on PyPI — obtain the matching wheel from your\n"
-                "Imspector installation:\n"
-                "  C:\\Imspector\\Versions\\<ver>\\python\\specpy\\\n"
-                "Then install it:\n"
-                "  poetry run pip install <path-to-wheel>.whl\n"
-                "See INSTALL_MSR.md for full instructions."
-            ) from exc
-        specpy = _specpy
-    return specpy
-
-# -------- existing: collect_zarr_fields (unchanged) --------
+# -------- collect_zarr_fields --------
 def collect_zarr_fields(zroot: str) -> List[Dict[str, Any]]:
     g = zarr.open(zroot, mode="r")
     out: List[Dict[str, Any]] = []

@@ -11,7 +11,7 @@ Python/Qt port of the original MATLAB application developed at the
 ## Features (v0.1 — Phase 1 + 2 + MSR import)
 
 - Load Abberior Imspector `.mat` files (formats **m2205** and **m2410**)
-- **Load `.msr` raw data files** directly (Windows, requires specpy) via File → Open .msr or drag-and-drop
+- **Load `.msr` raw data files** directly (cross-platform, no specpy/Imspector needed) via File → Open or drag-and-drop
 - Automatic parsing of both nested and flat iteration structures
 - Per-dataset floating info windows — click to activate (Fiji-style)
 - Multi-dataset management via `AppState` Qt signal bus
@@ -39,6 +39,7 @@ Python/Qt port of the original MATLAB application developed at the
 | scipy        | ≥ 1.11   |
 | pyqtgraph    | ≥ 0.13   |
 | h5py         | ≥ 3.9    |
+| msr-reader   | ≥ 0.2.1  |
 
 ---
 
@@ -65,7 +66,7 @@ poetry run minflux-viewer
 ### Using pip (without Poetry)
 
 ```bash
-pip install PyQt6 numpy scipy pyqtgraph h5py
+pip install PyQt6 numpy scipy pyqtgraph h5py msr-reader
 python -m minflux_viewer
 ```
 
