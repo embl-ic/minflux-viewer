@@ -112,6 +112,13 @@ def build_export_table(
         if ftr is not None:
             table["ftr"] = ftr
 
+    # A 2-D dataset's z is processed to flat 0, but mfx_get("znm") returns the
+    # raw (un-flattened) mfx_raw z — small measurement noise. Export the
+    # processed flat z so the saved data keeps its 2-D dimensionality on
+    # re-open (otherwise the noise reads back as 3-D).
+    if "znm" in table and int(getattr(ds.prop, "num_dim", 3) or 3) < 3:
+        table["znm"] = np.zeros_like(table["znm"])
+
     return table
 
 

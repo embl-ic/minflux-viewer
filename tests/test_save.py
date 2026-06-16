@@ -82,6 +82,30 @@ def test_metadata_can_be_skipped(tmp_path):
     assert len(written) == 1 and written[0].suffix == ".csv"
 
 
+def test_2d_dataset_exports_flat_z(tmp_path):
+    """A 2-D (threshold-flattened) dataset must export z=0 and re-open as 2-D —
+    not leak the raw mfx_raw z noise, which used to read back as 3-D."""
+    from minflux_viewer.core.loader import load_from_mfx_array, load_dataset
+
+    n = 200
+    dt = np.dtype([("vld", "?"), ("tid", "<i4"), ("itr", "<i4"), ("loc", "<f8", (3,))])
+    arr = np.zeros(n, dtype=dt)
+    arr["vld"] = True
+    arr["tid"] = np.repeat(np.arange(n // 4), 4)
+    arr["loc"][:, 0] = np.linspace(0, 1e-6, n)
+    arr["loc"][:, 1] = np.linspace(0, 1e-6, n)
+    arr["loc"][:, 2] = np.random.default_rng(0).uniform(0, 2e-9, n)   # 2 nm noise
+    prefs = {"data": {"enforce_min_z_range": True, "min_z_range_nm": 5.0}}
+
+    ds = load_from_mfx_array(arr, name="t.mat", prefs=prefs)
+    assert ds.prop.num_dim == 2
+    assert np.all(build_export_table(ds)["znm"] == 0)
+
+    written = save_dataset(ds, tmp_path / "e", fmt="mat", include_metadata=False)
+    # re-opens as 2-D even without the threshold preference
+    assert load_dataset(written[0], prefs=None).prop.num_dim == 2
+
+
 @pytest.mark.parametrize("fmt", ["mat", "npy", "json", "csv"])
 def test_export_reimport_roundtrip(tmp_path, fmt):
     """A saved dataset re-opens with correct coordinates (regression: a flat
