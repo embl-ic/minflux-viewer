@@ -80,3 +80,28 @@ def test_metadata_can_be_skipped(tmp_path):
     ds = _dataset()
     written = save_dataset(ds, tmp_path / "out", fmt="csv", include_metadata=False)
     assert len(written) == 1 and written[0].suffix == ".csv"
+
+
+@pytest.mark.parametrize("fmt", ["mat", "npy", "json", "csv"])
+def test_export_reimport_roundtrip(tmp_path, fmt):
+    """A saved dataset re-opens with correct coordinates (regression: a flat
+    export must NOT be misread by the mfx parser)."""
+    from minflux_viewer.core import loader as L
+
+    ds = _dataset(40)
+    written = save_dataset(ds, tmp_path / "rt", fmt=fmt, include_metadata=False)
+    loadfn = {"mat": L.load_dataset, "npy": L.load_npy,
+              "json": L.load_json, "csv": L.load_csv}[fmt]
+    re = loadfn(written[0])
+
+    assert re.prop.num_loc == ds.prop.num_loc
+    loc_x = re.attr.get("loc_x")
+    assert loc_x is not None and np.asarray(loc_x).shape == (ds.prop.num_loc,)
+    # coordinates round-trip (nm), no double RIMF correction
+    np.testing.assert_allclose(
+        np.asarray(re.attr["loc_x"]) * 1e9, np.asarray(ds.attr["loc_x"]) * 1e9, atol=1e-3
+    )
+    np.testing.assert_allclose(
+        np.asarray(re.attr["loc_z"]) * 1e9, np.asarray(ds.attr["loc_z"]) * 1e9, atol=1e-3
+    )
+    assert re.cali.RIMF == 1.0

@@ -58,6 +58,77 @@ _COORD_NM_BASE = {"xnm": "loc_x", "ynm": "loc_y", "znm": "loc_z"}
 # Public API
 # ---------------------------------------------------------------------------
 
+#: Coordinate column aliases for a flat (exported / generic) localization table.
+_FLAT_X = ("xnm", "x")
+_FLAT_Y = ("ynm", "y")
+_FLAT_Z = ("znm", "z")
+
+
+def _flat_table_from_dict(
+    raw: dict, name: str, folder: str, prefs: dict | None
+) -> "MinfluxDataset | None":
+    """Build a dataset from a flat localization table, or return None.
+
+    A flat table is a dict of 1-D columns with ``xnm``/``ynm`` (or ``x``/``y``)
+    coordinates and **no** structured mfx ``loc`` field — i.e. the layout written
+    by *Save Processed Data*. Coordinates are treated as final/processed (already
+    RIMF-applied), so RIMF is pinned to 1.0 and the post-load auto-estimation is
+    suppressed; derived attributes are recomputed; the saved ``ftr`` column, if
+    present, restores the filter state.
+    """
+    from .attributes import DERIVED_ATTRIBUTE_NAMES, LEGACY_DERIVED_ATTRIBUTE_ALIASES
+
+    if not isinstance(raw, dict):
+        return None
+    lookup = {str(k).lower(): k for k in raw.keys()}
+
+    def find(aliases):
+        return next((lookup[a] for a in aliases if a in lookup), None)
+
+    xk, yk = find(_FLAT_X), find(_FLAT_Y)
+    if xk is None or yk is None:
+        return None
+    loc = raw.get("loc")
+    if loc is not None and getattr(np.asarray(loc).dtype, "names", None):
+        return None                                  # structured mfx, not flat
+    x = np.asarray(raw[xk]).ravel().astype(float)
+    y = np.asarray(raw[yk]).ravel().astype(float)
+    if x.ndim != 1 or x.size < 2 or x.size != y.size:
+        return None
+    n = x.size
+    zk = find(_FLAT_Z)
+    z = None
+    if zk is not None:
+        zc = np.asarray(raw[zk]).ravel().astype(float)
+        if zc.ndim == 1 and zc.size == n:
+            z = zc
+
+    coord_keys = {xk, yk} | ({zk} if zk else set())
+    skip = set(DERIVED_ATTRIBUTE_NAMES) | set(LEGACY_DERIVED_ATTRIBUTE_ALIASES)
+    attrs: dict[str, np.ndarray] = {}
+    for key, val in raw.items():
+        if key in coord_keys or key in skip:
+            continue
+        col = np.asarray(val).ravel()
+        if col.ndim == 1 and col.size == n:
+            attrs[key] = col
+    tid = attrs.pop("tid", None)
+    tim = attrs.pop("tim", None)
+    ftr = attrs.pop("ftr", None)
+
+    ds = build_localization_dataset(
+        name=name, x_nm=x, y_nm=y, z_nm=z, folder=folder,
+        tid=tid, tim=tim, attrs=attrs or None, prefs=prefs,
+    )
+    # Re-imported processed coordinates are final: pin RIMF=1 and pre-empt the
+    # post-load auto-RIMF estimation (which would otherwise double-correct z).
+    ds.set_rimf(1.0, source="processed (re-imported, coordinates final)")
+    ds.derived["rimf"] = np.asarray([1.0], dtype=float)
+    if ftr is not None and np.asarray(ftr).ravel().size == n:
+        ds.filter_mask = np.asarray(ftr).ravel().astype(bool)
+    return ds
+
+
 def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
     """
     Load a MINFLUX ``.mat`` file and return a fully populated
@@ -92,6 +163,13 @@ def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
 
     # 1. Read the raw .mat file
     raw = _load_mat(path)
+
+    # 1b. A flat localization table (xnm/ynm columns, no structured mfx) — e.g.
+    # one written by Save Processed Data — loads generically, not via the mfx
+    # parser (which would lose the coordinates).
+    flat = _flat_table_from_dict(raw, path.name, str(path.parent), prefs)
+    if flat is not None:
+        return flat
 
     # 2. Build mfx_raw — all iterations, all measurements, no filtering
     mfx_raw_store = _build_mfx_raw_from_raw(raw)
@@ -1811,6 +1889,14 @@ def load_npy(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
 
     # ── Structured array (named fields) ──────────────────────────────
     if arr.dtype.names:
+        # A flat localization table (xnm/ynm fields) from Save Processed Data
+        # loads generically; a real mfx structured array goes to the mfx parser.
+        flat = _flat_table_from_dict(
+            {nm: np.asarray(arr[nm]) for nm in arr.dtype.names},
+            path.name, str(path.parent), prefs,
+        )
+        if flat is not None:
+            return flat
         return load_from_mfx_array(
             mfx=arr,
             name=path.name,
