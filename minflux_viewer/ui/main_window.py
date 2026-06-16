@@ -150,6 +150,9 @@ class MainWindow(QMainWindow):
         self._window_cycle_index = -1
         # One render window per dataset: {dataset_idx: RenderWindow}
         self._render_windows: dict[int, "RenderWindow"] = {}
+        # Standalone TIFF viewers are not MINFLUX datasets and never appear in
+        # the dataset manager.
+        self._tiff_windows: dict[str, QWidget] = {}
         self._last_channel_combine_settings: dict | None = None
         self._next_overlay_index = 1
         # ParaView subprocesses spawned by this session — terminated on exit
@@ -975,12 +978,42 @@ class MainWindow(QMainWindow):
             self._status_label.setText("Load failed.")
 
     def _load_tiff(self, path: str) -> None:
-        self._status_label.setText(f"Loading {Path(path).name}…")
+        self._status_label.setText(f"Opening TIFF {Path(path).name}…")
         self._state.log(f"Opening TIFF: {path}", "INFO")
+        key = str(Path(path).resolve())
+        existing = self._tiff_windows.get(key)
+        if existing is not None:
+            try:
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                self._status_label.setText(f"TIFF already open: {Path(path).name}")
+                return
+            except RuntimeError:
+                self._tiff_windows.pop(key, None)
         try:
-            from ..core.loader import load_tiff
-            dataset = load_tiff(path, prefs=self._state.prefs)
-            self._state.add_dataset(dataset)
+            from ..core.tiff_source import TiffImageSource
+            from .tiff_viewer_window import TiffViewerWindow
+
+            source = TiffImageSource(path)
+            win = TiffViewerWindow(source)
+            win.destroyed.connect(lambda _=None, k=key: self._tiff_windows.pop(k, None))
+            self._tiff_windows[key] = win
+            win.show()
+            win.raise_()
+            win.activateWindow()
+            try:
+                self._state._record_recent(key)
+                self._populate_recent_menu()
+            except Exception:
+                pass
+            meta = source.metadata
+            self._status_label.setText(f"TIFF opened: {Path(path).name}")
+            self._state.log(
+                f"Opened TIFF image viewer: {Path(path).name}  |  "
+                f"axes={meta.axes}  |  shape={meta.shape}  |  dtype={meta.dtype}",
+                "INFO",
+            )
         except Exception as exc:
             self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
             QMessageBox.critical(self, "Load error", str(exc))
@@ -1837,28 +1870,32 @@ class MainWindow(QMainWindow):
             return
         from .save_dialog import SaveProcessedDataDialog
 
-        dlg = SaveProcessedDataDialog(getattr(ds, "name", ""), self)
+        # A dataset is "file-backed" when it has a physical data file that, when
+        # re-opened, reproduces it (.mat/.npy/.json). For those we only write the
+        # metadata sidecar; otherwise (.msr extract, duplicate) we save the data.
+        src = Path(getattr(ds.file, "folder", "") or "") / (getattr(ds.file, "name", "") or "")
+        file_backed = src.is_file() and src.suffix.lower() in (".mat", ".npy", ".json")
+        default_dir = self._state.prefs["file"].get("default_folder", str(Path.home()))
+
+        dlg = SaveProcessedDataDialog(
+            getattr(ds, "name", ""),
+            file_backed=file_backed,
+            source_path=src if file_backed else None,
+            default_dir=default_dir,
+            parent=self,
+        )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         opts = dlg.options()
-        fmt = opts["fmt"]
-        filters = {
-            "mat": "MATLAB (*.mat)", "npy": "NumPy (*.npy)",
-            "json": "JSON (*.json)", "csv": "CSV (*.csv)",
-        }
-        exts = {"mat": ".mat", "npy": ".npy", "json": ".json", "csv": ".csv"}
-        default_dir = self._state.prefs["file"].get("default_folder", str(Path.home()))
-        stem = Path(getattr(ds, "name", "dataset") or "dataset").stem or "dataset"
-        suggested = str(Path(default_dir) / f"{stem}_processed{exts[fmt]}")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save processed data", suggested, filters[fmt]
-        )
-        if not path:
-            return
-        from ..core.save import save_dataset
+        from ..core.save import save_processed
 
         try:
-            written = save_dataset(ds, path, **opts)
+            written = save_processed(
+                ds,
+                data_path=opts["data_path"],
+                fmt=opts["fmt"],
+                metadata_dir=src.parent if file_backed else None,
+            )
         except Exception as exc:
             QMessageBox.critical(
                 self, "Save failed", f"Could not save processed data:\n{exc}"
@@ -2046,6 +2083,17 @@ class MainWindow(QMainWindow):
                 self._state.log(
                     f"Last-valid local density computation skipped for '{ds.name}': {exc}", "WARN",
                 )
+
+        # Restored-from-metadata filters re-evaluate now that derived attributes
+        # (den, …) exist, so a re-opened processed dataset shows its saved filter
+        # state. (filter_specs is only populated here via a metadata sidecar.)
+        if ds.state.get("filter_specs"):
+            try:
+                from ..core.loader import apply_saved_filters
+                if apply_saved_filters(ds):
+                    self._state.notify_filter_changed(idx)
+            except Exception as exc:
+                self._state.log(f"Restoring filters for '{ds.name}' failed: {exc}", "WARN")
 
     def _on_dataset_removed(self, idx: int) -> None:
         for mapping in (
@@ -2350,6 +2398,9 @@ class MainWindow(QMainWindow):
             try: win.close()
             except Exception: pass
         for win in list(self._render_windows.values()):
+            try: win.close()
+            except Exception: pass
+        for win in list(self._tiff_windows.values()):
             try: win.close()
             except Exception: pass
         for mapping in (self._scatter_windows, self._histogram_windows, self._attr_windows):

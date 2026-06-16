@@ -225,6 +225,7 @@ def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
     # so mfx_get can broadcast them to any selection.
     if not attr_matches_last_valid(dataset):
         dataset.components.derived_last = _derived_last_from_raw(mfx_raw_store, num_itr, prefs)
+    apply_metadata_sidecar(dataset, path)
     return dataset
 
 
@@ -246,6 +247,10 @@ def _load_mat(path: Path) -> dict:
             inner = next(iter(raw.values()))
             if hasattr(inner, "_fieldnames"):
                 raw = _mat_struct_to_dict(inner)
+            elif getattr(inner, "dtype", None) is not None and inner.dtype.names:
+                # A single structured ndarray (e.g. a saved canonical mfx) —
+                # explode its fields to the top level so the parser finds 'itr'.
+                raw = {nm: inner[nm] for nm in inner.dtype.names}
         return raw
     except NotImplementedError:
         # v7.3 HDF5 — scipy can't read these
@@ -1302,6 +1307,86 @@ def mfx_filter_mask(
     return mask, unevaluable
 
 
+def apply_saved_filters(ds: "MinfluxDataset") -> bool:
+    """Apply ``ds.state['filter_specs']`` over the materialized attributes and
+    set ``ds.filter_mask``; returns True if at least one spec was applied.
+
+    Resolves each attribute through :func:`attr_values_1d`, so coordinate
+    (``xnm``/``ynm``/``znm``) and derived (``den`` …) filters map to per-loc
+    values — mirroring the live FilterDialog. A spec whose attribute is not yet
+    materialized (e.g. ``den`` before post-load density) is skipped; callers
+    re-run this once those attributes exist.
+    """
+    from ..utils.filters import raw_spec_mask
+
+    specs = ds.state.get("filter_specs") or []
+    if not specs:
+        return False
+    n = int(ds.prop.num_loc)
+    tid_v = attr_values_1d(ds, "tid")
+    tid = np.arange(n) if tid_v is None else np.asarray(tid_v).ravel()
+    mask = np.ones(n, dtype=bool)
+    applied = False
+    for spec in specs:
+        vals = attr_values_1d(ds, str(spec.get("attribute", "")))
+        if vals is None:
+            continue
+        vals = np.asarray(vals).ravel()
+        if vals.shape[0] != n:
+            continue
+        mask &= raw_spec_mask(
+            vals.astype(float), tid, spec.get("mode", "per loc"),
+            float(spec.get("lo", -np.inf)), float(spec.get("hi", np.inf)),
+            bool(spec.get("lo_inc", True)), bool(spec.get("hi_inc", True)),
+        )
+        applied = True
+    if applied:
+        ds.filter_mask = mask
+    return applied
+
+
+def apply_metadata_sidecar(ds: "MinfluxDataset", data_path: "str | Path") -> bool:
+    """Restore the processing recipe from a ``<stem>_metadata.json`` sidecar.
+
+    If a metadata sidecar sits next to *data_path*, restore RIMF (pinned via
+    ``ds.derived['rimf']`` so post-load auto-estimation is suppressed), the
+    overlay transform, and the filter specs (and apply what is evaluable now).
+    Returns True if a sidecar was consumed.
+    """
+    from .save import is_metadata_json_payload, metadata_sidecar_path
+
+    side = metadata_sidecar_path(data_path)
+    try:
+        if not side.is_file():
+            return False
+        meta = json.loads(side.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not is_metadata_json_payload(meta):
+        return False
+
+    rimf = (meta.get("calibration") or {}).get("rimf")
+    if rimf is not None:
+        try:
+            ds.set_rimf(float(rimf), source="processed (metadata sidecar)")
+            ds.derived["rimf"] = np.asarray([float(rimf)], dtype=float)
+        except Exception:
+            pass
+
+    tf = meta.get("transform")
+    if tf is not None:
+        try:
+            ds.state["overlay_transform"] = np.asarray(tf, dtype=float)
+        except Exception:
+            pass
+
+    filters = meta.get("filters") or []
+    if filters:
+        ds.state["filter_specs"] = list(filters)
+        apply_saved_filters(ds)
+    return True
+
+
 def _attrs_include_invalid(attrs: "AttrStore") -> bool:
     """True when the materialized store retains rows with ``vld == False``."""
     vld = attrs.get("vld")
@@ -1897,13 +1982,15 @@ def load_npy(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
         )
         if flat is not None:
             return flat
-        return load_from_mfx_array(
+        ds = load_from_mfx_array(
             mfx=arr,
             name=path.name,
             folder=str(path.parent),
             datetime_str=file_info.datetime,
             prefs=prefs,
         )
+        apply_metadata_sidecar(ds, path)
+        return ds
 
     # ── Plain numeric array — treat as xyz coordinates ───────────────
     arr = np.atleast_2d(arr.squeeze())
@@ -1953,6 +2040,7 @@ def load_npy(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
         "iteration_load_mode": "last",
     })
     ds.components.mfx_raw = mfx_raw_store
+    apply_metadata_sidecar(ds, path)
     return ds
 
 
@@ -2239,6 +2327,7 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     ds.components.mfx_raw = mfx_raw_store
     if not attr_matches_last_valid(ds):
         ds.components.derived_last = _derived_last_from_raw(mfx_raw_store, _raw_num_itr, prefs)
+    apply_metadata_sidecar(ds, path)
     return ds
 
 
