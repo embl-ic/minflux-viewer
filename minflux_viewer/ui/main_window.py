@@ -1002,6 +1002,23 @@ class MainWindow(QMainWindow):
                     return
             except Exception:
                 pass
+            try:
+                from ..core.save import is_metadata_json_file
+                if is_metadata_json_file(path):
+                    self._state.log(
+                        f"'{Path(path).name}' is a metadata sidecar, not loadable data.",
+                        "WARN",
+                    )
+                    QMessageBox.information(
+                        self, "Metadata file",
+                        "This is a MINFLUX-viewer metadata sidecar (RIMF, transform, "
+                        "filter specs). It documents an exported dataset and is not "
+                        "itself loadable as data.",
+                    )
+                    self._status_label.setText("Ready.")
+                    return
+            except Exception:
+                pass
             self._state.log(f"Failed to load JSON '{Path(path).name}': {data_exc}", "ERROR")
             QMessageBox.critical(self, "Load error", str(data_exc))
             self._status_label.setText("Load failed.")
@@ -1812,7 +1829,48 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _save_data(self) -> None:
-        self._placeholder("Save processed data", "Phase 2")
+        ds = self._state.active_dataset
+        if ds is None:
+            QMessageBox.information(
+                self, "Save processed data", "No active dataset to save."
+            )
+            return
+        from .save_dialog import SaveProcessedDataDialog
+
+        dlg = SaveProcessedDataDialog(getattr(ds, "name", ""), self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        opts = dlg.options()
+        fmt = opts["fmt"]
+        filters = {
+            "mat": "MATLAB (*.mat)", "npy": "NumPy (*.npy)",
+            "json": "JSON (*.json)", "csv": "CSV (*.csv)",
+        }
+        exts = {"mat": ".mat", "npy": ".npy", "json": ".json", "csv": ".csv"}
+        default_dir = self._state.prefs["file"].get("default_folder", str(Path.home()))
+        stem = Path(getattr(ds, "name", "dataset") or "dataset").stem or "dataset"
+        suggested = str(Path(default_dir) / f"{stem}_processed{exts[fmt]}")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save processed data", suggested, filters[fmt]
+        )
+        if not path:
+            return
+        from ..core.save import save_dataset
+
+        try:
+            written = save_dataset(ds, path, **opts)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Save failed", f"Could not save processed data:\n{exc}"
+            )
+            return
+        self._state.log(
+            f"Saved processed data: {', '.join(p.name for p in written)}", "INFO"
+        )
+        QMessageBox.information(
+            self, "Save processed data",
+            "Saved:\n" + "\n".join(str(p) for p in written),
+        )
 
     # ------------------------------------------------------------------
     # AppState signal handlers
