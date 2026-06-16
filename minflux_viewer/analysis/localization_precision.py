@@ -715,8 +715,9 @@ def run_frc(parent, state) -> None:
                           f"This analysis requires {missing_reason(miss)}.")
         return
 
-    loc_x = ds.attr.get("loc_x")
-    loc_y = ds.attr.get("loc_y")
+    from ..core.loader import attr_values_1d
+    loc_x = attr_values_1d(ds, "loc_x")
+    loc_y = attr_values_1d(ds, "loc_y")
 
     x = np.asarray(loc_x, dtype=float) * 1.0e9    # m → nm
     y = np.asarray(loc_y, dtype=float) * 1.0e9
@@ -756,12 +757,15 @@ def run_stddev_per_trace(parent, state) -> None:
             f"This analysis requires {missing_reason(miss)}.")
         return
 
-    loc_x = np.asarray(ds.attr.get("loc_x"))
-    loc_y = np.asarray(ds.attr.get("loc_y"))
+    from ..core.loader import attr_values_1d
+    loc_x = np.asarray(attr_values_1d(ds, "loc_x"))
+    loc_y = np.asarray(attr_values_1d(ds, "loc_y"))
     # Raw z — no RIMF applied. The precision is a property of the measurement,
     # so it follows Ostersehlt et al. and uses the uncorrected coordinate.
-    loc_z = np.asarray(ds.attr.get("loc_z", np.zeros_like(loc_x)))
-    tid   = np.asarray(ds.attr.get("tid", np.arange(loc_x.size)))
+    _z = attr_values_1d(ds, "loc_z")
+    loc_z = np.zeros_like(loc_x) if _z is None else np.asarray(_z)
+    _tid = attr_values_1d(ds, "tid")
+    tid   = np.arange(loc_x.size) if _tid is None else np.asarray(_tid)
     ftr   = np.asarray(ds.filter_mask, dtype=bool)
 
     loc_xyz = np.column_stack([loc_x[ftr], loc_y[ftr], loc_z[ftr]])

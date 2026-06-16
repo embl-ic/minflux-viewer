@@ -1968,11 +1968,14 @@ class MainWindow(QMainWindow):
         if data_prefs.get("compute_loc_prec", True) and "sigma_per_trace_nm" not in ds.derived:
             try:
                 from ..analysis.localization_precision import stddev_per_trace
+                from ..core.loader import attr_values_1d
                 import numpy as np
-                loc_x = np.asarray(ds.attr.get("loc_x"))
-                loc_y = np.asarray(ds.attr.get("loc_y"))
-                loc_z = np.asarray(ds.attr.get("loc_z", np.zeros_like(loc_x)))
-                tid = np.asarray(ds.attr.get("tid", np.arange(loc_x.size)))
+                loc_x = np.asarray(attr_values_1d(ds, "loc_x"))
+                loc_y = np.asarray(attr_values_1d(ds, "loc_y"))
+                _z = attr_values_1d(ds, "loc_z")
+                loc_z = np.zeros_like(loc_x) if _z is None else np.asarray(_z)
+                _tid = attr_values_1d(ds, "tid")
+                tid = np.arange(loc_x.size) if _tid is None else np.asarray(_tid)
                 result = stddev_per_trace(np.column_stack([loc_x, loc_y, loc_z]), tid)
                 ds.attr["sigma_per_trace_nm"] = result["per_trace_sigma_xyz"]
                 ds.attr["sigma_trace_ids"] = result["trace_ids"]
