@@ -18,9 +18,18 @@ def main() -> None:
     from .ui.console_window import install_redirection
     install_redirection()
 
+    from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QIcon
     from PyQt6.QtWidgets import QApplication
     from . import __version__, resource_path
+
+    # pyqtgraph caches compiled GL shader programs globally, but GL program
+    # objects are per-context. Without context sharing, a second GLViewWidget
+    # (e.g. the scatter 3-D view opened after the volume/3-D view) reuses a
+    # program handle that is invalid in its own context, and OpenGL raises
+    # GL_INVALID_VALUE in glUseProgram. Sharing contexts makes the cached
+    # programs valid everywhere. Must be set BEFORE the QApplication is created.
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
 
     app = QApplication(sys.argv)
     app.setApplicationName("MINFLUX Data Viewer")

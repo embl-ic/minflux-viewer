@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QTimer, Qt
+from PyQt6.QtCore import QEvent, QObject, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
@@ -118,6 +118,27 @@ class _ScrollableMenuStyle(QProxyStyle):
         return super().styleHint(hint, option, widget, returnData)
 
 
+class _UpdateCheckSignals(QObject):
+    done = pyqtSignal(object)   # core.updater.UpdateCheckResult
+
+
+class _UpdateCheckTask(QRunnable):
+    """Run the GitHub update check off the UI thread (Tier-A in-app updater)."""
+
+    def __init__(self, current_version: str) -> None:
+        super().__init__()
+        self.signals = _UpdateCheckSignals()
+        self._current = current_version
+
+    def run(self) -> None:  # noqa: N802 - Qt API
+        from ..core.updater import UpdateCheckResult, check_for_update
+        try:
+            result = check_for_update(self._current)
+        except Exception as exc:  # never let a worker exception escape
+            result = UpdateCheckResult("error", self._current, None, str(exc))
+        self.signals.done.emit(result)
+
+
 class MainWindow(QMainWindow):
     """Top-level application window."""
 
@@ -207,6 +228,16 @@ class MainWindow(QMainWindow):
         state.active_changed.connect(self._on_active_changed)
         state.status_message.connect(self._status_label.setText)
         state.log_message.connect(self._on_log_message)
+
+        # Remembered ROI duplicate/crop options, per dataset (session-only,
+        # keyed by dataset identity — "use the same setup and stop asking").
+        self._roi_crop_setup: dict = {}
+
+        # Tier-A in-app update check (opt-out via Preferences > File). Delayed so
+        # it never slows startup; silent unless a newer release exists.
+        self._update_tasks: set = set()
+        if state.prefs.get("file", {}).get("check_updates_on_startup", True):
+            QTimer.singleShot(3000, lambda: self._check_for_updates(silent=True))
 
     def createPopupMenu(self):  # noqa: N802 - Qt override
         """Suppress Qt's default toolbar visibility popup on right-click."""
@@ -339,6 +370,12 @@ class MainWindow(QMainWindow):
         # Help menu
         u.actionAbout.triggered.connect(self._show_about)
         u.actionMemoryMonitor.triggered.connect(self._show_memory_monitor)
+        self.actionCheckUpdates = QAction("Check for Updates…", self)
+        self.actionCheckUpdates.triggered.connect(
+            lambda: self._check_for_updates(silent=False)
+        )
+        u.menuHelp.insertAction(u.actionAbout, self.actionCheckUpdates)
+        u.menuHelp.insertSeparator(u.actionAbout)
 
         # Toolbar duplicates
         u.toolbarRender.triggered.connect(self._show_render)
@@ -359,6 +396,16 @@ class MainWindow(QMainWindow):
             self._roi_tool_actions[tool] = action
             self._roi_tool_group.addAction(action)
             action.triggered.connect(lambda checked, t=tool: self._on_roi_tool(t, checked))
+        # Angle tool (ImageJ-style; not in the generated .ui). It's a measurement
+        # tool — three points A·B·C reporting the angle ABC — placed between the
+        # Line and Point tools on the toolbar.
+        self.toolAngle = QAction("Angle", self)
+        self.toolAngle.setCheckable(True)
+        self.toolAngle.setToolTip("Angle — click A, B (vertex), C to measure the angle ABC")
+        u.toolbar.insertAction(u.toolPoint, self.toolAngle)
+        self._roi_tool_actions["angle"] = self.toolAngle
+        self._roi_tool_group.addAction(self.toolAngle)
+        self.toolAngle.triggered.connect(lambda checked: self._on_roi_tool("angle", checked))
         self._state.rois.tool_changed.connect(self._sync_roi_tool_actions)
 
         # Wire icon images for toolbar buttons
@@ -1629,60 +1676,133 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(self.APP_NAME)
 
     def _duplicate_active_dataset(self) -> None:
+        """Edit → Duplicate / ``Shift+D``.
+
+        With an active rectangle ROI on the dataset, opens the crop options
+        dialog (first time per session, or whenever "stop asking" is off / a
+        specific Z range is involved) and produces a cropped duplicate;
+        otherwise a plain duplicate.
         """
-        Duplicate the active dataset (Edit → Duplicate).
-
-        Creates a deep copy with the current filter mask applied, prefixes
-        the display name with ``DUP_`` and adds it to AppState. The usual
-        signal chain then auto-opens a new render window.
-        """
-        import copy
-
-        from ..core.dataset import FileInfo, MinfluxDataset
-
         src = self._state.active_dataset
         if src is None:
             self._no_data_warning()
             return
+        src_idx = self._state.active_idx
+        record = self._active_rectangle_record(src, src_idx)
+        if record is None:
+            self._plain_duplicate(src)
+            return
 
+        from ..core import roi_crop as RC
+        from ..core.overlay import overlay_members
         try:
-            # Deep-copy the attribute store so edits to one don't leak to the other
-            new_attrs = copy.deepcopy(src.attr)
-            new_prop  = copy.deepcopy(src.prop)
-            new_cali  = copy.deepcopy(getattr(src, "cali", None))
-            new_channel = copy.deepcopy(getattr(src, "channel", None))
+            members = overlay_members(self._state, src_idx) or [(src_idx, src)]
+        except Exception:
+            members = [(src_idx, src)]
+        channel_names = [ds.name for _i, ds in members]
 
-            new_name = self._next_duplicate_name(src.file.name)
-            timestamp = datetime.now().strftime("%Y-%b-%d, %H:%M:%S")
-            new_file = FileInfo(
-                name=new_name,
-                folder=src.file.folder,
-                datetime=timestamp,
-                raw_data=None,           # don't duplicate the heavy raw blob
-                recent_path=src.file.recent_path,
+        setup = self._roi_crop_setup.get(id(src))
+        # Silent reuse only when stop-asking AND All-Z (a specific Z range can't
+        # be reused — it varies by XY region); otherwise (re)show the dialog.
+        show_dialog = setup is None or not setup.stop_asking or not setup.z_all
+        opts = setup
+        if show_dialog:
+            from .crop_dialog import CropDialog
+            z_vals = None
+            if int(getattr(src.prop, "num_dim", 2) or 2) >= 3:
+                coords = RC.display_coords(src)
+                if coords.size:
+                    xy_inside = RC.compute_crop_mask(src, record, trace_complete=False)
+                    z_vals = coords[:, 2][xy_inside]
+            dlg = CropDialog(
+                src.name, has_roi=True,
+                channels=channel_names if len(channel_names) > 1 else None,
+                z_values=z_vals, initial=setup, parent=self,
             )
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            opts = dlg.options()
+            if opts.stop_asking:
+                self._roi_crop_setup[id(src)] = opts
+            else:
+                self._roi_crop_setup.pop(id(src), None)
 
-            # Build kwargs only for attributes the dataclass actually has
-            kwargs = dict(file=new_file, prop=new_prop, attr=new_attrs)
-            if new_cali is not None:
-                kwargs["cali"] = new_cali
-            if new_channel is not None:
-                kwargs["channel"] = new_channel
+        if opts is None or not opts.only_roi:
+            self._plain_duplicate(src)
+            return
+        self._execute_crop(src_idx, src, record, members, opts)
 
-            dup = MinfluxDataset(**kwargs)
-            dup.metadata.update(copy.deepcopy(src.metadata))
-            dup.state.update(copy.deepcopy(src.state))
-            for key in ("msr_source_path", "msr_dataset_key", "msr_dataset_name"):
-                dup.metadata.pop(key, None)
-            for key in ("overlay_id", "overlay_index", "overlay_order", "overlay_transform", "render_group_id", "render_transform_2d"):
-                dup.state.pop(key, None)
-                dup.metadata.pop(key, None)
+    # ------------------------------------------------------------------
+    def _active_rectangle_record(self, ds, ds_idx):
+        """The active rectangle ROI for *ds*.
+
+        A freshly drawn ROI is a *draft* living on the render/scatter overlay
+        controller (not yet in ``state.rois.records``), so we look there as well
+        as among the selected persistent ROIs.
+        """
+        # 1) a selected, persisted rectangle ROI
+        try:
+            wanted = set(self._state.rois.selected_ids or [])
+        except Exception:
+            wanted = set()
+        try:
+            for record in self._state.rois.records:
+                if record.id in wanted and record.type == "rectangle":
+                    return record
+        except Exception:
+            pass
+        # 2) a freshly drawn draft on this dataset's render/scatter overlay
+        for win in (self._render_windows.get(ds_idx), self._scatter_windows.get(ds_idx)):
+            ctrl = getattr(win, "_roi_overlay", None)
+            if ctrl is None:
+                continue
+            try:
+                draft = ctrl.current_record()
+            except Exception:
+                draft = getattr(ctrl, "draft", None)
+            if draft is not None and getattr(draft, "type", None) == "rectangle":
+                return draft
+        return None
+
+    def _copy_dataset(self, src, new_name: str):
+        """Deep-copy a dataset as a fresh standalone (no overlay/source links)."""
+        import copy
+
+        from ..core.dataset import FileInfo, MinfluxDataset
+
+        timestamp = datetime.now().strftime("%Y-%b-%d, %H:%M:%S")
+        new_file = FileInfo(
+            name=new_name, folder=src.file.folder, datetime=timestamp,
+            raw_data=None, recent_path=src.file.recent_path,
+        )
+        kwargs = dict(
+            file=new_file,
+            prop=copy.deepcopy(src.prop),
+            attr=copy.deepcopy(src.attr),
+        )
+        cali = copy.deepcopy(getattr(src, "cali", None))
+        channel = copy.deepcopy(getattr(src, "channel", None))
+        if cali is not None:
+            kwargs["cali"] = cali
+        if channel is not None:
+            kwargs["channel"] = channel
+        dup = MinfluxDataset(**kwargs)
+        dup.metadata.update(copy.deepcopy(src.metadata))
+        dup.state.update(copy.deepcopy(src.state))
+        for key in ("msr_source_path", "msr_dataset_key", "msr_dataset_name"):
+            dup.metadata.pop(key, None)
+        for key in ("overlay_id", "overlay_index", "overlay_order",
+                    "overlay_transform", "render_group_id", "render_transform_2d"):
+            dup.state.pop(key, None)
+            dup.metadata.pop(key, None)
+        dup.metadata["source_dataset_name"] = src.file.name
+        dup.metadata["created_note"] = f"{timestamp}, derived from dataset: {src.file.name}"
+        return dup
+
+    def _plain_duplicate(self, src) -> None:
+        try:
+            dup = self._copy_dataset(src, self._next_duplicate_name(src.file.name))
             dup.metadata["duplicated_from_dataset"] = src.file.name
-            dup.metadata["created_note"] = (
-                f"{timestamp}, duplicated from dataset: {src.file.name}"
-            )
-            dup.metadata["source_dataset_name"] = src.file.name
-            # Copy filter mask so the duplicated dataset inherits the active view
             try:
                 dup.filter_mask = src.filter_mask.copy()
             except Exception:
@@ -1691,28 +1811,115 @@ class MainWindow(QMainWindow):
             self._state.log(f"Duplicate failed: {exc}", "ERROR")
             QMessageBox.critical(self, "Duplicate", str(exc))
             return
-
         self._state.add_dataset(dup)
-        self._state.log(f"Duplicated dataset as '{new_name}'.")
+        self._state.log(f"Duplicated dataset as '{dup.file.name}'.")
         try:
             self._state.journal.add(
                 "transform",
-                f"Duplicated dataset '{src.file.name}' as '{new_name}' "
+                f"Duplicated dataset '{src.file.name}' as '{dup.file.name}' "
                 f"(filter mask preserved).",
             )
         except Exception:
             pass
 
+    def _execute_crop(self, src_idx, src, record, members, opts) -> None:
+        """Produce cropped duplicate(s) per the chosen options (Model A or B).
+
+        A multi-channel crop is kept grouped as a new overlay (each channel's
+        LUT + transform carried over); a single-channel crop stays standalone,
+        so it renders with the default LUT (hot) like any lone dataset.
+        """
+        import copy
+        import uuid
+
+        import numpy as np
+
+        from ..core import roi_crop as RC
+
+        if len(members) > 1 and opts.channels:
+            sel = [(i, ds) for pos, (i, ds) in enumerate(members, start=1)
+                   if pos in opts.channels]
+        else:
+            sel = [(src_idx, src)]
+        if not sel:
+            sel = [(src_idx, src)]
+
+        z_range = None if opts.z_all else opts.z_range
+        trace_complete = not opts.clip
+        multi = len(sel) > 1
+
+        overlay_id = overlay_index = None
+        if multi:
+            overlay_index = self._next_overlay_index
+            self._next_overlay_index += 1
+            overlay_id = f"overlay:{overlay_index}:{uuid.uuid4().hex}"
+
+        made: list[int] = []
+        prev_suspend = getattr(self._state, "suspend_auto_render", False)
+        if multi:
+            self._state.suspend_auto_render = True   # group before rendering
+        try:
+            for order, (_idx, ds) in enumerate(sel, start=1):
+                try:
+                    mask = RC.compute_crop_mask(
+                        ds, record, z_range=z_range, trace_complete=trace_complete)
+                    name = self._unique_name("CROP_", ds.file.name)
+                    if opts.spatial_filter:                       # Model A
+                        dup = self._copy_dataset(ds, name)
+                        base = np.asarray(ds.filter_mask, dtype=bool)
+                        if base.shape[0] != mask.shape[0]:
+                            base = np.ones(mask.shape[0], dtype=bool)
+                        dup.filter_mask = base & mask
+                        if RC.crop_is_axis_aligned(ds, record):
+                            dup.state["filter_specs"] = list(ds.state.get("filter_specs") or []) \
+                                + RC.crop_filter_specs(record, trace_complete=trace_complete, z_range=z_range)
+                        else:
+                            dup.metadata["crop_mask_only"] = True   # opaque mask (not re-evaluable)
+                        dup.metadata["cropped_from_dataset"] = ds.file.name
+                        kept = int(np.asarray(dup.filter_mask, dtype=bool).sum())
+                    else:                                          # Model B (subset)
+                        dup = RC.subset_dataset(ds, mask, name=name, prefs=self._state.prefs)
+                        kept = int(dup.prop.num_loc)
+                    if multi:
+                        dup.state["overlay_id"] = overlay_id
+                        dup.state["render_group_id"] = overlay_id
+                        dup.state["overlay_index"] = overlay_index
+                        dup.state["overlay_order"] = order
+                        for key in ("overlay_lut", "render_channel_lut",
+                                    "overlay_transform", "render_transform_2d"):
+                            val = ds.state.get(key)
+                            if val is not None:
+                                dup.state[key] = copy.deepcopy(val)
+                    made.append(self._state.add_dataset(dup))
+                    model = "filter" if opts.spatial_filter else "subset"
+                    self._state.log(
+                        f"Cropped '{ds.file.name}' → '{name}' ({model}, {kept:,} locs).")
+                except Exception as exc:
+                    self._state.log(f"Crop of '{ds.file.name}' failed: {exc}", "ERROR")
+        finally:
+            self._state.suspend_auto_render = prev_suspend
+
+        if not made:
+            QMessageBox.warning(self, "Duplicate / crop",
+                                "No cropped dataset was produced (check the ROI).")
+            return
+        if multi:                                  # open one grouped render
+            self._show_render(made[0])
+
+    def _unique_name(self, prefix: str, base: str) -> str:
+        """``<prefix><base>`` with numbering only when needed."""
+        existing = {ds.file.name for ds in self._state.datasets}
+        name = f"{prefix}{base}"
+        if name not in existing:
+            return name
+        n = 2
+        while f"{prefix}{n}_{base}" in existing:
+            n += 1
+        return f"{prefix}{n}_{base}"
+
     def _next_duplicate_name(self, source_name: str) -> str:
         """Return DUP_<source_name>, with numbering only when needed."""
-        existing_names = {ds.file.name for ds in self._state.datasets}
-        base = f"DUP_{source_name}"
-        if base not in existing_names:
-            return base
-        n = 2
-        while f"DUP_{n}_{source_name}" in existing_names:
-            n += 1
-        return f"DUP_{n}_{source_name}"
+        return self._unique_name("DUP_", source_name)
 
     def _duplicate_dataset_for_overlay(self, src_idx: int, timestamp: str) -> int:
         import copy
@@ -1971,6 +2178,7 @@ class MainWindow(QMainWindow):
                 # plugin (raw last-valid z, never the RIMF-corrected loc_nm).
                 value = None
                 try:
+                    self._state.log(f"Estimating anisotropy / RIMF of '{ds.name}'…")
                     from ..analysis.trace_analysis import estimate_anisotropy_for_dataset
                     res = estimate_anisotropy_for_dataset(ds)
                     if res is not None and np.isfinite(res["rimf"]):
@@ -2004,6 +2212,7 @@ class MainWindow(QMainWindow):
 
         if data_prefs.get("compute_loc_prec", True) and "sigma_per_trace_nm" not in ds.derived:
             try:
+                self._state.log(f"Computing localization precision of '{ds.name}'…")
                 from ..analysis.localization_precision import stddev_per_trace
                 from ..core.loader import attr_values_1d
                 import numpy as np
@@ -2029,6 +2238,7 @@ class MainWindow(QMainWindow):
 
         if data_prefs.get("compute_local_density", True) and "den" not in ds.attr:
             try:
+                self._state.log(f"Computing local density of '{ds.name}'…")
                 from ..analysis.local_density import compute_local_density_for_dataset
                 density, method, detail = compute_local_density_for_dataset(ds, self._state.prefs)
                 ds.attr["den"] = density
@@ -2128,8 +2338,15 @@ class MainWindow(QMainWindow):
         mapping.update(moved)
 
     def _on_active_changed(self, idx: int) -> None:
+        if not (0 <= idx < len(self._state.datasets)):
+            return
         ds = self._state.datasets[idx]
         self.setWindowTitle(f"{self.APP_NAME}  —  {ds.name}")
+        # Report the active dataset to the Log (skip consecutive duplicates from
+        # window-focus re-emits).
+        if getattr(self, "_last_active_log_idx", None) != idx:
+            self._last_active_log_idx = idx
+            self._state.log(f"Active dataset: '{ds.name}'")
 
     # ------------------------------------------------------------------
     # Drag-and-drop  (files AND folders; any supported extension)
@@ -2322,6 +2539,10 @@ class MainWindow(QMainWindow):
             ipath = icon_dir / fname
             if ipath.exists():
                 action.setIcon(QIcon(str(ipath)))
+        # Angle tool lives on self (not the generated UI).
+        angle_icon = icon_dir / "angle.png"
+        if hasattr(self, "toolAngle") and angle_icon.exists():
+            self.toolAngle.setIcon(QIcon(str(angle_icon)))
 
     def _no_data_warning(self) -> None:        QMessageBox.information(self, "No data", "Please load a dataset first.")
 
@@ -2330,6 +2551,35 @@ class MainWindow(QMainWindow):
             self, feature,
             f"<b>{feature}</b> will be implemented in {phase}.",
         )
+
+    def _check_for_updates(self, *, silent: bool = False) -> None:
+        """Tier-A update check: query GitHub Releases off-thread, then report.
+
+        ``silent`` (the on-startup check) only surfaces an available update.
+        """
+        from .. import __version__
+        if not silent:
+            self._status_label.setText("Checking for updates…")
+        task = _UpdateCheckTask(__version__)
+        # Keep a reference: QRunnable auto-deletes after run(), which would race
+        # the queued cross-thread signal and drop the result.
+        self._update_tasks.add(task)
+        task.signals.done.connect(
+            lambda result, t=task: self._on_update_check_done(result, silent, t)
+        )
+        QThreadPool.globalInstance().start(task)
+
+    def _on_update_check_done(self, result, silent: bool, task=None) -> None:
+        from .update_dialog import show_update_result
+        self._update_tasks.discard(task)
+        if not silent:
+            self._status_label.setText("Ready.")
+        if result.status == "update_available":
+            self._state.log(
+                f"Update available: {result.latest.tag} "
+                f"(installed v{result.current_version}).", "INFO",
+            )
+        show_update_result(result, self, silent=silent)
 
     def _show_about(self) -> None:
         from .. import __version__

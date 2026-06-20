@@ -17,7 +17,7 @@ import numpy as np
 from PyQt6.QtCore import QObject, QPointF, pyqtSignal
 from PyQt6.QtGui import QPainterPath, QPolygonF
 
-ROI_TYPES = {"rectangle", "oval", "polygon", "freehand", "line", "point"}
+ROI_TYPES = {"rectangle", "oval", "polygon", "freehand", "line", "point", "angle"}
 
 
 @dataclass
@@ -224,8 +224,9 @@ def record_to_path(record: RoiRecord) -> QPainterPath:
             path.moveTo(float(pts[0][0]), float(pts[0][1]))
             path.lineTo(float(pts[1][0]), float(pts[1][1]))
     elif record.type == "point":
-        x, y = g.get("point", [0.0, 0.0])
-        path.addEllipse(float(x) - 2.0, float(y) - 2.0, 4.0, 4.0)
+        pt = g.get("point", [0.0, 0.0])
+        x, y = float(pt[0]), float(pt[1])
+        path.addEllipse(x - 2.0, y - 2.0, 4.0, 4.0)
     else:
         pts = g.get("points", [])
         if pts:
@@ -246,7 +247,9 @@ def record_to_points(record: RoiRecord) -> np.ndarray:
             return np.column_stack([x + w / 2.0 + np.cos(theta) * w / 2.0, y + h / 2.0 + np.sin(theta) * h / 2.0])
         return np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], dtype=float)
     if record.type == "point":
-        return np.asarray([g.get("point", [0.0, 0.0])], dtype=float)
+        # A point may carry a third (depth) coordinate; ImageJ/2-D paths use x,y.
+        pt = g.get("point", [0.0, 0.0])
+        return np.asarray([[float(pt[0]), float(pt[1])]], dtype=float)
     return np.asarray(g.get("points", []), dtype=float)
 
 

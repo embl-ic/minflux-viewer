@@ -24,9 +24,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEventLoop, Qt
 from PyQt6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QPlainTextEdit,
     QPushButton,
@@ -78,6 +79,7 @@ class LogWindow(QWidget):
         super().__init__(parent)
         self._state      = state
         self._autoscroll = True      # pause autoscroll when user scrolls up
+        self._progress_active = False  # a refreshing progress line is open
 
         self.setWindowTitle("Log (events)")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -86,8 +88,9 @@ class LogWindow(QWidget):
 
         self._build_ui()
 
-        # Connect to AppState log signal
+        # Connect to AppState log signals
         state.log_message.connect(self._append)
+        state.progress_log.connect(self._set_progress_line)
 
         # Post a startup banner
         self._append(f"MINFLUX Data Viewer started", Level.INFO)
@@ -159,6 +162,14 @@ class LogWindow(QWidget):
 
     def _append(self, message: str, level: str = Level.INFO) -> None:
         """Append a timestamped, coloured log line."""
+        # If a refreshing progress line is open, freeze it on its own line first
+        # so this message doesn't get concatenated onto the bar.
+        if self._progress_active:
+            c = self._text.textCursor()
+            c.movePosition(QTextCursor.MoveOperation.End)
+            c.insertText("\n")
+            self._progress_active = False
+
         ts    = datetime.now().strftime("%H:%M:%S")
         line  = f"[{ts}] [{level:5s}]  {message}"
         colour = _LEVEL_COLOUR.get(level, "#000000")
@@ -175,6 +186,39 @@ class LogWindow(QWidget):
             self._text.verticalScrollBar().setValue(
                 self._text.verticalScrollBar().maximum()
             )
+
+    def _set_progress_line(self, text: str, final: bool = False) -> None:
+        """Update one refreshing progress line in place (Fiji-style).
+
+        The line replaces itself on each call; ``final=True`` commits it (e.g.
+        the DONE bar). ``processEvents`` is scoped to this widget so the bar
+        repaints during a synchronous computation without disturbing the rest
+        of the UI (the status bar, in particular, is untouched).
+        """
+        cursor = self._text.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        if self._progress_active:                     # replace the current line
+            cursor.movePosition(
+                QTextCursor.MoveOperation.StartOfBlock, QTextCursor.MoveMode.KeepAnchor
+            )
+            cursor.removeSelectedText()
+
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(_LEVEL_COLOUR.get(Level.INFO, "#000000")))
+        cursor.setCharFormat(fmt)
+        cursor.insertText(text)
+
+        if final:
+            cursor.insertText("\n")
+            self._progress_active = False
+        else:
+            self._progress_active = True
+
+        if self._autoscroll:
+            self._text.verticalScrollBar().setValue(
+                self._text.verticalScrollBar().maximum()
+            )
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
     # ------------------------------------------------------------------
     # Scroll / copy / clear

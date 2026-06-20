@@ -38,7 +38,7 @@ from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
 from ..core.loader import attr_values_1d
 from ..core.overlay import CHANNEL_LUTS, PURE_COLOR_RGB, apply_display_transform_nm, overlay_members
-from ..core.roi_selection import active_roi_mask, rectangle_mask
+from ..core.roi_selection import active_roi_mask, rectangle_mask, roi_region_mask
 from .plot_format import plot_widget
 
 # ---------------------------------------------------------------------------
@@ -150,6 +150,7 @@ class ScatterWindow(QWidget):
         self._state = state
         self._dataset_idx = dataset_idx if dataset_idx is not None else state.active_idx
         self._3d_view = None         # built lazily on first 3D switch
+        self._3d_scatter = None
         self._manual_color_levels: tuple[float, float] | None = None
         self._last_color_values: np.ndarray = np.empty(0)
         self._lut_dialog = None
@@ -165,7 +166,6 @@ class ScatterWindow(QWidget):
         self._rgba_lut: np.ndarray | None = None
         self._3d_camera_initialised = False
         self._last_axis_text = "XY"
-        self._last_2d_black_background = False
         self._channels: list[dict] = []
         self._channel_rows: list[tuple[QLabel, QComboBox]] = []
         self._roi_highlight_2d = None
@@ -329,6 +329,7 @@ class ScatterWindow(QWidget):
         self._3d_scatter = scatter
         self._roi_highlight_3d = roi_scatter
         self._stack.addWidget(view)
+        self._apply_3d_blend(self._black_bg_check.isChecked())
 
     def _on_background_changed(self, black: bool) -> None:
         self._apply_background(black)
@@ -350,6 +351,24 @@ class ScatterWindow(QWidget):
         self._plot_2d.setBackground("k" if black else "w")
         if self._3d_view is not None:
             self._3d_view.setBackgroundColor("k" if black else "w")
+        self._apply_3d_blend(black)
+
+    def _apply_3d_blend(self, black: bool) -> None:
+        """Point blend mode for the 3-D view.
+
+        ``additive`` glows on black but is invisible on white (it adds to the
+        already-max white). ``translucent`` (alpha over) shows the point colour
+        on any background, so use it for the white background.
+        """
+        mode = "additive" if black else "translucent"
+        # May be called from _apply_background before the 3-D view is built.
+        for item in (getattr(self, "_3d_scatter", None),
+                     getattr(self, "_roi_highlight_3d", None)):
+            if item is not None:
+                try:
+                    item.setGLOptions(mode)
+                except Exception:
+                    pass
 
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -408,30 +427,27 @@ class ScatterWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _on_axis_changed(self, _text: str) -> None:
-        """Switch between 2D and 3D mode and re-draw."""
+        """Switch between 2D and 3D mode and re-draw.
+
+        The background (black/white) is preserved across the switch — 3-D no
+        longer forces black, since points are now visible on white too.
+        """
         axis_text = self._axis_combo.currentText()
         is_3d = axis_text == "3D"
         if is_3d:
-            if self._last_axis_text != "3D":
-                self._last_2d_black_background = self._black_bg_check.isChecked()
-            self._black_bg_check.blockSignals(True)
-            self._black_bg_check.setChecked(True)
-            self._black_bg_check.blockSignals(False)
             self._ensure_3d_built()
-            self._apply_background(True)
+            self._apply_background(self._black_bg_check.isChecked())
             if self._3d_view is not None:
                 self._stack.setCurrentWidget(self._3d_view)
         else:
-            if self._last_axis_text == "3D":
-                self._black_bg_check.blockSignals(True)
-                self._black_bg_check.setChecked(self._last_2d_black_background)
-                self._black_bg_check.blockSignals(False)
-                self._apply_background(self._last_2d_black_background)
             self._stack.setCurrentWidget(self._plot_2d)
         self._update_colorbar_visibility()
         self._last_axis_text = axis_text
         self._save_view_state()
         self._refresh()
+        # Re-project point markers onto the new projection plane.
+        if self._roi_overlay is not None and not is_3d:
+            self._roi_overlay.refresh()
 
     def _on_cmap_changed(self, name: str) -> None:
         self._cmap = _load_cmap(name)
@@ -595,11 +611,7 @@ class ScatterWindow(QWidget):
         self._axis_combo.blockSignals(False)
         self._last_axis_text = self._axis_combo.currentText()
         if self._axis_combo.currentText() == "3D":
-            self._black_bg_check.blockSignals(True)
-            self._black_bg_check.setChecked(True)
-            self._black_bg_check.blockSignals(False)
             self._ensure_3d_built()
-            self._apply_background(True)
             if self._3d_view is not None:
                 self._stack.setCurrentWidget(self._3d_view)
         else:
@@ -614,11 +626,8 @@ class ScatterWindow(QWidget):
         self._cmap = _load_cmap(self._cmap_combo.currentText())
         self._colorbar.setColorMap(self._cmap)
 
-        force_black_3d = self._axis_combo.currentText() == "3D"
         self._black_bg_check.blockSignals(True)
-        self._black_bg_check.setChecked(
-            True if force_black_3d else bool(saved.get("black_background", False))
-        )
+        self._black_bg_check.setChecked(bool(saved.get("black_background", False)))
         self._black_bg_check.blockSignals(False)
         self._apply_background(self._black_bg_check.isChecked())
 
@@ -725,7 +734,25 @@ class ScatterWindow(QWidget):
         if self._roi_highlight_3d is not None:
             self._roi_highlight_3d.setData(pos=np.empty((0, 3), dtype=np.float32))
 
+    def _owns_active_roi_draft(self) -> bool:
+        """True when an ROI is currently being drawn in *this* scatter view."""
+        ctrl = getattr(self, "_roi_overlay", None)
+        if ctrl is None:
+            return False
+        try:
+            return ctrl.current_record() is not None
+        except Exception:
+            return getattr(ctrl, "draft", None) is not None
+
+    def _roi_highlight_enabled(self) -> bool:
+        from ..core.roi_selection import roi_highlight_enabled
+        return roi_highlight_enabled(
+            self._state.prefs, is_source=self._owns_active_roi_draft())
+
     def _redraw_roi_highlight(self) -> None:
+        if not self._roi_highlight_enabled():
+            self._clear_roi_highlight()
+            return
         if self._axis_combo.currentText() == "3D":
             self._redraw_roi_highlight_3d()
         else:
@@ -1193,8 +1220,52 @@ class ScatterWindow(QWidget):
         self._lut_dialog.raise_()
         self._lut_dialog.activateWindow()
 
+    def roi_view_plane(self) -> str | None:
+        """Current scatter projection for ROI 3-D placement (XY/XZ/YZ); ``None``
+        in 3-D mode (ROIs are not drawn there)."""
+        axis = self._axis_combo.currentText()
+        return axis if axis in {"XY", "XZ", "YZ"} else None
+
+    def roi_depth_center(self) -> float | None:
+        """Centre of the data extent of the out-of-plane (depth) axis — the
+        value a drawn ROI gets in the dimension not shown in this projection.
+        The scatter view has no depth slider, so the data extent is the natural
+        'current viewing range' of that axis."""
+        depth_map = {"XY": 2, "XZ": 1, "YZ": 0}
+        axis = self._axis_combo.currentText()
+        if axis not in depth_map:
+            return None
+        ds = self._dataset()
+        if ds is None:
+            return None
+        locs = self._current_locs(ds)
+        k = depth_map[axis]
+        if locs.ndim != 2 or locs.shape[1] <= k:
+            return None
+        col = locs[:, k]
+        col = col[np.isfinite(col)]
+        if col.size == 0:
+            return None
+        return 0.5 * (float(col.min()) + float(col.max()))
+
+    def normalize_roi_record(self, record):
+        """Tag a drawn ROI with its view plane and the centre of the out-of-plane
+        data range, so its third-dimension position is defined."""
+        plane = self.roi_view_plane()
+        if plane is None:
+            return record
+        ctx = dict(record.context)
+        ctx.setdefault("view_plane", plane)
+        ctx.setdefault("depth_axis", {"XY": "Z", "XZ": "Y", "YZ": "X"}[plane])
+        if record.type != "point":
+            center = self.roi_depth_center()
+            if center is not None:
+                ctx.setdefault("depth_value", float(center))
+        record.context = ctx
+        return record
+
     def compute_roi_selection(self, record):
-        if record.type != "rectangle" or self._axis_combo.currentText() == "3D":
+        if record.type not in {"rectangle", "oval", "polygon", "freehand"} or self._axis_combo.currentText() == "3D":
             return None
         ds = self._dataset()
         if ds is None:
@@ -1214,7 +1285,7 @@ class ScatterWindow(QWidget):
         if base.shape[0] != locs.shape[0]:
             base = np.ones(locs.shape[0], dtype=bool)
         base &= np.all(np.isfinite(locs[:, :3]), axis=1)
-        mask = rectangle_mask(locs[:, ci], locs[:, cj], record, base_mask=base)
+        mask = roi_region_mask(locs[:, ci], locs[:, cj], record, base_mask=base)
         context = {
             "source_view": "scatter",
             "dataset_idx": self._dataset_idx,

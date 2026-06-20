@@ -68,7 +68,7 @@ from ..core.overlay import (
     matrix4_to_xy3,
     transform_key,
 )
-from ..core.roi_selection import active_roi_mask, rectangle_mask
+from ..core.roi_selection import active_roi_mask, rectangle_mask, roi_region_mask
 from ..core.spatial_grid import SpatialGrid
 from .render_config import (
     DIRECT_RENDER_THRESHOLD_NM,
@@ -2372,6 +2372,9 @@ class RenderWindow(QWidget):
         self._rebuild_all_grids()
         self._scheduler.cancel()
         self._schedule_render()
+        # Re-project point markers onto the new view plane.
+        if self._roi_overlay is not None:
+            self._roi_overlay.refresh()
 
     def _set_axis_visible_from_menu(self, checked: bool) -> None:
         self._set_axes_visible(bool(checked))
@@ -2621,7 +2624,25 @@ class RenderWindow(QWidget):
         fill.setAlpha(75)
         return [pg.mkBrush(fill)] * int(count)
 
+    def _owns_active_roi_draft(self) -> bool:
+        """True when an ROI is currently being drawn in *this* render view."""
+        ctrl = getattr(self, "_roi_overlay", None)
+        if ctrl is None:
+            return False
+        try:
+            return ctrl.current_record() is not None
+        except Exception:
+            return getattr(ctrl, "draft", None) is not None
+
+    def _roi_highlight_enabled(self) -> bool:
+        from ..core.roi_selection import roi_highlight_enabled
+        return roi_highlight_enabled(
+            self._state.prefs, is_source=self._owns_active_roi_draft())
+
     def _redraw_roi_highlight(self) -> None:
+        if not self._roi_highlight_enabled():
+            self._clear_roi_highlight()
+            return
         if self._roi_highlight_item is None or self._render_mode == "image":
             self._clear_roi_highlight()
             return
@@ -2679,8 +2700,38 @@ class RenderWindow(QWidget):
             size=7,
         )
 
+    def roi_view_plane(self) -> str | None:
+        """Current view orientation for ROI 3-D placement (XY/XZ/YZ)."""
+        return self._orientation if self._orientation in {"XY", "XZ", "YZ"} else None
+
+    def roi_depth_center(self) -> float | None:
+        """Centre of the current viewing range of the out-of-plane (depth) axis,
+        i.e. the value a newly drawn ROI gets in the dimension not shown on
+        screen.  ``None`` for 2-D datasets (no depth)."""
+        if not self._has_depth:
+            return None
+        lo, hi = self._depth_range
+        return 0.5 * (float(lo) + float(hi))
+
+    def normalize_roi_record(self, record):
+        """Tag a drawn ROI with the view plane it was drawn in and the centre of
+        the current viewing depth range, so its out-of-plane position is defined
+        (rather than defaulting to a meaningless in-plane coordinate)."""
+        plane = self.roi_view_plane()
+        if plane is None:
+            return record
+        ctx = dict(record.context)
+        ctx.setdefault("view_plane", plane)
+        ctx.setdefault("depth_axis", {"XY": "Z", "XZ": "Y", "YZ": "X"}[plane])
+        if record.type != "point":
+            center = self.roi_depth_center()
+            if center is not None:
+                ctx.setdefault("depth_value", float(center))
+        record.context = ctx
+        return record
+
     def compute_roi_selection(self, record):
-        if record.type != "rectangle" or self._idx is None:
+        if record.type not in {"rectangle", "oval", "polygon", "freehand"} or self._idx is None:
             return None
         if not (0 <= self._idx < len(self._state.datasets)):
             return None
@@ -2710,7 +2761,7 @@ class RenderWindow(QWidget):
             hi_mask = depth <= hi if right_inc else depth < hi
             base &= lo_mask & hi_mask
 
-        mask = rectangle_mask(locs[:, axes[0]], locs[:, axes[1]], record, base_mask=base)
+        mask = roi_region_mask(locs[:, axes[0]], locs[:, axes[1]], record, base_mask=base)
         context = {
             "source_view": "render",
             "dataset_idx": self._idx,

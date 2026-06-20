@@ -59,6 +59,7 @@ class DatasetManager(QDialog):
         self.setWindowFlags(Qt.WindowType.Window)
         self.resize(800, 240)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._positioned = False
 
         self._build_ui()
         self._rebuild_table()
@@ -66,6 +67,15 @@ class DatasetManager(QDialog):
         state.dataset_added.connect(self._on_dataset_added)
         state.dataset_removed.connect(self._on_dataset_removed)
         state.active_changed.connect(self._on_active_changed)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # Non-owned top-level window: place it fully on the active screen on
+        # first show so it never opens partly off the screen edge.
+        if not self._positioned:
+            self._positioned = True
+            from .modeless import ensure_on_screen
+            ensure_on_screen(self, self._owner)
 
     # ------------------------------------------------------------------
     # UI

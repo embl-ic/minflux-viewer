@@ -625,23 +625,34 @@ class PlotStyleDialog(QDialog):
 
 
 class AlignmentSaveDialog(QDialog):
-    def __init__(self, initial_paths: dict[str, str], parent=None):
+    def __init__(self, initial_paths: dict[str, str], initial_options: dict | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Save channel alignment outputs")
         self.resize(820, 240)
 
+        # Remembered checkbox states from the last run (persisted in settings).
+        opts = initial_options or {}
         self.save_beads = QCheckBox("Average beads CSV (all aligned channels)")
-        self.save_beads.setChecked(True)
+        self.save_beads.setChecked(bool(opts.get("save_beads", True)))
         self.save_transform = QCheckBox("Rigid transform CSV (all aligned channels)")
-        self.save_transform.setChecked(True)
+        self.save_transform.setChecked(bool(opts.get("save_transform", True)))
         self.save_localizations = QCheckBox("Aligned localizations CSV (all aligned channels)")
+        self.save_localizations.setChecked(bool(opts.get("save_localizations", False)))
         self.show_plot = QCheckBox("Show beads and alignment result")
+        self.show_plot.setChecked(bool(opts.get("show_plot", False)))
 
         self.path_beads = QLineEdit(initial_paths["beads"])
         self.path_transform = QLineEdit(initial_paths["transform"])
         self.path_localizations = QLineEdit(initial_paths["localizations"])
 
         layout = QVBoxLayout(self)
+        hint = QLabel(
+            "Use <b>Show Beads Drift</b> to manually check bead drift and select "
+            "beads for alignment — otherwise all common beads are used to compute "
+            "the alignment transformation.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #555;")
+        layout.addWidget(hint)
         grid = QGridLayout()
         layout.addLayout(grid)
         self._add_path_row(grid, 0, self.save_beads, self.path_beads)
@@ -1072,12 +1083,18 @@ class MsrReaderDialog(QWidget):
         self.setWindowFlags(Qt.WindowType.Window)
         self.resize(980, 860)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._positioned = False
 
         self._state = state
         self._worker: _ParseWorker | None = None
 
         self.parsed: dict[str, Any] = {}
         self.field_selection = {}
+        # gri-IDs the user excluded via "Show Beads Drift". None until the user
+        # applies a selection (None/empty = use all beads, as before).
+        self._bead_unchecked_gris = None
+        # Remembered "Align channel" save-dialog checkbox states (persisted).
+        self._alignment_save_options: dict = {}
         self.nodeinfo: dict[int, dict[str, Any]] = {}
         self.fullpath_by_item: dict[int, str] = {}
         self.datasetnode_info: dict[int, dict[str, Any]] = {}
@@ -1169,12 +1186,23 @@ class MsrReaderDialog(QWidget):
                 "zarr": bool(self.fmt_zarr.isChecked()),
             },
             "field_selection": clean_selection(self.field_selection),
+            "alignment_save": dict(self._alignment_save_options or {}),
         }
         try:
             self._settings_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
             self._last_input_dir = last_input_dir
         except Exception as exc:
             self.log(f"[warn] could not save settings: {exc}")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Non-owned top-level window: place it fully on the active screen on
+        # first show (it is tall — 860 px — and otherwise opens with its title
+        # bar above the screen top on shorter / scaled displays).
+        if not self._positioned:
+            self._positioned = True
+            from ...ui.modeless import ensure_on_screen
+            ensure_on_screen(self, self._owner)
 
     def closeEvent(self, event):
         self._save_settings()
@@ -1285,8 +1313,14 @@ class MsrReaderDialog(QWidget):
 
         self.logbox = None
         self.field_selection = settings.get("field_selection") or {}
+        self._alignment_save_options = settings.get("alignment_save") or {}
 
         bottom = QHBoxLayout()
+        self._beads_drift_btn = QPushButton("Show Beads Drift")
+        self._beads_drift_btn.setToolTip(
+            "Inspect MBM/bead drift per dataset and manually select beads for "
+            "alignment.")
+        self._beads_drift_btn.clicked.connect(self._on_show_beads_drift)
         align_button = QPushButton("Align channel")
         align_button.clicked.connect(self.on_align_channel)
         self._open_viewer_btn = QPushButton("Open in MINFLUX viewer")
@@ -1296,6 +1330,7 @@ class MsrReaderDialog(QWidget):
         export_button.clicked.connect(self.on_ok)
         cancel_button = QPushButton("Cancel")
         cancel_button.clicked.connect(self.close)
+        bottom.addWidget(self._beads_drift_btn)
         bottom.addWidget(align_button)
         bottom.addWidget(self._open_viewer_btn)
         bottom.addStretch(1)
@@ -2206,7 +2241,7 @@ class MsrReaderDialog(QWidget):
         if len(selected) < 2:
             return False, "fewer than two selected datasets"
         ref_name = selected[0]
-        ref_mbm = MFSTATE.mbm_map.get(ref_name)
+        ref_mbm = self._aligned_mbm_points(ref_name)
         if ref_mbm is None:
             return False, f"no bead points for reference dataset {ref_name}"
         is_3d = any(self._viewer_dataset_looks_3d(name) for name in selected)
@@ -2223,7 +2258,7 @@ class MsrReaderDialog(QWidget):
         if len(ref_ids) < min_beads:
             return False, f"reference dataset has {len(ref_ids)} usable bead(s); need at least {min_beads}"
         for moving_name in selected[1:]:
-            moving_mbm = MFSTATE.mbm_map.get(moving_name)
+            moving_mbm = self._aligned_mbm_points(moving_name)
             if moving_mbm is None:
                 return False, f"no bead points for {moving_name}"
             try:
@@ -2371,7 +2406,7 @@ class MsrReaderDialog(QWidget):
         if mode != "mbm info":
             return {}
         ref_name = selected[0]
-        ref_mbm = MFSTATE.mbm_map.get(ref_name)
+        ref_mbm = self._aligned_mbm_points(ref_name)
         if ref_mbm is None:
             raise ValueError(f"Could not find bead points (`grd/mbm/points`) for reference channel {ref_name}.")
         ref_mbm_for_alignment = self._filter_mbm_points_to_used_beads(ref_name, ref_mbm)
@@ -2384,11 +2419,13 @@ class MsrReaderDialog(QWidget):
             method="reference identity",
         )
         for moving_name in selected[1:]:
-            moving_mbm = MFSTATE.mbm_map.get(moving_name)
+            moving_mbm = self._aligned_mbm_points(moving_name)
             if moving_mbm is None:
                 raise ValueError(f"Could not find bead points (`grd/mbm/points`) for {moving_name}.")
             moving_mbm_for_alignment = self._filter_mbm_points_to_used_beads(moving_name, moving_mbm)
-            result = align_channels_from_arrays(ref_name, ref_mbm_for_alignment, moving_name, moving_mbm_for_alignment)
+            result = align_channels_from_arrays(
+                ref_name, ref_mbm_for_alignment, moving_name, moving_mbm_for_alignment,
+                transform_type=self._mbm_transform_type())
             transforms[moving_name] = {
                 "reference_channel": ref_name,
                 "moving_channel": moving_name,
@@ -2563,15 +2600,16 @@ class MsrReaderDialog(QWidget):
                     float(result.matrix_3x3[2, 0]), float(result.matrix_3x3[2, 1]), float(result.matrix_3x3[2, 2]),
                 ])
 
-    def _build_aligned_localizations_table(self, channel_name, channel_mfx, matrix_3x3):
-        from ...msr.alignment import apply_rigid_transform_2d
+    def _build_aligned_localizations_table(self, channel_name, channel_mfx, matrix_4x4):
+        from ...msr.alignment import apply_homogeneous_transform
         names = set(getattr(getattr(channel_mfx, "dtype", None), "names", ()) or ())
         if "loc" not in names:
             raise ValueError(f"{channel_name} mfx array has no 'loc' field")
         loc = np.asarray(channel_mfx["loc"], dtype=np.float64) * 1e9
         if loc.ndim != 2 or loc.shape[1] < 2:
             raise ValueError("mfx.loc must have shape (N, 2+) for alignment export")
-        aligned = apply_rigid_transform_2d(loc, matrix_3x3)
+        # Use the full 4x4 so Z is transformed too (3D datasets / 3D alignment).
+        aligned = apply_homogeneous_transform(loc, matrix_4x4)
         rows = []
         for idx in range(loc.shape[0]):
             row = {"channel_name": channel_name, "index": idx, "loc_x_nm": float(loc[idx, 0]), "loc_y_nm": float(loc[idx, 1]), "aligned_x_nm": float(aligned[idx, 0]), "aligned_y_nm": float(aligned[idx, 1])}
@@ -2594,6 +2632,55 @@ class MsrReaderDialog(QWidget):
             writer.writeheader()
             writer.writerows(rows)
 
+    def _aligned_mbm_points(self, name):
+        """Bead points for *name* with beads excluded via "Show Beads Drift"
+        removed. An empty selection (the default) returns all beads unchanged, so
+        the alignment behaves exactly as before unless the user made a choice."""
+        from ...msr import state as MFSTATE
+
+        points = MFSTATE.mbm_map.get(name)
+        if not self._bead_unchecked_gris or points is None:
+            return points
+        try:
+            import numpy as np
+            if "gri" in (getattr(points, "dtype", None).names or ()):
+                gri = np.asarray(points["gri"]).ravel()
+                return points[~np.isin(gri, list(self._bead_unchecked_gris))]
+        except Exception:
+            pass
+        return points
+
+    def _on_show_beads_drift(self):
+        from ...msr import state as MFSTATE
+        from .beads_drift import gather_msr_bead_drift
+        from .beads_drift_dialog import BeadsDriftDialog
+
+        datasets = (self.parsed or {}).get("datasets") or []
+        bead_data = gather_msr_bead_drift(datasets, getattr(MFSTATE, "mbm_map", {}))
+        if not bead_data:
+            QMessageBox.information(
+                self, "Show Beads Drift",
+                "The currently parsed .msr file has no MBM/bead data to display.\n\n"
+                "Parse a modern multi-channel .msr that contains 'grd/mbm/points'.")
+            return
+        dlg = BeadsDriftDialog(bead_data, unchecked_gris=self._bead_unchecked_gris, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._bead_unchecked_gris = dlg.unchecked_gris()
+            self.log(f"[beads] selection applied: {len(dlg.selected_gris())} beads kept, "
+                     f"{len(self._bead_unchecked_gris)} excluded from alignment.")
+
+    def _mbm_transform_type(self) -> str:
+        """The MBM-handling transform mode from Preferences (Preferences > MBM
+        Handling > transform_type); falls back to the rigid-XY + translational-Z
+        default when no app state / preference is available."""
+        from ...msr.alignment import TRANSFORM_RIGID_XY_Z
+
+        default = TRANSFORM_RIGID_XY_Z
+        if self._state is None:
+            return default
+        return (self._state.prefs.get("mbm_handling", {}) or {}).get(
+            "transform_type", default) or default
+
     def on_align_channel(self):
         from ...msr import state as MFSTATE
         from ...msr.alignment import align_channels_from_arrays
@@ -2608,24 +2695,35 @@ class MsrReaderDialog(QWidget):
             QMessageBox.critical(self, "Align channel", f"Expected at least 2 datasets for channel alignment, found {len(datasets)}.")
             return
         ref_name = datasets[0].get("display_name") or datasets[0].get("did") or "channel_1"
-        ref_mbm = MFSTATE.mbm_map.get(ref_name)
+        ref_mbm = self._aligned_mbm_points(ref_name)
         if ref_mbm is None:
             QMessageBox.critical(self, "Align channel", "Could not find bead points (`grd/mbm/points`) for the reference channel.")
             return
+        transform_type = self._mbm_transform_type()
+        self.log(f"[align] MBM-handling transform: {transform_type}")
         try:
             results = []
             aligned_localizations = []
             for ds in datasets[1:]:
                 moving_name = ds.get("display_name") or ds.get("did") or "channel"
-                moving_mbm = MFSTATE.mbm_map.get(moving_name)
+                moving_mbm = self._aligned_mbm_points(moving_name)
                 moving_mfx = MFSTATE.mfx_map.get(moving_name)
                 if moving_mbm is None:
                     raise ValueError(f"Could not find bead points (`grd/mbm/points`) for {moving_name}.")
                 if moving_mfx is None:
                     raise ValueError(f"Could not find `mfx` localizations for {moving_name}.")
-                result = align_channels_from_arrays(ref_name, ref_mbm, moving_name, moving_mbm)
+                result = align_channels_from_arrays(
+                    ref_name, ref_mbm, moving_name, moving_mbm, transform_type=transform_type)
+                is_3d = self._viewer_dataset_looks_3d(ref_name) or self._viewer_dataset_looks_3d(moving_name)
+                min_beads = 4 if is_3d else 3
+                if int(result.bead_ids.size) < min_beads:
+                    raise ValueError(
+                        f"Only {int(result.bead_ids.size)} matched bead(s) between "
+                        f"'{ref_name}' and '{moving_name}'; at least {min_beads} are "
+                        f"required for {'3D' if is_3d else '2D'} alignment "
+                        f"(check the bead selection in 'Show Beads Drift').")
                 results.append(result)
-                aligned_localizations.extend(self._build_aligned_localizations_table(moving_name, moving_mfx, result.matrix_3x3))
+                aligned_localizations.extend(self._build_aligned_localizations_table(moving_name, moving_mfx, result.matrix_4x4))
         except Exception as exc:
             self.log(f"[align] failed: {exc}")
             QMessageBox.critical(self, "Align channel", f"Alignment failed:\n{exc}")
@@ -2634,11 +2732,18 @@ class MsrReaderDialog(QWidget):
         for result in results:
             self.log(f"[align] {result.channel2_name} -> {result.channel1_name}; matched {result.bead_ids.size} beads; translation_nm=({result.translation[0]:.3f}, {result.translation[1]:.3f}); rmse_xy_nm={result.rmse:.3f}")
 
-        dlg = AlignmentSaveDialog(self._channel_alignment_defaults(), self)
+        dlg = AlignmentSaveDialog(
+            self._channel_alignment_defaults(), self._alignment_save_options, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             self.log("[align] save cancelled.")
             return
         payload = dlg.result_payload()
+        # Remember the checkbox states for next time.
+        self._alignment_save_options = {
+            k: bool(payload[k])
+            for k in ("save_beads", "save_transform", "save_localizations", "show_plot")
+        }
+        self._save_settings()
         try:
             if payload["save_beads"]:
                 self._write_alignment_beads_csv(payload["path_beads"], results)
@@ -2871,6 +2976,14 @@ class MsrReaderDialog(QWidget):
                     self.log(f"[error] {key}: {exc}")
         finally:
             self._state.suspend_auto_render = previous_suspend_auto_render
+
+        # A single imported dataset is standalone, not an overlay channel — drop
+        # the assigned channel colour so it renders with the default LUT (hot).
+        # The Red/Green/Blue cycle is only meaningful for a multi-channel overlay.
+        if len(imported_indices) == 1:
+            sole = self._state.datasets[imported_indices[0]]
+            sole.state.pop("overlay_lut", None)
+            sole.state.pop("render_channel_lut", None)
 
         if errors:
             QMessageBox.warning(

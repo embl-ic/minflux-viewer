@@ -35,6 +35,52 @@ def _alive(window: QWidget) -> bool:
         return False
 
 
+def ensure_on_screen(window: QWidget, owner: QWidget | None = None, *, margin: int = 24) -> None:
+    """Cap *window* to the available screen area and center it fully on-screen.
+
+    Unparented top-level windows (the MSR reader, Dataset Manager, modeless
+    result/plugin windows) get no automatic placement relative to a parent, so a
+    tall one can open with its title bar above the screen's top edge — worse on
+    laptop / scaled screens or when the taskbar shrinks the available height.
+    Call this **after** ``show()`` so the window frame geometry is known. The
+    target screen is the owner's screen, else the screen under the cursor, else
+    the primary screen. No-op on any failure.
+    """
+    try:
+        from PyQt6.QtGui import QCursor, QGuiApplication
+
+        screen = None
+        if owner is not None:
+            try:
+                top = owner.window()
+                screen = top.screen()
+            except Exception:
+                screen = None
+        if screen is None:
+            screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+
+        avail = screen.availableGeometry()
+        frame = window.frameGeometry()
+        # Shrink so the *frame* (incl. title bar) fits within the available area.
+        overflow_w = frame.width() - (avail.width() - 2 * margin)
+        overflow_h = frame.height() - (avail.height() - 2 * margin)
+        if overflow_w > 0 or overflow_h > 0:
+            window.resize(max(320, window.width() - max(0, overflow_w)),
+                          max(200, window.height() - max(0, overflow_h)))
+            frame = window.frameGeometry()
+        # Center the frame, then clamp its top-left inside the available area.
+        x = avail.left() + (avail.width() - frame.width()) // 2
+        y = avail.top() + (avail.height() - frame.height()) // 2
+        x = min(max(x, avail.left()), max(avail.left(), avail.right() - frame.width()))
+        y = min(max(y, avail.top()), max(avail.top(), avail.bottom() - frame.height()))
+        # move() positions the client area; compensate for the frame margins.
+        window.move(x + (window.x() - frame.x()), y + (window.y() - frame.y()))
+    except Exception:
+        pass
+
+
 def show_modeless(window: QWidget, owner: QWidget | None = None) -> QWidget:
     """Show *window* as a modeless, non-owned top-level window.
 
@@ -58,6 +104,7 @@ def show_modeless(window: QWidget, owner: QWidget | None = None) -> QWidget:
         window.destroyed.connect(lambda *_a, w=window: _ORPHAN_WINDOWS.discard(w))
 
     window.show()
+    ensure_on_screen(window, owner)
     window.raise_()
     window.activateWindow()
     return window

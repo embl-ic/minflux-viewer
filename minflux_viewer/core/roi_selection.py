@@ -74,6 +74,95 @@ def rectangle_mask(
     return out
 
 
+def _point_in_polygon(px: np.ndarray, py: np.ndarray, poly: np.ndarray) -> np.ndarray:
+    """Even-odd (ray-casting / PNPOLY) point-in-polygon, vectorised over points.
+
+    Even-odd is deliberate: a self-intersecting outline (e.g. a figure-8) then
+    encloses *both* lobes, matching how a user reads the shape.
+    """
+    px = np.asarray(px, dtype=float).ravel()
+    py = np.asarray(py, dtype=float).ravel()
+    poly = np.asarray(poly, dtype=float)
+    vx, vy = poly[:, 0], poly[:, 1]
+    n = poly.shape[0]
+    inside = np.zeros(px.shape, dtype=bool)
+    j = n - 1
+    for i in range(n):
+        dy = vy[j] - vy[i]
+        cond = (vy[i] > py) != (vy[j] > py)
+        x_int = vx[i] + (py - vy[i]) * (vx[j] - vx[i]) / (dy if dy != 0 else 1e-300)
+        inside ^= cond & (px < x_int)
+        j = i
+    return inside
+
+
+def oval_mask(x, y, record, *, base_mask=None) -> np.ndarray:
+    """Boolean mask for points inside an (optionally rotated) ellipse ROI."""
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    n = min(x.size, y.size)
+    out = np.zeros(n, dtype=bool)
+    try:
+        bx, by, bw, bh = (float(v) for v in record.geometry["bounds"])
+    except Exception:
+        return out
+    if n == 0:
+        return out
+    cx, cy = bx + bw / 2.0, by + bh / 2.0
+    ax = max(abs(bw) / 2.0, 1e-12)
+    ay = max(abs(bh) / 2.0, 1e-12)
+    out = np.isfinite(x[:n]) & np.isfinite(y[:n])
+    dx, dy = x[:n] - cx, y[:n] - cy
+    angle = float(record.geometry.get("angle", 0.0) or 0.0)
+    if abs(angle) > 1e-9:
+        theta = np.deg2rad(angle)
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        dx, dy = cos_t * dx + sin_t * dy, -sin_t * dx + cos_t * dy
+    out &= (dx / ax) ** 2 + (dy / ay) ** 2 <= 1.0
+    if base_mask is not None:
+        base = np.asarray(base_mask, dtype=bool).ravel()
+        if base.size == n:
+            out &= base
+    return out
+
+
+def polygon_mask(x, y, record, *, base_mask=None) -> np.ndarray:
+    """Boolean mask for points inside a polygon / freehand ROI (even-odd rule)."""
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    n = min(x.size, y.size)
+    out = np.zeros(n, dtype=bool)
+    pts = (record.geometry or {}).get("points", [])
+    if n == 0 or len(pts) < 3:
+        return out
+    poly = np.asarray(pts, dtype=float)[:, :2]
+    finite = np.isfinite(x[:n]) & np.isfinite(y[:n])
+    out = finite.copy()
+    if np.any(finite):
+        out[finite] = _point_in_polygon(x[:n][finite], y[:n][finite], poly)
+    if base_mask is not None:
+        base = np.asarray(base_mask, dtype=bool).ravel()
+        if base.size == n:
+            out &= base
+    return out
+
+
+def roi_region_mask(x, y, record, *, base_mask=None) -> np.ndarray:
+    """Enclosed-region mask for any 2-D ROI shape (rectangle/oval/polygon/freehand).
+
+    Line/point ROIs have no enclosed area → all-False.
+    """
+    kind = getattr(record, "type", None)
+    if kind == "rectangle":
+        return rectangle_mask(x, y, record, base_mask=base_mask)
+    if kind == "oval":
+        return oval_mask(x, y, record, base_mask=base_mask)
+    if kind in ("polygon", "freehand"):
+        return polygon_mask(x, y, record, base_mask=base_mask)
+    n = min(np.asarray(x).size, np.asarray(y).size)
+    return np.zeros(n, dtype=bool)
+
+
 def value_range_mask(
     values: np.ndarray,
     lo: float,
@@ -117,6 +206,19 @@ def store_roi_mask(
         "context": record.context,
     }
     return key
+
+
+def roi_highlight_enabled(prefs: dict | None, *, is_source: bool) -> bool:
+    """Whether a view should paint the ROI in-region highlight, per preferences.
+
+    The view where the ROI is being drawn (``is_source``) is gated by
+    ``plot.roi_highlight_in_roi``; every other view of the same dataset by
+    ``plot.roi_sync_highlight``. So an unchecked "highlight in ROI" can still
+    leave the synced highlight visible on the other views.
+    """
+    plot = (prefs or {}).get("plot", {})
+    key = "roi_highlight_in_roi" if is_source else "roi_sync_highlight"
+    return bool(plot.get(key, True))
 
 
 def active_roi_mask(

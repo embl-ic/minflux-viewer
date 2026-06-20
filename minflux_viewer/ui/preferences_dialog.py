@@ -367,6 +367,13 @@ class PreferencesDialog(QDialog):
         self._close_paraview = QCheckBox("close ParaView when exiting the application")
         form.addRow("", self._close_paraview)
 
+        self._check_updates = QCheckBox("check for updates on startup")
+        self._check_updates.setToolTip(
+            "On startup, check the GitHub releases page for a newer version. "
+            "Only notifies when an update is available; no data is sent."
+        )
+        form.addRow("", self._check_updates)
+
         self._temp_folder_edit, temp_row = self._browse_row(
             self._browse_temp_folder, file_mode=False,
         )
@@ -685,6 +692,22 @@ class PreferencesDialog(QDialog):
         widget_row.addStretch()
         form_roi.addRow("Edit widget size", widget_row)
 
+        self._roi_highlight_in_roi = QCheckBox(
+            "highlight data inside ROI region with ROI color")
+        self._roi_highlight_in_roi.setToolTip(
+            "Highlight the in-ROI localizations on the view where the ROI is "
+            "drawn. Uncheck to draw the ROI without recolouring the data under it.")
+        form_roi.addRow("", self._roi_highlight_in_roi)
+
+        self._roi_sync_highlight = QCheckBox(
+            "sync data ROI highlight on all views of the same dataset")
+        self._roi_sync_highlight.setToolTip(
+            "Also highlight the in-ROI data in the dataset's other open views "
+            "(scatter, histogram, attribute plot, …). Independent of the option "
+            "above: you can suppress the highlight on the drawing view yet still "
+            "see it synced on the others.")
+        form_roi.addRow("", self._roi_sync_highlight)
+
         root.addWidget(grp_roi)
 
         root.addStretch()
@@ -954,6 +977,7 @@ class PreferencesDialog(QDialog):
         self._keep_last_folder.setChecked(bool(f.get("keep_last_folder", True)))
         self._confirm_overwrite.setChecked(bool(f.get("confirm_overwrite", True)))
         self._close_paraview.setChecked(bool(f.get("close_paraview_on_exit", True)))
+        self._check_updates.setChecked(bool(f.get("check_updates_on_startup", True)))
 
         # Data
         self._iter_load.setCurrentText(str(d.get("iter_load", "last")))
@@ -990,6 +1014,8 @@ class PreferencesDialog(QDialog):
         self._set_combo(self._scatter_cmap_combo, p.get("scatter_cmap", "jet"), _SCATTER_CMAPS)
         self._set_combo(self._plot_cmap_combo, p.get("attr_cmap", "single color"), _ATTR_CMAPS)
         self._set_combo(self._roi_color_combo, p.get("roi_color", "Yellow"), _ROI_COLORS)
+        self._roi_highlight_in_roi.setChecked(bool(p.get("roi_highlight_in_roi", True)))
+        self._roi_sync_highlight.setChecked(bool(p.get("roi_sync_highlight", True)))
         self._roi_transparency.setValue(int(p.get("roi_transparency", 50)))
         self._roi_edge_size.setValue(int(p.get("roi_edge_size", 1)))
         self._roi_edit_widget_size.setValue(int(p.get("roi_edit_widget_size", 8)))
@@ -1045,6 +1071,7 @@ class PreferencesDialog(QDialog):
         f["keep_last_folder"] = bool(self._keep_last_folder.isChecked())
         f["confirm_overwrite"] = bool(self._confirm_overwrite.isChecked())
         f["close_paraview_on_exit"] = bool(self._close_paraview.isChecked())
+        f["check_updates_on_startup"] = bool(self._check_updates.isChecked())
 
         # Data
         d["iter_load"] = self._iter_load.currentText()
@@ -1076,6 +1103,8 @@ class PreferencesDialog(QDialog):
         p["scatter_cmap"] = self._scatter_cmap_combo.currentText()
         p["attr_cmap"] = self._plot_cmap_combo.currentText()
         p["roi_color"] = self._roi_color_combo.currentText()
+        p["roi_highlight_in_roi"] = bool(self._roi_highlight_in_roi.isChecked())
+        p["roi_sync_highlight"] = bool(self._roi_sync_highlight.isChecked())
         p["roi_transparency"] = int(self._roi_transparency.value())
         p["roi_edge_size"] = int(self._roi_edge_size.value())
         p["roi_edit_widget_size"] = int(self._roi_edit_widget_size.value())

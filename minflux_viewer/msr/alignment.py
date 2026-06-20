@@ -113,12 +113,85 @@ def apply_homogeneous_transform(points: np.ndarray, matrix_4x4: np.ndarray) -> n
     return out
 
 
+#: MBM-handling transform modes (Preferences > MBM Handling > transform_type).
+TRANSFORM_RIGID_XY_Z = "rigid XY + translational Z"
+TRANSFORM_TRANS_XYZ = "translational XYZ"
+TRANSFORM_RIGID_XYZ = "rigid XYZ"
+
+
+def _z_meaningful(*arrays: np.ndarray) -> bool:
+    return any(
+        np.any(np.isfinite(a[:, 2])) and np.nanmax(np.abs(a[:, 2])) > 0
+        for a in arrays
+    )
+
+
+def _kabsch(src: np.ndarray, dst: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Full 3-D rigid (rotation + translation) least-squares fit src → dst."""
+    src_c, dst_c = src.mean(axis=0), dst.mean(axis=0)
+    h = (src - src_c).T @ (dst - dst_c)
+    u, _, vt = np.linalg.svd(h)
+    rotation = vt.T @ u.T
+    if np.linalg.det(rotation) < 0:
+        vt = vt.copy()
+        vt[-1, :] *= -1.0
+        rotation = vt.T @ u.T
+    return rotation, dst_c - rotation @ src_c
+
+
+def _rmse3(aligned: np.ndarray, target: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.sum((aligned - target) ** 2, axis=1))))
+
+
+def solve_channel_transform(src_xyz: np.ndarray, dst_xyz: np.ndarray, transform_type: str):
+    """Solve a channel2→channel1 transform for the chosen MBM-handling mode.
+
+    Returns ``(rotation2x2, translation2, z_translation, matrix_3x3, matrix_4x4,
+    aligned_xyz, rmse)``. ``rigid XY + translational Z`` (default) reproduces the
+    original 2-D rigid + Z-shift; ``translational XYZ`` is a pure 3-D shift;
+    ``rigid XYZ`` is a full 3-D rigid (rotation in Z too).
+    """
+    mode = (transform_type or "").strip().lower()
+    src = np.asarray(src_xyz, dtype=np.float64)
+    dst = np.asarray(dst_xyz, dtype=np.float64)
+
+    if mode == TRANSFORM_TRANS_XYZ.lower():
+        t3 = np.median(dst - src, axis=0)
+        rot3 = np.eye(3, dtype=np.float64)
+        aligned = src + t3
+        rmse = _rmse3(aligned, dst)
+    elif mode == TRANSFORM_RIGID_XYZ.lower():
+        rot3, t3 = _kabsch(src, dst)
+        aligned = (rot3 @ src.T).T + t3
+        rmse = _rmse3(aligned, dst)
+    else:  # rigid XY + translational Z (default)
+        rotation, translation, _m3, rmse = compute_rigid_transform_2d(src[:, :2], dst[:, :2])
+        rot3 = np.eye(3, dtype=np.float64)
+        rot3[:2, :2] = rotation
+        t3 = np.array([translation[0], translation[1], 0.0], dtype=np.float64)
+        if _z_meaningful(src, dst):
+            t3[2] = float(np.nanmedian(dst[:, 2] - src[:, 2]))
+        aligned = np.column_stack([
+            (rotation @ src[:, :2].T).T + translation,
+            src[:, 2] + t3[2],
+        ])
+
+    matrix_4x4 = np.eye(4, dtype=np.float64)
+    matrix_4x4[:3, :3] = rot3
+    matrix_4x4[:3, 3] = t3
+    matrix_3x3 = np.eye(3, dtype=np.float64)
+    matrix_3x3[:2, :2] = rot3[:2, :2]
+    matrix_3x3[:2, 2] = t3[:2]
+    return rot3[:2, :2], t3[:2], float(t3[2]), matrix_3x3, matrix_4x4, aligned, float(rmse)
+
+
 def align_channels_from_arrays(
     channel1_name: str,
     channel1_points: np.ndarray,
     channel2_name: str,
     channel2_points: np.ndarray,
     max_points_per_bead: int = 10,
+    transform_type: str = TRANSFORM_RIGID_XY_Z,
 ) -> ChannelAlignmentResult:
     ch1 = extract_bead_summaries(channel1_points, max_points_per_bead=max_points_per_bead)
     ch2 = extract_bead_summaries(channel2_points, max_points_per_bead=max_points_per_bead)
@@ -129,23 +202,9 @@ def align_channels_from_arrays(
     channel2_xyz = np.vstack([ch2[int(b)].median_xyz for b in bead_ids]) * NM_PER_M
     channel1_counts = np.array([ch1[int(b)].count_used for b in bead_ids], dtype=np.int32)
     channel2_counts = np.array([ch2[int(b)].count_used for b in bead_ids], dtype=np.int32)
-    rotation, translation, matrix_3x3, rmse = compute_rigid_transform_2d(
-        channel2_xyz[:, :2], channel1_xyz[:, :2]
-    )
-    xy_aligned = apply_rigid_transform_2d(channel2_xyz, matrix_3x3)
-    z_translation = 0.0
-    if (
-        np.any(np.isfinite(channel1_xyz[:, 2]))
-        and np.any(np.isfinite(channel2_xyz[:, 2]))
-        and (np.nanmax(np.abs(channel1_xyz[:, 2])) > 0 or np.nanmax(np.abs(channel2_xyz[:, 2])) > 0)
-    ):
-        z_translation = float(np.nanmedian(channel1_xyz[:, 2] - channel2_xyz[:, 2]))
-    matrix_4x4 = np.eye(4, dtype=np.float64)
-    matrix_4x4[:2, :2] = rotation
-    matrix_4x4[:2, 3] = translation
-    matrix_4x4[2, 3] = z_translation
-    channel2_aligned_xyz = xy_aligned
-    channel2_aligned_xyz[:, 2] = channel2_aligned_xyz[:, 2] + z_translation
+    (rotation, translation, z_translation, matrix_3x3, matrix_4x4,
+     channel2_aligned_xyz, rmse) = solve_channel_transform(
+        channel2_xyz, channel1_xyz, transform_type)
     return ChannelAlignmentResult(
         channel1_name=channel1_name,
         channel2_name=channel2_name,

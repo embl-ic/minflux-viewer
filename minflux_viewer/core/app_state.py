@@ -17,6 +17,7 @@ being directly coupled to any other component.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,29 @@ from .dataset import MinfluxDataset
 
 if TYPE_CHECKING:
     pass
+
+
+def format_progress_bar(fraction: float, *, width: int = 10, done: bool = False) -> str:
+    """Render an ASCII progress bar like ``==========  42 % ==========``."""
+    bar = "=" * width
+    if done:
+        return f"{bar}  DONE  {bar}"
+    pct = int(round(max(0.0, min(1.0, fraction)) * 100.0))
+    return f"{bar}  {pct:3d} % {bar}"
+
+
+class _TaskProgress:
+    """Handle yielded by :meth:`AppState.task` — call ``update(fraction)``."""
+
+    def __init__(self, state: "AppState") -> None:
+        self._state = state
+        self._last_pct = -1
+
+    def update(self, fraction: float) -> None:
+        pct = int(round(max(0.0, min(1.0, fraction)) * 100.0))
+        if pct != self._last_pct:                  # throttle: only on % change
+            self._last_pct = pct
+            self._state.log_progress(format_progress_bar(fraction))
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +68,7 @@ DEFAULT_PREFS: dict = {
         "recent_files": [],
         "confirm_overwrite": True,
         "close_paraview_on_exit": True,
+        "check_updates_on_startup": True,
         "paraview_path": "",
         "temp_folder": "",           # app-wide temp dir; empty = use system temp
     },
@@ -79,6 +104,8 @@ DEFAULT_PREFS: dict = {
         "scatter_cmap": "jet",
         "roi_color": "Yellow",
         "roi_transparency": 50,
+        "roi_highlight_in_roi": True,   # highlight in-ROI data on the drawing view
+        "roi_sync_highlight": True,     # highlight in-ROI data on other views too
         "roi_edge_size": 1,
         "roi_edit_widget_size": 8,
         "filter_range_color": "Green",
@@ -247,6 +274,7 @@ class AppState(QObject):
     roi_selection_changed = pyqtSignal(int)
     status_message  = pyqtSignal(str)
     log_message     = pyqtSignal(str, str)  # (message, level)
+    progress_log    = pyqtSignal(str, bool)  # (bar text, final) — refreshing line
 
     # ------------------------------------------------------------------
     def __init__(self, parent: QObject | None = None) -> None:
@@ -424,6 +452,37 @@ class AppState(QObject):
             One of "INFO", "WARN", "ERROR", "DEBUG".
         """
         self.log_message.emit(message, level)
+
+    def log_progress(self, text: str, *, final: bool = False) -> None:
+        """Update the single refreshing progress line in the Log window.
+
+        ``final=True`` freezes the line (e.g. the DONE bar) so the next progress
+        starts fresh. Prefer :meth:`task` for the common header + bar pattern.
+        """
+        self.progress_log.emit(text, final)
+
+    @contextmanager
+    def task(self, message: str):
+        """Log *message* as a header, then a refreshing ASCII progress bar.
+
+        ::
+
+            with state.task(f"Computing FRC of dataset {ds.name}…") as t:
+                for i in range(n):
+                    ...
+                    t.update((i + 1) / n)        # → "==========  N % =========="
+            # the bar is finalized to DONE (or FAILED on exception) on exit
+        """
+        self.log(message)
+        self.log_progress(format_progress_bar(0.0))
+        handle = _TaskProgress(self)
+        try:
+            yield handle
+        except BaseException:
+            self.log_progress("=" * 10 + "  FAILED  " + "=" * 10, final=True)
+            raise
+        else:
+            self.log_progress(format_progress_bar(1.0, done=True), final=True)
 
     # ------------------------------------------------------------------
     # Preferences

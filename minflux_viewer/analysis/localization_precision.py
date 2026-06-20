@@ -304,6 +304,7 @@ def frc_resolution(
     repeats: int = FRC_DEFAULT_REPEATS,
     threshold: float = FRC_THRESHOLD,
     seed: int = 0,
+    progress=None,
 ) -> FRCResult:
     """Estimate image resolution by Fourier Ring Correlation.
 
@@ -394,12 +395,14 @@ def frc_resolution(
     ring, rmax = _rfft_ring_index(n_px)
     rng = np.random.default_rng(seed)
     curves: list[np.ndarray] = []
-    for _ in range(max(1, repeats)):
+    total = max(1, repeats)
+    for i in range(total):
         # Random 50/50 split of the points (Gwosch/Ostersehlt: rand < 0.5).
         ix = rng.random(n_points) < 0.5
-        if ix.sum() < 2 or (~ix).sum() < 2:
-            continue
-        curves.append(_radial_frc(_render(ix), _render(~ix), ring, rmax))
+        if ix.sum() >= 2 and (~ix).sum() >= 2:
+            curves.append(_radial_frc(_render(ix), _render(~ix), ring, rmax))
+        if progress is not None:
+            progress(i + 1, total)
 
     if not curves:
         return _fail("Could not form two non-empty halves for FRC.", pixel)
@@ -729,7 +732,10 @@ def run_frc(parent, state) -> None:
         if tid is not None:
             tid = tid[ftr]
 
-    result = frc_resolution(x, y, tid)
+    with state.task(f"Computing FRC of dataset {ds.name}…") as t:
+        result = frc_resolution(
+            x, y, tid, progress=lambda done, total: t.update(done / total)
+        )
 
     if np.isfinite(result.resolution_nm):
         _try_journal(
