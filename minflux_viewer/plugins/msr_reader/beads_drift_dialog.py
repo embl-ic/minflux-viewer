@@ -37,6 +37,30 @@ _COL_TITLES = ("Y (nm) vs X (nm)", "X (nm) vs time (sec)",
 _PLOT_KEYS = ((0, 1), (None, 0), (None, 1), (None, 2))
 _MAX_PTS = 600                # display cap per bead (keeps the dialog snappy)
 
+#: axis key -> label; keys 0/1/2 = X/Y/Z columns, "t" = time
+_AXIS_LABEL = {0: "X (nm)", 1: "Y (nm)", 2: "Z (nm)", "t": "time (sec)"}
+
+
+def _fmt_axis_value(key, value: float) -> str:
+    """`X (nm): 33.7` for nm axes, `time (sec): 1137` for the time axis."""
+    return f"{_AXIS_LABEL[key]}: {value:.{0 if key == 't' else 1}f}"
+
+
+def _point_tip(x, y, data) -> str:
+    """ScatterPlotItem hover tip — the per-spot string we stashed in ``data``."""
+    return str(data)
+
+
+def _build_point_tips(idxs, axis_vals: dict, xi, yi) -> list[str]:
+    """Per-point hover strings for a sub-plot: ``<idx>: <a>: v; <b>: v`` where
+    *a*/*b* are the two axes NOT plotted here (the plot shows axes *xi*,*yi*;
+    ``xi is None`` means the x-axis is time)."""
+    shown = {xi, yi} if xi is not None else {"t", yi}
+    k1, k2 = [k for k in (0, 1, 2, "t") if k not in shown]
+    a1, a2 = axis_vals[k1], axis_vals[k2]
+    return [f"{int(idxs[j])}: {_fmt_axis_value(k1, a1[j])}; {_fmt_axis_value(k2, a2[j])}"
+            for j in range(len(idxs))]
+
 
 def _time_cmap():
     import pyqtgraph as pg
@@ -49,24 +73,77 @@ def _subsample(n: int) -> np.ndarray | slice:
     return np.linspace(0, n - 1, _MAX_PTS).astype(int)
 
 
+def _nice_time_ticks(lo: float, hi: float, target: int = 4) -> list[float]:
+    """A handful of round tick values inside [lo, hi] (e.g. 0,1000,2000,3000)."""
+    span = hi - lo
+    if not np.isfinite(span) or span <= 0:
+        return [lo]
+    raw = span / max(target, 1)
+    mag = 10.0 ** np.floor(np.log10(raw))
+    norm = raw / mag
+    step = (1 if norm < 1.5 else 2 if norm < 3 else 5 if norm < 7 else 10) * mag
+    first = np.ceil(lo / step) * step
+    ticks: list[float] = []
+    v = first
+    while v <= hi + step * 1e-6:
+        ticks.append(round(float(v), 6))
+        v += step
+    return ticks or [lo]
+
+
 class _TimeColorBar(QWidget):
-    """Horizontal early→late colour legend for the time mapping."""
+    """Horizontal begin→end colour legend for the time mapping, with a second
+    ruler underneath showing the actual acquisition time the colours map to."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(26)
-        self.setMinimumWidth(240)
+        from PyQt6.QtWidgets import QSizePolicy
+        self.setFixedHeight(48)
+        self.setMinimumWidth(420)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._t_lo = 0.0
+        self._t_hi = 0.0          # hi <= lo => ruler hidden (no time range yet)
+
+    def set_time_range(self, t_lo: float, t_hi: float) -> None:
+        self._t_lo, self._t_hi = float(t_lo), float(t_hi)
+        self.update()
 
     def paintEvent(self, _event) -> None:
         p = QPainter(self)
-        w, h = self.width(), self.height()
-        p.drawText(0, h - 7, "time: early")
-        bar_x0, bar_x1 = 78, w - 36
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        fm = p.fontMetrics()
+        w = self.width()
+        bar_y0, bar_h = 4, 16
+        bar_x0 = max(78, fm.horizontalAdvance("time begin") + 10)
+        bar_x1 = w - 50                                   # right margin for "end" / "(sec)"
+        base = bar_y0 + bar_h - 3                         # text baseline aligned to the bar
+
+        # flanking labels: "time begin  [====gradient====]  end"
+        p.setPen(QColor(40, 40, 40))
+        p.drawText(bar_x0 - 4 - fm.horizontalAdvance("time begin"), base, "time begin")
         grad = QLinearGradient(bar_x0, 0, bar_x1, 0)
         for pos, (r, g, b) in zip(_CMAP_POS, _CMAP_RGB):
             grad.setColorAt(pos, QColor(r, g, b))
-        p.fillRect(bar_x0, 4, bar_x1 - bar_x0, h - 12, grad)
-        p.drawText(bar_x1 + 3, h - 7, "late")
+        p.fillRect(bar_x0, bar_y0, bar_x1 - bar_x0, bar_h, grad)
+        p.setPen(QColor(120, 120, 120))
+        p.drawRect(bar_x0, bar_y0, bar_x1 - bar_x0, bar_h)
+        p.setPen(QColor(40, 40, 40))
+        p.drawText(bar_x1 + 5, base, "end")
+
+        if self._t_hi <= self._t_lo:
+            return
+        # second ruler: axis line + a few round ticks under the gradient
+        line_y = bar_y0 + bar_h + 6
+        lbl_base = line_y + 4 + fm.ascent() + 1
+        span = self._t_hi - self._t_lo
+        p.setPen(QColor(90, 90, 90))
+        p.drawLine(bar_x0, line_y, bar_x1, line_y)
+        for v in _nice_time_ticks(self._t_lo, self._t_hi):
+            x = int(round(bar_x0 + (v - self._t_lo) / span * (bar_x1 - bar_x0)))
+            p.drawLine(x, line_y, x, line_y + 4)
+            txt = f"{v:g}"
+            p.drawText(x - fm.horizontalAdvance(txt) // 2, lbl_base, txt)
+        p.drawText(bar_x1 + 5, lbl_base, "(sec)")
 
 
 class BeadsDriftDialog(QDialog):
@@ -118,8 +195,8 @@ class BeadsDriftDialog(QDialog):
         root.addWidget(self._selection_label)
 
         cbar_row = QHBoxLayout()
-        cbar_row.addStretch(1)
-        cbar_row.addWidget(_TimeColorBar())
+        self._cbar = _TimeColorBar()
+        cbar_row.addWidget(self._cbar, 1)
         root.addLayout(cbar_row)
 
         from PyQt6.QtWidgets import QTabWidget
@@ -128,7 +205,7 @@ class BeadsDriftDialog(QDialog):
             placeholder = QWidget()
             QVBoxLayout(placeholder)
             self._tabs.addTab(placeholder, d["name"])
-        self._tabs.currentChanged.connect(self._build_tab)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self._tabs, 1)
 
         buttons = QDialogButtonBox()
@@ -147,8 +224,26 @@ class BeadsDriftDialog(QDialog):
         self._update_selection_line()
         if self._datasets:
             self._build_tab(0)
+            self._update_colorbar_range(0)
 
     # ------------------------------------------------------------------
+    def _on_tab_changed(self, index: int) -> None:
+        self._build_tab(index)
+        self._update_colorbar_range(index)
+
+    def _update_colorbar_range(self, index: int) -> None:
+        """Point the colour-bar's second ruler at the shown dataset's time span."""
+        if not (0 <= index < len(self._datasets)):
+            return
+        beads = self._datasets[index]["beads"]
+        times = [b["tim_s"] for b in beads if len(b["tim_s"])]
+        if not times:
+            self._cbar.set_time_range(0.0, 0.0)
+            return
+        t = np.concatenate(times)
+        lo, hi = float(np.min(t)), float(np.max(t))
+        self._cbar.set_time_range(lo, hi if hi > lo else lo + 1.0)
+
     @staticmethod
     def _dataset_ranges(beads: list[dict]) -> dict:
         x = np.concatenate([b["xyz_nm"][:, 0] for b in beads])
@@ -213,8 +308,10 @@ class BeadsDriftDialog(QDialog):
             xyz = bead["xyz_nm"]
             tim = bead["tim_s"]
             sel = _subsample(len(tim))
+            idxs = np.arange(len(tim))[sel]      # original sequence index per shown point
             xs, ys, zs, ts = xyz[sel, 0], xyz[sel, 1], xyz[sel, 2], tim[sel]
             cols = (xs, ys, zs)
+            axis_vals = {0: xs, 1: ys, 2: zs, "t": ts}   # value array per axis key
             span = (t_hi - t_lo) or 1.0
             rgba = cmap.map(np.clip((ts - t_lo) / span, 0, 1), mode="byte")
             brushes = [pg.mkBrush(int(a), int(b_), int(c_), int(d_)) for a, b_, c_, d_ in rgba]
@@ -222,13 +319,18 @@ class BeadsDriftDialog(QDialog):
             for c, (xi, yi) in enumerate(_PLOT_KEYS):
                 xdata = cols[xi] if xi is not None else ts
                 ydata = cols[yi]
+                # hover datatip: show the index + the two axes NOT plotted here
+                tips = _build_point_tips(idxs, axis_vals, xi, yi)
                 plot = pg.PlotWidget()
                 plot.setFixedHeight(168)
                 plot.setMinimumWidth(210)
                 plot.setMenuEnabled(True)
                 plot.showGrid(x=True, y=True, alpha=0.15)
                 plot.plot(xdata, ydata, pen=pg.mkPen((170, 170, 170, 120), width=1))
-                plot.addItem(pg.ScatterPlotItem(x=xdata, y=ydata, size=5, pen=None, brush=brushes))
+                plot.addItem(pg.ScatterPlotItem(
+                    x=xdata, y=ydata, size=5, pen=None, brush=brushes,
+                    data=tips, hoverable=True, hoverSize=9,
+                    hoverPen=pg.mkPen(255, 255, 255, 220), tip=_point_tip))
                 # shared axis limits per plot-type within the dataset
                 x_rng = ranges["x"] if xi == 0 else ranges["t"]
                 y_rng = y_range_for[yi]
