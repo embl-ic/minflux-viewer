@@ -81,6 +81,14 @@ _ROI_TOOL_DEFS: tuple[tuple[str, str, str], ...] = (
     ("Point", "point", "toolPoint"),
 )
 
+#: Fiji-style line family hosted on the single Line toolbar button
+#: (label, tool, icon file). Right-click the Line button to switch variant.
+_LINE_FAMILY: tuple[tuple[str, str, str], ...] = (
+    ("Straight Line", "line", "line.png"),
+    ("Polyline", "polyline", "polyline.png"),
+    ("Freehand Line", "freehand_line", "freeline.png"),
+)
+
 
 _AI_UNAPPROVED_MENU_TEXT = QColor("#404040")
 
@@ -325,6 +333,18 @@ class MainWindow(QMainWindow):
         self.menuAnalyzeTrace.addSeparator()
         self.menuAnalyzeTrace.addAction(self.actionTraceViewerAnalyze)
 
+        # Segmentation submenu — structure segmentation (NPC; more to come)
+        self.menuAnalyzeSegmentation = QMenu("Segmentation", self)
+        self.menuSegNPC = QMenu("NPC", self)
+        self.actionSegNpc2D = QAction("2D", self)
+        self.actionSegNpc2D.triggered.connect(self._segment_npc_2d)
+        self.actionSegNpc3D = QAction("3D", self)
+        self.actionSegNpc3D.triggered.connect(
+            lambda: self._placeholder("NPC segmentation (3D)", "a later implementation"))
+        self.menuSegNPC.addAction(self.actionSegNpc2D)
+        self.menuSegNPC.addAction(self.actionSegNpc3D)
+        self.menuAnalyzeSegmentation.addMenu(self.menuSegNPC)
+
         # Tracking submenu — Phase 5 placeholders
         u.actionParticleTracking.triggered.connect(
             lambda: self._placeholder("Particle tracking", "Phase 5")
@@ -357,10 +377,13 @@ class MainWindow(QMainWindow):
         self.actionChannelOverlay.triggered.connect(
             lambda: self._placeholder("Channel overlay", "a later implementation")
         )
+        self.actionChannelSeparateDcr = QAction("Separate Channel by DCR", self)
+        self.actionChannelSeparateDcr.triggered.connect(self._show_channel_separation)
         self.menuProcessChannel.addAction(self.actionChannelTool)
         self.menuProcessChannel.addAction(self.actionChannelCombine)
         self.menuProcessChannel.addAction(self.actionChannelSplit)
         self.menuProcessChannel.addAction(self.actionChannelOverlay)
+        self.menuProcessChannel.addAction(self.actionChannelSeparateDcr)
 
         self.menuProcessRoi = QMenu("ROI", self)
         self.actionRoiManager = QAction("ROI Manager", self)
@@ -391,11 +414,18 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             self._roi_tool_group.setExclusive(False)
+        # Fiji-style: the Line toolbar button hosts a *family* (straight / poly /
+        # freehand line); right-click it to switch, left-click activates the
+        # current variant. ``_line_variant`` tracks the active member.
+        self._line_variant = "line"
         for _label, tool, attr in _ROI_TOOL_DEFS:
             action = getattr(u, attr)
             self._roi_tool_actions[tool] = action
             self._roi_tool_group.addAction(action)
-            action.triggered.connect(lambda checked, t=tool: self._on_roi_tool(t, checked))
+            if tool == "line":
+                action.triggered.connect(lambda checked: self._on_roi_tool(self._line_variant, checked))
+            else:
+                action.triggered.connect(lambda checked, t=tool: self._on_roi_tool(t, checked))
         # Angle tool (ImageJ-style; not in the generated .ui). It's a measurement
         # tool — three points A·B·C reporting the angle ABC — placed between the
         # Line and Point tools on the toolbar.
@@ -406,6 +436,22 @@ class MainWindow(QMainWindow):
         self._roi_tool_actions["angle"] = self.toolAngle
         self._roi_tool_group.addAction(self.toolAngle)
         self.toolAngle.triggered.connect(lambda checked: self._on_roi_tool("angle", checked))
+        # Magnetic lasso tool (snaps to the rendered density centre), placed right
+        # after the Point tool.
+        self.toolMagneticLasso = QAction("Magnetic Lasso", self)
+        self.toolMagneticLasso.setCheckable(True)
+        self.toolMagneticLasso.setToolTip(
+            "Magnetic lasso — click to trace; each vertex snaps to the high-density "
+            "centre of the structure under the cursor. Right-click / double-click / "
+            "Enter to finish.")
+        anchor = getattr(u, "toolLut", None)
+        if anchor is not None:
+            u.toolbar.insertAction(anchor, self.toolMagneticLasso)
+        else:
+            u.toolbar.addAction(self.toolMagneticLasso)
+        self._roi_tool_actions["magnetic_lasso"] = self.toolMagneticLasso
+        self._roi_tool_group.addAction(self.toolMagneticLasso)
+        self.toolMagneticLasso.triggered.connect(lambda checked: self._on_roi_tool("magnetic_lasso", checked))
         self._state.rois.tool_changed.connect(self._sync_roi_tool_actions)
 
         # Wire icon images for toolbar buttons
@@ -459,6 +505,7 @@ class MainWindow(QMainWindow):
         self.actionChannelCombine.setText("Combine...")
         self.actionChannelSplit.setText("Split...")
         self.actionChannelOverlay.setText("Overlay")
+        self.actionChannelSeparateDcr.setText("Separate Channel by DCR")
         self.menuProcessRoi.setTitle("ROI")
         self.actionRoiManager.setText("ROI Manager")
         self.actionOpenSpreadsheet.setText("Open Spreadsheet Data...")
@@ -511,6 +558,7 @@ class MainWindow(QMainWindow):
         u.menuAnalysis.addAction(u.actionLocalDensity)
         u.menuAnalysis.addAction(self.menuAnalyzeClustering.menuAction())
         u.menuAnalysis.addAction(self.menuAnalyzeTrace.menuAction())
+        u.menuAnalysis.addAction(self.menuAnalyzeSegmentation.menuAction())
         u.menuAnalysis.addAction(u.menuTracking.menuAction())
 
         self._shortcut_actions = {
@@ -551,6 +599,7 @@ class MainWindow(QMainWindow):
             self.actionChannelCombine,
             self.actionChannelSplit,
             self.actionChannelOverlay,
+            self.actionChannelSeparateDcr,
             self.menuProcessRoi.menuAction(),
             self.actionRoiManager,
             u.menuBatchProcessing.menuAction(),
@@ -561,6 +610,9 @@ class MainWindow(QMainWindow):
             self.actionSetMeasurements,
             self.actionDbscan,
             self.actionKNearestNeighbour,
+            self.menuAnalyzeSegmentation.menuAction(),
+            self.actionSegNpc2D,
+            self.actionSegNpc3D,
             u.menuTracking.menuAction(),
             u.actionParticleTracking,
             u.actionMsdAnalysis,
@@ -578,6 +630,8 @@ class MainWindow(QMainWindow):
             u.menuBatchProcessing,
             u.menuAnalysis,
             self.menuAnalyzeClustering,
+            self.menuAnalyzeSegmentation,
+            self.menuSegNPC,
             u.menuTracking,
             u.menuHelp,
         ):
@@ -733,6 +787,16 @@ class MainWindow(QMainWindow):
         return QKeySequence(mods | key).toString(QKeySequence.SequenceFormat.PortableText)
 
     def eventFilter(self, obj, event) -> bool:
+        # Right-click on a ROI toolbar button → tool/variant switch menu.
+        if (event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.RightButton
+                and obj in getattr(self, "_roi_tool_buttons", {})):
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            if self._roi_tool_buttons[obj] == "line":
+                self._show_line_family_menu(obj, pos)
+            else:
+                self._show_roi_tool_menu(obj, pos)
+            return True
         if event.type() not in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
             return super().eventFilter(obj, event)
         seq = self._event_sequence_text(event)
@@ -1296,6 +1360,67 @@ class MainWindow(QMainWindow):
         from .roi_manager import RoiManagerWindow
         self._roi_manager_win = _raise_or_create(self._roi_manager_win, RoiManagerWindow, self._state)
 
+    def _segment_npc_2d(self) -> None:
+        """Analyze › Segmentation › NPC › 2D — detect NPC centres by ring-kernel
+        convolution and add a rectangle ROI around each into the ROI Manager."""
+        import numpy as np
+
+        idx = self._state.active_idx
+        if idx is None or self._state.active_dataset is None:
+            self._no_data_warning()
+            return
+        ds = self._state.datasets[idx]
+        try:
+            loc = np.asarray(ds.loc_nm, dtype=float)
+        except Exception:
+            loc = np.empty((0, 3))
+        if loc.ndim != 2 or loc.shape[0] < 3 or loc.shape[1] < 2:
+            QMessageBox.information(self, "NPC Segmentation", "The active dataset has no localizations to segment.")
+            return
+        mask = np.asarray(ds.filter_mask, dtype=bool)
+        if mask.shape[0] == loc.shape[0]:
+            loc = loc[mask]
+        xy = loc[:, :2]
+
+        from .npc_segmentation_dialog import NpcSegmentationDialog
+        dlg = NpcSegmentationDialog(self, defaults=getattr(self, "_npc_seg_defaults", None))
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        p = dlg.params()
+        self._npc_seg_defaults = p
+
+        from ..analysis.npc_segmentation import segment_npc_2d
+        try:
+            res = segment_npc_2d(
+                xy, diameter_nm=p["diameter_nm"], rim_nm=p["rim_nm"],
+                pixel_size_nm=p["pixel_size_nm"], min_support=p["min_support"])
+        except Exception as exc:
+            QMessageBox.warning(self, "NPC Segmentation", f"Segmentation failed: {exc}")
+            return
+        centers = res["centers"]
+        if centers.shape[0] == 0:
+            QMessageBox.information(
+                self, "NPC Segmentation",
+                "No NPCs detected with these parameters. Try adjusting the diameter, "
+                "rim size, pixel size, or lowering the min support score.")
+            return
+
+        from ..core.roi import RoiRecord
+        side = float(p["diameter_nm"])
+        for i, (cx, cy) in enumerate(centers, start=1):
+            rec = RoiRecord.create(
+                "rectangle",
+                {"bounds": [float(cx) - side / 2.0, float(cy) - side / 2.0, side, side]},
+                name=f"NPC {i}", coordinate_space="plot", stroke_color="#ffcc00")
+            rec.context = {"dataset_idx": idx, "source": "npc_segmentation_2d"}
+            self._state.rois.add(rec)
+        self._state.rois.set_show_all(True)     # reveal every detected NPC at once
+        self._show_render(idx)
+        self._show_roi_manager()
+        self._state.log(
+            f"NPC segmentation (2D): detected {centers.shape[0]} NPC(s) on '{ds.name}'; "
+            f"added rectangle ROIs to the ROI Manager.")
+
     def _notify_view_state_changed(self) -> None:
         mgr = getattr(self, "_ds_manager", None)
         if mgr is not None and hasattr(mgr, "refresh_views"):
@@ -1350,23 +1475,54 @@ class MainWindow(QMainWindow):
 
     def _sync_roi_tool_actions(self, tool: str = "") -> None:
         active_tool = tool or self._state.rois.active_tool or ""
+        family = {t for _l, t, _ic in _LINE_FAMILY}
+        if active_tool in family:
+            self._line_variant = active_tool
+            self._update_line_button_icon()
         for name, action in self._roi_tool_actions.items():
             blocked = action.blockSignals(True)
-            action.setChecked(name == active_tool)
+            # The single Line button stays checked for any of its family members.
+            action.setChecked(active_tool in family if name == "line" else name == active_tool)
             action.blockSignals(blocked)
 
+    def _update_line_button_icon(self) -> None:
+        from .. import resource_path
+        icon_file = {t: ic for _l, t, ic in _LINE_FAMILY}.get(self._line_variant, "line.png")
+        path = resource_path("icons", icon_file)
+        if path.exists():
+            self._ui.toolLine.setIcon(QIcon(str(path)))
+            self._ui.toolLine.setToolTip(
+                {t: lbl for lbl, t, _ic in _LINE_FAMILY}.get(self._line_variant, "Line")
+                + " — right-click to switch (straight / poly / freehand line)")
+
     def _install_roi_tool_menus(self) -> None:
-        for _label, _tool, attr in _ROI_TOOL_DEFS:
-            action = getattr(self._ui, attr, None)
-            if action is None:
-                continue
-            button = self._ui.toolbar.widgetForAction(action)
-            if button is None:
-                continue
-            button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            button.customContextMenuRequested.connect(
-                lambda pos, widget=button: self._show_roi_tool_menu(widget, pos)
-            )
+        # Only the Line button gets a right-click menu — the Fiji-style switch
+        # between straight / poly / freehand line. The other ROI buttons have no
+        # right-click menu. A QToolButton in a QToolBar swallows
+        # ``customContextMenuRequested``, so we intercept the right mouse press
+        # with an event filter instead (reliable).
+        self._roi_tool_buttons: dict = {}
+        line_action = getattr(self._ui, "toolLine", None)
+        button = self._ui.toolbar.widgetForAction(line_action) if line_action is not None else None
+        if button is not None:
+            self._roi_tool_buttons[button] = "line"
+            button.installEventFilter(self)
+
+    def _show_line_family_menu(self, widget: QWidget, pos) -> None:
+        """Fiji-style right-click switcher on the Line button."""
+        menu = QMenu(widget)
+        active = self._state.rois.active_tool
+        for label, tool, _ic in _LINE_FAMILY:
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(tool == active or (active is None and tool == self._line_variant))
+            action.triggered.connect(lambda _checked=False, t=tool: self._select_line_variant(t))
+        menu.exec(widget.mapToGlobal(pos))
+
+    def _select_line_variant(self, tool: str) -> None:
+        self._line_variant = tool
+        self._update_line_button_icon()
+        self._activate_roi_tool(tool)
 
     def _show_roi_tool_menu(self, widget: QWidget, pos) -> None:
         menu = QMenu(widget)
@@ -2028,6 +2184,102 @@ class MainWindow(QMainWindow):
         self._notify_view_state_changed()
         self._state.log(f"Created overlay {overlay_index} with {len(specs)} dataset(s).")
 
+    def _show_channel_separation(self) -> None:
+        """Process › Channel… › Separate Channel by DCR — open the DCR two-colour
+        separation tool for the active dataset."""
+        idx = self._state.active_idx
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        ds = self._state.datasets[idx]
+        from ..core.loader import attr_values_1d
+        if attr_values_1d(ds, "dcr") is None:
+            QMessageBox.information(
+                self, "Separate Channel by DCR",
+                "The active dataset has no DCR attribute, so it cannot be separated by DCR.")
+            return
+        from .channel_separation_window import ChannelSeparationWindow
+        from .modeless import show_modeless
+        win = ChannelSeparationWindow(self._state, idx, owner=self)
+        show_modeless(win, self)
+
+    def apply_dcr_channel_separation(self, src_idx: int, labels) -> bool:
+        """Build red / green / (unassigned) truncated copies from per-localization
+        channel *labels* (0/1/-1) and combine them as a render overlay. Returns
+        True on success. Called by ``ChannelSeparationWindow`` on Apply."""
+        import uuid
+
+        import numpy as np
+
+        from ..core.overlay import display_transform_record, identity_matrix4
+        from ..core.roi_crop import subset_dataset
+
+        if not (0 <= src_idx < len(self._state.datasets)):
+            return False
+        src = self._state.datasets[src_idx]
+        labels = np.asarray(labels).ravel()
+        n = int(getattr(src.prop, "num_loc", labels.size))
+        if labels.size != n:
+            return False
+        base_name = src.name
+        # (mask, LUT, name suffix, hidden-by-default)
+        plan = [
+            (labels == 0, "Red", "ch1 red", False),
+            (labels == 1, "Green", "ch2 green", False),
+            (labels == -1, "Gray", "unassigned", True),
+        ]
+        overlay_index = self._next_overlay_index
+        self._next_overlay_index += 1
+        overlay_id = f"overlay:{overlay_index}:{uuid.uuid4().hex}"
+        prefs = self._state.prefs
+
+        new_indices: list[int] = []
+        order = 0
+        previous = getattr(self._state, "suspend_auto_render", False)
+        self._state.suspend_auto_render = True
+        try:
+            for mask, lut, suffix, hidden in plan:
+                keep = np.asarray(mask, dtype=bool)
+                if not keep.any():
+                    continue
+                order += 1
+                new_ds = subset_dataset(src, keep, name=f"{base_name} [{suffix}]", prefs=prefs)
+                idx = self._state.add_dataset(new_ds)
+                ds = self._state.datasets[idx]
+                transform = display_transform_record(
+                    overlay_id=overlay_id, overlay_index=overlay_index, order=order,
+                    lut=lut, source_dataset_idx=idx, alignment_mode="stage origin",
+                    matrix_4x4=identity_matrix4(),
+                    provenance={"method": "dcr channel separation", "source_dataset": base_name})
+                ds.state["overlay_id"] = overlay_id
+                ds.state["render_group_id"] = overlay_id
+                ds.state["overlay_index"] = overlay_index
+                ds.state["overlay_order"] = order
+                ds.state["overlay_lut"] = lut
+                ds.state["render_channel_lut"] = lut
+                ds.state["overlay_transform"] = transform
+                ds.state["render_transform_2d"] = transform
+                if hidden:
+                    ds.state["overlay_default_hidden"] = True
+                ds.metadata["overlay_id"] = overlay_id
+                ds.metadata["overlay_index"] = overlay_index
+                ds.metadata["dcr_separated_from"] = base_name
+                new_indices.append(idx)
+        finally:
+            self._state.suspend_auto_render = previous
+
+        if not new_indices:
+            QMessageBox.warning(self, "Separate Channel by DCR",
+                                "No localizations were assigned to a channel.")
+            return False
+        anchor = new_indices[0]
+        self._state.set_active(anchor)
+        self._show_render(anchor)
+        self._notify_view_state_changed()
+        self._state.log(
+            f"Separated '{base_name}' into {len(new_indices)} DCR channel(s) (overlay {overlay_index}).")
+        return True
+
     def _show_render(self, dataset_idx: int | None = None):
         """
         Open (or raise) the render window for a dataset.
@@ -2543,6 +2795,9 @@ class MainWindow(QMainWindow):
         angle_icon = icon_dir / "angle.png"
         if hasattr(self, "toolAngle") and angle_icon.exists():
             self.toolAngle.setIcon(QIcon(str(angle_icon)))
+        lasso_icon = icon_dir / "lasso.png"
+        if hasattr(self, "toolMagneticLasso") and lasso_icon.exists():
+            self.toolMagneticLasso.setIcon(QIcon(str(lasso_icon)))
 
     def _no_data_warning(self) -> None:        QMessageBox.information(self, "No data", "Please load a dataset first.")
 

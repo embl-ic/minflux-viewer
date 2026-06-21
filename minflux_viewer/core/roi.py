@@ -17,7 +17,13 @@ import numpy as np
 from PyQt6.QtCore import QObject, QPointF, pyqtSignal
 from PyQt6.QtGui import QPainterPath, QPolygonF
 
-ROI_TYPES = {"rectangle", "oval", "polygon", "freehand", "line", "point", "angle"}
+ROI_TYPES = {
+    "rectangle", "oval", "polygon", "freehand", "line", "point", "angle",
+    "polyline", "freehand_line", "magnetic_lasso",
+}
+
+#: Open multi-vertex curve types (no enclosed area; drawn as open polylines).
+OPEN_LINE_TYPES = {"polyline", "freehand_line"}
 
 
 @dataclass
@@ -51,9 +57,11 @@ class RoiRecord:
         line_width: float = 1.5,
     ) -> "RoiRecord":
         roi_id = uuid.uuid4().hex
+        # Leave the name empty for auto-named ROIs; RoiStore.add assigns a
+        # human-friendly 1-based name (e.g. "rectangle-1") when the ROI is stored.
         return cls(
             id=roi_id,
-            name=name or f"{roi_type}-{roi_id[:4]}",
+            name=name or "",
             type=roi_type,
             geometry=geometry,
             coordinate_space=coordinate_space,
@@ -91,7 +99,31 @@ class RoiStore(QObject):
         self.active_tool = tool
         self.tool_changed.emit(tool or "")
 
+    def next_type_index(self, roi_type: str) -> int:
+        """Next 1-based index for naming a ROI of *roi_type* (``rectangle-1`` …),
+        one past the highest existing ``<type>-<n>`` so names don't collide even
+        after deletions."""
+        prefix = f"{roi_type}-"
+        max_n = 0
+        for r in self.records:
+            if r.type == roi_type and (r.name or "").startswith(prefix):
+                suffix = r.name[len(prefix):]
+                if suffix.isdigit():
+                    max_n = max(max_n, int(suffix))
+        return max_n + 1
+
+    def _is_auto_name(self, record: RoiRecord) -> bool:
+        name = record.name or ""
+        if not name:
+            return True
+        # legacy auto name was "<type>-<4 hex chars>"
+        prefix = f"{record.type}-"
+        suffix = name[len(prefix):] if name.startswith(prefix) else ""
+        return len(suffix) == 4 and all(c in "0123456789abcdef" for c in suffix)
+
     def add(self, record: RoiRecord) -> None:
+        if self._is_auto_name(record):
+            record.name = f"{record.type}-{self.next_type_index(record.type)}"
         self.records.append(record)
         self.selected_ids = [record.id]
         self.changed.emit()
@@ -228,11 +260,11 @@ def record_to_path(record: RoiRecord) -> QPainterPath:
         x, y = float(pt[0]), float(pt[1])
         path.addEllipse(x - 2.0, y - 2.0, 4.0, 4.0)
     else:
-        pts = g.get("points", [])
+        pts = g.get("points", [])          # vertices may carry a 3rd (depth) coord
         if pts:
             path.moveTo(float(pts[0][0]), float(pts[0][1]))
-            for x, y in pts[1:]:
-                path.lineTo(float(x), float(y))
+            for p in pts[1:]:
+                path.lineTo(float(p[0]), float(p[1]))
             if g.get("closed", record.type in {"polygon", "freehand"}):
                 path.closeSubpath()
     return path
@@ -250,7 +282,8 @@ def record_to_points(record: RoiRecord) -> np.ndarray:
         # A point may carry a third (depth) coordinate; ImageJ/2-D paths use x,y.
         pt = g.get("point", [0.0, 0.0])
         return np.asarray([[float(pt[0]), float(pt[1])]], dtype=float)
-    return np.asarray(g.get("points", []), dtype=float)
+    pts = np.asarray(g.get("points", []), dtype=float)
+    return pts[:, :2] if pts.ndim == 2 and pts.shape[1] >= 2 else pts   # drop depth
 
 
 def record_to_imagej(record: RoiRecord):
@@ -284,6 +317,8 @@ def record_to_imagej(record: RoiRecord):
         "polygon": ROI_TYPE.POLYGON,
         "freehand": ROI_TYPE.FREEHAND,
         "point": ROI_TYPE.POINT,
+        "polyline": ROI_TYPE.POLYLINE,
+        "freehand_line": ROI_TYPE.FREELINE,
     }
     roi.roitype = mapping.get(record.type, ROI_TYPE.POLYGON)
     return roi
@@ -296,8 +331,14 @@ def record_from_imagej(roi) -> RoiRecord:
     if roi_type_name == "point":
         roi_type = "point"
         geometry = {"point": coords[0].tolist() if coords.size else [float(roi.left), float(roi.top)]}
-    elif roi_type_name in {"line", "freeline", "polyline"}:
-        roi_type = "line" if coords.shape[0] == 2 else "freehand"
+    elif roi_type_name == "polyline":
+        roi_type = "polyline"
+        geometry = {"points": coords.tolist(), "closed": False}
+    elif roi_type_name == "freeline":
+        roi_type = "freehand_line"
+        geometry = {"points": coords.tolist(), "closed": False}
+    elif roi_type_name == "line":
+        roi_type = "line"
         geometry = {"points": coords.tolist(), "closed": False}
     elif roi_type_name == "oval":
         roi_type = "oval"

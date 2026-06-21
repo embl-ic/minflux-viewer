@@ -56,6 +56,37 @@ def update_point_in_plane(new_xy, old_point, plane: str | None) -> list[float]:
     return out
 
 
+# --- vertex-list variants (line / polyline / freehand line) -----------------
+# A line/curve is just "a list of vertices projected per view": each vertex is
+# the n=1 point case. Out-of-plane (depth) axis = centre of the current viewing
+# range, set once when drawn; preserved per-vertex when edited in another plane.
+
+def points_to_3d(xy_list, plane: str | None, depth: float | None) -> list[list[float]]:
+    """Build full-XYZ vertices from a 2-D draw (all at the same *depth*)."""
+    return [point_to_3d(p, plane, depth) for p in xy_list]
+
+
+def project_points(points, plane: str | None) -> list[list[float]]:
+    """Project a list of (possibly 3-D) vertices into *plane*'s two on-screen axes."""
+    return [list(project_point(p, plane)) for p in points]
+
+
+def update_points_in_plane(new_xy_list, old_points, plane: str | None) -> list[list[float]]:
+    """Apply in-plane handle moves to each vertex, preserving its out-of-plane axis.
+
+    Pairs ``new_xy_list[k]`` with ``old_points[k]``; if the counts differ (a
+    vertex was added/removed) the unmatched new vertices are taken as 2-D.
+    """
+    out: list[list[float]] = []
+    for k, xy in enumerate(new_xy_list):
+        old = old_points[k] if k < len(old_points) else None
+        if old is not None and len(old) >= 3:
+            out.append(update_point_in_plane(xy, old, plane))
+        else:
+            out.append([float(xy[0]), float(xy[1])])
+    return out
+
+
 class FilledRotateHandle(Handle):
     """Rotate handle with a filled circular hit area."""
 
@@ -262,6 +293,8 @@ class RoiOverlayController(QObject):
         self._drag_start: tuple[float, float] | None = None
         self._freehand_points: list[list[float]] = []
         self._polygon_points: list[list[float]] = []
+        self._polyline_points: list[list[float]] = []
+        self._lasso_points: list[list[float]] = []          # committed snapped vertices
         self._angle_points: list[list[float]] = []
         self._pending_selection_record: RoiRecord | None = None
         self._selection_timer = QTimer(self)
@@ -304,6 +337,8 @@ class RoiOverlayController(QObject):
         record = copy.deepcopy(selected_record)
         if record.type == "point":
             record.geometry = self._point_geometry_from_item(item, record.geometry)
+        elif record.type in {"line", "polyline", "freehand_line"}:
+            record.geometry = self._open_line_geometry_from_item(item, record.geometry, record.type)
         else:
             record.geometry = item_to_geometry(record.type, item)
         record.selection_dirty = True
@@ -314,14 +349,24 @@ class RoiOverlayController(QObject):
     def refresh(self) -> None:
         wanted = set()
         selected = set(self.store.selected_ids)
+        plane = self._view_plane()
+        plane_changed = plane != getattr(self, "_last_plane", plane)
+        self._last_plane = plane
         for record in self.store.records:
             if not record.visible:
                 continue
-            # Point ROIs are persistent spatial markers — keep them all visible
-            # regardless of the show-all / selection gate (multi-point drawing).
-            if not self.store.show_all and record.id not in selected and record.type != "point":
+            # Stored ROIs (incl. points) follow the Manager's Show-all / selection
+            # gate: with Show-all off, only the selected ROI(s) stay on screen, so
+            # unchecking it faithfully hides everything. (Points being *drawn* live
+            # in _session_points and stay visible via _refresh_session_points.)
+            if not self.store.show_all and record.id not in selected:
                 continue
             wanted.add(record.id)
+            # On a view-plane flip, rebuild 3-D line/polyline/freehand-line items so
+            # their vertices re-project onto the new plane (points use cheap setPos).
+            if (plane_changed and record.id in self.items
+                    and record.type in {"line", "polyline", "freehand_line"}):
+                self.plot_item.removeItem(self.items.pop(record.id))
             if record.id not in self.items:
                 item = self._make_item(record)
                 self.items[record.id] = item
@@ -342,6 +387,18 @@ class RoiOverlayController(QObject):
             if roi_id not in wanted:
                 self.plot_item.removeItem(self.labels.pop(roi_id))
         self._refresh_session_points()
+        # An in-progress draft (line/polyline/freehand line) must also re-project
+        # when the view plane flips, so its 3-D vertices show at the right depth.
+        if (plane_changed and self.draft is not None and self.draft_item is not None
+                and self.draft.type in {"line", "polyline", "freehand_line"}):
+            try:
+                self.plot_item.removeItem(self.draft_item)
+            except Exception:
+                pass
+            self.draft_item = self._make_item(self.draft)
+            self._style_item(self.draft_item, self.draft, True)
+            self._connect_draft_edit(self.draft_item)
+            self.plot_item.addItem(self.draft_item)
 
     def eventFilter(self, obj, event) -> bool:
         try:
@@ -356,6 +413,12 @@ class RoiOverlayController(QObject):
             # last left-click point back to the first.
             if self.store.active_tool == "polygon" and self._polygon_points:
                 self._finish_polygon()
+                return True
+            if self.store.active_tool == "polyline" and self._polyline_points:
+                self._finish_polyline()
+                return True
+            if self.store.active_tool == "magnetic_lasso" and self._lasso_points:
+                self._finish_lasso()
                 return True
             pos = self._event_to_view(event)
             hit = self._record_at(pos) if pos is not None else None
@@ -375,20 +438,30 @@ class RoiOverlayController(QObject):
             pos = self._event_to_view(event)
             if pos is None:
                 return False
-            if self._record_at(pos) is not None:
-                return False
-            if tool == "point":
-                # Each click drops a persistent point; the tool stays pressed so
-                # the user can keep marking points until the toolbar button is
-                # clicked again (no auto-release).
-                self._commit_point(pos)
-                return True
+            # Accumulating multi-vertex tools register EVERY left click as a new
+            # vertex in draw order — so an existing ROI (or the in-progress draft)
+            # under the cursor must NOT swallow the click via _record_at below.
             if tool == "polygon":
                 if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                     self._finish_polygon()
                 else:
                     self._polygon_points.append(list(pos))
                     self._update_polygon_draft()
+                return True
+            if tool == "polyline":
+                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    self._finish_polyline()
+                else:
+                    self._polyline_points.append(list(pos))
+                    self._update_polyline_draft()
+                return True
+            if tool == "magnetic_lasso":
+                snapped = self._snap_pos(pos)
+                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    self._finish_lasso()
+                else:
+                    self._lasso_points.append(list(snapped))
+                    self._update_lasso_draft()
                 return True
             if tool == "angle":
                 # Click A, then B (vertex), then C — three points finish it.
@@ -398,15 +471,34 @@ class RoiOverlayController(QObject):
                 else:
                     self._update_angle_draft()
                 return True
+            if self._record_at(pos) is not None:
+                return False
+            if tool == "point":
+                # Each click drops a persistent point; the tool stays pressed so
+                # the user can keep marking points until the toolbar button is
+                # clicked again (no auto-release).
+                self._commit_point(pos)
+                return True
             self._drag_start = pos
             self._freehand_points = [list(pos)]
             self._update_drag_draft(pos)
             return True
+        # Live rubber-band preview for click-based open lines (no drag in progress).
+        if event.type() == QEvent.Type.MouseMove and self._drag_start is None:
+            if tool == "polyline" and self._polyline_points:
+                pos = self._event_to_view(event)
+                if pos is not None:
+                    self._update_polyline_draft(preview=pos)
+            elif tool == "magnetic_lasso" and self._lasso_points:
+                pos = self._event_to_view(event)
+                if pos is not None:
+                    self._update_lasso_draft(preview=self._snap_pos(pos))
+            return False
         if event.type() == QEvent.Type.MouseMove and self._drag_start is not None:
             pos = self._event_to_view(event)
             if pos is None:
                 return False
-            if tool == "freehand":
+            if tool in {"freehand", "freehand_line"}:
                 self._freehand_points.append(list(pos))
             self._update_drag_draft(pos)
             return True
@@ -417,19 +509,35 @@ class RoiOverlayController(QObject):
             self._drag_start = None
             if tool in {"rectangle", "oval", "freehand"}:
                 self._finalize_draft_selection(update_item=True)
+            elif tool == "line":
+                self._finish_line()
+            elif tool == "freehand_line":
+                self._finish_freehand_line()
             self._maybe_release_tool(event.modifiers())
             return True
-        if event.type() == QEvent.Type.MouseButtonDblClick and tool == "polygon":
-            self._finish_polygon()
-            return True
-        if event.type() == QEvent.Type.KeyPress and tool == "polygon":
-            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        if event.type() == QEvent.Type.MouseButtonDblClick:
+            if tool == "polygon":
                 self._finish_polygon()
                 return True
-            if event.key() == Qt.Key.Key_Escape:
-                self._polygon_points = []
-                self._clear_draft()
+            if tool == "polyline":
+                self._finish_polyline()
                 return True
+            if tool == "magnetic_lasso":
+                self._finish_lasso()
+                return True
+        if event.type() == QEvent.Type.KeyPress:
+            finisher = {"polygon": self._finish_polygon, "polyline": self._finish_polyline,
+                        "magnetic_lasso": self._finish_lasso}.get(tool)
+            if finisher is not None:
+                if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    finisher()
+                    return True
+                if event.key() == Qt.Key.Key_Escape:
+                    self._polygon_points = []
+                    self._polyline_points = []
+                    self._lasso_points = []
+                    self._clear_draft()
+                    return True
         return False
 
     def _commit_point(self, pos) -> None:
@@ -503,6 +611,7 @@ class RoiOverlayController(QObject):
         self._show_manager_if_needed()
         for rec in records:
             self.store.add(rec)
+        self.store.deselect()            # all points filed into the Manager, off-screen
 
     # ------------------------------------------------------------------
     # 2-D view <-> 3-D coordinate helpers (out-of-plane = depth)
@@ -530,9 +639,26 @@ class RoiOverlayController(QObject):
                 return None
         return None
 
+    def _depths_at(self, pts_2d) -> list:
+        """Per-vertex out-of-plane (depth) value for in-plane points: the
+        data-aware weighted median of the structure under each vertex (so a point
+        drawn in XY lands on the actual object along Z), falling back to the
+        static view-range centre wherever the column is empty."""
+        center = self._depth_center()
+        getter = getattr(self.owner, "roi_depths_at", None)
+        depths = None
+        if callable(getter):
+            try:
+                depths = getter([(float(p[0]), float(p[1])) for p in pts_2d])
+            except Exception:
+                depths = None
+        if depths is None:
+            return [center] * len(pts_2d)
+        return [center if d is None else float(d) for d in depths]
+
     def _point_to_3d(self, pos) -> list[float]:
         """Build a full XYZ coordinate for a point clicked at in-plane *pos*."""
-        return point_to_3d(pos, self._view_plane(), self._depth_center())
+        return self._points_to_3d([pos])[0]
 
     def _project_point(self, record: RoiRecord) -> tuple[float, float]:
         """Project a (possibly 3-D) point geometry into the current view plane."""
@@ -546,6 +672,25 @@ class RoiOverlayController(QObject):
         pos = item.pos()
         old = old_geometry.get("point", [0.0, 0.0])
         return {"point": update_point_in_plane((pos.x(), pos.y()), old, self._view_plane())}
+
+    def _points_to_3d(self, pts_2d) -> list[list[float]]:
+        """Lift a 2-D draw (point / line / polyline / freehand line) to full XYZ,
+        giving each vertex a data-aware out-of-plane (depth) value."""
+        plane = self._view_plane()
+        depths = self._depths_at(pts_2d)
+        return [point_to_3d(p, plane, d) for p, d in zip(pts_2d, depths)]
+
+    def _project_points(self, record: RoiRecord) -> list[list[float]]:
+        """Project a (possibly 3-D) vertex-list geometry into the current plane."""
+        return project_points(record.geometry.get("points", []), self._view_plane())
+
+    def _open_line_geometry_from_item(self, item, old_geometry: dict[str, Any], roi_type: str) -> dict[str, Any]:
+        """Rebuild a line / polyline / freehand-line geometry after handle moves,
+        preserving each vertex's out-of-plane (depth) axis."""
+        new_xy = item_to_geometry(roi_type, item).get("points", [])
+        old = old_geometry.get("points", [])
+        pts = update_points_in_plane(new_xy, old, self._view_plane())
+        return {"points": pts, "closed": bool(old_geometry.get("closed", False))}
 
     def _maybe_release_tool(self, modifiers) -> None:
         """After a completed ROI draw, deactivate the shape tool so it is no
@@ -585,10 +730,80 @@ class RoiOverlayController(QObject):
             self._set_draft(RoiRecord.create("line", {"points": [[x0, y0], [x1, y1]], "closed": False}, **self._record_kwargs()))
         elif tool == "freehand":
             self._set_draft(RoiRecord.create("freehand", {"points": self._freehand_points, "closed": True}, **self._record_kwargs()))
+        elif tool == "freehand_line":
+            self._set_draft(RoiRecord.create("freehand_line", {"points": self._freehand_points, "closed": False}, **self._record_kwargs()))
 
     def _update_polygon_draft(self) -> None:
         if len(self._polygon_points) >= 1:
             self._set_draft(RoiRecord.create("polygon", {"points": self._polygon_points, "closed": False}, **self._record_kwargs()))
+
+    def _draw_points(self, committed, preview):
+        """Helper: committed vertices + optional rubber-band preview, ≥2 long."""
+        pts = list(committed)
+        if preview is not None:
+            pts = pts + [list(preview)]
+        return pts if len(pts) >= 2 else (pts + pts if pts else [[0, 0], [0, 0]])
+
+    def _update_polyline_draft(self, preview=None) -> None:
+        if self._polyline_points:
+            self._set_draft(RoiRecord.create(
+                "polyline", {"points": self._draw_points(self._polyline_points, preview), "closed": False},
+                **self._record_kwargs()))
+
+    def _finish_polyline(self) -> None:
+        if len(self._polyline_points) >= 2:
+            self._set_draft(RoiRecord.create(
+                "polyline", {"points": self._points_to_3d(self._polyline_points), "closed": False},
+                **self._record_kwargs()))
+            self._finalize_draft_selection(update_item=False)
+        self._polyline_points = []
+        # A right-click finish releases the tool (button unpresses); Ctrl keeps it
+        # active for drawing several polylines in a row.
+        self._maybe_release_tool(QApplication.keyboardModifiers())
+
+    def _finish_line(self) -> None:
+        if self.draft is None or self.draft.type != "line":
+            return
+        pts2d = [p[:2] for p in self.draft.geometry.get("points", [])[:2]]
+        self.draft.geometry = {"points": self._points_to_3d(pts2d), "closed": False}
+        self._finalize_draft_selection(update_item=True)
+
+    def _finish_freehand_line(self) -> None:
+        if len(self._freehand_points) >= 2:
+            self._set_draft(RoiRecord.create(
+                "freehand_line", {"points": self._points_to_3d(self._freehand_points), "closed": False},
+                **self._record_kwargs()))
+            self._finalize_draft_selection(update_item=True)
+        self._freehand_points = []
+
+    # --- magnetic lasso (snaps each vertex to the local density centre) -------
+    def _snap_pos(self, pos):
+        """Snap an in-plane cursor position to the high-density centre via the
+        owner's render raster; falls back to the raw position if unavailable."""
+        snapper = getattr(self.owner, "snap_to_density", None)
+        if callable(snapper):
+            try:
+                snapped = snapper(float(pos[0]), float(pos[1]))
+            except Exception:
+                snapped = None
+            if snapped is not None:
+                return (float(snapped[0]), float(snapped[1]))
+        return (float(pos[0]), float(pos[1]))
+
+    def _update_lasso_draft(self, preview=None) -> None:
+        if self._lasso_points:
+            self._set_draft(RoiRecord.create(
+                "polyline", {"points": self._draw_points(self._lasso_points, preview), "closed": False},
+                **self._record_kwargs()))
+
+    def _finish_lasso(self) -> None:
+        if len(self._lasso_points) >= 2:
+            self._set_draft(RoiRecord.create(
+                "polyline", {"points": self._points_to_3d(self._lasso_points), "closed": False},
+                **self._record_kwargs()))
+            self._finalize_draft_selection(update_item=False)
+        self._lasso_points = []
+        self._maybe_release_tool(QApplication.keyboardModifiers())
 
     def _finish_polygon(self) -> None:
         completed = len(self._polygon_points) >= 3
@@ -657,6 +872,8 @@ class RoiOverlayController(QObject):
     def _clear_draft(self) -> None:
         self.draft = None
         self._polygon_points = []
+        self._polyline_points = []
+        self._lasso_points = []
         self._freehand_points = []
         self._angle_points = []
         if self.draft_item is not None:
@@ -696,19 +913,25 @@ class RoiOverlayController(QObject):
                 fill_color=record.stroke_color, movable=True,
             )
         if record.type == "line":
-            pts = g.get("points", [[0, 0], [1, 1]])
+            pts = self._project_points(record) or [[0, 0], [1, 1]]
             return pg.LineSegmentROI(pts[:2], movable=True)
         if record.type == "point":
             x, y = self._project_point(record)
             return PointMarkerItem((x, y))
         if record.type == "angle":
             pts = g.get("points", [[0, 0], [1, 0], [2, 1]])
-            return pg.PolyLineROI(pts[:3], closed=False, movable=True)
+            return pg.PolyLineROI([p[:2] for p in pts[:3]], closed=False, movable=True)
+        if record.type in {"polyline", "freehand_line"}:
+            # open curves: no fill, no enclosed region
+            pts = self._project_points(record)
+            if len(pts) < 2:
+                pts = [[0, 0], [1, 1]]
+            return pg.PolyLineROI(pts, closed=False, movable=True)
         pts = g.get("points", [])
         if len(pts) < 2:
             pts = [[0, 0], [1, 1]]
         return FilledPolyLineROI(
-            pts, closed=bool(g.get("closed", record.type != "line")),
+            [p[:2] for p in pts], closed=bool(g.get("closed", record.type != "line")),
             fill_color=record.stroke_color, movable=True,
         )
 
@@ -755,6 +978,8 @@ class RoiOverlayController(QObject):
                 continue
             if record.type == "point":
                 record.geometry = self._point_geometry_from_item(item, record.geometry)
+            elif record.type in {"line", "polyline", "freehand_line"}:
+                record.geometry = self._open_line_geometry_from_item(item, record.geometry, record.type)
             else:
                 record.geometry = item_to_geometry(record.type, item)
             self._finalize_record_selection(record, update_item=True)
@@ -766,6 +991,9 @@ class RoiOverlayController(QObject):
             return
         if self.draft.type == "point":
             self.draft.geometry = self._point_geometry_from_item(item, self.draft.geometry)
+            return
+        if self.draft.type in {"line", "polyline", "freehand_line"}:
+            self.draft.geometry = self._open_line_geometry_from_item(item, self.draft.geometry, self.draft.type)
             return
         self.draft.geometry = item_to_geometry(self.draft.type, item)
         if self.draft.type in {"rectangle", "oval", "polygon", "freehand"}:
@@ -866,9 +1094,8 @@ class RoiOverlayController(QObject):
         for record in reversed(self.store.records):
             if not record.visible:
                 continue
-            # Points are always on-screen, so they are always hit-testable
-            # (lets a click on an existing point drag it instead of stacking).
-            if not self.store.show_all and record.id not in self.store.selected_ids and record.type != "point":
+            # Only hit-test ROIs that are actually on screen (same gate as refresh).
+            if not self.store.show_all and record.id not in self.store.selected_ids:
                 continue
             if self._point_hits_record(pos, record, tolerance):
                 return "stored", record
@@ -946,6 +1173,7 @@ class RoiOverlayController(QObject):
             self._remove_session_point(record.id)
             self._show_manager_if_needed()
             self.store.add(record)
+            self.store.deselect()        # leave the viewer; live only in the Manager
             return
         if kind != "draft" or self.draft is None:
             return
@@ -959,6 +1187,7 @@ class RoiOverlayController(QObject):
                 pass
         self._show_manager_if_needed()
         self.store.add(record)
+        self.store.deselect()            # the drawn ROI disappears from the view
 
     def _delete_hit_roi(self, kind: str, record: RoiRecord) -> None:
         self._delete_mask_for_record(record)
@@ -994,28 +1223,68 @@ class RoiOverlayController(QObject):
             return datasets[idx]
         return getattr(getattr(self.owner, "_state", None), "active_dataset", None)
 
+    _REGION_TYPES = {"rectangle", "oval", "polygon", "freehand"}
+
     def _show_roi_properties(self, record: RoiRecord) -> None:
+        import html
+
         from PyQt6.QtWidgets import QMessageBox
 
-        if record.selection_dirty:
+        if record.type in self._REGION_TYPES and record.selection_dirty:
             self._pending_selection_record = record
             self._compute_pending_selection()
-        geometry = self._geometry_text(record)
-        count = "pending" if record.selected_count is None else f"{record.selected_count:,}"
-        text = (
-            f"Name: {record.name}\n"
-            f"Type: {record.type}\n"
-            f"Geometry: {geometry}\n"
-            f"Localizations within: {count}"
-        )
-        QMessageBox.information(self.view_widget, "ROI Properties", text)
+        name = record.name or f"{record.type}-{self.store.next_type_index(record.type)}"
+        lines = [
+            f"Name: {name}",
+            f"Type: {record.type}",
+            f"Geometry: {self._geometry_text(record)}",
+        ]
+        if record.type in self._REGION_TYPES:
+            count = "pending" if record.selected_count is None else f"{record.selected_count:,}"
+            lines.append(f"Localizations within: {count}")
+        # Monospace so the polygon vertex columns line up.
+        box = QMessageBox(self.view_widget)
+        box.setWindowTitle("ROI Properties")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText("<pre style='font-family:Consolas,Courier New,monospace; margin:0'>"
+                    + html.escape("\n".join(lines)) + "</pre>")
+        box.exec()
+
+    @staticmethod
+    def _fmt(value) -> str:
+        """Integer nanometre precision (e.g. 12000) — easiest to estimate ROI
+        sizes at the nm scale."""
+        v = float(value)
+        return f"{int(round(v))}" if np.isfinite(v) else ""
 
     def _geometry_text(self, record: RoiRecord) -> str:
-        if record.type == "rectangle":
-            x, y, w, h = _bounds(record.geometry)
-            angle = float(record.geometry.get("angle", 0.0) or 0.0)
-            return f"box ({x:.3g}, {y:.3g}, {x + w:.3g}, {y + h:.3g}), angle {angle:.3g} deg"
-        return str(record.geometry)
+        f = self._fmt
+        g = record.geometry
+        t = record.type
+        if t in {"rectangle", "oval"}:
+            x, y, w, h = _bounds(g)
+            text = f"X={f(x)}, Y={f(y)}, W={f(w)}, H={f(h)}"
+            if t == "rectangle":
+                angle = float(g.get("angle", 0.0) or 0.0)
+                if abs(angle) > 1e-9:
+                    text += f", angle={angle:.1f}°"
+            return text
+        if t == "point":
+            pt = g.get("point", [0.0, 0.0])
+            return "(" + ", ".join(f(c) for c in pt[:3]) + ")"
+        pts = g.get("points", [])
+        if t in {"freehand", "freehand_line"} and len(pts) > 24:
+            x, y, w, h = _bounds(g)
+            return f"{len(pts)} vertices (freehand)\nbbox X={f(x)}, Y={f(y)}, W={f(w)}, H={f(h)}"
+        noun = "vertices" if t in {"polygon", "freehand", "polyline", "freehand_line"} else "points"
+        out = [f"{len(pts)} {noun}:"]
+        out += [f"  {f(p[0]):>9}  {f(p[1]):>9}" for p in pts]
+        if t == "angle" and len(pts) >= 3:
+            try:
+                out.append(f"angle = {_angle_abc(pts[0], pts[1], pts[2]):.1f}°")
+            except Exception:
+                pass
+        return "\n".join(out)
 
     def _sync_label(self, record: RoiRecord) -> None:
         if not self.store.show_labels or not record.label_visible:
@@ -1082,6 +1351,8 @@ def _bounds(geometry: dict[str, Any]) -> tuple[float, float, float, float]:
     pts = np.asarray(geometry.get("points", []), dtype=float)
     if pts.size == 0:
         return 0.0, 0.0, 0.0, 0.0
+    if pts.ndim == 2 and pts.shape[1] > 2:
+        pts = pts[:, :2]                          # vertices may carry a depth coord
     x0, y0 = pts.min(axis=0)
     x1, y1 = pts.max(axis=0)
     return float(x0), float(y0), float(x1 - x0), float(y1 - y0)

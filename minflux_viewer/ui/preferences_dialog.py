@@ -250,20 +250,28 @@ class PreferencesDialog(QDialog):
         self._page_list.setFixedWidth(168)
         self._page_list.setFrameShape(QFrame.Shape.Box)
         self._page_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Palette-driven so it stays readable under both light and dark system
+        # themes. Hardcoding background:white left non-selected items white-on-white
+        # (invisible) under a dark palette — only the selected row was forced black.
         self._page_list.setStyleSheet(
-            "QListWidget { background: white; border: 1px solid #9aa4b2; }"
+            "QListWidget { border: 1px solid #9aa4b2; }"
             "QListWidget::item { padding: 4px 8px; }"
-            "QListWidget::item:selected { background: #e7e7e7; color: black; }"
+            "QListWidget::item:selected {"
+            " background: palette(highlight); color: palette(highlighted-text); }"
         )
         self._page_list.currentRowChanged.connect(self._stack_page_changed)
         left.addWidget(self._page_list, stretch=1)
         content.addLayout(left)
 
         self._stack_frame = QFrame()
+        self._stack_frame.setObjectName("prefStackFrame")
         self._stack_frame.setFrameShape(QFrame.Shape.Box)
+        # Scope the border to the frame itself via its object name. A bare
+        # `QFrame { ... }` rule cascades to every descendant QLabel (QLabel is a
+        # QFrame), which is what painted the form labels as white boxes with
+        # invisible text under a dark palette. Background is left palette-driven.
         self._stack_frame.setStyleSheet(
-            "QFrame { background: white; border: 1px solid #9aa4b2; }"
-            "QFrame > QWidget { border: none; }"
+            "#prefStackFrame { border: 1px solid #9aa4b2; }"
             "QGroupBox { margin-top: 10px; padding: 10px 8px 8px 8px; }"
             "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }"
         )

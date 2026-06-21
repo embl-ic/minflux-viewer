@@ -81,4 +81,5 @@ def ensure_loaded() -> None:
     from . import msr_reader      # noqa: F401
     from . import paraview        # noqa: F401
     from . import script_editor   # noqa: F401
+    from . import trace_viewer    # noqa: F401
     from . import generate_method_text  # noqa: F401

@@ -1248,6 +1248,24 @@ class ScatterWindow(QWidget):
             return None
         return 0.5 * (float(col.min()) + float(col.max()))
 
+    def roi_depths_at(self, points):
+        """Data-aware out-of-plane value per drawn vertex (weighted median of the
+        depth axis among localizations near that in-plane location); ``None`` per
+        empty column so the caller falls back to ``roi_depth_center``."""
+        axis = self._axis_combo.currentText()
+        if axis not in {"XY", "XZ", "YZ"} or not points:
+            return [None] * len(points)
+        ds = self._dataset()
+        if ds is None:
+            return [None] * len(points)
+        locs = self._current_locs(ds)
+        if locs.ndim != 2 or locs.shape[1] < 3:
+            return [None] * len(points)
+        from ..core.roi_depth import weighted_depths
+        i, j = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}[axis]
+        k = {"XY": 2, "XZ": 1, "YZ": 0}[axis]
+        return weighted_depths(points, locs[:, i], locs[:, j], locs[:, k])
+
     def normalize_roi_record(self, record):
         """Tag a drawn ROI with its view plane and the centre of the out-of-plane
         data range, so its third-dimension position is defined."""

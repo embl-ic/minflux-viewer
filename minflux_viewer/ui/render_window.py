@@ -866,6 +866,9 @@ class RenderWindow(QWidget):
             if idx != self._idx and not same_group:
                 continue
             visible = idx == self._idx or same_group
+            # A channel may opt to start hidden (e.g. the DCR "unassigned" channel).
+            if visible and ds.state.get("overlay_default_hidden"):
+                visible = False
             self._channels.append({
                 "dataset_idx": idx,
                 "name": ds.name,
@@ -2372,6 +2375,8 @@ class RenderWindow(QWidget):
         self._rebuild_all_grids()
         self._scheduler.cancel()
         self._schedule_render()
+        if self._axis_visible:
+            self._update_axis_labels()      # keep X/Y/Z labels in sync with the plane
         # Re-project point markers onto the new view plane.
         if self._roi_overlay is not None:
             self._roi_overlay.refresh()
@@ -2502,6 +2507,21 @@ class RenderWindow(QWidget):
         plot_item = self._image_view.view
         for axis_name in ("left", "bottom"):
             plot_item.showAxis(axis_name, show=visible)
+        if visible:
+            self._update_axis_labels()
+
+    def _axis_label_names(self) -> tuple[str, str]:
+        """Bottom/left axis labels for the current orientation, so the user can
+        tell which axis is which."""
+        unit = "px" if self._image_data is not None else "nm"
+        names = {"XY": ("X", "Y"), "XZ": ("X", "Z"), "YZ": ("Y", "Z")}.get(self._orientation, ("X", "Y"))
+        return f"{names[0]} ({unit})", f"{names[1]} ({unit})"
+
+    def _update_axis_labels(self) -> None:
+        bottom, left = self._axis_label_names()
+        view = self._image_view.view
+        view.setLabel("bottom", bottom)
+        view.setLabel("left", left)
 
     def _on_orientation_changed(self, text: str) -> None:
         self._set_orientation(text)
@@ -2706,12 +2726,70 @@ class RenderWindow(QWidget):
 
     def roi_depth_center(self) -> float | None:
         """Centre of the current viewing range of the out-of-plane (depth) axis,
-        i.e. the value a newly drawn ROI gets in the dimension not shown on
-        screen.  ``None`` for 2-D datasets (no depth)."""
+        i.e. the fallback value a newly drawn ROI gets in the dimension not shown
+        on screen when there is no data at that XY.  ``None`` for 2-D datasets."""
         if not self._has_depth:
             return None
         lo, hi = self._depth_range
         return 0.5 * (float(lo) + float(hi))
+
+    def roi_depths_at(self, points):
+        """Data-aware out-of-plane value for each drawn in-plane vertex.
+
+        For every ``(a, b)`` in *points* (current-plane coordinates), return the
+        XY-proximity-weighted median of the localizations' depth coordinate at
+        that column — so a vertex lands on the actual 3-D structure rather than
+        the static range midpoint. ``None`` per point where the column is empty
+        (caller falls back to ``roi_depth_center``). ``None`` list for 2-D data."""
+        plane = self.roi_view_plane()
+        if plane is None or not self._has_depth or not points:
+            return [None] * len(points)
+        locs = self._depth_profile_locs()
+        if locs is None:
+            return [None] * len(points)
+        from ..core.roi_depth import weighted_depths
+        i, j = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}[plane]
+        k = {"XY": 2, "XZ": 1, "YZ": 0}[plane]
+        return weighted_depths(points, locs[:, i], locs[:, j], locs[:, k])
+
+    def _depth_profile_locs(self):
+        """Active dataset's localizations in display nm (all Z, unfiltered) for
+        sampling the out-of-plane structure under a drawn vertex."""
+        if self._idx is None or not (0 <= self._idx < len(self._state.datasets)):
+            return None
+        try:
+            locs = self._raw_render_locs(self._state.datasets[self._idx])
+        except Exception:
+            return None
+        return locs if locs.ndim == 2 and locs.shape[1] >= 3 and locs.shape[0] else None
+
+    def snap_to_density(self, x_nm: float, y_nm: float, *,
+                        window_nm: float = 60.0, iterations: int = 3):
+        """Snap an in-plane cursor (nm) to the local high-density centre by
+        mean-shifting on the **rendered density raster** (the magnetic-lasso
+        snap). Returns snapped ``(x_nm, y_nm)`` or ``None`` when no raster is
+        available (caller then keeps the raw cursor)."""
+        tile = self._last_scalar_tile
+        geom = self._last_tile_geometry
+        px = self._last_px_nm
+        if tile is None or geom is None or not px or px <= 0:
+            return None
+        tile = np.asarray(tile)
+        if tile.ndim != 3 or tile.shape[0] == 0:
+            return None
+        visible = [i for i, ch in enumerate(self._channels[:tile.shape[0]]) if ch.get("visible")]
+        if not visible:
+            visible = list(range(tile.shape[0]))
+        density = tile[visible].sum(axis=0)
+        if density.ndim != 2 or density.size == 0:
+            return None
+        from ..core.magnetic_snap import snap_density_centroid
+        x0, _x1, y0, _y1 = geom
+        col = (float(x_nm) - x0) / px
+        row = (float(y_nm) - y0) / px
+        win = int(np.clip(round(float(window_nm) / px), 3, 51))
+        sc, sr = snap_density_centroid(density, col, row, window=win, iterations=iterations)
+        return (x0 + sc * px, y0 + sr * px)
 
     def normalize_roi_record(self, record):
         """Tag a drawn ROI with the view plane it was drawn in and the centre of

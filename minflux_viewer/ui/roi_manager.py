@@ -120,6 +120,7 @@ class RoiManagerWindow(QWidget):
             QMessageBox.information(self, "Add ROI", "Draw an ROI on a compatible window first.")
             return
         self._store.add(adapter.consume_draft())
+        self._store.deselect()        # filed into the Manager; leaves the viewer (Show-all reveals)
 
     def _update(self) -> None:
         adapter = self._store.active_adapter
