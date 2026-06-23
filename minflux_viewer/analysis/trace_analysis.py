@@ -560,6 +560,9 @@ class _TraceSizeDialog(QDialog):
         bb.rejected.connect(self.reject)
         root.addWidget(bb)
 
+        from ..ui.text_select import make_labels_selectable
+        make_labels_selectable(self)   # let users copy the reported values
+
 
 class _AnisotropyDialog(QDialog):
     def __init__(self, parent: QWidget, result: dict, n_traces: int,
@@ -717,6 +720,9 @@ class _AnisotropyDialog(QDialog):
         close_btn.clicked.connect(self.reject)
         btn_row.addWidget(close_btn)
         root.addLayout(btn_row)
+
+        from ..ui.text_select import make_labels_selectable
+        make_labels_selectable(self)   # let users copy the RIMF / size values
 
     def _apply_to_data(self) -> None:
         if self._ds is None:

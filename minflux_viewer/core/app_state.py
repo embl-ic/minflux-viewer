@@ -78,6 +78,7 @@ DEFAULT_PREFS: dict = {
         "load_all_dcr": False,
         "compute_rimf": True,
         "compute_loc_prec": True,
+        "loc_precision_method": "stddev",  # "stddev" | "crlb" | "frc"
         "compute_local_density": True,
         "local_density_radius": 100,
         "local_density_dimensions": 2,
@@ -286,6 +287,11 @@ class AppState(QObject):
         # Processing-history journal — used by the Generate Method Text plugin.
         from .processing_journal import ProcessingJournal
         self.journal = ProcessingJournal()
+        # Retained log history (used by Generate Method Text to let the user pick
+        # the events relevant to a dataset). Each entry is tagged with the active
+        # dataset at emit time, so multi-dataset sessions stay attributable.
+        self._log_history: list[dict] = []
+        self._log_history_max = 5000
         from .roi import RoiStore
         self.rois = RoiStore(self)
         from ..scripting import create_facade
@@ -378,6 +384,21 @@ class AppState(QObject):
             )
         except Exception:
             pass
+        # Parseable, dataset-tagged load summary for the method-text generator.
+        try:
+            md = dataset.metadata
+            container = md.get("source_format")
+            ver = md.get("source_version", "?")
+            ver_str = f"{ver} ({container})" if container else str(ver)
+            n_itr = md.get("raw_num_itr", 1)
+            valid = md.get("valid_num_loc", dataset.prop.num_loc)
+            self.log(
+                f"Loaded dataset '{dataset.name}': {valid:,} valid locs, {n_itr} iteration(s), "
+                f"{dataset.prop.num_traces} trace(s), {dataset.prop.num_dim}D [{ver_str}].",
+                dataset_idx=idx,
+            )
+        except Exception:
+            pass
         return idx
 
     def remove_dataset(self, idx: int) -> None:
@@ -436,7 +457,7 @@ class AppState(QObject):
         if idx is not None:
             self.calibration_changed.emit(idx)
 
-    def log(self, message: str, level: str = "INFO") -> None:
+    def log(self, message: str, level: str = "INFO", *, dataset_idx: int | None = None) -> None:
         """
         Post a message to the log window.
 
@@ -451,7 +472,25 @@ class AppState(QObject):
         level:
             One of "INFO", "WARN", "ERROR", "DEBUG".
         """
+        from datetime import datetime
+        idx = self._active_idx if dataset_idx is None else dataset_idx
+        ds = self._datasets[idx] if (idx is not None and 0 <= idx < len(self._datasets)) else None
+        self._log_history.append({
+            "time": datetime.now(),
+            "level": str(level),
+            "message": str(message),
+            "dataset_idx": idx,
+            "dataset_name": ds.name if ds is not None else None,
+        })
+        if len(self._log_history) > self._log_history_max:
+            del self._log_history[: len(self._log_history) - self._log_history_max]
         self.log_message.emit(message, level)
+
+    @property
+    def log_history(self) -> list[dict]:
+        """All retained log events (oldest first), each tagged with the active
+        dataset at emit time."""
+        return list(self._log_history)
 
     def log_progress(self, text: str, *, final: bool = False) -> None:
         """Update the single refreshing progress line in the Log window.

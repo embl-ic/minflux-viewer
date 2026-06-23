@@ -1248,6 +1248,8 @@ class RoiOverlayController(QObject):
         box.setTextFormat(Qt.TextFormat.RichText)
         box.setText("<pre style='font-family:Consolas,Courier New,monospace; margin:0'>"
                     + html.escape("\n".join(lines)) + "</pre>")
+        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                    | Qt.TextInteractionFlag.TextSelectableByKeyboard)
         box.exec()
 
     @staticmethod

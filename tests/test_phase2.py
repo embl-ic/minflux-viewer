@@ -1168,32 +1168,40 @@ class TestProcessingJournal:
 # ---------------------------------------------------------------------------
 
 class TestGenerateMethodText:
-    def test_text_includes_credit_and_license(self):
-        from minflux_viewer.core.app_state import AppState
-        from minflux_viewer.plugins.generate_method_text import generate_methods_text
-        s = AppState()
-        s.journal.add("load", "Loaded dataset 'foo.mat'",
-                      num_loc=12345, num_traces=10, num_dim=3,
-                      source="/data/foo.mat")
-        s.journal.add("filter", "Applied EFC > 0.7 filter")
-        s.journal.add("analysis",
-                      "Localization precision (StdDev per trace): median σ = "
-                      "(5.0, 4.8, 7.1) nm")
-        s.journal.add("export", "Exported foo.vtp to ParaView")
-        text = generate_methods_text(s)
-        assert "EMBL Imaging Centre" in text
-        assert "MIT" in text
-        assert "Schmidt" in text       # StdDev reference
-        assert "12,345 localizations" in text
+    """The generator was redesigned to compile prose from selected *log events*
+    (see ``analysis/method_text.py`` and ``tests/test_method_text.py``)."""
+
+    @staticmethod
+    def _state():
+        from types import SimpleNamespace
+        return SimpleNamespace(datasets=[])
+
+    @staticmethod
+    def _ev(message, name="foo.mat", idx=0):
+        return {"message": message, "dataset_idx": idx, "dataset_name": name}
+
+    def test_text_from_log_events(self):
+        from minflux_viewer.analysis.method_text import generate_method_text
+        events = [
+            self._ev("Loaded dataset 'foo.mat': 12,345 valid locs, 4 iteration(s), "
+                     "10 trace(s), 3D [m2410 (obf / mfxdta)]."),
+            self._ev("Applied EFC > 0.7 filter"),
+            self._ev("Localization precision (StdDev per trace): combined (n-weighted) "
+                     "sigma_r = 5.00 nm, sigma_z = 7.10 nm over 8 of 10 traces "
+                     "(>=5 loc/trace, raw z)."),
+            self._ev("Saved processed data to foo.csv"),
+        ]
+        text = generate_method_text(self._state(), events, version="0.3.1")
+        assert "foo.mat" in text
+        assert "Ostersehlt" in text          # StdDev per trace reference
         assert "Filtering" in text
         assert "Export" in text
+        assert "MINFLUX Data Viewer" in text  # footer
 
-    def test_empty_journal_has_friendly_message(self):
-        from minflux_viewer.core.app_state import AppState
-        from minflux_viewer.plugins.generate_method_text import generate_methods_text
-        s = AppState()
-        text = generate_methods_text(s)
-        assert "processing journal is empty" in text
+    def test_empty_events_friendly_message(self):
+        from minflux_viewer.analysis.method_text import generate_method_text
+        text = generate_method_text(self._state(), [])
+        assert "No log events were selected" in text
 
 
 # ---------------------------------------------------------------------------

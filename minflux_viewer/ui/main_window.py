@@ -344,6 +344,22 @@ class MainWindow(QMainWindow):
         self.menuSegNPC.addAction(self.actionSegNpc2D)
         self.menuSegNPC.addAction(self.actionSegNpc3D)
         self.menuAnalyzeSegmentation.addMenu(self.menuSegNPC)
+        self.actionSegConvolution = QAction("Convolution…", self)
+        self.actionSegConvolution.triggered.connect(self._show_conv_segmentation)
+        self.menuAnalyzeSegmentation.addAction(self.actionSegConvolution)
+        self.actionSegCurvilinear = QAction("Curvilinear Structures…", self)
+        self.actionSegCurvilinear.triggered.connect(self._show_curvilinear_segmentation)
+        self.menuAnalyzeSegmentation.addAction(self.actionSegCurvilinear)
+        self.actionSegParticleAverage = QAction("Particle Average…", self)
+        self.actionSegParticleAverage.triggered.connect(self._show_particle_average)
+        self.menuAnalyzeSegmentation.addAction(self.actionSegParticleAverage)
+        self.menuAnalyzeSegmentation.addSeparator()
+        self.actionNpcDetectWanlu = QAction("NPC detection wanlu", self)
+        self.actionNpcDetectWanlu.triggered.connect(self._npc_detect_wanlu)
+        self.menuAnalyzeSegmentation.addAction(self.actionNpcDetectWanlu)
+        self.actionNpcAverageWanlu = QAction("NPC average wanlu", self)
+        self.actionNpcAverageWanlu.triggered.connect(self._npc_average_wanlu)
+        self.menuAnalyzeSegmentation.addAction(self.actionNpcAverageWanlu)
 
         # Tracking submenu — Phase 5 placeholders
         u.actionParticleTracking.triggered.connect(
@@ -613,6 +629,11 @@ class MainWindow(QMainWindow):
             self.menuAnalyzeSegmentation.menuAction(),
             self.actionSegNpc2D,
             self.actionSegNpc3D,
+            self.actionSegConvolution,
+            self.actionSegCurvilinear,
+            self.actionSegParticleAverage,
+            self.actionNpcDetectWanlu,
+            self.actionNpcAverageWanlu,
             u.menuTracking.menuAction(),
             u.actionParticleTracking,
             u.actionMsdAnalysis,
@@ -1418,8 +1439,260 @@ class MainWindow(QMainWindow):
         self._show_render(idx)
         self._show_roi_manager()
         self._state.log(
-            f"NPC segmentation (2D): detected {centers.shape[0]} NPC(s) on '{ds.name}'; "
+            f"NPC segmentation (2D): detected {centers.shape[0]} NPC(s) on '{ds.name}' "
+            f"(diameter={p['diameter_nm']:.0f} nm, rim={p['rim_nm']:.0f} nm, "
+            f"pixel={p['pixel_size_nm']:.1f} nm, min support={p['min_support']:.2f}); "
             f"added rectangle ROIs to the ROI Manager.")
+
+    def _show_conv_segmentation(self) -> None:
+        """Analyze › Segmentation › Convolution… — open the interactive
+        geometry-kernel convolution segmentation tool for the active dataset."""
+        idx = self._state.active_idx
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        from .conv_segmentation_dialog import ConvSegmentationWindow
+        from .modeless import show_modeless
+        win = ConvSegmentationWindow(self._state, idx, owner=self)
+        show_modeless(win, self)
+
+    def _show_curvilinear_segmentation(self) -> None:
+        """Analyze › Segmentation › Curvilinear Structures… — open the
+        interactive Hessian/Frangi filament-tracing tool for the active dataset."""
+        idx = self._state.active_idx
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        from .curvilinear_segmentation_dialog import CurvilinearSegmentationWindow
+        from .modeless import show_modeless
+        win = CurvilinearSegmentationWindow(self._state, idx, owner=self)
+        show_modeless(win, self)
+
+    def add_segmentation_rois(self, idx: int, centers, *, side_nm: float,
+                              name_prefix: str, source: str, stroke_color: str,
+                              names: list[str] | None = None,
+                              log_message: str | None = None) -> int:
+        """Add a rectangle ROI of side ``side_nm`` centred on each ``(x, y)`` in
+        *centers* to the ROI Manager, reveal them, and show render + manager.
+
+        ``names`` (if given, one per centre) sets each ROI's name; otherwise they
+        are auto-numbered ``"<name_prefix> <i>"``. Shared by the convolution
+        segmentation tool; returns the count added."""
+        import numpy as np
+
+        from ..core.roi import RoiRecord
+
+        centers = np.asarray(centers, dtype=float).reshape(-1, 2)
+        if centers.shape[0] == 0 or not (0 <= idx < len(self._state.datasets)):
+            return 0
+        side = max(float(side_nm), 1.0)
+        for i, (cx, cy) in enumerate(centers, start=1):
+            name = names[i - 1] if names is not None and i - 1 < len(names) else f"{name_prefix} {i}"
+            rec = RoiRecord.create(
+                "rectangle",
+                {"bounds": [float(cx) - side / 2.0, float(cy) - side / 2.0, side, side]},
+                name=name, coordinate_space="plot",
+                stroke_color=stroke_color)
+            rec.context = {"dataset_idx": idx, "source": source}
+            self._state.rois.add(rec)
+        self._state.rois.set_show_all(True)
+        self._show_render(idx)
+        self._show_roi_manager()
+        if log_message:
+            self._state.log(log_message)
+        return int(centers.shape[0])
+
+    def add_polyline_rois(self, idx: int, paths, *, name_prefix: str, source: str,
+                          stroke_color: str, names: list[str] | None = None,
+                          log_message: str | None = None) -> int:
+        """Add an open poly-line (``freehand_line``) ROI tracing each path in
+        *paths* (each an ``(M, 2)`` array of ``(x, y)`` nm vertices) to the ROI
+        Manager, reveal them, and show render + manager. Returns the count added.
+
+        Used by the curvilinear segmentation tool for traced centre lines."""
+        import numpy as np
+
+        from ..core.roi import RoiRecord
+
+        if not (0 <= idx < len(self._state.datasets)):
+            return 0
+        added = 0
+        for i, path in enumerate(paths, start=1):
+            pts = np.asarray(path, dtype=float).reshape(-1, 2)
+            if pts.shape[0] < 2:
+                continue
+            name = names[i - 1] if names is not None and i - 1 < len(names) else f"{name_prefix} {i}"
+            rec = RoiRecord.create(
+                "freehand_line",
+                {"points": pts.tolist(), "closed": False},
+                name=name, coordinate_space="plot", stroke_color=stroke_color)
+            rec.context = {"dataset_idx": idx, "source": source}
+            self._state.rois.add(rec)
+            added += 1
+        if added:
+            self._state.rois.set_show_all(True)
+            self._show_render(idx)
+            self._show_roi_manager()
+            if log_message:
+                self._state.log(log_message)
+        return added
+
+    def add_particle_average_dataset(self, points_xyz_nm, *, name: str,
+                                     log_message: str | None = None) -> int | None:
+        """Build a dataset from an averaged particle's pooled localizations
+        (``(N, 3)`` nm, already centred/aligned), register it, and open its render
+        + scatter views (3-D-ready). Returns the new dataset index."""
+        import uuid
+
+        import numpy as np
+
+        from ..core.dataset import build_localization_dataset
+
+        pts = np.asarray(points_xyz_nm, dtype=float).reshape(-1, 3)
+        if pts.shape[0] == 0:
+            return None
+        ds = build_localization_dataset(
+            name=name, x_nm=pts[:, 0], y_nm=pts[:, 1], z_nm=pts[:, 2],
+            source_version="particle_average", prefs=self._state.prefs)
+        # Unique synthetic path so repeated averages don't dedup onto each other.
+        ds.file.folder = f"<particle-average>/{uuid.uuid4().hex}"
+        ds.metadata["particle_average"] = True
+        # Coordinates are final/aligned — pin RIMF to 1.0 and suppress auto-z.
+        try:
+            ds.set_rimf(1.0, source="2D (no z correction)")
+            ds.derived["rimf"] = 1.0
+        except Exception:
+            pass
+        idx = self._state.add_dataset(ds)
+        if log_message:
+            self._state.log(log_message)
+        self._show_render(idx)
+        self._show_scatter(idx)
+        return idx
+
+    def _npc_detect_wanlu(self) -> None:
+        """Analyze › Segmentation › NPC detection wanlu — ring-convolution NPC
+        detection + sub-unit (trace) clustering; stores the per-NPC table on the
+        dataset and adds NPC-centre ROIs to the Manager."""
+        import numpy as np
+
+        idx = self._state.active_idx
+        if idx is None or self._state.active_dataset is None:
+            self._no_data_warning()
+            return
+        ds = self._state.datasets[idx]
+        from ..core.loader import attr_values_1d
+        tid = attr_values_1d(ds, "tid")
+        try:
+            loc = np.asarray(ds.loc_nm, dtype=float)
+        except Exception:
+            loc = np.empty((0, 3))
+        if loc.ndim != 2 or loc.shape[0] < 10 or tid is None:
+            QMessageBox.information(self, "NPC detection wanlu",
+                                    "Needs a MINFLUX dataset with trace ids and localizations.")
+            return
+        mask = np.asarray(ds.filter_mask, dtype=bool)
+        tid = np.asarray(tid).ravel()
+        if mask.shape[0] == loc.shape[0]:
+            loc, tid = loc[mask], tid[mask]
+
+        from .npc_wanlu_dialogs import NpcDetectWanluDialog
+        dlg = NpcDetectWanluDialog(self, defaults=getattr(self, "_npc_wanlu_detect_defaults", None))
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        p = dlg.params()
+        self._npc_wanlu_detect_defaults = p
+
+        from ..analysis import npc_wanlu as nw
+        try:
+            res = nw.detect_npc_wanlu(loc, tid, pixel_size=p["pixel_size"],
+                                      diameter=p["diameter"], rim=p["rim"],
+                                      min_units=p["min_units"], z_scale=p["z_scale"])
+        except Exception as exc:
+            QMessageBox.warning(self, "NPC detection wanlu", f"Detection failed: {exc}")
+            return
+        if res["n_npc"] == 0:
+            QMessageBox.information(self, "NPC detection wanlu",
+                                    "No NPCs accepted. Try adjusting diameter / rim / min sub-units.")
+            return
+        ds.derived["npc_wanlu"] = {"raw6": res["raw6"], "centers": res["centers"], "params": p}
+        self.add_segmentation_rois(
+            idx, res["centers"], side_nm=float(p["diameter"]),
+            name_prefix="NPC", source="npc_wanlu_detection", stroke_color="#ff8c00",
+            log_message=(f"NPC detection (Wanlu): {res['n_npc']} NPC(s), "
+                         f"{res['n_units']} sub-unit(s) on '{ds.name}' "
+                         f"(diameter={p['diameter']:.0f} nm, rim={p['rim']:.0f} nm, "
+                         f"min units={p['min_units']}, Z scale={p['z_scale']:.2f}); "
+                         f"stored {res['raw6'].shape[0]:,} localizations for averaging."))
+        QMessageBox.information(
+            self, "NPC detection wanlu",
+            f"Detected {res['n_npc']} NPC(s) with {res['n_units']} sub-unit(s).\n\n"
+            "Run 'NPC average wanlu' to build the two-ring average.")
+
+    def _npc_average_wanlu(self) -> None:
+        """Analyze › Segmentation › NPC average wanlu — two-ring averaging of the
+        NPCs detected by 'NPC detection wanlu' on the active dataset."""
+        import numpy as np
+
+        idx = self._state.active_idx
+        if idx is None or self._state.active_dataset is None:
+            self._no_data_warning()
+            return
+        ds = self._state.datasets[idx]
+        stored = ds.derived.get("npc_wanlu")
+        if not stored or np.asarray(stored.get("raw6", [])).size == 0:
+            QMessageBox.information(self, "NPC average wanlu",
+                                    "No NPC detection found on this dataset. "
+                                    "Run 'NPC detection wanlu' first.")
+            return
+        raw6 = np.asarray(stored["raw6"], dtype=float)
+        n_npc = int(np.unique(raw6[:, 3]).size)
+
+        from .npc_wanlu_dialogs import NpcAverageWanluDialog
+        dlg = NpcAverageWanluDialog(self, defaults=getattr(self, "_npc_wanlu_avg_defaults", None),
+                                    n_npc=n_npc)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        p = dlg.params()
+        self._npc_wanlu_avg_defaults = {
+            "diam_min": p["diameter_bounds"][0], "diam_max": p["diameter_bounds"][1],
+            "inter_min": p["inter_ring_bounds"][0], "inter_max": p["inter_ring_bounds"][1],
+            "inter_exp": p["expected_inter_ring"] or 0.0, "symmetry": p["symmetry"]}
+
+        from ..analysis import npc_wanlu as nw
+        try:
+            res = nw.average_npc_wanlu(
+                raw6, diameter_bounds=p["diameter_bounds"],
+                inter_ring_bounds=p["inter_ring_bounds"],
+                expected_inter_ring=p["expected_inter_ring"], symmetry=p["symmetry"])
+        except Exception as exc:
+            QMessageBox.warning(self, "NPC average wanlu", f"Averaging failed: {exc}")
+            return
+        avg = res["average_loc"]
+        if avg.shape[0] == 0:
+            QMessageBox.information(self, "NPC average wanlu",
+                                    "No NPCs passed the two-ring fit. Try widening the "
+                                    "diameter / inter-ring bounds.")
+            return
+        zlo, zhi = res["z_peaks"]
+        log = (f"NPC average (Wanlu): pooled {res['n_accepted']}/{res['n_npc']} NPC(s) "
+               f"({avg.shape[0]:,} localizations) from '{ds.name}'; "
+               f"Z rings {zlo:.1f}/{zhi:.1f} nm (sep {zhi - zlo:.1f} nm"
+               f"{', fallback' if res['z_fallback'] else ''}); 8-fold aligned.")
+        self.add_particle_average_dataset(
+            avg[:, :3], name=f"{ds.name} — NPC avg [{res['n_accepted']}]", log_message=log)
+
+    def _show_particle_average(self) -> None:
+        """Analyze › Segmentation › Particle Average… — open the particle-averaging
+        tool for the active dataset + ROI Manager box ROIs."""
+        idx = self._state.active_idx
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        from .modeless import show_modeless
+        from .particle_average_dialog import ParticleAverageWindow
+        win = ParticleAverageWindow(self._state, idx, owner=self)
+        show_modeless(win, self)
 
     def _notify_view_state_changed(self) -> None:
         mgr = getattr(self, "_ds_manager", None)

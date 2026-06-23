@@ -2985,6 +2985,17 @@ class MsrReaderDialog(QWidget):
             sole.state.pop("overlay_lut", None)
             sole.state.pop("render_channel_lut", None)
 
+        # Record an overlay-level summary so the Method-text generator can
+        # describe the whole multi-channel acquisition (source .msr, channels and
+        # their properties, reference, bead selection, alignment matrix) — tagged
+        # to the first channel so it auto-checks with the overlay. A single
+        # imported dataset is standalone, not an overlay, so skip it.
+        if len(imported_indices) >= 2:
+            self._record_overlay_load_event(
+                msr_path, imported, imported_indices, viewer_transforms,
+                align_choice if (align_choice and align_choice is not _ALIGN_CANCELLED) else None,
+            )
+
         if errors:
             QMessageBox.warning(
                 self, "Import warnings",
@@ -2999,6 +3010,51 @@ class MsrReaderDialog(QWidget):
                     existing._refresh_from_dataset()
                 parent._show_render(imported_indices[0])
             self.close()
+
+    def _record_overlay_load_event(self, msr_path, imported, imported_indices,
+                                   viewer_transforms, align_choice):
+        """Persist an overlay summary on each channel's metadata and emit one
+        parseable, overlay-tagged Log event the Method-text generator can expand
+        into a full description of the multi-channel load + alignment."""
+        if self._state is None:
+            return
+        alignment_mode = None
+        reference_key = imported[0] if imported else None
+        if align_choice:
+            alignment_mode, ref_name = align_choice
+            if ref_name:
+                reference_key = ref_name
+        for transform in (viewer_transforms or {}).values():
+            rc = transform.get("reference_channel")
+            if rc:
+                reference_key = rc
+                break
+        excluded = (sorted(int(g) for g in self._bead_unchecked_gris)
+                    if self._bead_unchecked_gris else [])
+
+        for idx in imported_indices:
+            try:
+                md = self._state.datasets[idx].metadata
+            except Exception:
+                continue
+            md["overlay_channels"] = list(imported)
+            md["overlay_reference"] = reference_key
+            md["overlay_alignment_mode"] = alignment_mode or "none"
+            md["overlay_bead_excluded"] = list(excluded)
+
+        msg = (f"MSR overlay loaded from '{Path(msr_path).name}': {len(imported)} channel(s) "
+               f"[{', '.join(imported)}]; reference channel '{reference_key}'; "
+               f"channel alignment: {alignment_mode or 'none'}")
+        if alignment_mode == "mbm info":
+            if excluded:
+                msg += f"; beads: all but {len(excluded)} user-excluded ({excluded})"
+            else:
+                msg += "; beads: all available beads used"
+        msg += "."
+        try:
+            self._state.log(msg, dataset_idx=imported_indices[0])
+        except TypeError:       # older AppState.log without dataset_idx
+            self._state.log(msg)
 
 
 # ---------------------------------------------------------------------------

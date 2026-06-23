@@ -128,6 +128,9 @@ class DataWindow(QWidget):
         self._btn.clicked.connect(self._activate)
         layout.addWidget(self._btn, row, 0, 1, 2)
 
+        from .text_select import make_labels_selectable
+        make_labels_selectable(self)   # copyable name / path / values
+
         self._refresh(self._state.active_idx)
 
     # ------------------------------------------------------------------

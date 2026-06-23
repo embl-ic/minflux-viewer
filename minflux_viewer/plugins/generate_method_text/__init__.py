@@ -1,255 +1,209 @@
 """
 minflux_viewer.plugins.generate_method_text
 =============================================
-Generate a publication-ready *Methods* paragraph that describes — in
-scientific prose — every processing step applied to the active dataset
-from the moment it was loaded up to the current state.
+Generate a publication-style *Methods* paragraph from the session's **Log
+events**.
 
-Source of truth: the :class:`ProcessingJournal` attached to
-:class:`AppState`. Every loader, filter, duplicator, exporter and
-analysis routine appends an entry; this plugin compiles those entries
-into a paragraph organised by stage (loading → filtering → analysis →
-export), then appends a credit line and the MIT licence notice.
-
-The output is shown in a non-modal dialog with **Copy to clipboard**
-and **Save to file…** buttons. No automatic citation lookup is
-performed — that's the user's responsibility — but the plugin does
-include explicit references for the analysis routines that come with
-papers attached (StdDev, FRC stub, CRLB stub).
+Flow: the user ticks the log events that belong to the dataset / method they want
+to describe and clicks **Generate**. Events are listed oldest→newest (same order
+as the Log dialog). Events for the active dataset are pre-checked; if the active
+dataset is part of an overlay, every channel's events in that overlay are
+pre-checked (so the whole multi-channel acquisition is described regardless of
+which channel is active). The selected events are compiled by
+:func:`minflux_viewer.analysis.method_text.generate_method_text` /
+``generate_method_html`` into prose grouped by stage, shown in an editable
+rich-text window whose citations are clickable DOI hyperlinks, with Copy / Save.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtCore import Qt, QMimeData, QUrl
+from PyQt6.QtGui import QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import (
     QDialog,
     QFileDialog,
     QHBoxLayout,
-    QPlainTextEdit,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
+    QTextEdit,
     QVBoxLayout,
 )
 
 from .. import PluginEntry, register
-from ... import __author__, __email__, __institution__, __license__, __version__
 
-
-# ---------------------------------------------------------------------------
-# Plugin entry
-# ---------------------------------------------------------------------------
 
 def _launch(state, parent=None) -> None:
-    text = generate_methods_text(state)
-    dlg = MethodTextDialog(text, parent=parent)
-    dlg.show()
+    if not getattr(state, "log_history", None):
+        QMessageBox.information(
+            parent, "Generate Method Text",
+            "No log events yet. Load a dataset and perform some operations, then try again.")
+        return
+    dlg = MethodEventSelectionDialog(state, parent=parent)
+    if dlg.exec() != QDialog.DialogCode.Accepted:
+        return
+    events = dlg.selected_events()
+    if not events:
+        QMessageBox.information(parent, "Generate Method Text", "No events were selected.")
+        return
+    from ...analysis.method_text import generate_method_text, generate_method_html
+    from ... import __version__
+    text = generate_method_text(state, events, version=__version__)
+    html = generate_method_html(state, events, version=__version__)
+    out = MethodTextDialog(text, html, parent=parent)
+    out.show()
     if parent is not None:
-        parent._plugin_method_text_dialog = dlg
+        parent._plugin_method_text_dialog = out   # keep alive
 
 
 register(PluginEntry(
     name="Generate Method Text",
-    tooltip="Compile a Methods paragraph from the processing-history journal.",
+    tooltip="Compile a Methods paragraph from selected Log events.",
     launch=_launch,
 ))
 
 
 # ---------------------------------------------------------------------------
-# Text generation
+# Event-selection dialog
 # ---------------------------------------------------------------------------
 
-def generate_methods_text(state) -> str:
-    """
-    Build a Methods-paragraph-style description of the session.
+class MethodEventSelectionDialog(QDialog):
+    """Pick the log events relevant to the method to describe."""
 
-    Returns a single string with line breaks (no markup).
-    """
-    journal  = getattr(state, "journal", None)
-    entries  = list(journal) if journal is not None else []
+    def __init__(self, state, parent=None) -> None:
+        super().__init__(parent)
+        self._state = state
+        self.setWindowTitle("Generate Method Text — select events")
+        self.resize(760, 480)
 
-    lines: list[str] = []
+        root = QVBoxLayout(self)
+        note = QLabel(
+            "Tick the Log events that belong to the dataset/method you want to describe, "
+            "then click Generate. Events are listed oldest first (like the Log). Events for "
+            "the active dataset — or, for an overlay, every channel in it — are pre-checked.")
+        note.setWordWrap(True)
+        root.addWidget(note)
 
-    # Title block
-    lines.append("METHODS — DATA PROCESSING")
-    lines.append("=" * 64)
-    lines.append("")
+        self._list = QListWidget()
+        root.addWidget(self._list, 1)
 
-    # Section 1: Acquisition / loading
-    load_entries = [e for e in entries if e.category == "load"]
-    if load_entries:
-        lines.append("Data acquisition and loading.")
-        for e in load_entries:
-            d = e.details
-            n_loc = d.get("num_loc", "?")
-            n_tr  = d.get("num_traces", "?")
-            n_dim = d.get("num_dim", "?")
-            src   = d.get("source", "(unknown source)")
-            n_loc_str = f"{n_loc:,}" if isinstance(n_loc, int) else str(n_loc)
-            n_tr_str  = f"{n_tr:,}"  if isinstance(n_tr, int)  else str(n_tr)
-            lines.append(
-                f"  • Dataset '{e.summary.replace(chr(0x27), '')[len('Loaded dataset '):]}': "
-                f"loaded {n_loc_str} localizations grouped into {n_tr_str} trace(s) "
-                f"({n_dim}-D coordinates) from {Path(src).name}."
-            )
-        lines.append("")
-    else:
-        lines.append("No dataset has been loaded in this session.")
-        lines.append("")
+        auto_idx = self._auto_check_indices(state)
+        for ev in state.log_history:     # oldest first (same order as the Log dialog)
+            t = ev["time"].strftime("%H:%M:%S") if ev.get("time") else ""
+            ds = ev.get("dataset_name") or "—"
+            item = QListWidgetItem(f"[{t}]  ({ds})  {ev.get('message', '')}")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            checked = ev.get("dataset_idx") in auto_idx
+            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, ev)
+            self._list.addItem(item)
+        self._list.scrollToBottom()      # newest events visible, like the Log
 
-    # Section 2: Filtering
-    filter_entries = [e for e in entries if e.category == "filter"]
-    if filter_entries:
-        lines.append("Filtering.")
-        for e in filter_entries:
-            lines.append(f"  • {e.summary}")
-        lines.append("")
+        btns = QHBoxLayout()
+        for text, checked in (("Select all", True), ("Select none", False)):
+            b = QPushButton(text)
+            b.clicked.connect(lambda _=False, c=checked: self._set_all(c))
+            btns.addWidget(b)
+        btns.addStretch(1)
+        gen = QPushButton("Generate")
+        gen.setDefault(True)
+        gen.clicked.connect(self.accept)
+        btns.addWidget(gen)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(cancel)
+        root.addLayout(btns)
 
-    # Section 3: Transformations (duplicate, etc.)
-    transform_entries = [e for e in entries if e.category == "transform"]
-    if transform_entries:
-        lines.append("Transformations.")
-        for e in transform_entries:
-            lines.append(f"  • {e.summary}")
-        lines.append("")
+    @staticmethod
+    def _auto_check_indices(state) -> set:
+        """Dataset indices whose events are pre-checked: the active dataset, or —
+        if it belongs to an overlay — every channel in that overlay."""
+        active = getattr(state, "active_idx", None)
+        if active is None:
+            return set()
+        try:
+            from ...core.overlay import overlay_members
+            return {idx for idx, _ds in overlay_members(state, active)}
+        except Exception:
+            return {active}
 
-    # Section 4: Analysis
-    analysis_entries = [e for e in entries if e.category == "analysis"]
-    if analysis_entries:
-        lines.append("Analysis.")
-        for e in analysis_entries:
-            lines.append(f"  • {e.summary}")
-        lines.append("")
-        # Standard reference list for the analyses we ship
-        used = " ".join(e.summary for e in analysis_entries).lower()
-        refs: list[str] = []
-        if "stddev" in used:
-            refs.append(
-                "Schmidt et al., Nat. Methods 19:1246 (2022) — per-trace "
-                "standard-deviation precision metric."
-            )
-        if "frc" in used:
-            refs.append(
-                "Banterle et al., J. Struct. Biol. 183:363 (2013); "
-                "Nieuwenhuizen et al., Nat. Methods 10:557 (2013) — FRC."
-            )
-        if "crlb" in used:
-            refs.append(
-                "Mortensen et al., Nat. Methods 7:377 (2010) — CRLB."
-            )
-        if refs:
-            lines.append("References:")
-            for r in refs:
-                lines.append(f"  - {r}")
-            lines.append("")
+    def _set_all(self, checked: bool) -> None:
+        st = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for i in range(self._list.count()):
+            self._list.item(i).setCheckState(st)
 
-    # Section 5: Export
-    export_entries = [e for e in entries if e.category == "export"]
-    if export_entries:
-        lines.append("Export.")
-        for e in export_entries:
-            lines.append(f"  • {e.summary}")
-        lines.append("")
-
-    # Section 6: Other / plugin
-    other_entries = [
-        e for e in entries
-        if e.category not in (
-            "load", "filter", "transform", "analysis", "export",
-        )
-    ]
-    if other_entries:
-        lines.append("Other operations.")
-        for e in other_entries:
-            lines.append(f"  • [{e.category}] {e.summary}")
-        lines.append("")
-
-    if len(entries) == 0:
-        lines.append(
-            "(The processing journal is empty. Load a dataset and apply at "
-            "least one filter, transformation or analysis to populate it.)"
-        )
-        lines.append("")
-
-    # Tooling block
-    lines.append("Tooling.")
-    lines.append(
-        f"  • Generated by MINFLUX Data Viewer v{__version__} "
-        f"({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})."
-    )
-    lines.append(
-        "  • Python/Qt port (PyQt6, pyqtgraph, NumPy, SciPy) of the original "
-        "MATLAB MINFLUX viewer."
-    )
-    lines.append("")
-
-    # Credit + licence
-    lines.append("=" * 64)
-    lines.append(f"Author: {__author__} <{__email__}>")
-    lines.append(f"        {__institution__}")
-    lines.append(
-        f"License: {__license__} — see the project repository for the full "
-        "licence text. The MIT License permits free use, modification, "
-        "distribution, and commercial use, provided the licence and "
-        "copyright notice are included with all copies or substantial "
-        "portions of the software."
-    )
-    return "\n".join(lines)
+    def selected_events(self) -> list:
+        """Checked events in display order (oldest first / chronological)."""
+        events = []
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                events.append(item.data(Qt.ItemDataRole.UserRole))
+        return events
 
 
 # ---------------------------------------------------------------------------
-# Dialog
+# Editable output window (rich text with clickable DOI hyperlinks)
 # ---------------------------------------------------------------------------
+
+class _LinkTextEdit(QTextEdit):
+    """Editable rich-text edit that opens the anchor under the cursor on click."""
+
+    def mouseReleaseEvent(self, ev) -> None:  # noqa: N802 (Qt signature)
+        if (ev.button() == Qt.MouseButton.LeftButton
+                and not self.textCursor().hasSelection()):
+            anchor = self.anchorAt(ev.pos())
+            if anchor:
+                QDesktopServices.openUrl(QUrl(anchor))
+                return
+        super().mouseReleaseEvent(ev)
+
 
 class MethodTextDialog(QDialog):
-    def __init__(self, text: str, parent=None) -> None:
+    def __init__(self, text: str, html: str, parent=None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle("Generate Method Text")
-        self.resize(720, 540)
+        self.resize(760, 560)
 
         root = QVBoxLayout(self)
-        self._editor = QPlainTextEdit()
-        self._editor.setPlainText(text)
-        self._editor.setReadOnly(False)   # allow user edits before saving
-        self._editor.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding,
-        )
-        # Monospace for nicer alignment of the section bars
-        font = self._editor.font()
-        font.setFamily("Consolas")
-        font.setStyleHint(font.StyleHint.Monospace)
-        self._editor.setFont(font)
-        root.addWidget(self._editor, stretch=1)
+        self._editor = _LinkTextEdit()
+        self._editor.setHtml(html)
+        self._editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        root.addWidget(self._editor, 1)
 
-        btn_row = QHBoxLayout()
-        copy_btn = QPushButton("Copy to clipboard")
-        copy_btn.clicked.connect(self._copy)
-        btn_row.addWidget(copy_btn)
-
-        save_btn = QPushButton("Save to file…")
-        save_btn.clicked.connect(self._save)
-        btn_row.addWidget(save_btn)
-
-        btn_row.addStretch()
-
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        btn_row.addWidget(close_btn)
-
-        root.addLayout(btn_row)
+        row = QHBoxLayout()
+        copy = QPushButton("Copy to clipboard")
+        copy.clicked.connect(self._copy)
+        row.addWidget(copy)
+        save = QPushButton("Save to file…")
+        save.clicked.connect(self._save)
+        row.addWidget(save)
+        row.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.close)
+        row.addWidget(close)
+        root.addLayout(row)
 
     def _copy(self) -> None:
-        QGuiApplication.clipboard().setText(self._editor.toPlainText())
+        """Copy both rich (links preserved for Word/Docs) and plain (URLs as text)."""
+        md = QMimeData()
+        md.setHtml(self._editor.toHtml())
+        md.setText(self._editor.toPlainText())
+        QGuiApplication.clipboard().setMimeData(md)
 
     def _save(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
+        path, selected = QFileDialog.getSaveFileName(
             self, "Save methods text", "methods.txt",
-            "Text files (*.txt);;Markdown (*.md);;All files (*)",
-        )
+            "Text files (*.txt);;HTML (*.html);;All files (*)")
         if not path:
             return
-        Path(path).write_text(self._editor.toPlainText(), encoding="utf-8")
+        if path.lower().endswith(".html") or "html" in (selected or "").lower():
+            Path(path).write_text(self._editor.toHtml(), encoding="utf-8")
+        else:
+            Path(path).write_text(self._editor.toPlainText(), encoding="utf-8")
