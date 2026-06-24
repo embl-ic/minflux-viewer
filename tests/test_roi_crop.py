@@ -63,7 +63,10 @@ def test_axis_aligned_detection_and_specs():
     ds = _dataset([300], [300])
     rect = _rect(200, 200, 400, 400)
     assert RC.crop_is_axis_aligned(ds, rect) is True
-    assert RC.crop_is_axis_aligned(ds, _rect(0, 0, 10, 10, angle=30)) is False
+    # a bounding-box crop is always axis-aligned, even of a rotated rect…
+    assert RC.crop_is_axis_aligned(ds, _rect(0, 0, 10, 10, angle=30)) is True
+    # …but the *exact shape* of a rotated rect is not.
+    assert RC.crop_is_axis_aligned(ds, _rect(0, 0, 10, 10, angle=30), exact_shape=True) is False
     specs = RC.crop_filter_specs(rect, z_range=(50, 200))
     by_attr = {s["attribute"]: s for s in specs}
     assert by_attr["xnm"]["lo"] == 200 and by_attr["xnm"]["hi"] == 600
@@ -71,6 +74,28 @@ def test_axis_aligned_detection_and_specs():
     assert by_attr["znm"]["lo"] == 50 and by_attr["znm"]["hi"] == 200
     assert all(s["mode"] == "per loc" for s in specs)
     assert RC.crop_filter_specs(rect, trace_complete=True)[0]["mode"] == "trace mean"
+
+
+def test_oval_crop_bbox_vs_exact_shape():
+    # 4 corner points just inside the bbox but OUTSIDE the inscribed ellipse,
+    # 1 centre point inside both. bbox crop keeps all 5; exact-shape keeps centre.
+    oval = RoiRecord.create("oval", {"bounds": [0, 0, 100, 100]}, coordinate_space="plot")
+    x = [5, 95, 95, 5, 50]
+    y = [5, 5, 95, 95, 50]
+    ds = _dataset(x, y)
+    bbox = RC.compute_crop_mask(ds, oval, exact_shape=False)
+    shape = RC.compute_crop_mask(ds, oval, exact_shape=True)
+    assert bbox.tolist() == [True, True, True, True, True]    # bounding box
+    assert shape.tolist() == [False, False, False, False, True]  # exact ellipse
+
+
+def test_polygon_crop_exact_shape():
+    # triangle (0,0),(100,0),(0,100): bbox keeps the far corner (90,90); shape drops it
+    tri = RoiRecord.create("polygon", {"points": [[0, 0], [100, 0], [0, 100]], "closed": True},
+                           coordinate_space="plot")
+    ds = _dataset([10, 90], [10, 90])
+    assert RC.compute_crop_mask(ds, tri, exact_shape=False).tolist() == [True, True]
+    assert RC.compute_crop_mask(ds, tri, exact_shape=True).tolist() == [True, False]
 
 
 def test_subset_dataset_keeps_in_roi_only():

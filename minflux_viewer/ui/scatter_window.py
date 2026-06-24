@@ -1226,6 +1226,13 @@ class ScatterWindow(QWidget):
         axis = self._axis_combo.currentText()
         return axis if axis in {"XY", "XZ", "YZ"} else None
 
+    def coordinate_view_box(self):
+        """The 2-D coordinate ViewBox for overlays (e.g. a scale bar), or None
+        in 3-D mode."""
+        if self.roi_view_plane() is None:
+            return None
+        return self._plot_2d.getPlotItem().getViewBox()
+
     def roi_depth_center(self) -> float | None:
         """Centre of the data extent of the out-of-plane (depth) axis — the
         value a drawn ROI gets in the dimension not shown in this projection.

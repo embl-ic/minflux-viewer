@@ -45,12 +45,16 @@ class CropDialog(QDialog):
         root = QVBoxLayout(self)
         root.addWidget(QLabel(f"Dataset: <b>{dataset_name}</b>"))
 
-        self._only_roi = QCheckBox("duplicate only ROI region")
-        self._only_roi.setChecked(bool(init.only_roi) and has_roi)
-        self._only_roi.setEnabled(has_roi)
-        if not has_roi:
-            self._only_roi.setToolTip("No active ROI — a plain duplicate will be made.")
-        root.addWidget(self._only_roi)
+        # With an active region ROI the duplicate always crops; this chooses the
+        # ROI's exact outline vs its (axis-aligned) bounding box.
+        self._exact_shape = QCheckBox("duplicate only the ROI region (exact shape; else bounding box)")
+        self._exact_shape.setChecked(bool(init.exact_shape))
+        self._exact_shape.setEnabled(has_roi)
+        self._exact_shape.setToolTip(
+            "On: keep data inside the exact ROI outline (oval/polygon/rotated rect).\n"
+            "Off: keep data inside the ROI's bounding box (as if it were a rectangle ROI)."
+        )
+        root.addWidget(self._exact_shape)
 
         self._clip = QCheckBox("clip data to ROI (allow partial traces)")
         self._clip.setChecked(bool(init.clip))
@@ -104,7 +108,6 @@ class CropDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
-        self._only_roi.toggled.connect(self._sync_enabled)
         self._all_z.toggled.connect(self._sync_enabled)
         self._sync_enabled()
 
@@ -181,13 +184,10 @@ class CropDialog(QDialog):
             self._z_label.setText(f"[{lo:.1f}, {hi:.1f}] nm")
 
     def _sync_enabled(self) -> None:
-        on = self._only_roi.isChecked()
-        self._clip.setEnabled(on)
-        self._channel_edit.setEnabled(on)
-        self._spatial.setEnabled(on)
+        # A region ROI always crops, so the crop options are always available;
+        # only the Z slider follows the All-Z toggle.
         if self._has_z:
-            self._all_z.setEnabled(on)
-            active = on and not self._all_z.isChecked()
+            active = not self._all_z.isChecked()
             if self._slider is not None:
                 self._slider.setEnabled(active)
             if self._region is not None:
@@ -203,7 +203,8 @@ class CropDialog(QDialog):
         if len(self._channels) > 1:
             channels = parse_channel_spec(self._channel_edit.text(), len(self._channels))
         return CropOptions(
-            only_roi=self._only_roi.isChecked() and self._only_roi.isEnabled(),
+            only_roi=True,                      # region ROI present ⇒ always crops
+            exact_shape=self._exact_shape.isChecked(),
             clip=self._clip.isChecked(),
             channels=channels,
             z_all=z_all,

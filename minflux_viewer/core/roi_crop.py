@@ -25,20 +25,50 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .overlay import apply_display_transform_nm
-from .roi_selection import rectangle_bounds, rectangle_mask
+from .roi_selection import rectangle_bounds, roi_region_mask
 
 
 @dataclass
 class CropOptions:
-    """User choices for an ROI duplicate/crop (see the backlog ROI-crop design)."""
+    """User choices for an ROI duplicate/crop (see the backlog ROI-crop design).
 
-    only_roi: bool = True               # master gate; off ⇒ plain duplicate
+    A region ROI (rectangle/oval/polygon/freehand) always crops; ``exact_shape``
+    chooses the ROI's exact outline vs its (axis-aligned) bounding box.
+    """
+
+    only_roi: bool = True               # retained for compat; region ROI ⇒ always crops
+    exact_shape: bool = False           # True = exact ROI shape; False = bounding box
     clip: bool = False                  # True = per-loc clip; False = trace-complete
     channels: list[int] = field(default_factory=list)  # 1-based; empty = active only
     z_all: bool = True
     z_range: tuple[float, float] | None = None
     spatial_filter: bool = True         # Model A (gate); False = subset (Model B)
     stop_asking: bool = False
+
+
+def _region_bbox(record) -> tuple[float, float, float, float] | None:
+    """Axis-aligned bounding box (x0, x1, y0, y1) of any region ROI in display nm,
+    honouring rotation (rect/oval rotated outline, polygon/freehand vertices)."""
+    t = getattr(record, "type", None)
+    if t in {"rectangle", "oval"}:
+        from .roi_convert import region_outline_points
+        pts = np.asarray(region_outline_points(record), dtype=float)
+    else:
+        from .roi import record_to_points
+        pts = np.asarray(record_to_points(record), dtype=float)
+        if pts.ndim == 2 and pts.shape[1] > 2:
+            pts = pts[:, :2]
+    if pts.size == 0:
+        return None
+    return (float(pts[:, 0].min()), float(pts[:, 0].max()),
+            float(pts[:, 1].min()), float(pts[:, 1].max()))
+
+
+def _bbox_mask(px: np.ndarray, py: np.ndarray, bbox) -> np.ndarray:
+    if bbox is None:
+        return np.zeros(px.shape[0], dtype=bool)
+    x0, x1, y0, y1 = bbox
+    return np.isfinite(px) & np.isfinite(py) & (px >= x0) & (px <= x1) & (py >= y0) & (py <= y1)
 
 
 def parse_channel_spec(text: str, n_channels: int) -> list[int]:
@@ -96,19 +126,26 @@ def compute_crop_mask(
     *,
     z_range: tuple[float, float] | None = None,
     trace_complete: bool = False,
+    exact_shape: bool = False,
 ) -> np.ndarray:
-    """Per-localization boolean mask (length ``num_loc``) for a rectangle ROI.
+    """Per-localization boolean mask (length ``num_loc``) for a region ROI.
 
+    ``exact_shape`` selects with the ROI's exact outline (rectangle/oval/polygon/
+    freehand); otherwise (default) with its **axis-aligned bounding box** — so an
+    oval/polygon/rotated-rect crops "as if the bounding box were a rectangle ROI".
     ``z_range=(lo, hi)`` additionally bounds the depth (Z) axis in display nm;
     ``None`` means *all Z*. With ``trace_complete`` a whole trace is included iff
-    its centroid (mean position) is inside — same O(N) cost as a per-loc test
-    (both dominated by the tid group-by), and the preferred semantics.
+    its centroid (mean position) is inside.
     """
     coords = display_coords(ds)
     n = coords.shape[0]
     if n == 0:
         return np.zeros(0, dtype=bool)
     x, y, z = coords[:, 0], coords[:, 1], coords[:, 2]
+    bbox = None if exact_shape else _region_bbox(record)
+
+    def region_in(px: np.ndarray, py: np.ndarray) -> np.ndarray:
+        return roi_region_mask(px, py, record) if exact_shape else _bbox_mask(px, py, bbox)
 
     if trace_complete:
         tid = _trace_ids(ds, n)
@@ -116,31 +153,36 @@ def compute_crop_mask(
         cnt = np.bincount(inv).astype(float)
         cx = np.bincount(inv, weights=x) / cnt
         cy = np.bincount(inv, weights=y) / cnt
-        trace_in = rectangle_mask(cx, cy, record)
+        trace_in = region_in(cx, cy)
         if z_range is not None:
             cz = np.bincount(inv, weights=z) / cnt
             lo, hi = sorted(float(v) for v in z_range)
             trace_in &= (cz >= lo) & (cz <= hi)
         return trace_in[inv]
 
-    inside = rectangle_mask(x, y, record)
+    inside = region_in(x, y)
     if z_range is not None:
         lo, hi = sorted(float(v) for v in z_range)
         inside &= np.isfinite(z) & (z >= lo) & (z <= hi)
     return inside
 
 
-def crop_is_axis_aligned(ds, record) -> bool:
-    """True when the rect maps to plain xnm/ynm bounds (no rotation/transform).
+def crop_is_axis_aligned(ds, record, *, exact_shape: bool = False) -> bool:
+    """True when the crop maps to plain xnm/ynm bounds (re-evaluable filter specs).
 
-    Only then can the crop be recorded as re-evaluable coordinate ``filter_specs``
-    (Model A round-trip); otherwise the caller stores the computed mask directly.
+    A **bounding-box** crop is always axis-aligned (absent an overlay transform);
+    an **exact-shape** crop only is for an unrotated rectangle. Otherwise the
+    caller stores the computed mask directly (Model A ``crop_mask_only``).
     """
-    angle = float((record.geometry or {}).get("angle", 0.0) or 0.0)
-    if abs(angle) > 1e-9:
-        return False
     transform = ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
-    return not transform
+    if transform:
+        return False
+    if not exact_shape:
+        return True
+    if getattr(record, "type", None) != "rectangle":
+        return False
+    angle = float((record.geometry or {}).get("angle", 0.0) or 0.0)
+    return abs(angle) <= 1e-9
 
 
 def crop_filter_specs(
@@ -148,13 +190,18 @@ def crop_filter_specs(
     *,
     trace_complete: bool = False,
     z_range: tuple[float, float] | None = None,
+    exact_shape: bool = False,
 ) -> list[dict]:
-    """Re-evaluable coordinate filter specs for an axis-aligned rectangle crop.
+    """Re-evaluable coordinate filter specs for an axis-aligned crop.
 
-    Caller must first check :func:`crop_is_axis_aligned`; for rotated/transformed
-    rectangles return value is unusable and the mask should be stored instead.
+    Caller must first check :func:`crop_is_axis_aligned`. Uses the ROI's exact
+    rectangle bounds when ``exact_shape`` (unrotated rect), else its bounding box.
     """
-    bounds = rectangle_bounds(record)
+    if exact_shape:
+        bounds = rectangle_bounds(record)
+    else:
+        bb = _region_bbox(record)
+        bounds = (bb[0], bb[1], bb[2], bb[3]) if bb else None
     if bounds is None:
         return []
     x0, x1, y0, y1 = bounds

@@ -286,18 +286,41 @@ def record_to_points(record: RoiRecord) -> np.ndarray:
     return pts[:, :2] if pts.ndim == 2 and pts.shape[1] >= 2 else pts   # drop depth
 
 
-def record_to_imagej(record: RoiRecord):
-    if record.coordinate_space != "pixel":
-        raise ValueError(
-            "ImageJ ROI export requires pixel-coordinate ROIs. "
-            "Use native JSON for plot/attribute-coordinate ROIs."
-        )
-    from roifile import ROI_TYPE, ImagejRoi
-    if record.type == "rectangle":
-        x, y, w, h = _bounds(record.geometry)
-        return ImagejRoi(roitype=ROI_TYPE.RECT, left=int(round(x)), top=int(round(y)), right=int(round(x + w)), bottom=int(round(y + h)), name=record.name)
+def _rotated_outline_points(record: RoiRecord) -> np.ndarray:
+    """Rotated outline vertices of a rectangle/oval (so a rotated box/ellipse can
+    be exported to ImageJ as a polygon rather than an axis-aligned bbox)."""
+    x, y, w, h = _bounds(record.geometry)
+    angle = float((record.geometry or {}).get("angle", 0.0) or 0.0)
+    cx, cy = x + w / 2.0, y + h / 2.0
+    th = np.deg2rad(angle)
+    cos_t, sin_t = np.cos(th), np.sin(th)
     if record.type == "oval":
-        x, y, w, h = _bounds(record.geometry)
+        a = np.linspace(0.0, 2.0 * np.pi, 64, endpoint=False)
+        local = np.column_stack([(w / 2.0) * np.cos(a), (h / 2.0) * np.sin(a)])
+    else:
+        local = np.array([[-w / 2.0, -h / 2.0], [w / 2.0, -h / 2.0],
+                          [w / 2.0, h / 2.0], [-w / 2.0, h / 2.0]])
+    rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+    return (local @ rot.T) + np.array([cx, cy])
+
+
+def record_to_imagej(record: RoiRecord):
+    """Convert a record to an ImageJ ROI.
+
+    Plot/attribute-coordinate ROIs are exported by writing their (nm) geometry
+    **directly as ImageJ pixel coordinates** — the spatial calibration is not
+    preserved, but the shape/region is (matching a 1 nm/pixel viewer TIFF export).
+    A rotated rectangle/oval is written as a polygon so the rotation survives.
+    """
+    from roifile import ROI_TYPE, ImagejRoi
+
+    g = record.geometry or {}
+    rotated = abs(float(g.get("angle", 0.0) or 0.0)) > 1e-9
+    if record.type == "rectangle" and not rotated:
+        x, y, w, h = _bounds(g)
+        return ImagejRoi(roitype=ROI_TYPE.RECT, left=int(round(x)), top=int(round(y)), right=int(round(x + w)), bottom=int(round(y + h)), name=record.name)
+    if record.type == "oval" and not rotated:
+        x, y, w, h = _bounds(g)
         return ImagejRoi(roitype=ROI_TYPE.OVAL, left=int(round(x)), top=int(round(y)), right=int(round(x + w)), bottom=int(round(y + h)), name=record.name)
     if record.type == "line":
         points = record_to_points(record)
@@ -311,17 +334,33 @@ def record_to_imagej(record: RoiRecord):
                 x1=float(x1), y1=float(y1), x2=float(x2), y2=float(y2),
                 name=record.name,
             )
-    points = record_to_points(record)
-    roi = ImagejRoi.frompoints(points, name=record.name)
+    if rotated and record.type in {"rectangle", "oval"}:
+        points = _rotated_outline_points(record)
+        export_type = "polygon"
+    else:
+        points = record_to_points(record)
+        export_type = record.type
+    roi = ImagejRoi.frompoints(np.asarray(points, dtype=float), name=record.name)
     mapping = {
         "polygon": ROI_TYPE.POLYGON,
         "freehand": ROI_TYPE.FREEHAND,
         "point": ROI_TYPE.POINT,
         "polyline": ROI_TYPE.POLYLINE,
         "freehand_line": ROI_TYPE.FREELINE,
+        "magnetic_lasso": ROI_TYPE.POLYLINE,
+        "angle": ROI_TYPE.POLYLINE,
     }
-    roi.roitype = mapping.get(record.type, ROI_TYPE.POLYGON)
+    roi.roitype = mapping.get(export_type, ROI_TYPE.POLYGON)
     return roi
+
+
+def is_roi_json_file(path: str | Path) -> bool:
+    """True when *path* is a native ROI-set JSON (a dict with a ``"rois"`` list)."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return isinstance(data, dict) and isinstance(data.get("rois"), list)
 
 
 def record_from_imagej(roi) -> RoiRecord:

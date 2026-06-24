@@ -297,6 +297,9 @@ class RoiOverlayController(QObject):
         self._lasso_points: list[list[float]] = []          # committed snapped vertices
         self._angle_points: list[list[float]] = []
         self._pending_selection_record: RoiRecord | None = None
+        # One-shot callback invoked with the next finished rectangle draft (used
+        # by the Scale Bar "At Selection" draw-then-place flow).
+        self._rect_request = None
         self._selection_timer = QTimer(self)
         self._selection_timer.setSingleShot(True)
         self._selection_timer.setInterval(120)
@@ -1007,6 +1010,21 @@ class RoiOverlayController(QObject):
             self._connect_draft_edit(self.draft_item)
             self.plot_item.addItem(self.draft_item)
         self._queue_selection_update(record)
+        # One-shot: hand a freshly drawn rectangle to a pending requester.
+        cb = self._rect_request
+        if cb is not None and record.type == "rectangle":
+            self._rect_request = None
+            try:
+                cb(record)
+            except Exception:
+                pass
+
+    def request_rectangle(self, callback) -> None:
+        """Activate the rectangle tool and call ``callback(record)`` once, with the
+        next finished rectangle draft (Scale Bar 'At Selection' draw-then-place)."""
+        self._rect_request = callback
+        self.activate()
+        self.store.set_tool("rectangle")
 
     def _finalize_record_selection(self, record: RoiRecord, *, update_item: bool) -> None:
         normalized = self._normalize_record(record)

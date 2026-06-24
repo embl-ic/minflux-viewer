@@ -38,10 +38,47 @@ class RoiManagerWindow(QWidget):
         self.setWindowFlags(Qt.WindowType.Window)
         self.resize(330, 430)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setAcceptDrops(True)
 
         self._build_ui()
         self._connect()
         self._refresh()
+
+    # -- drag & drop (ROI-set files) ------------------------------------
+    _ROI_DROP_EXTS = {".json", ".roi", ".zip"}
+
+    def _has_roi_url(self, event) -> bool:
+        md = event.mimeData()
+        return md.hasUrls() and any(
+            Path(u.toLocalFile()).suffix.lower() in self._ROI_DROP_EXTS
+            for u in md.urls())
+
+    def dragEnterEvent(self, event) -> None:
+        if self._has_roi_url(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if self._has_roi_url(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if Path(path).suffix.lower() in self._ROI_DROP_EXTS:
+                self._load_roi_path(path)
+        event.acceptProposedAction()
+
+    def _load_roi_path(self, path: str) -> None:
+        try:
+            records = self._store.load(path)
+            self._state.log(f"Loaded {len(records)} ROI(s) from {Path(path).name}.")
+        except Exception as exc:
+            self._state.log(f"Failed to load ROI file: {exc}", "ERROR")
+            QMessageBox.critical(self, "Open ROI set", str(exc))
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -247,12 +284,7 @@ class RoiManagerWindow(QWidget):
         )
         if not path:
             return
-        try:
-            records = self._store.load(path)
-            self._state.log(f"Loaded {len(records)} ROI(s) from {Path(path).name}.")
-        except Exception as exc:
-            self._state.log(f"Failed to load ROI file: {exc}", "ERROR")
-            QMessageBox.critical(self, "Open ROI set", str(exc))
+        self._load_roi_path(path)
 
     def _save(self) -> None:
         records = self._store.selected_records() or self._store.records
@@ -283,13 +315,14 @@ class RoiManagerWindow(QWidget):
             else:
                 path_obj = path_obj.with_suffix(".zip")
         if path_obj.suffix.lower() in {".roi", ".zip"} and has_non_pixel:
-            QMessageBox.warning(
-                self,
-                "ImageJ ROI export",
-                "Some ROIs are in plot/attribute coordinates, not ImageJ pixel coordinates. "
-                "Please save them as a native JSON ROI set for exact round-trip.",
-            )
-            return
+            # Don't block: write the plot/attribute (nm) geometry directly as
+            # ImageJ pixel coordinates. The spatial calibration is lost, but the
+            # shape/region is preserved (matches a 1 nm/pixel viewer TIFF export);
+            # use native JSON for an exact, calibrated round-trip.
+            self._state.log(
+                "Saving plot/attribute-coordinate ROI(s) to ImageJ format: their nm "
+                "geometry is written as pixel coordinates (calibration not preserved). "
+                "Use native JSON (*.json) for an exact round-trip.", "WARN")
         try:
             self._store.save(path_obj, records)
             self._state.log(f"Saved {len(records)} ROI(s) to {path_obj.name}.")

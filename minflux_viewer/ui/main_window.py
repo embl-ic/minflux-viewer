@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QObject, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QPoint, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProxyStyle,
     QPushButton,
+    QSizePolicy,
     QStyle,
     QStyleOptionMenuItem,
     QSpinBox,
@@ -63,8 +64,10 @@ from .data_window import DataWindow
 
 _SUPPORTED_EXTS: tuple[str, ...] = (
     ".mat", ".npy", ".csv", ".tsv", ".txt", ".xlsx", ".xlsm", ".msr",
-    ".tif", ".tiff", ".json",
+    ".tif", ".tiff", ".json", ".roi", ".zip",
 )
+#: ROI-set files (loaded into the ROI Manager, not as datasets).
+_ROI_FILE_EXTS: frozenset[str] = frozenset({".roi", ".zip"})
 
 #: Canonical loader format (see core.format_sniff.resolve_format) → method name.
 _FMT_LOADERS: dict[str, str] = {
@@ -298,10 +301,15 @@ class MainWindow(QMainWindow):
         u.actionBrightnessContrast.triggered.connect(self._show_brightness_contrast)
 
         # Analysis menu
-        self.actionMeasure = QAction("Measure", self)
-        self.actionMeasure.triggered.connect(
-            lambda: self._placeholder("Measure", "a later implementation")
+        self.menuMeasure = QMenu("Measure", self)
+        self.actionScaleBar = QAction("Scale Bar", self)
+        self.actionScaleBar.triggered.connect(self._show_scale_bar)
+        self.actionPlotProfile = QAction("Plot Profile", self)
+        self.actionPlotProfile.triggered.connect(
+            lambda: self._placeholder("Plot Profile", "a later implementation")
         )
+        self.menuMeasure.addAction(self.actionScaleBar)
+        self.menuMeasure.addAction(self.actionPlotProfile)
         self.actionSetMeasurements = QAction("Set Measurements...", self)
         self.actionSetMeasurements.triggered.connect(self._show_set_measurements)
         u.actionLocPrecisionFrc.triggered.connect(self._loc_precision_frc)
@@ -437,6 +445,9 @@ class MainWindow(QMainWindow):
         self.actionRoiSkeletonize = QAction("Skeletonize", self)
         self.actionRoiSkeletonize.triggered.connect(self._skeletonize_active_roi)
         self.menuProcessRoi.addAction(self.actionRoiSkeletonize)
+        self.actionRoiConvexHull = QAction("Convex Hull", self)
+        self.actionRoiConvexHull.triggered.connect(self._convex_hull_active_roi)
+        self.menuProcessRoi.addAction(self.actionRoiConvexHull)
 
         # Help menu
         u.actionAbout.triggered.connect(self._show_about)
@@ -448,13 +459,10 @@ class MainWindow(QMainWindow):
         u.menuHelp.insertAction(u.actionAbout, self.actionCheckUpdates)
         u.menuHelp.insertSeparator(u.actionAbout)
 
-        # Toolbar duplicates
-        u.toolbarRender.triggered.connect(self._show_render)
-        u.toolbarLog.triggered.connect(self._show_log)
-
         # Toolbar tools — LUT and Color (the silent-failure bug fix)
         u.toolLut.triggered.connect(self._show_lut)
         u.toolColor.triggered.connect(self._show_color_picker)
+        self._setup_toolbar_widgets()
         self._roi_tool_group = QActionGroup(self)
         try:
             self._roi_tool_group.setExclusionPolicy(
@@ -495,6 +503,9 @@ class MainWindow(QMainWindow):
         anchor = getattr(u, "toolLut", None)
         if anchor is not None:
             u.toolbar.insertAction(anchor, self.toolMagneticLasso)
+            # Separator sits to the right of the Magnetic Lasso (left of LUT);
+            # no separator between Point and Magnetic Lasso.
+            u.toolbar.insertSeparator(anchor)
         else:
             u.toolbar.addAction(self.toolMagneticLasso)
         self._roi_tool_actions["magnetic_lasso"] = self.toolMagneticLasso
@@ -543,7 +554,7 @@ class MainWindow(QMainWindow):
         u.actionBatchExport.setText("Batch Export...")
         u.actionBatchFilter.setText("Batch Filter...")
         u.actionAbout.setText("About")
-        self.actionMeasure.setText("Measure")
+        self.menuMeasure.setTitle("Measure")
         self.actionSetMeasurements.setText("Set Measurements...")
         self.menuAnalyzeClustering.setTitle("Clustering")
         self.actionDbscan.setText("DBSCAN")
@@ -599,7 +610,7 @@ class MainWindow(QMainWindow):
         u.menuProcess.addAction(u.menuBatchProcessing.menuAction())
 
         u.menuAnalysis.clear()
-        u.menuAnalysis.addAction(self.actionMeasure)
+        u.menuAnalysis.addAction(self.menuMeasure.menuAction())
         u.menuAnalysis.addAction(self.actionSetMeasurements)
         u.menuAnalysis.addSeparator()
         u.menuAnalysis.addAction(u.menuLocPrecision.menuAction())
@@ -654,11 +665,14 @@ class MainWindow(QMainWindow):
             *self._roi_convert_actions.values(),
             self.actionRoiResize,
             self.actionRoiSkeletonize,
+            self.actionRoiConvexHull,
             u.menuBatchProcessing.menuAction(),
             u.actionBatchRender,
             u.actionBatchExport,
             u.actionBatchFilter,
-            self.actionMeasure,
+            self.menuMeasure.menuAction(),
+            self.actionScaleBar,
+            self.actionPlotProfile,
             self.actionSetMeasurements,
             self.actionDbscan,
             self.actionKNearestNeighbour,
@@ -690,6 +704,7 @@ class MainWindow(QMainWindow):
             self.menuRoiConvert,
             u.menuBatchProcessing,
             u.menuAnalysis,
+            self.menuMeasure,
             self.menuAnalyzeClustering,
             self.menuHlyBPair,
             self.menuAnalyzeSegmentation,
@@ -1047,6 +1062,11 @@ class MainWindow(QMainWindow):
         p   = Path(path)
         ext = p.suffix.lower()
 
+        # ImageJ ROI / RoiSet files load into the ROI Manager, not as datasets.
+        if ext in _ROI_FILE_EXTS:
+            self._load_roi_json(path)
+            return
+
         from ..core.format_sniff import resolve_format
         fmt, note = resolve_format(path)
         if note:
@@ -1195,6 +1215,14 @@ class MainWindow(QMainWindow):
     def _load_json(self, path: str) -> None:
         self._status_label.setText(f"Loading {Path(path).name}…")
         self._state.log(f"Opening JSON: {path}", "INFO")
+        # A native ROI-set JSON (a dict with a "rois" list) loads ROIs, not data.
+        try:
+            from ..core.roi import is_roi_json_file
+            if is_roi_json_file(path):
+                self._load_roi_json(path)
+                return
+        except Exception:
+            pass
         try:
             from ..core.loader import load_json
             dataset = load_json(path, prefs=self._state.prefs)
@@ -1228,6 +1256,30 @@ class MainWindow(QMainWindow):
             self._state.log(f"Failed to load JSON '{Path(path).name}': {data_exc}", "ERROR")
             QMessageBox.critical(self, "Load error", str(data_exc))
             self._status_label.setText("Load failed.")
+
+    def _load_roi_json(self, path: str) -> None:
+        """Load a native ROI-set file (.json / .roi / .zip) into the ROI Manager,
+        attaching the ROIs to the active dataset and revealing them."""
+        try:
+            records = self._state.rois.load(path)
+        except Exception as exc:
+            self._state.log(f"Failed to load ROI file '{Path(path).name}': {exc}", "ERROR")
+            QMessageBox.critical(self, "Open ROI set", str(exc))
+            self._status_label.setText("Load failed.")
+            return
+        idx = self._state.active_idx
+        for r in records:
+            ctx = dict(r.context) if isinstance(r.context, dict) else {}
+            if isinstance(idx, int):
+                ctx["dataset_idx"] = idx
+            r.context = ctx
+            r.selection_dirty = True
+        self._state.rois.set_show_all(True)
+        if records:
+            self._state.rois.select([r.id for r in records])
+        self._show_roi_manager()
+        self._state.log(f"Loaded {len(records)} ROI(s) from {Path(path).name}.")
+        self._status_label.setText("Ready.")
 
     def _populate_recent_menu(self) -> None:
         self._recent_menu.clear()
@@ -1566,6 +1618,23 @@ class MainWindow(QMainWindow):
         old_type = record.type
         self._commit_roi_replacement(record, kind, adapter, new_record)
         self._state.log(f"Skeletonized ROI '{record.name}' ({old_type}) → line.")
+
+    def _convex_hull_active_roi(self) -> None:
+        """Process › ROI › Convex Hull — convert the active ROI to its convex
+        hull when that conversion is available (polygon / freehand). Any other
+        case (incompatible type, no active ROI, no active dataset) is ignored."""
+        from ..core.roi_convert import available_conversions, convert_roi
+
+        record, kind, adapter = self._active_roi()
+        if record is None or "convex_hull" not in available_conversions(record):
+            return  # silently ignore
+        try:
+            new_record = convert_roi(record, "convex_hull")
+        except Exception:
+            return
+        old_type = record.type
+        self._commit_roi_replacement(record, kind, adapter, new_record)
+        self._state.log(f"Converted ROI '{record.name}' ({old_type}) → convex hull.")
 
     def _run_hlyb_pair_analysis(self, mode: str = "3D") -> None:
         """Analyze › Clustering › HlyB subunit pair analysis › 2D/3D — detect
@@ -2276,6 +2345,182 @@ class MainWindow(QMainWindow):
         from .set_measurements_dialog import SetMeasurementsDialog
         SetMeasurementsDialog(self._state, parent=self).exec()
 
+    # ------------------------------------------------------------------
+    # Measure › Scale Bar
+    # ------------------------------------------------------------------
+
+    def _active_coordinate_view(self):
+        """A 2-D coordinate view (render/scatter) for the active dataset, or None.
+
+        Prefers the currently focused window when it is the active dataset's
+        render/scatter and is in a 2-D (XY/XZ/YZ) view."""
+        idx = self._state.active_idx
+        if idx is None:
+            return None
+        rw = self._render_windows.get(idx)
+        sw = self._scatter_windows.get(idx)
+
+        def is_2d(win):
+            try:
+                return win is not None and win.coordinate_view_box() is not None
+            except Exception:
+                return False
+
+        active = QApplication.activeWindow()
+        for win in (active, rw, sw):
+            if win in (rw, sw) and is_2d(win):
+                return win
+        return None
+
+    def _window_active_rectangle_bounds(self, win):
+        """Bounds (x0,x1,y0,y1) of the active rectangle ROI in *win*'s current
+        view plane (draft or selected), or None."""
+        from ..core.roi_selection import rectangle_bounds
+
+        plane = win.roi_view_plane()
+        candidates = []
+        overlay = getattr(win, "_roi_overlay", None)
+        if overlay is not None:
+            try:
+                rec = overlay.current_record()
+            except Exception:
+                rec = None
+            if rec is not None:
+                candidates.append(rec)
+        try:
+            sel = set(self._state.rois.selected_ids)
+            candidates.extend(r for r in self._state.rois.records if r.id in sel)
+        except Exception:
+            pass
+        for rec in candidates:
+            if getattr(rec, "type", None) != "rectangle":
+                continue
+            rec_plane = (getattr(rec, "context", {}) or {}).get("view_plane") or plane
+            if rec_plane != plane:
+                continue
+            b = rectangle_bounds(rec)
+            if b is not None:
+                return b
+        return None
+
+    @staticmethod
+    def _nice_scalebar_width(span: float) -> float:
+        if span <= 0:
+            return 100.0
+        target = span / 5.0
+        best = 1.0
+        for n in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000,
+                  10000, 20000, 50000, 100000, 200000, 500000):
+            if n <= target:
+                best = float(n)
+            else:
+                break
+        return best
+
+    def _show_scale_bar(self) -> None:
+        if self._state.active_dataset is None:
+            self._state.log("Scale bar: open a dataset first.", "WARN")
+            QMessageBox.information(self, "Scale Bar", "Open a dataset first.")
+            return
+        win = self._active_coordinate_view()
+        if win is None:
+            self._state.log("Scale bar: no 2-D coordinate view (render/scatter) for the "
+                            "active dataset.", "WARN")
+            QMessageBox.information(
+                self, "Scale Bar",
+                "Open a render or scatter view of the active dataset in a 2-D "
+                "orientation (XY / XZ / YZ) first.")
+            return
+        vb = win.coordinate_view_box()
+        try:
+            (xmin, xmax), _ = vb.viewRange()
+            span = abs(xmax - xmin)
+        except Exception:
+            span = 0.0
+        default_w = self._nice_scalebar_width(span)
+        default_h = max(default_w / 20.0, (span / 400.0) if span else 1.0)
+
+        from .scale_bar_dialog import ScaleBarDialog
+        dlg = ScaleBarDialog(self, default_width_nm=default_w, default_height_nm=default_h,
+                             has_selection=self._window_active_rectangle_bounds(win) is not None)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        params = dlg.values()
+
+        if params["location"] != "At Selection":
+            self._add_scale_bar(win, params, roi_center=None)
+            return
+
+        bounds = self._window_active_rectangle_bounds(win)
+        if bounds is not None:
+            self._add_scale_bar(win, params, roi_center=self._rect_center(bounds))
+            return
+        # No rectangle ROI yet → let the user draw one, then place at its centre.
+        overlay = getattr(win, "_roi_overlay", None)
+        if overlay is None or not hasattr(overlay, "request_rectangle"):
+            self._add_scale_bar(win, params, roi_center=None)  # fall back to a corner
+            return
+        self._state.log("Scale bar (At Selection): draw a rectangle on the view to "
+                        "position the scale bar.", "INFO")
+
+        def _on_rect(record, _win=win, _params=params):
+            from ..core.roi_selection import rectangle_bounds
+            b = rectangle_bounds(record)
+            if b is not None:
+                self._add_scale_bar(_win, _params, roi_center=self._rect_center(b))
+
+        overlay.request_rectangle(_on_rect)
+
+    @staticmethod
+    def _rect_center(bounds) -> tuple[float, float]:
+        x0, x1, y0, y1 = bounds
+        return (0.5 * (x0 + x1), 0.5 * (y0 + y1))
+
+    def _add_scale_bar(self, win, params, *, roi_center) -> None:
+        vb = win.coordinate_view_box()
+        if vb is None:
+            self._state.log("Scale bar: the view is no longer a 2-D coordinate view.", "WARN")
+            return
+        from .scale_bar import ScaleBarItem, format_nm, initial_scale_bar_center
+        center = initial_scale_bar_center(vb, params, roi_center=roi_center)
+        try:
+            sb = ScaleBarItem(
+                vb, width_nm=params["width_nm"], height_nm=params["height_nm"],
+                font_size=params["font_size"], color=params["color"],
+                bg_color=params["bg_color"], horizontal=params["horizontal"],
+                center=center)
+        except Exception as exc:
+            self._state.log(f"Scale bar failed: {exc}", "ERROR")
+            return
+        sb.sigEditRequested.connect(lambda item, _w=win: self._edit_scale_bar(_w, item))
+        sb.sigDeleteRequested.connect(lambda item, _w=win: self._delete_scale_bar(_w, item))
+        bars = getattr(win, "_scale_bars", None)
+        if bars is None:
+            bars = []
+            win._scale_bars = bars
+        bars.append(sb)
+        where = "at selection" if roi_center is not None else params["location"].lower()
+        self._state.log(f"Added {format_nm(params['width_nm'])} scale bar ({where}). "
+                        "Drag to move; right-click for Property / Delete.")
+
+    def _edit_scale_bar(self, win, item) -> None:
+        from .scale_bar_dialog import ScaleBarDialog
+        dlg = ScaleBarDialog(self, initial=item.params(), edit_mode=True)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        item.set_params(dlg.values())
+        self._state.log("Updated scale bar properties.")
+
+    def _delete_scale_bar(self, win, item) -> None:
+        try:
+            item.remove()
+        except Exception:
+            pass
+        bars = getattr(win, "_scale_bars", None)
+        if bars and item in bars:
+            bars.remove(item)
+        self._state.log("Deleted scale bar.")
+
     def _split_active_channel_group(self) -> None:
         """
         Split the active multi-channel render overlay into one render per dataset.
@@ -2443,9 +2688,9 @@ class MainWindow(QMainWindow):
             self._no_data_warning()
             return
         src_idx = self._state.active_idx
-        record = self._active_rectangle_record(src, src_idx)
+        record = self._active_region_record(src, src_idx)
         if record is None:
-            self._plain_duplicate(src)
+            self._plain_duplicate(src)     # non-region ROI or no ROI → whole dataset
             return
 
         from ..core import roi_crop as RC
@@ -2482,27 +2727,30 @@ class MainWindow(QMainWindow):
             else:
                 self._roi_crop_setup.pop(id(src), None)
 
-        if opts is None or not opts.only_roi:
+        if opts is None:
             self._plain_duplicate(src)
             return
         self._execute_crop(src_idx, src, record, members, opts)
 
     # ------------------------------------------------------------------
-    def _active_rectangle_record(self, ds, ds_idx):
-        """The active rectangle ROI for *ds*.
+    def _active_region_record(self, ds, ds_idx):
+        """The active **region** ROI (rectangle/oval/polygon/freehand) for *ds*.
 
-        A freshly drawn ROI is a *draft* living on the render/scatter overlay
-        controller (not yet in ``state.rois.records``), so we look there as well
-        as among the selected persistent ROIs.
+        A freshly drawn ROI is a *draft* on the render/scatter overlay controller
+        (not yet in ``state.rois.records``), so we look there as well as among the
+        selected persistent ROIs. Non-region ROIs (line/point/angle) → ``None``
+        (the duplicate then ignores the ROI and copies the whole dataset).
         """
-        # 1) a selected, persisted rectangle ROI
+        from ..core.roi_convert import REGION_TYPES
+
+        # 1) a selected, persisted region ROI
         try:
             wanted = set(self._state.rois.selected_ids or [])
         except Exception:
             wanted = set()
         try:
             for record in self._state.rois.records:
-                if record.id in wanted and record.type == "rectangle":
+                if record.id in wanted and record.type in REGION_TYPES:
                     return record
         except Exception:
             pass
@@ -2515,7 +2763,7 @@ class MainWindow(QMainWindow):
                 draft = ctrl.current_record()
             except Exception:
                 draft = getattr(ctrl, "draft", None)
-            if draft is not None and getattr(draft, "type", None) == "rectangle":
+            if draft is not None and getattr(draft, "type", None) in REGION_TYPES:
                 return draft
         return None
 
@@ -2614,10 +2862,12 @@ class MainWindow(QMainWindow):
         if multi:
             self._state.suspend_auto_render = True   # group before rendering
         try:
+            exact = bool(getattr(opts, "exact_shape", False))
             for order, (_idx, ds) in enumerate(sel, start=1):
                 try:
                     mask = RC.compute_crop_mask(
-                        ds, record, z_range=z_range, trace_complete=trace_complete)
+                        ds, record, z_range=z_range, trace_complete=trace_complete,
+                        exact_shape=exact)
                     name = self._unique_name("CROP_", ds.file.name)
                     if opts.spatial_filter:                       # Model A
                         dup = self._copy_dataset(ds, name)
@@ -2625,9 +2875,10 @@ class MainWindow(QMainWindow):
                         if base.shape[0] != mask.shape[0]:
                             base = np.ones(mask.shape[0], dtype=bool)
                         dup.filter_mask = base & mask
-                        if RC.crop_is_axis_aligned(ds, record):
+                        if RC.crop_is_axis_aligned(ds, record, exact_shape=exact):
                             dup.state["filter_specs"] = list(ds.state.get("filter_specs") or []) \
-                                + RC.crop_filter_specs(record, trace_complete=trace_complete, z_range=z_range)
+                                + RC.crop_filter_specs(record, trace_complete=trace_complete,
+                                                       z_range=z_range, exact_shape=exact)
                         else:
                             dup.metadata["crop_mask_only"] = True   # opaque mask (not re-evaluable)
                         dup.metadata["cropped_from_dataset"] = ds.file.name
@@ -2658,8 +2909,29 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Duplicate / crop",
                                 "No cropped dataset was produced (check the ROI).")
             return
-        if multi:                                  # open one grouped render
-            self._show_render(made[0])
+        # Move the ROI itself into the cropped view (active there), per the request.
+        self._carry_roi_to_cropped(record, made[0])
+        self._show_render(made[0])                  # open the cropped (grouped) view
+
+    def _carry_roi_to_cropped(self, record, new_idx: int) -> None:
+        """Add a copy of the source ROI to the store, retargeted to the cropped
+        dataset and selected, so it shows as the active ROI in the new view."""
+        import copy
+        import uuid
+
+        try:
+            clone = copy.deepcopy(record)
+        except Exception:
+            return
+        clone.id = uuid.uuid4().hex
+        ctx = dict(clone.context) if isinstance(clone.context, dict) else {}
+        ctx["dataset_idx"] = new_idx
+        clone.context = ctx
+        clone.mask_key = ""
+        clone.selected_count = None
+        clone.selection_dirty = True
+        self._state.rois.add(clone)
+        self._state.rois.select([clone.id])
 
     def _unique_name(self, prefix: str, base: str) -> str:
         """``<prefix><base>`` with numbering only when needed."""
@@ -3472,6 +3744,63 @@ class MainWindow(QMainWindow):
             "<p>EMBL Imaging Centre<br>"
             "<a href='mailto:ziqiang.huang@embl.de'>ziqiang.huang@embl.de</a></p>",
         )
+
+    def _setup_toolbar_widgets(self) -> None:
+        """Add a leading spacer (to shift the tools right so the first ROI button
+        roughly aligns with the 'File' menu) and a right-aligned search field."""
+        tb = self._ui.toolbar
+        self._toolbar_aligned = False
+
+        # Leading spacer — its width is set in _align_toolbar_to_menu() once the
+        # toolbar/menubar have a valid layout (after the first show).
+        self._toolbar_lead_spacer = QWidget()
+        self._toolbar_lead_spacer.setFixedWidth(0)
+        first = tb.actions()[0] if tb.actions() else None
+        if first is not None:
+            tb.insertWidget(first, self._toolbar_lead_spacer)
+        else:
+            tb.addWidget(self._toolbar_lead_spacer)
+
+        # Expanding spacer pushes the search field to the toolbar's right edge,
+        # regardless of window width.
+        expander = QWidget()
+        expander.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(expander)
+
+        self._toolbar_search = QLineEdit()
+        self._toolbar_search.setPlaceholderText("type here to search")
+        self._toolbar_search.setClearButtonEnabled(True)
+        fm = self._toolbar_search.fontMetrics()
+        width = fm.horizontalAdvance("x" * 25) + 24   # ~25 letters + padding/clear button
+        self._toolbar_search.setFixedWidth(int(width))
+        tb.addWidget(self._toolbar_search)
+
+    def _align_toolbar_to_menu(self) -> None:
+        """Size the leading spacer so the first ROI button's left edge roughly
+        aligns vertically with the 'File' menu's left edge."""
+        try:
+            tb = self._ui.toolbar
+            mb = self.menuBar()
+            menu_actions = mb.actions()
+            btn = tb.widgetForAction(self._ui.toolRect)
+            if not menu_actions or btn is None:
+                return
+            file_left = mb.mapTo(self, mb.actionGeometry(menu_actions[0]).topLeft()).x()
+            tool_left = btn.mapTo(self, QPoint(0, 0)).x()
+            spacer_w = self._toolbar_lead_spacer.width()
+            # Align the first ROI button with the 'File' menu, then nudge a bit
+            # further right by ~1/4 of a button width.
+            extra = 0.25 * btn.width()
+            new_w = file_left - (tool_left - spacer_w) + extra
+            self._toolbar_lead_spacer.setFixedWidth(max(0, int(round(new_w))))
+        except Exception:
+            pass
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not getattr(self, "_toolbar_aligned", True):
+            self._toolbar_aligned = True
+            QTimer.singleShot(0, self._align_toolbar_to_menu)
 
     def closeEvent(self, event) -> None:
         """

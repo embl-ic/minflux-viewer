@@ -142,17 +142,12 @@
    <property name="movable"><bool>false</bool></property>
    <attribute name="toolBarArea"><enum>TopToolBarArea</enum></attribute>
    <attribute name="toolBarBreak"><bool>false</bool></attribute>
-   <addaction name="actionOpen"/>
-   <addaction name="toolbarRender"/>
-   <addaction name="toolbarLog"/>
-   <addaction name="separator"/>
    <addaction name="toolRect"/>
    <addaction name="toolOval"/>
    <addaction name="toolPolygon"/>
    <addaction name="toolFreehand"/>
    <addaction name="toolLine"/>
    <addaction name="toolPoint"/>
-   <addaction name="separator"/>
    <addaction name="toolLut"/>
    <addaction name="toolColor"/>
   </widget>
@@ -276,14 +271,6 @@
    <property name="text"><string>&amp;About</string></property>
   </action>
 
-  <!-- Toolbar actions (duplicates of menu items; separate so Designer can
-       customise toolbar icons independently) -->
-  <action name="toolbarRender">
-   <property name="text"><string>Render</string></property>
-  </action>
-  <action name="toolbarLog">
-   <property name="text"><string>Log</string></property>
-  </action>
   <action name="toolRect">
    <property name="text"><string>Rect</string></property>
    <property name="checkable"><bool>true</bool></property>

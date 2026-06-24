@@ -2909,6 +2909,11 @@ class RenderWindow(QWidget):
         """Current view orientation for ROI 3-D placement (XY/XZ/YZ)."""
         return self._orientation if self._orientation in {"XY", "XZ", "YZ"} else None
 
+    def coordinate_view_box(self):
+        """The 2-D coordinate ViewBox for overlays (e.g. a scale bar), or None
+        when this isn't a 2-D coordinate view."""
+        return self._view_box if self.roi_view_plane() is not None else None
+
     def roi_depth_center(self) -> float | None:
         """Centre of the current viewing range of the out-of-plane (depth) axis,
         i.e. the fallback value a newly drawn ROI gets in the dimension not shown

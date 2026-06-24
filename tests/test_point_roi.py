@@ -33,10 +33,14 @@ def test_point_marker_setfillcolor_is_noop(_app):
     item.setFillColor("#ff0000", alpha=200)  # should simply do nothing
 
 
-def test_point_imagej_requires_pixel_space():
+def test_point_imagej_plot_space_exports_as_is():
+    # Plot/attribute-coordinate ROIs now export (no block); coords written as-is.
+    roifile = pytest.importorskip("roifile")
     plot_pt = RoiRecord.create("point", {"point": [4.0, 5.0]}, coordinate_space="plot")
-    with pytest.raises(ValueError):
-        record_to_imagej(plot_pt)
+    ij = record_to_imagej(plot_pt)
+    assert ij.roitype == roifile.ROI_TYPE.POINT
+    back = record_from_imagej(ij)
+    assert np.allclose(back.geometry["point"], [4.0, 5.0])
 
 
 def test_point_imagej_roundtrip_pixel_space():
