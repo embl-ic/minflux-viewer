@@ -79,6 +79,8 @@ class ConvSegmentationWindow(QDialog):
         self._suspend = False
         self._fitted = False       # auto-range the response view only on first draw
         self._image_lut = self._alpha_white_lut()
+        self._model_params: dict[str, dict] = {}   # per-model param cache (persisted)
+        self._active_model_key: str | None = None
 
         self._recompute_timer = QTimer(self)
         self._recompute_timer.setSingleShot(True)
@@ -86,7 +88,7 @@ class ConvSegmentationWindow(QDialog):
         self._recompute_timer.timeout.connect(self._recompute)
 
         self._build_ui()
-        self._rebuild_params(initial=True)   # populates param spins for first model
+        self._restore_prefs()      # restore last-session model + params (builds param spins)
         self._recompute()
 
     # ------------------------------------------------------------------ UI
@@ -377,18 +379,27 @@ class ConvSegmentationWindow(QDialog):
 
     # ----------------------------------------------------- parameter widgets
     def _rebuild_params(self, *, initial: bool = False) -> None:
-        """Replace the per-model parameter spin boxes when the model changes."""
+        """Replace the per-model parameter spin boxes when the model changes.
+
+        The leaving model's param values are cached (per-model, persisted across
+        sessions) and the entering model's saved/cached values are restored."""
+        if self._param_spins and self._active_model_key:    # cache the leaving model
+            self._model_params[self._active_model_key] = {
+                n: s.value() for n, s in self._param_spins.items()}
         while self._param_form.rowCount():
             self._param_form.removeRow(0)
         self._param_spins.clear()
         model = cs.get_model(self._model_key())
+        saved = self._model_params.get(self._model_key(), {})
         for ps in model.params:
-            spin = self._spin(ps.lo, ps.hi, ps.default, ps.decimals, ps.step, ps.suffix)
+            spin = self._spin(ps.lo, ps.hi, float(saved.get(ps.name, ps.default)),
+                              ps.decimals, ps.step, ps.suffix)
             if ps.tooltip:
                 spin.setToolTip(ps.tooltip)
             spin.valueChanged.connect(self._schedule_recompute)
             self._param_form.addRow(ps.label + ":", spin)
             self._param_spins[ps.name] = spin
+        self._active_model_key = self._model_key()
         # default the separation + crop-box size to the model's characteristic size
         self._suspend = True
         self._sep_spin.setValue(model.size(model.defaults()))
@@ -397,6 +408,72 @@ class ConvSegmentationWindow(QDialog):
         self._ring_group.setVisible(model.ringlike)   # ring validation: ring-like only
         if not initial:
             self._recompute()
+
+    # ----------------------------------------------------- persistence
+    def _restore_prefs(self) -> None:
+        """Restore the last-session parameters from ``state.prefs`` (or fall back
+        to the built-in defaults), then build the param spins for the model."""
+        cfg = dict(self._state.prefs.get("conv_segmentation", {}) or {})
+        self._model_params = dict(cfg.get("model_params", {}) or {})
+        mk = cfg.get("model")
+        self._model_combo.blockSignals(True)
+        if mk in cs.GEOMETRY_MODELS:
+            i = self._model_combo.findData(mk)
+            if i >= 0:
+                self._model_combo.setCurrentIndex(i)
+        self._model_combo.blockSignals(False)
+        self._rebuild_params(initial=True)          # builds spins (restores per-model params)
+        if not cfg:
+            return
+        self._suspend = True
+        try:
+            for spin, key in ((self._pixel_spin, "pixel_size"),
+                              (self._response_spin, "min_response"),
+                              (self._sep_spin, "min_separation"),
+                              (self._box_size, "box_size"),
+                              (self._max_inside, "max_inside"),
+                              (self._max_outside, "max_outside")):
+                if key in cfg:
+                    spin.setValue(float(cfg[key]))
+            if "max_detections" in cfg:
+                self._max_spin.setValue(int(cfg["max_detections"]))
+            for chk, key in ((self._zero_mean, "zero_mean"), (self._sqrt, "sqrt"),
+                             (self._dog, "dog"), (self._ring_validate, "ring_validate")):
+                if key in cfg:
+                    chk.setChecked(bool(cfg[key]))
+        finally:
+            self._suspend = False
+
+    def _save_prefs(self) -> None:
+        """Persist the current parameters to ``state.prefs`` (across sessions)."""
+        if self._active_model_key:
+            self._model_params[self._active_model_key] = self._params()
+        self._state.prefs["conv_segmentation"] = {
+            "model": self._model_key(),
+            "pixel_size": self._pixel_spin.value(),
+            "zero_mean": self._zero_mean.isChecked(),
+            "sqrt": self._sqrt.isChecked(),
+            "dog": self._dog.isChecked(),
+            "min_response": self._response_spin.value(),
+            "min_separation": self._sep_spin.value(),
+            "max_detections": self._max_spin.value(),
+            "ring_validate": self._ring_validate.isChecked(),
+            "max_inside": self._max_inside.value(),
+            "max_outside": self._max_outside.value(),
+            "box_size": self._box_size.value(),
+            "model_params": self._model_params,
+        }
+        try:
+            self._state.save_prefs()
+        except Exception:
+            pass
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        try:
+            self._save_prefs()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     # ----------------------------------------------------------- compute
     def _schedule_recompute(self) -> None:

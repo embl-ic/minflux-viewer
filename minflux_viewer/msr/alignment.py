@@ -31,6 +31,7 @@ class ChannelAlignmentResult:
     matrix_3x3: np.ndarray
     matrix_4x4: np.ndarray
     rmse: float
+    transform_type: str = ""
 
 
 def _require_fields(arr: np.ndarray, fields: Iterable[str], label: str) -> None:
@@ -118,6 +119,29 @@ TRANSFORM_RIGID_XY_Z = "rigid XY + translational Z"
 TRANSFORM_TRANS_XYZ = "translational XYZ"
 TRANSFORM_RIGID_XYZ = "rigid XYZ"
 
+#: Absolute minimum matched beads required to attempt any channel alignment.
+#: (2 → translational XYZ only; 3 → also rigid XY + translational Z;
+#: 4 → full rigid XYZ — see ``effective_transform_type``.)
+MIN_BEADS_FOR_ALIGNMENT = 2
+
+
+def effective_transform_type(requested: str, n_beads: int) -> str:
+    """Constrain the *requested* MBM transform mode to one solvable with
+    *n_beads* matched beads.
+
+    Bead-count rules (identical for 2-D and 3-D, overriding the preference):
+    2 beads → translational XYZ only; 3 beads → translational XYZ or
+    rigid XY + translational Z (full rigid XYZ is downgraded to the latter,
+    since 3 points cannot fix a unique 3-D rotation robustly); 4+ beads →
+    the requested mode is honoured unchanged.
+    """
+    mode = (requested or "").strip().lower()
+    if n_beads >= 4:
+        return requested
+    if n_beads == 3:
+        return TRANSFORM_RIGID_XY_Z if mode == TRANSFORM_RIGID_XYZ.lower() else requested
+    return TRANSFORM_TRANS_XYZ
+
 
 def _z_meaningful(*arrays: np.ndarray) -> bool:
     return any(
@@ -202,6 +226,9 @@ def align_channels_from_arrays(
     channel2_xyz = np.vstack([ch2[int(b)].median_xyz for b in bead_ids]) * NM_PER_M
     channel1_counts = np.array([ch1[int(b)].count_used for b in bead_ids], dtype=np.int32)
     channel2_counts = np.array([ch2[int(b)].count_used for b in bead_ids], dtype=np.int32)
+    # Downgrade the requested mode to what this many matched beads can support
+    # (overriding the preference for low bead counts — see effective_transform_type).
+    transform_type = effective_transform_type(transform_type, int(bead_ids.size))
     (rotation, translation, z_translation, matrix_3x3, matrix_4x4,
      channel2_aligned_xyz, rmse) = solve_channel_transform(
         channel2_xyz, channel1_xyz, transform_type)
@@ -220,4 +247,5 @@ def align_channels_from_arrays(
         matrix_3x3=matrix_3x3,
         matrix_4x4=matrix_4x4,
         rmse=rmse,
+        transform_type=transform_type,
     )

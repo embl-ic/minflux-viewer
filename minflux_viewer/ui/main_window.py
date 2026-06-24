@@ -317,8 +317,17 @@ class MainWindow(QMainWindow):
         self.actionKNearestNeighbour.triggered.connect(
             lambda: self._placeholder("K nearest neighbour", "a later implementation")
         )
+        self.menuHlyBPair = QMenu("HlyB subunit pair analysis", self)
+        self.actionHlyB2D = QAction("2D", self)
+        self.actionHlyB2D.triggered.connect(lambda: self._run_hlyb_pair_analysis(mode="2D"))
+        self.actionHlyB3D = QAction("3D", self)
+        self.actionHlyB3D.triggered.connect(lambda: self._run_hlyb_pair_analysis(mode="3D"))
+        self.menuHlyBPair.addAction(self.actionHlyB2D)
+        self.menuHlyBPair.addAction(self.actionHlyB3D)
         self.menuAnalyzeClustering.addAction(self.actionDbscan)
         self.menuAnalyzeClustering.addAction(self.actionKNearestNeighbour)
+        self.menuAnalyzeClustering.addSeparator()
+        self.menuAnalyzeClustering.addMenu(self.menuHlyBPair)
 
         # Trace submenu — size estimation, anisotropy, trace viewer
         self.menuAnalyzeTrace = QMenu("Trace", self)
@@ -405,6 +414,29 @@ class MainWindow(QMainWindow):
         self.actionRoiManager = QAction("ROI Manager", self)
         self.actionRoiManager.triggered.connect(self._show_roi_manager)
         self.menuProcessRoi.addAction(self.actionRoiManager)
+        self.menuProcessRoi.addSeparator()
+        # Convert submenu: only the target type is listed; the source is the
+        # active ROI at call time (selected ROI, else the active draft).
+        self.menuRoiConvert = QMenu("Convert", self)
+        self._roi_convert_actions = {}
+        for label, target in (
+            ("to Rectangle", "rectangle"),
+            ("to Oval", "oval"),
+            ("Line to Region", "region"),
+            ("Region to Line", "line"),
+            ("to Point", "point"),
+        ):
+            act = QAction(label, self)
+            act.triggered.connect(lambda _checked=False, t=target: self._convert_active_roi(t))
+            self.menuRoiConvert.addAction(act)
+            self._roi_convert_actions[target] = act
+        self.menuProcessRoi.addMenu(self.menuRoiConvert)
+        self.actionRoiResize = QAction("Enlarge / Shrink…", self)
+        self.actionRoiResize.triggered.connect(self._resize_active_roi)
+        self.menuProcessRoi.addAction(self.actionRoiResize)
+        self.actionRoiSkeletonize = QAction("Skeletonize", self)
+        self.actionRoiSkeletonize.triggered.connect(self._skeletonize_active_roi)
+        self.menuProcessRoi.addAction(self.actionRoiSkeletonize)
 
         # Help menu
         u.actionAbout.triggered.connect(self._show_about)
@@ -618,6 +650,10 @@ class MainWindow(QMainWindow):
             self.actionChannelSeparateDcr,
             self.menuProcessRoi.menuAction(),
             self.actionRoiManager,
+            self.menuRoiConvert.menuAction(),
+            *self._roi_convert_actions.values(),
+            self.actionRoiResize,
+            self.actionRoiSkeletonize,
             u.menuBatchProcessing.menuAction(),
             u.actionBatchRender,
             u.actionBatchExport,
@@ -626,6 +662,9 @@ class MainWindow(QMainWindow):
             self.actionSetMeasurements,
             self.actionDbscan,
             self.actionKNearestNeighbour,
+            self.menuHlyBPair.menuAction(),
+            self.actionHlyB2D,
+            self.actionHlyB3D,
             self.menuAnalyzeSegmentation.menuAction(),
             self.actionSegNpc2D,
             self.actionSegNpc3D,
@@ -648,9 +687,11 @@ class MainWindow(QMainWindow):
             u.menuView,
             self.menuProcessChannel,
             self.menuProcessRoi,
+            self.menuRoiConvert,
             u.menuBatchProcessing,
             u.menuAnalysis,
             self.menuAnalyzeClustering,
+            self.menuHlyBPair,
             self.menuAnalyzeSegmentation,
             self.menuSegNPC,
             u.menuTracking,
@@ -1381,6 +1422,228 @@ class MainWindow(QMainWindow):
         from .roi_manager import RoiManagerWindow
         self._roi_manager_win = _raise_or_create(self._roi_manager_win, RoiManagerWindow, self._state)
 
+    # ------------------------------------------------------------------
+    # ROI convert / enlarge-shrink / skeletonize (Process › ROI)
+    # ------------------------------------------------------------------
+
+    def _active_roi(self):
+        """The active ROI as ``(record, kind, adapter)``: the single selected
+        stored ROI, else the active overlay's draft. ``kind`` is
+        ``"stored"`` / ``"draft"`` / ``None``."""
+        store = self._state.rois
+        selected = store.selected_records()
+        if len(selected) == 1:
+            return selected[0], "stored", store.active_adapter
+        adapter = store.active_adapter
+        if adapter is not None:
+            try:
+                draft = adapter.current_record()
+            except Exception:
+                draft = None
+            if draft is not None:
+                return draft, "draft", adapter
+        return None, None, None
+
+    def _clear_roi_cached_mask(self, record) -> None:
+        """Drop a stored ROI's cached selection mask (state + derived) so a
+        converted/edited ROI doesn't leave a stale highlight behind."""
+        from ..core.roi_selection import ROI_MASKS_STATE_KEY
+
+        idx = record.context.get("dataset_idx") if isinstance(record.context, dict) else None
+        datasets = self._state.datasets
+        ds = datasets[idx] if isinstance(idx, int) and 0 <= idx < len(datasets) else None
+        if ds is None:
+            ds = self._state.active_dataset
+        if ds is None:
+            return
+        masks = ds.state.get(ROI_MASKS_STATE_KEY, {})
+        meta = masks.pop(record.id, None)
+        key = getattr(record, "mask_key", "") or (meta or {}).get("key")
+        if key:
+            ds.derived.pop(key, None)
+
+    def _commit_roi_replacement(self, record, kind, adapter, new_record) -> None:
+        """Replace a stored ROI in place; a draft stays a draft of the new type
+        in the view (not filed into the Manager)."""
+        store = self._state.rois
+        if kind == "stored":
+            self._clear_roi_cached_mask(record)  # drop the old shape's stale highlight
+            new_record.name = (
+                f"{new_record.type}-{store.next_type_index(new_record.type)}"
+                if store._is_auto_name(record) else record.name)
+            store.update(record.id, new_record)
+            store.select([record.id])
+        else:  # draft — keep it editable in the view, do not open/file the Manager
+            replace_draft = getattr(adapter, "replace_draft", None)
+            if callable(replace_draft):
+                replace_draft(new_record)
+            else:
+                if adapter is not None:
+                    try:
+                        adapter.consume_draft()
+                    except Exception:
+                        pass
+                store.add(new_record)
+        idx = record.context.get("dataset_idx") if isinstance(record.context, dict) else None
+        self._state.notify_roi_selection_changed(idx if isinstance(idx, int) else None)
+
+    def _convert_active_roi(self, target: str) -> None:
+        from ..core.roi_convert import available_conversions, convert_roi
+
+        record, kind, adapter = self._active_roi()
+        if record is None:
+            QMessageBox.information(self, "Convert ROI", "Select an ROI (or draw one) first.")
+            return
+        if target not in available_conversions(record):
+            QMessageBox.information(
+                self, "Convert ROI",
+                f"Cannot convert a {record.type} ROI ('{record.name}') to {target}.")
+            return
+        width = height = None
+        from .roi_convert_dialog import RoiSizeDialog
+        if record.type == "point" and target in {"rectangle", "oval"}:
+            dlg = RoiSizeDialog(self, title=f"Point → {target}", need_height=True)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            width, height = dlg.values()
+        elif target == "region":
+            dlg = RoiSizeDialog(self, title="Line → region", need_height=False, width_label="Width")
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            width, _ = dlg.values()
+        try:
+            new_record = convert_roi(record, target, width=width, height=height)
+        except Exception as exc:
+            QMessageBox.warning(self, "Convert ROI", str(exc))
+            return
+        old_type = record.type
+        self._commit_roi_replacement(record, kind, adapter, new_record)
+        self._state.log(f"Converted ROI '{record.name}' ({old_type}) → {new_record.type}.")
+
+    def _resize_active_roi(self) -> None:
+        from ..core.roi_convert import LINE_TYPES, can_resize, enlarge_shrink_roi
+        from .roi_convert_dialog import RoiResizeDialog
+
+        record, kind, adapter = self._active_roi()
+        if record is None:
+            QMessageBox.information(self, "Enlarge / Shrink ROI", "Select an ROI (or draw one) first.")
+            return
+        if not can_resize(record):
+            QMessageBox.information(self, "Enlarge / Shrink ROI", "Angle ROIs cannot be enlarged or shrunk.")
+            return
+        allow_shrink = record.type not in ({"point"} | LINE_TYPES)
+        dlg = RoiResizeDialog(self, allow_shrink=allow_shrink)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        mode, value = dlg.values()
+        try:
+            new_record = enlarge_shrink_roi(record, value, mode=mode)
+        except Exception as exc:
+            QMessageBox.warning(self, "Enlarge / Shrink ROI", str(exc))
+            return
+        old_type = record.type
+        self._commit_roi_replacement(record, kind, adapter, new_record)
+        self._state.log(
+            f"{mode.capitalize()}d ROI '{record.name}' ({old_type}) by {value:g} nm → {new_record.type}.")
+
+    def _skeletonize_active_roi(self) -> None:
+        from ..core.roi_convert import REGION_TYPES, skeletonize_roi
+
+        record, kind, adapter = self._active_roi()
+        if record is None:
+            QMessageBox.information(self, "Skeletonize ROI", "Select a region ROI (or draw one) first.")
+            return
+        if record.type not in REGION_TYPES:
+            QMessageBox.information(
+                self, "Skeletonize ROI",
+                "Skeletonize applies to region ROIs (rectangle / oval / polygon / freehand).")
+            return
+        try:
+            new_record = skeletonize_roi(record)
+        except Exception as exc:
+            QMessageBox.warning(self, "Skeletonize ROI", str(exc))
+            return
+        old_type = record.type
+        self._commit_roi_replacement(record, kind, adapter, new_record)
+        self._state.log(f"Skeletonized ROI '{record.name}' ({old_type}) → line.")
+
+    def _run_hlyb_pair_analysis(self, mode: str = "3D") -> None:
+        """Analyze › Clustering › HlyB subunit pair analysis › 2D/3D — detect
+        protein sub-units from traces, cluster them into HlyB structures and
+        report the sub-unit pair distances in a scatter + histogram window. The
+        2-D path first builds a per-E.coli mask and drops traces in the eroded
+        border margin (where 2-D distances are unreliable)."""
+        import numpy as np
+        from ..core.loader import mfx_get
+
+        mode = "2D" if str(mode).upper() == "2D" else "3D"
+        idx = self._state.active_idx
+        if idx is None or self._state.active_dataset is None:
+            self._no_data_warning()
+            return
+        ds = self._state.datasets[idx]
+
+        def _col(attr):
+            v = mfx_get(ds, attr, itr="last", vld_only=True)
+            return None if v is None else np.asarray(v, dtype=float).ravel()
+
+        lx, ly, lz, tid = _col("loc_x"), _col("loc_y"), _col("loc_z"), _col("tid")
+        if lx is None or ly is None or tid is None or lx.size < 3:
+            QMessageBox.information(
+                self, "HlyB Subunit Pair Analysis",
+                "The active dataset has no localizations with trace IDs to analyze.")
+            return
+        if lz is None or lz.size != lx.size:
+            lz = np.zeros_like(lx)
+        loc_m = np.column_stack([lx, ly, lz])  # metres, raw z (z-scaling applied in analysis)
+
+        from .hlyb_clustering_dialog import HlyBClusteringDialog, HlyBResultWindow
+        from ..analysis.hlyb_clustering import HlyBConfig, analyze_hlyb, analyze_hlyb_2d
+
+        defaults = getattr(self, "_hlyb_cfg", None)
+        if defaults is None:
+            defaults = HlyBConfig(z_scaling_factor=float(getattr(ds.cali, "RIMF", 0.67) or 0.67))
+        dlg = HlyBClusteringDialog(self, defaults=defaults, mode=mode)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        cfg = dlg.config()
+        self._hlyb_cfg = cfg
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = analyze_hlyb_2d(loc_m, tid, cfg) if mode == "2D" else analyze_hlyb(loc_m, tid, cfg)
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "HlyB Subunit Pair Analysis", f"Analysis failed: {exc}")
+            return
+        finally:
+            if QApplication.overrideCursor() is not None:
+                QApplication.restoreOverrideCursor()
+
+        from .modeless import show_modeless
+        win = HlyBResultWindow(result, cfg, title=f"{ds.name} ({mode})", owner=self,
+                               prefer_2d=(mode == "2D"))
+        show_modeless(win, self)
+
+        pd = result["all_pair_distances"]
+        med = float(np.median(pd)) if pd.size else float("nan")
+        if mode == "2D":
+            prefix = (
+                f"HlyB subunit pair analysis (2D) on '{ds.name}': "
+                f"{result['n_total_traces']} trace(s), {result['n_border_traces']} border-excluded, "
+                f"{result['n_traces']} interior → ")
+            extra = (f"border {cfg.border_size_nm:g} nm, mask px {cfg.mask_pixel_size_nm:g} nm")
+        else:
+            prefix = f"HlyB subunit pair analysis (3D) on '{ds.name}': {result['n_traces']} trace(s) → "
+            extra = f"z-scale {cfg.z_scaling_factor:g}"
+        self._state.log(
+            prefix
+            + f"{result['n_subunits']} subunit(s) → {result['n_structures']} HlyB structure(s); "
+            f"{pd.size} pair(s), median distance {med:.2f} nm "
+            f"(unit Ø {result['dunit_nm']:.1f} nm, HlyB radius {result['hlyb_diameter_nm']:.1f} nm, "
+            f"min loc/trace {cfg.min_loc_per_trace}, {extra}).",
+            dataset_idx=idx)
+
     def _segment_npc_2d(self) -> None:
         """Analyze › Segmentation › NPC › 2D — detect NPC centres by ring-kernel
         convolution and add a rectangle ROI around each into the ROI Manager."""
@@ -1549,8 +1812,15 @@ class MainWindow(QMainWindow):
         from ..core.dataset import build_localization_dataset
 
         pts = np.asarray(points_xyz_nm, dtype=float).reshape(-1, 3)
+        pts = pts[np.all(np.isfinite(pts), axis=1)]
         if pts.shape[0] == 0:
             return None
+        # Re-zero to the averaged/template frame: subtract the (robust) median so
+        # the averaged particle is centred on the origin regardless of the source
+        # coordinates. For the symmetric NPC ring the median is the ring centre,
+        # so this is ~a no-op when the aligner already centred — and corrective if
+        # any residual offset remains.
+        pts = pts - np.median(pts, axis=0)
         ds = build_localization_dataset(
             name=name, x_nm=pts[:, 0], y_nm=pts[:, 1], z_nm=pts[:, 2],
             source_version="particle_average", prefs=self._state.prefs)
@@ -1566,6 +1836,17 @@ class MainWindow(QMainWindow):
         idx = self._state.add_dataset(ds)
         if log_message:
             self._state.log(log_message)
+        # Deselect the (source) detection ROIs: otherwise the selected box ROIs
+        # would highlight in the averaged particle's fresh render/scatter at their
+        # original — now meaningless — coordinates, which is confusing.
+        try:
+            self._state.rois.deselect()
+        except Exception:
+            pass
+        # A freshly-appended dataset gets a new index, so its render/scatter are
+        # created fresh (stale windows from closed datasets are handled by the
+        # re-index path). Do NOT close/recreate the auto-opened render here — its
+        # async tile workers would deliver into a deleted window and crash.
         self._show_render(idx)
         self._show_scatter(idx)
         return idx
@@ -1659,28 +1940,73 @@ class MainWindow(QMainWindow):
             "inter_min": p["inter_ring_bounds"][0], "inter_max": p["inter_ring_bounds"][1],
             "inter_exp": p["expected_inter_ring"] or 0.0, "symmetry": p["symmetry"]}
 
+        # Run the (heavy) two-ring averaging off the UI thread, with a refreshing
+        # progress bar in the Log — same pattern as the Particle Average tool.
+        if getattr(self, "_wanlu_avg_task", None) is not None:
+            return                                           # already averaging
         from ..analysis import npc_wanlu as nw
-        try:
+        from ..core.app_state import format_progress_bar
+        from .particle_average_dialog import _AverageTask
+
+        ds_name = ds.name
+        holder: dict = {}
+
+        def compute(progress):
             res = nw.average_npc_wanlu(
                 raw6, diameter_bounds=p["diameter_bounds"],
                 inter_ring_bounds=p["inter_ring_bounds"],
-                expected_inter_ring=p["expected_inter_ring"], symmetry=p["symmetry"])
-        except Exception as exc:
-            QMessageBox.warning(self, "NPC average wanlu", f"Averaging failed: {exc}")
+                expected_inter_ring=p["expected_inter_ring"], symmetry=p["symmetry"],
+                progress=progress)
+            avg = res["average_loc"]
+            zlo, zhi = res["z_peaks"]
+            holder["name"] = f"{ds_name} — NPC avg [{res['n_accepted']}]"
+            holder["log"] = (
+                f"NPC average (Wanlu): pooled {res['n_accepted']}/{res['n_npc']} NPC(s) "
+                f"({avg.shape[0]:,} localizations) from '{ds_name}'; "
+                f"Z rings {zlo:.1f}/{zhi:.1f} nm (sep {zhi - zlo:.1f} nm"
+                f"{', fallback' if res['z_fallback'] else ''}); 8-fold aligned.")
+            return avg[:, :3], ""
+
+        self._wanlu_avg_holder = holder
+        self._wanlu_avg_last_pct = -1
+        self._state.log(f"NPC average (Wanlu): averaging {n_npc} NPC(s)…")
+        self._state.log_progress(format_progress_bar(0.0))
+        task = _AverageTask(compute)
+        task.signals.progress.connect(self._on_wanlu_avg_progress)
+        task.signals.done.connect(self._on_wanlu_avg_done)
+        task.signals.failed.connect(self._on_wanlu_avg_failed)
+        self._wanlu_avg_task = task                          # keep a ref (auto-deletes)
+        QThreadPool.globalInstance().start(task)
+
+    def _on_wanlu_avg_progress(self, done: int, total: int) -> None:
+        from ..core.app_state import format_progress_bar
+        if total <= 0:
             return
-        avg = res["average_loc"]
-        if avg.shape[0] == 0:
+        pct = int(done / total * 100)
+        if pct != getattr(self, "_wanlu_avg_last_pct", -1):  # throttle to whole percent
+            self._wanlu_avg_last_pct = pct
+            self._state.log_progress(format_progress_bar(done / total))
+
+    def _on_wanlu_avg_done(self, pts, _desc: str) -> None:
+        import numpy as np
+
+        from ..core.app_state import format_progress_bar
+        self._wanlu_avg_task = None
+        self._state.log_progress(format_progress_bar(1.0, done=True), final=True)
+        pts = np.asarray(pts)
+        holder = getattr(self, "_wanlu_avg_holder", {}) or {}
+        if pts.ndim != 2 or pts.shape[0] == 0:
             QMessageBox.information(self, "NPC average wanlu",
                                     "No NPCs passed the two-ring fit. Try widening the "
                                     "diameter / inter-ring bounds.")
             return
-        zlo, zhi = res["z_peaks"]
-        log = (f"NPC average (Wanlu): pooled {res['n_accepted']}/{res['n_npc']} NPC(s) "
-               f"({avg.shape[0]:,} localizations) from '{ds.name}'; "
-               f"Z rings {zlo:.1f}/{zhi:.1f} nm (sep {zhi - zlo:.1f} nm"
-               f"{', fallback' if res['z_fallback'] else ''}); 8-fold aligned.")
         self.add_particle_average_dataset(
-            avg[:, :3], name=f"{ds.name} — NPC avg [{res['n_accepted']}]", log_message=log)
+            pts, name=holder.get("name", "NPC avg"), log_message=holder.get("log"))
+
+    def _on_wanlu_avg_failed(self, msg: str) -> None:
+        self._wanlu_avg_task = None
+        self._state.log_progress("=" * 10 + "  FAILED  " + "=" * 10, final=True)
+        QMessageBox.warning(self, "NPC average wanlu", f"Averaging failed: {msg}")
 
     def _show_particle_average(self) -> None:
         """Analyze › Segmentation › Particle Average… — open the particle-averaging
@@ -2860,6 +3186,20 @@ class MainWindow(QMainWindow):
                     setattr(win, "_idx", new_key)
                 if hasattr(win, "_dataset_idx"):
                     setattr(win, "_dataset_idx", new_key)
+                # The window now points to a different dataset slot — drop any
+                # per-window coordinate cache and redraw so it shows the correct
+                # (e.g. averaged, re-zeroed) localizations, not the previous ones.
+                if hasattr(win, "_cached_dataset_idx"):
+                    win._cached_dataset_idx = None
+                    win._cached_locs_nm = None
+                for refresh in ("_refresh", "_refresh_from_dataset"):
+                    fn = getattr(win, refresh, None)
+                    if callable(fn):
+                        try:
+                            fn()
+                        except Exception:
+                            pass
+                        break
         mapping.update(moved)
 
     def _on_active_changed(self, idx: int) -> None:

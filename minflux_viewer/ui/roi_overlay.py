@@ -13,7 +13,7 @@ from PyQt6.QtGui import QPainter, QPainterPath
 from PyQt6.QtWidgets import QApplication
 
 from ..core.roi import RoiRecord, RoiStore
-from ..core.roi_selection import ROI_MASKS_STATE_KEY, rectangle_bounds, store_roi_mask
+from ..core.roi_selection import ROI_MASKS_STATE_KEY, store_roi_mask
 
 # For a 2-D view plane, which two XYZ columns are plotted (i, j) and which is the
 # out-of-plane "depth" column (k). Used to give a drawn ROI a full 3-D position:
@@ -900,18 +900,25 @@ class RoiOverlayController(QObject):
         g = record.geometry
         if record.type in {"rectangle", "oval"}:
             x, y, w, h = _bounds(g)
+            angle = float(g.get("angle", 0.0) or 0.0)
+            # geometry["bounds"] is the *unrotated* axis-aligned box (its centre is
+            # the rotation centre). pyqtgraph rotates a ROI about its origin, so
+            # offset the origin by −R(angle)·(w/2, h/2) to keep the centre fixed.
+            cx, cy = x + w / 2.0, y + h / 2.0
+            if abs(angle) > 1e-9:
+                t = np.deg2rad(angle)
+                cos_t, sin_t = np.cos(t), np.sin(t)
+                hx = cos_t * (w / 2.0) - sin_t * (h / 2.0)
+                hy = sin_t * (w / 2.0) + cos_t * (h / 2.0)
+                px, py = cx - hx, cy - hy
+            else:
+                px, py = x, y
+            size = [max(w, 1e-9), max(h, 1e-9)]
             if record.type == "rectangle":
-                return FilledRectROI(
-                    [x, y],
-                    [max(w, 1e-9), max(h, 1e-9)],
-                    angle=float(g.get("angle", 0.0) or 0.0),
-                    fill_color=record.stroke_color,
-                    movable=True,
-                )
-            return FilledEllipseROI(
-                [x, y], [max(w, 1e-9), max(h, 1e-9)],
-                fill_color=record.stroke_color, movable=True,
-            )
+                return FilledRectROI([px, py], size, angle=angle,
+                                     fill_color=record.stroke_color, movable=True)
+            return FilledEllipseROI([px, py], size, angle=angle,
+                                    fill_color=record.stroke_color, movable=True)
         if record.type == "line":
             pts = self._project_points(record) or [[0, 0], [1, 1]]
             return pg.LineSegmentROI(pts[:2], movable=True)
@@ -922,11 +929,12 @@ class RoiOverlayController(QObject):
             pts = g.get("points", [[0, 0], [1, 0], [2, 1]])
             return pg.PolyLineROI([p[:2] for p in pts[:3]], closed=False, movable=True)
         if record.type in {"polyline", "freehand_line"}:
-            # open curves: no fill, no enclosed region
+            # open curves (no fill / no enclosed region) — but a region→Line
+            # conversion yields a *closed* outline (still a line type, no mask).
             pts = self._project_points(record)
             if len(pts) < 2:
                 pts = [[0, 0], [1, 1]]
-            return pg.PolyLineROI(pts, closed=False, movable=True)
+            return pg.PolyLineROI(pts, closed=bool(g.get("closed", False)), movable=True)
         pts = g.get("points", [])
         if len(pts) < 2:
             pts = [[0, 0], [1, 1]]
@@ -955,11 +963,10 @@ class RoiOverlayController(QObject):
                 pass
 
     def _connect_edit(self, item, record: RoiRecord) -> None:
-        if record.type == "point" and hasattr(item, "sigPositionChangeFinished"):
-            item.sigPositionChangeFinished.connect(lambda _item=item, roi_id=record.id: self._update_record_from_item(roi_id, _item))
-            return
-        if hasattr(item, "sigRegionChangeFinished"):
-            item.sigRegionChangeFinished.connect(lambda _item=item, roi_id=record.id: self._update_record_from_item(roi_id, _item))
+        # A stored ROI displayed in the view is a live *editable copy*: moving or
+        # reshaping it must NOT change the Manager's record until the user clicks
+        # Update (which calls record_for_update). So we deliberately do not commit
+        # edits here — only the angle ROI's live status read-out is wired up.
         if record.type == "angle" and hasattr(item, "sigRegionChanged"):
             item.sigRegionChanged.connect(lambda _item=item: self._report_angle_from_item(_item))
 
@@ -971,20 +978,6 @@ class RoiOverlayController(QObject):
             item.sigRegionChangeFinished.connect(lambda _item=item: self._update_draft_from_item(_item))
         if self.draft is not None and self.draft.type == "angle" and hasattr(item, "sigRegionChanged"):
             item.sigRegionChanged.connect(lambda _item=item: self._report_angle_from_item(_item))
-
-    def _update_record_from_item(self, roi_id: str, item) -> None:
-        for record in self.store.records:
-            if record.id != roi_id:
-                continue
-            if record.type == "point":
-                record.geometry = self._point_geometry_from_item(item, record.geometry)
-            elif record.type in {"line", "polyline", "freehand_line"}:
-                record.geometry = self._open_line_geometry_from_item(item, record.geometry, record.type)
-            else:
-                record.geometry = item_to_geometry(record.type, item)
-            self._finalize_record_selection(record, update_item=True)
-            self.store.changed.emit()
-            return
 
     def _update_draft_from_item(self, item) -> None:
         if self.draft is None:
@@ -1115,17 +1108,16 @@ class RoiOverlayController(QObject):
         if record.type == "point":
             px, py = self._project_point(record)
             return abs(pos[0] - px) <= tolerance and abs(pos[1] - py) <= tolerance
-        if record.type != "rectangle":
+        if record.type not in {"rectangle", "oval"}:
             x, y, w, h = _bounds(record.geometry)
             return x - tolerance <= pos[0] <= x + w + tolerance and y - tolerance <= pos[1] <= y + h + tolerance
-        bounds = rectangle_bounds(record)
-        if bounds is None:
-            return False
-        x0, x1, y0, y1 = bounds
-        cx = 0.5 * (x0 + x1)
-        cy = 0.5 * (y0 + y1)
-        half_w = max(0.5 * (x1 - x0), 0.0)
-        half_h = max(0.5 * (y1 - y0), 0.0)
+        # rectangle / oval: bounds is the unrotated box centred at the true centre,
+        # so the rotated hit-test about that centre is correct for both.
+        x, y, w, h = _bounds(record.geometry)
+        cx = x + w / 2.0
+        cy = y + h / 2.0
+        half_w = max(w / 2.0, 0.0)
+        half_h = max(h / 2.0, 0.0)
         angle = float(record.geometry.get("angle", 0.0) or 0.0)
         theta = np.deg2rad(angle)
         cos_t = np.cos(theta)
@@ -1148,6 +1140,13 @@ class RoiOverlayController(QObject):
     def _show_roi_context_menu(self, hit: tuple[str, RoiRecord], global_pos) -> None:
         from PyQt6.QtWidgets import QMenu
 
+        from ..core.roi_convert import (
+            REGION_TYPES,
+            TARGET_LABELS,
+            available_conversions,
+            can_resize,
+        )
+
         kind, record = hit
         menu = QMenu(self.view_widget)
         add_action = menu.addAction("Add to Manager")
@@ -1156,17 +1155,130 @@ class RoiOverlayController(QObject):
         if kind == "session":
             add_all_action = menu.addAction("Add all session points to Manager")
             add_all_action.setEnabled(len(self._session_points) > 0)
+        menu.addSeparator()
+        convert_actions = {}
+        targets = available_conversions(record)
+        if targets:
+            convert_menu = menu.addMenu("Convert to")
+            for tok in targets:
+                act = convert_menu.addAction(TARGET_LABELS.get(tok, tok))
+                convert_actions[act] = tok
+        resize_action = menu.addAction("Enlarge / Shrink…")
+        resize_action.setEnabled(can_resize(record))
+        skeletonize_action = menu.addAction("Skeletonize")
+        skeletonize_action.setEnabled(record.type in REGION_TYPES)
+        menu.addSeparator()
         delete_action = menu.addAction("Delete")
         properties_action = menu.addAction("Properties...")
         chosen = menu.exec(global_pos)
+        if chosen is None:
+            return
         if chosen is add_action:
             self._add_hit_to_manager(kind, record)
         elif add_all_action is not None and chosen is add_all_action:
             self._add_all_session_points_to_manager()
+        elif chosen in convert_actions:
+            self._convert_hit(kind, record, convert_actions[chosen])
+        elif chosen is resize_action:
+            self._resize_hit(kind, record)
+        elif chosen is skeletonize_action:
+            self._skeletonize_hit(kind, record)
         elif chosen is delete_action:
             self._delete_hit_roi(kind, record)
         elif chosen is properties_action:
             self._show_roi_properties(record)
+
+    def replace_draft(self, new_record: RoiRecord) -> None:
+        """Show *new_record* as the current editable draft. Convert / Enlarge /
+        Skeletonize use this so a drawn-but-unsaved ROI changes type **in place**
+        in the view — it is not filed into the Manager (nor is the Manager
+        opened) until the user adds it."""
+        self._set_draft(new_record)
+        self._finalize_draft_selection(update_item=False)
+
+    def _replace_hit(self, kind: str, record: RoiRecord, new_record: RoiRecord) -> None:
+        """Apply a converted/resized record. A *stored* ROI is updated in place;
+        a *draft* / *session* ROI stays in the view as the new type's draft — the
+        Manager is neither opened nor written to until the user adds it."""
+        store = self.store
+        if kind == "stored":
+            self._delete_mask_for_record(record)  # geometry changed → old mask is stale
+            new_record.name = (
+                f"{new_record.type}-{store.next_type_index(new_record.type)}"
+                if store._is_auto_name(record) else record.name)
+            store.update(record.id, new_record)
+            store.select([record.id])
+            return
+        if kind == "session":
+            self._remove_session_point(record.id)
+        self.replace_draft(new_record)
+
+    def _roi_size_for_conversion(self, record: RoiRecord, target: str):
+        """Prompt for the width/height a conversion needs; ``None`` = cancelled,
+        ``()`` = no size required."""
+        from .roi_convert_dialog import RoiSizeDialog
+
+        if record.type == "point" and target in {"rectangle", "oval"}:
+            dlg = RoiSizeDialog(self.view_widget, title=f"Point → {target}", need_height=True)
+            if dlg.exec() != dlg.DialogCode.Accepted:
+                return None
+            w, h = dlg.values()
+            return {"width": w, "height": h}
+        if target == "region":
+            dlg = RoiSizeDialog(self.view_widget, title="Line → region", need_height=False,
+                                width_label="Width")
+            if dlg.exec() != dlg.DialogCode.Accepted:
+                return None
+            w, _ = dlg.values()
+            return {"width": w}
+        return {}
+
+    def _convert_hit(self, kind: str, record: RoiRecord, target: str) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+
+        from ..core.roi_convert import convert_roi
+
+        size = self._roi_size_for_conversion(record, target)
+        if size is None:
+            return
+        try:
+            new_record = convert_roi(record, target, **size)
+        except Exception as exc:
+            QMessageBox.warning(self.view_widget, "Convert ROI", str(exc))
+            return
+        self._replace_hit(kind, record, new_record)
+
+    def _resize_hit(self, kind: str, record: RoiRecord) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+
+        from ..core.roi_convert import LINE_TYPES, can_resize, enlarge_shrink_roi
+        from .roi_convert_dialog import RoiResizeDialog
+
+        if not can_resize(record):
+            return
+        allow_shrink = record.type not in ({"point"} | LINE_TYPES)
+        dlg = RoiResizeDialog(self.view_widget, allow_shrink=allow_shrink)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        mode, value = dlg.values()
+        try:
+            new_record = enlarge_shrink_roi(record, value, mode=mode)
+        except Exception as exc:
+            QMessageBox.warning(self.view_widget, "Enlarge / Shrink ROI", str(exc))
+            return
+        self._replace_hit(kind, record, new_record)
+
+    def _skeletonize_hit(self, kind: str, record: RoiRecord) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+
+        from ..core.roi_convert import skeletonize_roi
+
+        try:
+            new_record = skeletonize_roi(record)
+        except Exception as exc:
+            QMessageBox.warning(self.view_widget, "Skeletonize ROI", str(exc))
+            return
+        self._replace_hit(kind, record, new_record)
 
     def _add_hit_to_manager(self, kind: str, record: RoiRecord) -> None:
         if kind == "session":
@@ -1266,10 +1378,9 @@ class RoiOverlayController(QObject):
         if t in {"rectangle", "oval"}:
             x, y, w, h = _bounds(g)
             text = f"X={f(x)}, Y={f(y)}, W={f(w)}, H={f(h)}"
-            if t == "rectangle":
-                angle = float(g.get("angle", 0.0) or 0.0)
-                if abs(angle) > 1e-9:
-                    text += f", angle={angle:.1f}°"
+            angle = float(g.get("angle", 0.0) or 0.0)
+            if abs(angle) > 1e-9:
+                text += f", angle={angle:.1f}°"
             return text
         if t == "point":
             pt = g.get("point", [0.0, 0.0])
@@ -1304,10 +1415,18 @@ class RoiOverlayController(QObject):
         label.setColor(record.stroke_color)
         if record.type == "point":
             x, y = self._project_point(record)   # label at the projected marker
-            w = h = 0.0
+            label.setPos(x, y)
+        elif record.type in {"line", "polyline", "freehand_line", "magnetic_lasso", "angle"}:
+            # Line-family ROIs: label at the vertex centroid, not a bbox corner.
+            pts = np.asarray(self._project_points(record), dtype=float)
+            if pts.size:
+                label.setPos(float(pts[:, 0].mean()), float(pts[:, 1].mean()))
+            else:
+                x, y, w, h = _bounds(record.geometry)
+                label.setPos(x + w, y)
         else:
             x, y, w, h = _bounds(record.geometry)
-        label.setPos(x + w, y)
+            label.setPos(x + w, y)
 
     def _label_text(self, record: RoiRecord) -> str:
         total = max(len(self.store.records), 1)
@@ -1323,24 +1442,34 @@ def item_to_geometry(roi_type: str, item) -> dict[str, Any]:
         pos = item.pos()                     # PointMarkerItem (TargetItem): centre
         return {"point": [float(pos.x()), float(pos.y())]}
     if roi_type in {"rectangle", "oval"}:
-        pos = item.pos()
         size = item.size()
-        x, y, w, h = float(pos.x()), float(pos.y()), float(size.x()), float(size.y())
-        geometry = {"bounds": [x, y, w, h]}
-        if roi_type == "rectangle" and hasattr(item, "angle"):
-            geometry["angle"] = float(item.angle())
+        w, h = float(size.x()), float(size.y())
+        angle = float(item.angle()) if hasattr(item, "angle") else 0.0
+        # Store the *unrotated* box whose centre is the ROI's true (rotated)
+        # centre, so masks/hit-tests (which rotate about that centre) are correct.
+        centre = item.mapToParent(pg.Point(w / 2.0, h / 2.0))
+        cx, cy = float(centre.x()), float(centre.y())
+        geometry = {"bounds": [cx - w / 2.0, cy - h / 2.0, w, h]}
+        if abs(angle) > 1e-9:
+            geometry["angle"] = angle
         return geometry
-    if roi_type == "line":
-        pts = []
-        for _handle, point in item.getSceneHandlePositions():
-            view = item.mapSceneToParent(point)
+    # Multi-vertex shapes (line / polyline / freehand line / polygon / freehand /
+    # angle): read each handle in *scene* coords and map to parent, so a body
+    # move (which leaves the local handle coords unchanged) is also captured.
+    pts: list[list[float]] = []
+    if hasattr(item, "getSceneHandlePositions"):
+        for entry in item.getSceneHandlePositions():
+            scene_pt = entry[1] if isinstance(entry, (tuple, list)) else entry
+            view = item.mapSceneToParent(scene_pt)
             pts.append([float(view.x()), float(view.y())])
+    elif hasattr(item, "getState"):
+        pts = [[float(p[0]), float(p[1])] for p in item.getState().get("points", [])]
+    if roi_type == "line":
         return {"points": pts[:2], "closed": False}
-    if hasattr(item, "getState"):
-        state = item.getState()
-        points = [[float(p[0]), float(p[1])] for p in state.get("points", [])]
-        return {"points": points, "closed": bool(state.get("closed", roi_type != "line"))}
-    return {"points": [], "closed": roi_type in {"polygon", "freehand"}}
+    # polygon/freehand are always closed; a polyline keeps its current closed
+    # state (a region→Line outline is a closed polyline).
+    closed = roi_type in {"polygon", "freehand"} or bool(getattr(item, "closed", False))
+    return {"points": pts, "closed": closed}
 
 
 def _bounds(geometry: dict[str, Any]) -> tuple[float, float, float, float]:

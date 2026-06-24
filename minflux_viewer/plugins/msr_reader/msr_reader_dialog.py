@@ -647,7 +647,7 @@ class AlignmentSaveDialog(QDialog):
 
         layout = QVBoxLayout(self)
         hint = QLabel(
-            "Use <b>Show Beads Drift</b> to manually check bead drift and select "
+            "Use <b>Show beads drift</b> to manually check bead drift and select "
             "beads for alignment — otherwise all common beads are used to compute "
             "the alignment transformation.")
         hint.setWordWrap(True)
@@ -854,12 +854,15 @@ class ViewerAlignmentDialog(QDialog):
 
 
 class AlignmentPlotWindow(QDialog):
-    def __init__(self, results, parent=None):
+    def __init__(self, results, parent=None, data_bounds_nm=None):
         super().__init__(parent)
         self.setWindowTitle("Beads and alignment result")
         self.resize(1150, 760)
         self.results = results
         self.datasets = self._build_plot_datasets(results)
+        # (min_xyz, max_xyz) nm bounding box of all datasets' raw localizations,
+        # drawn as a view-aware yellow data-range rectangle. None = no box.
+        self.data_bounds_nm = data_bounds_nm
         self.visibility = {}
         self._items = {}
         self._axis_indices = (0, 1)
@@ -952,11 +955,37 @@ class AlignmentPlotWindow(QDialog):
             item.setVisible(self.visibility[key].isChecked())
             self.plot.addItem(item)
             self._items[key] = item
+        self._draw_data_range_box()
         labels = self._axis_labels()
         self.plot.setLabel("bottom", labels[0], units="nm")
         self.plot.setLabel("left", labels[1], units="nm")
         self.plot.setTitle("Bead positions before and after channel alignment")
         self._set_equal_range()
+
+    def _data_box_xy(self):
+        """(x0, y0, x1, y1) of the data-range box for the current view, or None."""
+        if self.data_bounds_nm is None:
+            return None
+        mins, maxs = self.data_bounds_nm
+        x_idx, y_idx = self._axis_indices
+        if x_idx >= len(mins) or y_idx >= len(mins):
+            return None
+        return (float(mins[x_idx]), float(mins[y_idx]),
+                float(maxs[x_idx]), float(maxs[y_idx]))
+
+    def _draw_data_range_box(self):
+        import pyqtgraph as pg
+
+        box = self._data_box_xy()
+        if box is None:
+            return
+        x0, y0, x1, y1 = box
+        self.plot.plot(
+            [x0, x1, x1, x0, x0],
+            [y0, y0, y1, y1, y0],
+            pen=pg.mkPen((230, 200, 0), width=2),
+            name="data range",
+        )
 
     def _update_visibility(self):
         if not self._items:
@@ -990,6 +1019,10 @@ class AlignmentPlotWindow(QDialog):
         x_idx, y_idx = self._axis_indices
         xy = xyz[:, [x_idx, y_idx]]
         xy = xy[np.all(np.isfinite(xy), axis=1)]
+        box = self._data_box_xy()
+        if box is not None:
+            corners = np.array([[box[0], box[1]], [box[2], box[3]]], dtype=np.float64)
+            xy = np.vstack([xy, corners]) if xy.size else corners
         if xy.size == 0:
             return
         mins = xy.min(axis=0)
@@ -1316,7 +1349,7 @@ class MsrReaderDialog(QWidget):
         self._alignment_save_options = settings.get("alignment_save") or {}
 
         bottom = QHBoxLayout()
-        self._beads_drift_btn = QPushButton("Show Beads Drift")
+        self._beads_drift_btn = QPushButton("Show beads drift")
         self._beads_drift_btn.setToolTip(
             "Inspect MBM/bead drift per dataset and manually select beads for "
             "alignment.")
@@ -2236,7 +2269,7 @@ class MsrReaderDialog(QWidget):
 
     def _viewer_mbm_alignment_available(self, selected: list[str]) -> tuple[bool, str]:
         from ...msr import state as MFSTATE
-        from ...msr.alignment import extract_bead_summaries
+        from ...msr.alignment import MIN_BEADS_FOR_ALIGNMENT, extract_bead_summaries
 
         if len(selected) < 2:
             return False, "fewer than two selected datasets"
@@ -2244,8 +2277,10 @@ class MsrReaderDialog(QWidget):
         ref_mbm = self._aligned_mbm_points(ref_name)
         if ref_mbm is None:
             return False, f"no bead points for reference dataset {ref_name}"
-        is_3d = any(self._viewer_dataset_looks_3d(name) for name in selected)
-        min_beads = 4 if is_3d else 3
+        # 2 matched beads suffice (translational XYZ); the transform mode is
+        # downgraded to what the matched-bead count supports — see
+        # alignment.effective_transform_type.
+        min_beads = MIN_BEADS_FOR_ALIGNMENT
         try:
             ref_ids = set(extract_bead_summaries(ref_mbm))
         except Exception as exc:
@@ -2418,6 +2453,11 @@ class MsrReaderDialog(QWidget):
             np.eye(4, dtype=np.float64),
             method="reference identity",
         )
+        gri_to_rid = self._bead_gri_to_rid(selected)
+        excluded = sorted(int(g) for g in (self._bead_unchecked_gris or set()))
+        self.log(
+            f"[viewer align] user-excluded {len(excluded)} bead(s): "
+            f"{self._format_bead_ids(excluded, gri_to_rid)}")
         for moving_name in selected[1:]:
             moving_mbm = self._aligned_mbm_points(moving_name)
             if moving_mbm is None:
@@ -2438,8 +2478,10 @@ class MsrReaderDialog(QWidget):
                 "rmse_xy_nm": float(result.rmse),
                 "method": "mbm xy rigid plus z translation",
             }
+            used = [int(b) for b in result.bead_ids]
             self.log(
-                f"[viewer align] {moving_name} -> {ref_name}; matched {result.bead_ids.size} beads; "
+                f"[viewer align] {moving_name} -> {ref_name}; used {len(used)} bead(s): "
+                f"{self._format_bead_ids(used, gri_to_rid)}; "
                 f"translation_nm=({result.translation[0]:.3f}, {result.translation[1]:.3f}); "
                 f"rmse_xy_nm={result.rmse:.3f}"
             )
@@ -2650,6 +2692,38 @@ class MsrReaderDialog(QWidget):
             pass
         return points
 
+    def _bead_gri_to_rid(self, names) -> dict[int, str]:
+        """Map ``gri`` (numeric bead ID) → R-ID (the ``points_by_gri`` "name",
+        e.g. ``R113``) across *names*, for human-readable bead reporting."""
+        out: dict[int, str] = {}
+        for name in names:
+            zroot = self._viewer_zroot_for_dataset_name(name)
+            if not zroot:
+                continue
+            attrs = self._read_zarr_attrs_safe(zroot, "grd/mbm/points")
+            pbg = attrs.get("points_by_gri", {}) if isinstance(attrs, dict) else {}
+            for key, info in (pbg or {}).items():
+                if not isinstance(info, dict):
+                    continue
+                try:
+                    gri = int(info.get("gri", key))
+                except (TypeError, ValueError):
+                    continue
+                rid = info.get("name")
+                if rid:
+                    out.setdefault(gri, str(rid))
+        return out
+
+    @staticmethod
+    def _format_bead_ids(gris, gri_to_rid: dict[int, str] | None = None) -> str:
+        """``"12 (R113), 27 (R140)"`` — gri plus R-ID when known; ``(none)`` if empty."""
+        gri_to_rid = gri_to_rid or {}
+        parts = []
+        for g in sorted({int(x) for x in (gris or [])}):
+            rid = gri_to_rid.get(g)
+            parts.append(f"{g} ({rid})" if rid else str(g))
+        return ", ".join(parts) if parts else "(none)"
+
     def _on_show_beads_drift(self):
         from ...msr import state as MFSTATE
         from .beads_drift import gather_msr_bead_drift
@@ -2659,15 +2733,22 @@ class MsrReaderDialog(QWidget):
         bead_data = gather_msr_bead_drift(datasets, getattr(MFSTATE, "mbm_map", {}))
         if not bead_data:
             QMessageBox.information(
-                self, "Show Beads Drift",
+                self, "Show beads drift",
                 "The currently parsed .msr file has no MBM/bead data to display.\n\n"
                 "Parse a modern multi-channel .msr that contains 'grd/mbm/points'.")
             return
         dlg = BeadsDriftDialog(bead_data, unchecked_gris=self._bead_unchecked_gris, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._bead_unchecked_gris = dlg.unchecked_gris()
-            self.log(f"[beads] selection applied: {len(dlg.selected_gris())} beads kept, "
-                     f"{len(self._bead_unchecked_gris)} excluded from alignment.")
+            gri_to_rid = {int(b["gri"]): str(b.get("rid", "") or "")
+                          for d in bead_data for b in d.get("beads", [])}
+            gri_to_rid = {g: r for g, r in gri_to_rid.items() if r}
+            kept = sorted(int(g) for g in dlg.selected_gris())
+            excluded = sorted(int(g) for g in self._bead_unchecked_gris)
+            self.log(f"[beads] selection applied: {len(kept)} bead(s) kept: "
+                     f"{self._format_bead_ids(kept, gri_to_rid)}")
+            self.log(f"[beads] {len(excluded)} bead(s) excluded from alignment: "
+                     f"{self._format_bead_ids(excluded, gri_to_rid)}")
 
     def _mbm_transform_type(self) -> str:
         """The MBM-handling transform mode from Preferences (Preferences > MBM
@@ -2681,9 +2762,45 @@ class MsrReaderDialog(QWidget):
         return (self._state.prefs.get("mbm_handling", {}) or {}).get(
             "transform_type", default) or default
 
+    def _combined_loc_bounds_nm(self, names) -> tuple[np.ndarray, np.ndarray] | None:
+        """Combined raw-localization bounding box (nm) across *names*, for the
+        alignment plot's data-range overlay.
+
+        Surveys each dataset's raw ``mfx['loc']`` with no validity check: an
+        ``(Nloc, Nitr, 3)`` grid uses the last iteration, a flat m2410
+        ``(N, 2/3)`` array is used as-is. Returns ``(min_xyz, max_xyz)`` in nm
+        (z padded with 0 for 2-D data), or ``None`` when no coordinates exist.
+        """
+        from ...msr import state as MFSTATE
+
+        mins: list[np.ndarray] = []
+        maxs: list[np.ndarray] = []
+        for name in names:
+            mfx = MFSTATE.mfx_map.get(name)
+            fields = set(getattr(getattr(mfx, "dtype", None), "names", ()) or ())
+            if "loc" not in fields:
+                continue
+            loc = np.asarray(mfx["loc"], dtype=np.float64)
+            if loc.ndim == 3 and loc.shape[-1] >= 2:
+                loc = loc[:, -1, :]  # last iteration of an (Nloc, Nitr, 3) grid
+            if loc.ndim != 2 or loc.shape[1] < 2:
+                continue
+            cols = min(3, loc.shape[1])
+            xyz = np.zeros((loc.shape[0], 3), dtype=np.float64)
+            xyz[:, :cols] = loc[:, :cols]
+            xyz *= 1e9
+            xyz = xyz[np.all(np.isfinite(xyz), axis=1)]
+            if xyz.size == 0:
+                continue
+            mins.append(xyz.min(axis=0))
+            maxs.append(xyz.max(axis=0))
+        if not mins:
+            return None
+        return np.min(np.vstack(mins), axis=0), np.max(np.vstack(maxs), axis=0)
+
     def on_align_channel(self):
         from ...msr import state as MFSTATE
-        from ...msr.alignment import align_channels_from_arrays
+        from ...msr.alignment import MIN_BEADS_FOR_ALIGNMENT, align_channels_from_arrays
 
         if not self._ensure_single_file_parsed():
             return
@@ -2704,8 +2821,10 @@ class MsrReaderDialog(QWidget):
         try:
             results = []
             aligned_localizations = []
+            loc_bound_names = [ref_name]
             for ds in datasets[1:]:
                 moving_name = ds.get("display_name") or ds.get("did") or "channel"
+                loc_bound_names.append(moving_name)
                 moving_mbm = self._aligned_mbm_points(moving_name)
                 moving_mfx = MFSTATE.mfx_map.get(moving_name)
                 if moving_mbm is None:
@@ -2714,14 +2833,12 @@ class MsrReaderDialog(QWidget):
                     raise ValueError(f"Could not find `mfx` localizations for {moving_name}.")
                 result = align_channels_from_arrays(
                     ref_name, ref_mbm, moving_name, moving_mbm, transform_type=transform_type)
-                is_3d = self._viewer_dataset_looks_3d(ref_name) or self._viewer_dataset_looks_3d(moving_name)
-                min_beads = 4 if is_3d else 3
-                if int(result.bead_ids.size) < min_beads:
+                if int(result.bead_ids.size) < MIN_BEADS_FOR_ALIGNMENT:
                     raise ValueError(
                         f"Only {int(result.bead_ids.size)} matched bead(s) between "
-                        f"'{ref_name}' and '{moving_name}'; at least {min_beads} are "
-                        f"required for {'3D' if is_3d else '2D'} alignment "
-                        f"(check the bead selection in 'Show Beads Drift').")
+                        f"'{ref_name}' and '{moving_name}'; at least {MIN_BEADS_FOR_ALIGNMENT} "
+                        f"are required for alignment "
+                        f"(check the bead selection in 'Show beads drift').")
                 results.append(result)
                 aligned_localizations.extend(self._build_aligned_localizations_table(moving_name, moving_mfx, result.matrix_4x4))
         except Exception as exc:
@@ -2729,8 +2846,20 @@ class MsrReaderDialog(QWidget):
             QMessageBox.critical(self, "Align channel", f"Alignment failed:\n{exc}")
             return
         self.log(f"[align] reference channel: {ref_name}")
+        align_names = {ref_name} | {r.channel2_name for r in results}
+        gri_to_rid = self._bead_gri_to_rid(align_names)
+        excluded = sorted(int(g) for g in (self._bead_unchecked_gris or set()))
+        self.log(
+            f"[align] user-excluded {len(excluded)} bead(s): "
+            f"{self._format_bead_ids(excluded, gri_to_rid)}")
         for result in results:
-            self.log(f"[align] {result.channel2_name} -> {result.channel1_name}; matched {result.bead_ids.size} beads; translation_nm=({result.translation[0]:.3f}, {result.translation[1]:.3f}); rmse_xy_nm={result.rmse:.3f}")
+            used = [int(b) for b in result.bead_ids]
+            self.log(
+                f"[align] {result.channel2_name} -> {result.channel1_name}; used "
+                f"{len(used)} bead(s): {self._format_bead_ids(used, gri_to_rid)}; "
+                f"transform={result.transform_type}; "
+                f"translation_nm=({result.translation[0]:.3f}, {result.translation[1]:.3f}); "
+                f"rmse_xy_nm={result.rmse:.3f}")
 
         dlg = AlignmentSaveDialog(
             self._channel_alignment_defaults(), self._alignment_save_options, self)
@@ -2759,7 +2888,8 @@ class MsrReaderDialog(QWidget):
             QMessageBox.critical(self, "Align channel", f"Failed to save alignment outputs:\n{exc}")
             return
         if payload["show_plot"]:
-            AlignmentPlotWindow(results, self).exec()
+            data_bounds = self._combined_loc_bounds_nm(loc_bound_names)
+            AlignmentPlotWindow(results, self, data_bounds_nm=data_bounds).exec()
         summary = [f"Reference channel: {ref_name}"] + [
             f"{result.channel2_name}: matched {result.bead_ids.size}, translation ({result.translation[0]:.3f}, {result.translation[1]:.3f}) nm, RMSE XY {result.rmse:.3f} nm"
             for result in results

@@ -167,6 +167,22 @@ def test_z_scale_flattens_stored_z():
     assert np.isclose(np.ptp(half["raw6"][:, 2]), 0.5 * np.ptp(full["raw6"][:, 2]), rtol=0.15)
 
 
+def test_average_reports_progress_per_npc():
+    rows, tid0 = [], 0
+    rng = np.random.default_rng(11)
+    for i in range(5):
+        raw, tid0 = _raw6_npc(rng.uniform(-1500, 1500), rng.uniform(-1500, 1500),
+                              rng.uniform(-30, 30), i + 1, rot=rng.uniform(0, 6),
+                              seed=i, tid0=tid0)
+        rows.append(raw)
+    calls = []
+    nw.average_npc_wanlu(np.vstack(rows), diameter_bounds=(65, 85),
+                         inter_ring_bounds=(20, 32), expected_inter_ring=25,
+                         progress=lambda d, t: calls.append((d, t)))
+    assert len(calls) == 5                       # one per NPC
+    assert calls[-1] == (5, 5)                   # monotone to total
+
+
 def test_empty_inputs_safe():
     assert nw.detect_npc_wanlu(np.empty((0, 3)), np.empty(0))["n_npc"] == 0
     assert nw.average_npc_wanlu(np.empty((0, 6)))["n_accepted"] == 0

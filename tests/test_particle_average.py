@@ -137,6 +137,21 @@ def test_template_provided_aligns_to_ring():
     assert corr > 0.5
 
 
+def test_average_reports_progress():
+    parts = _random_particles(k=6, seed=5)
+    free_calls = []
+    pa.average_particles(parts, mode="free", box_nm=200, pixel_nm=4, n_angles=24,
+                         n_iter=3, progress=lambda d, t: free_calls.append((d, t)))
+    assert free_calls[-1] == (3 * 6, 3 * 6)        # n_iter × n_particles
+    tmpl = pa.geometry_template_image("ring", {"diameter_nm": 100, "rim_nm": 12},
+                                      box_nm=160, pixel_nm=4)
+    tmpl_calls = []
+    pa.average_particles(parts, mode="template", template_img=tmpl, box_nm=160,
+                         pixel_nm=4, n_angles=24,
+                         progress=lambda d, t: tmpl_calls.append((d, t)))
+    assert tmpl_calls[-1] == (6, 6)                # one per particle
+
+
 def test_empty_particles_safe():
     res = pa.average_template_free([], box_nm=150, pixel_nm=3)
     assert res["points"].shape == (0, 3)

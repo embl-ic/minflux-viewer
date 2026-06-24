@@ -167,14 +167,20 @@ def _pool(particles_c, transforms) -> np.ndarray:
 
 def average_template_provided(particles, template_img, *, box_nm=DEFAULT_BOX_NM,
                               pixel_nm=DEFAULT_PIXEL_NM, n_angles=DEFAULT_N_ANGLES,
-                              sigma_nm: float | None = None) -> dict:
-    """Align every particle to a fixed template image and pool them."""
+                              sigma_nm: float | None = None, progress=None) -> dict:
+    """Align every particle to a fixed template image and pool them.
+
+    ``progress(done, total)`` (optional) is called once per aligned particle."""
     angles = np.linspace(0.0, 360.0, int(n_angles), endpoint=False)
     sigma_nm = pixel_nm if sigma_nm is None else sigma_nm
     particles_c = [center_particle(np.asarray(p, float)) for p in particles]
-    transforms = [align_particle(p[:, :2], template_img, box_nm=box_nm,
-                                 pixel_nm=pixel_nm, angles=angles, sigma_nm=sigma_nm)
-                  for p in particles_c]
+    transforms = []
+    total = len(particles_c)
+    for i, p in enumerate(particles_c, start=1):
+        if progress is not None:
+            progress(i, total)
+        transforms.append(align_particle(p[:, :2], template_img, box_nm=box_nm,
+                                         pixel_nm=pixel_nm, angles=angles, sigma_nm=sigma_nm))
     pooled = _pool(particles_c, transforms)
     avg_img = render_points(pooled[:, :2], box_nm, pixel_nm, sigma_nm) if pooled.size else \
         np.zeros_like(template_img)
@@ -186,9 +192,12 @@ def average_template_provided(particles, template_img, *, box_nm=DEFAULT_BOX_NM,
 
 def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_PIXEL_NM,
                           n_angles=DEFAULT_N_ANGLES, n_iter=DEFAULT_N_ITERS,
-                          sigma_nm: float | None = None, seed: int = 0) -> dict:
+                          sigma_nm: float | None = None, seed: int = 0, progress=None) -> dict:
     """Reference-free 2-D averaging: seed the reference from one particle, then
-    iterate *align-all → mean → repeat*."""
+    iterate *align-all → mean → repeat*.
+
+    ``progress(done, total)`` (optional) is called per particle-alignment across
+    all iterations (``total = n_iter × n_particles``)."""
     angles = np.linspace(0.0, 360.0, int(n_angles), endpoint=False)
     sigma_nm = pixel_nm if sigma_nm is None else sigma_nm
     particles_c = [center_particle(np.asarray(p, float)) for p in particles]
@@ -202,9 +211,17 @@ def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_
     template = render_points(particles_c[seed_idx][:, :2], box_nm, pixel_nm, sigma_nm)
     transforms = [(0.0, 0.0, 0.0, 0.0)] * len(particles_c)
     history = []
-    for _ in range(max(int(n_iter), 1)):
-        transforms = [align_particle(p[:, :2], template, box_nm=box_nm, pixel_nm=pixel_nm,
-                                     angles=angles, sigma_nm=sigma_nm) for p in particles_c]
+    n_it = max(int(n_iter), 1)
+    total = n_it * len(particles_c)
+    step = 0
+    for _ in range(n_it):
+        transforms = []
+        for p in particles_c:
+            step += 1
+            if progress is not None:
+                progress(step, total)
+            transforms.append(align_particle(p[:, :2], template, box_nm=box_nm,
+                                             pixel_nm=pixel_nm, angles=angles, sigma_nm=sigma_nm))
         imgs = [_aligned_image(p, t, box_nm, pixel_nm, sigma_nm)
                 for p, t in zip(particles_c, transforms)]
         new_template = np.mean(imgs, axis=0)

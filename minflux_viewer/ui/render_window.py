@@ -35,6 +35,7 @@ Interactions (unchanged from pre-pyramid version)
 from __future__ import annotations
 
 from collections import OrderedDict
+from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
@@ -51,6 +52,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -654,6 +656,7 @@ class RenderWindow(QWidget):
         self._sigma_nm_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._channels: list[dict] = []
         self._channel_rows: list[tuple[QLabel, QComboBox]] = []
+        self._export_workers: list = []  # live TIFF-export QThreads (kept from GC)
 
         # Pyramid render pipeline state
         self._phys_tile_cache: PhysicalTileCache = PhysicalTileCache()
@@ -2364,6 +2367,9 @@ class RenderWindow(QWidget):
         axis_action.setChecked(self._axis_visible)
         axis_action.triggered.connect(self._set_axis_visible_from_menu)
 
+        export_action = menu.addAction("Export to TIFF…", self._export_to_tiff)
+        export_action.setEnabled(self._render_mode == "localizations")
+
         menu.addAction("Reset View", self._reset_view)
         menu.exec(self._image_view.ui.graphicsView.mapToGlobal(pos))
 
@@ -2415,6 +2421,185 @@ class RenderWindow(QWidget):
         if self._volume_window is not None and self._volume_window.isVisible():
             self._volume_window._sigma_nm_xyz = self._sigma_nm_xyz
             self._volume_window.refresh_from_dataset()
+
+    def _active_rectangle_xy_bounds(self) -> tuple[float, float, float, float] | None:
+        """X/Y bounds (nm, display coords) of the active/selected XY-plane
+        rectangle ROI, or None. Used to restrict the TIFF export to the ROI."""
+        from ..core.roi_selection import rectangle_bounds
+
+        candidates = []
+        ctrl = getattr(self, "_roi_overlay", None)
+        if ctrl is not None:
+            try:
+                rec = ctrl.current_record()
+            except Exception:
+                rec = None
+            if rec is not None:
+                candidates.append(rec)
+        try:
+            selected = set(self._state.rois.selected_ids)
+            candidates.extend(r for r in self._state.rois.records if r.id in selected)
+        except Exception:
+            pass
+        for rec in candidates:
+            if getattr(rec, "type", None) != "rectangle":
+                continue
+            plane = (getattr(rec, "context", {}) or {}).get("view_plane") or self._orientation
+            if plane != "XY":
+                continue
+            bounds = rectangle_bounds(rec)
+            if bounds is not None:
+                return bounds  # (x0, x1, y0, y1)
+        return None
+
+    def _gather_export_channels(self) -> list:
+        """Snapshot the visible localization channels as TiffExportChannel(s)."""
+        from ..core.tiff_export import TiffExportChannel
+
+        out = []
+        for ch in self._channels:
+            if not ch.get("visible") or ch.get("kind") != "localizations":
+                continue
+            ds = self._state.datasets[ch["dataset_idx"]]
+            xyz = self._dataset_locs(ds)
+            if xyz.shape[0] > 0:
+                out.append(TiffExportChannel(name=str(ch.get("name") or ds.name), xyz=xyz))
+        return out
+
+    def _export_to_tiff(self) -> None:
+        """Export the visible localization channels to a multipage (OME-)TIFF.
+
+        A modal dialog collects XY pixel size, Z voxel depth, the export ranges
+        (XY pre-filled from the active rectangle ROI when present, else the data
+        extent) and — for 3-D data — the editable RIMF z-scaling. Each visible
+        channel becomes a Z-sliced 2-D-histogram stack with physical calibration
+        in OME metadata. The binning/writing runs on a background worker so the
+        viewer stays responsive; progress and completion go to the Log (no
+        progress bar / pop-up).
+        """
+        from .tiff_export_dialog import TiffExportDialog, TiffExportWorker
+
+        if self._render_mode != "localizations":
+            QMessageBox.information(
+                self, "Export to TIFF", "TIFF export is only available for localization renders."
+            )
+            return
+
+        channels = self._gather_export_channels()
+        if not channels:
+            QMessageBox.information(
+                self, "Export to TIFF", "No visible localizations pass the current filter."
+            )
+            return
+
+        all_xyz = np.vstack([c.xyz for c in channels])
+        is_3d = float(all_xyz[:, 2].max() - all_xyz[:, 2].min()) > 1.0
+
+        roi_bounds = self._active_rectangle_xy_bounds()
+        if roi_bounds is not None:
+            x_span = (roi_bounds[0], roi_bounds[1])
+            y_span = (roi_bounds[2], roi_bounds[3])
+        else:
+            x_span = (float(all_xyz[:, 0].min()), float(all_xyz[:, 0].max()))
+            y_span = (float(all_xyz[:, 1].min()), float(all_xyz[:, 1].max()))
+        z_span = (float(all_xyz[:, 2].min()), float(all_xyz[:, 2].max()))
+
+        ds0 = self._state.datasets[self._idx] if self._idx is not None else None
+        rimf = None
+        if is_3d and ds0 is not None:
+            try:
+                rimf = float(getattr(ds0.cali, "RIMF", 1.0) or 1.0)
+            except Exception:
+                rimf = None
+
+        stem = "render"
+        folder = ""
+        if ds0 is not None:
+            stem = Path(str(getattr(ds0, "name", "") or "render")).stem or "render"
+            folder = str(getattr(getattr(ds0, "file", None), "folder", "") or "")
+        default_path = str(Path(folder) / f"{stem}.ome.tif") if folder else f"{stem}.ome.tif"
+        default_px = max(1.0, round(self._current_render_pixel_size_nm(), 1))
+
+        dialog = TiffExportDialog(
+            default_path=default_path,
+            default_pixel_nm=default_px,
+            default_voxel_nm=default_px,
+            is_3d=is_3d,
+            x_span=x_span,
+            y_span=y_span,
+            z_span=z_span,
+            rimf=rimf,
+            xy_from_roi=roi_bounds is not None,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        params = dialog.params()
+        if not params["path"]:
+            QMessageBox.warning(self, "Export to TIFF", "Choose an output file path.")
+            return
+
+        # Apply an edited RIMF to the active dataset (single source of truth — the
+        # render and all views update too), then re-snapshot so the exported z
+        # and the rescaled Z range agree.
+        new_rimf = params.get("rimf")
+        if new_rimf is not None and rimf is not None and abs(new_rimf - rimf) > 1e-6 and ds0 is not None:
+            ds0.set_rimf(float(new_rimf), source="manual (tiff export)")
+            if self._idx is not None:
+                self._state.notify_calibration_changed(self._idx)
+            self._state.log(
+                f"RIMF set to {new_rimf:.4f} (manual, TIFF export)", dataset_idx=self._idx
+            )
+            channels = self._gather_export_channels()
+            if not channels:
+                QMessageBox.information(
+                    self, "Export to TIFF", "No visible localizations pass the current filter."
+                )
+                return
+
+        worker = TiffExportWorker(
+            channels,
+            params["path"],
+            pixel_size_nm=params["pixel_size_nm"],
+            voxel_depth_nm=params["voxel_depth_nm"],
+            is_3d=is_3d,
+            x_range=params["x_range"],
+            y_range=params["y_range"],
+            z_range=params["z_range"],
+            parent=self,
+        )
+        self._export_workers.append(worker)
+        worker.progress.connect(lambda msg: self._state.log(msg, dataset_idx=self._idx))
+        worker.completed.connect(self._on_tiff_export_done)
+        worker.failed.connect(self._on_tiff_export_failed)
+        worker.completed.connect(lambda *_: self._forget_export_worker(worker))
+        worker.failed.connect(lambda *_: self._forget_export_worker(worker))
+        n_ch = len(channels)
+        self._state.log(
+            f"Export to TIFF started: {n_ch} channel(s), pixel {params['pixel_size_nm']:g} nm"
+            + (f", voxel {params['voxel_depth_nm']:g} nm" if is_3d else " (2-D)")
+            + f" → {params['path']}",
+            dataset_idx=self._idx,
+        )
+        worker.start()
+
+    def _on_tiff_export_done(self, result) -> None:
+        self._state.log(
+            f"Export to TIFF done: {result.axes} {result.shape} {result.dtype} "
+            f"(max count {result.max_count}) → {result.path}",
+            dataset_idx=self._idx,
+        )
+
+    def _on_tiff_export_failed(self, message: str) -> None:
+        self._state.log(f"Export to TIFF failed: {message}", level="ERROR", dataset_idx=self._idx)
+
+    def _forget_export_worker(self, worker) -> None:
+        try:
+            worker.wait(50)
+        except Exception:
+            pass
+        if worker in self._export_workers:
+            self._export_workers.remove(worker)
 
     def _show_data_info_window(self) -> None:
         if self._idx is None or not (0 <= self._idx < len(self._state.datasets)):
@@ -2870,6 +3055,15 @@ class RenderWindow(QWidget):
             except Exception:
                 pass
             self._volume_window = None
+        # Let any in-flight TIFF export finish so its QThread is not destroyed
+        # while running (the file write is short relative to the binning).
+        for worker in list(self._export_workers):
+            try:
+                if worker.isRunning():
+                    worker.wait()
+            except Exception:
+                pass
+        self._export_workers.clear()
         super().closeEvent(event)
 
     # ------------------------------------------------------------------

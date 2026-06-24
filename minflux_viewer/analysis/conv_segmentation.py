@@ -129,6 +129,20 @@ def _gaussian_kernel(p: dict, px: float) -> np.ndarray:
     return np.exp(-(xk ** 2 + yk ** 2) / (2.0 * sigma ** 2))
 
 
+def _log_kernel(p: dict, px: float) -> np.ndarray:
+    """Laplacian-of-Gaussian (Mexican-hat / Ricker) blob detector.
+
+    Positive centre, negative surround, zero-crossing at the blob radius. Tuned to
+    a bright blob of the given diameter (``sigma = diameter / (2·√2)`` puts the
+    zero-crossing on the blob edge). Inherently zero-mean."""
+    d = float(p["diameter_nm"])
+    sigma = max(d / (2.0 * np.sqrt(2.0)), px * 1e-3)
+    xk, yk = _coord_grid(3.5 * sigma, px)
+    r2 = xk ** 2 + yk ** 2
+    s2 = sigma ** 2
+    return (1.0 - r2 / (2.0 * s2)) * np.exp(-r2 / (2.0 * s2))
+
+
 GEOMETRY_MODELS: dict[str, GeometryModel] = {
     "ring": GeometryModel(
         key="ring",
@@ -167,6 +181,18 @@ GEOMETRY_MODELS: dict[str, GeometryModel] = {
         ),
         make_kernel=_gaussian_kernel,
         size=lambda p: float(p["fwhm_nm"]),
+    ),
+    "log": GeometryModel(
+        key="log",
+        label="LoG (Laplacian of Gaussian)",
+        description="Laplacian-of-Gaussian (Mexican-hat) blob detector — positive "
+                    "centre, negative surround. Responds to bright blobs of the given "
+                    "diameter and suppresses uniform background (inherently zero-mean).",
+        params=(
+            ParamSpec("diameter_nm", "Diameter", 60.0, 4.0, 5000.0, 1.0, 1),
+        ),
+        make_kernel=_log_kernel,
+        size=lambda p: float(p["diameter_nm"]),
     ),
 }
 

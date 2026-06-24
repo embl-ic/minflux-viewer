@@ -182,7 +182,7 @@ class BeadsDriftDialog(QDialog):
         for line in (
             "Check bead drift and select beads for alignment; by default all common beads will be used.",
             "Uncheck a bead to exclude it — the selection is linked across datasets by bead ID.",
-            "Be aware of the minimum number of beads (3 for 2D, 4 for 3D) required for alignment.",
+            "Minimum matched beads: 2 (translational XYZ), 3 (also rigid XY + translational Z), 4 (full rigid XYZ).",
             "When finished, click <b>Apply</b> to update the bead selection.",
         ):
             lbl = QLabel(line)

@@ -33,7 +33,7 @@ def _disk(cx, cy, radius, n=300, seed=0):
 
 # --- registry ------------------------------------------------------------------
 def test_registry_models_have_params_and_defaults():
-    assert set(cs.GEOMETRY_MODELS) >= {"ring", "disk", "gaussian"}
+    assert set(cs.GEOMETRY_MODELS) >= {"ring", "disk", "gaussian", "log"}
     for model in cs.GEOMETRY_MODELS.values():
         assert model.params, f"{model.key} has no params"
         d = model.defaults()
@@ -66,6 +66,28 @@ def test_disk_kernel_is_finite_and_square():
     k = cs.build_kernel("disk", {"diameter_nm": 80.0, "edge_nm": 8.0}, 4.0)
     assert k.ndim == 2 and k.shape[0] == k.shape[1]
     assert np.isfinite(k).all()
+
+
+def test_log_kernel_is_mexican_hat():
+    # positive centre, negative surround, ~zero total (DC-free blob detector)
+    k = cs.build_kernel("log", {"diameter_nm": 60.0}, 4.0, zero_mean=False)
+    c = k.shape[0] // 2
+    assert k[c, c] > 0                       # positive centre
+    assert k.min() < 0                       # negative surround
+    assert abs(k.sum()) < 0.05 * np.abs(k).sum()   # near zero-mean
+    assert np.isfinite(k).all()
+
+
+def test_segment_detects_blobs_with_log():
+    truth = [(0.0, 0.0), (300.0, 200.0)]
+    pts = np.vstack([_blob(cx, cy, 10.0, seed=i) for i, (cx, cy) in enumerate(truth)])
+    res = cs.segment_by_convolution(
+        pts, model_key="log", params={"diameter_nm": 50.0},
+        pixel_size_nm=4.0, min_response=0.3, min_distance_nm=120.0)
+    centers = res["centers"]
+    assert centers.shape[0] == 2
+    for cx, cy in truth:
+        assert np.min(np.hypot(centers[:, 0] - cx, centers[:, 1] - cy)) < 25.0
 
 
 # --- NMS -----------------------------------------------------------------------

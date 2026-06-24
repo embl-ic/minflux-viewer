@@ -359,6 +359,8 @@ def _bounds(geometry: dict[str, Any]) -> tuple[float, float, float, float]:
     pts = np.asarray(geometry.get("points", []), dtype=float)
     if pts.size == 0:
         return 0.0, 0.0, 0.0, 0.0
+    if pts.ndim == 2 and pts.shape[1] > 2:
+        pts = pts[:, :2]          # line/polyline vertices may carry a depth coord
     x0, y0 = pts.min(axis=0)
     x1, y1 = pts.max(axis=0)
     return float(x0), float(y0), float(x1 - x0), float(y1 - y0)

@@ -4,18 +4,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import html
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
+    QDialog,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
-    QInputDialog,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
-    QCheckBox,
     QVBoxLayout,
     QWidget,
 )
@@ -55,13 +57,15 @@ class RoiManagerWindow(QWidget):
             ("Add", self._add),
             ("Update", self._update),
             ("Delete", self._delete),
-            ("Rename...", self._rename),
-            ("Deselect", self._deselect),
-            ("Open...", self._open),
-            ("Save...", self._save),
+            ("Property", self._property),
+            ("Combine", self._combine),
+            ("Convert", self._convert),
             ("Move Up", lambda: self._move(-1)),
             ("Move Down", lambda: self._move(1)),
-            ("Combine", self._combine),
+            ("Select All", self._select_all),
+            ("Deselect", self._deselect),
+            ("Save", self._save),
+            ("Open", self._open),
         ]
         for idx, (label, slot) in enumerate(buttons):
             btn = QPushButton(label)
@@ -145,14 +149,85 @@ class RoiManagerWindow(QWidget):
     def _delete(self) -> None:
         self._store.delete_selected()
 
-    def _rename(self) -> None:
+    def _notify_roi_changed(self, record) -> None:
+        idx = record.context.get("dataset_idx") if isinstance(record.context, dict) else None
+        self._state.notify_roi_selection_changed(idx if isinstance(idx, int) else None)
+
+    def _property(self) -> None:
+        from .roi_convert_dialog import EDITABLE_PROPERTY_TYPES, RoiPropertyDialog, roi_property_text
+
         selected = self._store.selected_records()
-        if len(selected) != 1:
-            QMessageBox.information(self, "Rename ROI", "Select exactly one ROI to rename.")
+        if not selected:
+            QMessageBox.information(self, "ROI Properties", "Select an ROI first.")
             return
-        name, ok = QInputDialog.getText(self, "Rename ROI", "Name:", text=selected[0].name)
-        if ok and name.strip():
-            self._store.rename(selected[0].id, name.strip())
+        if len(selected) == 1 and selected[0].type in EDITABLE_PROPERTY_TYPES:
+            record = selected[0]
+            dlg = RoiPropertyDialog(record, self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            new_record = dlg.result_record()
+            self._store.update(record.id, new_record)
+            self._store.select([record.id])
+            self._notify_roi_changed(record)
+            return
+        # Multiple selection or a type without simple geometry editing → read-only.
+        text = "\n\n".join(roi_property_text(r) for r in selected)
+        box = QMessageBox(self)
+        box.setWindowTitle("ROI Properties")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText("<pre style='font-family:Consolas,Courier New,monospace; margin:0'>"
+                    + html.escape(text) + "</pre>")
+        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                    | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        box.exec()
+
+    def _convert(self) -> None:
+        from ..core.roi_convert import available_conversions, convert_roi
+        from .roi_convert_dialog import RoiConvertDialog
+
+        selected = self._store.selected_records()
+        if not selected:
+            QMessageBox.information(self, "Convert ROIs", "Select one or more ROIs first.")
+            return
+        dlg = RoiConvertDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        target, width, height = dlg.values()
+        converted_ids = []
+        skipped = 0
+        last_record = None
+        for record in selected:
+            if target not in available_conversions(record):
+                skipped += 1
+                continue
+            kwargs = {}
+            if record.type == "point" and target in {"rectangle", "oval"}:
+                kwargs = {"width": width, "height": height}
+            elif target == "region":
+                kwargs = {"width": width}
+            try:
+                new_record = convert_roi(record, target, **kwargs)
+            except Exception:
+                skipped += 1
+                continue
+            new_record.name = (
+                f"{new_record.type}-{self._store.next_type_index(new_record.type)}"
+                if self._store._is_auto_name(record) else record.name)
+            self._store.update(record.id, new_record)
+            converted_ids.append(record.id)
+            last_record = record
+        if converted_ids:
+            self._store.select(converted_ids)
+            if last_record is not None:
+                self._notify_roi_changed(last_record)
+        self._state.log(
+            f"Convert ROIs → {target}: {len(converted_ids)} converted, {skipped} skipped.")
+        if not converted_ids:
+            QMessageBox.information(
+                self, "Convert ROIs", "None of the selected ROIs can convert to that type.")
+
+    def _select_all(self) -> None:
+        self._store.select([r.id for r in self._store.records])
 
     def _deselect(self) -> None:
         self._store.deselect()

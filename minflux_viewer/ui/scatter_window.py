@@ -406,7 +406,7 @@ class ScatterWindow(QWidget):
         bg_action.setChecked(self._background_is_black())
         bg_action.triggered.connect(self._set_black_background)
 
-        axis_menu = menu.addMenu("Axis")
+        axis_menu = menu.addMenu("View")
         for axis in _AXIS_OPTIONS:
             action = axis_menu.addAction(axis)
             action.setCheckable(True)

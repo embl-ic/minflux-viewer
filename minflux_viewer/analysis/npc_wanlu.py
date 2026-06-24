@@ -430,9 +430,12 @@ def average_npc_wanlu(raw6, *, diameter_bounds=(70.0, 90.0),
                       z_mad_factor=3.0, min_locs_per_npc=20, min_fit_points=3,
                       tilt_max_deg=15.0, max_center_shift_xy=20.0,
                       max_center_shift_z=5.0, rim=20.0, symmetry=8,
-                      robust_k=3.0, max_iter=2500, max_fev=8000) -> dict:
+                      robust_k=3.0, max_iter=2500, max_fev=8000, progress=None) -> dict:
     """Two-ring NPC averaging from a ``raw6`` ``[x,y,z,npc_id,unit_id,trace_id]``
-    table (nm). Returns the pooled ``average_loc`` (N, 4: x,y,z,ring) + fit stats."""
+    table (nm). Returns the pooled ``average_loc`` (N, 4: x,y,z,ring) + fit stats.
+
+    ``progress(done, total)`` (optional) is called once per fitted NPC so a caller
+    can report progress; the per-NPC fit is the dominant cost."""
     raw6 = np.asarray(raw6, dtype=float)
     out = {"average_loc": np.empty((0, 4)), "n_accepted": 0, "n_npc": 0,
            "z_peaks": (np.nan, np.nan), "z_fallback": True, "fits": []}
@@ -478,7 +481,10 @@ def average_npc_wanlu(raw6, *, diameter_bounds=(70.0, 90.0),
 
     pooled = []
     fits = []
-    for nid, C in cache.items():
+    total = len(cache)
+    for i, (nid, C) in enumerate(cache.items(), start=1):
+        if progress is not None:
+            progress(i, total)
         unit_z0 = C["uc"][:, 2] - C["zmean"]
         ring_unit = np.where(np.abs(unit_z0 - p1) <= np.abs(unit_z0 - p2), -1, 1)
         lower_uids = C["uids"][ring_unit == -1]
