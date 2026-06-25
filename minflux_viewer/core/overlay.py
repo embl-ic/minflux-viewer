@@ -21,6 +21,24 @@ PURE_COLOR_RGB = {
     "Gray": (120, 120, 120),
 }
 
+#: Default per-dataset overlay channel colours (1st..6th), cycled for overlays.
+DEFAULT_OVERLAY_COLORS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"]
+
+
+def overlay_color_cycle(prefs: dict | None) -> list[str]:
+    """The configured overlay channel-colour cycle (Preferences > Appearance >
+    Overlay), or the built-in default. Always returns a non-empty list."""
+    colors = None
+    try:
+        colors = (prefs or {}).get("plot", {}).get("overlay_colors")
+    except Exception:
+        colors = None
+    if isinstance(colors, (list, tuple)):
+        out = [str(c) for c in colors if str(c).strip()]
+        if out:
+            return out
+    return list(DEFAULT_OVERLAY_COLORS)
+
 
 @dataclass
 class OverlayMemberSpec:

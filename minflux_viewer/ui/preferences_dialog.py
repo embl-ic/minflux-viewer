@@ -81,6 +81,13 @@ _ROI_COLORS = [
     "Yellow", "Red", "Green", "Cyan", "Magenta", "White", "Black",
 ]
 
+# Overlay channel colour choices (Preferences > Appearance > Overlay).
+_OVERLAY_COLORS = [
+    "Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray", "White",
+]
+_OVERLAY_DEFAULTS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"]
+_OVERLAY_ORDINALS = ["1st", "2nd", "3rd", "4th", "5th", "6th"]
+
 _MBM_TRANSFORM_TYPES = [
     "rigid XY + translational Z",
     "translational XYZ",
@@ -729,6 +736,27 @@ class PreferencesDialog(QDialog):
 
         root.addWidget(grp_roi)
 
+        # ── Overlay ──────────────────────────────────────────────────
+        grp_overlay = QGroupBox("Overlay")
+        overlay_layout = QVBoxLayout(grp_overlay)
+        overlay_layout.setSpacing(4)
+        overlay_layout.addWidget(QLabel("dataset LUT/color setting"))
+
+        overlay_row = QHBoxLayout()
+        self._overlay_color_combos: list[QComboBox] = []
+        for i in range(6):
+            overlay_row.addWidget(QLabel(_OVERLAY_ORDINALS[i]))
+            combo = QComboBox()
+            combo.addItems(_OVERLAY_COLORS)
+            self._overlay_color_combos.append(combo)
+            overlay_row.addWidget(combo)
+            if i < 5:
+                overlay_row.addSpacing(14)
+        overlay_row.addStretch()
+        overlay_layout.addLayout(overlay_row)
+
+        root.addWidget(grp_overlay)
+
         root.addStretch()
         return w
 
@@ -1046,6 +1074,10 @@ class PreferencesDialog(QDialog):
         self._set_combo(self._filter_bounds_color_combo, p.get("filter_bounds_color", "Green"),
                         _ROI_COLORS)
         self._filter_bounds_size.setValue(int(p.get("filter_bounds_size", 1)))
+        overlay_colors = p.get("overlay_colors", _OVERLAY_DEFAULTS)
+        for i, combo in enumerate(self._overlay_color_combos):
+            default = overlay_colors[i] if i < len(overlay_colors) else _OVERLAY_DEFAULTS[i]
+            self._set_combo(combo, default, _OVERLAY_COLORS)
         hist_values = set(p.get("histogram_values", ["trace mean"]))
         self._hist_trace_mean.setChecked("trace mean" in hist_values)
         self._hist_trace_median.setChecked("trace median" in hist_values)
@@ -1134,6 +1166,7 @@ class PreferencesDialog(QDialog):
         p["filter_range_alpha"] = int(self._filter_range_alpha.value())
         p["filter_bounds_color"] = self._filter_bounds_color_combo.currentText()
         p["filter_bounds_size"] = int(self._filter_bounds_size.value())
+        p["overlay_colors"] = [c.currentText() for c in self._overlay_color_combos]
         hist_values = []
         for name, cb in (
             ("trace mean", self._hist_trace_mean),

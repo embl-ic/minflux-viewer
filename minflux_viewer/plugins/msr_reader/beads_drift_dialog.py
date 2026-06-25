@@ -36,6 +36,12 @@ _COL_TITLES = ("Y (nm) vs X (nm)", "X (nm) vs time (sec)",
 #: (x source index, y index); x index None => time axis
 _PLOT_KEYS = ((0, 1), (None, 0), (None, 1), (None, 2))
 _MAX_PTS = 600                # display cap per bead (keeps the dialog snappy)
+# Sub-plot size — ~75% of the original (168×210) so more beads fit vertically
+# (beads are stacked as rows).
+_SUBPLOT_H = 126
+_SUBPLOT_W = 158
+_ROW_HEIGHT = _SUBPLOT_H + 12     # subplot + grid vertical spacing per bead row
+_DIALOG_CHROME = 320              # instructions + colorbar + headers + buttons + margins
 
 #: axis key -> label; keys 0/1/2 = X/Y/Z columns, "t" = time
 _AXIS_LABEL = {0: "X (nm)", 1: "Y (nm)", 2: "Z (nm)", "t": "time (sec)"}
@@ -152,10 +158,15 @@ class BeadsDriftDialog(QDialog):
     def __init__(self, datasets: list[dict], *, unchecked_gris=None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Beads drift — manual selection")
-        self.setMinimumSize(1000, 640)
 
         self._datasets = datasets or []
         n_ds = len(self._datasets)
+
+        # Size the dialog to the bead count: tall when many beads (capped at 95%
+        # of the screen height, so nothing is hidden — the plot grid scrolls),
+        # compact when only a few beads. Width fits the four sub-plots + labels.
+        self.setMinimumSize(940, 360)
+        self.resize(*self._initial_size())
 
         # gri -> 1-based dataset numbers it appears in; "common" = in all datasets.
         self._gri_to_ds: dict[int, list[int]] = {}
@@ -227,6 +238,35 @@ class BeadsDriftDialog(QDialog):
             self._update_colorbar_range(0)
 
     # ------------------------------------------------------------------
+    def _initial_size(self) -> tuple[int, int]:
+        """(width, height): height grows with the tallest dataset's bead count
+        (rows are stacked vertically), capped at 95% of the available screen
+        height so the dialog is never taller than the screen — the plot grid
+        scrolls instead. A few beads → a compact dialog."""
+        from PyQt6.QtWidgets import QApplication
+
+        max_beads = max((len(d.get("beads", [])) for d in self._datasets), default=1)
+        max_beads = max(int(max_beads), 1)
+        desired_h = _DIALOG_CHROME + max_beads * _ROW_HEIGHT
+        screen = self.screen() or QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen is not None else None
+        cap_h = int(avail.height() * 0.95) if avail is not None else 1000
+        height = max(min(desired_h, cap_h), 460)
+        width = 1000 if avail is None else min(1000, int(avail.width() * 0.95))
+        return width, height
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().showEvent(event)
+        # After the frame geometry is known, make sure a tall dialog stays fully
+        # on-screen (title bar + buttons visible), capping to the available area.
+        if not getattr(self, "_positioned", False):
+            self._positioned = True
+            try:
+                from ...ui.modeless import ensure_on_screen
+                ensure_on_screen(self, self.parent())
+            except Exception:
+                pass
+
     def _on_tab_changed(self, index: int) -> None:
         self._build_tab(index)
         self._update_colorbar_range(index)
@@ -322,8 +362,8 @@ class BeadsDriftDialog(QDialog):
                 # hover datatip: show the index + the two axes NOT plotted here
                 tips = _build_point_tips(idxs, axis_vals, xi, yi)
                 plot = pg.PlotWidget()
-                plot.setFixedHeight(168)
-                plot.setMinimumWidth(210)
+                plot.setFixedHeight(_SUBPLOT_H)
+                plot.setMinimumWidth(_SUBPLOT_W)
                 plot.setMenuEnabled(True)
                 plot.showGrid(x=True, y=True, alpha=0.15)
                 plot.plot(xdata, ydata, pen=pg.mkPen((170, 170, 170, 120), width=1))

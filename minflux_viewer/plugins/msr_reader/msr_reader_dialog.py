@@ -773,6 +773,9 @@ class FieldDialog(QDialog):
 # Sentinel: user cancelled the alignment dialog -> abort the whole
 # "Open in MINFLUX viewer" action (distinct from None = "not applicable").
 _ALIGN_CANCELLED = object()
+# The user chose to open each selected dataset as an individual (standalone)
+# dataset — no overlay group, no channel alignment.
+_OPEN_INDIVIDUAL = object()
 
 
 class ViewerAlignmentDialog(QDialog):
@@ -793,10 +796,18 @@ class ViewerAlignmentDialog(QDialog):
         layout = QVBoxLayout(self)
         label = QLabel(
             "This MSR file contains multiple datasets.\n"
-            "Choose how to align them when opening as a multi-channel render overlay."
+            "Choose how to align them when opening as a multi-channel render overlay, "
+            "or open each as an individual dataset."
         )
         label.setWordWrap(True)
         layout.addWidget(label)
+
+        # Open each selected dataset standalone (no overlay, no alignment). When
+        # checked, the reference/alignment controls below are irrelevant.
+        self.individual_check = QCheckBox(
+            "Open each as an individual dataset (no overlay / no alignment)", self)
+        self.individual_check.toggled.connect(self._on_individual_toggled)
+        layout.addWidget(self.individual_check)
 
         ref_row = QHBoxLayout()
         ref_row.addWidget(QLabel("Reference dataset:"))
@@ -826,6 +837,16 @@ class ViewerAlignmentDialog(QDialog):
         layout.addWidget(buttons)
 
         self._on_reference_changed(self.ref_combo.currentText())
+
+    def _on_individual_toggled(self, checked: bool) -> None:
+        """Disable the overlay alignment controls when opening individually."""
+        self.ref_combo.setEnabled(not checked)
+        self.align_combo.setEnabled(not checked)
+        if checked:
+            self._mbm_note.setVisible(False)
+
+    def open_individual(self) -> bool:
+        return self.individual_check.isChecked()
 
     def _on_reference_changed(self, ref_name: str) -> None:
         try:
@@ -2262,6 +2283,9 @@ class MsrReaderDialog(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             self.log("[viewer align] cancelled; open aborted")
             return _ALIGN_CANCELLED
+        if dlg.open_individual():
+            self.log("[viewer] opening each selected dataset as an individual dataset")
+            return _OPEN_INDIVIDUAL
         mode = dlg.alignment_mode()
         ref_name = dlg.reference_dataset()
         self.log(f"[viewer align] selected mode: {mode}; reference: {ref_name}")
@@ -2960,6 +2984,7 @@ class MsrReaderDialog(QWidget):
     def _on_open_in_viewer(self):
         from ...msr import state as MFSTATE
         from ...core.loader import load_from_mfx_array
+        from ...core.overlay import overlay_color_cycle
 
         if self._state is None:
             QMessageBox.warning(self, "Not connected", "Not connected to a viewer instance.")
@@ -2979,6 +3004,7 @@ class MsrReaderDialog(QWidget):
         imported_indices = []
         errors = []
         render_group_id = f"msr:{msr_path.resolve() if str(msr_path) else 'memory'}:{uuid.uuid4().hex}"
+        overlay_cycle = overlay_color_cycle(self._state.prefs)
         overlay_index = 1
         parent = self._owner
         if parent is not None:
@@ -2992,7 +3018,8 @@ class MsrReaderDialog(QWidget):
         if align_choice is _ALIGN_CANCELLED:
             self.log("[viewer] open in viewer aborted by user")
             return
-        if align_choice:
+        individual = align_choice is _OPEN_INDIVIDUAL
+        if align_choice and not individual:
             alignment_mode, reference_name = align_choice
             try:
                 viewer_transforms = self._viewer_channel_alignment_transforms(
@@ -3007,7 +3034,11 @@ class MsrReaderDialog(QWidget):
                 )
 
         previous_suspend_auto_render = getattr(self._state, "suspend_auto_render", False)
-        self._state.suspend_auto_render = True
+        # Overlay mode groups channels into one render view, so suppress the
+        # per-dataset auto-render and open one grouped view at the end. Individual
+        # mode wants each dataset opened on its own per Preferences > Data, so it
+        # leaves the auto-open behaviour untouched.
+        self._state.suspend_auto_render = previous_suspend_auto_render if individual else True
         try:
             for ds in datasets_info:
                 key = ds.get("display_name") or ds.get("did") or "dataset"
@@ -3043,17 +3074,19 @@ class MsrReaderDialog(QWidget):
                         prefs=self._state.prefs,
                     )
                     from ...core.dataset import AttributeComponent
-                    dataset.state["overlay_id"] = render_group_id
-                    dataset.state["render_group_id"] = render_group_id
-                    dataset.state["overlay_index"] = overlay_index
-                    dataset.state["overlay_order"] = len(imported_indices) + 1
-                    dataset.state["overlay_lut"] = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"][len(imported_indices) % 6]
-                    dataset.state["render_channel_lut"] = dataset.state["overlay_lut"]
+                    if not individual:
+                        dataset.state["overlay_id"] = render_group_id
+                        dataset.state["render_group_id"] = render_group_id
+                        dataset.state["overlay_index"] = overlay_index
+                        dataset.state["overlay_order"] = len(imported_indices) + 1
+                        dataset.state["overlay_lut"] = overlay_cycle[len(imported_indices) % len(overlay_cycle)]
+                        dataset.state["render_channel_lut"] = dataset.state["overlay_lut"]
                     dataset.metadata["msr_source_path"] = str(msr_path)
                     dataset.metadata["msr_dataset_key"] = key
                     dataset.metadata["msr_dataset_name"] = key
-                    dataset.metadata["overlay_id"] = render_group_id
-                    dataset.metadata["overlay_index"] = overlay_index
+                    if not individual:
+                        dataset.metadata["overlay_id"] = render_group_id
+                        dataset.metadata["overlay_index"] = overlay_index
                     # The data version (m2410/m2205/legacy) is detected from the
                     # mfx structure by load_from_mfx_array — keep it. Record the
                     # obf/mfxdta CONTAINER separately (it's the transport, not the
@@ -3077,17 +3110,19 @@ class MsrReaderDialog(QWidget):
                         dataset.metadata["transformed"] = bool(transform.get("moving_channel") != transform.get("reference_channel"))
                     idx = self._state.add_dataset(dataset)
                     loaded = self._state.datasets[idx]
-                    loaded.state["overlay_id"] = render_group_id
-                    loaded.state["render_group_id"] = render_group_id
-                    loaded.state["overlay_index"] = overlay_index
-                    loaded.state["overlay_order"] = len(imported_indices) + 1
-                    loaded.state["overlay_lut"] = dataset.state.get("overlay_lut")
-                    loaded.state["render_channel_lut"] = loaded.state["overlay_lut"]
+                    if not individual:
+                        loaded.state["overlay_id"] = render_group_id
+                        loaded.state["render_group_id"] = render_group_id
+                        loaded.state["overlay_index"] = overlay_index
+                        loaded.state["overlay_order"] = len(imported_indices) + 1
+                        loaded.state["overlay_lut"] = dataset.state.get("overlay_lut")
+                        loaded.state["render_channel_lut"] = loaded.state["overlay_lut"]
                     loaded.metadata["msr_source_path"] = str(msr_path)
                     loaded.metadata["msr_dataset_key"] = key
                     loaded.metadata["msr_dataset_name"] = key
-                    loaded.metadata["overlay_id"] = render_group_id
-                    loaded.metadata["overlay_index"] = overlay_index
+                    if not individual:
+                        loaded.metadata["overlay_id"] = render_group_id
+                        loaded.metadata["overlay_index"] = overlay_index
                     if key in MFSTATE.mbm_map:
                         loaded.mbm = AttributeComponent({"points": MFSTATE.mbm_map[key]})
                         loaded.metadata["mbm_points"] = MFSTATE.mbm_map[key]
@@ -3120,7 +3155,7 @@ class MsrReaderDialog(QWidget):
         # their properties, reference, bead selection, alignment matrix) — tagged
         # to the first channel so it auto-checks with the overlay. A single
         # imported dataset is standalone, not an overlay, so skip it.
-        if len(imported_indices) >= 2:
+        if len(imported_indices) >= 2 and not individual:
             self._record_overlay_load_event(
                 msr_path, imported, imported_indices, viewer_transforms,
                 align_choice if (align_choice and align_choice is not _ALIGN_CANCELLED) else None,
@@ -3134,7 +3169,10 @@ class MsrReaderDialog(QWidget):
         if imported:
             self.log(f"[viewer] imported {len(imported)} dataset(s): {', '.join(imported)}")
             parent = self._owner
-            if parent is not None and hasattr(parent, "_show_render") and imported_indices:
+            # Overlay mode opens one grouped render view here. Individual mode has
+            # already opened each dataset's viewers per Preferences > Data (auto-
+            # render was not suspended), so don't force a render here.
+            if not individual and parent is not None and hasattr(parent, "_show_render") and imported_indices:
                 existing = getattr(parent, "_render_windows", {}).get(imported_indices[0])
                 if existing is not None and hasattr(existing, "_refresh_from_dataset"):
                     existing._refresh_from_dataset()

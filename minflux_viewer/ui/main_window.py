@@ -330,8 +330,13 @@ class MainWindow(QMainWindow):
         self.actionHlyB2D.triggered.connect(lambda: self._run_hlyb_pair_analysis(mode="2D"))
         self.actionHlyB3D = QAction("3D", self)
         self.actionHlyB3D.triggered.connect(lambda: self._run_hlyb_pair_analysis(mode="3D"))
+        self.actionHlyBTemplate3D = QAction("Template matching (3D)", self)
+        self.actionHlyBTemplate3D.triggered.connect(
+            lambda: self._run_hlyb_pair_analysis(mode="TEMPLATE3D")
+        )
         self.menuHlyBPair.addAction(self.actionHlyB2D)
         self.menuHlyBPair.addAction(self.actionHlyB3D)
+        self.menuHlyBPair.addAction(self.actionHlyBTemplate3D)
         self.menuAnalyzeClustering.addAction(self.actionDbscan)
         self.menuAnalyzeClustering.addAction(self.actionKNearestNeighbour)
         self.menuAnalyzeClustering.addSeparator()
@@ -364,6 +369,9 @@ class MainWindow(QMainWindow):
         self.actionSegConvolution = QAction("Convolution…", self)
         self.actionSegConvolution.triggered.connect(self._show_conv_segmentation)
         self.menuAnalyzeSegmentation.addAction(self.actionSegConvolution)
+        self.actionSegConvolution3D = QAction("Convolution (3D)…", self)
+        self.actionSegConvolution3D.triggered.connect(self._show_conv_segmentation_3d)
+        self.menuAnalyzeSegmentation.addAction(self.actionSegConvolution3D)
         self.actionSegCurvilinear = QAction("Curvilinear Structures…", self)
         self.actionSegCurvilinear.triggered.connect(self._show_curvilinear_segmentation)
         self.menuAnalyzeSegmentation.addAction(self.actionSegCurvilinear)
@@ -671,7 +679,6 @@ class MainWindow(QMainWindow):
             u.actionBatchExport,
             u.actionBatchFilter,
             self.menuMeasure.menuAction(),
-            self.actionScaleBar,
             self.actionPlotProfile,
             self.actionSetMeasurements,
             self.actionDbscan,
@@ -679,6 +686,7 @@ class MainWindow(QMainWindow):
             self.menuHlyBPair.menuAction(),
             self.actionHlyB2D,
             self.actionHlyB3D,
+            self.actionHlyBTemplate3D,
             self.menuAnalyzeSegmentation.menuAction(),
             self.actionSegNpc2D,
             self.actionSegNpc3D,
@@ -1637,15 +1645,20 @@ class MainWindow(QMainWindow):
         self._state.log(f"Converted ROI '{record.name}' ({old_type}) → convex hull.")
 
     def _run_hlyb_pair_analysis(self, mode: str = "3D") -> None:
-        """Analyze › Clustering › HlyB subunit pair analysis › 2D/3D — detect
+        """Analyze › Clustering › HlyB subunit pair analysis › 2D/3D/template — detect
         protein sub-units from traces, cluster them into HlyB structures and
         report the sub-unit pair distances in a scatter + histogram window. The
         2-D path first builds a per-E.coli mask and drops traces in the eroded
-        border margin (where 2-D distances are unreliable)."""
+        border margin (where 2-D distances are unreliable). The template path
+        accepts partial 3-D matches to the six-site HlyB distance model."""
         import numpy as np
         from ..core.loader import mfx_get
 
-        mode = "2D" if str(mode).upper() == "2D" else "3D"
+        mode_text = str(mode).upper()
+        if "TEMPLATE" in mode_text:
+            mode = "TEMPLATE3D"
+        else:
+            mode = "2D" if mode_text == "2D" else "3D"
         idx = self._state.active_idx
         if idx is None or self._state.active_dataset is None:
             self._no_data_warning()
@@ -1667,7 +1680,12 @@ class MainWindow(QMainWindow):
         loc_m = np.column_stack([lx, ly, lz])  # metres, raw z (z-scaling applied in analysis)
 
         from .hlyb_clustering_dialog import HlyBClusteringDialog, HlyBResultWindow
-        from ..analysis.hlyb_clustering import HlyBConfig, analyze_hlyb, analyze_hlyb_2d
+        from ..analysis.hlyb_clustering import (
+            HlyBConfig,
+            analyze_hlyb,
+            analyze_hlyb_2d,
+            analyze_hlyb_template3d,
+        )
 
         defaults = getattr(self, "_hlyb_cfg", None)
         if defaults is None:
@@ -1680,7 +1698,12 @@ class MainWindow(QMainWindow):
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            result = analyze_hlyb_2d(loc_m, tid, cfg) if mode == "2D" else analyze_hlyb(loc_m, tid, cfg)
+            if mode == "2D":
+                result = analyze_hlyb_2d(loc_m, tid, cfg)
+            elif mode == "TEMPLATE3D":
+                result = analyze_hlyb_template3d(loc_m, tid, cfg)
+            else:
+                result = analyze_hlyb(loc_m, tid, cfg)
         except Exception as exc:
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "HlyB Subunit Pair Analysis", f"Analysis failed: {exc}")
@@ -1690,7 +1713,8 @@ class MainWindow(QMainWindow):
                 QApplication.restoreOverrideCursor()
 
         from .modeless import show_modeless
-        win = HlyBResultWindow(result, cfg, title=f"{ds.name} ({mode})", owner=self,
+        title_mode = "Template matching (3D)" if mode == "TEMPLATE3D" else mode
+        win = HlyBResultWindow(result, cfg, title=f"{ds.name} ({title_mode})", owner=self,
                                prefer_2d=(mode == "2D"))
         show_modeless(win, self)
 
@@ -1702,14 +1726,29 @@ class MainWindow(QMainWindow):
                 f"{result['n_total_traces']} trace(s), {result['n_border_traces']} border-excluded, "
                 f"{result['n_traces']} interior → ")
             extra = (f"border {cfg.border_size_nm:g} nm, mask px {cfg.mask_pixel_size_nm:g} nm")
+        elif mode == "TEMPLATE3D":
+            qc = result.get("match_qc", {})
+            prefix = (
+                f"HlyB subunit pair analysis (template matching 3D) on '{ds.name}': "
+                f"{result['n_traces']} trace(s) → ")
+            extra = (
+                f"z-scale {cfg.z_scaling_factor:g}, template tol {result['model_pair_tolerance_nm']:.1f} nm, "
+                f"tested {qc.get('n_candidates_tested', 0)} candidate(s), "
+                f"passed {qc.get('n_candidates_passed_thresholds', 0)}, "
+                f"overlap-rejected {qc.get('n_overlap_rejected', 0)}"
+            )
         else:
             prefix = f"HlyB subunit pair analysis (3D) on '{ds.name}': {result['n_traces']} trace(s) → "
             extra = f"z-scale {cfg.z_scaling_factor:g}"
+        radius_label = (
+            f"candidate edge {result['candidate_edge_radius_nm']:.1f} nm"
+            if mode == "TEMPLATE3D" else f"HlyB radius {result['hlyb_diameter_nm']:.1f} nm"
+        )
         self._state.log(
             prefix
             + f"{result['n_subunits']} subunit(s) → {result['n_structures']} HlyB structure(s); "
             f"{pd.size} pair(s), median distance {med:.2f} nm "
-            f"(unit Ø {result['dunit_nm']:.1f} nm, HlyB radius {result['hlyb_diameter_nm']:.1f} nm, "
+            f"(unit Ø {result['dunit_nm']:.1f} nm, {radius_label}, "
             f"min loc/trace {cfg.min_loc_per_trace}, {extra}).",
             dataset_idx=idx)
 
@@ -1788,6 +1827,34 @@ class MainWindow(QMainWindow):
         win = ConvSegmentationWindow(self._state, idx, owner=self)
         show_modeless(win, self)
 
+    def _show_conv_segmentation_3d(self) -> None:
+        """Analyze › Segmentation › Convolution (3D)… — open the interactive
+        3-D geometry-kernel convolution segmentation tool for the active dataset.
+
+        Requires a 3-D dataset; the data and kernel are convolved in full 3-D and
+        viewed as an orthogonal (XY/XZ/YZ) slice viewer."""
+        import numpy as np
+
+        idx = self._state.active_idx
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        ds = self._state.datasets[idx]
+        try:
+            loc = np.asarray(ds.loc_nm, dtype=float)
+        except Exception:
+            loc = np.empty((0, 2))
+        if loc.ndim != 2 or loc.shape[1] < 3:
+            QMessageBox.information(
+                self, "Convolution Segmentation (3D)",
+                "The active dataset is 2-D. Use 'Convolution…' for 2-D data; the 3-D "
+                "tool needs localizations with a Z coordinate.")
+            return
+        from .conv_segmentation_3d_dialog import ConvSegmentation3DWindow
+        from .modeless import show_modeless
+        win = ConvSegmentation3DWindow(self._state, idx, owner=self)
+        show_modeless(win, self)
+
     def _show_curvilinear_segmentation(self) -> None:
         """Analyze › Segmentation › Curvilinear Structures… — open the
         interactive Hessian/Frangi filament-tracing tool for the active dataset."""
@@ -1825,6 +1892,34 @@ class MainWindow(QMainWindow):
                 {"bounds": [float(cx) - side / 2.0, float(cy) - side / 2.0, side, side]},
                 name=name, coordinate_space="plot",
                 stroke_color=stroke_color)
+            rec.context = {"dataset_idx": idx, "source": source}
+            self._state.rois.add(rec)
+        self._state.rois.set_show_all(True)
+        self._show_render(idx)
+        self._show_roi_manager()
+        if log_message:
+            self._state.log(log_message)
+        return int(centers.shape[0])
+
+    def add_point_rois_3d(self, idx: int, centers, *, name_prefix: str, source: str,
+                          stroke_color: str, names: list[str] | None = None,
+                          log_message: str | None = None) -> int:
+        """Add a 3-D point ROI (full ``[x, y, z]`` nm geometry) for each centre in
+        *centers* ``(K, 3)`` to the ROI Manager, reveal them, and show render +
+        manager. Used by the 3-D convolution segmentation tool; returns the count
+        added."""
+        import numpy as np
+
+        from ..core.roi import RoiRecord
+
+        centers = np.asarray(centers, dtype=float).reshape(-1, 3)
+        if centers.shape[0] == 0 or not (0 <= idx < len(self._state.datasets)):
+            return 0
+        for i, (cx, cy, cz) in enumerate(centers, start=1):
+            name = names[i - 1] if names is not None and i - 1 < len(names) else f"{name_prefix} {i}"
+            rec = RoiRecord.create(
+                "point", {"point": [float(cx), float(cy), float(cz)]},
+                name=name, coordinate_space="plot", stroke_color=stroke_color)
             rec.context = {"dataset_idx": idx, "source": source}
             self._state.rois.add(rec)
         self._state.rois.set_show_all(True)

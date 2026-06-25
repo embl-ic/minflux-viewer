@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..analysis import conv_segmentation as cs
+from .layer_brightness import LayerBrightness, percentile_levels
 from .roi_overlay import PointMarkerItem
 
 _MAX_IMAGE_PX = 40_000_000      # guard: skip convolution above this histogram size
@@ -78,6 +79,8 @@ class ConvSegmentationWindow(QDialog):
         self._labels: list[str] = []
         self._suspend = False
         self._fitted = False       # auto-range the response view only on first draw
+        self._data_vmax = 1.0      # current Data-layer default high level
+        self._bc = LayerBrightness()
         self._image_lut = self._alpha_white_lut()
         self._model_params: dict[str, dict] = {}   # per-model param cache (persisted)
         self._active_model_key: str | None = None
@@ -88,6 +91,7 @@ class ConvSegmentationWindow(QDialog):
         self._recompute_timer.timeout.connect(self._recompute)
 
         self._build_ui()
+        self._register_bc_layers()
         self._restore_prefs()      # restore last-session model + params (builds param spins)
         self._recompute()
 
@@ -235,6 +239,16 @@ class ConvSegmentationWindow(QDialog):
         layers.addWidget(self._show_response)
         layers.addWidget(self._show_image)
         layers.addStretch(1)
+        layers.addWidget(QLabel("B/C:"))
+        self._bc_target = QComboBox()
+        self._bc_target.addItems(["Response", "Data"])
+        self._bc_target.setToolTip("Layer the Brightness/Contrast dialog adjusts.")
+        self._bc_target.currentTextChanged.connect(self._bc.set_target)
+        layers.addWidget(self._bc_target)
+        self._bc_btn = QPushButton("B/C…")
+        self._bc_btn.setToolTip("Open the Brightness/Contrast dialog for the selected layer.")
+        self._bc_btn.clicked.connect(self._open_bc)
+        layers.addWidget(self._bc_btn)
         center.addLayout(layers)
 
         self._plot = pg.PlotWidget()
@@ -339,6 +353,26 @@ class ConvSegmentationWindow(QDialog):
         line.setFrameShape(QFrame.Shape.HLine)
         line.setStyleSheet("color:#444;")
         return line
+
+    # ----------------------------------------------------- brightness/contrast
+    def _register_bc_layers(self) -> None:
+        """Register the Response and Data image layers with the shared B/C dialog."""
+        self._bc.add_layer(
+            "Response",
+            get_pixels=lambda: self._response if self._response.size else None,
+            apply=lambda lo, hi: self._resp_img.setLevels((lo, hi)),
+            auto=lambda: percentile_levels(self._response, 0.0, 99.5),
+            default=lambda: (0.0, 1.0))
+        self._bc.add_layer(
+            "Data",
+            get_pixels=lambda: (self._H[self._H > 0] if self._H.size else None),
+            apply=lambda lo, hi: self._hist_img.setLevels((lo, hi)),
+            auto=lambda: percentile_levels(self._H, 0.0, 99.5, positive_only=True),
+            default=lambda: (0.0, self._data_vmax))
+
+    def _open_bc(self) -> None:
+        self._bc.set_target(self._bc_target.currentText())
+        self._bc.open(self)
 
     @staticmethod
     def _alpha_white_lut() -> np.ndarray:
@@ -471,6 +505,10 @@ class ConvSegmentationWindow(QDialog):
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
         try:
             self._save_prefs()
+        except Exception:
+            pass
+        try:
+            self._bc.close()
         except Exception:
             pass
         super().closeEvent(event)
@@ -634,14 +672,19 @@ class ConvSegmentationWindow(QDialog):
         rect = QRectF(float(self._xedge[0]), float(self._yedge[0]),
                       float(self._xedge[-1] - self._xedge[0]),
                       float(self._yedge[-1] - self._yedge[0]))
-        self._resp_img.setImage(self._oriented(self._response), levels=(0.0, 1.0))
+        pos = self._H[self._H > 0]
+        self._data_vmax = float(np.percentile(pos, 99.0)) if pos.size else 1.0
+        self._data_vmax = max(self._data_vmax, 1.0)
+
+        resp_lv = self._bc.effective_levels("Response") or (0.0, 1.0)
+        self._resp_img.setImage(self._oriented(self._response), levels=resp_lv)
         self._resp_img.setRect(rect)
 
-        pos = self._H[self._H > 0]
-        vmax = float(np.percentile(pos, 99.0)) if pos.size else 1.0
-        self._hist_img.setImage(self._oriented(self._H), levels=(0.0, max(vmax, 1.0)))
+        data_lv = self._bc.effective_levels("Data") or (0.0, self._data_vmax)
+        self._hist_img.setImage(self._oriented(self._H), levels=data_lv)
         self._hist_img.setRect(rect)
         self._update_layer_visibility()
+        self._bc.refresh_if_open()
 
         if not self._fitted:        # keep the user's pan/zoom on later recomputes
             self._plot.getViewBox().autoRange(padding=0.02)

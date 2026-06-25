@@ -114,6 +114,8 @@ DEFAULT_PREFS: dict = {
         "filter_bounds_color": "Green",
         "filter_bounds_size": 1,
         "histogram_values": ["trace mean"],
+        # Per-dataset overlay channel colours (1st..6th), cycled for overlays.
+        "overlay_colors": ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"],
     },
     "plugin": {
         "msr_export_folder": "",

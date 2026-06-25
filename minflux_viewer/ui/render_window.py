@@ -651,7 +651,10 @@ class RenderWindow(QWidget):
         self._render_mode: str = "localizations"
         self._image_data: np.ndarray | None = None
         self._dataset_dim_label: str = "2D"
-        self._active_cmap: str = "hot"
+        # Default colormap from Preferences > Appearance > Render View (the combo
+        # stores capitalized names like "Hot"; the render pipeline uses lowercase).
+        pref_cmap = str(state.prefs.get("plot", {}).get("render_cmap", "hot")).lower()
+        self._active_cmap: str = pref_cmap if pref_cmap in _COLORMAPS else "hot"
         self._axis_visible: bool = False
         self._sigma_nm_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._channels: list[dict] = []
@@ -857,7 +860,10 @@ class RenderWindow(QWidget):
             for ch in self._channels
         }
         self._channels = []
-        color_cycle = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray"]
+        from ..core.overlay import overlay_color_cycle
+        # Channel colours from Preferences > Appearance > Overlay (+ Gray fallback
+        # for a 7th channel beyond the configured cycle).
+        color_cycle = list(overlay_color_cycle(self._state.prefs)) + ["Gray"]
         active_group = None
         if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
             ds0 = self._state.datasets[self._idx]
