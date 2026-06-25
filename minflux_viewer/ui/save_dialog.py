@@ -1,16 +1,19 @@
 """
-Save-processed-data dialog.
+Save / Export dialog.
 
-The data is always written as **canonical raw** values; all gating, calibration
-and filtering go into a ``<stem>_metadata.json`` sidecar. The dialog therefore
-only decides *where*:
+Most decisions are pre-configured in **Preferences > Data > "When saving/exporting
+data file:"** (enabled formats, data content, include flags, filter handling), so
+this dialog stays short: it asks for the **path + format**, the **content** (only
+when both raw and snapshot are enabled), and exposes the rest under **More
+options…** for one-off overrides.
 
-- **File-backed dataset** (already has a physical ``.mat`` / ``.npy`` / ``.json``):
-  the raw data is already on disk, so only the metadata sidecar is written.
-- **No source file** (``.msr`` extract, duplicate): the user picks a name, a
-  format (``.mat`` / ``.npy`` / ``.json``) and, optionally, a full location.
+Data content:
+- **Raw canonical** — the untouched all-iteration ``mfx`` (reloads + re-applies the
+  recipe). For a file-backed dataset the raw is already on disk, so this offers a
+  "recipe sidecar only" shortcut.
+- **Processed snapshot** — the current view with RIMF/transform/filter baked in.
 
-The actual writing is done by :func:`minflux_viewer.core.save.save_processed`.
+The writing is done by :func:`minflux_viewer.core.save.save_processed`.
 """
 
 from __future__ import annotations
@@ -19,36 +22,38 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
-_DESCRIPTION = (
-    "The data is saved as <b>canonical raw data</b>, intentionally without "
-    "touching the raw values. All gating, calibration and filtering are saved "
-    "to and tracked from a <code>&lt;stem&gt;_metadata.json</code> file."
-)
-
-# (label, format key, extension)
-_FORMATS = (
-    ("MATLAB (.mat)", "mat", ".mat"),
-    ("NumPy (.npy)", "npy", ".npy"),
-    ("JSON (.json)", "json", ".json"),
-)
-_FILTERS = {
-    "mat": "MATLAB (*.mat)", "npy": "NumPy (*.npy)", "json": "JSON (*.json)",
+# (extension label, format key)
+_FORMAT_LABELS = {
+    "mat": "MATLAB (.mat)", "npy": "NumPy (.npy)", "npz": "NumPy zip (.npz)",
+    "json": "JSON (.json)", "csv": "CSV (.csv)", "zarr": "Zarr (.zarr)",
 }
+_EXT = {"mat": ".mat", "npy": ".npy", "npz": ".npz", "json": ".json",
+        "csv": ".csv", "zarr": ".zarr"}
+_FILTERS = {
+    "mat": "MATLAB (*.mat)", "npy": "NumPy (*.npy)", "npz": "NumPy zip (*.npz)",
+    "json": "JSON (*.json)", "csv": "CSV (*.csv)", "zarr": "Zarr (*.zarr)",
+}
+_ALL_FORMATS = ["mat", "npy", "npz", "json", "csv", "zarr"]
+# A file-backed dataset can skip re-writing raw only for reloadable raw formats.
+_RELOADABLE_RAW_EXT = (".mat", ".npy", ".json")
 
 
 class SaveProcessedDataDialog(QDialog):
-    """Decide where to save processed data (data file + metadata sidecar)."""
+    """Collect where/how to save, defaulting from the export preferences."""
 
     def __init__(
         self,
@@ -57,65 +62,78 @@ class SaveProcessedDataDialog(QDialog):
         file_backed: bool = False,
         source_path: str | Path | None = None,
         default_dir: str | Path | None = None,
+        prefs: dict | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Save processed data")
-        self.setMinimumWidth(480)
+        self.setWindowTitle("Save / export data")
+        self.setMinimumWidth(520)
 
         self._file_backed = bool(file_backed)
         self._chosen_path: Path | None = None
         self._default_dir = Path(default_dir or Path.home())
+        data_prefs = (prefs or {}).get("data", {}) if prefs else {}
+
+        # enabled formats (fall back to all so saving is never locked out)
+        enabled = [k for k in _ALL_FORMATS
+                   if k in set(data_prefs.get("export_formats", _ALL_FORMATS))]
+        self._formats = enabled or list(_ALL_FORMATS)
+        # content choices
+        content = list(data_prefs.get("export_content", ["raw", "snapshot"])) or \
+            ["raw", "snapshot"]
+        self._contents = [c for c in ("raw", "snapshot") if c in content] or \
+            ["raw", "snapshot"]
 
         root = QVBoxLayout(self)
         if dataset_name:
             root.addWidget(QLabel(f"Dataset: <b>{dataset_name}</b>"))
 
-        desc = QLabel(_DESCRIPTION)
-        desc.setWordWrap(True)
-        desc.setStyleSheet("color: palette(mid); margin: 4px 0;")
-        root.addWidget(desc)
+        # ── content ──────────────────────────────────────────────────
+        content_row = QHBoxLayout()
+        content_row.addWidget(QLabel("Content:"))
+        self._content_combo = QComboBox()
+        _labels = {"raw": "Raw canonical (all iterations)",
+                   "snapshot": "Processed snapshot (current view)"}
+        for c in self._contents:
+            self._content_combo.addItem(_labels[c], c)
+        self._content_combo.currentIndexChanged.connect(lambda *_: self._refresh())
+        content_row.addWidget(self._content_combo, 1)
+        root.addLayout(content_row)
+        # Hide the row entirely when there's only one content choice.
+        if len(self._contents) < 2:
+            self._content_combo.parentWidget()  # no-op; keep ref
+            for i in range(content_row.count()):
+                w = content_row.itemAt(i).widget()
+                if w is not None:
+                    w.setVisible(False)
 
-        if self._file_backed:
-            self._build_file_backed(root, source_path)
-        else:
-            self._build_no_file(root, dataset_name)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Save).setDefault(True)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
-
-    # ------------------------------------------------------------------
-    def _build_file_backed(self, root: QVBoxLayout, source_path) -> None:
+        # ── file-backed raw shortcut ─────────────────────────────────
         src = Path(source_path) if source_path else None
-        stem = (src.stem if src else "dataset")
-        path_lbl = QLabel(f"Input data file exists:\n<b>{src}</b>")
-        path_lbl.setWordWrap(True)
-        path_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        root.addWidget(path_lbl)
-        note = QLabel(
-            f"Only the operation will be saved into "
-            f"<b>{stem}_metadata.json</b> (next to the data file)."
-        )
-        note.setWordWrap(True)
-        root.addWidget(note)
+        self._recipe_only = QCheckBox("raw data already on disk — write recipe sidecar only")
+        self._recipe_only.setChecked(True)
+        self._recipe_only.toggled.connect(lambda *_: self._refresh())
+        if self._file_backed and src is not None:
+            note = QLabel(f"Source: <b>{src}</b>")
+            note.setWordWrap(True)
+            note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            root.addWidget(note)
+            root.addWidget(self._recipe_only)
 
-    def _build_no_file(self, root: QVBoxLayout, dataset_name: str) -> None:
-        stem = Path(dataset_name or "dataset").stem or "dataset"
-
+        # ── name / format / location ─────────────────────────────────
+        self._path_box = QWidget()
+        pbox = QVBoxLayout(self._path_box)
+        pbox.setContentsMargins(0, 0, 0, 0)
         name_row = QHBoxLayout()
         name_row.addWidget(QLabel("Name:"))
-        self._name = QLineEdit(f"{stem}_processed")
+        stem = Path(dataset_name or "dataset").stem or "dataset"
+        self._name = QLineEdit(f"{stem}_export")
         name_row.addWidget(self._name, 1)
         self._format = QComboBox()
-        for label, key, _ext in _FORMATS:
-            self._format.addItem(label, key)
+        for key in self._formats:
+            self._format.addItem(_FORMAT_LABELS[key], key)
+        self._format.currentIndexChanged.connect(lambda *_: self._sync_location())
         name_row.addWidget(self._format)
-        root.addLayout(name_row)
+        pbox.addLayout(name_row)
 
         browse_row = QHBoxLayout()
         self._loc_lbl = QLabel(f"Location: {self._default_dir}")
@@ -124,43 +142,112 @@ class SaveProcessedDataDialog(QDialog):
         browse = QPushButton("Save as…")
         browse.clicked.connect(self._on_browse)
         browse_row.addWidget(browse)
-        root.addLayout(browse_row)
+        pbox.addLayout(browse_row)
+        root.addWidget(self._path_box)
+
+        # ── More options… ────────────────────────────────────────────
+        self._more_btn = QPushButton("More options ▸")
+        self._more_btn.setCheckable(True)
+        self._more_btn.setFlat(True)
+        self._more_btn.toggled.connect(self._toggle_more)
+        root.addWidget(self._more_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self._more_box = QGroupBox()
+        more = QVBoxLayout(self._more_box)
+        self._inc_attrs = QCheckBox("include properties & attributes")
+        self._inc_attrs.setChecked(bool(data_prefs.get("export_include_attrs", True)))
+        self._inc_derived = QCheckBox("freeze derived attributes")
+        self._inc_derived.setChecked(bool(data_prefs.get("export_include_derived", False)))
+        self._inc_recipe = QCheckBox("write recipe sidecar")
+        self._inc_recipe.setChecked(bool(data_prefs.get("export_include_recipe", True)))
+        more.addWidget(self._inc_attrs)
+        more.addWidget(self._inc_derived)
+        more.addWidget(self._inc_recipe)
+        filt_row = QHBoxLayout()
+        filt_row.addWidget(QLabel("Filter handling:"))
+        self._filter_mode = QComboBox()
+        self._filter_mode.addItem("flag rows (ftr column, keep all)", "flag")
+        self._filter_mode.addItem("apply (drop filtered rows)", "apply")
+        i = self._filter_mode.findData(data_prefs.get("export_filter_mode", "flag"))
+        if i >= 0:
+            self._filter_mode.setCurrentIndex(i)
+        filt_row.addWidget(self._filter_mode, 1)
+        more.addLayout(filt_row)
+        self._more_box.setVisible(False)
+        root.addWidget(self._more_box)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setDefault(True)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self._sync_location()
+        self._refresh()
 
     # ------------------------------------------------------------------
+    def _current_content(self) -> str:
+        return self._content_combo.currentData() or self._contents[0]
+
+    def _is_recipe_only(self) -> bool:
+        """Metadata-only: file-backed, raw content, shortcut checked."""
+        return (self._file_backed and self._current_content() == "raw"
+                and self._recipe_only.isChecked())
+
+    def _refresh(self) -> None:
+        # The recipe-only shortcut only applies to raw content on a file-backed ds.
+        show_shortcut = self._file_backed and self._current_content() == "raw"
+        self._recipe_only.setVisible(show_shortcut)
+        self._path_box.setVisible(not self._is_recipe_only())
+        self.adjustSize()
+
+    def _toggle_more(self, on: bool) -> None:
+        self._more_btn.setText("More options ▾" if on else "More options ▸")
+        self._more_box.setVisible(on)
+        self.adjustSize()
+
+    def _sync_location(self) -> None:
+        ext = _EXT[self._format.currentData()]
+        if self._chosen_path is not None:
+            self._loc_lbl.setText(f"Location: {self._chosen_path.with_suffix(ext).parent}")
+
     def _on_browse(self) -> None:
         fmt = self._format.currentData()
-        ext = dict((k, e) for _l, k, e in _FORMATS)[fmt]
+        ext = _EXT[fmt]
         suggested = str(self._default_dir / f"{self._name.text() or 'dataset'}{ext}")
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save processed data", suggested, _FILTERS[fmt]
-        )
+            self, "Save / export data", suggested, _FILTERS[fmt])
         if not path:
             return
         p = Path(path)
         self._chosen_path = p
-        # reflect the chosen file in the form
         self._name.setText(p.stem)
         self._loc_lbl.setText(f"Location: {p.parent}")
-        if p.suffix.lower() in (".mat", ".npy", ".json"):
-            key = p.suffix.lower().lstrip(".")
-            i = self._format.findData(key)
-            if i >= 0:
-                self._format.setCurrentIndex(i)
+        key = p.suffix.lower().lstrip(".")
+        i = self._format.findData(key)
+        if i >= 0:
+            self._format.setCurrentIndex(i)
 
     # ------------------------------------------------------------------
     def options(self) -> dict:
-        """Return where/how to save.
-
-        File-backed → ``{"data_path": None}`` (metadata only). Otherwise
-        ``{"data_path": <Path>, "fmt": <key>}``.
-        """
-        if self._file_backed:
-            return {"data_path": None, "fmt": None}
+        """Return the full save options for :func:`core.save.save_processed`."""
+        include = {
+            "attrs": self._inc_attrs.isChecked(),
+            "derived": self._inc_derived.isChecked(),
+            "recipe": self._inc_recipe.isChecked(),
+        }
+        filter_mode = self._filter_mode.currentData() or "flag"
+        content = self._current_content()
+        if self._is_recipe_only():
+            return {"data_path": None, "fmt": None, "content": "raw",
+                    "include": {**include, "recipe": True}, "filter_mode": filter_mode}
         fmt = self._format.currentData()
-        ext = dict((k, e) for _l, k, e in _FORMATS)[fmt]
+        ext = _EXT[fmt]
         if self._chosen_path is not None:
             data_path = self._chosen_path.with_suffix(ext)
         else:
             name = self._name.text().strip() or "dataset"
             data_path = self._default_dir / f"{name}{ext}"
-        return {"data_path": data_path, "fmt": fmt}
+        return {"data_path": data_path, "fmt": fmt, "content": content,
+                "include": include, "filter_mode": filter_mode}

@@ -3307,6 +3307,7 @@ class MainWindow(QMainWindow):
             file_backed=file_backed,
             source_path=src if file_backed else None,
             default_dir=default_dir,
+            prefs=self._state.prefs,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -3320,6 +3321,9 @@ class MainWindow(QMainWindow):
                 data_path=opts["data_path"],
                 fmt=opts["fmt"],
                 metadata_dir=src.parent if file_backed else None,
+                content=opts.get("content", "raw"),
+                include=opts.get("include"),
+                filter_mode=opts.get("filter_mode", "flag"),
             )
         except Exception as exc:
             QMessageBox.critical(

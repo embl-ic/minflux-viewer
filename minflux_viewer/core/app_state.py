@@ -95,6 +95,13 @@ DEFAULT_PREFS: dict = {
         "show_scatter": False,
         "show_histogram": False,
         "show_render": True,
+        # When saving/exporting a data file (defaults that shrink the Save dialog):
+        "export_formats": ["mat", "npy", "npz", "json", "csv", "zarr"],  # offered in the dialog
+        "export_content": ["raw", "snapshot"],   # raw canonical / processed snapshot
+        "export_include_attrs": True,            # original properties & attributes
+        "export_include_derived": False,         # freeze derived attributes (snapshot)
+        "export_include_recipe": True,           # write the metadata sidecar
+        "export_filter_mode": "flag",            # "apply" (drop rows) | "flag" (ftr col)
     },
     "plot": {
         "rimf_value": 0.67,
