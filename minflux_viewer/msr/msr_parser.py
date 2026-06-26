@@ -63,33 +63,41 @@ class LegacyMSRParser:
         except Exception:
             return ""
 
-    def build_series_tree_entries(self, msr_file: str, meta=None) -> list[dict]:
+    def build_series_tree_entries(self, msr_file: str, meta=None, log=print) -> list[dict]:
         entries: list[dict] = []
         try:
             from msr_reader import OBFFile
         except Exception:
             return entries
 
-        with OBFFile(msr_file) as obf:
-            for i in range(obf.num_stacks):
-                header = obf.stack_headers[i]
-                sh = obf.shapes[i]
-                name = (
-                    getattr(header, "description", "")
-                    or getattr(header, "name", "")
-                    or getattr(sh, "name", "")
-                    or f"Series {i + 1}"
-                )
-                sizes = list(getattr(sh, "sizes", []) or [])
-                shape_str = " x ".join(str(s) for s in sizes) if sizes else ""
-                entries.append(
-                    {
-                        "index": i,
-                        "display_name": str(name).replace("_", " "),
-                        "shape_str": shape_str,
-                        "dtype": self._dtype_name(getattr(header, "dtype", 0)),
-                    }
-                )
+        # Defense-in-depth: a malformed/variant OBF header must not crash the open
+        # (the patched reader handles meta_data_position==0; this catches the rest).
+        try:
+            with OBFFile(msr_file) as obf:
+                for i in range(obf.num_stacks):
+                    header = obf.stack_headers[i]
+                    sh = obf.shapes[i]
+                    name = (
+                        getattr(header, "description", "")
+                        or getattr(header, "name", "")
+                        or getattr(sh, "name", "")
+                        or f"Series {i + 1}"
+                    )
+                    sizes = list(getattr(sh, "sizes", []) or [])
+                    shape_str = " x ".join(str(s) for s in sizes) if sizes else ""
+                    entries.append(
+                        {
+                            "index": i,
+                            "display_name": str(name).replace("_", " "),
+                            "shape_str": shape_str,
+                            "dtype": self._dtype_name(getattr(header, "dtype", 0)),
+                        }
+                    )
+        except Exception as exc:
+            try:
+                log(f"[warn] could not read OBF image-series tree: {exc}")
+            except Exception:
+                pass
         return entries
 
 
@@ -143,7 +151,7 @@ class GeneralMSRParser:
             "mode": "legacy",
             "msr": str(msr_file),
             "metadata": _ome_metadata(msr_file),
-            "legacy_series_tree": self.legacy.build_series_tree_entries(str(msr_file)),
+            "legacy_series_tree": self.legacy.build_series_tree_entries(str(msr_file), log=log),
         }
 
     def _mfxdta_dataset_entry(self, stack_idx, desc, blob, collect_zarr_fields, label_map, log):

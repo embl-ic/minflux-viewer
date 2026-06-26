@@ -25,6 +25,12 @@ single-channel and modern multi-channel files alike) are recovered from the
 embedded ``MFXDTA`` stacks, so ``parse_msr_general`` works on every platform.
 """
 
+from .obf_compat import apply_obf_reader_patches
+
+# Work around the read-only msr-reader's meta_data_position==0 crash before any
+# OBFFile is constructed (see obf_compat for details).
+apply_obf_reader_patches()
+
 from .io import parse_msr_general, pick_one_msr, collect_zarr_fields
 from .export import export_arrays
 from .utils import slug
