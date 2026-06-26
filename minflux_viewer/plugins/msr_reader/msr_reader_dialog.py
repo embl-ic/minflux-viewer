@@ -2335,6 +2335,26 @@ class MsrReaderDialog(QWidget):
         return True, ""
 
     def _viewer_used_bead_gri_for_dataset(self, name: str) -> set[int] | None:
+        # Prefer translated legacy MBM metadata (gri↔R-ID map + used list).
+        from ...msr import state as MFSTATE
+        meta = (getattr(MFSTATE, "mbm_meta_map", {}) or {}).get(name)
+        if meta:
+            pbg = meta.get("points_by_gri") or {}
+            used_names = {str(x).strip() for x in (meta.get("used") or []) if str(x).strip()}
+            name_to_gri = {}
+            for info in pbg.values():
+                if isinstance(info, dict) and info.get("name") is not None:
+                    try:
+                        name_to_gri[str(info["name"])] = int(info["gri"])
+                    except (TypeError, ValueError):
+                        pass
+            if used_names and name_to_gri:
+                used_gri = {name_to_gri[n] for n in used_names if n in name_to_gri}
+                if used_gri:
+                    self.log(f"[viewer align] {name}: using {len(used_gri)} "
+                             f"metadata-marked used bead(s) (legacy MBM)")
+                    return used_gri
+
         zroot = self._viewer_zroot_for_dataset_name(name)
         if not zroot:
             return None
@@ -2719,13 +2739,17 @@ class MsrReaderDialog(QWidget):
     def _bead_gri_to_rid(self, names) -> dict[int, str]:
         """Map ``gri`` (numeric bead ID) → R-ID (the ``points_by_gri`` "name",
         e.g. ``R113``) across *names*, for human-readable bead reporting."""
+        from ...msr import state as MFSTATE
+        meta_map = getattr(MFSTATE, "mbm_meta_map", {}) or {}
         out: dict[int, str] = {}
         for name in names:
-            zroot = self._viewer_zroot_for_dataset_name(name)
-            if not zroot:
-                continue
-            attrs = self._read_zarr_attrs_safe(zroot, "grd/mbm/points")
-            pbg = attrs.get("points_by_gri", {}) if isinstance(attrs, dict) else {}
+            pbg = (meta_map.get(name) or {}).get("points_by_gri") or {}
+            if not pbg:
+                zroot = self._viewer_zroot_for_dataset_name(name)
+                if not zroot:
+                    continue
+                attrs = self._read_zarr_attrs_safe(zroot, "grd/mbm/points")
+                pbg = attrs.get("points_by_gri", {}) if isinstance(attrs, dict) else {}
             for key, info in (pbg or {}).items():
                 if not isinstance(info, dict):
                     continue

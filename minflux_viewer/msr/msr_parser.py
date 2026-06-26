@@ -3,7 +3,7 @@ from typing import Any, Dict
 import numpy as np
 import zarr
 
-from .state import reset as reset_state, set_mfx_for, set_mbm_for
+from .state import reset as reset_state, set_mfx_for, set_mbm_for, set_mbm_meta_for
 
 
 def _ome_metadata(msr_file: str) -> dict | None:
@@ -184,6 +184,16 @@ class GeneralMSRParser:
                 if getattr(beads, "size", 0):
                     set_mbm_for(name, beads)
                     log(f"    [mbm] loaded key='{name}' shape={beads.shape}")
+            else:
+                # Legacy bead layout: nested grd/mbm/<R-ID> structured arrays.
+                # Translate to the model points array + metadata (tree unchanged).
+                from .legacy_mbm import build_legacy_mbm
+                legacy = build_legacy_mbm(arch, log)
+                if legacy is not None:
+                    pts, pbg, used = legacy
+                    if getattr(pts, "size", 0):
+                        set_mbm_for(name, pts)
+                    set_mbm_meta_for(name, {"points_by_gri": pbg, "used": used})
         except Exception as e:
             log(f"    [warn] stack {stack_idx}: mfx load failed: {e}")
             return None
