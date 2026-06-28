@@ -330,8 +330,13 @@ class MainWindow(QMainWindow):
         self.actionHlyB2D.triggered.connect(lambda: self._run_hlyb_pair_analysis(mode="2D"))
         self.actionHlyB3D = QAction("3D", self)
         self.actionHlyB3D.triggered.connect(lambda: self._run_hlyb_pair_analysis(mode="3D"))
+        self.actionHlyBTemplate3D = QAction("Template matching (3D)", self)
+        self.actionHlyBTemplate3D.triggered.connect(
+            lambda: self._run_hlyb_pair_analysis(mode="TEMPLATE3D")
+        )
         self.menuHlyBPair.addAction(self.actionHlyB2D)
         self.menuHlyBPair.addAction(self.actionHlyB3D)
+        self.menuHlyBPair.addAction(self.actionHlyBTemplate3D)
         self.menuAnalyzeClustering.addAction(self.actionDbscan)
         self.menuAnalyzeClustering.addAction(self.actionKNearestNeighbour)
         self.menuAnalyzeClustering.addSeparator()
@@ -364,6 +369,9 @@ class MainWindow(QMainWindow):
         self.actionSegConvolution = QAction("Convolution…", self)
         self.actionSegConvolution.triggered.connect(self._show_conv_segmentation)
         self.menuAnalyzeSegmentation.addAction(self.actionSegConvolution)
+        self.actionSegConvolution3D = QAction("Convolution (3D)…", self)
+        self.actionSegConvolution3D.triggered.connect(self._show_conv_segmentation_3d)
+        self.menuAnalyzeSegmentation.addAction(self.actionSegConvolution3D)
         self.actionSegCurvilinear = QAction("Curvilinear Structures…", self)
         self.actionSegCurvilinear.triggered.connect(self._show_curvilinear_segmentation)
         self.menuAnalyzeSegmentation.addAction(self.actionSegCurvilinear)
@@ -671,7 +679,6 @@ class MainWindow(QMainWindow):
             u.actionBatchExport,
             u.actionBatchFilter,
             self.menuMeasure.menuAction(),
-            self.actionScaleBar,
             self.actionPlotProfile,
             self.actionSetMeasurements,
             self.actionDbscan,
@@ -679,6 +686,7 @@ class MainWindow(QMainWindow):
             self.menuHlyBPair.menuAction(),
             self.actionHlyB2D,
             self.actionHlyB3D,
+            self.actionHlyBTemplate3D,
             self.menuAnalyzeSegmentation.menuAction(),
             self.actionSegNpc2D,
             self.actionSegNpc3D,
@@ -1637,15 +1645,20 @@ class MainWindow(QMainWindow):
         self._state.log(f"Converted ROI '{record.name}' ({old_type}) → convex hull.")
 
     def _run_hlyb_pair_analysis(self, mode: str = "3D") -> None:
-        """Analyze › Clustering › HlyB subunit pair analysis › 2D/3D — detect
+        """Analyze › Clustering › HlyB subunit pair analysis › 2D/3D/template — detect
         protein sub-units from traces, cluster them into HlyB structures and
         report the sub-unit pair distances in a scatter + histogram window. The
         2-D path first builds a per-E.coli mask and drops traces in the eroded
-        border margin (where 2-D distances are unreliable)."""
+        border margin (where 2-D distances are unreliable). The template path
+        accepts partial 3-D matches to the six-site HlyB distance model."""
         import numpy as np
         from ..core.loader import mfx_get
 
-        mode = "2D" if str(mode).upper() == "2D" else "3D"
+        mode_text = str(mode).upper()
+        if "TEMPLATE" in mode_text:
+            mode = "TEMPLATE3D"
+        else:
+            mode = "2D" if mode_text == "2D" else "3D"
         idx = self._state.active_idx
         if idx is None or self._state.active_dataset is None:
             self._no_data_warning()
@@ -1667,7 +1680,12 @@ class MainWindow(QMainWindow):
         loc_m = np.column_stack([lx, ly, lz])  # metres, raw z (z-scaling applied in analysis)
 
         from .hlyb_clustering_dialog import HlyBClusteringDialog, HlyBResultWindow
-        from ..analysis.hlyb_clustering import HlyBConfig, analyze_hlyb, analyze_hlyb_2d
+        from ..analysis.hlyb_clustering import (
+            HlyBConfig,
+            analyze_hlyb,
+            analyze_hlyb_2d,
+            analyze_hlyb_template3d,
+        )
 
         defaults = getattr(self, "_hlyb_cfg", None)
         if defaults is None:
@@ -1680,7 +1698,12 @@ class MainWindow(QMainWindow):
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            result = analyze_hlyb_2d(loc_m, tid, cfg) if mode == "2D" else analyze_hlyb(loc_m, tid, cfg)
+            if mode == "2D":
+                result = analyze_hlyb_2d(loc_m, tid, cfg)
+            elif mode == "TEMPLATE3D":
+                result = analyze_hlyb_template3d(loc_m, tid, cfg)
+            else:
+                result = analyze_hlyb(loc_m, tid, cfg)
         except Exception as exc:
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "HlyB Subunit Pair Analysis", f"Analysis failed: {exc}")
@@ -1690,7 +1713,8 @@ class MainWindow(QMainWindow):
                 QApplication.restoreOverrideCursor()
 
         from .modeless import show_modeless
-        win = HlyBResultWindow(result, cfg, title=f"{ds.name} ({mode})", owner=self,
+        title_mode = "Template matching (3D)" if mode == "TEMPLATE3D" else mode
+        win = HlyBResultWindow(result, cfg, title=f"{ds.name} ({title_mode})", owner=self,
                                prefer_2d=(mode == "2D"))
         show_modeless(win, self)
 
@@ -1702,14 +1726,29 @@ class MainWindow(QMainWindow):
                 f"{result['n_total_traces']} trace(s), {result['n_border_traces']} border-excluded, "
                 f"{result['n_traces']} interior → ")
             extra = (f"border {cfg.border_size_nm:g} nm, mask px {cfg.mask_pixel_size_nm:g} nm")
+        elif mode == "TEMPLATE3D":
+            qc = result.get("match_qc", {})
+            prefix = (
+                f"HlyB subunit pair analysis (template matching 3D) on '{ds.name}': "
+                f"{result['n_traces']} trace(s) → ")
+            extra = (
+                f"z-scale {cfg.z_scaling_factor:g}, template tol {result['model_pair_tolerance_nm']:.1f} nm, "
+                f"tested {qc.get('n_candidates_tested', 0)} candidate(s), "
+                f"passed {qc.get('n_candidates_passed_thresholds', 0)}, "
+                f"overlap-rejected {qc.get('n_overlap_rejected', 0)}"
+            )
         else:
             prefix = f"HlyB subunit pair analysis (3D) on '{ds.name}': {result['n_traces']} trace(s) → "
             extra = f"z-scale {cfg.z_scaling_factor:g}"
+        radius_label = (
+            f"candidate edge {result['candidate_edge_radius_nm']:.1f} nm"
+            if mode == "TEMPLATE3D" else f"HlyB radius {result['hlyb_diameter_nm']:.1f} nm"
+        )
         self._state.log(
             prefix
             + f"{result['n_subunits']} subunit(s) → {result['n_structures']} HlyB structure(s); "
             f"{pd.size} pair(s), median distance {med:.2f} nm "
-            f"(unit Ø {result['dunit_nm']:.1f} nm, HlyB radius {result['hlyb_diameter_nm']:.1f} nm, "
+            f"(unit Ø {result['dunit_nm']:.1f} nm, {radius_label}, "
             f"min loc/trace {cfg.min_loc_per_trace}, {extra}).",
             dataset_idx=idx)
 
@@ -1788,6 +1827,34 @@ class MainWindow(QMainWindow):
         win = ConvSegmentationWindow(self._state, idx, owner=self)
         show_modeless(win, self)
 
+    def _show_conv_segmentation_3d(self) -> None:
+        """Analyze › Segmentation › Convolution (3D)… — open the interactive
+        3-D geometry-kernel convolution segmentation tool for the active dataset.
+
+        Requires a 3-D dataset; the data and kernel are convolved in full 3-D and
+        viewed as an orthogonal (XY/XZ/YZ) slice viewer."""
+        import numpy as np
+
+        idx = self._state.active_idx
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        ds = self._state.datasets[idx]
+        try:
+            loc = np.asarray(ds.loc_nm, dtype=float)
+        except Exception:
+            loc = np.empty((0, 2))
+        if loc.ndim != 2 or loc.shape[1] < 3:
+            QMessageBox.information(
+                self, "Convolution Segmentation (3D)",
+                "The active dataset is 2-D. Use 'Convolution…' for 2-D data; the 3-D "
+                "tool needs localizations with a Z coordinate.")
+            return
+        from .conv_segmentation_3d_dialog import ConvSegmentation3DWindow
+        from .modeless import show_modeless
+        win = ConvSegmentation3DWindow(self._state, idx, owner=self)
+        show_modeless(win, self)
+
     def _show_curvilinear_segmentation(self) -> None:
         """Analyze › Segmentation › Curvilinear Structures… — open the
         interactive Hessian/Frangi filament-tracing tool for the active dataset."""
@@ -1825,6 +1892,34 @@ class MainWindow(QMainWindow):
                 {"bounds": [float(cx) - side / 2.0, float(cy) - side / 2.0, side, side]},
                 name=name, coordinate_space="plot",
                 stroke_color=stroke_color)
+            rec.context = {"dataset_idx": idx, "source": source}
+            self._state.rois.add(rec)
+        self._state.rois.set_show_all(True)
+        self._show_render(idx)
+        self._show_roi_manager()
+        if log_message:
+            self._state.log(log_message)
+        return int(centers.shape[0])
+
+    def add_point_rois_3d(self, idx: int, centers, *, name_prefix: str, source: str,
+                          stroke_color: str, names: list[str] | None = None,
+                          log_message: str | None = None) -> int:
+        """Add a 3-D point ROI (full ``[x, y, z]`` nm geometry) for each centre in
+        *centers* ``(K, 3)`` to the ROI Manager, reveal them, and show render +
+        manager. Used by the 3-D convolution segmentation tool; returns the count
+        added."""
+        import numpy as np
+
+        from ..core.roi import RoiRecord
+
+        centers = np.asarray(centers, dtype=float).reshape(-1, 3)
+        if centers.shape[0] == 0 or not (0 <= idx < len(self._state.datasets)):
+            return 0
+        for i, (cx, cy, cz) in enumerate(centers, start=1):
+            name = names[i - 1] if names is not None and i - 1 < len(names) else f"{name_prefix} {i}"
+            rec = RoiRecord.create(
+                "point", {"point": [float(cx), float(cy), float(cz)]},
+                name=name, coordinate_space="plot", stroke_color=stroke_color)
             rec.context = {"dataset_idx": idx, "source": source}
             self._state.rois.add(rec)
         self._state.rois.set_show_all(True)
@@ -3212,6 +3307,7 @@ class MainWindow(QMainWindow):
             file_backed=file_backed,
             source_path=src if file_backed else None,
             default_dir=default_dir,
+            prefs=self._state.prefs,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -3225,6 +3321,9 @@ class MainWindow(QMainWindow):
                 data_path=opts["data_path"],
                 fmt=opts["fmt"],
                 metadata_dir=src.parent if file_backed else None,
+                content=opts.get("content", "raw"),
+                include=opts.get("include"),
+                filter_mode=opts.get("filter_mode", "flag"),
             )
         except Exception as exc:
             QMessageBox.critical(
@@ -3274,71 +3373,119 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(delay_ms, lambda i=idx: self._run_post_load_computations(i))
 
     def _run_post_load_computations(self, idx: int) -> None:
+        """Kick off the one-time computed attributes (RIMF, localization
+        precision, local density) as a chain of single-shot steps.
+
+        Each step returns to the event loop before the next runs, so the Log
+        updates live and the UI stays responsive — the heavy estimators are now
+        vectorised, so every step is sub-second instead of the old ~20 s block.
+        Steps re-resolve the dataset by identity, so closing it mid-chain (or
+        removing another dataset, which shifts indices) aborts/retargets safely.
+        """
         if not (0 <= idx < len(self._state.datasets)):
             return
         ds = self._state.datasets[idx]
         data_prefs = self._state.prefs.get("data", {})
+        needs = (
+            (data_prefs.get("compute_rimf", True) and "rimf" not in ds.derived)
+            or (data_prefs.get("compute_loc_prec", True) and "sigma_per_trace_nm" not in ds.derived)
+            or (data_prefs.get("compute_local_density", True) and "den" not in ds.attr)
+            or bool(ds.state.get("filter_specs"))
+        )
+        if needs:
+            self._state.log(f"Post-load processing of '{ds.name}' (RIMF, precision, density)…")
+        # Schedule (don't call) the first step so the line above paints first.
+        self._post_load_next(ds, self._post_load_rimf)
 
+    def _post_load_index(self, ds) -> "int | None":
+        """Current index of *ds* by identity, or None if it was removed."""
+        for i, d in enumerate(self._state.datasets):
+            if d is ds:
+                return i
+        return None
+
+    def _post_load_next(self, ds, step) -> None:
+        """Run the next post-load step from the event loop (keeps the UI live)."""
+        QTimer.singleShot(0, lambda: step(ds))
+
+    def _post_load_rimf(self, ds) -> None:
+        idx = self._post_load_index(ds)
+        if idx is None:
+            return
+        data_prefs = self._state.prefs.get("data", {})
         if data_prefs.get("compute_rimf", True) and "rimf" not in ds.derived:
             import numpy as np
             plot_prefs = self._state.prefs.get("plot", {})
             if ds.prop.num_dim < 3:
                 # 2D data: Z is all zero, so anisotropy estimation is moot.
-                # RIMF = 1.0 keeps the Z scaling a no-op and stays consistent
-                # with the 3D pipeline without spending the computation.
                 ds.set_rimf(1.0, source="2D (no z correction)")
                 ds.derived["rimf"] = np.asarray([1.0], dtype=float)
                 self._state.log(f"RIMF for '{ds.name}': 1.0 (2D dataset, computation skipped).")
+                self._state.notify_calibration_changed(idx)
             elif plot_prefs.get("use_fixed_rimf", False):
-                # Manual override: apply the fixed preference value instead of
-                # estimating. Tracked as a 'fixed' provenance source.
                 fixed = float(plot_prefs.get("rimf_value", 1.0))
                 ds.set_rimf(fixed, source="fixed (preference)")
                 ds.derived["rimf"] = np.asarray([fixed], dtype=float)
                 self._state.log(f"RIMF for '{ds.name}': {fixed:.4g} (fixed preference value).")
+                self._state.notify_calibration_changed(idx)
             else:
-                # compute_rimf checked: run the same anisotropy estimation as the
-                # plugin (raw last-valid z, never the RIMF-corrected loc_nm).
-                value = None
-                try:
-                    self._state.log(f"Estimating anisotropy / RIMF of '{ds.name}'…")
-                    from ..analysis.trace_analysis import estimate_anisotropy_for_dataset
-                    res = estimate_anisotropy_for_dataset(ds)
-                    if res is not None and np.isfinite(res["rimf"]):
-                        value = float(res["rimf"])
-                        # Apply only when in the physically expected window;
-                        # otherwise treat as failed and reset to 1.0 below.
-                        if 0.5 <= value <= 1.0:
-                            ds.set_rimf(value, source="auto (estimate anisotropy)")
-                            ds.derived["rimf"] = np.asarray([value], dtype=float)
-                            ds.derived["rimf_sizes_x"] = res["x"].sizes
-                            ds.derived["rimf_sizes_y"] = res["y"].sizes
-                            ds.derived["rimf_sizes_z"] = res["z"].sizes
-                            self._state.log(
-                                f"Computed RIMF for '{ds.name}': {value:.4g} (raw last-valid z)"
-                            )
-                except Exception as exc:
-                    self._state.log(f"RIMF estimation failed for '{ds.name}': {exc}", "WARN")
-                if "rimf" not in ds.derived:
-                    # Out of [0.5, 1.0] or estimation failed → reset to 1.0.
-                    ds.set_rimf(1.0, source="auto (out of range → 1.0)")
-                    ds.derived["rimf"] = np.asarray([1.0], dtype=float)
-                    shown = f"{value:.4g}" if value is not None else "failed"
-                    self._state.log(
-                        f"RIMF for '{ds.name}': estimate {shown} outside [0.5, 1.0] — reset to 1.0.",
-                        "WARN",
-                    )
-            # This runs after the dataset's windows are shown, so notify the
-            # views to reflect the freshly-applied RIMF (data-info RIMF text,
-            # render/scatter z-scaling).
-            self._state.notify_calibration_changed(idx)
+                # Heavy estimate: announce now and run it on the next event-loop
+                # turn so this line is painted before the (sub-second) compute.
+                self._state.log(f"Estimating anisotropy / RIMF of '{ds.name}'…")
+                self._post_load_next(ds, self._post_load_rimf_estimate)
+                return
+        self._post_load_next(ds, self._post_load_loc_prec)
 
+    def _post_load_rimf_estimate(self, ds) -> None:
+        idx = self._post_load_index(ds)
+        if idx is None:
+            return
+        import time
+
+        import numpy as np
+        value = None
+        try:
+            t0 = time.perf_counter()
+            from ..analysis.trace_analysis import estimate_anisotropy_for_dataset
+            res = estimate_anisotropy_for_dataset(ds)
+            dt = time.perf_counter() - t0
+            if res is not None and np.isfinite(res["rimf"]):
+                value = float(res["rimf"])
+                if 0.5 <= value <= 1.0:
+                    ds.set_rimf(value, source="auto (estimate anisotropy)")
+                    ds.derived["rimf"] = np.asarray([value], dtype=float)
+                    ds.derived["rimf_sizes_x"] = res["x"].sizes
+                    ds.derived["rimf_sizes_y"] = res["y"].sizes
+                    ds.derived["rimf_sizes_z"] = res["z"].sizes
+                    self._state.log(
+                        f"Computed RIMF for '{ds.name}': {value:.4g} (raw last-valid z, {dt:.1f}s)"
+                    )
+        except Exception as exc:
+            self._state.log(f"RIMF estimation failed for '{ds.name}': {exc}", "WARN")
+        if "rimf" not in ds.derived:
+            ds.set_rimf(1.0, source="auto (out of range → 1.0)")
+            ds.derived["rimf"] = np.asarray([1.0], dtype=float)
+            shown = f"{value:.4g}" if value is not None else "failed"
+            self._state.log(
+                f"RIMF for '{ds.name}': estimate {shown} outside [0.5, 1.0] — reset to 1.0.",
+                "WARN",
+            )
+        self._state.notify_calibration_changed(idx)
+        self._post_load_next(ds, self._post_load_loc_prec)
+
+    def _post_load_loc_prec(self, ds) -> None:
+        if self._post_load_index(ds) is None:
+            return
+        data_prefs = self._state.prefs.get("data", {})
         if data_prefs.get("compute_loc_prec", True) and "sigma_per_trace_nm" not in ds.derived:
             try:
+                import time
+
+                import numpy as np
                 self._state.log(f"Computing localization precision of '{ds.name}'…")
+                t0 = time.perf_counter()
                 from ..analysis.localization_precision import stddev_per_trace
                 from ..core.loader import attr_values_1d
-                import numpy as np
                 loc_x = np.asarray(attr_values_1d(ds, "loc_x"))
                 loc_y = np.asarray(attr_values_1d(ds, "loc_y"))
                 _z = attr_values_1d(ds, "loc_z")
@@ -3346,24 +3493,33 @@ class MainWindow(QMainWindow):
                 _tid = attr_values_1d(ds, "tid")
                 tid = np.arange(loc_x.size) if _tid is None else np.asarray(_tid)
                 result = stddev_per_trace(np.column_stack([loc_x, loc_y, loc_z]), tid)
+                dt = time.perf_counter() - t0
                 ds.attr["sigma_per_trace_nm"] = result["per_trace_sigma_xyz"]
                 ds.attr["sigma_trace_ids"] = result["trace_ids"]
                 ds.derived["sigma_per_trace_nm"] = result["per_trace_sigma_xyz"]
                 ds.derived["sigma_trace_ids"] = result["trace_ids"]
                 ds.cali.loc_precision = np.asarray(result["median_sigma_xyz"], dtype=float)
                 self._state.log(
-                    f"Computed localization precision for '{ds.name}' using StdDev per trace: "
-                    f"median sigma=({result['median_sigma_xyz'][0]:.3g}, "
+                    f"Computed localization precision for '{ds.name}' using StdDev per trace "
+                    f"({dt:.1f}s): median sigma=({result['median_sigma_xyz'][0]:.3g}, "
                     f"{result['median_sigma_xyz'][1]:.3g}, {result['median_sigma_xyz'][2]:.3g}) nm."
                 )
             except Exception as exc:
                 self._state.log(f"Localization precision computation skipped for '{ds.name}': {exc}", "WARN")
+        self._post_load_next(ds, self._post_load_density)
 
+    def _post_load_density(self, ds) -> None:
+        if self._post_load_index(ds) is None:
+            return
+        data_prefs = self._state.prefs.get("data", {})
         if data_prefs.get("compute_local_density", True) and "den" not in ds.attr:
             try:
+                import time
                 self._state.log(f"Computing local density of '{ds.name}'…")
+                t0 = time.perf_counter()
                 from ..analysis.local_density import compute_local_density_for_dataset
                 density, method, detail = compute_local_density_for_dataset(ds, self._state.prefs)
+                dt = time.perf_counter() - t0
                 ds.attr["den"] = density
                 ds.attr["local_density"] = density
                 ds.derived["den"] = density
@@ -3372,7 +3528,7 @@ class MainWindow(QMainWindow):
                     if name not in ds.prop.attr_names:
                         ds.prop.attr_names.append(name)
                 self._state.log(
-                    f"Computed local density for '{ds.name}' using {method} ({detail})."
+                    f"Computed local density for '{ds.name}' using {method} ({detail}, {dt:.1f}s)."
                 )
             except Exception as exc:
                 self._state.log(f"Local density computation skipped for '{ds.name}': {exc}", "WARN")
@@ -3416,7 +3572,12 @@ class MainWindow(QMainWindow):
                 self._state.log(
                     f"Last-valid local density computation skipped for '{ds.name}': {exc}", "WARN",
                 )
+        self._post_load_next(ds, self._post_load_finalize)
 
+    def _post_load_finalize(self, ds) -> None:
+        idx = self._post_load_index(ds)
+        if idx is None:
+            return
         # Restored-from-metadata filters re-evaluate now that derived attributes
         # (den, …) exist, so a re-opened processed dataset shows its saved filter
         # state. (filter_specs is only populated here via a metadata sidecar.)

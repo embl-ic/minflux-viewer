@@ -30,6 +30,8 @@ works in nm throughout.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations, permutations
+from math import comb
 
 import numpy as np
 
@@ -46,6 +48,17 @@ class HlyBConfig:
     diameter_distance_1a1b_nm: float = 14.0
     diameter_distance_1a2a_nm: float = 15.0
     diameter_distance_1b2b_nm: float = 23.0
+    neighboring_domain_distance_nm: float = 12.8
+    cross_domain_distance_nm: float = 21.3
+    # 3-D template matching: 0 means "auto from data/model".
+    min_observed_subunits_per_HlyB: int = 0
+    max_observed_subunits_per_HlyB: int = 6
+    model_pair_tolerance_nm: float = 0.0
+    model_rms_threshold_nm: float = 0.0
+    model_max_residual_nm: float = 0.0
+    min_pair_match_fraction: float = 0.6
+    candidate_edge_radius_nm: float = 0.0
+    max_candidate_subsets_per_component: int = 20_000
     # 2-D-only: per-E.coli mask + border erosion (Ecoli_dimer_analysis_2D.m).
     border_size_nm: float = 200.0       # shrink each cell mask in by this much
     mask_pixel_size_nm: float = 20.0    # render pixel for the mask histogram
@@ -317,6 +330,271 @@ def analyze_hlyb(loc_m: np.ndarray, tid: np.ndarray, cfg: HlyBConfig | None = No
         "n_traces": int(sub["n_traces"]),
         "n_subunits": int(centers.shape[0]),
         "n_structures": len(structures),
+    }
+
+
+# --------------------------------------------------------------------------
+# 3-D template-matching variant: partial six-site HlyB model
+# --------------------------------------------------------------------------
+
+def hlyb_template_model(cfg: HlyBConfig) -> dict:
+    """Six-site HlyB distance model used by the template-matching mode."""
+    labels = np.array(["1a", "1b", "2a", "2b", "3a", "3b"], dtype=object)
+    n = labels.size
+    dist = np.zeros((n, n), dtype=float)
+    classes = np.empty((n, n), dtype=object)
+    classes[:, :] = ""
+
+    def set_pair(a: str, b: str, d: float, cls: str) -> None:
+        ia = int(np.where(labels == a)[0][0])
+        ib = int(np.where(labels == b)[0][0])
+        dist[ia, ib] = dist[ib, ia] = float(d)
+        classes[ia, ib] = classes[ib, ia] = cls
+
+    for a, b in (("1a", "1b"), ("2a", "2b"), ("3a", "3b")):
+        set_pair(a, b, cfg.diameter_distance_1a1b_nm, "dimer")
+    for a, b in (("1b", "2a"), ("2b", "3a"), ("3b", "1a")):
+        set_pair(a, b, cfg.neighboring_domain_distance_nm, "neighboring domains")
+    for a, b in (("1a", "2a"), ("2a", "3a"), ("3a", "1a")):
+        set_pair(a, b, cfg.diameter_distance_1a2a_nm, "every second A-domain")
+    for a, b in (("1b", "2b"), ("2b", "3b"), ("3b", "1b")):
+        set_pair(a, b, cfg.diameter_distance_1b2b_nm, "every second B-domain")
+    for a, b in (("1a", "2b"), ("2a", "3b"), ("3a", "1b")):
+        set_pair(a, b, cfg.cross_domain_distance_nm, "cross-domain")
+
+    tri = np.triu_indices(n, 1)
+    return {
+        "labels": labels,
+        "distance_matrix_nm": dist,
+        "class_matrix": classes,
+        "prior_distances_nm": np.unique(dist[tri]),
+    }
+
+
+def _pair_indices(n: int) -> np.ndarray:
+    return np.array([(i, j) for i in range(n - 1) for j in range(i + 1, n)], dtype=int)
+
+
+def _assignment_cache(model: dict, max_n: int) -> dict[int, dict]:
+    labels = model["labels"]
+    D = model["distance_matrix_nm"]
+    out: dict[int, dict] = {}
+    for n in range(2, max_n + 1):
+        pair_idx = _pair_indices(n)
+        assignments = np.array(list(permutations(range(labels.size), n)), dtype=int)
+        expected = np.empty((assignments.shape[0], pair_idx.shape[0]), dtype=float)
+        for r, assign in enumerate(assignments):
+            expected[r] = [D[assign[i], assign[j]] for i, j in pair_idx]
+        out[n] = {"pair_idx": pair_idx, "assignments": assignments, "expected": expected}
+    return out
+
+
+def _connected_components(adj: np.ndarray) -> list[np.ndarray]:
+    n = adj.shape[0]
+    seen = np.zeros(n, dtype=bool)
+    comps: list[np.ndarray] = []
+    for start in range(n):
+        if seen[start]:
+            continue
+        stack = [start]
+        seen[start] = True
+        comp = []
+        while stack:
+            i = stack.pop()
+            comp.append(i)
+            for j in np.where(adj[i])[0]:
+                if not seen[j]:
+                    seen[j] = True
+                    stack.append(int(j))
+        comps.append(np.array(comp, dtype=int))
+    return comps
+
+
+def _score_template_candidate(
+    unit_indices: np.ndarray,
+    centers: np.ndarray,
+    sub: dict,
+    model: dict,
+    cfg: HlyBConfig,
+    cache: dict,
+) -> dict:
+    n = centers.shape[0]
+    pair_idx = cache["pair_idx"]
+    obs = np.array([np.linalg.norm(centers[j] - centers[i]) for i, j in pair_idx], dtype=float)
+    expected_all = cache["expected"]
+    residual_all = obs[None, :] - expected_all
+    rms_all = np.sqrt(np.mean(residual_all * residual_all, axis=1))
+    best = int(np.argmin(rms_all))
+    assignment = cache["assignments"][best]
+    expected = expected_all[best]
+    residual = obs - expected
+    max_abs = float(np.max(np.abs(residual))) if residual.size else 0.0
+    match_fraction = float(np.mean(np.abs(residual) <= cfg.model_pair_tolerance_nm))
+    labels = model["labels"][assignment]
+    class_matrix = model["class_matrix"]
+    pair_classes = np.array([class_matrix[assignment[i], assignment[j]] for i, j in pair_idx], dtype=object)
+
+    if n == 2:
+        accepted = max_abs <= cfg.model_pair_tolerance_nm
+    else:
+        accepted = (
+            float(rms_all[best]) <= cfg.model_rms_threshold_nm
+            and max_abs <= cfg.model_max_residual_nm
+            and match_fraction >= cfg.min_pair_match_fraction
+        )
+
+    traces = [sub["unit_traces"][int(i)] for i in unit_indices]
+    support = float(np.mean([len(t) for t in traces])) if traces else 0.0
+    if n >= 4 and float(rms_all[best]) <= 0.5 * cfg.model_rms_threshold_nm:
+        quality = "strong"
+    elif n >= 3 and float(rms_all[best]) <= cfg.model_rms_threshold_nm:
+        quality = "moderate"
+    else:
+        quality = "weak"
+
+    return {
+        "id": -1,
+        "unit_indices": unit_indices.astype(int),
+        "unit_centers": centers,
+        "centroid": centers.mean(axis=0) if centers.shape[0] else np.zeros(3),
+        "pair_index": pair_idx,
+        "pair_distances": obs,
+        "expected_pair_distances": expected,
+        "pair_residuals": residual,
+        "pair_classes": pair_classes,
+        "template_labels": labels.astype(object),
+        "rms_residual_nm": float(rms_all[best]),
+        "max_abs_residual_nm": max_abs,
+        "match_fraction": match_fraction,
+        "mean_supporting_traces": support,
+        "quality": quality,
+        "traces": traces,
+        "accepted": bool(accepted),
+        "reject_reason": "",
+    }
+
+
+def _match_partial_templates(centers: np.ndarray, sub: dict, model: dict, cfg: HlyBConfig) -> tuple[list[dict], list[dict], dict]:
+    from scipy.spatial.distance import pdist, squareform
+
+    n_units = centers.shape[0]
+    min_n = max(2, int(cfg.min_observed_subunits_per_HlyB or cfg.min_unit_count_per_HlyB))
+    max_n = min(int(cfg.max_observed_subunits_per_HlyB), model["labels"].size)
+    if n_units < min_n:
+        return [], [], {
+            "n_components": 0,
+            "component_sizes": [],
+            "n_candidates_tested": 0,
+            "n_candidates_passed_thresholds": 0,
+            "n_overlap_rejected": 0,
+            "n_skipped_large_subsets": 0,
+        }
+
+    D = squareform(pdist(centers)) if n_units > 1 else np.empty((n_units, n_units))
+    adj = (D <= cfg.candidate_edge_radius_nm) & (D > 0)
+    comps = _connected_components(adj)
+    cache = _assignment_cache(model, max_n)
+    candidates: list[dict] = []
+    n_skipped = 0
+
+    for comp in comps:
+        if comp.size < min_n:
+            continue
+        local_max = min(max_n, comp.size)
+        for n in range(local_max, min_n - 1, -1):
+            subset_count = int(comb(int(comp.size), n))
+            if subset_count > cfg.max_candidate_subsets_per_component:
+                n_skipped += subset_count
+                continue
+            for subset_local in combinations(range(comp.size), n):
+                idx = comp[np.array(subset_local, dtype=int)]
+                cand = _score_template_candidate(idx, centers[idx], sub, model, cfg, cache[n])
+                candidates.append(cand)
+
+    passed = [c for c in candidates if c["accepted"]]
+    rejected = [c for c in candidates if not c["accepted"]]
+    passed.sort(key=lambda c: (-c["unit_centers"].shape[0], c["rms_residual_nm"], -c["mean_supporting_traces"]))
+
+    used = np.zeros(n_units, dtype=bool)
+    structures: list[dict] = []
+    n_overlap = 0
+    for cand in passed:
+        if np.any(used[cand["unit_indices"]]):
+            cand = dict(cand)
+            cand["reject_reason"] = "overlaps better-ranked accepted candidate"
+            rejected.append(cand)
+            n_overlap += 1
+            continue
+        used[cand["unit_indices"]] = True
+        cand = dict(cand)
+        cand["id"] = len(structures) + 1
+        structures.append(cand)
+
+    qc = {
+        "n_components": len(comps),
+        "component_sizes": [int(c.size) for c in comps],
+        "n_candidates_tested": len(candidates),
+        "n_candidates_passed_thresholds": len(passed),
+        "n_overlap_rejected": n_overlap,
+        "n_skipped_large_subsets": n_skipped,
+    }
+    return structures, rejected, qc
+
+
+def analyze_hlyb_template3d(loc_m: np.ndarray, tid: np.ndarray, cfg: HlyBConfig | None = None) -> dict:
+    """3-D HlyB analysis using partial six-site template matching.
+
+    The MINFLUX data may observe only a subset of a complex. This mode first
+    detects candidate sub-unit centres with the standard pipeline, then accepts
+    non-overlapping groups of 2-6 centres whose 3-D pair-distance matrix can be
+    assigned to a partial HlyB distance template.
+    """
+    cfg = cfg or HlyBConfig()
+    sub = locate_subunit_centers(
+        loc_m,
+        tid,
+        z_scale=cfg.z_scaling_factor,
+        pixel_size=cfg.unit_render_pixel_size,
+        min_loc_per_trace=cfg.min_loc_per_trace,
+        basic_unit_size_nm=cfg.basic_unit_size_nm,
+    )
+    centers = sub["unit_centers"]
+    model = hlyb_template_model(cfg)
+
+    cfg = HlyBConfig(**vars(cfg))
+    if cfg.model_pair_tolerance_nm <= 0:
+        cfg.model_pair_tolerance_nm = max(5.0, float(sub["dunit_nm"]))
+    if cfg.model_rms_threshold_nm <= 0:
+        cfg.model_rms_threshold_nm = 0.8 * cfg.model_pair_tolerance_nm
+    if cfg.model_max_residual_nm <= 0:
+        cfg.model_max_residual_nm = 1.6 * cfg.model_pair_tolerance_nm
+    if cfg.candidate_edge_radius_nm <= 0:
+        cfg.candidate_edge_radius_nm = float(np.max(model["prior_distances_nm"]) + cfg.model_pair_tolerance_nm)
+
+    structures, rejected, qc = _match_partial_templates(centers, sub, model, cfg)
+    all_pair_dist: list[float] = []
+    for st in structures:
+        all_pair_dist.extend(np.asarray(st["pair_distances"], dtype=float).tolist())
+
+    return {
+        "points_nm": sub["points_nm"],
+        "subunit_centers": centers,
+        "subunit_cluster": np.full(centers.shape[0], -1, dtype=np.int64),
+        "structures": structures,
+        "rejected_candidates": rejected,
+        "all_pair_distances": np.array(all_pair_dist, dtype=float),
+        "dunit_nm": float(sub["dunit_nm"]),
+        "hlyb_diameter_nm": float(cfg.candidate_edge_radius_nm),
+        "candidate_edge_radius_nm": float(cfg.candidate_edge_radius_nm),
+        "model_pair_tolerance_nm": float(cfg.model_pair_tolerance_nm),
+        "model_rms_threshold_nm": float(cfg.model_rms_threshold_nm),
+        "model_max_residual_nm": float(cfg.model_max_residual_nm),
+        "n_traces": int(sub["n_traces"]),
+        "n_subunits": int(centers.shape[0]),
+        "n_structures": len(structures),
+        "model": model,
+        "match_qc": qc,
+        "template_matching": True,
     }
 
 

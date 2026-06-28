@@ -31,8 +31,13 @@ import numpy as np
 #: Tag identifying the metadata sidecar JSON (a dict; filter/data JSON are lists).
 METADATA_JSON_MARKER = "minflux_viewer_metadata"
 
-DATA_FORMATS = ("mat", "npy", "json")
-_EXT = {"mat": ".mat", "npy": ".npy", "json": ".json"}
+DATA_FORMATS = ("mat", "npy", "npz", "json", "csv", "zarr")
+_EXT = {"mat": ".mat", "npy": ".npy", "npz": ".npz", "json": ".json",
+        "csv": ".csv", "zarr": ".zarr"}
+#: Formats that take a flat columns dict (rest take the structured mfx array).
+_COLUMN_FORMATS = {"csv", "npz", "zarr"}
+#: Derived attributes offered in a processed snapshot when "freeze derived" is on.
+_DERIVED_FOR_SNAPSHOT = ("den", "siz", "dst", "spd", "dt", "dur", "len", "tim_trace")
 
 #: Spatial vector bases that the parser split into _x/_y/_z components.
 _VEC_BASES = {"loc": ("x", "y", "z"), "lnc": ("x", "y", "z"), "ext": ("x", "y", "z")}
@@ -140,6 +145,109 @@ def dataset_to_mfx_array(ds) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Flat columns (CSV / npz / zarr) and the processed snapshot
+# ---------------------------------------------------------------------------
+def flatten_mfx_array(mfx: np.ndarray) -> dict[str, np.ndarray]:
+    """Structured ``mfx`` → ``{column: 1-D array}``, splitting vector fields with
+    the loader-recognized suffixes (``loc → loc_x/loc_y/loc_z``,
+    ``dcr → dcr_0/dcr_1``) so a flat CSV/columns export reloads with no new parser.
+    The split/join convention here is the inverse of :func:`dataset_to_mfx_array`.
+    """
+    cols: dict[str, np.ndarray] = {}
+    for name in mfx.dtype.names:
+        v = np.asarray(mfx[name])
+        if v.ndim == 1:
+            cols[name] = v
+            continue
+        k = v.shape[1]
+        if name in _VEC_BASES and k == 3:
+            sfx = _VEC_BASES[name]
+        elif name == "dcr" and k == 2:
+            sfx = ("0", "1")
+        else:
+            sfx = tuple(str(i) for i in range(k))
+        for i, s in enumerate(sfx):
+            cols[f"{name}_{s}"] = v[:, i]
+    return cols
+
+
+def columns_to_structured(columns: dict[str, np.ndarray]) -> np.ndarray:
+    """A ``{column: 1-D array}`` dict → a flat structured array (one field each).
+    Used so the .mat/.npy/.json writers can serialize a snapshot table."""
+    if not columns:
+        return np.zeros(0, dtype=np.dtype([("xnm", np.float64)]))
+    n = len(np.asarray(next(iter(columns.values()))).ravel())
+    dt = [(str(k), np.asarray(v).dtype) for k, v in columns.items()]
+    arr = np.zeros(n, dtype=np.dtype(dt))
+    for k, v in columns.items():
+        arr[str(k)] = np.asarray(v).ravel()
+    return arr
+
+
+def build_snapshot_table(
+    ds, *, include_attrs: bool = True, include_derived: bool = False,
+    filter_mode: str = "flag",
+) -> tuple[dict[str, np.ndarray], int]:
+    """Build the **processed snapshot** of the current view: the last-valid
+    selection with RIMF- and transform-baked ``xnm/ynm/znm`` (canonical
+    "baked XOR recipe" rule), the standard attributes, optionally frozen derived
+    attributes, and the filter applied (rows dropped) or flagged (``ftr`` column).
+
+    Returns ``(columns, rows_dropped)``. Coordinates are in nm.
+    """
+    from . import overlay as _ov
+    from .loader import mfx_filter_mask, mfx_get
+
+    xnm = mfx_get(ds, "xnm", itr="last", vld_only=True)
+    ynm = mfx_get(ds, "ynm", itr="last", vld_only=True)
+    if xnm is None or ynm is None:
+        raise ValueError("Dataset has no coordinates to snapshot.")
+    xnm = np.asarray(xnm, dtype=float)
+    ynm = np.asarray(ynm, dtype=float)
+    znm = mfx_get(ds, "znm", itr="last", vld_only=True)
+    znm = np.asarray(znm, dtype=float) if znm is not None else np.zeros_like(xnm)
+    n = xnm.size
+
+    # Bake the per-dataset display transform into the (already RIMF-scaled) coords.
+    transform = ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
+    pts = _ov.apply_display_transform_nm(np.column_stack([xnm, ynm, znm]), transform)
+    cols: dict[str, np.ndarray] = {"xnm": pts[:, 0], "ynm": pts[:, 1], "znm": pts[:, 2]}
+
+    raw = getattr(ds, "mfx_raw", None)
+    source_keys = set(raw.keys()) if (raw is not None and len(raw)) else set(ds.attr.keys())
+    if include_attrs:
+        skip = _EXCLUDE_KEYS | {"loc_x", "loc_y", "loc_z", "itr", "vld"}
+        for name in sorted(source_keys - skip):
+            v = mfx_get(ds, name, itr="last", vld_only=True)
+            if v is None:
+                continue
+            v = np.asarray(v)
+            if v.ndim == 1 and v.size == n:
+                cols[name] = v
+    if include_derived:
+        for name in _DERIVED_FOR_SNAPSHOT:
+            v = mfx_get(ds, name, itr="last", vld_only=True)
+            if v is None:
+                continue
+            v = np.asarray(v)
+            if v.ndim == 1 and v.size == n:
+                cols[name] = v
+
+    rows_dropped = 0
+    fm = mfx_filter_mask(ds, itr="last", vld_only=True)
+    mask = np.asarray(fm[0], dtype=bool) if fm and fm[0] is not None else None
+    if mask is not None and mask.size == n and not mask.all():
+        if filter_mode == "apply":
+            rows_dropped = int((~mask).sum())
+            cols = {k: v[mask] for k, v in cols.items()}
+        elif filter_mode == "flag":
+            cols["ftr"] = mask
+    elif filter_mode == "flag" and mask is not None and mask.size == n:
+        cols["ftr"] = mask          # all-True ftr still records "nothing filtered"
+    return cols, rows_dropped
+
+
+# ---------------------------------------------------------------------------
 # Metadata recipe
 # ---------------------------------------------------------------------------
 def _sanitize(obj: Any) -> Any:
@@ -154,17 +262,24 @@ def _sanitize(obj: Any) -> Any:
     return obj
 
 
-def build_metadata(ds, *, data_filename: str | None = None) -> dict:
+def build_metadata(ds, *, data_filename: str | None = None,
+                   content: str = "raw", snapshot: dict | None = None) -> dict:
     """Build the processing-recipe sidecar: source, gating, calibration, filters.
 
-    Deliberately omits derived/dimensionality state (``num_dim`` is re-derived
-    from the raw z by the same Z-check on load) and the ``ftr`` mask (the filter
-    specs reproduce it).
+    For ``content="raw"`` (default) nothing is baked — ``rimf``/``transform``/
+    ``filters`` are recorded so reload reproduces the processed state. For
+    ``content="snapshot"`` the data file already has RIMF + transform + filter
+    baked in, so the **applied** ``rimf`` is pinned to ``1.0`` and ``transform``/
+    ``filters`` are cleared (the baked-XOR-recipe rule); the original values are
+    kept under ``*_baked`` keys for provenance only.
     """
     md = ds.metadata
     transform = ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
+    rimf = float(getattr(ds.cali, "RIMF", 1.0) or 1.0)
+    filters = ds.state.get("filter_specs") or []
     meta = {
         METADATA_JSON_MARKER: 1,
+        "content": content,
         "name": getattr(ds, "name", None),
         "data_file": data_filename,
         "original_source_version": md.get("source_version"),
@@ -174,12 +289,22 @@ def build_metadata(ds, *, data_filename: str | None = None) -> dict:
             "includes_invalid": bool(md.get("includes_invalid", False)),
         },
         "calibration": {
-            "rimf": float(getattr(ds.cali, "RIMF", 1.0) or 1.0),
+            "rimf": rimf,
             "rimf_provenance": ds.rimf_provenance,
         },
         "transform": transform,
-        "filters": ds.state.get("filter_specs") or [],
+        "filters": filters,
     }
+    if content == "snapshot":
+        # Everything is baked into the data; reload must NOT re-apply it.
+        meta["calibration"]["rimf"] = 1.0
+        meta["calibration"]["baked_rimf"] = rimf
+        meta["transform"] = None
+        meta["transform_baked"] = transform
+        meta["filters"] = []
+        meta["filter_specs_baked"] = filters
+        if snapshot:
+            meta["snapshot"] = snapshot
     return _sanitize(meta)
 
 
@@ -215,6 +340,48 @@ def _write_json(path: Path, mfx: np.ndarray) -> None:
 _WRITERS = {"mat": _write_mat, "npy": _write_npy, "json": _write_json}
 
 
+# --- flat-columns writers (CSV / npz / zarr) -------------------------------
+def _write_csv(path: Path, columns: dict[str, np.ndarray]) -> None:
+    names = list(columns)
+    if not names:
+        path.write_text("", encoding="utf-8")
+        return
+    data = np.column_stack([np.asarray(columns[k], dtype=float).ravel() for k in names])
+    # %.10g keeps coordinate precision while staying compact; ints/bools round-trip
+    # as their numeric value (the flat-table loader re-casts on read).
+    np.savetxt(str(path), data, delimiter=",", header=",".join(names),
+               comments="", fmt="%.10g")
+
+
+def _write_npz(path: Path, columns: dict[str, np.ndarray]) -> None:
+    np.savez(str(path), **{str(k): np.asarray(v) for k, v in columns.items()})
+
+
+def _write_zarr(path: Path, columns: dict[str, np.ndarray]) -> None:
+    import zarr
+
+    store = zarr.DirectoryStore(str(path))
+    root = zarr.group(store=store, overwrite=True)
+    for k, v in columns.items():
+        root.create_dataset(str(k), data=np.asarray(v))
+
+
+def _write_columns(fmt: str, path: Path, columns: dict[str, np.ndarray]) -> None:
+    """Write a flat columns dict in *fmt*. Structured formats (.mat/.npy/.json)
+    serialize a structured array built from the columns; .csv/.npz/.zarr take the
+    columns directly."""
+    if fmt == "csv":
+        _write_csv(path, columns)
+    elif fmt == "npz":
+        _write_npz(path, columns)
+    elif fmt == "zarr":
+        _write_zarr(path, columns)
+    elif fmt in _WRITERS:
+        _WRITERS[fmt](path, columns_to_structured(columns))
+    else:
+        raise ValueError(f"Unsupported data format: {fmt!r}")
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -224,21 +391,53 @@ def save_processed(
     data_path: str | Path | None = None,
     fmt: str | None = None,
     metadata_dir: str | Path | None = None,
+    content: str = "raw",
+    include: dict | None = None,
+    filter_mode: str = "flag",
 ) -> list[Path]:
-    """Save *ds* as processed data; returns the written file paths.
+    """Save *ds* to file; returns the written paths.
 
-    - ``data_path`` + ``fmt`` set → write the canonical raw mfx (no-file case).
-    - ``data_path`` omitted → metadata only (the raw data already exists on
-      disk); the sidecar is written into ``metadata_dir`` (the source folder)
-      as ``<source-stem>_metadata.json``.
+    Parameters
+    ----------
+    data_path, fmt :
+        Write the data file. ``fmt`` is one of :data:`DATA_FORMATS`. Omit
+        ``data_path`` for a metadata-only save (file-backed raw already on disk).
+    content :
+        ``"raw"`` — canonical all-iteration ``mfx`` (m2410 layout); reloads and
+        re-processes via the recipe. ``"snapshot"`` — the current view with RIMF/
+        transform/filter baked in (self-contained).
+    include :
+        ``{"attrs": bool, "derived": bool, "recipe": bool}`` (defaults
+        True/False/True). ``recipe`` controls the ``_metadata.json`` sidecar.
+    filter_mode :
+        Snapshot only — ``"apply"`` drops filtered rows; ``"flag"`` keeps all and
+        adds an ``ftr`` column.
     """
+    include = include or {}
+    inc_attrs = bool(include.get("attrs", True))
+    inc_derived = bool(include.get("derived", False))
+    inc_recipe = bool(include.get("recipe", True))
     written: list[Path] = []
+    snapshot_meta: dict | None = None
+    data_filename: str | None
 
     if data_path is not None:
-        if fmt not in _WRITERS:
+        if fmt not in _EXT:
             raise ValueError(f"Unsupported data format: {fmt!r}")
         data_path = Path(data_path).with_suffix(_EXT[fmt])
-        _WRITERS[fmt](data_path, dataset_to_mfx_array(ds))
+        if content == "snapshot":
+            columns, dropped = build_snapshot_table(
+                ds, include_attrs=inc_attrs, include_derived=inc_derived,
+                filter_mode=filter_mode)
+            _write_columns(fmt, data_path, columns)
+            snapshot_meta = {"filter_mode": filter_mode, "rows_dropped": dropped,
+                             "n_rows": len(next(iter(columns.values()))) if columns else 0}
+        else:
+            mfx = dataset_to_mfx_array(ds)
+            if fmt in _COLUMN_FORMATS:
+                _write_columns(fmt, data_path, flatten_mfx_array(mfx))
+            else:
+                _WRITERS[fmt](data_path, mfx)
         written.append(data_path)
         sidecar = metadata_sidecar_path(data_path)
         data_filename = data_path.name
@@ -248,10 +447,14 @@ def save_processed(
         folder = Path(metadata_dir or getattr(ds.file, "folder", "") or ".")
         sidecar = folder / f"{stem}_metadata.json"
         data_filename = getattr(ds.file, "name", None)
+        content = "raw"          # nothing baked when only the recipe is written
 
-    sidecar.write_text(
-        json.dumps(build_metadata(ds, data_filename=data_filename), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    written.append(sidecar)
+    if inc_recipe:
+        sidecar.write_text(
+            json.dumps(build_metadata(ds, data_filename=data_filename,
+                                      content=content, snapshot=snapshot_meta),
+                       indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        written.append(sidecar)
     return written

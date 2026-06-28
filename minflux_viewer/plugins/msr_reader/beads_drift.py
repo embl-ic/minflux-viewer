@@ -84,8 +84,10 @@ def gather_msr_bead_drift(datasets, mbm_map) -> list[dict]:
     *datasets* is the MSR parse result's ``datasets`` list (each with
     ``display_name`` + ``zroot``); *mbm_map* maps name → ``grd/mbm/points`` array.
     """
+    from ...msr import state as _state
     from ...msr.io import read_zarr_attrs
 
+    meta_map = getattr(_state, "mbm_meta_map", {}) or {}
     out: list[dict] = []
     for d in datasets or []:
         name = d.get("display_name") or d.get("did") or "dataset"
@@ -93,11 +95,19 @@ def gather_msr_bead_drift(datasets, mbm_map) -> list[dict]:
         points = (mbm_map or {}).get(name)
         if store is None or points is None or not getattr(points, "size", 0):
             continue
-        try:
-            pbg = (read_zarr_attrs(store, "grd/mbm/points") or {}).get("points_by_gri", {})
-            used = (read_zarr_attrs(store, "mbm") or {}).get("used", [])
-        except Exception:
-            pbg, used = {}, []
+        # Prefer the translated legacy MBM metadata; else read the modern in-store
+        # zarr attrs.
+        meta = meta_map.get(name) or {}
+        pbg = meta.get("points_by_gri") or {}
+        used = meta.get("used") or []
+        if not pbg or not used:
+            try:
+                if not pbg:
+                    pbg = (read_zarr_attrs(store, "grd/mbm/points") or {}).get("points_by_gri", {})
+                if not used:
+                    used = (read_zarr_attrs(store, "mbm") or {}).get("used", [])
+            except Exception:
+                pass
         beads = extract_bead_drift(points, pbg, used)
         if beads:
             out.append({"name": name, "beads": beads})

@@ -81,6 +81,20 @@ _ROI_COLORS = [
     "Yellow", "Red", "Green", "Cyan", "Magenta", "White", "Black",
 ]
 
+# Overlay channel colour choices (Preferences > Appearance > Overlay).
+_OVERLAY_COLORS = [
+    "Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray", "White",
+]
+_OVERLAY_DEFAULTS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"]
+_OVERLAY_ORDINALS = ["1st", "2nd", "3rd", "4th", "5th", "6th"]
+
+# Save/Export — file formats offered (Preferences > Data, and the Save dialog).
+_EXPORT_FORMATS = [
+    (".mat", "mat"), (".npy", "npy"), (".npz", "npz"),
+    (".json", "json"), (".csv", "csv"), (".zarr", "zarr"),
+]
+_EXPORT_FORMAT_DEFAULTS = ["mat", "npy", "npz", "json", "csv", "zarr"]
+
 _MBM_TRANSFORM_TYPES = [
     "rigid XY + translational Z",
     "translational XYZ",
@@ -555,6 +569,64 @@ class PreferencesDialog(QDialog):
         show_row3.addStretch()
         root.addLayout(show_row3)
 
+        # "When saving/exporting data file:" section — defaults that shrink the
+        # per-save dialog.
+        root.addSpacing(6)
+        root.addWidget(self._section_label("When saving/exporting data file:"))
+
+        fmt_row = QHBoxLayout()
+        fmt_row.addSpacing(18)
+        fmt_row.addWidget(QLabel("Enabled formats:"))
+        self._export_format_checks: dict[str, QCheckBox] = {}
+        for label, key in _EXPORT_FORMATS:
+            cb = QCheckBox(label)
+            self._export_format_checks[key] = cb
+            fmt_row.addWidget(cb)
+        fmt_row.addStretch()
+        root.addLayout(fmt_row)
+
+        content_row = QHBoxLayout()
+        content_row.addSpacing(18)
+        content_row.addWidget(QLabel("Data content:"))
+        self._export_content_raw = QCheckBox("raw canonical (all iterations)")
+        self._export_content_snapshot = QCheckBox("processed snapshot (current view)")
+        self._export_content_raw.setToolTip(
+            "The untouched all-iteration data; reloads and re-applies the recipe.")
+        self._export_content_snapshot.setToolTip(
+            "The current view with RIMF/transform/filter baked in; self-contained.")
+        content_row.addWidget(self._export_content_raw)
+        content_row.addSpacing(20)
+        content_row.addWidget(self._export_content_snapshot)
+        content_row.addStretch()
+        root.addLayout(content_row)
+
+        inc_row = QHBoxLayout()
+        inc_row.addSpacing(18)
+        inc_row.addWidget(QLabel("Include:"))
+        self._export_inc_attrs = QCheckBox("properties & attributes")
+        self._export_inc_derived = QCheckBox("derived attributes (freeze)")
+        self._export_inc_recipe = QCheckBox("recipe sidecar (reproduce later)")
+        inc_row.addWidget(self._export_inc_attrs)
+        inc_row.addSpacing(14)
+        inc_row.addWidget(self._export_inc_derived)
+        inc_row.addSpacing(14)
+        inc_row.addWidget(self._export_inc_recipe)
+        inc_row.addStretch()
+        root.addLayout(inc_row)
+
+        filt_row = QHBoxLayout()
+        filt_row.addSpacing(18)
+        filt_row.addWidget(QLabel("Filter handling:"))
+        self._export_filter_mode = QComboBox()
+        self._export_filter_mode.addItem("flag rows (ftr column, keep all)", "flag")
+        self._export_filter_mode.addItem("apply (drop filtered rows)", "apply")
+        self._export_filter_mode.setToolTip(
+            "Processed snapshot only: keep every row with a boolean 'ftr' column, "
+            "or physically drop the filtered-out rows.")
+        filt_row.addWidget(self._export_filter_mode)
+        filt_row.addStretch()
+        root.addLayout(filt_row)
+
         root.addStretch()
         return w
 
@@ -728,6 +800,27 @@ class PreferencesDialog(QDialog):
         form_roi.addRow("", self._roi_sync_highlight)
 
         root.addWidget(grp_roi)
+
+        # ── Overlay ──────────────────────────────────────────────────
+        grp_overlay = QGroupBox("Overlay")
+        overlay_layout = QVBoxLayout(grp_overlay)
+        overlay_layout.setSpacing(4)
+        overlay_layout.addWidget(QLabel("dataset LUT/color setting"))
+
+        overlay_row = QHBoxLayout()
+        self._overlay_color_combos: list[QComboBox] = []
+        for i in range(6):
+            overlay_row.addWidget(QLabel(_OVERLAY_ORDINALS[i]))
+            combo = QComboBox()
+            combo.addItems(_OVERLAY_COLORS)
+            self._overlay_color_combos.append(combo)
+            overlay_row.addWidget(combo)
+            if i < 5:
+                overlay_row.addSpacing(14)
+        overlay_row.addStretch()
+        overlay_layout.addLayout(overlay_row)
+
+        root.addWidget(grp_overlay)
 
         root.addStretch()
         return w
@@ -1027,6 +1120,18 @@ class PreferencesDialog(QDialog):
         self._show_hist.setChecked(bool(d.get("show_histogram", False)))
         self._show_render.setChecked(bool(d.get("show_render", False)))
 
+        # When saving/exporting
+        enabled_fmts = set(d.get("export_formats", _EXPORT_FORMAT_DEFAULTS))
+        for key, cb in self._export_format_checks.items():
+            cb.setChecked(key in enabled_fmts)
+        content = set(d.get("export_content", ["raw", "snapshot"]))
+        self._export_content_raw.setChecked("raw" in content)
+        self._export_content_snapshot.setChecked("snapshot" in content)
+        self._export_inc_attrs.setChecked(bool(d.get("export_include_attrs", True)))
+        self._export_inc_derived.setChecked(bool(d.get("export_include_derived", False)))
+        self._export_inc_recipe.setChecked(bool(d.get("export_include_recipe", True)))
+        self._set_combo_data(self._export_filter_mode, d.get("export_filter_mode", "flag"))
+
         # Plot
         self._px_spin.setValue(float(p.get("render_pixel_size", 2)))
         self._set_combo(self._render_cmap_combo, p.get("render_cmap", "Hot"), _RENDER_CMAPS)
@@ -1046,6 +1151,10 @@ class PreferencesDialog(QDialog):
         self._set_combo(self._filter_bounds_color_combo, p.get("filter_bounds_color", "Green"),
                         _ROI_COLORS)
         self._filter_bounds_size.setValue(int(p.get("filter_bounds_size", 1)))
+        overlay_colors = p.get("overlay_colors", _OVERLAY_DEFAULTS)
+        for i, combo in enumerate(self._overlay_color_combos):
+            default = overlay_colors[i] if i < len(overlay_colors) else _OVERLAY_DEFAULTS[i]
+            self._set_combo(combo, default, _OVERLAY_COLORS)
         hist_values = set(p.get("histogram_values", ["trace mean"]))
         self._hist_trace_mean.setChecked("trace mean" in hist_values)
         self._hist_trace_median.setChecked("trace median" in hist_values)
@@ -1118,6 +1227,20 @@ class PreferencesDialog(QDialog):
         d["show_histogram"] = bool(self._show_hist.isChecked())
         d["show_render"] = bool(self._show_render.isChecked())
 
+        # When saving/exporting
+        d["export_formats"] = [k for k, cb in self._export_format_checks.items()
+                               if cb.isChecked()]
+        content = []
+        if self._export_content_raw.isChecked():
+            content.append("raw")
+        if self._export_content_snapshot.isChecked():
+            content.append("snapshot")
+        d["export_content"] = content
+        d["export_include_attrs"] = bool(self._export_inc_attrs.isChecked())
+        d["export_include_derived"] = bool(self._export_inc_derived.isChecked())
+        d["export_include_recipe"] = bool(self._export_inc_recipe.isChecked())
+        d["export_filter_mode"] = str(self._export_filter_mode.currentData() or "flag")
+
         # Plot
         p["render_pixel_size"] = float(self._px_spin.value())
         p["render_cmap"] = self._render_cmap_combo.currentText()
@@ -1134,6 +1257,7 @@ class PreferencesDialog(QDialog):
         p["filter_range_alpha"] = int(self._filter_range_alpha.value())
         p["filter_bounds_color"] = self._filter_bounds_color_combo.currentText()
         p["filter_bounds_size"] = int(self._filter_bounds_size.value())
+        p["overlay_colors"] = [c.currentText() for c in self._overlay_color_combos]
         hist_values = []
         for name, cb in (
             ("trace mean", self._hist_trace_mean),

@@ -5,9 +5,11 @@ from minflux_viewer.analysis.hlyb_clustering import (
     HlyBConfig,
     analyze_hlyb,
     analyze_hlyb_2d,
+    analyze_hlyb_template3d,
     compute_border_mask,
     dbscan,
     estimate_trace_size,
+    hlyb_template_model,
     locate_subunit_centers,
 )
 
@@ -84,6 +86,71 @@ def test_analyze_hlyb_empty_input():
     assert res["n_subunits"] == 0
     assert res["n_structures"] == 0
     assert res["all_pair_distances"].size == 0
+
+
+# -- 3-D template matching --------------------------------------------------
+
+def _partial_template_centers():
+    """Two observed 1a/1b/2a partial HlyB complexes."""
+    x = (15.0**2 + 14.0**2 - 12.8**2) / (2 * 14.0)
+    y = np.sqrt(15.0**2 - x**2)
+    tri = np.array([[0.0, 0.0, 0.0], [14.0, 0.0, 0.0], [x, y, 0.0]])
+    return [tri, tri + np.array([300.0, 0.0, 0.0])]
+
+
+def _template_partial_locs():
+    locs, tids, tid = [], [], 1
+    for base in _partial_template_centers():
+        for center in base:
+            pts = _make_subunit(center, n=40, sigma_nm=0.8, seed=tid)
+            locs.append(pts)
+            tids.append(np.full(pts.shape[0], tid))
+            tid += 1
+    loc_nm = np.vstack(locs)
+    return loc_nm / 1e9, np.concatenate(tids)
+
+
+def test_hlyb_template_model_contains_all_priors():
+    model = hlyb_template_model(HlyBConfig())
+    assert list(model["labels"]) == ["1a", "1b", "2a", "2b", "3a", "3b"]
+    assert set(np.round(model["prior_distances_nm"], 1)) == {12.8, 14.0, 15.0, 21.3, 23.0}
+
+
+def test_analyze_hlyb_template3d_finds_partial_matches():
+    loc_m, tid = _template_partial_locs()
+    cfg = HlyBConfig(
+        basic_unit_size_nm=8.0,
+        min_loc_per_trace=1,
+        min_unit_count_per_HlyB=2,
+        z_scaling_factor=1.0,
+    )
+    res = analyze_hlyb_template3d(loc_m, tid, cfg)
+    assert res["template_matching"] is True
+    assert res["n_subunits"] == 6
+    assert res["n_structures"] == 2
+    assert res["all_pair_distances"].size == 6
+    assert all(st["unit_centers"].shape[0] == 3 for st in res["structures"])
+    assert np.all(np.abs(np.sort(res["all_pair_distances"]) - np.array([12.8, 12.8, 14, 14, 15, 15])) < 3)
+
+
+def test_analyze_hlyb_template3d_rejects_single_overlarge_structure():
+    locs, tids, tid = [], [], 1
+    centers = np.vstack(_partial_template_centers())
+    centers = np.vstack([centers, centers[0] + np.array([0.0, 35.0, 0.0])])
+    for center in centers:
+        pts = _make_subunit(center, n=40, sigma_nm=0.8, seed=tid + 50)
+        locs.append(pts)
+        tids.append(np.full(pts.shape[0], tid))
+        tid += 1
+    loc_m = np.vstack(locs) / 1e9
+    res = analyze_hlyb_template3d(
+        loc_m,
+        np.concatenate(tids),
+        HlyBConfig(basic_unit_size_nm=8.0, z_scaling_factor=1.0),
+    )
+    assert res["n_subunits"] == 7
+    assert res["n_structures"] >= 2
+    assert all(st["unit_centers"].shape[0] <= 6 for st in res["structures"])
 
 
 # -- 2-D variant: E.coli border preprocessing ------------------------------

@@ -108,6 +108,19 @@ _CHANNEL_COLORS = {
 }
 
 
+def _luminance_clamped(rgb, max_lum: float = 0.72) -> tuple[float, float, float]:
+    """Darken a colour (preserving hue) if it is too bright to read on a white
+    background. Colours at/under *max_lum* (Red, Green, Blue, Magenta, hot's
+    mid orange…) pass through; near-white ones (Yellow/Gray channels, the bright
+    end of warm colormaps) are scaled down to *max_lum* luminance."""
+    r, g, b = (float(rgb[0]), float(rgb[1]), float(rgb[2]))
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    if lum > max_lum:
+        s = max_lum / lum
+        r, g, b = r * s, g * s, b * s
+    return (r, g, b)
+
+
 class DepthRangeSlider(QWidget):
     """Small horizontal floating-point range slider for depth gating."""
 
@@ -651,7 +664,10 @@ class RenderWindow(QWidget):
         self._render_mode: str = "localizations"
         self._image_data: np.ndarray | None = None
         self._dataset_dim_label: str = "2D"
-        self._active_cmap: str = "hot"
+        # Default colormap from Preferences > Appearance > Render View (the combo
+        # stores capitalized names like "Hot"; the render pipeline uses lowercase).
+        pref_cmap = str(state.prefs.get("plot", {}).get("render_cmap", "hot")).lower()
+        self._active_cmap: str = pref_cmap if pref_cmap in _COLORMAPS else "hot"
         self._axis_visible: bool = False
         self._sigma_nm_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._channels: list[dict] = []
@@ -857,7 +873,10 @@ class RenderWindow(QWidget):
             for ch in self._channels
         }
         self._channels = []
-        color_cycle = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray"]
+        from ..core.overlay import overlay_color_cycle
+        # Channel colours from Preferences > Appearance > Overlay (+ Gray fallback
+        # for a 7th channel beyond the configured cycle).
+        color_cycle = list(overlay_color_cycle(self._state.prefs)) + ["Gray"]
         active_group = None
         if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
             ds0 = self._state.datasets[self._idx]
@@ -1033,6 +1052,7 @@ class RenderWindow(QWidget):
                 self._idx = ds_idx
                 self._state.set_active(ds_idx)
                 self._update_overlay_title()
+                self._sync_bc_dialog()
         QWidget.mousePressEvent(row, event)
 
     def _update_overlay_title(self) -> None:
@@ -1059,6 +1079,9 @@ class RenderWindow(QWidget):
             except Exception:
                 pass
             self._compose_from_cache()
+            # Recolour the B/C histogram if this is the active channel.
+            if ch_idx == self._active_channel_index():
+                self._sync_bc_dialog()
 
     def _channel_locs(self, ch: dict) -> np.ndarray:
         ds = self._state.datasets[ch["dataset_idx"]]
@@ -1884,13 +1907,79 @@ class RenderWindow(QWidget):
     # Brightness & Contrast helpers
     # ------------------------------------------------------------------
 
+    def _active_channel_index(self) -> int:
+        """Index into ``self._channels`` for the active dataset/channel.
+
+        In an overlay this is the channel of the active dataset (``self._idx``);
+        Brightness/Contrast reads and edits only that channel. Falls back to the
+        first visible channel, then 0, so a single-dataset window still resolves.
+        """
+        for i, ch in enumerate(self._channels):
+            if ch.get("dataset_idx") == self._idx:
+                return i
+        return next((i for i, ch in enumerate(self._channels) if ch.get("visible")), 0)
+
+    def _active_channel_lut_name(self) -> str:
+        ci = self._active_channel_index()
+        if 0 <= ci < len(self._channels):
+            return self._channels[ci].get("lut") or self._active_cmap
+        return self._active_cmap
+
+    def _channel_lut_rgb(self, lut_name: str) -> np.ndarray:
+        """256×3 RGB ([0, 1]) lookup table for *lut_name*, matching the render."""
+        ramp = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+        rgb = np.asarray(self._map_norm_to_rgb(ramp, lut_name), dtype=np.float32)
+        return np.clip(rgb.reshape(-1, 3), 0.0, 1.0)
+
+    def _histogram_bar_color(self) -> tuple[float, float, float]:
+        """One representative colour for the active channel's B/C histogram.
+
+        Solid-colour channels (Red/Green/…) use their pure colour; gradient
+        colormaps (hot/jet/…) use their mid (~127th) LUT colour as a stand-in
+        for the whole map. Either way the result is luminance-clamped so it
+        stays visible on the white histogram background (a per-bin gradient
+        made bright bins vanish against white)."""
+        name = self._active_channel_lut_name()
+        if name in _CHANNEL_COLORS:
+            rgb = _CHANNEL_COLORS[name]
+        else:
+            lut = self._channel_lut_rgb(name)
+            rgb = tuple(float(v) for v in lut[lut.shape[0] // 2])
+        return _luminance_clamped(rgb)
+
     def _bc_pixels(self) -> np.ndarray | None:
-        if self._last_scalar_tile is not None:
+        if self._last_scalar_tile is not None and self._channels:
+            ci = self._active_channel_index()
+            if 0 <= ci < self._last_scalar_tile.shape[0]:
+                return self._last_scalar_tile[ci]
             for idx, ch in enumerate(self._channels):
                 if ch["visible"] and idx < self._last_scalar_tile.shape[0]:
                     return self._last_scalar_tile[idx]
         img = self._image_view.imageItem.image
         return None if img is None else np.asarray(img)
+
+    def _sync_bc_dialog(self) -> None:
+        """Point the open B/C dialog at the active channel: its pixel histogram
+        (coloured with that channel's LUT) and its own contrast levels."""
+        dlg = self._bc_dialog
+        if dlg is None or not dlg.isVisible():
+            return
+        dlg.set_bar_color(self._histogram_bar_color())
+        pixels = self._bc_pixels()
+        if pixels is None:
+            return
+        dlg.set_data(pixels)
+        ci = self._active_channel_index()
+        levels = self._channels[ci].get("levels") if 0 <= ci < len(self._channels) else None
+        is_auto = levels is None
+        if levels is None:
+            levels = (
+                self._manual_levels if len(self._channels) == 1 and self._manual_levels
+                else self._compute_auto_levels(pixels)
+            )
+        if levels is not None:
+            dlg.set_levels(*levels)
+        dlg.set_auto_state(bool(is_auto))
 
     def _compose_from_cache(self, *_args) -> None:
         """Recompose RGBA from the last scalar tile without re-rendering."""
@@ -2183,18 +2272,12 @@ class RenderWindow(QWidget):
                 on_reset=self._on_bc_reset,
                 parent=self,
             )
-            img = self._image_view.imageItem.image
-            if img is not None:
-                pixels = self._bc_pixels()
-                if pixels is not None:
-                    self._bc_dialog.set_data(pixels)
-                    if self._manual_levels is not None:
-                        self._bc_dialog.set_levels(*self._manual_levels)
-            self._bc_dialog.set_auto_state(self._auto_bc)
 
         self._bc_dialog.show()
         self._bc_dialog.raise_()
         self._bc_dialog.activateWindow()
+        # Populate (or re-target) for the current active channel + its LUT.
+        self._sync_bc_dialog()
 
     def _on_levels_changed(self, lo: float, hi: float) -> None:
         if self._auto_bc:
@@ -2203,7 +2286,7 @@ class RenderWindow(QWidget):
                 self._bc_dialog.set_auto_state(False)
         self._bc_auto_threshold = 0
         self._manual_levels = (lo, hi)
-        target = next((i for i, ch in enumerate(self._channels) if ch["visible"]), 0)
+        target = self._active_channel_index()
         if 0 <= target < len(self._channels):
             self._channels[target]["levels"] = (lo, hi)
             self._compose_from_cache()
@@ -2217,12 +2300,12 @@ class RenderWindow(QWidget):
             return
         self._auto_bc = True
         self._manual_levels = levels
-        for ch in self._channels:
-            if ch["visible"]:
-                ch["levels"] = None
-                break
+        target = self._active_channel_index()
+        if 0 <= target < len(self._channels):
+            self._channels[target]["levels"] = None
         self._compose_from_cache()
         if self._bc_dialog is not None:
+            self._bc_dialog.set_bar_color(self._histogram_bar_color())
             self._bc_dialog.set_data(img)
             self._bc_dialog.set_levels(*levels)
             self._bc_dialog.set_auto_state(True)
@@ -2239,11 +2322,11 @@ class RenderWindow(QWidget):
         self._manual_levels = levels
         self._auto_bc = False
         self._bc_auto_threshold = 0
-        for ch in self._channels:
-            if ch["visible"]:
-                ch["levels"] = levels
-                break
+        target = self._active_channel_index()
+        if 0 <= target < len(self._channels):
+            self._channels[target]["levels"] = levels
         if self._bc_dialog is not None:
+            self._bc_dialog.set_bar_color(self._histogram_bar_color())
             self._bc_dialog.set_data(img)
             self._bc_dialog.set_levels(*levels)
         self._compose_from_cache()
@@ -3060,6 +3143,14 @@ class RenderWindow(QWidget):
             except Exception:
                 pass
             self._volume_window = None
+        # The Brightness/Contrast palette is a top-level always-on-top Tool
+        # window, so it does not hide with this viewer on its own — close it
+        # explicitly or it lingers orphaned over the desktop.
+        if self._bc_dialog is not None:
+            try:
+                self._bc_dialog.close()
+            except Exception:
+                pass
         # Let any in-flight TIFF export finish so its QThread is not destroyed
         # while running (the file write is short relative to the binning).
         for worker in list(self._export_workers):
@@ -3113,7 +3204,11 @@ class RenderWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _on_active_changed(self, idx: int) -> None:
-        pass
+        # In an overlay, follow the active channel so Brightness/Contrast reads
+        # and edits the dataset the user selected.
+        if any(ch.get("dataset_idx") == idx for ch in self._channels):
+            self._idx = idx
+            self._sync_bc_dialog()
 
     def _on_filter_changed(self, idx: int) -> None:
         if any(ch["dataset_idx"] == idx for ch in self._channels):
