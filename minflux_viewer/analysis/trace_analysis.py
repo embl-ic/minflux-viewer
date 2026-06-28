@@ -92,12 +92,22 @@ def estimate_size_nd_details(
     if uid.size == 0:
         return empty
 
+    # Group rows by id with a single stable sort, then walk contiguous blocks.
+    # The previous ``mask = ids == cid`` inside the id loop was O(N × n_ids) —
+    # with tens of thousands of traces that dominated dataset open time.
+    order = np.argsort(ids, kind="stable")
+    ids_sorted = ids[order]
+    data_sorted = data[order]
+    starts = np.flatnonzero(np.r_[True, ids_sorted[1:] != ids_sorted[:-1]])
+    ends = np.r_[starts[1:], ids_sorted.size]
+
     parts: list[np.ndarray] = []
-    for cid in uid:
-        mask = ids == cid
-        pts = data[mask]
-        if len(pts) < 2:
+    for s, e in zip(starts, ends):
+        if exclude_zero_id and ids_sorted[s] == 0:
             continue
+        if e - s < 2:
+            continue
+        pts = data_sorted[s:e]
         centroid = np.median(pts, axis=0)
         parts.append(np.linalg.norm(pts - centroid, axis=1))
 

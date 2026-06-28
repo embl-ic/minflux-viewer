@@ -3373,71 +3373,119 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(delay_ms, lambda i=idx: self._run_post_load_computations(i))
 
     def _run_post_load_computations(self, idx: int) -> None:
+        """Kick off the one-time computed attributes (RIMF, localization
+        precision, local density) as a chain of single-shot steps.
+
+        Each step returns to the event loop before the next runs, so the Log
+        updates live and the UI stays responsive — the heavy estimators are now
+        vectorised, so every step is sub-second instead of the old ~20 s block.
+        Steps re-resolve the dataset by identity, so closing it mid-chain (or
+        removing another dataset, which shifts indices) aborts/retargets safely.
+        """
         if not (0 <= idx < len(self._state.datasets)):
             return
         ds = self._state.datasets[idx]
         data_prefs = self._state.prefs.get("data", {})
+        needs = (
+            (data_prefs.get("compute_rimf", True) and "rimf" not in ds.derived)
+            or (data_prefs.get("compute_loc_prec", True) and "sigma_per_trace_nm" not in ds.derived)
+            or (data_prefs.get("compute_local_density", True) and "den" not in ds.attr)
+            or bool(ds.state.get("filter_specs"))
+        )
+        if needs:
+            self._state.log(f"Post-load processing of '{ds.name}' (RIMF, precision, density)…")
+        # Schedule (don't call) the first step so the line above paints first.
+        self._post_load_next(ds, self._post_load_rimf)
 
+    def _post_load_index(self, ds) -> "int | None":
+        """Current index of *ds* by identity, or None if it was removed."""
+        for i, d in enumerate(self._state.datasets):
+            if d is ds:
+                return i
+        return None
+
+    def _post_load_next(self, ds, step) -> None:
+        """Run the next post-load step from the event loop (keeps the UI live)."""
+        QTimer.singleShot(0, lambda: step(ds))
+
+    def _post_load_rimf(self, ds) -> None:
+        idx = self._post_load_index(ds)
+        if idx is None:
+            return
+        data_prefs = self._state.prefs.get("data", {})
         if data_prefs.get("compute_rimf", True) and "rimf" not in ds.derived:
             import numpy as np
             plot_prefs = self._state.prefs.get("plot", {})
             if ds.prop.num_dim < 3:
                 # 2D data: Z is all zero, so anisotropy estimation is moot.
-                # RIMF = 1.0 keeps the Z scaling a no-op and stays consistent
-                # with the 3D pipeline without spending the computation.
                 ds.set_rimf(1.0, source="2D (no z correction)")
                 ds.derived["rimf"] = np.asarray([1.0], dtype=float)
                 self._state.log(f"RIMF for '{ds.name}': 1.0 (2D dataset, computation skipped).")
+                self._state.notify_calibration_changed(idx)
             elif plot_prefs.get("use_fixed_rimf", False):
-                # Manual override: apply the fixed preference value instead of
-                # estimating. Tracked as a 'fixed' provenance source.
                 fixed = float(plot_prefs.get("rimf_value", 1.0))
                 ds.set_rimf(fixed, source="fixed (preference)")
                 ds.derived["rimf"] = np.asarray([fixed], dtype=float)
                 self._state.log(f"RIMF for '{ds.name}': {fixed:.4g} (fixed preference value).")
+                self._state.notify_calibration_changed(idx)
             else:
-                # compute_rimf checked: run the same anisotropy estimation as the
-                # plugin (raw last-valid z, never the RIMF-corrected loc_nm).
-                value = None
-                try:
-                    self._state.log(f"Estimating anisotropy / RIMF of '{ds.name}'…")
-                    from ..analysis.trace_analysis import estimate_anisotropy_for_dataset
-                    res = estimate_anisotropy_for_dataset(ds)
-                    if res is not None and np.isfinite(res["rimf"]):
-                        value = float(res["rimf"])
-                        # Apply only when in the physically expected window;
-                        # otherwise treat as failed and reset to 1.0 below.
-                        if 0.5 <= value <= 1.0:
-                            ds.set_rimf(value, source="auto (estimate anisotropy)")
-                            ds.derived["rimf"] = np.asarray([value], dtype=float)
-                            ds.derived["rimf_sizes_x"] = res["x"].sizes
-                            ds.derived["rimf_sizes_y"] = res["y"].sizes
-                            ds.derived["rimf_sizes_z"] = res["z"].sizes
-                            self._state.log(
-                                f"Computed RIMF for '{ds.name}': {value:.4g} (raw last-valid z)"
-                            )
-                except Exception as exc:
-                    self._state.log(f"RIMF estimation failed for '{ds.name}': {exc}", "WARN")
-                if "rimf" not in ds.derived:
-                    # Out of [0.5, 1.0] or estimation failed → reset to 1.0.
-                    ds.set_rimf(1.0, source="auto (out of range → 1.0)")
-                    ds.derived["rimf"] = np.asarray([1.0], dtype=float)
-                    shown = f"{value:.4g}" if value is not None else "failed"
-                    self._state.log(
-                        f"RIMF for '{ds.name}': estimate {shown} outside [0.5, 1.0] — reset to 1.0.",
-                        "WARN",
-                    )
-            # This runs after the dataset's windows are shown, so notify the
-            # views to reflect the freshly-applied RIMF (data-info RIMF text,
-            # render/scatter z-scaling).
-            self._state.notify_calibration_changed(idx)
+                # Heavy estimate: announce now and run it on the next event-loop
+                # turn so this line is painted before the (sub-second) compute.
+                self._state.log(f"Estimating anisotropy / RIMF of '{ds.name}'…")
+                self._post_load_next(ds, self._post_load_rimf_estimate)
+                return
+        self._post_load_next(ds, self._post_load_loc_prec)
 
+    def _post_load_rimf_estimate(self, ds) -> None:
+        idx = self._post_load_index(ds)
+        if idx is None:
+            return
+        import time
+
+        import numpy as np
+        value = None
+        try:
+            t0 = time.perf_counter()
+            from ..analysis.trace_analysis import estimate_anisotropy_for_dataset
+            res = estimate_anisotropy_for_dataset(ds)
+            dt = time.perf_counter() - t0
+            if res is not None and np.isfinite(res["rimf"]):
+                value = float(res["rimf"])
+                if 0.5 <= value <= 1.0:
+                    ds.set_rimf(value, source="auto (estimate anisotropy)")
+                    ds.derived["rimf"] = np.asarray([value], dtype=float)
+                    ds.derived["rimf_sizes_x"] = res["x"].sizes
+                    ds.derived["rimf_sizes_y"] = res["y"].sizes
+                    ds.derived["rimf_sizes_z"] = res["z"].sizes
+                    self._state.log(
+                        f"Computed RIMF for '{ds.name}': {value:.4g} (raw last-valid z, {dt:.1f}s)"
+                    )
+        except Exception as exc:
+            self._state.log(f"RIMF estimation failed for '{ds.name}': {exc}", "WARN")
+        if "rimf" not in ds.derived:
+            ds.set_rimf(1.0, source="auto (out of range → 1.0)")
+            ds.derived["rimf"] = np.asarray([1.0], dtype=float)
+            shown = f"{value:.4g}" if value is not None else "failed"
+            self._state.log(
+                f"RIMF for '{ds.name}': estimate {shown} outside [0.5, 1.0] — reset to 1.0.",
+                "WARN",
+            )
+        self._state.notify_calibration_changed(idx)
+        self._post_load_next(ds, self._post_load_loc_prec)
+
+    def _post_load_loc_prec(self, ds) -> None:
+        if self._post_load_index(ds) is None:
+            return
+        data_prefs = self._state.prefs.get("data", {})
         if data_prefs.get("compute_loc_prec", True) and "sigma_per_trace_nm" not in ds.derived:
             try:
+                import time
+
+                import numpy as np
                 self._state.log(f"Computing localization precision of '{ds.name}'…")
+                t0 = time.perf_counter()
                 from ..analysis.localization_precision import stddev_per_trace
                 from ..core.loader import attr_values_1d
-                import numpy as np
                 loc_x = np.asarray(attr_values_1d(ds, "loc_x"))
                 loc_y = np.asarray(attr_values_1d(ds, "loc_y"))
                 _z = attr_values_1d(ds, "loc_z")
@@ -3445,24 +3493,33 @@ class MainWindow(QMainWindow):
                 _tid = attr_values_1d(ds, "tid")
                 tid = np.arange(loc_x.size) if _tid is None else np.asarray(_tid)
                 result = stddev_per_trace(np.column_stack([loc_x, loc_y, loc_z]), tid)
+                dt = time.perf_counter() - t0
                 ds.attr["sigma_per_trace_nm"] = result["per_trace_sigma_xyz"]
                 ds.attr["sigma_trace_ids"] = result["trace_ids"]
                 ds.derived["sigma_per_trace_nm"] = result["per_trace_sigma_xyz"]
                 ds.derived["sigma_trace_ids"] = result["trace_ids"]
                 ds.cali.loc_precision = np.asarray(result["median_sigma_xyz"], dtype=float)
                 self._state.log(
-                    f"Computed localization precision for '{ds.name}' using StdDev per trace: "
-                    f"median sigma=({result['median_sigma_xyz'][0]:.3g}, "
+                    f"Computed localization precision for '{ds.name}' using StdDev per trace "
+                    f"({dt:.1f}s): median sigma=({result['median_sigma_xyz'][0]:.3g}, "
                     f"{result['median_sigma_xyz'][1]:.3g}, {result['median_sigma_xyz'][2]:.3g}) nm."
                 )
             except Exception as exc:
                 self._state.log(f"Localization precision computation skipped for '{ds.name}': {exc}", "WARN")
+        self._post_load_next(ds, self._post_load_density)
 
+    def _post_load_density(self, ds) -> None:
+        if self._post_load_index(ds) is None:
+            return
+        data_prefs = self._state.prefs.get("data", {})
         if data_prefs.get("compute_local_density", True) and "den" not in ds.attr:
             try:
+                import time
                 self._state.log(f"Computing local density of '{ds.name}'…")
+                t0 = time.perf_counter()
                 from ..analysis.local_density import compute_local_density_for_dataset
                 density, method, detail = compute_local_density_for_dataset(ds, self._state.prefs)
+                dt = time.perf_counter() - t0
                 ds.attr["den"] = density
                 ds.attr["local_density"] = density
                 ds.derived["den"] = density
@@ -3471,7 +3528,7 @@ class MainWindow(QMainWindow):
                     if name not in ds.prop.attr_names:
                         ds.prop.attr_names.append(name)
                 self._state.log(
-                    f"Computed local density for '{ds.name}' using {method} ({detail})."
+                    f"Computed local density for '{ds.name}' using {method} ({detail}, {dt:.1f}s)."
                 )
             except Exception as exc:
                 self._state.log(f"Local density computation skipped for '{ds.name}': {exc}", "WARN")
@@ -3515,7 +3572,12 @@ class MainWindow(QMainWindow):
                 self._state.log(
                     f"Last-valid local density computation skipped for '{ds.name}': {exc}", "WARN",
                 )
+        self._post_load_next(ds, self._post_load_finalize)
 
+    def _post_load_finalize(self, ds) -> None:
+        idx = self._post_load_index(ds)
+        if idx is None:
+            return
         # Restored-from-metadata filters re-evaluate now that derived attributes
         # (den, …) exist, so a re-opened processed dataset shows its saved filter
         # state. (filter_specs is only populated here via a metadata sidecar.)

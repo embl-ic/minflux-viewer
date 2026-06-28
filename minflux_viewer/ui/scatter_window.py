@@ -1065,12 +1065,10 @@ class ScatterWindow(QWidget):
     ) -> tuple[np.ndarray, np.ndarray, str, float, float]:
         """Return values, uint8 color bins, label, and display levels."""
         c_name = self._cbar_combo.currentText()
-        if c_name not in ds.attr:
-            n = indices.size
-            values = np.zeros(n, dtype=float)
-            bins, vmin, vmax = self._map_values_to_bins(values)
-            return values, bins, c_name, vmin, vmax
-
+        # Resolve through _color_cache_for_dataset (→ attr_values_1d), not a bare
+        # ``c_name in ds.attr`` check: coordinate views xnm/ynm/znm are NOT keys
+        # in ds.attr (the store holds loc_x/loc_y/loc_z), so that check wrongly
+        # rejected them and coloured every point with bin 0 (one flat colour).
         cache = self._color_cache_for_dataset(ds, c_name)
         if cache is None:
             values = np.zeros(indices.size, dtype=float)

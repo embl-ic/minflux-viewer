@@ -359,13 +359,55 @@ def _source_metadata_from_raw(raw: dict, *, load_all_itr: bool = False) -> dict[
         "raw_num_itr": _raw_iteration_count(raw),
         "iteration_load_mode": "all" if load_all_itr else "last",
     }
-    cfr_iter = _effective_iteration_column(raw, "cfr")
-    efc_iter = _effective_iteration_column(raw, "efc") or _effective_iteration_column(raw, "efo")
+    meta.update(_effective_iteration_metadata(raw))
+    return meta
+
+
+def _effective_iteration_metadata(source: Any) -> dict[str, int]:
+    """CFR/EFC effective-iteration metadata for the dataset info dialog.
+
+    ``source`` is any dict-like (``.get``) exposing the per-localization /
+    per-iteration arrays — the raw ``.mat`` dict (``_source_metadata_from_raw``)
+    or the all-iteration ``mfx_raw`` store (``load_from_mfx_array``).
+    """
+    meta: dict[str, int] = {}
+    cfr_iter = _effective_iteration_column(source, "cfr")
+    efc_iter = _effective_iteration_column(source, "efc") or _effective_iteration_column(source, "efo")
     if cfr_iter is not None:
         meta["cfr_iteration"] = cfr_iter
     if efc_iter is not None:
         meta["efc_iteration"] = efc_iter
     return meta
+
+
+# Attributes only measured at one (possibly non-last) loop iteration. Their
+# materialized last-iteration value is zero/NaN, so the meaningful per-loc value
+# is the value at the iteration recorded in ``metadata[<…>_iteration]``.
+_EFFECTIVE_ITER_META = {"cfr": "cfr_iteration", "efc": "efc_iteration"}
+
+
+def effective_iteration_for_attr(ds: "MinfluxDataset", attr: str) -> "int | None":
+    """0-based iteration index where *attr* (cfr/efc) is actually measured.
+
+    Returns ``None`` when *attr* has no special effective iteration, the
+    metadata is missing, or the effective iteration is already the last one
+    (so the default last-iteration materialization is correct and no special
+    handling is needed).
+    """
+    key = _EFFECTIVE_ITER_META.get(attr)
+    if key is None or ds is None:
+        return None
+    val = ds.metadata.get(key)
+    if val is None:
+        return None
+    try:
+        idx0 = int(val) - 1                       # 1-based metadata → 0-based
+    except (TypeError, ValueError):
+        return None
+    n_itr = int(ds.metadata.get("raw_num_itr", getattr(ds.prop, "num_itr", 1)) or 1)
+    if idx0 < 0 or idx0 >= n_itr - 1:
+        return None                               # effective == last → no change
+    return idx0
 
 
 def _detect_raw_version(raw: dict) -> str:
@@ -444,7 +486,21 @@ def _raw_iteration_count(raw: dict) -> int:
 
 
 def _effective_iteration_column(raw: dict, field: str) -> int | None:
-    """Return the 1-based iteration column selected for CFR/EFC-like arrays."""
+    """Return the 1-based iteration that carries a CFR/EFC-like array.
+
+    Handles both source layouts:
+
+    * **m2205** 2-D ``(num_loc, num_itr)``: pick the iteration column whose
+      values carry the most signal (``sum |value|``) across valid localizations.
+    * **m2410** flat 1-D (one row per localization-iteration, alongside a 1-D
+      ``itr`` index column): group rows by iteration index and pick the
+      iteration that carries the most signal across valid rows.
+
+    In m2410 acquisitions CFR/EFC are only measured at one (or a few) of the
+    loop iterations and are zero/NaN elsewhere — the analog of the m2205
+    "one non-zero column", just flattened — so the same dominant-signal rule
+    applies to both.
+    """
     try:
         itr_val = raw.get("itr")
         merged = raw
@@ -456,6 +512,15 @@ def _effective_iteration_column(raw: dict, field: str) -> int | None:
             merged.update(itr_val)
         arr = np.asarray(merged.get(field))
         itr_arr = np.asarray(merged.get("itr"))
+        if arr.dtype == object or arr.ndim == 0 or itr_arr.ndim == 0:
+            return None
+
+        # m2410 flat layout: 1-D itr index + a per-row field of equal length
+        # ((N,) or a squeezable (N, 1)).
+        if itr_arr.ndim == 1 and arr.size == itr_arr.size:
+            return _effective_iteration_flat(itr_arr, arr, merged.get("vld"))
+
+        # m2205 2-D layout: (num_loc, num_itr).
         if arr.ndim != 2 or itr_arr.ndim < 2:
             return None
         num_loc, num_itr = itr_arr.shape if itr_arr.shape[0] != 1 else (itr_arr.shape[1], 1)
@@ -468,6 +533,34 @@ def _effective_iteration_column(raw: dict, field: str) -> int | None:
         return col + 1
     except Exception:
         return None
+
+
+def _effective_iteration_flat(itr_arr, field_arr, vld_val) -> int | None:
+    """Effective (1-based) iteration for a flat m2410 per-row field.
+
+    Groups rows by iteration index and returns the iteration carrying the most
+    total signal (``sum |value|``, NaN treated as 0) across valid rows.
+    ``None`` when the field/itr are non-numeric or no iteration carries signal.
+    """
+    itr = np.asarray(itr_arr).ravel()
+    field = np.asarray(field_arr).ravel()
+    if itr.size == 0 or field.size != itr.size:
+        return None
+    if not np.issubdtype(itr.dtype, np.number) or not np.issubdtype(field.dtype, np.number):
+        return None
+    if vld_val is not None:
+        vld = np.asarray(vld_val, dtype=bool).ravel()
+        if vld.size == itr.size:
+            itr = itr[vld]
+            field = field[vld]
+    if itr.size == 0 or itr.min() < 0:
+        return None
+    weight = np.abs(field.astype(np.float64, copy=False))
+    weight[~np.isfinite(weight)] = 0.0
+    sums = np.bincount(itr.astype(np.int64, copy=False), weights=weight)
+    if sums.size == 0 or not np.any(sums > 0):
+        return None
+    return int(np.argmax(sums)) + 1
 
 
 def _dcr_is_two_channel(arr: np.ndarray, sample: int = 500) -> bool:
@@ -1178,6 +1271,65 @@ def _broadcast_derived(
     return per_loc[loc_id[mask]]
 
 
+def _gather_iteration_values(
+    raw: "AttrStore",
+    attr: str,
+    source_mask: np.ndarray,
+    target_mask: "np.ndarray | None",
+) -> "np.ndarray | None":
+    """Per-localization value of *attr* taken from ``source_mask`` rows, indexed
+    onto ``target_mask`` rows.
+
+    The inverse of :func:`_broadcast_derived`: instead of spreading a last-valid
+    per-loc value across all rows, it gathers each localization's value from the
+    rows selected by ``source_mask`` (e.g. its effective-iteration row) and lays
+    it onto the rows selected by ``target_mask``. NaN for groups absent from
+    ``source_mask``. Both masks index the same flattened raw store.
+    """
+    arr = raw.get(attr)
+    if arr is None or target_mask is None or source_mask is None:
+        return None
+    arr = np.asarray(arr)
+    if arr.ndim != 1:
+        return None
+    loc_id = _raw_loc_id(raw)
+    if loc_id is None:
+        return None
+    per_loc = np.full(int(loc_id.max()) + 1, np.nan)
+    per_loc[loc_id[source_mask]] = arr[source_mask].astype(float, copy=False)
+    return per_loc[loc_id[target_mask]]
+
+
+def effective_attr_values_1d(ds: "MinfluxDataset", attr: str) -> "np.ndarray | None":
+    """``ds.attr``-aligned values of *attr* (cfr/efc) at its effective iteration.
+
+    cfr/efc are only measured at one loop iteration; their materialized
+    last-iteration value is zero/NaN. This gathers each localization's value
+    from its effective-iteration row (:func:`effective_iteration_for_attr`) and
+    aligns it to ``ds.attr`` rows, so filters/histograms see the real per-loc
+    value. Returns ``None`` when *attr* has no effective iteration, the raw
+    store is empty, or the materialized rows have no aligned raw selection.
+    """
+    eff = effective_iteration_for_attr(ds, attr)
+    if eff is None:
+        return None
+    raw = getattr(ds, "mfx_raw", None)
+    if raw is None or len(raw) == 0:
+        return None
+    rows = _attr_row_selection(ds)
+    if rows is None:
+        return None
+    target_mask = mfx_row_mask(raw, itr=rows[0], vld_only=rows[1])
+    source_mask = mfx_row_mask(raw, itr=eff, vld_only=True)
+    vals = _gather_iteration_values(raw, attr, source_mask, target_mask)
+    if vals is None:
+        return None
+    arr = np.asarray(vals)
+    if arr.ndim == 1 and arr.shape[0] == int(getattr(ds.prop, "num_loc", 0)):
+        return arr
+    return None
+
+
 def mfx_get(
     ds: "MinfluxDataset",
     attr: str,
@@ -1285,12 +1437,26 @@ def mfx_filter_mask(
     tid_sel = np.asarray(tid_sel).ravel()
     n = tid_sel.shape[0]
 
+    raw = getattr(ds, "mfx_raw", None)
+    browse_mask = (
+        mfx_row_mask(raw, itr=itr, vld_only=vld_only)
+        if raw is not None and len(raw) else None
+    )
+
     specs = ds.state.get("filter_specs") or []
     mask = np.ones(n, dtype=bool)
     unevaluable: list[str] = []
     for spec in specs:
         attr = spec.get("attribute", "")
-        vals = mfx_get(ds, attr, itr=itr, vld_only=vld_only)
+        # cfr/efc are per-localization properties measured at one iteration; the
+        # filter must use that effective value broadcast onto the browse rows,
+        # not the (zero/NaN) value at whatever iteration is being viewed.
+        eff = effective_iteration_for_attr(ds, attr)
+        if eff is not None and browse_mask is not None:
+            src_mask = mfx_row_mask(raw, itr=eff, vld_only=True)
+            vals = _gather_iteration_values(raw, attr, src_mask, browse_mask)
+        else:
+            vals = mfx_get(ds, attr, itr=itr, vld_only=vld_only)
         if vals is None or np.asarray(vals).ravel().shape[0] != n:
             if attr and attr not in unevaluable:
                 unevaluable.append(attr)
@@ -1490,6 +1656,13 @@ def attr_values_1d(ds: "MinfluxDataset", attr: str) -> "np.ndarray | None":
         if attr == "znm":
             v = v * float(getattr(ds.cali, "RIMF", 1.0) or 1.0)
         return v
+
+    # cfr/efc measured at a non-last iteration: the meaningful per-loc value is
+    # the value at that effective iteration, not the zero/NaN last-iteration one.
+    if attr in _EFFECTIVE_ITER_META:
+        eff_vals = effective_attr_values_1d(ds, attr)
+        if eff_vals is not None:
+            return eff_vals
 
     # Derived attrs: keep the Stage B contract (same last-valid values in
     # every view) on all-iteration / invalid-inclusive materializations.
@@ -1931,6 +2104,10 @@ def load_from_mfx_array(
             "includes_invalid": _attrs_include_invalid(attrs),
         }
     )
+    # Effective CFR/EFC iteration — computed from the all-iteration raw store,
+    # since the materialized last-valid view (itr == global max) may not be the
+    # iteration where CFR/EFC were measured.
+    dataset.metadata.update(_effective_iteration_metadata(mfx_raw_store))
     dataset.components.mfx_raw = mfx_raw_store
     if not attr_matches_last_valid(dataset):
         dataset.components.derived_last = _derived_last_from_raw(mfx_raw_store, num_itr, prefs)

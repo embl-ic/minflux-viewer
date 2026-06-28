@@ -35,7 +35,13 @@ from ..core.attributes import (
     plot_attribute_names,
 )
 from ..core.iteration import iteration_labels, ordinal, parse_iteration_label
-from ..core.loader import attr_matches_selection, attr_values_1d, mfx_filter_mask, mfx_get
+from ..core.loader import (
+    attr_matches_selection,
+    attr_values_1d,
+    effective_iteration_for_attr,
+    mfx_filter_mask,
+    mfx_get,
+)
 from ..core.roi_selection import rectangle_bounds, value_range_mask
 from .filter_dialog import SmartBoundsSpinBox, _filter_spinner_values
 from .plot_format import plot_widget
@@ -291,7 +297,7 @@ class HistogramWindow(QWidget):
         self._iter_combo.blockSignals(True)
         self._iter_combo.clear()
         self._iter_combo.addItems(iter_opts)
-        default_label = self._default_iter_label(ds)
+        default_label = self._default_iter_label_for(ds, self._attr_combo.currentText())
         saved_label = str(saved.get("iter", "") or "")
         self._iter_combo.setCurrentText(saved_label if saved_label in iter_opts else default_label)
         self._iter_combo.blockSignals(False)
@@ -347,6 +353,43 @@ class HistogramWindow(QWidget):
         labels = self._iter_labels(ds)
         return f"last ({ordinal(self._num_itr(ds))})" if labels else ""
 
+    def _effective_iter_label(self, ds, attr: str) -> "str | None":
+        """Dropdown label for *attr*'s effective iteration (cfr/efc), else None."""
+        eff = effective_iteration_for_attr(ds, attr)
+        if eff is None:
+            return None
+        label = ordinal(eff + 1)
+        return label if label in self._iter_labels(ds) else None
+
+    def _default_iter_label_for(self, ds, attr: str) -> str:
+        """Preferred default label for *attr*: its effective iteration (cfr/efc)
+        when defined, otherwise the last-iteration default."""
+        return self._effective_iter_label(ds, attr) or self._default_iter_label(ds)
+
+    def _enforce_effective_iteration(self) -> None:
+        """Auto-select the effective iteration when the attribute is cfr/efc.
+
+        cfr/efc are only measured at one loop iteration (zero/NaN at `last`), so
+        switching to one of them jumps the Iter dropdown to that iteration. The
+        dropdown stays enabled, so the user can still browse other iterations.
+        Switching *away* to a normal attribute restores the default view when the
+        dropdown is still sitting on the previous attribute's effective iteration
+        (a deliberate manual browse of another iteration is preserved).
+        """
+        ds = self._dataset()
+        if ds is None:
+            return
+        label = self._effective_iter_label(ds, self._attr_combo.currentText())
+        if label is None:
+            prev_label = self._effective_iter_label(ds, getattr(self, "_last_attr_name", "") or "")
+            if prev_label is None or self._iter_combo.currentText() != prev_label:
+                return
+            label = self._default_iter_label(ds)
+        if label and self._iter_combo.currentText() != label and self._iter_combo.findText(label) >= 0:
+            self._iter_combo.blockSignals(True)
+            self._iter_combo.setCurrentText(label)
+            self._iter_combo.blockSignals(False)
+
     def _selection(self) -> tuple:
         """Return (itr_selector, render_mode) for the current label."""
         return parse_iteration_label(self._iter_combo.currentText())
@@ -362,9 +405,22 @@ class HistogramWindow(QWidget):
         raw store.
         """
         itr_sel, render = self._selection()
+        ds = self._dataset()
+        # cfr/efc: their effective iteration carries the canonical per-loc value
+        # (attr_values_1d returns it), so that single-iteration selection routes
+        # through the materialized path — keeping filter-edit/ROI working and the
+        # Iter label matching the displayed values. Any other iteration browses
+        # the genuine raw values.
+        eff = effective_iteration_for_attr(ds, self._attr_combo.currentText()) if ds is not None else None
+        if eff is not None and render == "single":
+            is_eff = isinstance(itr_sel, (int, np.integer)) and int(itr_sel) == eff
+            if not is_eff:
+                return True
+            return not attr_matches_selection(
+                ds, itr="last", vld_only=self._valid_chk.isChecked(),
+            )
         if not (itr_sel == "last" and render == "single"):
             return True
-        ds = self._dataset()
         return ds is not None and not attr_matches_selection(
             ds, itr="last", vld_only=self._valid_chk.isChecked(),
         )
@@ -908,24 +964,33 @@ class HistogramWindow(QWidget):
     ) -> None:
         """Display and edit a filter range on top of this histogram."""
         self._clear_filter_edit(restore=False)
-        # Filter editing operates on the materialized (last-iteration, valid)
-        # store. Force the selection back to default if the user had switched.
+        # Set the attribute first so cfr/efc can pick their effective iteration.
+        if self._attr_combo.findText(attr) >= 0:
+            self._attr_combo.blockSignals(True)
+            self._attr_combo.setCurrentText(attr)
+            self._attr_combo.blockSignals(False)
+        if self._agg_combo.findText(mode) >= 0:
+            self._agg_combo.blockSignals(True)
+            self._agg_combo.setCurrentText(mode)
+            self._agg_combo.blockSignals(False)
+        # cfr/efc: edit on their effective-iteration view (its canonical per-loc
+        # value); this stays a materialized selection so filter-edit works.
+        self._enforce_effective_iteration()
+        # Filter editing needs the materialized store. If still in raw mode (a
+        # normal attribute on a non-last / all-iteration selection), fall back
+        # to the default last-iteration view.
         if self._is_raw_mode():
             self._iter_combo.blockSignals(True)
             self._valid_chk.blockSignals(True)
             ds0 = self._dataset()
             if ds0 is not None:
-                self._iter_combo.setCurrentText(self._default_iter_label(ds0))
+                self._iter_combo.setCurrentText(self._default_iter_label_for(ds0, attr))
             self._valid_chk.setChecked(True)
             self._iter_combo.blockSignals(False)
             self._valid_chk.blockSignals(False)
             self._clear_raw_items()
         ds = self._dataset()
         saved_state = dict((ds.state.get(self._view_state_key, {}) if ds is not None else {}))
-        if self._attr_combo.findText(attr) >= 0:
-            self._attr_combo.setCurrentText(attr)
-        if self._agg_combo.findText(mode) >= 0:
-            self._agg_combo.setCurrentText(mode)
         self._reset_for_new_data()
         self._filter_edit = {
             "saved_state": saved_state,
@@ -1221,6 +1286,7 @@ class HistogramWindow(QWidget):
 
     def _on_histogram_attribute_changed(self, *_args) -> None:
         self._enforce_trace_aggregation()
+        self._enforce_effective_iteration()
         self._reset_for_new_data()
         if self._filter_edit:
             self._reset_filter_region_to_current_data()

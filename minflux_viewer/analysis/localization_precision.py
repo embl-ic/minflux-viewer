@@ -134,22 +134,30 @@ def stddev_per_trace(
     loc_nm = np.asarray(loc_xyz, dtype=float) * 1.0e9
 
     tid = np.asarray(tid).ravel()
-    uniq, inverse = np.unique(tid, return_inverse=True)
+    uniq = np.unique(tid)
     n_total = uniq.size
+
+    # Group by trace via a single stable sort + contiguous blocks, instead of an
+    # O(N × n_traces) ``inverse == i`` scan per trace (the per-trace loop was a
+    # major contributor to dataset open time on files with many traces).
+    order = np.argsort(tid, kind="stable")
+    tid_sorted = tid[order]
+    loc_sorted = loc_nm[order]
+    starts = np.flatnonzero(np.r_[True, tid_sorted[1:] != tid_sorted[:-1]])
+    ends = np.r_[starts[1:], tid_sorted.size]
 
     sigmas = []
     counts = []
     used_ids = []
-    for i, t in enumerate(uniq):
-        sel = inverse == i
-        n = int(sel.sum())
+    for s, e in zip(starts, ends):
+        n = int(e - s)
         if n < min_locs:
             continue
         # ddof=1 → sample standard deviation
-        s = loc_nm[sel].std(axis=0, ddof=1)
-        sigmas.append(s)
+        sig = loc_sorted[s:e].std(axis=0, ddof=1)
+        sigmas.append(sig)
         counts.append(n)
-        used_ids.append(t)
+        used_ids.append(tid_sorted[s])
 
     if not sigmas:
         return _empty(n_total)

@@ -38,7 +38,16 @@ class HistogramPreview(QWidget):
         self._data_max = 1.0
         self._lo = 0.0
         self._hi = 1.0
+        self._bar_rgb: tuple[float, float, float] | None = None  # single bar colour
         self.setMinimumSize(150, 70)
+
+    def set_bar_color(self, rgb: "tuple[float, float, float] | None") -> None:
+        """Single representative fill colour for the bars (None → red default)."""
+        if rgb is None:
+            self._bar_rgb = None
+        else:
+            self._bar_rgb = tuple(float(np.clip(c, 0.0, 1.0)) for c in rgb[:3])
+        self.update()
 
     def set_state(
         self,
@@ -54,6 +63,12 @@ class HistogramPreview(QWidget):
         self._lo = float(lo)
         self._hi = float(hi)
         self.update()
+
+    def _pen_color(self) -> QColor:
+        if self._bar_rgb is None:
+            return QColor(255, 0, 0)
+        r, g, b = self._bar_rgb
+        return QColor(int(r * 255), int(g * 255), int(b * 255))
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -72,9 +87,10 @@ class HistogramPreview(QWidget):
                 h = max(rect.height() - 2, 1)
                 x0 = rect.left() + 1
                 y_base = rect.bottom() - 1
-                painter.setPen(QPen(QColor(255, 0, 0), 1))
+                n = hist.size
+                painter.setPen(QPen(self._pen_color(), 1))
                 for i, value in enumerate(hist):
-                    x = x0 + int(round(i * w / max(hist.size - 1, 1)))
+                    x = x0 + int(round(i * w / max(n - 1, 1)))
                     y = y_base - int(round((float(value) / peak) * h))
                     painter.drawLine(x, y_base, x, y)
 
@@ -219,6 +235,10 @@ class BrightnessContrastDialog(QDialog):
         if not self._levels_initialized or self._hi <= self._lo:
             self._lo, self._hi = self._data_min, self._data_max
         self._update_controls_from_levels()
+
+    def set_bar_color(self, rgb: "tuple[float, float, float] | None") -> None:
+        """Colour the histogram bars with a single representative LUT colour."""
+        self._histogram.set_bar_color(rgb)
 
     def set_levels(self, lo: float, hi: float) -> None:
         if hi <= lo:
