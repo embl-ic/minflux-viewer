@@ -29,6 +29,7 @@ Flow
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -56,6 +57,12 @@ _MACOS_CANDIDATES: tuple[str, ...] = (
     "/Applications/ParaView.app/Contents/MacOS/paraview",
 )
 
+_MACOS_APP_DIRS: tuple[str, ...] = (
+    "/Applications",
+    "/System/Volumes/Data/Applications",
+    str(Path.home() / "Applications"),
+)
+
 _LINUX_CANDIDATES: tuple[str, ...] = (
     "/usr/bin/paraview",
     "/usr/local/bin/paraview",
@@ -68,6 +75,50 @@ _LINUX_CANDIDATES: tuple[str, ...] = (
 # Finder
 # ---------------------------------------------------------------------------
 
+def _path_as_paraview_executable(path: str | Path) -> Path | None:
+    """Resolve a file path or ParaView .app bundle to the executable."""
+    p = Path(path).expanduser()
+    if p.is_file():
+        return p.resolve()
+
+    # On macOS, Finder shows app bundles as applications. Users may browse to
+    # ParaView.app itself, or to a bundle directory whose ".app" suffix is hidden
+    # in Finder. In both cases the real executable lives inside the bundle.
+    bundle_exe = p / "Contents" / "MacOS" / "paraview"
+    if bundle_exe.is_file():
+        return bundle_exe.resolve()
+    return None
+
+
+def _version_key(path: Path) -> tuple[int, ...]:
+    """Best-effort version tuple from names like ParaView-6.1.1.app."""
+    text = path.as_posix()
+    matches = re.findall(r"\d+(?:\.\d+)*", text)
+    if not matches:
+        return ()
+    return tuple(int(part) for part in matches[-1].split("."))
+
+
+def _macos_bundle_candidates() -> list[Path]:
+    """Return discovered ParaView app-bundle executables, newest first."""
+    candidates: list[Path] = []
+    for app_dir in _MACOS_APP_DIRS:
+        root = Path(app_dir).expanduser()
+        if not root.is_dir():
+            continue
+        for pattern in ("ParaView*.app", "paraview*.app", "ParaView*", "paraview*"):
+            try:
+                for bundle in root.glob(pattern):
+                    exe = bundle / "Contents" / "MacOS" / "paraview"
+                    if exe.is_file():
+                        candidates.append(exe.resolve())
+            except OSError:
+                continue
+
+    unique = {str(p): p for p in candidates}.values()
+    return sorted(unique, key=lambda p: (_version_key(p), str(p)), reverse=True)
+
+
 def find_paraview_executable(
     explicit_path: str | None = None,
     prefs: dict | None = None,
@@ -79,24 +130,24 @@ def find_paraview_executable(
     """
     # 1. Explicit argument
     if explicit_path:
-        p = Path(explicit_path).expanduser()
-        if p.is_file():
-            return p.resolve()
+        p = _path_as_paraview_executable(explicit_path)
+        if p is not None:
+            return p
 
     # 2. User preference
     if prefs is not None:
         pref_path = prefs.get("file", {}).get("paraview_path", "")
         if pref_path:
-            p = Path(pref_path).expanduser()
-            if p.is_file():
-                return p.resolve()
+            p = _path_as_paraview_executable(pref_path)
+            if p is not None:
+                return p
 
     # 3. Environment variable
     env_path = os.environ.get("PARAVIEW", "")
     if env_path:
-        p = Path(env_path).expanduser()
-        if p.is_file():
-            return p.resolve()
+        p = _path_as_paraview_executable(env_path)
+        if p is not None:
+            return p
 
     # 4. Shell PATH
     for name in ("paraview", "paraview.exe"):
@@ -108,14 +159,17 @@ def find_paraview_executable(
     if sys.platform.startswith("win"):
         candidates: Iterable[str] = _WINDOWS_CANDIDATES
     elif sys.platform == "darwin":
+        for p in _macos_bundle_candidates():
+            if p.is_file():
+                return p.resolve()
         candidates = _MACOS_CANDIDATES
     else:
         candidates = _LINUX_CANDIDATES
 
     for c in candidates:
-        p = Path(c)
-        if p.is_file():
-            return p.resolve()
+        p = _path_as_paraview_executable(c)
+        if p is not None:
+            return p
 
     return None
 
@@ -211,7 +265,7 @@ def launch_paraview(
         raise FileNotFoundError(f"VTP file not found: {vtp_path}")
 
     exe = (
-        Path(paraview_exe).expanduser().resolve()
+        _path_as_paraview_executable(paraview_exe)
         if paraview_exe
         else find_paraview_executable(prefs=prefs)
     )
@@ -252,10 +306,13 @@ def not_found_instructions() -> str:
         "<b>ParaView was not found.</b><br><br>"
         "ParaView is a separate open-source application. To enable the "
         "ParaView viewer you can either:<br><br>"
-        "1. Install ParaView 5.12.1 (recommended) from "
+        "1. Install ParaView from "
         "<a href='https://www.paraview.org/download/'>paraview.org/download</a>. "
-        "On Windows the default install location is detected automatically.<br>"
+        "Default install locations are detected automatically on Windows, macOS, "
+        "and Linux where possible.<br>"
         "2. Or set the <tt>PARAVIEW</tt> environment variable to point at the "
-        "executable (e.g. <tt>C:\\Program Files\\ParaView 5.12.1\\bin\\paraview.exe</tt>).<br>"
-        "3. Or configure the path in Edit → Preferences (coming in Phase 4)."
+        "executable or macOS app bundle (e.g. "
+        "<tt>/Applications/ParaView.app</tt> or "
+        "<tt>C:\\Program Files\\ParaView\\bin\\paraview.exe</tt>).<br>"
+        "3. Or configure the path in Edit → Preferences → Plugin."
     )

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import QEvent, Qt, QStringListModel, QTimer
-from PyQt6.QtGui import QFont, QTextCursor, QTextOption
+from PyQt6.QtGui import QFont, QFontDatabase, QTextCursor, QTextOption
 from PyQt6.QtWidgets import (
     QCompleter,
     QDialog,
@@ -231,7 +231,7 @@ class ScriptEditorWindow(QWidget):
         root.addWidget(splitter, 1)
 
     def _mono_font(self, size: int) -> QFont:
-        font = QFont("Consolas")
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         font.setStyleHint(QFont.StyleHint.Monospace)
         font.setPointSize(size)
         return font

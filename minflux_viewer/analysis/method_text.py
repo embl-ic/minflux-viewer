@@ -414,7 +414,7 @@ def _format_text(by_stage, citations, version: str) -> str:
 
 def _format_html(by_stage, citations, version: str) -> str:
     esc = _html.escape
-    parts = ['<div style="font-family: Consolas, monospace; white-space: pre-wrap;">']
+    parts = ['<div style="font-family: monospace; white-space: pre-wrap;">']
     parts.append("<b>METHODS — DATA PROCESSING</b>")
     parts.append("=" * 60)
     parts.append("")

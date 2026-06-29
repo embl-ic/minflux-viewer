@@ -25,7 +25,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from PyQt6.QtCore import QEventLoop, Qt
-from PyQt6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
+from PyQt6.QtGui import QColor, QFont, QFontDatabase, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -112,7 +112,7 @@ class LogWindow(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
 
-        font = QFont("Consolas, Courier New, monospace")
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         font.setPointSize(10)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self._text.setFont(font)

@@ -708,6 +708,15 @@ class TestParaViewFinder:
         result = find_paraview_executable(explicit_path=str(fake))
         assert result == fake.resolve()
 
+    def test_explicit_macos_bundle_path_accepted(self, tmp_path):
+        from minflux_viewer.utils.paraview_launcher import find_paraview_executable
+        bundle = tmp_path / "ParaView-6.1.1.app"
+        exe = bundle / "Contents" / "MacOS" / "paraview"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("")
+        result = find_paraview_executable(explicit_path=str(bundle))
+        assert result == exe.resolve()
+
     def test_explicit_missing_path_ignored(self, tmp_path):
         """Non-existent explicit path should fall through to other methods."""
         from minflux_viewer.utils.paraview_launcher import find_paraview_executable
@@ -732,6 +741,26 @@ class TestParaViewFinder:
         monkeypatch.setenv("PARAVIEW", str(fake))
         result = find_paraview_executable()
         assert result == fake.resolve()
+
+    def test_macos_bundle_auto_detect_prefers_newest(self, tmp_path, monkeypatch):
+        from minflux_viewer.utils import paraview_launcher
+        apps = tmp_path / "Applications"
+        apps.mkdir()
+        older = apps / "ParaView-5.12.1.app" / "Contents" / "MacOS" / "paraview"
+        newer = apps / "ParaView-6.1.1.app" / "Contents" / "MacOS" / "paraview"
+        older.parent.mkdir(parents=True)
+        newer.parent.mkdir(parents=True)
+        older.write_text("")
+        newer.write_text("")
+
+        monkeypatch.setattr(paraview_launcher.sys, "platform", "darwin")
+        monkeypatch.setattr(paraview_launcher, "_MACOS_APP_DIRS", (str(apps),))
+        monkeypatch.setattr(paraview_launcher, "_MACOS_CANDIDATES", ())
+        monkeypatch.delenv("PARAVIEW", raising=False)
+        monkeypatch.setenv("PATH", "")
+
+        result = paraview_launcher.find_paraview_executable()
+        assert result == newer.resolve()
 
     def test_startup_script_written(self, tmp_path):
         from minflux_viewer.utils.paraview_launcher import _write_startup_script

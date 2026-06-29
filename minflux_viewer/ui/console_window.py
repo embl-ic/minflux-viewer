@@ -22,7 +22,7 @@ import sys
 from datetime import datetime
 
 from PyQt6.QtCore import QThread, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
+from PyQt6.QtGui import QColor, QFont, QFontDatabase, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QApplication,
@@ -145,7 +145,7 @@ class ConsoleWindow(QWidget):
         self._text.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        font = QFont("Consolas, Courier New, monospace")
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         font.setPointSize(10)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self._text.setFont(font)

@@ -212,7 +212,7 @@ class RoiManagerWindow(QWidget):
         box = QMessageBox(self)
         box.setWindowTitle("ROI Properties")
         box.setTextFormat(Qt.TextFormat.RichText)
-        box.setText("<pre style='font-family:Consolas,Courier New,monospace; margin:0'>"
+        box.setText("<pre style='font-family:monospace; margin:0'>"
                     + html.escape(text) + "</pre>")
         box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
                                     | Qt.TextInteractionFlag.TextSelectableByKeyboard)
