@@ -140,6 +140,10 @@ class _UpdateCheckTask(QRunnable):
         super().__init__()
         self.signals = _UpdateCheckSignals()
         self._current = current_version
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
 
     def run(self) -> None:  # noqa: N802 - Qt API
         from ..core.updater import UpdateCheckResult, check_for_update
@@ -147,7 +151,8 @@ class _UpdateCheckTask(QRunnable):
             result = check_for_update(self._current)
         except Exception as exc:  # never let a worker exception escape
             result = UpdateCheckResult("error", self._current, None, str(exc))
-        self.signals.done.emit(result)
+        if not self._cancelled:
+            self.signals.done.emit(result)
 
 
 class MainWindow(QMainWindow):
@@ -250,9 +255,10 @@ class MainWindow(QMainWindow):
 
         # Tier-A in-app update check (opt-out via Preferences > File). Delayed so
         # it never slows startup; silent unless a newer release exists.
+        self._is_shutting_down = False
         self._update_tasks: set = set()
         if state.prefs.get("file", {}).get("check_updates_on_startup", True):
-            QTimer.singleShot(3000, lambda: self._check_for_updates(silent=True))
+            QTimer.singleShot(3000, self._maybe_startup_update_check)
 
     def createPopupMenu(self):  # noqa: N802 - Qt override
         """Suppress Qt's default toolbar visibility popup on right-click."""
@@ -3915,6 +3921,8 @@ class MainWindow(QMainWindow):
 
         ``silent`` (the on-startup check) only surfaces an available update.
         """
+        if getattr(self, "_is_shutting_down", False):
+            return
         from .. import __version__
         if not silent:
             self._status_label.setText("Checking for updates…")
@@ -3927,9 +3935,16 @@ class MainWindow(QMainWindow):
         )
         QThreadPool.globalInstance().start(task)
 
+    def _maybe_startup_update_check(self) -> None:
+        if getattr(self, "_is_shutting_down", False):
+            return
+        self._check_for_updates(silent=True)
+
     def _on_update_check_done(self, result, silent: bool, task=None) -> None:
         from .update_dialog import show_update_result
         self._update_tasks.discard(task)
+        if getattr(self, "_is_shutting_down", False):
+            return
         if not silent:
             self._status_label.setText("Ready.")
         if result.status == "update_available":
@@ -4028,6 +4043,7 @@ class MainWindow(QMainWindow):
         Behaviour is controlled by the pref ``file.close_paraview_on_exit``
         (default ``True``). Set it to ``False`` to let ParaView survive.
         """
+        self._is_shutting_down = True
         app = QApplication.instance()
         if app is not None:
             try:
@@ -4036,6 +4052,7 @@ class MainWindow(QMainWindow):
                 pass
         self._state.save_prefs()
         self._close_all_child_windows()
+        self._drain_background_tasks()
         close_paraview = bool(
             self._state.prefs.get("file", {}).get("close_paraview_on_exit", True)
         )
@@ -4051,6 +4068,26 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Cleanup helpers
     # ------------------------------------------------------------------
+
+    def _drain_background_tasks(self) -> None:
+        """Cancel queued Qt background work before QApplication teardown."""
+        for task in list(getattr(self, "_update_tasks", set())):
+            try:
+                task.cancel()
+            except Exception:
+                pass
+            try:
+                task.signals.done.disconnect()
+            except Exception:
+                pass
+        self._update_tasks.clear()
+
+        try:
+            pool = QThreadPool.globalInstance()
+            pool.clear()
+            pool.waitForDone(2500)
+        except Exception:
+            pass
 
     def _close_all_child_windows(self) -> None:
         """

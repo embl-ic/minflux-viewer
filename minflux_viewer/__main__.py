@@ -13,7 +13,7 @@ from __future__ import annotations
 import sys
 
 
-def main() -> None:
+def main() -> int:
     # Install stdout/stderr redirection ASAP so even early prints get captured
     from .ui.console_window import install_redirection
     install_redirection()
@@ -52,8 +52,24 @@ def main() -> None:
         if arg.lower().endswith((".mat", ".npy", ".csv", ".msr")):
             window._route_file(arg)
 
-    sys.exit(app.exec())
+    exit_code = app.exec()
+
+    # Give Qt one explicit cleanup turn before Python starts tearing down
+    # module globals and local QWidget wrappers. This is especially helpful on
+    # macOS, where late QObject/OpenGL destruction can otherwise surface as a
+    # native "quit unexpectedly" dialog even after a normal user quit.
+    try:
+        window.deleteLater()
+        app.processEvents()
+    except RuntimeError:
+        pass
+    try:
+        from .ui.console_window import restore_redirection
+        restore_redirection()
+    except Exception:
+        pass
+    return int(exit_code)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
