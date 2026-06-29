@@ -108,7 +108,16 @@ class FilledRotateHandle(Handle):
 class FilledRectROI(pg.ROI):
     """Rectangle ROI with a visible translucent face and edit handles."""
 
-    def __init__(self, pos, size, *, angle: float = 0.0, fill_color="#ffff00", **kwargs) -> None:
+    def __init__(
+        self,
+        pos,
+        size,
+        *,
+        angle: float = 0.0,
+        fill_color="#ffff00",
+        y_axis_inverted: bool = False,
+        **kwargs,
+    ) -> None:
         super().__init__(pos, size, angle=angle, **kwargs)
         self._fill_color = pg.mkColor(fill_color)
         self._fill_color.setAlpha(32)
@@ -132,8 +141,10 @@ class FilledRectROI(pg.ROI):
             parent=self,
             antialias=self._antialias,
         )
-        # In the displayed plot coordinates this places the handle above the ROI.
-        self.addRotateHandle([0.5, 1.22], center, item=rotate_handle, name="rotate")
+        # Keep the edit adornment at the top of the monitor. With an ImageJ-style
+        # top-left origin, data Y is inverted, so data-space "above" is local -Y.
+        rotate_y = -0.22 if y_axis_inverted else 1.22
+        self.addRotateHandle([0.5, rotate_y], center, item=rotate_handle, name="rotate")
 
     def setFillColor(self, color, alpha: int = 32) -> None:
         self._fill_color = pg.mkColor(color)
@@ -355,6 +366,9 @@ class RoiOverlayController(QObject):
         plane = self._view_plane()
         plane_changed = plane != getattr(self, "_last_plane", plane)
         self._last_plane = plane
+        y_inverted = self._view_y_inverted()
+        y_orientation_changed = y_inverted != getattr(self, "_last_y_inverted", y_inverted)
+        self._last_y_inverted = y_inverted
         for record in self.store.records:
             if not record.visible:
                 continue
@@ -367,8 +381,13 @@ class RoiOverlayController(QObject):
             wanted.add(record.id)
             # On a view-plane flip, rebuild 3-D line/polyline/freehand-line items so
             # their vertices re-project onto the new plane (points use cheap setPos).
-            if (plane_changed and record.id in self.items
-                    and record.type in {"line", "polyline", "freehand_line"}):
+            if (
+                record.id in self.items
+                and (
+                    (plane_changed and record.type in {"line", "polyline", "freehand_line"})
+                    or (y_orientation_changed and record.type == "rectangle")
+                )
+            ):
                 self.plot_item.removeItem(self.items.pop(record.id))
             if record.id not in self.items:
                 item = self._make_item(record)
@@ -392,8 +411,14 @@ class RoiOverlayController(QObject):
         self._refresh_session_points()
         # An in-progress draft (line/polyline/freehand line) must also re-project
         # when the view plane flips, so its 3-D vertices show at the right depth.
-        if (plane_changed and self.draft is not None and self.draft_item is not None
-                and self.draft.type in {"line", "polyline", "freehand_line"}):
+        if (
+            self.draft is not None
+            and self.draft_item is not None
+            and (
+                (plane_changed and self.draft.type in {"line", "polyline", "freehand_line"})
+                or (y_orientation_changed and self.draft.type == "rectangle")
+            )
+        ):
             try:
                 self.plot_item.removeItem(self.draft_item)
             except Exception:
@@ -713,6 +738,12 @@ class RoiOverlayController(QObject):
     def _event_target(self):
         return self.view_widget.viewport() if hasattr(self.view_widget, "viewport") else self.view_widget
 
+    def _view_y_inverted(self) -> bool:
+        try:
+            return bool(getattr(self.view_box, "state", {}).get("yInverted", False))
+        except Exception:
+            return False
+
     def _event_to_view(self, event) -> tuple[float, float] | None:
         point = event.position().toPoint() if hasattr(event, "position") else event.pos()
         scene_pos = self.view_widget.mapToScene(point)
@@ -919,7 +950,9 @@ class RoiOverlayController(QObject):
             size = [max(w, 1e-9), max(h, 1e-9)]
             if record.type == "rectangle":
                 return FilledRectROI([px, py], size, angle=angle,
-                                     fill_color=record.stroke_color, movable=True)
+                                     fill_color=record.stroke_color,
+                                     y_axis_inverted=self._view_y_inverted(),
+                                     movable=True)
             return FilledEllipseROI([px, py], size, angle=angle,
                                     fill_color=record.stroke_color, movable=True)
         if record.type == "line":

@@ -81,10 +81,6 @@ DEFAULT_PREFS: dict = {
         "loc_precision_method": "stddev",  # "stddev" | "crlb" | "frc"
         "compute_local_density": True,
         "local_density_radius": 100,
-        "local_density_dimensions": 2,
-        "local_density_method": "kdtree",
-        "local_density_voxel_size": 100,
-        "local_density_smooth_sigma": 1.0,
         # 2D/3D threshold: datasets whose Z range is below this many nm
         # are treated as 2D (Z values forced to zero).
         "enforce_min_z_range": True,
@@ -108,8 +104,10 @@ DEFAULT_PREFS: dict = {
         "use_fixed_rimf": False,
         "render_pixel_size": 2,
         "render_cmap": "hot",
+        "render_xy_origin": "top_left",     # "top_left" | "bottom_left"
         "scatter_color_by": "tid",
         "scatter_cmap": "jet",
+        "scatter_xy_origin": "top_left",    # "top_left" | "bottom_left"
         "roi_color": "Yellow",
         "roi_transparency": 50,
         "roi_highlight_in_roi": True,   # highlight in-ROI data on the drawing view

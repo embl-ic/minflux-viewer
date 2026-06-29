@@ -86,6 +86,24 @@ def test_rotated_rectangle_hit_test(_app):
     assert ctrl._point_hits_record((200.0, 200.0), rec, 0.5) is False
 
 
+def test_rectangle_rotate_handle_stays_screen_top_when_y_axis_inverts(_app):
+    ctrl = _ctrl(_app)
+    rec = RoiRecord.create("rectangle", {"bounds": [0.0, 0.0, 100.0, 50.0]})
+
+    ctrl.store.add(rec)
+    ctrl.store.set_show_all(True)
+    ctrl.refresh()
+    normal = ctrl.items[rec.id]
+    normal_handle = next(h for h in normal.handles if h.get("name") == "rotate")
+    assert float(normal_handle["item"].pos().y()) > 50.0
+
+    ctrl.view_box.invertY(True)
+    ctrl.refresh()
+    inverted = ctrl.items[rec.id]
+    inverted_handle = next(h for h in inverted.handles if h.get("name") == "rotate")
+    assert float(inverted_handle["item"].pos().y()) < 0.0
+
+
 def test_stored_roi_edit_does_not_mutate_record_until_update(_app):
     ctrl = _ctrl(_app)
     rec = RoiRecord.create("rectangle", {"bounds": [0.0, 0.0, 100.0, 50.0]})

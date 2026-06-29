@@ -194,6 +194,10 @@ class MainWindow(QMainWindow):
         from .generated.main_window_ui import Ui_MainWindow
         self._ui = Ui_MainWindow()
         self._ui.setupUi(self)
+        try:
+            self.menuBar().setNativeMenuBar(False)
+        except Exception:
+            pass
         self.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
         self._ui.toolbar.setWindowTitle("Main Toolbar")
         self._ui.toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
@@ -582,6 +586,7 @@ class MainWindow(QMainWindow):
         u.menuAnalysis.setTitle("Analyze")
         u.menuLocPrecision.setTitle("Localization Precision")
         u.menuTracking.setTitle("Tracking")
+        self._keep_standard_actions_in_declared_menus()
 
         u.menuFile.clear()
         u.menuFile.addAction(u.actionOpen)
@@ -594,9 +599,15 @@ class MainWindow(QMainWindow):
         u.menuFile.addAction(self.actionClose)
         u.menuFile.addAction(self.actionCloseAll)
         u.menuFile.addSeparator()
-        u.menuFile.addAction(u.actionPreferences)
-        u.menuFile.addSeparator()
         u.menuFile.addAction(u.actionQuit)
+
+        u.menuEdit.clear()
+        u.menuEdit.addAction(u.actionDatasetManager)
+        u.menuEdit.addAction(u.actionFilter)
+        u.menuEdit.addSeparator()
+        u.menuEdit.addAction(u.actionDuplicate)
+        u.menuEdit.addSeparator()
+        u.menuEdit.addAction(u.actionPreferences)
 
         u.menuView.clear()
         u.menuView.addAction(u.actionShowInfo)
@@ -628,6 +639,15 @@ class MainWindow(QMainWindow):
         u.menuAnalysis.addAction(self.menuAnalyzeSegmentation.menuAction())
         u.menuAnalysis.addAction(u.menuTracking.menuAction())
 
+        u.menuHelp.clear()
+        u.menuHelp.addAction(u.actionConsole)
+        u.menuHelp.addAction(u.actionMemoryMonitor)
+        check_updates = getattr(self, "actionCheckUpdates", None)
+        if check_updates is not None:
+            u.menuHelp.addAction(check_updates)
+        u.menuHelp.addSeparator()
+        u.menuHelp.addAction(u.actionAbout)
+
         self._shortcut_actions = {
             "open": u.actionOpen,
             "open_spreadsheet": self.actionOpenSpreadsheet,
@@ -653,6 +673,28 @@ class MainWindow(QMainWindow):
         self._app_shortcut_focus = QShortcut(self)
         self._app_shortcut_focus.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._app_shortcut_focus.activated.connect(self._focus_main_window)
+
+    def _keep_standard_actions_in_declared_menus(self) -> None:
+        """Do not let macOS TextHeuristicRole relocate these actions.
+
+        Qt's default TextHeuristicRole recognises labels such as About,
+        Preferences and Quit and moves them into the macOS application menu.
+        For this Fiji-style viewer we keep the actions in our declared menus so
+        File/Edit/Help match across platforms.
+        """
+        try:
+            role = QAction.MenuRole.NoRole
+        except Exception:
+            return
+        for action in (
+            self._ui.actionAbout,
+            self._ui.actionPreferences,
+            self._ui.actionQuit,
+        ):
+            try:
+                action.setMenuRole(role)
+            except Exception:
+                pass
 
     def _mark_ai_unapproved_actions(self) -> None:
         """Visually separate AI-generated/unapproved actions from approved UI."""
@@ -2430,11 +2472,18 @@ class MainWindow(QMainWindow):
         """Open the modal Preferences dialog (Edit → Preferences…)."""
         from .preferences_dialog import PreferencesDialog
         dlg = PreferencesDialog(self._state, parent=self)
-        dlg.exec()
-        # After OK the dialog has already written prefs + saved; rebuild
-        # any UI bits that depend on them.
-        self._apply_shortcuts()
-        self._populate_recent_menu()
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            # After OK the dialog has already written prefs + saved; rebuild
+            # any UI bits that depend on them.
+            self._apply_shortcuts()
+            self._populate_recent_menu()
+            self._refresh_plot_preferences()
+
+    def _refresh_plot_preferences(self) -> None:
+        for win in list(self._render_windows.values()) + list(self._scatter_windows.values()):
+            refresh = getattr(win, "refresh_preferences", None)
+            if callable(refresh):
+                refresh()
 
     def _show_set_measurements(self) -> None:
         from .set_measurements_dialog import SetMeasurementsDialog
@@ -3520,6 +3569,10 @@ class MainWindow(QMainWindow):
                 from ..analysis.local_density import compute_local_density_for_dataset
                 density, method, detail = compute_local_density_for_dataset(ds, self._state.prefs)
                 dt = time.perf_counter() - t0
+                if "auto fallback" in detail:
+                    fallback_msg = f"Local density auto fallback for '{ds.name}': {detail}."
+                    print(fallback_msg)
+                    self._state.log(fallback_msg, "WARN")
                 ds.attr["den"] = density
                 ds.attr["local_density"] = density
                 ds.derived["den"] = density
@@ -3558,12 +3611,16 @@ class MainWindow(QMainWindow):
                         np.asarray(y, dtype=float) * 1e9,
                         np.asarray(z, dtype=float) * 1e9 * ds.cali.RIMF,
                     ])
-                    dims = int(data_prefs.get(
-                        "local_density_dimensions", 3 if ds.prop.num_dim == 3 else 2,
-                    ))
+                    dims = 3 if ds.prop.num_dim == 3 else 2
                     density, method, detail = compute_local_density_for_points(
                         points_nm, self._state.prefs, dimensions=dims,
                     )
+                    if "auto fallback" in detail:
+                        fallback_msg = (
+                            f"Last-valid local density auto fallback for '{ds.name}': {detail}."
+                        )
+                        print(fallback_msg)
+                        self._state.log(fallback_msg, "WARN")
                     ds.components.derived_last["den"] = density
                     self._state.log(
                         f"Computed last-valid local density for '{ds.name}' using {method} ({detail})."

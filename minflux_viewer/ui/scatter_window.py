@@ -21,6 +21,7 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -151,6 +152,12 @@ class ScatterWindow(QWidget):
         self._dataset_idx = dataset_idx if dataset_idx is not None else state.active_idx
         self._3d_view = None         # built lazily on first 3D switch
         self._3d_scatter = None
+        self._3d_grid = None
+        self._3d_axis = None
+        self._3d_axis_items: list = []
+        self._3d_box_items: list = []
+        self._show_3d_axis = True
+        self._show_3d_bounding_box = True
         self._manual_color_levels: tuple[float, float] | None = None
         self._last_color_values: np.ndarray = np.empty(0)
         self._lut_dialog = None
@@ -183,6 +190,11 @@ class ScatterWindow(QWidget):
         state.calibration_changed.connect(self._on_calibration_changed)
         state.roi_selection_changed.connect(self._on_roi_selection_changed)
         state.rois.selection_changed.connect(self._redraw_roi_highlight)
+
+    def refresh_preferences(self) -> None:
+        self._apply_y_axis_direction()
+        if getattr(self, "_roi_overlay", None) is not None:
+            self._roi_overlay.refresh()
 
     @property
     def dataset_idx(self) -> int | None:
@@ -241,6 +253,7 @@ class ScatterWindow(QWidget):
         self._plot_2d.customContextMenuRequested.connect(self._show_context_menu)
         self._plot_2d.getPlotItem().getViewBox().setMenuEnabled(False)
         self._plot_2d.setAspectLocked(True)
+        self._apply_y_axis_direction()
         self._plot_2d.showGrid(x=True, y=True, alpha=0.2)
         self._scatter_2d = pg.ScatterPlotItem(
             size=2, pen=None, brush=pg.mkBrush(200, 200, 200, 180),
@@ -319,6 +332,10 @@ class ScatterWindow(QWidget):
         axis = gl.GLAxisItem()
         axis.setSize(500, 500, 500)
         view.addItem(axis)
+        try:
+            axis.setVisible(False)
+        except Exception:
+            pass
 
         scatter = gl.GLScatterPlotItem(pxMode=True, size=2.0)
         view.addItem(scatter)
@@ -327,6 +344,8 @@ class ScatterWindow(QWidget):
 
         self._3d_view    = view
         self._3d_scatter = scatter
+        self._3d_grid = grid
+        self._3d_axis = axis
         self._roi_highlight_3d = roi_scatter
         self._stack.addWidget(view)
         self._apply_3d_blend(self._black_bg_check.isChecked())
@@ -351,6 +370,7 @@ class ScatterWindow(QWidget):
         self._plot_2d.setBackground("k" if black else "w")
         if self._3d_view is not None:
             self._3d_view.setBackgroundColor("k" if black else "w")
+            self._refresh_3d_reference_items()
         self._apply_3d_blend(black)
 
     def _apply_3d_blend(self, black: bool) -> None:
@@ -369,6 +389,19 @@ class ScatterWindow(QWidget):
                     item.setGLOptions(mode)
                 except Exception:
                     pass
+
+    def _xy_origin_top_left(self) -> bool:
+        value = str(
+            self._state.prefs.get("plot", {}).get("scatter_xy_origin", "top_left")
+        ).lower()
+        return value != "bottom_left"
+
+    def _apply_y_axis_direction(self) -> None:
+        try:
+            invert = self._axis_combo.currentText() == "XY" and self._xy_origin_top_left()
+            self._plot_2d.getPlotItem().getViewBox().invertY(invert)
+        except Exception:
+            pass
 
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -401,7 +434,7 @@ class ScatterWindow(QWidget):
         custom_action.setChecked(current_cmap.startswith("solid:custom:"))
         custom_action.triggered.connect(self._pick_solid_color)
 
-        bg_action = menu.addAction("Black background")
+        bg_action = menu.addAction("Black Background")
         bg_action.setCheckable(True)
         bg_action.setChecked(self._background_is_black())
         bg_action.triggered.connect(self._set_black_background)
@@ -412,6 +445,18 @@ class ScatterWindow(QWidget):
             action.setCheckable(True)
             action.setChecked(axis == self._axis_combo.currentText())
             action.triggered.connect(lambda _checked=False, value=axis: self._axis_combo.setCurrentText(value))
+
+        if self._axis_combo.currentText() == "3D":
+            menu.addSeparator()
+            axis_action = menu.addAction("Axis")
+            axis_action.setCheckable(True)
+            axis_action.setChecked(self._show_3d_axis)
+            axis_action.triggered.connect(self._set_3d_axis_visible)
+
+            box_action = menu.addAction("Bounding Box")
+            box_action.setCheckable(True)
+            box_action.setChecked(self._show_3d_bounding_box)
+            box_action.triggered.connect(self._set_3d_bounding_box_visible)
 
         menu.addSeparator()
         menu.addAction("Reset View", self._reset_view)
@@ -441,6 +486,7 @@ class ScatterWindow(QWidget):
                 self._stack.setCurrentWidget(self._3d_view)
         else:
             self._stack.setCurrentWidget(self._plot_2d)
+        self._apply_y_axis_direction()
         self._update_colorbar_visibility()
         self._last_axis_text = axis_text
         self._save_view_state()
@@ -485,6 +531,7 @@ class ScatterWindow(QWidget):
         if self._axis_combo.currentText() == "3D" and self._3d_view is not None:
             self._reset_3d_camera()
         else:
+            self._apply_y_axis_direction()
             self._plot_2d.autoRange()
 
     def _reset_3d_camera(self, pos: np.ndarray | None = None) -> None:
@@ -508,6 +555,229 @@ class ScatterWindow(QWidget):
             extent = 100.0
         self._3d_view.opts["center"] = pg.Vector(*centre)
         self._3d_view.setCameraPosition(distance=max(extent * 1.5, 100.0))
+
+    def _set_3d_axis_visible(self, checked: bool) -> None:
+        self._show_3d_axis = bool(checked)
+        self._refresh_3d_reference_items()
+        self._save_view_state()
+
+    def _set_3d_bounding_box_visible(self, checked: bool) -> None:
+        self._show_3d_bounding_box = bool(checked)
+        self._refresh_3d_reference_items()
+        self._save_view_state()
+
+    @staticmethod
+    def _nice_3d_step(span: float, target: int = 6) -> float:
+        raw = float(span) / max(int(target), 1)
+        if not np.isfinite(raw) or raw <= 0:
+            return 1.0
+        mag = 10.0 ** np.floor(np.log10(raw))
+        norm = raw / mag
+        step = (1 if norm < 1.5 else 2 if norm < 3 else 5 if norm < 7 else 10) * mag
+        return float(max(step, 1e-9))
+
+    @staticmethod
+    def _tick_values(lo: float, hi: float, *, max_ticks: int = 5) -> list[float]:
+        if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
+            return []
+        step = ScatterWindow._nice_3d_step(hi - lo, target=max_ticks)
+        start = np.ceil(lo / step) * step
+        vals: list[float] = []
+        value = start
+        while value <= hi + step * 1e-9 and len(vals) < max_ticks + 2:
+            vals.append(float(value))
+            value += step
+        return vals[:max_ticks]
+
+    @staticmethod
+    def _fmt_tick(value: float) -> str:
+        if abs(value) >= 1000 or float(value).is_integer():
+            return f"{value:.0f}"
+        return f"{value:.3g}"
+
+    def _reference_color(self) -> tuple[float, float, float, float]:
+        return (0.72, 0.72, 0.72, 0.72) if self._background_is_black() else (0.28, 0.28, 0.28, 0.58)
+
+    def _text_color(self) -> tuple[int, int, int, int]:
+        return (230, 230, 230, 230) if self._background_is_black() else (35, 35, 35, 230)
+
+    def _visible_xyz_3d(self) -> np.ndarray:
+        parts: list[np.ndarray] = []
+        if self._channels:
+            channels = self._channels
+            for ch in channels:
+                if not ch.get("visible", True):
+                    continue
+                ds_idx = ch.get("dataset_idx")
+                if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
+                    continue
+                ds = self._state.datasets[ds_idx]
+                locs = self._locs_for_dataset(ds)
+                mask = np.asarray(ds.filter_mask, dtype=bool).ravel()
+                if mask.size != locs.shape[0]:
+                    mask = np.ones(locs.shape[0], dtype=bool)
+                finite = np.all(np.isfinite(locs[:, :3]), axis=1)
+                xyz = locs[mask & finite, :3]
+                if xyz.size:
+                    parts.append(xyz)
+        else:
+            ds = self._dataset()
+            if ds is not None:
+                locs = self._current_locs(ds)
+                mask = np.asarray(ds.filter_mask, dtype=bool).ravel()
+                if mask.size != locs.shape[0]:
+                    mask = np.ones(locs.shape[0], dtype=bool)
+                finite = np.all(np.isfinite(locs[:, :3]), axis=1)
+                xyz = locs[mask & finite, :3]
+                if xyz.size:
+                    parts.append(xyz)
+        if not parts:
+            return np.empty((0, 3), dtype=np.float64)
+        return np.vstack(parts).astype(np.float64, copy=False)
+
+    @staticmethod
+    def _expanded_bounds(xyz: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        xyz = np.asarray(xyz, dtype=np.float64)
+        if xyz.ndim != 2 or xyz.shape[0] == 0 or xyz.shape[1] < 3:
+            return None
+        xyz = xyz[np.all(np.isfinite(xyz[:, :3]), axis=1), :3]
+        if xyz.size == 0:
+            return None
+        mins = xyz.min(axis=0)
+        maxs = xyz.max(axis=0)
+        spans = maxs - mins
+        max_span = max(float(np.max(spans)), 1.0)
+        for i in range(3):
+            if spans[i] <= 0:
+                mins[i] -= max_span * 0.05
+                maxs[i] += max_span * 0.05
+        spans = maxs - mins
+        return mins, maxs, spans
+
+    def _clear_3d_items(self, items: list) -> None:
+        if self._3d_view is None:
+            items.clear()
+            return
+        for item in list(items):
+            try:
+                self._3d_view.removeItem(item)
+            except Exception:
+                pass
+        items.clear()
+
+    def _add_3d_line(
+        self,
+        items: list,
+        start: np.ndarray,
+        end: np.ndarray,
+        *,
+        color: tuple[float, float, float, float],
+        width: float = 1.2,
+    ) -> None:
+        if self._3d_view is None:
+            return
+        try:
+            import pyqtgraph.opengl as gl
+            item = gl.GLLinePlotItem(
+                pos=np.vstack([start, end]).astype(np.float32),
+                color=color,
+                width=width,
+                antialias=True,
+            )
+            self._3d_view.addItem(item)
+            items.append(item)
+        except Exception:
+            pass
+
+    def _add_3d_text(self, items: list, pos: np.ndarray, text: str, *, label: bool = False) -> None:
+        if self._3d_view is None:
+            return
+        try:
+            import pyqtgraph.opengl as gl
+            font = QFont("Helvetica", 11 if label else 8)
+            item = gl.GLTextItem(
+                pos=np.asarray(pos, dtype=np.float64),
+                text=str(text),
+                color=self._text_color(),
+                font=font,
+                glOptions="translucent",
+            )
+            self._3d_view.addItem(item)
+            items.append(item)
+        except Exception:
+            pass
+
+    def _configure_3d_grid(self, mins: np.ndarray, maxs: np.ndarray, spans: np.ndarray) -> None:
+        if self._3d_grid is None:
+            return
+        centre = (mins + maxs) / 2.0
+        xy_size = max(float(np.max(spans[:2])) * 1.15, 1.0)
+        spacing = self._nice_3d_step(xy_size, target=8)
+        z_floor = float(min(mins[2], 0.0))
+        try:
+            self._3d_grid.setSize(xy_size, xy_size)
+            self._3d_grid.setSpacing(spacing, spacing)
+            self._3d_grid.resetTransform()
+            self._3d_grid.translate(float(centre[0]), float(centre[1]), z_floor)
+        except Exception:
+            pass
+
+    def _draw_3d_axis(self, mins: np.ndarray, maxs: np.ndarray, spans: np.ndarray) -> None:
+        if not self._show_3d_axis:
+            return
+        origin = mins.copy()
+        pad = max(float(np.max(spans)) * 0.04, 1.0)
+        axis_defs = (
+            (0, np.array([maxs[0], origin[1], origin[2]]), (0.9, 0.15, 0.15, 0.95), "X (nm)"),
+            (1, np.array([origin[0], maxs[1], origin[2]]), (0.15, 0.7, 0.25, 0.95), "Y (nm)"),
+            (2, np.array([origin[0], origin[1], maxs[2]]), (0.15, 0.35, 0.95, 0.95), "Z (nm)"),
+        )
+        for dim, end, color, label in axis_defs:
+            self._add_3d_line(self._3d_axis_items, origin, end, color=color, width=2.0)
+            label_pos = end.copy()
+            label_pos[dim] += pad
+            self._add_3d_text(self._3d_axis_items, label_pos, label, label=True)
+            for tick in self._tick_values(float(mins[dim]), float(maxs[dim])):
+                tick_pos = origin.copy()
+                tick_pos[dim] = tick
+                tick_end = tick_pos.copy()
+                side_dim = 1 if dim != 1 else 0
+                tick_end[side_dim] += pad * 0.35
+                self._add_3d_line(self._3d_axis_items, tick_pos, tick_end, color=color, width=1.0)
+                text_pos = tick_end.copy()
+                text_pos[side_dim] += pad * 0.12
+                self._add_3d_text(self._3d_axis_items, text_pos, self._fmt_tick(tick))
+
+    def _draw_3d_bounding_box(self, mins: np.ndarray, maxs: np.ndarray) -> None:
+        if not self._show_3d_bounding_box:
+            return
+        x0, y0, z0 = mins
+        x1, y1, z1 = maxs
+        corners = np.array([
+            [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+            [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+        ], dtype=np.float64)
+        edges = (
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        )
+        color = self._reference_color()
+        for a, b in edges:
+            self._add_3d_line(self._3d_box_items, corners[a], corners[b], color=color, width=1.4)
+
+    def _refresh_3d_reference_items(self) -> None:
+        if self._3d_view is None:
+            return
+        self._clear_3d_items(self._3d_axis_items)
+        self._clear_3d_items(self._3d_box_items)
+        bounds = self._expanded_bounds(self._visible_xyz_3d())
+        if bounds is None:
+            return
+        mins, maxs, spans = bounds
+        self._configure_3d_grid(mins, maxs, spans)
+        self._draw_3d_axis(mins, maxs, spans)
+        self._draw_3d_bounding_box(mins, maxs)
 
     def _build_channels(self) -> None:
         previous = {
@@ -596,6 +866,7 @@ class ScatterWindow(QWidget):
             self._scatter_2d.setData([], [])
             if self._3d_view is not None:
                 self._3d_scatter.setData(pos=np.empty((0, 3)))
+                self._refresh_3d_reference_items()
             self.setWindowTitle("Scatter Plot")
             return
 
@@ -610,6 +881,7 @@ class ScatterWindow(QWidget):
             self._axis_combo.setCurrentText(axis_default)
         self._axis_combo.blockSignals(False)
         self._last_axis_text = self._axis_combo.currentText()
+        self._apply_y_axis_direction()
         if self._axis_combo.currentText() == "3D":
             self._ensure_3d_built()
             if self._3d_view is not None:
@@ -630,6 +902,8 @@ class ScatterWindow(QWidget):
         self._black_bg_check.setChecked(bool(saved.get("black_background", False)))
         self._black_bg_check.blockSignals(False)
         self._apply_background(self._black_bg_check.isChecked())
+        self._show_3d_axis = bool(saved.get("show_3d_axis", True))
+        self._show_3d_bounding_box = bool(saved.get("show_3d_bounding_box", True))
 
         # Populate colour-by combo (preserve selection if possible)
         old = self._cbar_combo.currentText()
@@ -850,6 +1124,7 @@ class ScatterWindow(QWidget):
         if ds_active is not None and save_state:
             self._save_view_state(ds_active)
         axis = self._axis_combo.currentText()
+        self._apply_y_axis_direction()
         col_map = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
         if axis == "3D":
             self._draw_overlay_3d()
@@ -916,11 +1191,13 @@ class ScatterWindow(QWidget):
             total += int(np.count_nonzero(mask))
         if not pos_parts:
             self._3d_scatter.setData(pos=np.empty((0, 3)))
+            self._refresh_3d_reference_items()
             self._info_label.setText("No finite XYZ localisations pass the current filters for 3D display.")
             return
         pos = np.vstack(pos_parts).astype(np.float32, copy=False)
         rgba = np.vstack(rgba_parts).astype(np.float32, copy=False)
         self._3d_scatter.setData(pos=pos, color=rgba, size=3.0, pxMode=True)
+        self._refresh_3d_reference_items()
         if not self._3d_camera_initialised:
             self._reset_3d_camera(pos)
             self._3d_camera_initialised = True
@@ -943,6 +1220,8 @@ class ScatterWindow(QWidget):
             "color_by": self._cbar_combo.currentText(),
             "colormap": self._cmap_combo.currentText(),
             "black_background": self._black_bg_check.isChecked(),
+            "show_3d_axis": bool(self._show_3d_axis),
+            "show_3d_bounding_box": bool(self._show_3d_bounding_box),
             "axis": self._axis_combo.currentText(),
         }
 
@@ -950,6 +1229,7 @@ class ScatterWindow(QWidget):
 
     def _draw_2d(self, locs: np.ndarray, ftr: np.ndarray, ds) -> None:
         axis = self._axis_combo.currentText()
+        self._apply_y_axis_direction()
         col_map  = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
         ax_text  = {"XY": ("X (nm)", "Y (nm)"),
                     "XZ": ("X (nm)", "Z (nm)"),
@@ -1005,6 +1285,7 @@ class ScatterWindow(QWidget):
         raw_display = indices.size
         if raw_display == 0:
             self._3d_scatter.setData(pos=np.empty((0, 3)))
+            self._refresh_3d_reference_items()
             self._info_label.setText("No localisations pass the current filter.")
             return
 
@@ -1016,6 +1297,7 @@ class ScatterWindow(QWidget):
         n_display = indices.size
         if n_display == 0:
             self._3d_scatter.setData(pos=np.empty((0, 3)))
+            self._refresh_3d_reference_items()
             self._info_label.setText(
                 "No finite XYZ localisations pass the current filter for 3D display."
             )
@@ -1029,6 +1311,7 @@ class ScatterWindow(QWidget):
         pos = pos.astype(np.float32, copy=False)
         point_size = 4.0 if not self._background_is_black() else 3.0
         self._3d_scatter.setData(pos=pos, color=rgba, size=point_size, pxMode=True)
+        self._refresh_3d_reference_items()
 
         # First-time camera setup
         if not self._3d_camera_initialised:

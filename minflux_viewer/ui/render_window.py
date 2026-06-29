@@ -727,6 +727,11 @@ class RenderWindow(QWidget):
         state.rois.selection_changed.connect(self._redraw_roi_highlight)
         self._scheduler.tile_ready.connect(self._on_tile_ready)
 
+    def refresh_preferences(self) -> None:
+        self._apply_y_axis_direction()
+        if getattr(self, "_roi_overlay", None) is not None:
+            self._roi_overlay.refresh()
+
     # ------------------------------------------------------------------
     # UI
     # ------------------------------------------------------------------
@@ -757,7 +762,7 @@ class RenderWindow(QWidget):
         except Exception:
             pass
         self._view_box.setAspectLocked(True)
-        self._view_box.invertY(False)
+        self._apply_y_axis_direction()
         self._view_box.sigRangeChanged.connect(self._on_range_changed)
         self._image_view.ui.graphicsView.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu
@@ -847,6 +852,7 @@ class RenderWindow(QWidget):
         if ds.image_data is not None and not ds.has_localizations:
             self._render_mode = "image"
             self._locs_nm = self._xy = self._depth = None
+            self._apply_y_axis_direction()
             self._configure_image_depth(ds.image_data)
             self._image_data = self._prepare_image_payload(ds.image_data)
             self._bounds_xy = self._image_bounds(ds, self._image_data)
@@ -1178,6 +1184,23 @@ class RenderWindow(QWidget):
             return selected[0]
         return np.nanmax(selected.astype(np.float64, copy=False), axis=0)
 
+    def _xy_origin_top_left(self) -> bool:
+        value = str(
+            self._state.prefs.get("plot", {}).get("render_xy_origin", "top_left")
+        ).lower()
+        return value != "bottom_left"
+
+    def _should_invert_y_axis(self) -> bool:
+        if self._render_mode == "image":
+            return self._xy_origin_top_left()
+        return self._orientation == "XY" and self._xy_origin_top_left()
+
+    def _apply_y_axis_direction(self) -> None:
+        try:
+            self._view_box.invertY(self._should_invert_y_axis())
+        except Exception:
+            pass
+
     def _configure_image_depth(self, image: np.ndarray) -> None:
         depth = self._image_depth_count(image)
         if depth <= 1:
@@ -1210,6 +1233,7 @@ class RenderWindow(QWidget):
         if self._image_data is None:
             self._info_label.setText("No image data.")
             return
+        self._apply_y_axis_direction()
         ox, oy = ds.image_origin_nm
         sx, sy = ds.image_pixel_size_nm
         height, width = self._image_data.shape[:2]
@@ -1238,6 +1262,7 @@ class RenderWindow(QWidget):
         """Split (N,3) locs into (xy_pair, depth) based on current orientation."""
         if self._locs_nm is None or self._locs_nm.shape[0] == 0:
             return
+        self._apply_y_axis_direction()
 
         o = self._orientation
         if o == "XY":
@@ -1393,6 +1418,7 @@ class RenderWindow(QWidget):
 
     def _render(self) -> None:
         """Timer callback: dispatch to tiled or direct render based on zoom."""
+        self._apply_y_axis_direction()
         if self._render_mode == "image":
             self._render_image_mode()
             return
@@ -2460,6 +2486,7 @@ class RenderWindow(QWidget):
         if text not in _RENDER_ORIENTATIONS:
             return
         self._orientation = text
+        self._apply_y_axis_direction()
         self._apply_orientation()
         self._rebuild_all_grids()
         self._scheduler.cancel()

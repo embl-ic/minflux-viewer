@@ -993,6 +993,8 @@ class TestPreferencesDialog:
         # Modify a couple of values
         state.prefs["data"]["min_z_range_nm"] = 17.5
         state.prefs["data"]["enforce_min_z_range"] = False
+        state.prefs["plot"]["render_xy_origin"] = "bottom_left"
+        state.prefs["plot"]["scatter_xy_origin"] = "bottom_left"
         state.prefs["file"]["temp_folder"] = "/tmp/xyz"
         state.prefs["plugin"] = {
             "msr_remember_last": False,
@@ -1003,13 +1005,23 @@ class TestPreferencesDialog:
         assert not dlg._enforce_z.isChecked()
         assert dlg._temp_folder_edit.text() == "/tmp/xyz"   # now on the File tab
         assert not dlg._msr_remember.isChecked()
+        assert dlg._render_xy_origin_combo.currentData() == "bottom_left"
+        assert dlg._scatter_xy_origin_combo.currentData() == "bottom_left"
 
         # Change a value and apply
         dlg._min_z_spin.setValue(99.0)
         dlg._enforce_z.setChecked(True)
+        dlg._render_xy_origin_combo.setCurrentIndex(
+            dlg._render_xy_origin_combo.findData("top_left")
+        )
+        dlg._scatter_xy_origin_combo.setCurrentIndex(
+            dlg._scatter_xy_origin_combo.findData("top_left")
+        )
         dlg._apply_widgets_to_draft()
         assert dlg._draft["data"]["min_z_range_nm"] == 99.0
         assert dlg._draft["data"]["enforce_min_z_range"] is True
+        assert dlg._draft["plot"]["render_xy_origin"] == "top_left"
+        assert dlg._draft["plot"]["scatter_xy_origin"] == "top_left"
 
     def test_reset_current_tab_only_resets_visible(self):
         from minflux_viewer.core.app_state import AppState, DEFAULT_PREFS
@@ -1026,6 +1038,16 @@ class TestPreferencesDialog:
         dlg._reset_current_tab()
         assert dlg._draft["data"]["min_z_range_nm"] == DEFAULT_PREFS["data"]["min_z_range_nm"]
         assert dlg._draft["plot"]["rimf_value"] == 2.5   # untouched (plot page)
+
+    def test_attribute_checkboxes_show_descriptions_on_hover(self):
+        from minflux_viewer.core.app_state import AppState
+        from minflux_viewer.ui.preferences_dialog import PreferencesDialog
+
+        dlg = PreferencesDialog(AppState())
+
+        assert "Trace ID" in dlg._attribute_checks["tid"].toolTip()
+        assert "Calculated fluorophore coordinates" in dlg._attribute_checks["loc"].toolTip()
+        assert "local density" in dlg._computed_attribute_checks["den"].toolTip()
 
     def test_recent_files_dialog_remove_and_clear(self):
         from minflux_viewer.ui.preferences_dialog import RecentFilesDialog

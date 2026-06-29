@@ -55,6 +55,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.app_state import AppState, DEFAULT_PREFS
+from ..msr.descriptions import describe_path
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,11 @@ _OVERLAY_COLORS = [
 _OVERLAY_DEFAULTS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"]
 _OVERLAY_ORDINALS = ["1st", "2nd", "3rd", "4th", "5th", "6th"]
 
+_XY_ORIGIN_OPTIONS = [
+    ("origin at top left (Y increase downward)", "top_left"),
+    ("origin at bottom left (Y increase upward)", "bottom_left"),
+]
+
 # Save/Export — file formats offered (Preferences > Data, and the Save dialog).
 _EXPORT_FORMATS = [
     (".mat", "mat"), (".npy", "npy"), (".npz", "npz"),
@@ -120,6 +126,11 @@ _COMPUTED_ATTRIBUTE_INFO = [
     ("tim_trace", "time stamp zeroed at each track start"),
     ("den", "local density at data point"),
 ]
+
+
+def _attribute_tooltip(name: str) -> str:
+    """Human-readable hover text for raw MINFLUX attribute preference items."""
+    return f"{name}: {describe_path(f'mfx/{name}', is_array=False)}"
 
 _SHORTCUT_LABELS = {
     "focus_main_window": "Focus main window",
@@ -508,37 +519,6 @@ class PreferencesDialog(QDialog):
         density_row.addStretch()
         root.addLayout(density_row)
 
-        density_method_row = QHBoxLayout()
-        density_method_row.addSpacing(36)
-        density_method_row.addWidget(QLabel("method"))
-        self._density_method = QComboBox()
-        self._density_method.addItem("KD-tree range search", "kdtree")
-        self._density_method.addItem("2D histogram", "histogram_2d")
-        self._density_method.setMinimumWidth(170)
-        density_method_row.addWidget(self._density_method)
-        density_method_row.addStretch()
-        root.addLayout(density_method_row)
-
-        # Histogram-method parameters on their own row so nothing is clipped.
-        density_hist_row = QHBoxLayout()
-        density_hist_row.addSpacing(36)
-        density_hist_row.addWidget(QLabel("histogram voxel"))
-        self._density_voxel = QDoubleSpinBox()
-        self._density_voxel.setRange(0.1, 100000.0)
-        self._density_voxel.setDecimals(1)
-        self._density_voxel.setMinimumWidth(90)
-        density_hist_row.addWidget(self._density_voxel)
-        density_hist_row.addWidget(QLabel("nm"))
-        density_hist_row.addSpacing(18)
-        density_hist_row.addWidget(QLabel("smoothing sigma"))
-        self._density_sigma = QDoubleSpinBox()
-        self._density_sigma.setRange(0.0, 100.0)
-        self._density_sigma.setDecimals(2)
-        self._density_sigma.setMinimumWidth(88)
-        density_hist_row.addWidget(self._density_sigma)
-        density_hist_row.addStretch()
-        root.addLayout(density_hist_row)
-
         root.addSpacing(6)
 
         # Show section (2×2 grid)
@@ -659,6 +639,11 @@ class PreferencesDialog(QDialog):
         self._render_cmap_combo.addItems(_RENDER_CMAPS)
         form_render.addRow("Colormap", self._render_cmap_combo)
 
+        self._render_xy_origin_combo = QComboBox()
+        for label, value in _XY_ORIGIN_OPTIONS:
+            self._render_xy_origin_combo.addItem(label, value)
+        form_render.addRow("Display XY coordinates as", self._render_xy_origin_combo)
+
         root.addWidget(grp_render)
 
         # ── Scatter Plot ─────────────────────────────────────────────
@@ -674,6 +659,11 @@ class PreferencesDialog(QDialog):
         self._scatter_cmap_combo = QComboBox()
         self._scatter_cmap_combo.addItems(_SCATTER_CMAPS)
         form_scatter.addRow("Colormap", self._scatter_cmap_combo)
+
+        self._scatter_xy_origin_combo = QComboBox()
+        for label, value in _XY_ORIGIN_OPTIONS:
+            self._scatter_xy_origin_combo.addItem(label, value)
+        form_scatter.addRow("Display XY coordinates as", self._scatter_xy_origin_combo)
 
         root.addWidget(grp_scatter)
 
@@ -923,6 +913,7 @@ class PreferencesDialog(QDialog):
         cols = 4
         for i, name in enumerate(_ATTRIBUTE_ORDER):
             cb = QCheckBox(name)
+            cb.setToolTip(_attribute_tooltip(name))
             self._attribute_checks[name] = cb
             grid.addWidget(cb, i // cols, i % cols)
         scroll.setWidget(panel)
@@ -935,6 +926,7 @@ class PreferencesDialog(QDialog):
         computed_layout.setSpacing(4)
         for name, description in _COMPUTED_ATTRIBUTE_INFO:
             cb = QCheckBox(f"{name}: {description}")
+            cb.setToolTip(f"{name}: {description}")
             self._computed_attribute_checks[name] = cb
             computed_layout.addWidget(cb)
         root.addWidget(computed_panel)
@@ -1110,10 +1102,6 @@ class PreferencesDialog(QDialog):
         self._loc_prec_method.setEnabled(self._compute_loc_prec.isChecked())
         self._compute_density.setChecked(bool(d.get("compute_local_density", False)))
         self._density_radius.setValue(float(d.get("local_density_radius", 100)))
-        self._density_dimensions = int(d.get("local_density_dimensions", 2))
-        self._set_combo_data(self._density_method, d.get("local_density_method", "kdtree"))
-        self._density_voxel.setValue(float(d.get("local_density_voxel_size", 100)))
-        self._density_sigma.setValue(float(d.get("local_density_smooth_sigma", 1.0)))
         self._show_data_info.setChecked(bool(d.get("show_data_info", True)))
         self._show_attr.setChecked(bool(d.get("show_attr_plot", True)))
         self._show_scatter.setChecked(bool(d.get("show_scatter", False)))
@@ -1135,9 +1123,11 @@ class PreferencesDialog(QDialog):
         # Plot
         self._px_spin.setValue(float(p.get("render_pixel_size", 2)))
         self._set_combo(self._render_cmap_combo, p.get("render_cmap", "Hot"), _RENDER_CMAPS)
+        self._set_combo_data(self._render_xy_origin_combo, p.get("render_xy_origin", "top_left"))
         self._set_combo(self._scatter_color_by_combo, p.get("scatter_color_by", "tid"),
                         _SCATTER_COLOR_BY_OPTIONS)
         self._set_combo(self._scatter_cmap_combo, p.get("scatter_cmap", "jet"), _SCATTER_CMAPS)
+        self._set_combo_data(self._scatter_xy_origin_combo, p.get("scatter_xy_origin", "top_left"))
         self._set_combo(self._plot_cmap_combo, p.get("attr_cmap", "single color"), _ATTR_CMAPS)
         self._set_combo(self._roi_color_combo, p.get("roi_color", "Yellow"), _ROI_COLORS)
         self._roi_highlight_in_roi.setChecked(bool(p.get("roi_highlight_in_roi", True)))
@@ -1217,10 +1207,6 @@ class PreferencesDialog(QDialog):
         d["loc_precision_method"] = str(self._loc_prec_method.currentData() or "stddev")
         d["compute_local_density"] = bool(self._compute_density.isChecked())
         d["local_density_radius"] = float(self._density_radius.value())
-        d["local_density_dimensions"] = int(getattr(self, "_density_dimensions", 2))
-        d["local_density_method"] = str(self._density_method.currentData() or "kdtree")
-        d["local_density_voxel_size"] = float(self._density_voxel.value())
-        d["local_density_smooth_sigma"] = float(self._density_sigma.value())
         d["show_data_info"] = bool(self._show_data_info.isChecked())
         d["show_attr_plot"] = bool(self._show_attr.isChecked())
         d["show_scatter"] = bool(self._show_scatter.isChecked())
@@ -1244,8 +1230,10 @@ class PreferencesDialog(QDialog):
         # Plot
         p["render_pixel_size"] = float(self._px_spin.value())
         p["render_cmap"] = self._render_cmap_combo.currentText()
+        p["render_xy_origin"] = str(self._render_xy_origin_combo.currentData() or "top_left")
         p["scatter_color_by"] = self._scatter_color_by_combo.currentText()
         p["scatter_cmap"] = self._scatter_cmap_combo.currentText()
+        p["scatter_xy_origin"] = str(self._scatter_xy_origin_combo.currentData() or "top_left")
         p["attr_cmap"] = self._plot_cmap_combo.currentText()
         p["roi_color"] = self._roi_color_combo.currentText()
         p["roi_highlight_in_roi"] = bool(self._roi_highlight_in_roi.isChecked())

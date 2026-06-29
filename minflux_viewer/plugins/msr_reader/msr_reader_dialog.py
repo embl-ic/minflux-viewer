@@ -12,6 +12,7 @@ from typing import Any, Optional
 import numpy as np
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -33,6 +34,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSpinBox,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -632,18 +634,15 @@ class AlignmentSaveDialog(QDialog):
 
         # Remembered checkbox states from the last run (persisted in settings).
         opts = initial_options or {}
-        self.save_beads = QCheckBox("Average beads CSV (all aligned channels)")
+        self.save_beads = QCheckBox("Matched bead summary CSV")
         self.save_beads.setChecked(bool(opts.get("save_beads", True)))
-        self.save_transform = QCheckBox("Rigid transform CSV (all aligned channels)")
+        self.save_transform = QCheckBox("Alignment transform CSV")
         self.save_transform.setChecked(bool(opts.get("save_transform", True)))
-        self.save_localizations = QCheckBox("Aligned localizations CSV (all aligned channels)")
-        self.save_localizations.setChecked(bool(opts.get("save_localizations", False)))
         self.show_plot = QCheckBox("Show beads and alignment result")
         self.show_plot.setChecked(bool(opts.get("show_plot", False)))
 
         self.path_beads = QLineEdit(initial_paths["beads"])
         self.path_transform = QLineEdit(initial_paths["transform"])
-        self.path_localizations = QLineEdit(initial_paths["localizations"])
 
         layout = QVBoxLayout(self)
         hint = QLabel(
@@ -657,7 +656,6 @@ class AlignmentSaveDialog(QDialog):
         layout.addLayout(grid)
         self._add_path_row(grid, 0, self.save_beads, self.path_beads)
         self._add_path_row(grid, 1, self.save_transform, self.path_transform)
-        self._add_path_row(grid, 2, self.save_localizations, self.path_localizations)
         layout.addWidget(self.show_plot)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -687,11 +685,9 @@ class AlignmentSaveDialog(QDialog):
         return {
             "save_beads": self.save_beads.isChecked(),
             "save_transform": self.save_transform.isChecked(),
-            "save_localizations": self.save_localizations.isChecked(),
             "show_plot": self.show_plot.isChecked(),
             "path_beads": self.path_beads.text().strip(),
             "path_transform": self.path_transform.text().strip(),
-            "path_localizations": self.path_localizations.text().strip(),
         }
 
 
@@ -878,15 +874,26 @@ class AlignmentPlotWindow(QDialog):
     def __init__(self, results, parent=None, data_bounds_nm=None):
         super().__init__(parent)
         self.setWindowTitle("Beads and alignment result")
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
         self.resize(1150, 760)
         self.results = results
         self.datasets = self._build_plot_datasets(results)
         # (min_xyz, max_xyz) nm bounding box of all datasets' raw localizations,
-        # drawn as a view-aware yellow data-range rectangle. None = no box.
+        # drawn as a view-aware wireframe data-range box. None = bead bounds.
         self.data_bounds_nm = data_bounds_nm
         self.visibility = {}
         self._items = {}
         self._axis_indices = (0, 1)
+        self._view_mode = "XY"
+        self._view_3d = None
+        self._grid_3d = None
+        self._axis_3d = None
+        self._items_3d = {}
+        self._box_3d_items = []
+        self._axis_3d_items = []
+        self._show_3d_axis = True
+        self._show_3d_bounding_box = True
 
         import pyqtgraph as pg
 
@@ -899,17 +906,19 @@ class AlignmentPlotWindow(QDialog):
             cb.toggled.connect(self._update_visibility)
             self.visibility[key] = cb
             controls.addWidget(cb)
-        controls.addWidget(QLabel("View:"))
-        self.view_mode = QComboBox()
-        self.view_mode.addItems(["XY", "XZ", "YZ"])
-        self.view_mode.currentTextChanged.connect(self._on_view_changed)
-        controls.addWidget(self.view_mode)
         controls.addStretch(1)
-        self.hover_label = QLabel("Hover near a point to see bead ID, channel, and coordinates (nm).")
+        self.hover_label = QLabel("Hover near a point to see bead ID, channel, and coordinates (µm).")
         controls.addWidget(self.hover_label)
         layout.addLayout(controls)
 
         self.plot = pg.PlotWidget(background="w")
+        try:
+            self.plot.setMenuEnabled(False)
+            self.plot.getPlotItem().getViewBox().setMenuEnabled(False)
+        except Exception:
+            pass
+        self.plot.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.plot.customContextMenuRequested.connect(self._show_context_menu)
         self.plot.showGrid(x=True, y=True, alpha=0.22)
         self.plot.setAspectLocked(True)
         self.plot.addLegend()
@@ -917,7 +926,9 @@ class AlignmentPlotWindow(QDialog):
         self.plot.getAxis("left").setPen("k")
         self.plot.getAxis("bottom").setTextPen("k")
         self.plot.getAxis("left").setTextPen("k")
-        layout.addWidget(self.plot, stretch=1)
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self.plot)
+        layout.addWidget(self._stack, stretch=1)
         self.plot.scene().sigMouseMoved.connect(self._on_hover)
         self._draw()
 
@@ -952,16 +963,24 @@ class AlignmentPlotWindow(QDialog):
             }
         return datasets
 
+    @staticmethod
+    def _to_um(values_nm):
+        return np.asarray(values_nm, dtype=np.float64) / 1000.0
+
     def _draw(self):
         import pyqtgraph as pg
 
+        if self._view_mode == "3D":
+            self._draw_3d()
+            return
+        self._stack.setCurrentWidget(self.plot)
         self.plot.clear()
         if getattr(self.plot.plotItem, "legend", None) is not None:
             self.plot.plotItem.legend.clear()
         self._items = {}
         x_idx, y_idx = self._axis_indices
         for key, meta in self.datasets.items():
-            xyz = meta["xyz_nm"]
+            xyz = self._to_um(meta["xyz_nm"])
             brush = pg.mkBrush(meta["color"] + "80")
             pen = pg.mkPen(meta["color"], width=1)
             item = pg.ScatterPlotItem(
@@ -978,8 +997,8 @@ class AlignmentPlotWindow(QDialog):
             self._items[key] = item
         self._draw_data_range_box()
         labels = self._axis_labels()
-        self.plot.setLabel("bottom", labels[0], units="nm")
-        self.plot.setLabel("left", labels[1], units="nm")
+        self.plot.setLabel("bottom", labels[0], units="µm")
+        self.plot.setLabel("left", labels[1], units="µm")
         self.plot.setTitle("Bead positions before and after channel alignment")
         self._set_equal_range()
 
@@ -987,7 +1006,8 @@ class AlignmentPlotWindow(QDialog):
         """(x0, y0, x1, y1) of the data-range box for the current view, or None."""
         if self.data_bounds_nm is None:
             return None
-        mins, maxs = self.data_bounds_nm
+        mins = self._to_um(self.data_bounds_nm[0])
+        maxs = self._to_um(self.data_bounds_nm[1])
         x_idx, y_idx = self._axis_indices
         if x_idx >= len(mins) or y_idx >= len(mins):
             return None
@@ -1009,34 +1029,73 @@ class AlignmentPlotWindow(QDialog):
         )
 
     def _update_visibility(self):
-        if not self._items:
-            return
         for key, item in self._items.items():
             item.setVisible(self.visibility[key].isChecked())
+        for key, item in self._items_3d.items():
+            item.setVisible(self.visibility[key].isChecked())
+        if self._view_mode == "3D":
+            self._configure_3d_reference_items()
 
     def _axis_labels(self):
-        mode = self.view_mode.currentText().upper()
+        mode = self._view_mode.upper()
         if mode == "XZ":
             return "x", "z"
         if mode == "YZ":
             return "y", "z"
         return "x", "y"
 
-    def _on_view_changed(self):
-        mode = self.view_mode.currentText().upper()
+    def _set_view_mode(self, mode: str) -> None:
+        mode = str(mode).upper()
         if mode == "XZ":
             self._axis_indices = (0, 2)
         elif mode == "YZ":
             self._axis_indices = (1, 2)
-        else:
+        elif mode == "3D":
             self._axis_indices = (0, 1)
+        else:
+            mode = "XY"
+            self._axis_indices = (0, 1)
+        self._view_mode = mode
         self._draw()
+
+    def _show_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+        view_menu = menu.addMenu("View")
+        for mode in ("XY", "XZ", "YZ", "3D"):
+            action = view_menu.addAction(mode)
+            action.setCheckable(True)
+            action.setChecked(mode == self._view_mode)
+            action.triggered.connect(lambda _checked=False, value=mode: self._set_view_mode(value))
+        if self._view_mode == "3D":
+            menu.addSeparator()
+            axis_action = menu.addAction("Axis")
+            axis_action.setCheckable(True)
+            axis_action.setChecked(self._show_3d_axis)
+            axis_action.triggered.connect(self._set_3d_axis_visible)
+
+            box_action = menu.addAction("Bounding Box")
+            box_action.setCheckable(True)
+            box_action.setChecked(self._show_3d_bounding_box)
+            box_action.triggered.connect(self._set_3d_bounding_box_visible)
+        menu.addSeparator()
+        menu.addAction("Reset View", self._reset_view)
+        sender = self.sender()
+        if isinstance(sender, QWidget):
+            menu.exec(sender.mapToGlobal(pos))
+        else:
+            menu.exec(self.mapToGlobal(pos))
+
+    def _reset_view(self) -> None:
+        if self._view_mode == "3D":
+            self._reset_3d_camera()
+        else:
+            self._set_equal_range()
 
     def _set_equal_range(self):
         visible_xyz = [meta["xyz_nm"] for key, meta in self.datasets.items() if self.visibility[key].isChecked()]
         if not visible_xyz:
             visible_xyz = [meta["xyz_nm"] for meta in self.datasets.values()]
-        xyz = np.vstack(visible_xyz)
+        xyz = self._to_um(np.vstack(visible_xyz))
         x_idx, y_idx = self._axis_indices
         xy = xyz[:, [x_idx, y_idx]]
         xy = xy[np.all(np.isfinite(xy), axis=1)]
@@ -1053,7 +1112,347 @@ class AlignmentPlotWindow(QDialog):
         self.plot.setXRange(centers[0] - radius, centers[0] + radius, padding=0)
         self.plot.setYRange(centers[1] - radius, centers[1] + radius, padding=0)
 
+    def _ensure_3d_built(self) -> bool:
+        if self._view_3d is not None:
+            return True
+        try:
+            import pyqtgraph.opengl as gl
+        except Exception as exc:
+            QMessageBox.warning(self, "3D view", f"3D view is unavailable:\n{exc}")
+            return False
+        view = gl.GLViewWidget()
+        view.setBackgroundColor("w")
+        view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        view.customContextMenuRequested.connect(self._show_context_menu)
+        grid = gl.GLGridItem()
+        grid.setSize(1000, 1000)
+        grid.setSpacing(100, 100)
+        try:
+            grid.setColor((160, 160, 160, 80))
+        except Exception:
+            pass
+        view.addItem(grid)
+        axis = gl.GLAxisItem()
+        axis.setSize(500, 500, 500)
+        view.addItem(axis)
+        try:
+            axis.setVisible(False)
+        except Exception:
+            pass
+        self._view_3d = view
+        self._grid_3d = grid
+        self._axis_3d = axis
+        self._items_3d = {}
+        self._stack.addWidget(view)
+        return True
+
+    @staticmethod
+    def _nice_grid_spacing_um(span_um: float, target_lines: int = 8) -> float:
+        raw = float(span_um) / max(int(target_lines), 1)
+        if not np.isfinite(raw) or raw <= 0:
+            return 1.0
+        mag = 10.0 ** np.floor(np.log10(raw))
+        norm = raw / mag
+        step = (1 if norm < 1.5 else 2 if norm < 3 else 5 if norm < 7 else 10) * mag
+        return float(max(step, 1e-6))
+
+    def _plot_xyz_um(self, *, visible_only: bool, include_data_bounds: bool) -> np.ndarray:
+        parts: list[np.ndarray] = []
+        for key, meta in self.datasets.items():
+            if visible_only and not self.visibility[key].isChecked():
+                continue
+            xyz = self._to_um(meta["xyz_nm"])
+            xyz = xyz[np.all(np.isfinite(xyz), axis=1)]
+            if xyz.size:
+                parts.append(xyz[:, :3])
+        if include_data_bounds and self.data_bounds_nm is not None:
+            bounds = np.vstack([
+                self._to_um(self.data_bounds_nm[0]),
+                self._to_um(self.data_bounds_nm[1]),
+            ])
+            bounds = bounds[np.all(np.isfinite(bounds), axis=1)]
+            if bounds.size:
+                parts.append(bounds[:, :3])
+        if not parts and visible_only:
+            return self._plot_xyz_um(visible_only=False, include_data_bounds=include_data_bounds)
+        if not parts:
+            return np.empty((0, 3), dtype=np.float64)
+        return np.vstack(parts).astype(np.float64, copy=False)
+
+    @staticmethod
+    def _visible_3d_rgba(color) -> tuple[float, float, float, float]:
+        rgb = np.array([color.redF(), color.greenF(), color.blueF()], dtype=np.float64)
+        luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+        if luminance > 0.58:
+            rgb *= np.clip(0.58 / luminance, 0.55, 1.0)
+        return float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0
+
+    def _set_3d_axis_visible(self, checked: bool) -> None:
+        self._show_3d_axis = bool(checked)
+        if self._view_mode == "3D":
+            self._configure_3d_reference_items()
+
+    def _set_3d_bounding_box_visible(self, checked: bool) -> None:
+        self._show_3d_bounding_box = bool(checked)
+        if self._view_mode == "3D":
+            self._configure_3d_reference_items()
+
+    @staticmethod
+    def _fmt_tick_nm(value_um: float) -> str:
+        value_nm = float(value_um) * 1000.0
+        if abs(value_nm) >= 1000 or float(value_nm).is_integer():
+            return f"{value_nm:.0f}"
+        return f"{value_nm:.3g}"
+
+    @staticmethod
+    def _tick_values_um(lo: float, hi: float, *, max_ticks: int = 5) -> list[float]:
+        if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
+            return []
+        step = AlignmentPlotWindow._nice_grid_spacing_um(hi - lo, target_lines=max_ticks)
+        start = np.ceil(lo / step) * step
+        values: list[float] = []
+        value = start
+        while value <= hi + step * 1e-9 and len(values) < max_ticks + 2:
+            values.append(float(value))
+            value += step
+        return values[:max_ticks]
+
+    @staticmethod
+    def _expanded_bounds_um(xyz: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        xyz = np.asarray(xyz, dtype=np.float64)
+        if xyz.ndim != 2 or xyz.shape[0] == 0 or xyz.shape[1] < 3:
+            return None
+        xyz = xyz[np.all(np.isfinite(xyz[:, :3]), axis=1), :3]
+        if xyz.size == 0:
+            return None
+        mins = np.nanmin(xyz, axis=0)
+        maxs = np.nanmax(xyz, axis=0)
+        spans = maxs - mins
+        max_span = max(float(np.nanmax(spans)), 1.0)
+        for dim in range(3):
+            if spans[dim] <= 0:
+                mins[dim] -= max_span * 0.05
+                maxs[dim] += max_span * 0.05
+        spans = np.maximum(maxs - mins, 1e-6)
+        return mins, maxs, spans
+
+    def _bounding_box_bounds_um(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        if self.data_bounds_nm is not None:
+            bounds = np.vstack([
+                self._to_um(self.data_bounds_nm[0]),
+                self._to_um(self.data_bounds_nm[1]),
+            ])
+            return self._expanded_bounds_um(bounds)
+        return self._expanded_bounds_um(
+            self._plot_xyz_um(visible_only=True, include_data_bounds=False)
+        )
+
+    @staticmethod
+    def _reference_color() -> tuple[float, float, float, float]:
+        return 0.35, 0.35, 0.35, 0.68
+
+    @staticmethod
+    def _text_color() -> tuple[int, int, int, int]:
+        return 35, 35, 35, 230
+
+    def _clear_3d_items(self, items: list) -> None:
+        if self._view_3d is None:
+            items.clear()
+            return
+        for item in list(items):
+            try:
+                self._view_3d.removeItem(item)
+            except Exception:
+                pass
+        items.clear()
+
+    def _add_3d_line(
+        self,
+        items: list,
+        start: np.ndarray,
+        end: np.ndarray,
+        *,
+        color: tuple[float, float, float, float],
+        width: float = 1.2,
+    ) -> None:
+        if self._view_3d is None:
+            return
+        try:
+            import pyqtgraph.opengl as gl
+
+            item = gl.GLLinePlotItem(
+                pos=np.vstack([start, end]).astype(np.float32),
+                color=color,
+                width=width,
+                antialias=True,
+            )
+            self._view_3d.addItem(item)
+            items.append(item)
+        except Exception:
+            pass
+
+    def _add_3d_text(self, items: list, pos: np.ndarray, text: str, *, label: bool = False) -> None:
+        if self._view_3d is None:
+            return
+        try:
+            import pyqtgraph.opengl as gl
+
+            item = gl.GLTextItem(
+                pos=np.asarray(pos, dtype=np.float64),
+                text=str(text),
+                color=self._text_color(),
+                font=QFont("Helvetica", 11 if label else 8),
+                glOptions="translucent",
+            )
+            self._view_3d.addItem(item)
+            items.append(item)
+        except Exception:
+            pass
+
+    def _draw_3d_axis(self, mins: np.ndarray, maxs: np.ndarray, spans: np.ndarray) -> None:
+        if not self._show_3d_axis:
+            return
+        origin = mins.copy()
+        pad = max(float(np.max(spans)) * 0.04, 0.05)
+        axis_defs = (
+            (0, np.array([maxs[0], origin[1], origin[2]]), (0.9, 0.15, 0.15, 0.95), "X (nm)"),
+            (1, np.array([origin[0], maxs[1], origin[2]]), (0.15, 0.7, 0.25, 0.95), "Y (nm)"),
+            (2, np.array([origin[0], origin[1], maxs[2]]), (0.15, 0.35, 0.95, 0.95), "Z (nm)"),
+        )
+        for dim, end, color, label in axis_defs:
+            self._add_3d_line(self._axis_3d_items, origin, end, color=color, width=2.0)
+            label_pos = end.copy()
+            label_pos[dim] += pad
+            self._add_3d_text(self._axis_3d_items, label_pos, label, label=True)
+            for tick in self._tick_values_um(float(mins[dim]), float(maxs[dim])):
+                tick_pos = origin.copy()
+                tick_pos[dim] = tick
+                tick_end = tick_pos.copy()
+                side_dim = 1 if dim != 1 else 0
+                tick_end[side_dim] += pad * 0.35
+                self._add_3d_line(self._axis_3d_items, tick_pos, tick_end, color=color, width=1.0)
+                text_pos = tick_end.copy()
+                text_pos[side_dim] += pad * 0.12
+                self._add_3d_text(self._axis_3d_items, text_pos, self._fmt_tick_nm(tick))
+
+    def _draw_3d_bounding_box(self, mins: np.ndarray, maxs: np.ndarray) -> None:
+        if not self._show_3d_bounding_box:
+            return
+        x0, y0, z0 = mins
+        x1, y1, z1 = maxs
+        corners = np.array([
+            [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+            [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+        ], dtype=np.float64)
+        edges = (
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        )
+        color = self._reference_color()
+        for a, b in edges:
+            self._add_3d_line(self._box_3d_items, corners[a], corners[b], color=color, width=1.4)
+
+    def _configure_3d_reference_items(self) -> None:
+        if self._view_3d is None:
+            return
+        self._clear_3d_items(self._axis_3d_items)
+        self._clear_3d_items(self._box_3d_items)
+        xyz = self._plot_xyz_um(visible_only=True, include_data_bounds=True)
+        bounds = self._expanded_bounds_um(xyz)
+        if bounds is None:
+            return
+        mins, maxs, spans = bounds
+        centre = (mins + maxs) / 2.0
+        xy_size = max(float(np.max(spans[:2])) * 1.15, 1.0)
+        spacing = self._nice_grid_spacing_um(xy_size)
+        z_floor = float(min(mins[2], 0.0)) if np.isfinite(mins[2]) else 0.0
+
+        if self._grid_3d is not None:
+            try:
+                self._grid_3d.setSize(xy_size, xy_size)
+                self._grid_3d.setSpacing(spacing, spacing)
+                self._grid_3d.resetTransform()
+                self._grid_3d.translate(float(centre[0]), float(centre[1]), z_floor)
+            except Exception:
+                pass
+        if self._axis_3d is not None:
+            try:
+                axis_size = max(min(xy_size * 0.25, xy_size), 0.5, float(spans[2]) * 1.1)
+                self._axis_3d.setSize(axis_size, axis_size, axis_size)
+                self._axis_3d.resetTransform()
+                self._axis_3d.translate(float(mins[0]), float(mins[1]), z_floor)
+                self._axis_3d.setVisible(False)
+            except Exception:
+                pass
+        self._draw_3d_axis(mins, maxs, spans)
+        box_bounds = self._bounding_box_bounds_um()
+        if box_bounds is not None:
+            box_mins, box_maxs, _box_spans = box_bounds
+            self._draw_3d_bounding_box(box_mins, box_maxs)
+
+    def _draw_3d(self) -> None:
+        if not self._ensure_3d_built() or self._view_3d is None:
+            self._view_mode = "XY"
+            self._axis_indices = (0, 1)
+            self._draw()
+            return
+        import pyqtgraph as pg
+        import pyqtgraph.opengl as gl
+
+        self._stack.setCurrentWidget(self._view_3d)
+        for item in list(self._items_3d.values()):
+            try:
+                self._view_3d.removeItem(item)
+            except Exception:
+                pass
+        self._items_3d = {}
+        self._clear_3d_items(self._axis_3d_items)
+        self._clear_3d_items(self._box_3d_items)
+        for key, meta in self.datasets.items():
+            xyz = self._to_um(meta["xyz_nm"])
+            xyz = xyz[np.all(np.isfinite(xyz), axis=1)]
+            if xyz.size == 0:
+                continue
+            color = pg.mkColor(meta["color"])
+            rgba = np.tile(self._visible_3d_rgba(color), (xyz.shape[0], 1)).astype(np.float32)
+            point_size = 10.5 if meta.get("symbol") == "star" else 8.5
+            item = gl.GLScatterPlotItem(pxMode=True, size=point_size)
+            try:
+                item.setGLOptions("translucent")
+            except Exception:
+                pass
+            item.setData(
+                pos=xyz.astype(np.float32, copy=False),
+                color=rgba,
+                size=point_size,
+                pxMode=True,
+            )
+            item.setVisible(self.visibility[key].isChecked())
+            self._view_3d.addItem(item)
+            self._items_3d[key] = item
+        self._configure_3d_reference_items()
+        self._reset_3d_camera()
+        self.hover_label.setText("3D view: use mouse to rotate, pan, and zoom. Coordinates are displayed in µm.")
+
+    def _reset_3d_camera(self) -> None:
+        if self._view_3d is None:
+            return
+        xyz = self._plot_xyz_um(visible_only=True, include_data_bounds=True)
+        if xyz.size == 0:
+            return
+        centre = xyz.mean(axis=0)
+        span = xyz.max(axis=0) - xyz.min(axis=0)
+        extent = float(np.linalg.norm(span))
+        if not np.isfinite(extent) or extent <= 0:
+            extent = 10.0
+        import pyqtgraph as pg
+        self._view_3d.opts["center"] = pg.Vector(*centre)
+        self._view_3d.setCameraPosition(distance=max(extent * 1.5, 5.0))
+
     def _best_hover_target(self, scene_pos):
+        if self._view_mode == "3D":
+            return None
         if not self.plot.sceneBoundingRect().contains(scene_pos):
             return None
         point = self.plot.plotItem.vb.mapSceneToView(scene_pos)
@@ -1066,7 +1465,7 @@ class AlignmentPlotWindow(QDialog):
         for key in self.datasets:
             if not self.visibility[key].isChecked():
                 continue
-            xyz = self.datasets[key]["xyz_nm"][:, [x_idx, y_idx]]
+            xyz = self._to_um(self.datasets[key]["xyz_nm"])[:, [x_idx, y_idx]]
             scaled = np.column_stack([(xyz[:, 0] - mouse_xy[0]) / sx, (xyz[:, 1] - mouse_xy[1]) / sy])
             dist2 = np.sum(scaled ** 2, axis=1)
             idx = int(np.argmin(dist2))
@@ -1078,15 +1477,16 @@ class AlignmentPlotWindow(QDialog):
     def _on_hover(self, scene_pos):
         target = self._best_hover_target(scene_pos)
         if target is None or target["dist2"] > 0.0004:
-            self.hover_label.setText("Hover near a point to see bead ID, channel, and coordinates (nm).")
+            if self._view_mode != "3D":
+                self.hover_label.setText("Hover near a point to see bead ID, channel, and coordinates (µm).")
             return
         key = target["key"]
         idx = target["index"]
-        xyz = self.datasets[key]["xyz_nm"][idx]
+        xyz = self._to_um(self.datasets[key]["xyz_nm"][idx])
         bead_id = int(self.datasets[key]["bead_ids"][idx])
         self.hover_label.setText(
             f"bead ID {bead_id} | {self.datasets[key]['label']} | "
-            f"x {xyz[0]:.3f} nm, y {xyz[1]:.3f} nm, z {xyz[2]:.3f} nm"
+            f"x {xyz[0]:.4f} µm, y {xyz[1]:.4f} µm, z {xyz[2]:.4f} µm"
         )
 
 
@@ -1144,8 +1544,9 @@ class MsrReaderDialog(QWidget):
 
         self.parsed: dict[str, Any] = {}
         self.field_selection = {}
-        # gri-IDs the user excluded via "Show Beads Drift". None until the user
-        # applies a selection (None/empty = use all beads, as before).
+        # gri-IDs the user excluded via "Show Beads Drift". Alignment always
+        # starts from metadata-marked used beads; these exclusions further
+        # narrow that set after the user applies a manual selection.
         self._bead_unchecked_gris = None
         # Remembered "Align channel" save-dialog checkbox states (persisted).
         self._alignment_save_options: dict = {}
@@ -2334,7 +2735,9 @@ class MsrReaderDialog(QWidget):
                 return False, f"{moving_name} has {matched} usable bead(s) matching the reference; need at least {min_beads}"
         return True, ""
 
-    def _viewer_used_bead_gri_for_dataset(self, name: str) -> set[int] | None:
+    def _viewer_used_bead_gri_for_dataset(
+        self, name: str, *, log_prefix: str = "[viewer align]"
+    ) -> set[int] | None:
         # Prefer translated legacy MBM metadata (gri↔R-ID map + used list).
         from ...msr import state as MFSTATE
         meta = (getattr(MFSTATE, "mbm_meta_map", {}) or {}).get(name)
@@ -2351,7 +2754,7 @@ class MsrReaderDialog(QWidget):
             if used_names and name_to_gri:
                 used_gri = {name_to_gri[n] for n in used_names if n in name_to_gri}
                 if used_gri:
-                    self.log(f"[viewer align] {name}: using {len(used_gri)} "
+                    self.log(f"{log_prefix} {name}: using {len(used_gri)} "
                              f"metadata-marked used bead(s) (legacy MBM)")
                     return used_gri
 
@@ -2369,12 +2772,12 @@ class MsrReaderDialog(QWidget):
             if missing:
                 preview = ", ".join(missing[:5])
                 suffix = "..." if len(missing) > 5 else ""
-                self.log(f"[viewer align] {name}: {len(missing)} used bead name(s) not mapped to gri: {preview}{suffix}")
+                self.log(f"{log_prefix} {name}: {len(missing)} used bead name(s) not mapped to gri: {preview}{suffix}")
             if used_gri:
-                self.log(f"[viewer align] {name}: using {len(used_gri)} metadata-marked used bead(s)")
+                self.log(f"{log_prefix} {name}: using {len(used_gri)} metadata-marked used bead(s)")
                 return used_gri
         if used_gri_from_points:
-            self.log(f"[viewer align] {name}: using {len(used_gri_from_points)} bead(s) marked used in points metadata")
+            self.log(f"{log_prefix} {name}: using {len(used_gri_from_points)} bead(s) marked used in points metadata")
             return used_gri_from_points
         return None
 
@@ -2420,9 +2823,11 @@ class MsrReaderDialog(QWidget):
         visit(attrs)
         return name_to_gri, used_gri
 
-    def _filter_mbm_points_to_used_beads(self, name: str, points) -> np.ndarray:
+    def _filter_mbm_points_to_used_beads(
+        self, name: str, points, *, log_prefix: str = "[viewer align]"
+    ) -> np.ndarray:
         arr = np.asarray(points)
-        used_gri = self._viewer_used_bead_gri_for_dataset(name)
+        used_gri = self._viewer_used_bead_gri_for_dataset(name, log_prefix=log_prefix)
         if used_gri is None:
             return arr
         names = set(getattr(getattr(arr, "dtype", None), "names", ()) or ())
@@ -2430,7 +2835,7 @@ class MsrReaderDialog(QWidget):
             return arr
         mask = np.isin(np.asarray(arr["gri"], dtype=np.uint32), np.asarray(sorted(used_gri), dtype=np.uint32))
         filtered = arr[mask]
-        self.log(f"[viewer align] {name}: filtered mbm points to {len(filtered)} row(s) from used bead metadata")
+        self.log(f"{log_prefix} {name}: filtered mbm points to {len(filtered)} row(s) from used bead metadata")
         return filtered
 
     def _viewer_dataset_looks_3d(self, name: str) -> bool:
@@ -2647,9 +3052,8 @@ class MsrReaderDialog(QWidget):
         msr = pick_one_msr(self.input_path_edit.text().strip())
         stem = Path(msr).stem if msr else "channel_alignment"
         return {
-            "beads": str(out_dir / f"{stem}_aligned_beads.csv"),
-            "transform": str(out_dir / f"{stem}_rigid_transform.csv"),
-            "localizations": str(out_dir / f"{stem}_aligned_localizations.csv"),
+            "beads": str(out_dir / f"{stem}_matched_bead_summary.csv"),
+            "transform": str(out_dir / f"{stem}_alignment_transform.csv"),
         }
 
     def _write_alignment_beads_csv(self, out_path: str, results):
@@ -2671,52 +3075,28 @@ class MsrReaderDialog(QWidget):
 
     def _write_alignment_transform_csv(self, out_path: str, results):
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        matrix_fields = [
+            f"matrix_4x4_{row}{col}{'_nm' if col == 3 and row < 3 else ''}"
+            for row in range(4)
+            for col in range(4)
+        ]
         with open(out_path, "w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
             writer.writerow([
-                "reference_channel_name", "moving_channel_name", "matched_bead_count",
-                "translation_x_nm", "translation_y_nm", "rmse_xy_nm",
-                "m00", "m01", "m02_nm", "m10", "m11", "m12_nm", "m20", "m21", "m22",
+                "reference_channel_name", "moving_channel_name", "transform_type",
+                "matched_bead_count", "rmse_xy_nm",
+                "translation_x_nm", "translation_y_nm", "translation_z_nm",
+                *matrix_fields,
             ])
             for result in results:
+                matrix = np.asarray(result.matrix_4x4, dtype=np.float64)
                 writer.writerow([
-                    result.channel1_name, result.channel2_name, int(result.bead_ids.size), float(result.translation[0]), float(result.translation[1]), float(result.rmse),
-                    float(result.matrix_3x3[0, 0]), float(result.matrix_3x3[0, 1]), float(result.matrix_3x3[0, 2]),
-                    float(result.matrix_3x3[1, 0]), float(result.matrix_3x3[1, 1]), float(result.matrix_3x3[1, 2]),
-                    float(result.matrix_3x3[2, 0]), float(result.matrix_3x3[2, 1]), float(result.matrix_3x3[2, 2]),
+                    result.channel1_name, result.channel2_name, result.transform_type,
+                    int(result.bead_ids.size), float(result.rmse),
+                    float(result.translation[0]), float(result.translation[1]),
+                    float(result.z_translation),
+                    *[float(matrix[row, col]) for row in range(4) for col in range(4)],
                 ])
-
-    def _build_aligned_localizations_table(self, channel_name, channel_mfx, matrix_4x4):
-        from ...msr.alignment import apply_homogeneous_transform
-        names = set(getattr(getattr(channel_mfx, "dtype", None), "names", ()) or ())
-        if "loc" not in names:
-            raise ValueError(f"{channel_name} mfx array has no 'loc' field")
-        loc = np.asarray(channel_mfx["loc"], dtype=np.float64) * 1e9
-        if loc.ndim != 2 or loc.shape[1] < 2:
-            raise ValueError("mfx.loc must have shape (N, 2+) for alignment export")
-        # Use the full 4x4 so Z is transformed too (3D datasets / 3D alignment).
-        aligned = apply_homogeneous_transform(loc, matrix_4x4)
-        rows = []
-        for idx in range(loc.shape[0]):
-            row = {"channel_name": channel_name, "index": idx, "loc_x_nm": float(loc[idx, 0]), "loc_y_nm": float(loc[idx, 1]), "aligned_x_nm": float(aligned[idx, 0]), "aligned_y_nm": float(aligned[idx, 1])}
-            if loc.shape[1] >= 3:
-                row["loc_z_nm"] = float(loc[idx, 2])
-                row["aligned_z_nm"] = float(aligned[idx, 2])
-            if "vld" in names:
-                row["vld"] = bool(channel_mfx["vld"][idx])
-            if "itr" in names:
-                row["itr"] = int(channel_mfx["itr"][idx])
-            rows.append(row)
-        return rows
-
-    def _write_dict_rows_csv(self, out_path: str, rows: list[dict]):
-        if not rows:
-            raise ValueError("no localization rows are available to export")
-        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(rows)
 
     def _aligned_mbm_points(self, name):
         """Bead points for *name* with beads excluded via "Show Beads Drift"
@@ -2786,7 +3166,11 @@ class MsrReaderDialog(QWidget):
                 "Parse a modern multi-channel .msr that contains 'grd/mbm/points'.")
             return
         dlg = BeadsDriftDialog(bead_data, unchecked_gris=self._bead_unchecked_gris, parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
+        dlg.accepted.connect(lambda d=dlg, data=bead_data: self._apply_beads_drift_selection(d, data))
+        self._show_child_dialog(dlg)
+
+    def _apply_beads_drift_selection(self, dlg, bead_data) -> None:
+        try:
             self._bead_unchecked_gris = dlg.unchecked_gris()
             gri_to_rid = {int(b["gri"]): str(b.get("rid", "") or "")
                           for d in bead_data for b in d.get("beads", [])}
@@ -2797,6 +3181,8 @@ class MsrReaderDialog(QWidget):
                      f"{self._format_bead_ids(kept, gri_to_rid)}")
             self.log(f"[beads] {len(excluded)} bead(s) excluded from alignment: "
                      f"{self._format_bead_ids(excluded, gri_to_rid)}")
+        except Exception as exc:
+            self.log(f"[beads] selection apply failed: {exc}")
 
     def _mbm_transform_type(self) -> str:
         """The MBM-handling transform mode from Preferences (Preferences > MBM
@@ -2864,11 +3250,13 @@ class MsrReaderDialog(QWidget):
         if ref_mbm is None:
             QMessageBox.critical(self, "Align channel", "Could not find bead points (`grd/mbm/points`) for the reference channel.")
             return
+        ref_mbm_for_alignment = self._filter_mbm_points_to_used_beads(
+            ref_name, ref_mbm, log_prefix="[align]"
+        )
         transform_type = self._mbm_transform_type()
         self.log(f"[align] MBM-handling transform: {transform_type}")
         try:
             results = []
-            aligned_localizations = []
             loc_bound_names = [ref_name]
             for ds in datasets[1:]:
                 moving_name = ds.get("display_name") or ds.get("did") or "channel"
@@ -2879,8 +3267,12 @@ class MsrReaderDialog(QWidget):
                     raise ValueError(f"Could not find bead points (`grd/mbm/points`) for {moving_name}.")
                 if moving_mfx is None:
                     raise ValueError(f"Could not find `mfx` localizations for {moving_name}.")
+                moving_mbm_for_alignment = self._filter_mbm_points_to_used_beads(
+                    moving_name, moving_mbm, log_prefix="[align]"
+                )
                 result = align_channels_from_arrays(
-                    ref_name, ref_mbm, moving_name, moving_mbm, transform_type=transform_type)
+                    ref_name, ref_mbm_for_alignment, moving_name, moving_mbm_for_alignment,
+                    transform_type=transform_type)
                 if int(result.bead_ids.size) < MIN_BEADS_FOR_ALIGNMENT:
                     raise ValueError(
                         f"Only {int(result.bead_ids.size)} matched bead(s) between "
@@ -2888,7 +3280,6 @@ class MsrReaderDialog(QWidget):
                         f"are required for alignment "
                         f"(check the bead selection in 'Show beads drift').")
                 results.append(result)
-                aligned_localizations.extend(self._build_aligned_localizations_table(moving_name, moving_mfx, result.matrix_4x4))
         except Exception as exc:
             self.log(f"[align] failed: {exc}")
             QMessageBox.critical(self, "Align channel", f"Alignment failed:\n{exc}")
@@ -2918,7 +3309,7 @@ class MsrReaderDialog(QWidget):
         # Remember the checkbox states for next time.
         self._alignment_save_options = {
             k: bool(payload[k])
-            for k in ("save_beads", "save_transform", "save_localizations", "show_plot")
+            for k in ("save_beads", "save_transform", "show_plot")
         }
         self._save_settings()
         try:
@@ -2928,21 +3319,22 @@ class MsrReaderDialog(QWidget):
             if payload["save_transform"]:
                 self._write_alignment_transform_csv(payload["path_transform"], results)
                 self.log(f"[align] wrote transform CSV: {payload['path_transform']}")
-            if payload["save_localizations"]:
-                self._write_dict_rows_csv(payload["path_localizations"], aligned_localizations)
-                self.log(f"[align] wrote aligned localizations CSV: {payload['path_localizations']}")
         except Exception as exc:
             self.log(f"[align] save failed: {exc}")
             QMessageBox.critical(self, "Align channel", f"Failed to save alignment outputs:\n{exc}")
             return
         if payload["show_plot"]:
             data_bounds = self._combined_loc_bounds_nm(loc_bound_names)
-            AlignmentPlotWindow(results, self, data_bounds_nm=data_bounds).exec()
+            self._show_child_dialog(
+                AlignmentPlotWindow(results, self, data_bounds_nm=data_bounds)
+            )
         summary = [f"Reference channel: {ref_name}"] + [
             f"{result.channel2_name}: matched {result.bead_ids.size}, translation ({result.translation[0]:.3f}, {result.translation[1]:.3f}) nm, RMSE XY {result.rmse:.3f} nm"
             for result in results
         ]
-        QMessageBox.information(self, "Align channel", "Alignment completed.\n\n" + "\n".join(summary))
+        self.log("[align] completed. " + " | ".join(summary))
+        if not payload["show_plot"]:
+            QMessageBox.information(self, "Align channel", "Alignment completed.\n\n" + "\n".join(summary))
 
     # ------------------------------------------------------------------
     # Export

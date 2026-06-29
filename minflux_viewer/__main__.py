@@ -30,6 +30,9 @@ def main() -> None:
     # GL_INVALID_VALUE in glUseProgram. Sharing contexts makes the cached
     # programs valid everywhere. Must be set BEFORE the QApplication is created.
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    # Keep the menu bar attached to the main window on platforms that support a
+    # native/global menu bar (macOS, and some Linux desktop environments).
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeMenuBar, True)
 
     app = QApplication(sys.argv)
     app.setApplicationName("MINFLUX Data Viewer")

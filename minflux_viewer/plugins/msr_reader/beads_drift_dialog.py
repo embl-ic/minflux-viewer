@@ -158,6 +158,8 @@ class BeadsDriftDialog(QDialog):
     def __init__(self, datasets: list[dict], *, unchecked_gris=None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Beads drift — manual selection")
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
 
         self._datasets = datasets or []
         n_ds = len(self._datasets)
