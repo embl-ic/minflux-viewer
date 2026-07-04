@@ -135,6 +135,55 @@ def check_for_update(current_version: str, *, timeout: float = _TIMEOUT) -> Upda
     return UpdateCheckResult("up_to_date", current_version, latest)
 
 
+def download_url(url: str, dest, *, progress=None, expected_size: int = 0,
+                 timeout: float = 60.0, chunk: int = 1 << 16):
+    """Stream *url* to *dest*, calling ``progress(done, total)`` as it goes.
+
+    Follows redirects (GitHub asset URLs redirect to a signed CDN URL). When
+    *expected_size* is given it is verified against the written byte count and a
+    mismatch raises ``ValueError`` — so a truncated download is never applied.
+    Returns the destination :class:`~pathlib.Path`.
+    """
+    from pathlib import Path
+
+    dest = Path(dest)
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/octet-stream",
+            "User-Agent": "minflux-viewer-updater",
+        },
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    done = 0
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        total = int(resp.headers.get("Content-Length") or expected_size or 0)
+        if progress:
+            progress(0, total)
+        with open(dest, "wb") as fh:
+            while True:
+                block = resp.read(chunk)
+                if not block:
+                    break
+                fh.write(block)
+                done += len(block)
+                if progress:
+                    progress(done, total)
+    if expected_size and dest.stat().st_size != int(expected_size):
+        raise ValueError(
+            f"Downloaded size {dest.stat().st_size} != expected {expected_size} "
+            "(incomplete download)."
+        )
+    return dest
+
+
+def download_asset(asset: ReleaseAsset, dest, *, progress=None, timeout: float = 60.0):
+    """Download a :class:`ReleaseAsset` to *dest*, verifying its known size."""
+    return download_url(asset.url, dest, progress=progress,
+                        expected_size=int(getattr(asset, "size", 0) or 0),
+                        timeout=timeout)
+
+
 def select_asset_for_platform(
     assets, *, system: str | None = None, machine: str | None = None
 ) -> ReleaseAsset | None:

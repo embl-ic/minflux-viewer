@@ -33,3 +33,8 @@ htmlcov/
 # MATLAB remnants
 *.asv
 *.m~
+
+# Release build artifacts - publish via GitHub Releases, never commit"
+MINFLUX-Viewer-*.zip
+MINFLUX-Viewer-*.tar.gz
+MINFLUX-Viewer-*.dmg
