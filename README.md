@@ -2,7 +2,7 @@
 
 **A desktop app to view, filter, process, and analyse [MINFLUX](https://www.embl.org/about/info/imaging-centre/) single-molecule localization data — in one place, on Windows, macOS, and Linux.**
 
-If you have MINFLUX data (Abberior `.msr`, exported `.mat`/`.csv`/`.npy`, or plain localization tables) and want to *look at it, clean it up, and measure things* without writing code or wrestling with a Python environment, this tool is for you. It reads your files natively — including Abberior `.msr` **without needing Imspector or the specpy SDK** — and gives you Fiji-style windows for rendering, scatter/histogram exploration, region selection, and a growing set of quantitative analyses.
+If you have MINFLUX data (Abberior `.msr`, exported `.mat`/`.csv`/`.npy`, or plain localization tables) and want to *look at it, clean it up, and measure things* without writing code or wrestling with a Python environment, this tool is for you. It reads your files natively — including Abberior `.msr` on **Windows, macOS, and Linux** — and gives you Fiji-style windows for rendering, scatter/histogram exploration, region selection, and a growing set of quantitative analyses.
 
 Developed at the [EMBL Imaging Centre](https://www.embl.org/about/info/imaging-centre/) (a Python/Qt successor to an in-house MATLAB toolset).
 
@@ -11,10 +11,12 @@ Developed at the [EMBL Imaging Centre](https://www.embl.org/about/info/imaging-c
 ## What you can do with it
 
 **📂 Open almost any MINFLUX data**
-- Abberior Imspector **`.msr`** (native, cross-platform — no specpy/Imspector install), single- and multi-channel.
-- `.mat` (Imspector `m2205` / `m2410`), `.npy`, `.csv`, `.json`, `.npz`, `.zarr`, spreadsheets.
+- Abberior Imspector **`.msr`** — read natively on **Windows, macOS, and Linux** (not Windows-only), both **modern multi-channel** and older **legacy single-channel** files, including any embedded confocal/STED images and bead/fiducial data.
+- `.mat` (Imspector `m2205` and `m2410`), `.npy`, `.csv`, `.json`, `.npz`, `.zarr`, spreadsheets — any localization table.
 - TIFF images and OBF image series (Fiji-style image viewer).
 - Just **drag-and-drop** files onto the window. Multiple datasets and multi-colour **overlays** are handled together.
+
+> **A file or version not opening?** MINFLUX data has evolved through several structural versions (`m2410`, `m2205`, and older *legacy* layouts) and container formats across Imspector/MINFLUX releases. We've validated the common ones, but if a file of yours doesn't open correctly we'd genuinely like to see it — please [open an issue](https://github.com/EMBL-ICLM/minflux-viewer/issues) with a sample so we can extend the parser to cover it.
 
 **🔬 Visualize**
 - **Render** — fast 2-D super-resolution reconstruction with colormaps, a depth slider for 3-D data, white/black background, scale bar, and a **3-D volume** preview.
@@ -37,7 +39,7 @@ Developed at the [EMBL Imaging Centre](https://www.embl.org/about/info/imaging-c
 
 ### Why this viewer
 - **One tool for the whole workflow** — open → filter → process → analyse → export, without switching software.
-- **Reads Abberior `.msr` natively and cross-platform** — no Imspector, no specpy, no vendor lock-in.
+- **Reads Abberior `.msr` natively on Windows, macOS, and Linux** — not limited to Windows.
 - **Everything normalizes to one internal model**, so the same tools work regardless of the source format.
 - **Cross-platform** builds with **in-app auto-update** (Windows & Linux).
 
