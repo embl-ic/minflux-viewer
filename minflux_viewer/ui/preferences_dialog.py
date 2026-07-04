@@ -1081,7 +1081,7 @@ class PreferencesDialog(QDialog):
         self._keep_last_folder.setChecked(bool(f.get("keep_last_folder", True)))
         self._confirm_overwrite.setChecked(bool(f.get("confirm_overwrite", True)))
         self._close_paraview.setChecked(bool(f.get("close_paraview_on_exit", True)))
-        self._check_updates.setChecked(bool(f.get("check_updates_on_startup", True)))
+        self._check_updates.setChecked(bool(f.get("check_updates_on_startup", False)))
 
         # Data
         self._iter_load.setCurrentText(str(d.get("iter_load", "last")))

@@ -48,6 +48,14 @@ def is_windows() -> bool:
     return sys.platform.startswith("win")
 
 
+def is_linux() -> bool:
+    return sys.platform.startswith("linux")
+
+
+def is_macos() -> bool:
+    return sys.platform == "darwin"
+
+
 def current_exe() -> Path:
     """Path to the running executable (the frozen app exe when frozen)."""
     return Path(sys.executable).resolve()
@@ -61,10 +69,14 @@ def install_dir() -> Path:
 def can_self_update() -> bool:
     """Whether one-click self-update is supported in this run.
 
-    Only the **frozen Windows** build can swap its own folder; a source checkout
-    or a non-Windows frozen build falls back to the download page.
+    Supported on the **frozen Windows and Linux** builds (they can swap their own
+    one-folder install and relaunch). **macOS is intentionally excluded**: a
+    downloaded, unsigned ``.app`` is Gatekeeper-quarantined, so an in-place update
+    would re-trigger a security prompt every time — a clean macOS auto-update
+    needs Developer ID code-signing + notarization first. A source checkout also
+    falls back to the download page.
     """
-    return is_frozen() and is_windows()
+    return is_frozen() and (is_windows() or is_linux())
 
 
 def find_app_root(extract_dir, exe_name: str = APP_EXE_NAME) -> Path:
@@ -75,13 +87,16 @@ def find_app_root(extract_dir, exe_name: str = APP_EXE_NAME) -> Path:
     that has the exe at the root. Raises ``FileNotFoundError`` if not found.
     """
     root = Path(extract_dir)
-    if (root / exe_name).exists():
+    # Match the exe *file* — on Linux the exe (`minflux_viewer`) and its folder
+    # share a name, so `.exists()` would wrongly match the directory.
+    if (root / exe_name).is_file():
         return root
     for child in sorted(p for p in root.iterdir() if p.is_dir()):
-        if (child / exe_name).exists():
+        if (child / exe_name).is_file():
             return child
     for found in root.rglob(exe_name):
-        return found.parent
+        if found.is_file():
+            return found.parent
     raise FileNotFoundError(f"{exe_name} not found under {root}")
 
 
@@ -96,16 +111,23 @@ def is_writable(path) -> bool:
         return False
 
 
-def stage_update(zip_path, *, exe_name: str = APP_EXE_NAME) -> tuple[Path, Path]:
-    """Extract *zip_path* to a temp dir; return ``(staged_app_root, extract_dir)``.
+def stage_update(archive_path, *, exe_name: str = APP_EXE_NAME) -> tuple[Path, Path]:
+    """Extract *archive_path* to a temp dir; return ``(staged_app_root, extract_dir)``.
 
-    ``staged_app_root`` is the folder containing *exe_name* (the files to copy
-    over the install); ``extract_dir`` is its temp parent (deleted by the helper
-    after the swap).
+    Handles both ``.zip`` (Windows asset) and ``.tar.gz``/``.tgz``/``.tar.xz``
+    (Linux asset). ``staged_app_root`` is the folder containing *exe_name* (the
+    files to copy over the install); ``extract_dir`` is its temp parent (deleted
+    by the helper after the swap).
     """
     extract_dir = Path(tempfile.mkdtemp(prefix="mfv_update_"))
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(extract_dir)
+    name = str(archive_path).lower()
+    if name.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tar")):
+        import tarfile
+        with tarfile.open(archive_path) as tf:
+            tf.extractall(extract_dir)
+    else:
+        with zipfile.ZipFile(archive_path) as zf:
+            zf.extractall(extract_dir)
     return find_app_root(extract_dir, exe_name), extract_dir
 
 
@@ -151,47 +173,86 @@ def build_helper_bat(*, pid: int, staged_dir, install_dir, exe_path, extract_dir
     )
 
 
-def launch_helper(bat_path, target_dir) -> None:
-    """Start the helper .bat detached, elevating only if *target_dir* isn't writable.
+def build_helper_sh(*, pid: int, staged_dir, install_dir, exe_path, extract_dir) -> str:
+    """Return the Linux helper shell script (POSIX ``sh``).
 
-    When the install dir is user-writable (portable / ``%LOCALAPPDATA%``) the
-    helper runs silently in its own console; under ``C:\\Program Files`` it needs
-    admin, so it's launched via ``ShellExecuteW("runas", …)`` (a UAC prompt).
+    Waits for *pid* to exit, moves the install to ``.bak``, copies the staged
+    files in, relaunches *exe_path* (detached), rolls back on failure, cleans up
+    ``extract_dir`` and deletes itself. All paths are embedded (no arg parsing).
     """
-    bat_path = str(bat_path)
+    # POSIX forward-slash paths (Path.as_posix keeps '/' even when generated on Windows).
+    staged = Path(staged_dir).as_posix()
+    inst = Path(install_dir).as_posix()
+    exe = Path(exe_path).as_posix()
+    ext = Path(extract_dir).as_posix()
+    return (
+        "#!/bin/sh\n"
+        f'while kill -0 {pid} 2>/dev/null; do sleep 0.5; done\n'
+        f'rm -rf "{inst}.bak"\n'
+        f'if mv "{inst}" "{inst}.bak"; then\n'
+        f'  if cp -a "{staged}" "{inst}"; then\n'
+        f'    rm -rf "{inst}.bak"\n'
+        f'  else\n'
+        f'    rm -rf "{inst}"; mv "{inst}.bak" "{inst}"\n'
+        f'  fi\n'
+        f'fi\n'
+        f'chmod +x "{exe}" 2>/dev/null\n'
+        f'( "{exe}" >/dev/null 2>&1 & )\n'
+        f'rm -rf "{ext}"\n'
+        'rm -- "$0"\n'
+    )
+
+
+def launch_helper(script_path, target_dir) -> None:
+    """Start the swap-and-relaunch helper detached (Windows ``.bat`` / Linux ``.sh``).
+
+    Windows: runs in its own console, elevating via ``ShellExecuteW("runas", …)``
+    only if *target_dir* isn't writable (``C:\\Program Files``). Linux: a detached
+    ``sh`` session in a new process group so it outlives the exiting app.
+    """
+    script_path = str(script_path)
     neutral_cwd = tempfile.gettempdir()          # not inside the install dir
-    if is_writable(target_dir):
-        subprocess.Popen(
-            ["cmd", "/c", bat_path],
-            cwd=neutral_cwd,
-            creationflags=_CREATE_NEW_CONSOLE | _CREATE_NEW_PROCESS_GROUP,
-            close_fds=True,
-        )
+    if is_windows():
+        if is_writable(target_dir):
+            subprocess.Popen(
+                ["cmd", "/c", script_path], cwd=neutral_cwd,
+                creationflags=_CREATE_NEW_CONSOLE | _CREATE_NEW_PROCESS_GROUP,
+                close_fds=True)
+        else:
+            import ctypes
+            # SW_SHOWNORMAL = 1; 'runas' triggers UAC; 5th arg = neutral CWD.
+            ctypes.windll.shell32.ShellExecuteW(  # type: ignore[attr-defined]
+                None, "runas", "cmd.exe", f'/c "{script_path}"', neutral_cwd, 1)
     else:
-        import ctypes
-
-        # SW_SHOWNORMAL = 1; 'runas' triggers the UAC elevation prompt; the 5th
-        # arg (lpDirectory) sets the elevated process's CWD to a neutral folder.
-        ctypes.windll.shell32.ShellExecuteW(  # type: ignore[attr-defined]
-            None, "runas", "cmd.exe", f'/c "{bat_path}"', neutral_cwd, 1)
+        subprocess.Popen(
+            ["/bin/sh", script_path], cwd=neutral_cwd,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True)
 
 
-def apply_update(zip_path, *, pid: int | None = None, exe_path=None,
+def apply_update(archive_path, *, pid: int | None = None, exe_path=None,
                  target_dir=None) -> Path:
-    """Stage *zip_path* and launch the swap-and-relaunch helper.
+    """Stage *archive_path* and launch the swap-and-relaunch helper.
 
     The caller must **quit the app immediately after** this returns so the helper
-    (which waits on *pid*) can replace the locked files. Returns the helper .bat
-    path. ``pid``/``exe_path``/``target_dir`` default to the running process.
+    (which waits on *pid*) can replace the files. Returns the helper-script path.
+    ``pid``/``exe_path``/``target_dir`` default to the running process.
     """
     exe = Path(exe_path) if exe_path else current_exe()
     target = Path(target_dir) if target_dir else install_dir()
     the_pid = int(pid if pid is not None else os.getpid())
 
-    staged_root, extract_dir = stage_update(zip_path, exe_name=exe.name)
-    bat = build_helper_bat(pid=the_pid, staged_dir=staged_root, install_dir=target,
-                           exe_path=exe, extract_dir=extract_dir)
-    bat_path = Path(tempfile.gettempdir()) / f"mfv_apply_update_{the_pid}.bat"
-    bat_path.write_text(bat, encoding="ascii")
-    launch_helper(bat_path, target)
-    return bat_path
+    staged_root, extract_dir = stage_update(archive_path, exe_name=exe.name)
+    kw = dict(pid=the_pid, staged_dir=staged_root, install_dir=target,
+              exe_path=exe, extract_dir=extract_dir)
+    if is_windows():
+        script = build_helper_bat(**kw)
+        script_path = Path(tempfile.gettempdir()) / f"mfv_apply_update_{the_pid}.bat"
+        script_path.write_text(script, encoding="ascii")
+    else:
+        script = build_helper_sh(**kw)
+        script_path = Path(tempfile.gettempdir()) / f"mfv_apply_update_{the_pid}.sh"
+        script_path.write_text(script, encoding="utf-8")
+        os.chmod(script_path, 0o755)
+    launch_helper(script_path, target)
+    return script_path

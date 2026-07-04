@@ -17,6 +17,7 @@ from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QLabel,
@@ -35,14 +36,16 @@ from ..core.updater import (
 )
 
 
-def show_update_result(result: UpdateCheckResult, parent=None, *, silent: bool = False) -> None:
+def show_update_result(result: UpdateCheckResult, parent=None, *, silent: bool = False,
+                       state=None) -> None:
     """Present an :class:`UpdateCheckResult`.
 
     ``silent`` (startup check) suppresses the up-to-date and error cases so the
-    user is only interrupted when a newer release exists.
+    user is only interrupted when a newer release exists. ``state`` (AppState)
+    lets the "check on startup" preference be toggled from the dialog.
     """
     if result.update_available and result.latest is not None:
-        _UpdateAvailableDialog(result, parent).exec()
+        _UpdateAvailableDialog(result, parent, state=state).exec()
     elif silent:
         return
     elif result.status == "up_to_date":
@@ -83,12 +86,14 @@ class _DownloadWorker(QThread):
 class _UpdateAvailableDialog(QDialog):
     """Shows the new version + notes; offers one-click install (frozen Windows)."""
 
-    def __init__(self, result: UpdateCheckResult, parent=None) -> None:
+    def __init__(self, result: UpdateCheckResult, parent=None, *, state=None) -> None:
         super().__init__(parent)
         self._result = result
+        self._state = state
         rel = result.latest
         self._asset = select_asset_for_platform(rel.assets)
         self._worker: _DownloadWorker | None = None
+        self._downloaded_path: str | None = None       # set once a verified zip is fetched
 
         self.setWindowTitle("Update available")
         self.setMinimumSize(540, 460)
@@ -125,6 +130,17 @@ class _UpdateAvailableDialog(QDialog):
         self._progress.hide()
         root.addWidget(self._progress)
 
+        # Opt-in toggle for the on-startup check (same preference as Preferences ›
+        # File). Off by default: the app only reaches out to GitHub on startup if
+        # the user explicitly enables it here (or in Preferences).
+        self._auto_check = QCheckBox("Automatically check for updates on startup")
+        self._auto_check.setToolTip(
+            "When on, MINFLUX Viewer checks the GitHub releases page for a newer "
+            "version at startup (a single request; no data is sent). Off by default.")
+        self._auto_check.setChecked(self._auto_check_pref())
+        self._auto_check.toggled.connect(self._on_auto_check_toggled)
+        root.addWidget(self._auto_check)
+
         self._buttons = QDialogButtonBox()
         # One-click install is only possible for the frozen Windows build with a
         # matching downloadable asset; otherwise fall back to the browser links.
@@ -147,9 +163,28 @@ class _UpdateAvailableDialog(QDialog):
         self._close_btn.clicked.connect(self.reject)
         root.addWidget(self._buttons)
 
+    # -- on-startup check preference -----------------------------------------
+    def _auto_check_pref(self) -> bool:
+        if self._state is None:
+            return False
+        return bool(self._state.prefs.get("file", {}).get("check_updates_on_startup", False))
+
+    def _on_auto_check_toggled(self, checked: bool) -> None:
+        if self._state is None:
+            return
+        self._state.prefs.setdefault("file", {})["check_updates_on_startup"] = bool(checked)
+        try:
+            self._state.save_prefs()
+        except Exception:
+            pass
+
     # -- one-click install ---------------------------------------------------
     def _start_install(self) -> None:
         if self._asset is None:
+            return
+        # Already fetched this session (user picked "Later") → skip re-download.
+        if self._downloaded_path and Path(self._downloaded_path).is_file():
+            self._prompt_restart(self._downloaded_path)
             return
         dest = Path(tempfile.gettempdir()) / self._asset.name
         if self._install_btn is not None:
@@ -177,8 +212,42 @@ class _UpdateAvailableDialog(QDialog):
             self._progress.setRange(0, 0)
 
     def _on_downloaded(self, path: str) -> None:
+        self._downloaded_path = path
+        self._progress.hide()
+        self._prompt_restart(path)
+
+    def _prompt_restart(self, path: str) -> None:
+        """Fiji-style: confirm before restarting to apply the downloaded update."""
+        rel = self._result.latest
+        version = rel.tag or ("v" + rel.version)
+        box = QMessageBox(self)
+        box.setWindowTitle("Update ready")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"{version} has been downloaded.")
+        box.setInformativeText(
+            "MINFLUX Viewer needs to close and reopen to apply the update "
+            "(the files are replaced in place). Restart now?")
+        restart_btn = box.addButton("Restart now", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(restart_btn)
+        box.exec()
+        if box.clickedButton() is restart_btn:
+            self._apply_and_quit(path)
+            return
+        # Deferred: keep the downloaded file; offer to apply without re-downloading.
+        self._status.setText(
+            f"{version} downloaded — click “Install && Restart” to apply when ready.")
+        self._status.show()
+        if self._install_btn is not None:
+            self._install_btn.setText("Install && Restart")
+            self._install_btn.setEnabled(True)
+        self._page_btn.setEnabled(True)
+
+    def _apply_and_quit(self, path: str) -> None:
         self._status.setText("Installing… the application will close and reopen.")
+        self._status.show()
         self._progress.setRange(0, 0)
+        self._progress.show()
         QApplication.processEvents()
         try:
             self_update.apply_update(path)

@@ -19,7 +19,7 @@ def _make_npc(*, diameter=100.0, inter=40.0, rim=6.0, sym=8, per=40,
     if tilt_deg:
         tr = np.deg2rad(tilt_deg)
         n = np.array([np.sin(tr) * np.cos(az), np.sin(tr) * np.sin(az), np.cos(tr)])
-        pts = (gf._rotation_a_to_b([0, 0, 1], n) @ pts.T).T
+        pts = (gf.rotation_a_to_b([0, 0, 1], n) @ pts.T).T
     return pts + np.asarray(center, float)
 
 

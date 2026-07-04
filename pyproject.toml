@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "minflux-viewer"
-version = "0.3.3"
+version = "0.3.4"
 description = "MINFLUX nanoscopy data viewer — Fiji-style desktop application with .msr import"
 authors = ["Ziqiang Huang <ziqiang.huang@embl.de>"]
 readme = "README.md"

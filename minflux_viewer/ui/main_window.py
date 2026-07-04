@@ -260,7 +260,7 @@ class MainWindow(QMainWindow):
         # it never slows startup; silent unless a newer release exists.
         self._is_shutting_down = False
         self._update_tasks: set = set()
-        if state.prefs.get("file", {}).get("check_updates_on_startup", True):
+        if state.prefs.get("file", {}).get("check_updates_on_startup", False):
             QTimer.singleShot(3000, self._maybe_startup_update_check)
 
     def createPopupMenu(self):  # noqa: N802 - Qt override
@@ -4293,7 +4293,7 @@ class MainWindow(QMainWindow):
                 f"Update available: {result.latest.tag} "
                 f"(installed v{result.current_version}).", "INFO",
             )
-        show_update_result(result, self, silent=silent)
+        show_update_result(result, self, silent=silent, state=self._state)
 
     def _show_about(self) -> None:
         from .. import __version__

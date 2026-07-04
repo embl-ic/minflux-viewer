@@ -8,9 +8,26 @@
 # Output:  dist\minflux_viewer\minflux_viewer.exe
 
 from pathlib import Path
+import re
 import sys
 
 ROOT = Path(SPECPATH)   # repo root (where this .spec lives)
+
+# App version, parsed from the package without importing it.
+VERSION = re.search(
+    r'__version__\s*=\s*"([^"]+)"',
+    (ROOT / "minflux_viewer" / "__init__.py").read_text(encoding="utf-8"),
+).group(1)
+
+# psutil ships a per-OS backend; name the right one so static analysis finds it.
+PSUTIL_BACKEND = {"win32": "psutil._pswindows",
+                  "darwin": "psutil._psosx"}.get(sys.platform, "psutil._pslinux")
+
+# Icons: a .png works for the Windows exe; a macOS .app wants .icns (optional).
+EXE_ICON = str(ROOT / "resources" / "icons" / "minflux_viewer_logo.png") \
+    if sys.platform == "win32" else None
+_ICNS = ROOT / "resources" / "icons" / "minflux_viewer_logo.icns"
+MAC_ICON = str(_ICNS) if _ICNS.exists() else None
 
 # ---------------------------------------------------------------------------
 # Data files to bundle
@@ -54,8 +71,8 @@ hidden_imports = [
     "msr_reader.obffile",
     # roifile
     "roifile",
-    # psutil Windows backend
-    "psutil._pswindows",
+    # psutil per-OS backend (Windows/macOS/Linux)
+    PSUTIL_BACKEND,
     # minflux_viewer plugins (loaded at runtime via importlib)
     "minflux_viewer.plugins.msr_reader",
     "minflux_viewer.plugins.paraview",
@@ -130,7 +147,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(ROOT / "resources" / "icons" / "minflux_viewer_logo.png"),
+    icon=EXE_ICON,
 )
 
 # ---------------------------------------------------------------------------
@@ -145,3 +162,24 @@ coll = COLLECT(
     upx_exclude=[],
     name="minflux_viewer",
 )
+
+# ---------------------------------------------------------------------------
+# macOS — wrap the one-folder build into a clickable .app bundle
+# (Windows/Linux ship the COLLECT folder as-is.)
+# ---------------------------------------------------------------------------
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="MINFLUX Viewer.app",
+        icon=MAC_ICON,
+        bundle_identifier="eu.embl.ic.minflux-viewer",
+        version=VERSION,
+        info_plist={
+            "CFBundleName": "MINFLUX Viewer",
+            "CFBundleDisplayName": "MINFLUX Viewer",
+            "CFBundleShortVersionString": VERSION,
+            "CFBundleVersion": VERSION,
+            "NSHighResolutionCapable": True,
+            "NSRequiresAquaSystemAppearance": False,
+        },
+    )

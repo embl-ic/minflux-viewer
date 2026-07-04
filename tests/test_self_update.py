@@ -107,14 +107,49 @@ def test_build_helper_bat_has_wait_swap_rollback_relaunch():
 
 
 # --- gating ------------------------------------------------------------------
-def test_can_self_update_requires_frozen(monkeypatch):
-    monkeypatch.setattr(su, "is_frozen", lambda: False)
-    assert su.can_self_update() is False
-    monkeypatch.setattr(su, "is_frozen", lambda: True)
-    monkeypatch.setattr(su, "is_windows", lambda: True)
-    assert su.can_self_update() is True
+def test_can_self_update_frozen_windows_or_linux(monkeypatch):
     monkeypatch.setattr(su, "is_windows", lambda: False)
-    assert su.can_self_update() is False
+    monkeypatch.setattr(su, "is_linux", lambda: False)
+    monkeypatch.setattr(su, "is_frozen", lambda: False)
+    assert su.can_self_update() is False              # source run
+    monkeypatch.setattr(su, "is_frozen", lambda: True)
+    assert su.can_self_update() is False              # frozen macOS → excluded
+    monkeypatch.setattr(su, "is_windows", lambda: True)
+    assert su.can_self_update() is True               # frozen Windows
+    monkeypatch.setattr(su, "is_windows", lambda: False)
+    monkeypatch.setattr(su, "is_linux", lambda: True)
+    assert su.can_self_update() is True               # frozen Linux
+
+
+def test_build_helper_sh_has_wait_swap_rollback_relaunch():
+    sh = su.build_helper_sh(
+        pid=4321, staged_dir="/tmp/stage/minflux_viewer",
+        install_dir="/opt/minflux_viewer", exe_path="/opt/minflux_viewer/minflux_viewer",
+        extract_dir="/tmp/stage")
+    assert sh.startswith("#!/bin/sh")
+    assert "kill -0 4321" in sh                                   # waits for our process
+    assert 'mv "/opt/minflux_viewer" "/opt/minflux_viewer.bak"' in sh
+    assert 'cp -a "/tmp/stage/minflux_viewer" "/opt/minflux_viewer"' in sh
+    assert 'mv "/opt/minflux_viewer.bak" "/opt/minflux_viewer"' in sh  # rollback
+    assert '"/opt/minflux_viewer/minflux_viewer" >/dev/null 2>&1 &' in sh  # relaunch
+    assert 'rm -- "$0"' in sh                                     # self-delete
+
+
+def test_stage_update_handles_tarball(tmp_path):
+    import tarfile
+    build = tmp_path / "build" / "minflux_viewer"
+    (build / "_internal").mkdir(parents=True)
+    (build / "minflux_viewer").write_bytes(b"NEWEXE")            # Linux exe (no .exe)
+    tgz = tmp_path / "MINFLUX-Viewer-9.9-linux.tar.gz"
+    with tarfile.open(tgz, "w:gz") as tf:
+        tf.add(build, arcname="minflux_viewer")
+    app_root, extract_dir = su.stage_update(tgz, exe_name="minflux_viewer")
+    try:
+        assert (app_root / "minflux_viewer").read_bytes() == b"NEWEXE"
+        assert (app_root / "_internal").exists()
+    finally:
+        import shutil
+        shutil.rmtree(extract_dir, ignore_errors=True)
 
 
 def test_is_writable(tmp_path):
@@ -142,3 +177,28 @@ def test_apply_update_stages_and_launches(tmp_path, monkeypatch):
     # the staged new files were extracted and referenced in the script
     assert "minflux_viewer.exe" in text
     bat_path.unlink(missing_ok=True)
+
+
+def test_apply_update_linux_writes_sh(tmp_path, monkeypatch):
+    import tarfile
+    monkeypatch.setattr(su, "is_windows", lambda: False)      # take the POSIX branch
+    build = tmp_path / "build" / "minflux_viewer"
+    (build / "_internal").mkdir(parents=True)
+    (build / "minflux_viewer").write_bytes(b"NEW")
+    tgz = tmp_path / "app-linux.tar.gz"
+    with tarfile.open(tgz, "w:gz") as tf:
+        tf.add(build, arcname="minflux_viewer")
+
+    install = tmp_path / "install" / "minflux_viewer"
+    install.mkdir(parents=True)
+    exe = install / "minflux_viewer"
+    exe.write_bytes(b"OLD")
+    calls = {}
+    monkeypatch.setattr(su, "launch_helper", lambda s, t: calls.update(s=Path(s), t=Path(t)))
+
+    sh_path = su.apply_update(tgz, pid=999, exe_path=exe, target_dir=install)
+    assert sh_path.suffix == ".sh" and sh_path.exists()
+    text = sh_path.read_text()
+    assert "kill -0 999" in text and install.as_posix() in text
+    assert calls["s"] == sh_path
+    sh_path.unlink(missing_ok=True)

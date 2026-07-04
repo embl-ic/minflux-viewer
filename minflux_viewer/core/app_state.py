@@ -71,7 +71,7 @@ DEFAULT_PREFS: dict = {
         "recent_files": [],
         "confirm_overwrite": True,
         "close_paraview_on_exit": True,
-        "check_updates_on_startup": True,
+        "check_updates_on_startup": False,   # opt-in: no startup network call by default
         "paraview_path": "",
         "temp_folder": "",           # app-wide temp dir; empty = use system temp
     },
@@ -250,6 +250,12 @@ def _migrate_prefs(prefs: dict) -> dict:
         data["show_attr_plot"] = False
         data["show_render"] = True
         migrations["v021_compute_show_defaults"] = True
+    # The on-startup update check is now opt-in. The previous default was ON and
+    # got persisted implicitly (not an explicit choice), so reset it once so no
+    # install reaches out to GitHub on startup unless the user re-enables it.
+    if not migrations.get("v035_update_check_optin"):
+        prefs.setdefault("file", {})["check_updates_on_startup"] = False
+        migrations["v035_update_check_optin"] = True
     return prefs
 
 
