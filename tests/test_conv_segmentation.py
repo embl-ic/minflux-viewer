@@ -207,7 +207,7 @@ def test_empty_and_sparse_safe():
         assert res["kernel"].ndim == 2     # kernel still built
 
 
-# --- SMAP-aligned: sqrt stabilization -----------------------------------------
+# --- sqrt stabilization -------------------------------------------------------
 def test_sqrt_stabilize_compresses_counts():
     H = np.array([[0.0, 1.0], [4.0, 9.0]])
     out = cs.stabilize_histogram(H, sqrt_stabilize=True)
@@ -223,7 +223,7 @@ def test_sqrt_stabilize_still_detects_rings():
     assert res["centers"].shape[0] == 2
 
 
-# --- SMAP-aligned: DoG band-pass ----------------------------------------------
+# --- DoG band-pass ------------------------------------------------------------
 def test_dog_bandpass_suppresses_flat_background():
     flat = np.ones((60, 60)) * 5.0
     out = cs.dog_bandpass(flat, radius_px=4.0)
@@ -246,7 +246,7 @@ def test_segment_with_dog_detects_rings():
     assert res["centers"].shape[0] == 2
 
 
-# --- SMAP-aligned: ring validation (reject solid blobs) -----------------------
+# --- ring validation (reject solid blobs) -------------------------------------
 def test_inside_ratio_high_for_blob_low_for_ring():
     ring = _ring(0, 0, 100.0, n=200, sigma=3.0, seed=1)
     disk = _disk(0, 0, 50.0, n=200, seed=2)         # solid filled cluster

@@ -155,14 +155,14 @@ class ConvSegmentationWindow(QDialog):
         self._sqrt.setChecked(cs.DEFAULT_SQRT)
         self._sqrt.setToolTip(
             "Convolve the square root of the histogram, down-weighting bright "
-            "aggregates that would otherwise dominate the response (SMAP-style).")
+            "aggregates that would otherwise dominate the response.")
         self._sqrt.toggled.connect(self._schedule_recompute)
         common.addRow("", self._sqrt)
         self._dog = QCheckBox("DoG band-pass")
         self._dog.setChecked(cs.DEFAULT_DOG)
         self._dog.setToolTip(
             "Difference-of-Gaussians band-pass on the response at the structure "
-            "scale, suppressing slow background (SMAP segmentNPC).")
+            "scale, suppressing slow background.")
         self._dog.toggled.connect(self._schedule_recompute)
         common.addRow("", self._dog)
         left.addLayout(common)
@@ -194,7 +194,7 @@ class ConvSegmentationWindow(QDialog):
         self._ring_validate = QCheckBox("Reject solid blobs (ring)")
         self._ring_validate.setToolTip(
             "Filter detections whose centre is filled, by the inside/outside-ring "
-            "localization-count ratios (SMAP NPCsegmentCleanup).")
+            "localization-count ratios.")
         self._ring_validate.toggled.connect(lambda *_: self._rethreshold())
         rv.addRow(self._ring_validate)
         self._max_inside = self._spin(0.0, 5.0, cs.DEFAULT_MAX_INSIDE, 2, 0.05, "")

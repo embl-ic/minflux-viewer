@@ -25,15 +25,14 @@ Design notes
   rescaled to its own max so the acceptance threshold is a density-independent
   fraction in ``[0, 1]``.
 
-SMAP-aligned options (mirroring ``segmentNPC`` in J. Ries' SMAP):
+Optional refinements:
 * ``sqrt_stabilize`` — convolve the **square root** of the histogram, compressing
-  bright aggregates that would otherwise dominate the response (SMAP convolves
-  ``sqrt`` of the rendered image).
+  bright aggregates that would otherwise dominate the response.
 * ``dog`` — apply a **difference-of-Gaussians band-pass** to the response at the
   structure scale (σ ≈ 0.7·R and 2·R), suppressing slow background — a two-scale
   generalisation of the single-scale ``zero_mean`` trick.
 * **ring validation** — for ring-like models, reject solid blobs by the
-  inside/outside-ring localization-count ratios (SMAP's ``NPCsegmentCleanup``).
+  inside/outside-ring localization-count ratios.
 
 Pure NumPy/SciPy — Qt-free and unit-testable. Distances are in nm.
 """
@@ -238,19 +237,18 @@ def render_histogram_2d(x: np.ndarray, y: np.ndarray, pixel_size_nm: float):
 
 
 def stabilize_histogram(H, sqrt_stabilize: bool = DEFAULT_SQRT) -> np.ndarray:
-    """Optionally √-compress the counts image (SMAP convolves ``sqrt`` of the
-    rendered image), down-weighting bright aggregates before convolution."""
+    """Optionally √-compress the counts image, down-weighting bright aggregates
+    before convolution."""
     H = np.asarray(H, dtype=float)
     return np.sqrt(np.clip(H, 0.0, None)) if sqrt_stabilize else H
 
 
 def dog_bandpass(response, radius_px: float) -> np.ndarray:
-    """Difference-of-Gaussians band-pass at the structure scale (SMAP's
-    ``imfilter(imfD, gauss_small) - imfilter(imfD, gauss_large)``).
+    """Difference-of-Gaussians band-pass at the structure scale.
 
     ``radius_px`` is the structure radius in pixels; the two Gaussian widths are
-    ``0.7·radius`` and ``2·radius`` (per ``segmentNPC``). Suppresses background
-    slower than the structure while keeping the structure-scale signal.
+    ``0.7·radius`` and ``2·radius``. Suppresses background slower than the
+    structure while keeping the structure-scale signal.
     """
     from scipy.ndimage import gaussian_filter
 
@@ -340,7 +338,7 @@ def detections_from_response(response, xedge, yedge, *, min_response: float,
 
 
 # --------------------------------------------------------------------------- #
-# Ring validation (reject solid blobs) — SMAP NPCsegmentCleanup inside/outside
+# Ring validation (reject solid blobs) — inside/outside-ring count ratios
 # --------------------------------------------------------------------------- #
 def ring_inside_outside_ratios(xy, centers, radius_nm: float, rim_nm: float):
     """Per-detection localization-count ratios about a ring of radius ``R``.
