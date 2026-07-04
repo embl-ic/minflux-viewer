@@ -223,6 +223,43 @@ def test_average_table_and_gof_gate():
     assert strict["n_accepted"] == sum(r["accepted"] for r in strict["table"])
 
 
+def test_average_aligned_parallel_for_subset_repool():
+    """Result carries per-NPC aligned points (parallel to table/fits) so a user
+    sub-selection can re-pool any subset without re-fitting."""
+    rng = np.random.default_rng(11)
+    rows, tid0 = [], 0
+    for i in range(6):
+        cx, cy, cz = rng.uniform(-2000, 2000), rng.uniform(-2000, 2000), rng.uniform(-40, 40)
+        raw, tid0 = _raw6_npc(cx, cy, cz, i + 1, rot=rng.uniform(0, 2 * np.pi), seed=i, tid0=tid0)
+        rows.append(raw)
+    res = nw.average_npc_wanlu(np.vstack(rows), min_gof=-10.0, diameter_bounds=(65, 85),
+                               inter_ring_bounds=(20, 32), expected_inter_ring=25)
+    aligned = res["aligned"]
+    assert len(aligned) == len(res["table"]) == len(res["fits"])
+    ok = [a for a in aligned if a is not None]
+    assert ok and all(np.asarray(a).shape[1] == 3 for a in ok)
+    # re-pooling any subset is a plain vstack of the cached aligned arrays
+    subset = np.vstack([np.asarray(aligned[i])[:, :3] for i in (0, 2) if aligned[i] is not None])
+    assert subset.shape[0] > 0
+    # stacking every accepted NPC's aligned points reproduces the pooled average count
+    acc = [np.asarray(aligned[j])[:, :3] for j, r in enumerate(res["table"])
+           if r["accepted"] and aligned[j] is not None]
+    assert np.vstack(acc).shape[0] == res["average_loc"].shape[0]
+
+
 def test_empty_inputs_safe():
     assert nw.detect_npc_wanlu(np.empty((0, 3)), np.empty(0))["n_npc"] == 0
     assert nw.average_npc_wanlu(np.empty((0, 6)))["n_accepted"] == 0
+
+
+def test_ring_points_two_circles_at_fitted_radius():
+    fit = {"ok": True, "u": np.array([1.0, 0.0, 0.0]), "v": np.array([0.0, 1.0, 0.0]),
+           "radius": 37.5, "lower": np.array([0.0, 0.0, -15.0]),
+           "upper": np.array([0.0, 0.0, 15.0])}
+    rings = nw.ring_points(fit, n=64)
+    assert len(rings) == 2
+    for centre, ring in zip((fit["lower"], fit["upper"]), rings):
+        assert ring.shape == (64, 3)
+        assert np.allclose(np.linalg.norm(ring - centre, axis=1), 37.5, atol=1e-6)
+    assert nw.ring_points({"ok": False}) == []
+    assert nw.ring_points(None) == []

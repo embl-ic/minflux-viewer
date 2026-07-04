@@ -394,13 +394,6 @@ class MainWindow(QMainWindow):
         self.actionSegParticleAverage = QAction("Particle Average…", self)
         self.actionSegParticleAverage.triggered.connect(self._show_particle_average)
         self.menuAnalyzeSegmentation.addAction(self.actionSegParticleAverage)
-        self.menuAnalyzeSegmentation.addSeparator()
-        self.actionNpcDetectWanlu = QAction("NPC detection wanlu", self)
-        self.actionNpcDetectWanlu.triggered.connect(self._npc_detect_wanlu)
-        self.menuAnalyzeSegmentation.addAction(self.actionNpcDetectWanlu)
-        self.actionNpcAverageWanlu = QAction("NPC average wanlu", self)
-        self.actionNpcAverageWanlu.triggered.connect(self._npc_average_wanlu)
-        self.menuAnalyzeSegmentation.addAction(self.actionNpcAverageWanlu)
 
         # Tracking submenu — Phase 5 placeholders
         u.actionParticleTracking.triggered.connect(
@@ -763,8 +756,6 @@ class MainWindow(QMainWindow):
             self.actionSegConvolution,
             self.actionSegCurvilinear,
             self.actionSegParticleAverage,
-            self.actionNpcDetectWanlu,
-            self.actionNpcAverageWanlu,
             u.menuTracking.menuAction(),
             u.actionParticleTracking,
             u.actionMsdAnalysis,
@@ -2398,167 +2389,6 @@ class MainWindow(QMainWindow):
         if made:
             self._show_render(made[0])
         return made[0] if made else None
-
-    def _npc_detect_wanlu(self) -> None:
-        """Analyze › Segmentation › NPC detection wanlu — ring-convolution NPC
-        detection + sub-unit (trace) clustering; stores the per-NPC table on the
-        dataset and adds NPC-centre ROIs to the Manager."""
-        import numpy as np
-
-        idx = self._state.active_idx
-        if idx is None or self._state.active_dataset is None:
-            self._no_data_warning()
-            return
-        ds = self._state.datasets[idx]
-        from ..core.loader import attr_values_1d
-        from ..core.roi_crop import display_coords
-        tid = attr_values_1d(ds, "tid")
-        # Display coordinates (loc_nm + overlay transform) so detected centre ROIs
-        # land correctly on an overlay channel; per-NPC re-zeroing in averaging
-        # makes the stored raw6 frame irrelevant to the fit.
-        loc = display_coords(ds)
-        if loc.ndim != 2 or loc.shape[0] < 10 or tid is None:
-            QMessageBox.information(self, "NPC detection wanlu",
-                                    "Needs a MINFLUX dataset with trace ids and localizations.")
-            return
-        mask = np.asarray(ds.filter_mask, dtype=bool)
-        tid = np.asarray(tid).ravel()
-        if mask.shape[0] == loc.shape[0]:
-            loc, tid = loc[mask], tid[mask]
-
-        from .npc_wanlu_dialogs import NpcDetectWanluDialog
-        dlg = NpcDetectWanluDialog(self, defaults=getattr(self, "_npc_wanlu_detect_defaults", None))
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        p = dlg.params()
-        self._npc_wanlu_detect_defaults = p
-
-        from ..analysis import npc_wanlu as nw
-        try:
-            res = nw.detect_npc_wanlu(loc, tid, pixel_size=p["pixel_size"],
-                                      diameter=p["diameter"], rim=p["rim"],
-                                      min_units=p["min_units"], z_scale=p["z_scale"])
-        except Exception as exc:
-            QMessageBox.warning(self, "NPC detection wanlu", f"Detection failed: {exc}")
-            return
-        if res["n_npc"] == 0:
-            QMessageBox.information(self, "NPC detection wanlu",
-                                    "No NPCs accepted. Try adjusting diameter / rim / min sub-units.")
-            return
-        ds.derived["npc_wanlu"] = {"raw6": res["raw6"], "centers": res["centers"], "params": p}
-        self.add_segmentation_rois(
-            idx, res["centers"], side_nm=float(p["diameter"]),
-            name_prefix="NPC", source="npc_wanlu_detection", stroke_color="#ff8c00",
-            log_message=(f"NPC detection (Wanlu): {res['n_npc']} NPC(s), "
-                         f"{res['n_units']} sub-unit(s) on '{ds.name}' "
-                         f"(diameter={p['diameter']:.0f} nm, rim={p['rim']:.0f} nm, "
-                         f"min units={p['min_units']}, Z scale={p['z_scale']:.2f}); "
-                         f"stored {res['raw6'].shape[0]:,} localizations for averaging."))
-        QMessageBox.information(
-            self, "NPC detection wanlu",
-            f"Detected {res['n_npc']} NPC(s) with {res['n_units']} sub-unit(s).\n\n"
-            "Run 'NPC average wanlu' to build the two-ring average.")
-
-    def _npc_average_wanlu(self) -> None:
-        """Analyze › Segmentation › NPC average wanlu — two-ring averaging of the
-        NPCs detected by 'NPC detection wanlu' on the active dataset."""
-        import numpy as np
-
-        idx = self._state.active_idx
-        if idx is None or self._state.active_dataset is None:
-            self._no_data_warning()
-            return
-        ds = self._state.datasets[idx]
-        stored = ds.derived.get("npc_wanlu")
-        if not stored or np.asarray(stored.get("raw6", [])).size == 0:
-            QMessageBox.information(self, "NPC average wanlu",
-                                    "No NPC detection found on this dataset. "
-                                    "Run 'NPC detection wanlu' first.")
-            return
-        raw6 = np.asarray(stored["raw6"], dtype=float)
-        n_npc = int(np.unique(raw6[:, 3]).size)
-
-        from .npc_wanlu_dialogs import NpcAverageWanluDialog
-        dlg = NpcAverageWanluDialog(self, defaults=getattr(self, "_npc_wanlu_avg_defaults", None),
-                                    n_npc=n_npc)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        p = dlg.params()
-        self._npc_wanlu_avg_defaults = {
-            "diam_min": p["diameter_bounds"][0], "diam_max": p["diameter_bounds"][1],
-            "inter_min": p["inter_ring_bounds"][0], "inter_max": p["inter_ring_bounds"][1],
-            "inter_exp": p["expected_inter_ring"] or 0.0, "symmetry": p["symmetry"]}
-
-        # Run the (heavy) two-ring averaging off the UI thread, with a refreshing
-        # progress bar in the Log — same pattern as the Particle Average tool.
-        if getattr(self, "_wanlu_avg_task", None) is not None:
-            return                                           # already averaging
-        from ..analysis import npc_wanlu as nw
-        from ..core.app_state import format_progress_bar
-        from .particle_average_dialog import _AverageTask
-
-        ds_name = ds.name
-        holder: dict = {}
-
-        def compute(progress):
-            res = nw.average_npc_wanlu(
-                raw6, diameter_bounds=p["diameter_bounds"],
-                inter_ring_bounds=p["inter_ring_bounds"],
-                expected_inter_ring=p["expected_inter_ring"], symmetry=p["symmetry"],
-                progress=progress)
-            avg = res["average_loc"]
-            zlo, zhi = res["z_peaks"]
-            holder["name"] = f"{ds_name} — NPC avg [{res['n_accepted']}]"
-            holder["log"] = (
-                f"NPC average (Wanlu): pooled {res['n_accepted']}/{res['n_npc']} NPC(s) "
-                f"({avg.shape[0]:,} localizations) from '{ds_name}'; "
-                f"Z rings {zlo:.1f}/{zhi:.1f} nm (sep {zhi - zlo:.1f} nm"
-                f"{', fallback' if res['z_fallback'] else ''}); 8-fold aligned.")
-            return avg[:, :3], ""
-
-        self._wanlu_avg_holder = holder
-        self._wanlu_avg_last_pct = -1
-        self._state.log(f"NPC average (Wanlu): averaging {n_npc} NPC(s)…")
-        self._state.log_progress(format_progress_bar(0.0))
-        task = _AverageTask(compute)
-        task.signals.progress.connect(self._on_wanlu_avg_progress)
-        task.signals.done.connect(self._on_wanlu_avg_done)
-        task.signals.failed.connect(self._on_wanlu_avg_failed)
-        self._wanlu_avg_task = task                          # keep a ref (auto-deletes)
-        QThreadPool.globalInstance().start(task)
-
-    def _on_wanlu_avg_progress(self, done: int, total: int) -> None:
-        from ..core.app_state import format_progress_bar
-        if total <= 0:
-            return
-        pct = int(done / total * 100)
-        if pct != getattr(self, "_wanlu_avg_last_pct", -1):  # throttle to whole percent
-            self._wanlu_avg_last_pct = pct
-            self._state.log_progress(format_progress_bar(done / total))
-            self._state.status_progress("Averaging NPCs (two-ring fit)", done / total)
-
-    def _on_wanlu_avg_done(self, pts, _desc: str) -> None:
-        import numpy as np
-
-        from ..core.app_state import format_progress_bar
-        self._wanlu_avg_task = None
-        self._state.log_progress(format_progress_bar(1.0, done=True), final=True)
-        self._state.status_message.emit("NPC averaging: done.")
-        pts = np.asarray(pts)
-        holder = getattr(self, "_wanlu_avg_holder", {}) or {}
-        if pts.ndim != 2 or pts.shape[0] == 0:
-            QMessageBox.information(self, "NPC average wanlu",
-                                    "No NPCs passed the two-ring fit. Try widening the "
-                                    "diameter / inter-ring bounds.")
-            return
-        self.add_particle_average_dataset(
-            pts, name=holder.get("name", "NPC avg"), log_message=holder.get("log"))
-
-    def _on_wanlu_avg_failed(self, msg: str) -> None:
-        self._wanlu_avg_task = None
-        self._state.log_progress("=" * 10 + "  FAILED  " + "=" * 10, final=True)
-        self._state.status_message.emit("NPC averaging: failed.")
-        QMessageBox.warning(self, "NPC average wanlu", f"Averaging failed: {msg}")
 
     def _show_particle_average(self) -> None:
         """Analyze › Segmentation › Particle Average… — open the particle-averaging

@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .geometry import rotation_a_to_b
+
 DEFAULT_BOX_NM = 150.0
 DEFAULT_PIXEL_NM = 3.0
 DEFAULT_N_ANGLES = 36
@@ -40,17 +42,6 @@ DEFAULT_N_ITERS = 5
 # --------------------------------------------------------------------------- #
 # Axial tilt correction (per-particle PCA) — makes the image fitters 3-D-aware
 # --------------------------------------------------------------------------- #
-def _rotation_a_to_b(a, b) -> np.ndarray:
-    """Rotation matrix taking unit-ish vector *a* onto *b* (Rodrigues)."""
-    a = np.asarray(a, float); a = a / (np.linalg.norm(a) or 1.0)
-    b = np.asarray(b, float); b = b / (np.linalg.norm(b) or 1.0)
-    v = np.cross(a, b)
-    s = float(np.linalg.norm(v))
-    c = float(a @ b)
-    if s < 1e-12:
-        return np.eye(3) if c > 0 else -np.eye(3)
-    K = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
-    return np.eye(3) + K + K @ K * ((1 - c) / (s ** 2))
 
 
 def estimate_tilt_normal(points):
@@ -83,7 +74,7 @@ def flatten_tilt(points):
     normal, tilt = estimate_tilt_normal(P)
     if tilt < 1e-9:
         return P, 0.0
-    R = _rotation_a_to_b(normal, [0.0, 0.0, 1.0])
+    R = rotation_a_to_b(normal, [0.0, 0.0, 1.0])
     ctr = P[:, :3].mean(axis=0)
     out = P.copy()
     out[:, :3] = (R @ (P[:, :3] - ctr).T).T
@@ -103,7 +94,7 @@ def _particle_prep(points, correct_tilt: bool):
     if correct_tilt and work.ndim == 2 and work.shape[1] >= 3 and work.shape[0] >= 3:
         normal, tilt = estimate_tilt_normal(work)
         if tilt >= 1e-9:
-            R = _rotation_a_to_b(normal, [0.0, 0.0, 1.0])
+            R = rotation_a_to_b(normal, [0.0, 0.0, 1.0])
             C = work[:, :3].mean(axis=0)
             Mt = np.eye(4)
             Mt[:3, :3] = R
@@ -157,6 +148,34 @@ def pool_transformed(particle_points, matrices) -> np.ndarray:
     return np.vstack(pooled) if pooled else np.empty((0, 3))
 
 
+def collapse_traces(points, tid) -> np.ndarray:
+    """Collapse each MINFLUX trace (``tid``) to its centroid — **one point per
+    molecule-blink** instead of one per localization.
+
+    In MINFLUX the localizations sharing a ``tid`` are the iterative localizations
+    of a *single emitter during one on-event*; they are highly correlated, so
+    fitting/aligning on raw localizations over-counts long/bright molecules and
+    biases the result toward them. Collapsing to trace centroids gives each
+    molecule-blink one equal vote (denoised + far fewer points), which de-biases
+    the average and speeds the fit. Falls back to the raw points when ``tid`` is
+    missing, mis-sized or degenerate (≤1 group). Preserves the coordinate frame
+    and dimensionality of *points*.
+    """
+    P = np.asarray(points, dtype=float)
+    if tid is None or P.ndim != 2 or P.shape[0] == 0:
+        return P
+    t = np.asarray(tid).ravel()
+    if t.size != P.shape[0]:
+        return P
+    uid, inv = np.unique(t, return_inverse=True)
+    if uid.size <= 1 or uid.size == P.shape[0]:
+        return P                                    # nothing to gain
+    sums = np.zeros((uid.size, P.shape[1]), dtype=float)
+    np.add.at(sums, inv, P)
+    counts = np.bincount(inv, minlength=uid.size).astype(float)
+    return sums / counts[:, None]
+
+
 def _prepare_particles(particles, correct_tilt: bool):
     """Center (+ optionally PCA-untilt) each particle. Returns
     ``(centered, tilts, prep_matrices)``; ``prep_matrices[i]`` maps the original
@@ -166,9 +185,47 @@ def _prepare_particles(particles, correct_tilt: bool):
         work, t, M = _particle_prep(p, correct_tilt)
         prepared.append(work)
         mats.append(M)
-        if correct_tilt:
-            tilts.append(t)
+        tilts.append(t)                 # per-particle (0.0 when not correcting)
     return prepared, tilts, mats
+
+
+def image_particle_table(transforms, particles_c, tilts) -> list[dict]:
+    """Per-particle alignment metrics for the image fitters (one row/particle).
+
+    Columns mirror the NPC two-ring table's role: the fitted 2-D rigid transform
+    (``angle``/``dx``/``dy``), per-particle PCA ``tilt`` (0 when not corrected),
+    ``n_locs``, and the cross-correlation ``score`` (higher = better match to the
+    reference/template). Image fitters pool every particle, so ``accepted`` is
+    always True (kept for a uniform table across methods)."""
+    rows = []
+    for i, t in enumerate(transforms):
+        theta, dx, dy, score = t
+        n = int(np.asarray(particles_c[i]).shape[0]) if i < len(particles_c) else 0
+        rows.append({"particle": i + 1, "n_locs": n, "angle": float(theta),
+                     "dx": float(dx), "dy": float(dy),
+                     "tilt": float(tilts[i]) if i < len(tilts) else 0.0,
+                     "score": float(score), "accepted": True})
+    return rows
+
+
+def geometry_outline(kind: str, params: dict, n: int = 96):
+    """Outline geometry for a template *kind* → ``(marker_points|None, [polyline])``.
+
+    For overlaying the fitted template on a particle in the inspector: a ring
+    circle polyline (``ring``/``disk``/``gaussian``) or a ring + N corner markers
+    (``npc``), all at z = 0, in nm."""
+    phi = np.linspace(0.0, 2 * np.pi, n)
+    if kind == "npc":
+        r = float(params.get("diameter_nm", 100.0)) / 2.0
+        fold = max(int(round(float(params.get("symmetry", 8)))), 1)
+        ang = 2 * np.pi * np.arange(fold) / fold
+        corners = np.column_stack([r * np.cos(ang), r * np.sin(ang), np.zeros(fold)])
+        circle = np.column_stack([r * np.cos(phi), r * np.sin(phi), np.zeros(n)])
+        return corners, [circle]
+    r = (float(params.get("fwhm_nm", 40.0)) if kind == "gaussian"
+         else float(params.get("diameter_nm", 100.0))) / 2.0
+    circle = np.column_stack([r * np.cos(phi), r * np.sin(phi), np.zeros(n)])
+    return None, [circle]
 
 
 # --------------------------------------------------------------------------- #
@@ -340,6 +397,7 @@ def average_template_provided(particles, template_img, *, box_nm=DEFAULT_BOX_NM,
     return {"points": pooled, "average_image": avg_img, "template": template_img,
             "transforms": transforms, "particle_transforms": mats4,
             "scores": scores, "n_particles": len(particles_c),
+            "table": image_particle_table(transforms, particles_c, tilts),
             "box_nm": box_nm, "pixel_nm": pixel_nm, "mode": "template",
             "mean_tilt_deg": float(np.mean(tilts)) if tilts else 0.0}
 
@@ -360,8 +418,8 @@ def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_
     if not particles_c:
         return {"points": np.empty((0, 3)), "average_image": np.zeros((8, 8)),
                 "template": np.zeros((8, 8)), "transforms": [], "particle_transforms": [],
-                "scores": np.empty(0), "n_particles": 0, "iterations": 0, "box_nm": box_nm,
-                "pixel_nm": pixel_nm, "mode": "free"}
+                "scores": np.empty(0), "table": [], "n_particles": 0, "iterations": 0,
+                "box_nm": box_nm, "pixel_nm": pixel_nm, "mode": "free"}
     # seed reference from the particle with the most localizations (most defined)
     seed_idx = int(np.argmax([p.shape[0] for p in particles_c]))
     template = render_points(particles_c[seed_idx][:, :2], box_nm, pixel_nm, sigma_nm)
@@ -389,6 +447,7 @@ def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_
     return {"points": pooled, "average_image": avg_img, "template": template,
             "transforms": transforms, "particle_transforms": mats4,
             "scores": np.array([t[3] for t in transforms]),
+            "table": image_particle_table(transforms, particles_c, tilts),
             "n_particles": len(particles_c), "iterations": len(history),
             "score_history": history, "box_nm": box_nm, "pixel_nm": pixel_nm,
             "mode": "free", "mean_tilt_deg": float(np.mean(tilts)) if tilts else 0.0}

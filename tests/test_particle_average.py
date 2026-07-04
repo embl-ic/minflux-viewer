@@ -287,6 +287,47 @@ def test_template_provided_npc_phase_locks_corners():
     assert _dominant_angular_harmonic(res["points"]) == 8   # pooled corners cluster 8-fold
 
 
+def test_image_particle_table_has_per_particle_rows():
+    parts = _random_particles(k=5, seed=2)
+    res = pa.average_template_free(parts, box_nm=180, pixel_nm=4, n_angles=24, n_iter=2)
+    tbl = res["table"]
+    assert len(tbl) == len(parts)
+    assert {"particle", "n_locs", "angle", "dx", "dy", "tilt", "score", "accepted"} <= set(tbl[0])
+    assert [r["particle"] for r in tbl] == list(range(1, len(parts) + 1))
+    assert all(r["accepted"] for r in tbl)                 # image fitters pool all
+    assert tbl[0]["n_locs"] == parts[0].shape[0]
+    tmpl = pa.geometry_template_image("ring", {"diameter_nm": 100, "rim_nm": 12}, 160, 4)
+    res2 = pa.average_particles(parts, mode="template", template_img=tmpl,
+                                box_nm=160, pixel_nm=4, n_angles=24)
+    assert len(res2["table"]) == len(parts)
+
+
+def test_collapse_traces_centroids_and_fallback():
+    # 3 traces (tids 0,1,2) with 4/2/1 locs → 3 centroids
+    pts = np.array([[0, 0, 0], [2, 0, 0], [0, 2, 0], [2, 2, 0],      # tid 0 centroid (1,1,0)
+                    [10, 10, 5], [12, 10, 5],                         # tid 1 centroid (11,10,5)
+                    [20, 20, 20]], float)                            # tid 2 (as-is)
+    tid = np.array([0, 0, 0, 0, 1, 1, 2])
+    c = pa.collapse_traces(pts, tid)
+    assert c.shape == (3, 3)
+    np.testing.assert_allclose(c[0], [1, 1, 0])
+    np.testing.assert_allclose(c[1], [11, 10, 5])
+    np.testing.assert_allclose(c[2], [20, 20, 20])
+    # fallbacks: no tid, all-distinct, or degenerate → raw points unchanged
+    np.testing.assert_array_equal(pa.collapse_traces(pts, None), pts)
+    np.testing.assert_array_equal(pa.collapse_traces(pts, np.arange(7)), pts)
+    np.testing.assert_array_equal(pa.collapse_traces(pts, np.zeros(7)), pts)
+
+
+def test_geometry_outline_ring_and_npc():
+    corners, curves = pa.geometry_outline("ring", {"diameter_nm": 100.0})
+    assert corners is None and len(curves) == 1
+    assert np.allclose(np.hypot(curves[0][:, 0], curves[0][:, 1]), 50.0, atol=1e-6)
+    corners, curves = pa.geometry_outline("npc", {"diameter_nm": 80.0, "symmetry": 8})
+    assert corners.shape == (8, 3) and len(curves) == 1
+    assert np.allclose(np.hypot(corners[:, 0], corners[:, 1]), 40.0, atol=1e-6)  # radius=diam/2
+
+
 def test_template_provided_npc_with_tilt_runs_3d():
     parts = []
     for i in range(8):

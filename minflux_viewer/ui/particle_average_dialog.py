@@ -9,7 +9,7 @@ appending from further datasets/files so particles from many acquisitions
 accumulate into one pool that is averaged together.
 
 Workflow:
-1. Detect on a dataset (e.g. Convolution / NPC detection wanlu) so box ROIs land
+1. Detect on a dataset (e.g. Convolution / NPC detection) so box ROIs land
    in the ROI Manager; select the rows here and **Collect** — each ROI's
    localizations are cropped, **re-zeroed** (XY to the box centre, Z to the median)
    and stored as an independent copy with their ``tid`` / sub-unit ``unit_id``
@@ -22,8 +22,8 @@ Workflow:
 Average methods:
   * *template-free* — reference-free image alignment;
   * *template-provided* — align to a geometry template;
-  * *NPC two-ring (Wanlu)* — constrained two-ring fit + 8-fold phase alignment
-    (uses the stored ``tid`` / ``unit_id``).
+  * *NPC two-ring model fit* — unbiased canonical 8-corner two-ring fit
+    (``analysis.npc_geomfit``), with LoG sub-unit seeding.
 
 Modeless / non-owned per the project window convention.
 """
@@ -59,7 +59,6 @@ from PyQt6.QtWidgets import (
 )
 
 from ..analysis import conv_segmentation as cs
-from ..analysis import npc_wanlu as nw
 from ..analysis import particle_average as pa
 from ..core.app_state import format_progress_bar
 from ..core.particle_extract import (
@@ -203,7 +202,7 @@ class ParticleAverageWindow(QDialog):
         self._method = QComboBox()
         self._method.addItem("Template-free (reference-free)", "free")
         self._method.addItem("Template-provided (geometry)", "template")
-        self._method.addItem("NPC two-ring (Wanlu)", "wanlu")
+        self._method.addItem("NPC two-ring model fit (8-fold, unbiased)", "geomfit")
         self._method.currentIndexChanged.connect(self._on_method_changed)
         mv.addWidget(self._method)
 
@@ -241,41 +240,55 @@ class ParticleAverageWindow(QDialog):
             "channel(s) too, producing a combined multi-channel averaged overlay. "
             "Default on for an overlay; only the reference channel is used to align.")
         self._multichannel.clicked.connect(lambda *_: setattr(self, "_multichannel_user_set", True))
+        self._image_group = self._trace_group_checkbox()
         ib.addRow("Average box:", self._box_size)
         ib.addRow("Pixel size:", self._pixel)
         ib.addRow("Rotation steps:", self._angles)
         ib.addRow("Iterations:", self._iters)
         ib.addRow("", self._tilt_correct)
         ib.addRow("", self._multichannel)
+        ib.addRow("", self._image_group)
         mv.addWidget(self._image_box)
 
-        # NPC wanlu params
-        self._wanlu_box = QWidget()
-        wb = QFormLayout(self._wanlu_box)
-        wb.setContentsMargins(12, 0, 0, 0)
-        self._diam_min = self._dspin(20.0, 200.0, 70.0, 1, 1.0, " nm")
-        self._diam_max = self._dspin(20.0, 300.0, 90.0, 1, 1.0, " nm")
-        self._inter_min = self._dspin(5.0, 100.0, 20.0, 1, 1.0, " nm")
-        self._inter_max = self._dspin(5.0, 150.0, 40.0, 1, 1.0, " nm")
-        self._inter_exp = self._dspin(0.0, 150.0, 0.0, 1, 1.0, " nm")
-        self._inter_exp.setToolTip("Expected inter-ring distance for the Z fallback (0 = bounds midpoint).")
-        self._z_scale = self._dspin(0.1, 2.0, 1.0, 2, 0.01, "")
-        self._z_scale.setToolTip("Z flattening (MATLAB rimf); < 1 (e.g. 0.67) for un-z-corrected data.")
-        self._sym = QSpinBox(); self._sym.setRange(2, 16); self._sym.setValue(8)
-        self._min_gof = self._dspin(-1.0, 1.0, 0.0, 2, 0.05, "")
-        self._min_gof.setToolTip(
-            "Goodness-of-fit gate (R²): only NPCs whose two-ring fit explains at "
-            "least this fraction of the point spread are pooled. < 0 keeps all; "
-            "higher = stricter. Every fitted NPC is still listed in the result table.")
-        wb.addRow("Diameter min:", self._diam_min)
-        wb.addRow("Diameter max:", self._diam_max)
-        wb.addRow("Inter-ring min:", self._inter_min)
-        wb.addRow("Inter-ring max:", self._inter_max)
-        wb.addRow("Inter-ring expected:", self._inter_exp)
-        wb.addRow("Z scale (rimf):", self._z_scale)
-        wb.addRow("Symmetry:", self._sym)
-        wb.addRow("Min goodness of fit:", self._min_gof)
-        mv.addWidget(self._wanlu_box)
+        # NPC geometry model-fit params (unbiased canonical two-ring fit)
+        self._geomfit_box = QWidget()
+        gb = QFormLayout(self._geomfit_box)
+        gb.setContentsMargins(12, 0, 0, 0)
+        self._g_diam_min = self._dspin(20.0, 300.0, 60.0, 1, 1.0, " nm")
+        self._g_diam_max = self._dspin(20.0, 400.0, 130.0, 1, 1.0, " nm")
+        self._g_inter_min = self._dspin(0.0, 150.0, 0.0, 1, 1.0, " nm")
+        self._g_inter_max = self._dspin(0.0, 200.0, 80.0, 1, 1.0, " nm")
+        self._g_rim_min = self._dspin(0.5, 60.0, 1.0, 1, 0.5, " nm")
+        self._g_rim_max = self._dspin(0.5, 80.0, 30.0, 1, 0.5, " nm")
+        self._g_tilt_max = self._dspin(0.0, 90.0, 45.0, 0, 1.0, "°")
+        self._g_sym = QSpinBox(); self._g_sym.setRange(2, 16); self._g_sym.setValue(8)
+        self._g_min_gof = self._dspin(-1.0, 1.0, 0.3, 2, 0.05, "")
+        self._g_min_gof.setToolTip(
+            "Goodness-of-fit gate (R² of point-to-nearest-corner residuals): only "
+            "particles whose canonical NPC fit reaches this are pooled. Every fitted "
+            "particle is still listed in the table for parameter study / re-filtering.")
+        self._geom_group = self._trace_group_checkbox()
+        self._geom_subunit_init = QCheckBox("Seed fit from LoG sub-units (init only)")
+        self._geom_subunit_init.setChecked(True)
+        self._geom_subunit_init.setToolTip(
+            "Seed each fit's radius / phase / inter-ring from LoG-detected sub-units "
+            "(the corners), for faster, more robust convergence on tricky particles. "
+            "Initialization only — the fit still refines on the localizations, so it "
+            "never biases the result. Falls back to the moment init when tid is absent.")
+        for lbl, w in (("Diameter min:", self._g_diam_min), ("Diameter max:", self._g_diam_max),
+                       ("Inter-ring min:", self._g_inter_min), ("Inter-ring max:", self._g_inter_max),
+                       ("Rim min:", self._g_rim_min), ("Rim max:", self._g_rim_max),
+                       ("Tilt max:", self._g_tilt_max), ("Symmetry:", self._g_sym),
+                       ("Min goodness of fit:", self._g_min_gof)):
+            gb.addRow(lbl, w)
+        gb.addRow("", self._geom_group)
+        gb.addRow("", self._geom_subunit_init)
+        info = QLabel("Fits a canonical 8-corner two-ring NPC to each particle's raw 3-D "
+                      "points (no sub-unit detection). Inter-ring min = 0 allows a single "
+                      "ring. Reports per-particle diameter/inter-ring/rim/tilt for study.")
+        info.setStyleSheet("color:#888;"); info.setWordWrap(True)
+        gb.addRow(info)
+        mv.addWidget(self._geomfit_box)
         root.addWidget(method_group)
 
         self._status = QLabel("")
@@ -295,6 +308,19 @@ class ParticleAverageWindow(QDialog):
         self._rebuild_template_params()
 
     @staticmethod
+    def _trace_group_checkbox() -> QCheckBox:
+        """A 'use trace grouping' checkbox (default on): collapse each MINFLUX
+        trace (tid) to one centroid per molecule-blink before averaging."""
+        chk = QCheckBox("Use trace grouping (collapse tid → 1 point/molecule)")
+        chk.setChecked(True)
+        chk.setToolTip(
+            "Collapse each MINFLUX trace (tid = one emitter's on-event) to its centroid "
+            "before fitting/aligning — one equal vote per molecule-blink instead of one "
+            "per (correlated) localization. De-biases long/bright molecules, denoises and "
+            "speeds the fit. Uncheck to use every raw localization.")
+        return chk
+
+    @staticmethod
     def _dspin(lo, hi, val, decimals, step, suffix) -> QDoubleSpinBox:
         s = QDoubleSpinBox()
         s.setRange(lo, hi)
@@ -309,7 +335,7 @@ class ParticleAverageWindow(QDialog):
         m = self._method.currentData()
         self._template_box.setVisible(m == "template")
         self._image_box.setVisible(m in ("free", "template"))
-        self._wanlu_box.setVisible(m == "wanlu")
+        self._geomfit_box.setVisible(m == "geomfit")
 
     def _on_geom_changed(self) -> None:
         self._rebuild_template_params()
@@ -580,19 +606,19 @@ class ParticleAverageWindow(QDialog):
         self._status.setText(msg)
 
     # ----------------------------------------------------------- run
-    def _build_raw6(self, z_scale: float) -> np.ndarray:
-        rows = []
-        for i, p in enumerate(self._particles, start=1):
-            n = p.points.shape[0]
-            tid = p.tid if p.tid is not None else np.arange(n)
-            unit = p.unit_id if (p.unit_id is not None and p.unit_id.max() > 0) \
-                else (np.arange(n) + 1)
-            tid_g = np.asarray(tid, dtype=float) + i * 1e7      # globally-unique trace ids
-            z = p.points[:, 2] * float(z_scale)
-            rows.append(np.column_stack([p.points[:, 0], p.points[:, 1], z,
-                                         np.full(n, i, float),
-                                         np.asarray(unit, dtype=float), tid_g]))
-        return np.vstack(rows) if rows else np.empty((0, 6))
+    def _grouped_points(self, use_grouping: bool) -> list:
+        """Per-particle point arrays for a fit, optionally collapsed to trace
+        (tid) centroids — one point per molecule-blink (de-biasing over-counting)."""
+        if not use_grouping:
+            return [np.asarray(p.points, float) for p in self._particles]
+        return [pa.collapse_traces(p.points, p.tid) for p in self._particles]
+
+    def _use_grouping_for(self, method: str) -> bool:
+        if method in ("free", "template"):
+            return bool(self._image_group.isChecked())
+        if method == "geomfit":
+            return bool(self._geom_group.isChecked())
+        return False
 
     def _run(self) -> None:
         if self._task is not None:
@@ -604,29 +630,42 @@ class ParticleAverageWindow(QDialog):
             return
         method = self._method.currentData()
         n_in = len(self._particles)
+        use_grouping = self._use_grouping_for(method)
+        grouped = self._grouped_points(use_grouping)
 
         # Read every widget value on the UI thread, then build a closure that does
         # the heavy work off-thread (never touch widgets from the worker).
-        if method == "wanlu":
-            raw6 = self._build_raw6(self._z_scale.value())
-            dbounds = (self._diam_min.value(), self._diam_max.value())
-            ibounds = (self._inter_min.value(), self._inter_max.value())
-            exp = self._inter_exp.value()
-            sym = self._sym.value()
-            mingof = float(self._min_gof.value())
+        if method == "geomfit":
+            g_particles = grouped
+            dbounds = (self._g_diam_min.value(), self._g_diam_max.value())
+            ibounds = (self._g_inter_min.value(), self._g_inter_max.value())
+            rbounds = (self._g_rim_min.value(), self._g_rim_max.value())
+            tmax = float(self._g_tilt_max.value())
+            gsym = int(self._g_sym.value())
+            gmingof = float(self._g_min_gof.value())
+            # Raw localizations + trace ids for the LoG sub-unit fit-init (the fit
+            # itself uses g_particles, which may be trace-collapsed).
+            g_subinit = bool(self._geom_subunit_init.isChecked())
+            g_init_pts = [np.asarray(p.points, float) for p in self._particles]
+            g_init_tids = [(None if p.tid is None else np.asarray(p.tid)) for p in self._particles]
 
             def compute(progress):
-                res = nw.average_npc_wanlu(
-                    raw6, diameter_bounds=dbounds, inter_ring_bounds=ibounds,
-                    expected_inter_ring=(exp if exp > 0 else None), symmetry=sym,
-                    min_gof=mingof, progress=progress)
-                zlo, zhi = res["z_peaks"]
-                desc = (f"NPC two-ring: {res['n_accepted']}/{res['n_npc']} accepted "
-                        f"(GoF≥{mingof:g}), Z rings {zlo:.1f}/{zhi:.1f} nm (sep {zhi - zlo:.1f})")
-                return res["average_loc"][:, :3], desc, {"table": res.get("table", []),
-                                                         "min_gof": mingof}
+                from ..analysis import npc_geomfit as gfit
+                res = gfit.average_npc_geomfit(
+                    g_particles, init_particles=g_init_pts, init_tids=g_init_tids,
+                    subunit_init=g_subinit, diameter_bounds=dbounds, inter_bounds=ibounds,
+                    rim_bounds=rbounds, tilt_max_deg=tmax, symmetry=gsym,
+                    min_gof=gmingof, progress=progress)
+                diams = [r["diameter"] for r in res["table"] if np.isfinite(r.get("diameter", np.nan))]
+                med = float(np.median(diams)) if diams else float("nan")
+                desc = (f"NPC model fit: {res['n_accepted']}/{res['n_particles']} accepted "
+                        f"(GoF≥{gmingof:g}), median diameter {med:.1f} nm")
+                return res["average_loc"][:, :3], desc, {
+                    "table": res.get("table", []), "min_gof": gmingof, "mode": "geomfit",
+                    "fits": res.get("fits", []), "aligned": res.get("aligned", []),
+                    "symmetry": gsym}
         else:
-            particles = [p.points for p in self._particles]
+            particles = grouped
             box, px = float(self._box_size.value()), float(self._pixel.value())
             n_ang = int(self._angles.value())
             tilt = bool(self._tilt_correct.isChecked())
@@ -636,13 +675,20 @@ class ParticleAverageWindow(QDialog):
             mc = self._multichannel_data()
             n_locs = len(self._particles)
 
-            def _channel_extra(res):
-                if not mc["channels"]:
-                    return {}
-                mats = res.get("particle_transforms", [])
-                pooled = {name: pa.pool_transformed(pl, mats) for name, pl in mc["channels"].items()}
-                return {"channels": pooled, "ref_name": mc["ref_name"],
-                        "luts": mc["luts"], "ref_lut": mc["ref_lut"]}
+            def _extra(res, geom):
+                """Result payload for the UI thread: channel pooling (multi-channel)
+                + the per-particle table + per-particle transforms + geometry (for
+                the inspector overlay)."""
+                e: dict = {}
+                if mc["channels"]:
+                    mats = res.get("particle_transforms", [])
+                    e["channels"] = {name: pa.pool_transformed(pl, mats)
+                                     for name, pl in mc["channels"].items()}
+                    e.update({"ref_name": mc["ref_name"], "luts": mc["luts"],
+                              "ref_lut": mc["ref_lut"]})
+                e.update({"table": res.get("table", []), "mode": method, "geom": geom,
+                          "particle_transforms": res.get("particle_transforms", [])})
+                return e
 
             if method == "template":
                 key = self._geom_combo.currentData()
@@ -654,7 +700,7 @@ class ParticleAverageWindow(QDialog):
                     res = pa.average_particles(particles, mode="template", template_img=tmpl,
                                                box_nm=box, pixel_nm=px, n_angles=n_ang,
                                                sigma_nm=px, correct_tilt=tilt, progress=progress)
-                    return res["points"], f"template '{key_label}'{tilt_tag}", _channel_extra(res)
+                    return res["points"], f"template '{key_label}'{tilt_tag}", _extra(res, (key, params))
             else:
                 n_iter = int(self._iters.value())
 
@@ -663,9 +709,10 @@ class ParticleAverageWindow(QDialog):
                                                n_angles=n_ang, n_iter=n_iter, sigma_nm=px,
                                                correct_tilt=tilt, progress=progress)
                     return (res["points"], f"template-free, {res.get('iterations', 0)} iter{tilt_tag}",
-                            _channel_extra(res))
+                            _extra(res, None))
 
-        self._pending = {"n_in": n_in, "method": method, "sources": self._n_sources()}
+        self._pending = {"n_in": n_in, "method": method, "sources": self._n_sources(),
+                         "particles_snapshot": grouped}
         self._last_pct = -1
         self._state.log(f"Particle average ({method}): averaging {n_in} collected particle(s)…")
         self._state.log_progress(format_progress_bar(0.0))
@@ -696,11 +743,26 @@ class ParticleAverageWindow(QDialog):
         self._run_btn.setEnabled(True)
         self._state.log_progress(format_progress_bar(1.0, done=True), final=True)
         self._state.status_message.emit("Particle average: done.")
-        # A per-particle fit table (NPC two-ring) is shown even if nothing was
+        extra = extra if isinstance(extra, dict) else {}
+        method = self._pending.get("method", "")
+        pts_arr = np.asarray(pts)
+        # Stash everything the per-particle inspector needs (snapshot at run time).
+        self._insp = {
+            "method": method,
+            "particles": self._pending.get("particles_snapshot") or [],
+            "ptransforms": extra.get("particle_transforms"),
+            "geom": extra.get("geom"),
+            "reference": pts_arr[:, :3] if (method == "free" and pts_arr.size) else None,
+            "fits": extra.get("fits"),
+            "aligned": extra.get("aligned"),
+            "symmetry": extra.get("symmetry", 8),
+            "table": extra.get("table") or [],
+        }
+        # A per-particle fit table is shown for every method — even if nothing was
         # pooled, so the user can see *why* (e.g. all rejected by the GoF gate).
-        table = (extra or {}).get("table") if isinstance(extra, dict) else None
+        table = extra.get("table")
         if table:
-            self._show_fit_table(table, (extra or {}).get("min_gof"))
+            self._show_fit_table(table, method, extra.get("min_gof"))
         pts = np.asarray(pts)
         if pts.ndim != 2 or pts.shape[0] == 0:
             self._status.setText("No particles passed the average / GoF gate. "
@@ -736,14 +798,124 @@ class ParticleAverageWindow(QDialog):
             f"Averaged {n_in} particles · {pts.shape[0]:,} locs ({desc}). "
             "Opened render view (switch to 3-D for depth).")
 
-    def _show_fit_table(self, table, min_gof) -> None:
+    def _show_fit_table(self, table, method, min_gof=None) -> None:
         owner = self._owner if self._owner is not None else self
-        win = ParticleFitTableWindow(table, min_gof=min_gof)
+        if method == "geomfit":
+            columns = GEOM_COLS
+            n_acc = sum(1 for r in table if r.get("accepted"))
+            header = f"{n_acc} / {len(table)} particle(s) accepted"
+            if min_gof is not None:
+                header += f"   (min GoF = {min_gof:g})"
+            log = (f"Particle fit table: {n_acc}/{len(table)} particle(s) passed the "
+                   f"GoF gate (min GoF {min_gof:g}).")
+        else:
+            columns = IMAGE_COLS
+            header = f"{len(table)} particle(s) aligned — {method}"
+            log = f"Particle fit table: {len(table)} particle(s) ({method})."
+        win = ParticleFitTableWindow(table, columns=columns, header=header, min_gof=min_gof,
+                                     on_show=self._show_particle, on_rebuild=self._rebuild_average,
+                                     owner=owner)
         from .modeless import show_modeless
         show_modeless(win, owner)
-        n_acc = sum(1 for r in table if r.get("accepted"))
-        self._state.log(f"Particle fit table: {n_acc}/{len(table)} NPC(s) passed the "
-                        f"GoF gate (min GoF {min_gof:g}).")
+        self._fit_table_win = win               # keep a reference
+        self._state.log(log + "  Double-click a row (or 'Show selected particle') to "
+                        "inspect its point cloud + fitted model.")
+
+    def _show_particle(self, idx: int) -> None:
+        """Open the per-particle inspector (point cloud + fitted model) for row *idx*."""
+        ctx = getattr(self, "_insp", None)
+        if not ctx:
+            return
+        from .modeless import show_modeless
+        from .particle_inspector import ParticleInspectorWindow
+        method = ctx["method"]
+        try:
+            if method in ("free", "template"):
+                parts = ctx["particles"]
+                if not (0 <= idx < len(parts)):
+                    return
+                p = np.asarray(parts[idx], float)
+                mats = ctx.get("ptransforms")
+                aligned = (pa.apply_particle_transform(p, mats[idx])
+                           if mats and idx < len(mats) and mats[idx] is not None else _as_xyz(p))
+                model_pts = model_curves = None
+                if method == "template" and ctx.get("geom"):
+                    key, params = ctx["geom"]
+                    model_pts, model_curves = pa.geometry_outline(key, params)
+                elif method == "free" and ctx.get("reference") is not None:
+                    model_pts = _decimate(ctx["reference"], 6000)     # pooled average as reference
+                win = ParticleInspectorWindow(
+                    title=f"Particle {idx + 1} — {method}", cloud=aligned,
+                    model_points=model_pts, model_curves=model_curves,
+                    is_3d=_has_z(aligned), owner=self._owner)
+            elif method == "geomfit":
+                from ..analysis import npc_geomfit as gfit
+                table, fits, aligned = (ctx.get("table") or [], ctx.get("fits") or [],
+                                        ctx.get("aligned") or [])
+                sym = int(ctx.get("symmetry", 8))
+                if not (0 <= idx < len(table)):
+                    return
+                fit = fits[idx] if idx < len(fits) else None
+                A = aligned[idx] if idx < len(aligned) else None
+                cloud = np.asarray(A, float)[:, :3] if A is not None else np.empty((0, 3))
+                model_pts = model_curves = None
+                if fit and fit.get("ok"):
+                    # aligned points are canonical → overlay the canonical model (phase 0)
+                    model_pts, model_curves = gfit.canonical_overlay(fit["radius"], fit["inter"], sym)
+                win = ParticleInspectorWindow(
+                    title=f"Particle {idx + 1} — NPC model fit", cloud=cloud,
+                    model_points=model_pts, model_curves=model_curves, is_3d=True, owner=self._owner)
+            else:
+                return
+        except Exception as exc:                                      # pragma: no cover - defensive
+            self._status.setText(f"Could not open particle view: {exc}")
+            return
+        show_modeless(win, self._owner if self._owner is not None else self)
+
+    def _rebuild_average(self, selected: list) -> None:
+        """Re-pool only the user-selected (filtered) particles into a new averaged
+        view. Cheap: it re-applies the already-computed per-particle transforms
+        (image) / stacks the cached aligned points (geometry fit) — no re-fit."""
+        ctx = getattr(self, "_insp", None)
+        if not ctx or not selected:
+            self._status.setText("No particles selected to rebuild the average.")
+            return
+        method = ctx["method"]
+        try:
+            if method in ("free", "template"):
+                parts = ctx.get("particles") or []
+                mats = ctx.get("ptransforms") or []
+                sub_p = [parts[i] for i in selected if i < len(parts)]
+                sub_m = [mats[i] for i in selected if i < len(mats)]
+                pooled = pa.pool_transformed(sub_p, sub_m) if (sub_m and sub_p) else np.empty((0, 3))
+            else:                                                     # geomfit
+                aligned = ctx.get("aligned") or []
+                arrs = [np.asarray(aligned[i], float)[:, :3] for i in selected
+                        if i < len(aligned) and aligned[i] is not None
+                        and np.asarray(aligned[i]).size]
+                pooled = np.vstack(arrs) if arrs else np.empty((0, 3))
+        except Exception as exc:                                      # pragma: no cover - defensive
+            self._status.setText(f"Rebuild failed: {exc}")
+            return
+        pooled = np.asarray(pooled)
+        if pooled.ndim != 2 or pooled.shape[0] == 0:
+            self._status.setText("The selection produced no localizations to average.")
+            return
+        if self._owner is None or not hasattr(self._owner, "add_particle_average_dataset"):
+            return
+        k, n = len(selected), len(ctx.get("table") or [])
+        name = f"Particle avg [{k}/{n} filtered, {method}]"
+        log = (f"Rebuilt particle average from {k}/{n} filtered particle(s) ({method}): "
+               f"{pooled.shape[0]:,} localization(s).")
+        try:
+            self._owner.add_particle_average_dataset(pooled[:, :3], name=name, log_message=log)
+        except Exception as exc:                                      # pragma: no cover - defensive
+            self._status.setText(f"Rebuilt average but display failed: {exc}")
+            return
+        self._state.log(log)
+        self._status.setText(
+            f"Rebuilt average from {k}/{n} filtered particles ({pooled.shape[0]:,} locs) — "
+            "opened a new view.")
 
     def _on_failed(self, msg: str) -> None:
         self._task = None
@@ -891,87 +1063,321 @@ class ParticleLoadDialog(QDialog):
         return {"mode": "data_roi", "data_path": data, "roi_path": roi} if (data and roi) else None
 
 
+# Column specs (label, row-key, display format) for each method's fit table.
+IMAGE_COLS = [
+    ("Particle", "particle", "{:d}"),
+    ("Locs", "n_locs", "{:d}"),
+    ("Angle (°)", "angle", "{:.1f}"),
+    ("dx (nm)", "dx", "{:.1f}"),
+    ("dy (nm)", "dy", "{:.1f}"),
+    ("Tilt (°)", "tilt", "{:.1f}"),
+    ("Score", "score", "{:.3f}"),
+    ("Accepted", "accepted", None),
+]
+GEOM_COLS = [
+    ("Particle", "particle", "{:d}"),
+    ("Locs", "n_locs", "{:d}"),
+    ("Diameter (nm)", "diameter", "{:.1f}"),
+    ("Inter-ring (nm)", "inter", "{:.1f}"),
+    ("Rim (nm)", "rim", "{:.1f}"),
+    ("Tilt (°)", "tilt", "{:.1f}"),
+    ("Phase (°)", "phase", "{:.1f}"),
+    ("GoF (R²)", "gof", "{:.3f}"),
+    ("RMSE (nm)", "rmse", "{:.2f}"),
+    ("Accepted", "accepted", None),
+]
+
+
+class _SortItem(QTableWidgetItem):
+    """Table cell that sorts by a stored numeric value, not its display text."""
+
+    def __init__(self, text: str, sort_value: float) -> None:
+        super().__init__(text)
+        self._sort_value = sort_value
+
+    def __lt__(self, other) -> bool:                       # noqa: D401 - Qt hook
+        try:
+            return self._sort_value < other._sort_value
+        except Exception:
+            return super().__lt__(other)
+
+
 class ParticleFitTableWindow(QWidget):
-    """Per-NPC two-ring fit metrics (recomputed on the best fit). Modeless."""
+    """Per-particle fit metrics for any averaging method. Modeless.
 
-    _COLS = [
-        ("NPC", "npc_id", "{:d}"),
-        ("Locs", "n_locs", "{:d}"),
-        ("Radius (nm)", "radius", "{:.1f}"),
-        ("Rim (nm)", "rim", "{:.1f}"),
-        ("Inter-ring (nm)", "inter", "{:.1f}"),
-        ("Tilt (°)", "tilt", "{:.1f}"),
-        ("GoF (R²)", "gof", "{:.3f}"),
-        ("RMSE (nm)", "rmse", "{:.2f}"),
-        ("NRMSE", "nrmse", "{:.3f}"),
-        ("Accepted", "accepted", None),
-    ]
+    Columns are **click-to-sort** (numeric-aware). Selecting a row and clicking
+    *Show selected particle* (or double-clicking) calls ``on_show(orig_index)``
+    with the particle's original index (stable across sorting)."""
 
-    def __init__(self, table, *, min_gof=None) -> None:
+    def __init__(self, table, *, columns=None, header=None, min_gof=None,
+                 on_show=None, on_rebuild=None, owner=None) -> None:
         super().__init__(None)
         self._rows = list(table)
-        self.setWindowTitle("Particle fit table — NPC two-ring")
+        self._columns = list(columns) if columns else GEOM_COLS
+        self._on_show = on_show
+        self._on_rebuild = on_rebuild
+        self._filters: dict = {}                # col_key -> (lo, hi) active ranges
+        self._passing: set | None = None        # original indices passing the filters
+        self._accepted_by_index: dict = {}
+        self._updating_region = False
+        self.setWindowTitle("Particle fit table")
         self.setWindowFlags(Qt.WindowType.Window)
-        self.resize(760, 440)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.resize(840, 640)
         root = QVBoxLayout(self)
-        n_acc = sum(1 for r in self._rows if r.get("accepted"))
-        head = f"{n_acc} / {len(self._rows)} NPC(s) accepted"
-        if min_gof is not None:
-            head += f"   (min GoF = {min_gof:g})"
-        lbl = QLabel(head)
+
+        if header is None:
+            n_acc = sum(1 for r in self._rows if r.get("accepted", True))
+            header = f"{n_acc} / {len(self._rows)} accepted"
+            if min_gof is not None:
+                header += f"   (min GoF = {min_gof:g})"
+        lbl = QLabel(header)
         lbl.setStyleSheet("font-weight:bold;")
         root.addWidget(lbl)
 
-        self._tbl = QTableWidget(len(self._rows), len(self._COLS))
-        self._tbl.setHorizontalHeaderLabels([c[0] for c in self._COLS])
+        self._tbl = QTableWidget(len(self._rows), len(self._columns))
+        self._tbl.setHorizontalHeaderLabels([c[0] for c in self._columns])
         self._tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setSortingEnabled(True)
+        self._tbl.itemDoubleClicked.connect(lambda *_a: self._activate())
         self._fill()
         root.addWidget(self._tbl, 1)
+
+        # histogram + interactive range filter over the numeric fit columns
+        self._filter_cols = [(label, key) for (label, key, _f) in self._columns
+                             if key not in ("accepted", self._columns[0][1])]
+        if self._filter_cols:
+            root.addWidget(self._build_filter_panel())
 
         btns = QHBoxLayout()
         save = QPushButton("Save CSV…")
         save.clicked.connect(self._save_csv)
+        btns.addWidget(save)
+        if self._on_show is not None:
+            show = QPushButton("Show selected particle")
+            show.clicked.connect(self._activate)
+            btns.addWidget(show)
+        btns.addStretch(1)
         close = QPushButton("Close")
         close.clicked.connect(self.close)
-        btns.addWidget(save)
-        btns.addStretch(1)
         btns.addWidget(close)
         root.addLayout(btns)
+        if self._rows:
+            self._tbl.selectRow(0)
+        if self._filter_cols:
+            self._draw_histogram()
+            self._refresh_filter_state()
 
     def _fill(self) -> None:
         from PyQt6.QtGui import QColor
+        self._tbl.setSortingEnabled(False)                 # insert then re-enable
         for r, row in enumerate(self._rows):
-            accepted = bool(row.get("accepted"))
-            for c, (_lbl, key, fmt) in enumerate(self._COLS):
+            accepted = bool(row.get("accepted", True))
+            self._accepted_by_index[r] = accepted
+            for c, (_lbl, key, fmt) in enumerate(self._columns):
                 v = row.get(key)
                 if key == "accepted":
-                    text = "yes" if accepted else "no"
+                    text, sortk = ("yes" if accepted else "no"), (1.0 if accepted else 0.0)
                 elif v is None or (isinstance(v, float) and not np.isfinite(v)):
-                    text = "—"
+                    text, sortk = "—", float("-inf")
                 else:
                     try:
                         text = fmt.format(v)
                     except Exception:
                         text = str(v)
-                item = QTableWidgetItem(text)
+                    try:
+                        sortk = float(v)
+                    except Exception:
+                        sortk = float("-inf")
+                item = _SortItem(text, sortk)
+                if c == 0:                                 # original index survives sorting
+                    item.setData(Qt.ItemDataRole.UserRole, r)
                 if not accepted:
                     item.setForeground(QColor("#999"))
                 self._tbl.setItem(r, c, item)
+        self._tbl.setSortingEnabled(True)
+
+    def _activate(self, *_a) -> None:
+        if self._on_show is None:
+            return
+        r = self._tbl.currentRow()
+        if r < 0:
+            return
+        it = self._tbl.item(r, 0)
+        orig = it.data(Qt.ItemDataRole.UserRole) if it is not None else None
+        if orig is not None:
+            self._on_show(int(orig))
 
     def _save_csv(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Save fit table", "npc_fit_table.csv",
+        path, _ = QFileDialog.getSaveFileName(self, "Save fit table", "particle_fit_table.csv",
                                               "CSV (*.csv);;All files (*)")
         if not path:
             return
         if not path.lower().endswith(".csv"):
             path += ".csv"
         import csv
-        keys = [c[1] for c in self._COLS]
+        keys = [c[1] for c in self._columns]
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([c[0] for c in self._COLS])
+            writer.writerow([c[0] for c in self._columns])
             for row in self._rows:
                 writer.writerow([row.get(k) for k in keys])
+
+    # ------------------------------------------------- histogram / range filter
+    def _build_filter_panel(self):
+        import pyqtgraph as pg
+        from PyQt6.QtWidgets import QGroupBox
+
+        box = QGroupBox("Filter particles by fit value (drag the green range; combine across columns)")
+        v = QVBoxLayout(box)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Histogram of:"))
+        self._hist_col = QComboBox()
+        for label, key in self._filter_cols:
+            self._hist_col.addItem(label, key)
+        self._hist_col.currentIndexChanged.connect(self._draw_histogram)
+        row.addWidget(self._hist_col, 1)
+        v.addLayout(row)
+
+        self._hist_plot = pg.PlotWidget()
+        self._hist_plot.setBackground("w")
+        self._hist_plot.setMaximumHeight(160)
+        self._hist_plot.setLabel("left", "count")
+        self._hist_curve = None
+        self._region = pg.LinearRegionItem(brush=pg.mkBrush(60, 170, 90, 60),
+                                           pen=pg.mkPen(40, 130, 70, 220))
+        self._region.setZValue(10)
+        self._region.sigRegionChanged.connect(self._on_region_changed)
+        self._hist_plot.addItem(self._region)
+        v.addWidget(self._hist_plot)
+
+        crow = QHBoxLayout()
+        self._pass_label = QLabel("")
+        self._pass_label.setStyleSheet("font-weight:bold; color:#1a7;")
+        crow.addWidget(self._pass_label)
+        crow.addStretch(1)
+        clear = QPushButton("Clear filters")
+        clear.clicked.connect(self._clear_filters)
+        crow.addWidget(clear)
+        if self._on_rebuild is not None:
+            reb = QPushButton("Rebuild average from selection")
+            reb.setToolTip("Re-pool only the selected (filtered) particles into a new "
+                           "averaged view. Cheap — reuses the per-particle transforms; no re-fit.")
+            reb.clicked.connect(self._do_rebuild)
+            crow.addWidget(reb)
+        v.addLayout(crow)
+        return box
+
+    def _column_values(self, key) -> np.ndarray:
+        return np.array([_num(r.get(key)) for r in self._rows], dtype=float)
+
+    def _draw_histogram(self, *_a) -> None:
+        import pyqtgraph as pg
+        key = self._hist_col.currentData()
+        vals = self._column_values(key)
+        finite = vals[np.isfinite(vals)]
+        if self._hist_curve is not None:
+            self._hist_plot.removeItem(self._hist_curve)
+            self._hist_curve = None
+        if finite.size == 0:
+            return
+        lo, hi = float(finite.min()), float(finite.max())
+        if hi <= lo:
+            hi = lo + 1.0
+        nb = int(min(30, max(5, round(np.sqrt(finite.size)))))
+        counts, edges = np.histogram(finite, bins=nb, range=(lo, hi))
+        self._hist_curve = pg.PlotCurveItem(
+            edges, counts, stepMode=True, fillLevel=0,
+            brush=pg.mkBrush(120, 120, 120, 150), pen=pg.mkPen(80, 80, 80))
+        self._hist_plot.addItem(self._hist_curve)
+        self._updating_region = True                       # programmatic → don't record
+        self._region.setBounds([lo, hi])
+        self._region.setRegion(list(self._filters.get(key, (lo, hi))))
+        self._updating_region = False
+        self._hist_plot.setXRange(lo, hi, padding=0.03)
+
+    def _on_region_changed(self, *_a) -> None:
+        if self._updating_region:
+            return
+        key = self._hist_col.currentData()
+        lo, hi = (float(x) for x in self._region.getRegion())
+        finite = self._column_values(key)
+        finite = finite[np.isfinite(finite)]
+        # A range spanning the whole data extent = no filter on this column.
+        if finite.size and lo <= finite.min() + 1e-9 and hi >= finite.max() - 1e-9:
+            self._filters.pop(key, None)
+        else:
+            self._filters[key] = (lo, hi)
+        self._refresh_filter_state()
+
+    def _clear_filters(self) -> None:
+        self._filters.clear()
+        self._draw_histogram()
+        self._refresh_filter_state()
+
+    def _passing_mask(self) -> np.ndarray:
+        keep = np.ones(len(self._rows), dtype=bool)
+        for key, (lo, hi) in self._filters.items():
+            vals = self._column_values(key)
+            with np.errstate(invalid="ignore"):
+                keep &= np.isfinite(vals) & (vals >= lo) & (vals <= hi)
+        return keep
+
+    def _refresh_filter_state(self) -> None:
+        from PyQt6.QtGui import QColor
+        keep = self._passing_mask()
+        active = bool(self._filters)
+        self._passing = set(int(i) for i in np.nonzero(keep)[0])
+        n_pass = int(keep.sum())
+        suffix = "" if active else "   (no filter — all particles)"
+        self._pass_label.setText(f"{n_pass} / {len(self._rows)} particle(s) selected{suffix}")
+        default = self.palette().text().color()
+        grey = QColor("#aaaaaa")
+        for tr in range(self._tbl.rowCount()):
+            it0 = self._tbl.item(tr, 0)
+            if it0 is None:
+                continue
+            orig = int(it0.data(Qt.ItemDataRole.UserRole))
+            is_grey = (orig not in self._passing) if active else (not self._accepted_by_index.get(orig, True))
+            colour = grey if is_grey else default
+            for c in range(self._tbl.columnCount()):
+                it = self._tbl.item(tr, c)
+                if it is not None:
+                    it.setForeground(colour)
+
+    def _do_rebuild(self) -> None:
+        if self._on_rebuild is None:
+            return
+        sel = sorted(int(i) for i in np.nonzero(self._passing_mask())[0])
+        self._on_rebuild(sel)
+
+
+def _num(v) -> float:
+    """Coerce a table cell to float; non-numeric / missing → NaN (excluded by filters)."""
+    try:
+        f = float(v)
+        return f if np.isfinite(f) else float("nan")
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _has_z(arr) -> bool:
+    a = np.asarray(arr)
+    return a.ndim == 2 and a.shape[1] > 2 and float(np.ptp(a[:, 2])) > 1e-6
+
+
+def _as_xyz(arr) -> np.ndarray:
+    a = np.asarray(arr, float)
+    if a.ndim != 2 or a.shape[0] == 0:
+        return np.empty((0, 3))
+    return a[:, :3] if a.shape[1] >= 3 else np.column_stack([a[:, :2], np.zeros(a.shape[0])])
+
+
+def _decimate(arr, n: int) -> np.ndarray:
+    a = np.asarray(arr, float)
+    if a.shape[0] <= n:
+        return a
+    return a[np.linspace(0, a.shape[0] - 1, n).astype(int)]
