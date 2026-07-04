@@ -586,6 +586,11 @@ class RoiOverlayController(QObject):
         record = RoiRecord.create("point", {"point": self._point_to_3d(pos)}, **self._record_kwargs())
         record = self._normalize_record(record)
         self._add_session_point(record)
+        # Read-out: this point's X/Y + the running session-point count.
+        p = record.geometry.get("point") or [0.0, 0.0, 0.0]
+        self._emit_status(
+            f"Point X={float(p[0]):.0f}, Y={float(p[1]):.0f}   "
+            f"(session point {len(self._session_points)})")
 
     # ------------------------------------------------------------------
     # Session points (pending markers, not yet in the Manager/store)
@@ -894,6 +899,78 @@ class RoiOverlayController(QObject):
         if len(pts) >= 3:
             self._report_angle(pts[:3])
 
+    def _emit_status(self, text: str) -> None:
+        """Push a live read-out to the main-window status bar (best effort)."""
+        if not text:
+            return
+        state = getattr(self.owner, "_state", None)
+        sig = getattr(state, "status_message", None) if state is not None else None
+        if sig is not None:
+            try:
+                sig.emit(text)
+            except Exception:
+                pass
+
+    def _clear_status(self) -> None:
+        """Blank the status bar (ROI drawing/editing finished, deleted or committed)."""
+        state = getattr(self.owner, "_state", None)
+        sig = getattr(state, "status_message", None) if state is not None else None
+        if sig is not None:
+            try:
+                sig.emit("")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _roi_status_text(roi_type: str, geometry: dict) -> str:
+        """Concise live geometry read-out (integer nm) for a draft ROI: origin +
+        size for rectangle/oval, type + vertex count + bounding box for other
+        shapes, X/Y for a point. Coordinates may carry a depth (3-D) — always index
+        ``[0]``/``[1]``, never ``x, y = p``."""
+        g = geometry or {}
+        if roi_type == "angle":
+            return ""                                   # angle has its own read-out
+        if roi_type in {"rectangle", "oval"}:
+            b = g.get("bounds") or [0, 0, 0, 0]
+            x, y, w, h = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
+            ang = float(g.get("angle", 0.0) or 0.0)
+            label = "Rectangle" if roi_type == "rectangle" else "Oval"
+            text = f"{label} X={x:.0f}, Y={y:.0f}, W={w:.0f}, H={h:.0f}"
+            return text + (f", angle={ang:.0f}°" if abs(ang) > 1e-6 else "")
+        if roi_type == "point":
+            p = g.get("point") or [0.0, 0.0, 0.0]
+            return f"Point X={float(p[0]):.0f}, Y={float(p[1]):.0f}"
+        pts = g.get("points") or []                     # line/polyline/polygon/freehand…
+        if len(pts) >= 1:
+            arr = np.asarray([[float(p[0]), float(p[1])] for p in pts], dtype=float)
+            x0, y0 = float(arr[:, 0].min()), float(arr[:, 1].min())
+            w, h = float(np.ptp(arr[:, 0])), float(np.ptp(arr[:, 1]))
+            label = {"line": "Line", "polyline": "Polyline", "freehand_line": "Freehand line",
+                     "polygon": "Polygon", "freehand": "Freehand"}.get(roi_type, roi_type.capitalize())
+            return (f"{label}  {len(pts)} vertices  "
+                    f"Bounding Box X={x0:.0f}, Y={y0:.0f}, W={w:.0f}, H={h:.0f}")
+        return ""
+
+    def _report_roi_status(self, record) -> None:
+        """Live status for a draft *record* (angle uses its dedicated read-out)."""
+        rtype = getattr(record, "type", None)
+        if rtype in (None, "angle"):
+            return
+        try:
+            self._emit_status(self._roi_status_text(rtype, getattr(record, "geometry", {})))
+        except Exception:
+            pass
+
+    def _report_status_from_item(self, item) -> None:
+        """Live status while a draft ROI is edited (moved / reshaped)."""
+        if self.draft is None or self.draft.type == "angle":
+            return
+        try:
+            geom = item_to_geometry(self.draft.type, item)
+        except Exception:
+            return
+        self._emit_status(self._roi_status_text(self.draft.type, geom))
+
     def _set_draft(self, record: RoiRecord) -> None:
         self.draft = record
         if self.draft_item is not None:
@@ -902,8 +979,10 @@ class RoiOverlayController(QObject):
         self._style_item(self.draft_item, record, True)
         self._connect_draft_edit(self.draft_item)
         self.plot_item.addItem(self.draft_item)
+        self._report_roi_status(record)          # live geometry read-out → status bar
 
     def _clear_draft(self) -> None:
+        self._clear_status()                         # drawing done / cancelled / deleted
         self.draft = None
         self._polygon_points = []
         self._polyline_points = []
@@ -1009,11 +1088,15 @@ class RoiOverlayController(QObject):
     def _connect_draft_edit(self, item) -> None:
         if self.draft is not None and self.draft.type == "point" and hasattr(item, "sigPositionChangeFinished"):
             item.sigPositionChangeFinished.connect(lambda _item=item: self._update_draft_from_item(_item))
+            if hasattr(item, "sigPositionChanged"):      # live point drag → status
+                item.sigPositionChanged.connect(lambda _item=item: self._report_status_from_item(_item))
             return
         if hasattr(item, "sigRegionChangeFinished"):
             item.sigRegionChangeFinished.connect(lambda _item=item: self._update_draft_from_item(_item))
         if self.draft is not None and self.draft.type == "angle" and hasattr(item, "sigRegionChanged"):
             item.sigRegionChanged.connect(lambda _item=item: self._report_angle_from_item(_item))
+        elif hasattr(item, "sigRegionChanged"):          # live shape edit → status
+            item.sigRegionChanged.connect(lambda _item=item: self._report_status_from_item(_item))
 
     def _update_draft_from_item(self, item) -> None:
         if self.draft is None:
@@ -1353,6 +1436,7 @@ class RoiOverlayController(QObject):
         self.store.deselect()            # the drawn ROI disappears from the view
 
     def _delete_hit_roi(self, kind: str, record: RoiRecord) -> None:
+        self._clear_status()                         # deleted ROI → clear its read-out
         self._delete_mask_for_record(record)
         if kind == "draft":
             self._clear_draft()

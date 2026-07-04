@@ -140,6 +140,26 @@ def test_post_load_chain_and_abort(_qt_app):
         assert ok, "post-load chain did not finish"
         assert np.isfinite(np.asarray(ds.derived["rimf"])).all()
         assert np.asarray(ds.attr["den"]).shape[0] == ds.prop.num_loc
+
+        # The Log window auto-opens on the first log message (placed beside the
+        # main window, not over its menu) — so after the post-load chain's many
+        # log lines it exists.
+        assert win._log_win is not None
+
+        # Averaged super-particles skip per-trace precision + local density on load
+        # (their tid is a per-loc placeholder and the dense superposition makes the
+        # KD-tree density heuristic mis-estimate → a long all-core freeze).
+        from minflux_viewer.core.dataset import build_localization_dataset
+        pa_pts = np.random.default_rng(0).normal(0, 50, (200, 3))
+        ds_pa = build_localization_dataset(name="pa", x_nm=pa_pts[:, 0], y_nm=pa_pts[:, 1],
+                                           z_nm=pa_pts[:, 2], prefs=state.prefs)
+        ds_pa.metadata["particle_average"] = True
+        ds_pa.derived["rimf"] = 1.0
+        state.add_dataset(ds_pa)                       # so _post_load_index resolves it
+        win._post_load_loc_prec(ds_pa)
+        assert "sigma_per_trace_nm" not in ds_pa.derived   # loc-precision skipped
+        win._post_load_density(ds_pa)
+        assert "den" not in ds_pa.attr                     # local density skipped
     finally:
         win.close()
         _qt_app.processEvents()

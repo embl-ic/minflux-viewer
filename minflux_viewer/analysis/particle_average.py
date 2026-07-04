@@ -38,6 +38,140 @@ DEFAULT_N_ITERS = 5
 
 
 # --------------------------------------------------------------------------- #
+# Axial tilt correction (per-particle PCA) — makes the image fitters 3-D-aware
+# --------------------------------------------------------------------------- #
+def _rotation_a_to_b(a, b) -> np.ndarray:
+    """Rotation matrix taking unit-ish vector *a* onto *b* (Rodrigues)."""
+    a = np.asarray(a, float); a = a / (np.linalg.norm(a) or 1.0)
+    b = np.asarray(b, float); b = b / (np.linalg.norm(b) or 1.0)
+    v = np.cross(a, b)
+    s = float(np.linalg.norm(v))
+    c = float(a @ b)
+    if s < 1e-12:
+        return np.eye(3) if c > 0 else -np.eye(3)
+    K = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return np.eye(3) + K + K @ K * ((1 - c) / (s ** 2))
+
+
+def estimate_tilt_normal(points):
+    """Best-fit plane normal (PCA smallest-variance axis) + tilt vs +Z, degrees.
+
+    Returns ``(+Z, 0.0)`` for planar / 2-D data (no out-of-plane spread) so the
+    correction is a safe no-op there."""
+    P = np.asarray(points, float)
+    if P.ndim != 2 or P.shape[0] < 3 or P.shape[1] < 3:
+        return np.array([0.0, 0.0, 1.0]), 0.0
+    C = P[:, :3] - P[:, :3].mean(axis=0)
+    if not np.any(np.abs(C[:, 2]) > 1e-9):          # flat 2-D data → no tilt
+        return np.array([0.0, 0.0, 1.0]), 0.0
+    _w, V = np.linalg.eigh(C.T @ C)
+    normal = V[:, 0]                                 # smallest eigenvalue
+    if normal[2] < 0:
+        normal = -normal
+    tilt = float(np.degrees(np.arccos(np.clip(abs(float(normal[2])), 0.0, 1.0))))
+    return normal, tilt
+
+
+def flatten_tilt(points):
+    """Rotate a particle so its best-fit-plane normal points along +Z (un-tilt).
+
+    Returns ``(rotated_points, tilt_deg)``. The XYZ block is rotated about the
+    particle centroid; any extra columns pass through. No-op for 2-D / planar data."""
+    P = np.asarray(points, float)
+    if P.ndim != 2 or P.shape[1] < 3 or P.shape[0] < 3:
+        return P, 0.0
+    normal, tilt = estimate_tilt_normal(P)
+    if tilt < 1e-9:
+        return P, 0.0
+    R = _rotation_a_to_b(normal, [0.0, 0.0, 1.0])
+    ctr = P[:, :3].mean(axis=0)
+    out = P.copy()
+    out[:, :3] = (R @ (P[:, :3] - ctr).T).T
+    return out, tilt
+
+
+def _particle_prep(points, correct_tilt: bool):
+    """Center (+ optionally PCA-untilt) one particle **and** return the 4×4 matrix
+    that maps its original (re-zeroed) XYZ into the prepared frame.
+
+    The matrix lets the *same* preparation be replayed on another channel's
+    localizations (multi-channel averaging)."""
+    p = np.asarray(points, float)
+    M = np.eye(4)
+    work = p.copy()
+    tilt = 0.0
+    if correct_tilt and work.ndim == 2 and work.shape[1] >= 3 and work.shape[0] >= 3:
+        normal, tilt = estimate_tilt_normal(work)
+        if tilt >= 1e-9:
+            R = _rotation_a_to_b(normal, [0.0, 0.0, 1.0])
+            C = work[:, :3].mean(axis=0)
+            Mt = np.eye(4)
+            Mt[:3, :3] = R
+            Mt[:3, 3] = -R @ C                          # rotate about the centroid
+            M = Mt @ M
+            work[:, :3] = (R @ (work[:, :3] - C).T).T
+    c = np.zeros(3)
+    if work.shape[0]:
+        c[0], c[1] = work[:, 0].mean(), work[:, 1].mean()
+        if work.shape[1] > 2:
+            c[2] = work[:, 2].mean()
+    Mc = np.eye(4)
+    Mc[:3, 3] = -c
+    M = Mc @ M
+    work[:, 0] -= c[0]
+    work[:, 1] -= c[1]
+    if work.shape[1] > 2:
+        work[:, 2] -= c[2]
+    return work, tilt, M
+
+
+def _matrix_2d(theta_deg: float, dx_nm: float, dy_nm: float) -> np.ndarray:
+    """4×4 matrix for a 2-D rigid transform (XY rotation about origin + shift; Z
+    passes through) — the ``transform_points`` operation as a matrix."""
+    th = np.deg2rad(theta_deg)
+    c, s = np.cos(th), np.sin(th)
+    M = np.eye(4)
+    M[0, 0], M[0, 1] = c, -s
+    M[1, 0], M[1, 1] = s, c
+    M[0, 3], M[1, 3] = float(dx_nm), float(dy_nm)
+    return M
+
+
+def apply_particle_transform(points, matrix) -> np.ndarray:
+    """Apply a 4×4 particle transform to ``(M, ≥2)`` points → ``(M, 3)`` nm."""
+    P = np.asarray(points, float)
+    if P.ndim != 2 or P.shape[0] == 0:
+        return np.empty((0, 3))
+    xyz = P[:, :3] if P.shape[1] >= 3 else np.column_stack([P[:, :2], np.zeros(P.shape[0])])
+    h = np.column_stack([xyz, np.ones(xyz.shape[0])])
+    return (np.asarray(matrix, float) @ h.T).T[:, :3]
+
+
+def pool_transformed(particle_points, matrices) -> np.ndarray:
+    """Pool a channel by applying each particle's 4×4 transform to its points."""
+    pooled = []
+    for pts, M in zip(particle_points, matrices):
+        if pts is None or len(pts) == 0 or M is None:
+            continue
+        pooled.append(apply_particle_transform(pts, M))
+    return np.vstack(pooled) if pooled else np.empty((0, 3))
+
+
+def _prepare_particles(particles, correct_tilt: bool):
+    """Center (+ optionally PCA-untilt) each particle. Returns
+    ``(centered, tilts, prep_matrices)``; ``prep_matrices[i]`` maps the original
+    re-zeroed particle into the prepared frame (for multi-channel replay)."""
+    prepared, tilts, mats = [], [], []
+    for p in particles:
+        work, t, M = _particle_prep(p, correct_tilt)
+        prepared.append(work)
+        mats.append(M)
+        if correct_tilt:
+            tilts.append(t)
+    return prepared, tilts, mats
+
+
+# --------------------------------------------------------------------------- #
 # Particle helpers
 # --------------------------------------------------------------------------- #
 def center_particle(points) -> np.ndarray:
@@ -87,7 +221,13 @@ def render_points(points_xy, box_nm: float, pixel_nm: float,
 
 def geometry_template_image(kind: str, params: dict, box_nm: float,
                             pixel_nm: float, sigma_nm: float | None = None) -> np.ndarray:
-    """A geometry template rendered to a box-sized image (ring / disk / gaussian)."""
+    """A geometry template rendered to a box-sized image.
+
+    ``kind`` ∈ {``ring``, ``disk``, ``gaussian``, ``npc``}. ``npc`` is a **ring of
+    N Gaussian corner blobs** (``symmetry``-fold, default 8) — it breaks the plain
+    ring's continuous rotational symmetry down to Cn, so template alignment can
+    **phase-lock** each particle to the nearest corner and the average shows the N
+    discrete NPC sub-units instead of a smeared ring."""
     n = max(int(round(box_nm / max(pixel_nm, 1e-6))), 8)
     half = box_nm / 2.0
     c = np.linspace(-half + pixel_nm / 2, half - pixel_nm / 2, n)
@@ -101,6 +241,15 @@ def geometry_template_image(kind: str, params: dict, box_nm: float,
         r0 = float(params.get("diameter_nm", 80.0)) / 2.0
         edge = max(float(params.get("edge_nm", pixel_nm)), pixel_nm)
         img = 0.5 * (1.0 - np.tanh((r - r0) / edge))
+    elif kind == "npc":                                  # ring of N corner blobs
+        r0 = float(params.get("diameter_nm", 100.0)) / 2.0
+        fold = max(int(round(float(params.get("symmetry", 8)))), 1)
+        corner = max(float(params.get("corner_nm", 12.0)), pixel_nm)
+        img = np.zeros_like(r)
+        for k in range(fold):
+            ang = 2.0 * np.pi * k / fold
+            cx0, cy0 = r0 * np.cos(ang), r0 * np.sin(ang)
+            img = img + np.exp(-(((xx - cx0) ** 2 + (yy - cy0) ** 2)) / (2.0 * corner ** 2))
     else:  # gaussian
         fwhm = max(float(params.get("fwhm_nm", 40.0)), pixel_nm)
         sigma = fwhm / 2.3548200450309493
@@ -167,13 +316,15 @@ def _pool(particles_c, transforms) -> np.ndarray:
 
 def average_template_provided(particles, template_img, *, box_nm=DEFAULT_BOX_NM,
                               pixel_nm=DEFAULT_PIXEL_NM, n_angles=DEFAULT_N_ANGLES,
-                              sigma_nm: float | None = None, progress=None) -> dict:
+                              sigma_nm: float | None = None, correct_tilt: bool = False,
+                              progress=None) -> dict:
     """Align every particle to a fixed template image and pool them.
 
-    ``progress(done, total)`` (optional) is called once per aligned particle."""
+    ``correct_tilt`` first PCA-untilts each particle (3-D data); ``progress(done,
+    total)`` (optional) is called once per aligned particle."""
     angles = np.linspace(0.0, 360.0, int(n_angles), endpoint=False)
     sigma_nm = pixel_nm if sigma_nm is None else sigma_nm
-    particles_c = [center_particle(np.asarray(p, float)) for p in particles]
+    particles_c, tilts, prep_mats = _prepare_particles(particles, correct_tilt)
     transforms = []
     total = len(particles_c)
     for i, p in enumerate(particles_c, start=1):
@@ -185,26 +336,31 @@ def average_template_provided(particles, template_img, *, box_nm=DEFAULT_BOX_NM,
     avg_img = render_points(pooled[:, :2], box_nm, pixel_nm, sigma_nm) if pooled.size else \
         np.zeros_like(template_img)
     scores = np.array([t[3] for t in transforms])
+    mats4 = [_matrix_2d(t[0], t[1], t[2]) @ M for t, M in zip(transforms, prep_mats)]
     return {"points": pooled, "average_image": avg_img, "template": template_img,
-            "transforms": transforms, "scores": scores, "n_particles": len(particles_c),
-            "box_nm": box_nm, "pixel_nm": pixel_nm, "mode": "template"}
+            "transforms": transforms, "particle_transforms": mats4,
+            "scores": scores, "n_particles": len(particles_c),
+            "box_nm": box_nm, "pixel_nm": pixel_nm, "mode": "template",
+            "mean_tilt_deg": float(np.mean(tilts)) if tilts else 0.0}
 
 
 def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_PIXEL_NM,
                           n_angles=DEFAULT_N_ANGLES, n_iter=DEFAULT_N_ITERS,
-                          sigma_nm: float | None = None, seed: int = 0, progress=None) -> dict:
+                          sigma_nm: float | None = None, seed: int = 0,
+                          correct_tilt: bool = False, progress=None) -> dict:
     """Reference-free 2-D averaging: seed the reference from one particle, then
     iterate *align-all → mean → repeat*.
 
-    ``progress(done, total)`` (optional) is called per particle-alignment across
-    all iterations (``total = n_iter × n_particles``)."""
+    ``correct_tilt`` first PCA-untilts each particle (3-D data); ``progress(done,
+    total)`` (optional) is called per particle-alignment across all iterations
+    (``total = n_iter × n_particles``)."""
     angles = np.linspace(0.0, 360.0, int(n_angles), endpoint=False)
     sigma_nm = pixel_nm if sigma_nm is None else sigma_nm
-    particles_c = [center_particle(np.asarray(p, float)) for p in particles]
+    particles_c, tilts, prep_mats = _prepare_particles(particles, correct_tilt)
     if not particles_c:
         return {"points": np.empty((0, 3)), "average_image": np.zeros((8, 8)),
-                "template": np.zeros((8, 8)), "transforms": [], "scores": np.empty(0),
-                "n_particles": 0, "iterations": 0, "box_nm": box_nm,
+                "template": np.zeros((8, 8)), "transforms": [], "particle_transforms": [],
+                "scores": np.empty(0), "n_particles": 0, "iterations": 0, "box_nm": box_nm,
                 "pixel_nm": pixel_nm, "mode": "free"}
     # seed reference from the particle with the most localizations (most defined)
     seed_idx = int(np.argmax([p.shape[0] for p in particles_c]))
@@ -229,11 +385,13 @@ def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_
         template = new_template
     pooled = _pool(particles_c, transforms)
     avg_img = render_points(pooled[:, :2], box_nm, pixel_nm, sigma_nm)
+    mats4 = [_matrix_2d(t[0], t[1], t[2]) @ M for t, M in zip(transforms, prep_mats)]
     return {"points": pooled, "average_image": avg_img, "template": template,
-            "transforms": transforms, "scores": np.array([t[3] for t in transforms]),
+            "transforms": transforms, "particle_transforms": mats4,
+            "scores": np.array([t[3] for t in transforms]),
             "n_particles": len(particles_c), "iterations": len(history),
             "score_history": history, "box_nm": box_nm, "pixel_nm": pixel_nm,
-            "mode": "free"}
+            "mode": "free", "mean_tilt_deg": float(np.mean(tilts)) if tilts else 0.0}
 
 
 def average_particles(particles, *, mode="free", template_img=None, **kwargs) -> dict:

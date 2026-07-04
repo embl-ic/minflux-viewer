@@ -440,17 +440,10 @@ class ConvSegmentation3DWindow(QDialog):
         ds = self._dataset()
         if ds is None:
             return np.empty((0, 3))
-        try:
-            loc = np.asarray(ds.loc_nm, dtype=float)
-        except Exception:
-            return np.empty((0, 3))
-        if loc.ndim != 2 or loc.shape[0] == 0 or loc.shape[1] < 3:
-            return np.empty((0, 3))
-        mask = np.asarray(ds.filter_mask, dtype=bool)
-        if mask.shape[0] == loc.shape[0]:
-            loc = loc[mask]
-        xyz = loc[:, :3]
-        return xyz[np.all(np.isfinite(xyz), axis=1)]
+        # Detect in display coordinates (loc_nm + overlay transform) so 3-D point
+        # ROIs land correctly on an overlay channel.
+        from ..core.roi_crop import display_xyz_filtered
+        return display_xyz_filtered(ds)
 
     def _model_key(self) -> str:
         return self._model_combo.currentData()

@@ -99,6 +99,24 @@ def test_scale_bar_item_set_params(_app):
     assert p["bg_color"] is not None
 
 
+def test_scale_bar_label_stays_above_bar_when_y_inverted(_app):
+    from PyQt6.QtGui import QColor
+
+    from minflux_viewer.ui.scale_bar import ScaleBarItem
+    _plot, vb = _viewbox()
+    sb = ScaleBarItem(vb, width_nm=1.0, height_nm=1.0, font_size=10,
+                      color=QColor(255, 255, 255), bg_color=None,
+                      horizontal=True, center=(500.0, 400.0))
+    y_normal = sb._label.pos().y()
+    assert y_normal > 0                                  # +y is up → label above the bar
+    vb.invertY(True)
+    sb._relayout()
+    y_inverted = sb._label.pos().y()
+    assert y_inverted < 0                                # +y now down → label flips to keep
+    assert abs(y_inverted) == pytest.approx(abs(y_normal), rel=1e-6)   # same on-screen gap
+    sb.remove()
+
+
 def test_scale_bar_dialog_values(_app):
     from minflux_viewer.ui.scale_bar_dialog import ScaleBarDialog
     dlg = ScaleBarDialog(default_width_nm=200.0, default_height_nm=8.0)

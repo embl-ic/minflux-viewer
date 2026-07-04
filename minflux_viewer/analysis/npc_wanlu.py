@@ -425,14 +425,56 @@ def align_one_npc(P, unit_centers, fit, *, symmetry=8):
     return locA, unitA, float(np.rad2deg(phase))
 
 
+def _fit_metrics(fit, Plo, Pup) -> dict:
+    """Recompute per-NPC quality on the best fit.
+
+    Residuals are the point-to-ring distances split into a **radial** part
+    (``hypot(xp, yp) − radius`` in the ring plane) and an **out-of-plane** part
+    (signed distance to the ring's plane). From them:
+
+    * ``rim``   — ring radial width (1σ of the radial residuals), nm;
+    * ``rmse``  — RMS 3-D point-to-ring distance ``sqrt(mean(rad² + plane²))``, nm;
+    * ``nrmse`` — ``rmse / radius`` (dimensionless normalized error);
+    * ``gof``   — R²-like ``1 − SS_res/SS_tot`` (fraction of the point spread the
+      two-ring model explains; ≤ 1, < 0 means worse than the bare centroid).
+    """
+    rlo, plo = _ring_residuals(Plo, fit["lower"], fit["normal"], fit["u"], fit["v"], fit["radius"])
+    rup, pup = _ring_residuals(Pup, fit["upper"], fit["normal"], fit["u"], fit["v"], fit["radius"])
+    rad = np.concatenate([rlo, rup]) if (rlo.size or rup.size) else np.empty(0)
+    pln = np.concatenate([plo, pup]) if (plo.size or pup.size) else np.empty(0)
+    n = int(rad.size)
+    if n == 0:
+        return _nan_metrics()
+    d2 = rad ** 2 + pln ** 2
+    rmse = float(np.sqrt(np.mean(d2)))
+    rim = float(np.std(rad))
+    P = np.vstack([Plo, Pup])
+    ss_res = float(np.sum(d2))
+    ss_tot = float(np.sum((P[:, :3] - P[:, :3].mean(axis=0)) ** 2))
+    gof = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
+    radius = float(fit["radius"])
+    nrmse = float(rmse / radius) if radius > 0 else float("nan")
+    return dict(radius=radius, rim=rim, inter=float(fit["inter"]),
+                tilt=float(fit["tilt_deg"]), gof=gof, rmse=rmse, nrmse=nrmse, n=n)
+
+
+def _nan_metrics() -> dict:
+    nan = float("nan")
+    return dict(radius=nan, rim=nan, inter=nan, tilt=nan, gof=nan, rmse=nan, nrmse=nan, n=0)
+
+
 def average_npc_wanlu(raw6, *, diameter_bounds=(70.0, 90.0),
                       inter_ring_bounds=(20.0, 40.0), expected_inter_ring=None,
                       z_mad_factor=3.0, min_locs_per_npc=20, min_fit_points=3,
                       tilt_max_deg=15.0, max_center_shift_xy=20.0,
-                      max_center_shift_z=5.0, rim=20.0, symmetry=8,
+                      max_center_shift_z=5.0, rim=20.0, symmetry=8, min_gof=0.0,
                       robust_k=3.0, max_iter=2500, max_fev=8000, progress=None) -> dict:
     """Two-ring NPC averaging from a ``raw6`` ``[x,y,z,npc_id,unit_id,trace_id]``
     table (nm). Returns the pooled ``average_loc`` (N, 4: x,y,z,ring) + fit stats.
+
+    Only NPCs whose fit goodness-of-fit (R²) is ``>= min_gof`` are pooled; a
+    per-NPC ``table`` of recomputed metrics (radius, rim, inter-ring, tilt, GoF,
+    RMSE, normalized RMSE, accepted) is always returned for every fitted NPC.
 
     ``progress(done, total)`` (optional) is called once per fitted NPC so a caller
     can report progress; the per-NPC fit is the dominant cost."""
@@ -481,6 +523,7 @@ def average_npc_wanlu(raw6, *, diameter_bounds=(70.0, 90.0),
 
     pooled = []
     fits = []
+    table = []
     total = len(cache)
     for i, (nid, C) in enumerate(cache.items(), start=1):
         if progress is not None:
@@ -496,11 +539,18 @@ def average_npc_wanlu(raw6, *, diameter_bounds=(70.0, 90.0),
         Pup = C["loc"][ring_loc == 1]
         fit = fit_two_ring(Plo, Pup, C["centroid"], opt)
         fits.append(fit)
-        if not fit.get("ok"):
+        metrics = _fit_metrics(fit, Plo, Pup) if fit.get("ok") else _nan_metrics()
+        # goodness-of-fit gate: only well-fit NPCs are pooled into the average.
+        accepted = bool(fit.get("ok")) and np.isfinite(metrics["gof"]) and metrics["gof"] >= min_gof
+        table.append({"npc_id": int(nid), "n_locs": int(C["loc"].shape[0]),
+                      **metrics, "accepted": bool(accepted)})
+        if not accepted:
             continue
         locA, _unitA, _ph = align_one_npc(C["loc"], C["uc"], fit, symmetry=symmetry)
         pooled.append(np.column_stack([locA, ring_loc]))
     out["fits"] = fits
+    out["table"] = table
+    out["min_gof"] = float(min_gof)
     out["n_accepted"] = len(pooled)
     if pooled:
         out["average_loc"] = np.vstack(pooled)

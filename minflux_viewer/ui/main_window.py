@@ -231,6 +231,9 @@ class MainWindow(QMainWindow):
         # submenu empty — we expose it as self._recent_menu for compatibility
         # with _populate_recent_menu().
         self._recent_menu = self._ui.menuOpenRecent
+        # Its entries are file paths, not commands — keep them out of the toolbar
+        # command finder (command_finder.collect_commands skips flagged menus).
+        self._recent_menu.setProperty("command_finder_exclude", True)
         # Scroll (don't wrap into columns) when the history is long.
         # setStyle() doesn't take ownership, so keep a reference alive.
         self._recent_menu_style = _ScrollableMenuStyle(self._recent_menu.style())
@@ -279,6 +282,10 @@ class MainWindow(QMainWindow):
         self.actionOpenSpreadsheet.triggered.connect(self._open_spreadsheet_dialog)
         self.actionOpenTiff = QAction("Open .tif file...", self)
         self.actionOpenTiff.triggered.connect(self._open_tiff_dialog)
+        # Sample data is a submenu of user-editable presets (Data Simulator plugin);
+        # exclude from the command finder like the recent-files list.
+        self.menuOpenSample = QMenu("Open Sample Data", self)
+        self.menuOpenSample.setProperty("command_finder_exclude", True)
         u.actionSave.triggered.connect(self._save_data)
         u.actionQuit.triggered.connect(self.close)
         self.actionClose = QAction("Close", self)
@@ -352,18 +359,14 @@ class MainWindow(QMainWindow):
         self.menuAnalyzeClustering.addSeparator()
         self.menuAnalyzeClustering.addMenu(self.menuHlyBPair)
 
-        # Trace submenu — size estimation, anisotropy, trace viewer
+        # Trace submenu — trace-specific measurements.
         self.menuAnalyzeTrace = QMenu("Trace", self)
         self.actionTraceSize = QAction("Estimate Average Trace Size", self)
         self.actionTraceSize.triggered.connect(self._run_trace_size)
         self.actionTraceAnisotropy = QAction("Estimate Anisotropy", self)
         self.actionTraceAnisotropy.triggered.connect(self._run_trace_anisotropy)
-        self.actionTraceViewerAnalyze = QAction("Trace Viewer", self)
-        self.actionTraceViewerAnalyze.triggered.connect(self._show_trace_viewer)
         self.menuAnalyzeTrace.addAction(self.actionTraceSize)
         self.menuAnalyzeTrace.addAction(self.actionTraceAnisotropy)
-        self.menuAnalyzeTrace.addSeparator()
-        self.menuAnalyzeTrace.addAction(self.actionTraceViewerAnalyze)
 
         # Segmentation submenu — structure segmentation (NPC; more to come)
         self.menuAnalyzeSegmentation = QMenu("Segmentation", self)
@@ -385,6 +388,9 @@ class MainWindow(QMainWindow):
         self.actionSegCurvilinear = QAction("Curvilinear Structures…", self)
         self.actionSegCurvilinear.triggered.connect(self._show_curvilinear_segmentation)
         self.menuAnalyzeSegmentation.addAction(self.actionSegCurvilinear)
+        self.actionSegStraightenedVolume = QAction("Straightened Volume along Skeleton...", self)
+        self.actionSegStraightenedVolume.triggered.connect(self._show_straightened_volume_skeleton)
+        self.menuAnalyzeSegmentation.addAction(self.actionSegStraightenedVolume)
         self.actionSegParticleAverage = QAction("Particle Average…", self)
         self.actionSegParticleAverage.triggered.connect(self._show_particle_average)
         self.menuAnalyzeSegmentation.addAction(self.actionSegParticleAverage)
@@ -400,7 +406,8 @@ class MainWindow(QMainWindow):
         u.actionParticleTracking.triggered.connect(
             lambda: self._placeholder("Particle tracking", "Phase 5")
         )
-        u.actionTraceViewer.triggered.connect(self._show_trace_viewer)
+        # actionTraceViewer (legacy View/Tracking entry) retired. The retained
+        # trace inspection workflow lives in Plugins > Trace Viewer.
         u.actionMsdAnalysis.triggered.connect(
             lambda: self._placeholder("MSD analysis", "Phase 5")
         )
@@ -424,6 +431,8 @@ class MainWindow(QMainWindow):
         self.actionChannelCombine.triggered.connect(self._show_channel_combine)
         self.actionChannelSplit = QAction("Split...", self)
         self.actionChannelSplit.triggered.connect(self._split_active_channel_group)
+        self.actionChannelFlatten = QAction("Flatten", self)
+        self.actionChannelFlatten.triggered.connect(self._flatten_active_channel_group)
         self.actionChannelOverlay = QAction("Overlay", self)
         self.actionChannelOverlay.triggered.connect(
             lambda: self._placeholder("Channel overlay", "a later implementation")
@@ -433,6 +442,7 @@ class MainWindow(QMainWindow):
         self.menuProcessChannel.addAction(self.actionChannelTool)
         self.menuProcessChannel.addAction(self.actionChannelCombine)
         self.menuProcessChannel.addAction(self.actionChannelSplit)
+        self.menuProcessChannel.addAction(self.actionChannelFlatten)
         self.menuProcessChannel.addAction(self.actionChannelOverlay)
         self.menuProcessChannel.addAction(self.actionChannelSeparateDcr)
 
@@ -470,12 +480,20 @@ class MainWindow(QMainWindow):
         # Help menu
         u.actionAbout.triggered.connect(self._show_about)
         u.actionMemoryMonitor.triggered.connect(self._show_memory_monitor)
+        self.actionCommandFinder = QAction("Command Finder…", self)
+        self.actionCommandFinder.setStatusTip("Search all menu commands (Fiji-style)")
+        self.actionCommandFinder.triggered.connect(lambda: self._open_command_finder(""))
         self.actionCheckUpdates = QAction("Check for Updates…", self)
         self.actionCheckUpdates.triggered.connect(
             lambda: self._check_for_updates(silent=False)
         )
         u.menuHelp.insertAction(u.actionAbout, self.actionCheckUpdates)
         u.menuHelp.insertSeparator(u.actionAbout)
+        self.actionExportMsr = QAction("Export to .msr…", self)
+        self.actionExportMsr.setStatusTip(
+            "Write the active dataset (and any overlay channels + MBM beads) to an .msr "
+            "file this viewer can reopen — round-trip, not Imspector-native.")
+        self.actionExportMsr.triggered.connect(self._export_to_msr)
 
         # Toolbar tools — LUT and Color (the silent-failure bug fix)
         u.toolLut.triggered.connect(self._show_lut)
@@ -566,7 +584,6 @@ class MainWindow(QMainWindow):
         u.actionLocPrecisionStdDev.setText("StdDev per Trace")
         u.actionLocalDensity.setText("Local Density")
         u.actionParticleTracking.setText("Particle Tracking")
-        u.actionTraceViewer.setText("Trace Viewer")
         u.actionMsdAnalysis.setText("MSD Analysis")
         u.actionBatchRender.setText("Batch Render...")
         u.actionBatchExport.setText("Batch Export...")
@@ -598,14 +615,17 @@ class MainWindow(QMainWindow):
         u.menuFile.addAction(u.actionOpen)
         u.menuFile.addAction(self.actionOpenSpreadsheet)
         u.menuFile.addAction(self.actionOpenTiff)
+        u.menuFile.addAction(self.menuOpenSample.menuAction())
         u.menuFile.addAction(u.menuOpenRecent.menuAction())
         u.menuFile.addSeparator()
         u.menuFile.addAction(u.actionSave)
+        u.menuFile.addAction(self.actionExportMsr)
         u.menuFile.addSeparator()
         u.menuFile.addAction(self.actionClose)
         u.menuFile.addAction(self.actionCloseAll)
         u.menuFile.addSeparator()
         u.menuFile.addAction(u.actionQuit)
+        self._rebuild_sample_menu()          # populate File › Open Sample Data presets
 
         u.menuEdit.clear()
         u.menuEdit.addAction(u.actionDatasetManager)
@@ -624,7 +644,6 @@ class MainWindow(QMainWindow):
         u.menuView.addAction(u.actionHistogram)
         u.menuView.addAction(u.actionScatter)
         u.menuView.addAction(u.actionRender)
-        u.menuView.addAction(u.actionTraceViewer)
         u.menuView.addSeparator()
         u.menuView.addAction(u.actionLog)
 
@@ -648,6 +667,9 @@ class MainWindow(QMainWindow):
         u.menuHelp.clear()
         u.menuHelp.addAction(u.actionConsole)
         u.menuHelp.addAction(u.actionMemoryMonitor)
+        cf = getattr(self, "actionCommandFinder", None)
+        if cf is not None:                              # between Monitor Memory & Updates
+            u.menuHelp.addAction(cf)
         check_updates = getattr(self, "actionCheckUpdates", None)
         if check_updates is not None:
             u.menuHelp.addAction(check_updates)
@@ -1083,11 +1105,227 @@ class MainWindow(QMainWindow):
             self._route_file(p)
 
     def _open_msr_dialog(self, msr_path: str) -> None:
-        """Hand an ``.msr`` file to the MSR Reader plugin (drag-drop entry point)."""
+        """Hand an ``.msr`` file to the MSR Reader plugin (drag-drop entry point).
+
+        **Every** ``.msr`` opens in the MSR reader — including image-only files
+        with no MINFLUX data. Their OBF image series are viewable from the reader
+        (right-click a Series node › *Preview* / *Open as image*, or select them in
+        *Datasets / Fields included…* and *Open in MINFLUX viewer*)."""
         if not msr_path:
             return
         from .msr_import_dialog import open_msr
         open_msr(msr_path, self._state, parent=self)
+
+    # ------------------------------------------------------------------
+    # Sample data (Data Simulator) — File › Open Sample Data presets
+    # ------------------------------------------------------------------
+    def sample_presets(self) -> list:
+        from ..core.sample_presets import load_presets
+        return load_presets(self._state.prefs)
+
+    def set_sample_presets(self, presets: list) -> None:
+        """Persist the Sample-Data presets and rebuild the File submenu."""
+        from ..core.sample_presets import save_presets
+        save_presets(self._state.prefs, presets)
+        self._state.save_prefs()
+        self._rebuild_sample_menu()
+
+    def _rebuild_sample_menu(self) -> None:
+        """(Re)build File › Open Sample Data from the persisted presets."""
+        menu = getattr(self, "menuOpenSample", None)
+        if menu is None:
+            return
+        menu.clear()
+        for preset in self.sample_presets():
+            act = menu.addAction(preset["name"])
+            act.triggered.connect(lambda _=False, p=dict(preset): self.generate_simulated(p))
+        menu.addSeparator()
+        edit = menu.addAction("Edit presets (Data Simulator)…")
+        edit.triggered.connect(self._open_data_simulator)
+
+    def _open_data_simulator(self) -> None:
+        from .data_simulator_window import DataSimulatorWindow
+        from .modeless import show_modeless
+        show_modeless(DataSimulatorWindow(self._state, owner=self), self)
+
+    def _finalize_sim_dataset(self, name, coords, tid, attrs):
+        """Build one simulated dataset from arrays (version = 'simulation', RIMF pinned)."""
+        import uuid
+
+        from ..core.dataset import build_localization_dataset
+        ds = build_localization_dataset(
+            name=name, x_nm=coords[:, 0], y_nm=coords[:, 1], z_nm=coords[:, 2],
+            tid=tid, attrs=attrs, source_version="simulation", prefs=self._state.prefs)
+        ds.file.folder = f"<simulated>/{uuid.uuid4().hex}"
+        ds.metadata["simulated"] = True
+        # Coordinates are the true simulated nm — pin RIMF to 1.0 and suppress the
+        # post-load auto-anisotropy estimate.
+        try:
+            ds.set_rimf(1.0, source="simulated (true z)")
+            ds.derived["rimf"] = 1.0
+        except Exception:
+            pass
+        # Attach the acquisition's shared fiducial beads (one set per Generate
+        # call, so every channel of an overlay carries the same beads) — written
+        # to grd/mbm/points on Export to .msr.
+        spec = getattr(self, "_sim_bead_spec", None)
+        if spec is not None:
+            pts, pbg, used = spec
+            ds.metadata["mbm_points"] = pts
+            ds.metadata["mbm_points_by_gri"] = pbg
+            ds.metadata["mbm_used"] = used
+        return ds, int(coords.shape[0]), (int(tid.max()) if tid.size else 0)
+
+    def _build_simulated_dataset(self, name: str, kwargs: dict):
+        from ..core.simulate import simulate_localizations
+        coords, tid, attrs = simulate_localizations(**kwargs)
+        return self._finalize_sim_dataset(name, coords, tid, attrs)
+
+    def generate_simulated(self, config: dict, *, include_beads: bool = False,
+                           bead_count: int = 4) -> None:
+        """Generate the dataset(s) for a Data-Simulator config / Sample-Data preset.
+        ``channels > 1`` builds a multi-channel overlay; the NPC overlay / DCR
+        multi-sims build a co-registered overlay / a single DCR-mixed dataset.
+
+        When ``include_beads`` is set, one shared set of synthetic fiducial beads
+        is generated for this call and attached to every produced dataset (so
+        Export to .msr writes ``grd/mbm/points``)."""
+        from ..core.sample_presets import normalize_preset
+        from ..core.simulate import sim_kind
+        p = normalize_preset(config)
+        self._sim_bead_spec = None
+        if include_beads:
+            try:
+                from ..core.simulate import simulate_beads
+                field = float((p.get("params") or {}).get("size_nm", 5000.0))
+                self._sim_bead_spec = simulate_beads(
+                    bead_count, field_nm=field, dim=int(p["dim"]), seed=p["seed"])
+            except Exception as exc:
+                self._state.log(f"Bead simulation failed: {exc}", "WARNING")
+                self._sim_bead_spec = None
+        try:
+            kind = sim_kind(p["structure"])
+            if kind == "overlay":
+                self._generate_sim_overlay(p)
+            elif kind == "dcr":
+                self._generate_sim_dcr(p)
+            else:
+                self._generate_sim_single(p)
+        finally:
+            self._sim_bead_spec = None
+
+    def _generate_sim_overlay(self, p: dict) -> None:
+        """NPC 3-channel overlay: co-registered channels on one shared scaffold."""
+        import uuid
+
+        from ..core.overlay import overlay_color_cycle
+        from ..core.simulate import simulate_npc_overlay
+        label = p["name"]
+        self._status_label.setText(f"Simulating {label}…")
+        try:
+            chans = simulate_npc_overlay(
+                p["params"], locs_per_trace=p["locs_per_trace"],
+                precision_nm=p["precision_nm"], seed=p["seed"])
+            overlay_id = f"sim:{uuid.uuid4().hex}"
+            overlay_index = int(getattr(self, "_next_overlay_index", 1))
+            self._next_overlay_index = overlay_index + 1
+            cycle = overlay_color_cycle(self._state.prefs)
+            prev_suspend = getattr(self._state, "suspend_auto_render", False)
+            self._state.suspend_auto_render = True
+            made: list[int] = []
+            try:
+                for order, ch in enumerate(chans, start=1):
+                    ds, _n, _t = self._finalize_sim_dataset(
+                        f"Sample: {label} · {ch['name']}", ch["coords"], ch["tid"], ch["attrs"])
+                    lut = ch.get("lut") or cycle[(order - 1) % len(cycle)]
+                    ds.state.update({
+                        "overlay_id": overlay_id, "render_group_id": overlay_id,
+                        "overlay_index": overlay_index, "overlay_order": order,
+                        "overlay_lut": lut, "render_channel_lut": lut})
+                    ds.metadata["overlay_id"] = overlay_id
+                    made.append(self._state.add_dataset(ds))
+            finally:
+                self._state.suspend_auto_render = prev_suspend
+            self._state.log(
+                f"Generated sample data '{label}': {len(chans)} co-registered "
+                f"channel(s) on a shared NPC scaffold ({', '.join(c['name'] for c in chans)}).")
+            if made:
+                self._show_render(made[0])
+        except Exception as exc:
+            self._state.log(f"Sample data generation failed: {exc}", "ERROR")
+            QMessageBox.critical(self, "Data Simulator", str(exc))
+            self._status_label.setText("Sample data failed.")
+
+    def _generate_sim_dcr(self, p: dict) -> None:
+        """NPC 2-channel by DCR: one dataset, two reporters via a bimodal ``dcr``."""
+        from ..core.simulate import simulate_npc_dcr
+        label = p["name"]
+        self._status_label.setText(f"Simulating {label}…")
+        try:
+            coords, tid, attrs = simulate_npc_dcr(
+                p["params"], locs_per_trace=p["locs_per_trace"],
+                precision_nm=p["precision_nm"], seed=p["seed"])
+            ds, nloc, ntr = self._finalize_sim_dataset(f"Sample: {label}", coords, tid, attrs)
+            self._state.log(
+                f"Generated sample data '{label}': {nloc:,} localization(s), {ntr:,} trace(s); "
+                "two reporters mixed with a bimodal 'dcr' (separate via Process › Channel › "
+                "Separate Channel by DCR).")
+            self._state.add_dataset(ds)
+        except Exception as exc:
+            self._state.log(f"Sample data generation failed: {exc}", "ERROR")
+            QMessageBox.critical(self, "Data Simulator", str(exc))
+            self._status_label.setText("Sample data failed.")
+
+    def _generate_sim_single(self, p: dict) -> None:
+        """Generate a single-structure sample (``channels > 1`` = independent overlay)."""
+        import uuid
+
+        from ..core.overlay import overlay_color_cycle
+        from ..core.sample_presets import simulate_kwargs
+        label = p["name"]
+        channels = p["channels"]
+        kwargs = simulate_kwargs(p)
+        self._status_label.setText(f"Simulating {label}…")
+        try:
+            if channels <= 1:
+                ds, nloc, ntr = self._build_simulated_dataset(f"Sample: {label}", kwargs)
+                self._state.log(
+                    f"Generated sample data '{label}': {nloc:,} localization(s), "
+                    f"{ntr:,} trace(s) ({p['dim']}-D, precision {p['precision_nm']:g} nm).")
+                self._state.add_dataset(ds)
+                return
+            # multi-channel overlay: build each channel, link, open one grouped view
+            overlay_id = f"sim:{uuid.uuid4().hex}"
+            overlay_index = int(getattr(self, "_next_overlay_index", 1))
+            self._next_overlay_index = overlay_index + 1
+            cycle = overlay_color_cycle(self._state.prefs)
+            prev_suspend = getattr(self._state, "suspend_auto_render", False)
+            self._state.suspend_auto_render = True
+            made: list[int] = []
+            try:
+                for ch in range(channels):
+                    kw = dict(kwargs)
+                    if kw.get("seed") is not None:
+                        kw["seed"] = int(kw["seed"]) + ch      # distinct realizations
+                    ds, nloc, _ntr = self._build_simulated_dataset(
+                        f"Sample: {label} (ch{ch + 1})", kw)
+                    lut = cycle[ch % len(cycle)]
+                    ds.state.update({
+                        "overlay_id": overlay_id, "render_group_id": overlay_id,
+                        "overlay_index": overlay_index, "overlay_order": ch + 1,
+                        "overlay_lut": lut, "render_channel_lut": lut})
+                    ds.metadata["overlay_id"] = overlay_id
+                    made.append(self._state.add_dataset(ds))
+            finally:
+                self._state.suspend_auto_render = prev_suspend
+            self._state.log(
+                f"Generated sample data '{label}': {channels} channel(s) overlaid.")
+            if made:
+                self._show_render(made[0])
+        except Exception as exc:
+            self._state.log(f"Sample data generation failed: {exc}", "ERROR")
+            QMessageBox.critical(self, "Data Simulator", str(exc))
+            self._status_label.setText("Sample data failed.")
 
     def _open_spreadsheet_dialog(self) -> None:
         try:
@@ -1226,43 +1464,49 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load error", str(exc))
             self._status_label.setText("Load failed.")
 
-    def _load_tiff(self, path: str) -> None:
-        self._status_label.setText(f"Opening TIFF {Path(path).name}…")
-        self._state.log(f"Opening TIFF: {path}", "INFO")
-        key = str(Path(path).resolve())
+    def _open_image_viewer(self, source, key: str) -> None:
+        """Show *source* (a TIFF or OBF image source) in a TIFF viewer window,
+        de-duplicated by *key* (path + series). The window owns / closes the
+        source; a multi-series source can switch series in-window."""
         existing = self._tiff_windows.get(key)
         if existing is not None:
             try:
                 existing.show()
                 existing.raise_()
                 existing.activateWindow()
-                self._status_label.setText(f"TIFF already open: {Path(path).name}")
                 return
             except RuntimeError:
                 self._tiff_windows.pop(key, None)
+        from .tiff_viewer_window import TiffViewerWindow
+        win = TiffViewerWindow(source)
+        win.destroyed.connect(lambda _=None, k=key: self._tiff_windows.pop(k, None))
+        self._tiff_windows[key] = win
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        meta = source.metadata
+        self._state.log(
+            f"Opened image viewer: {Path(source.path).name} [{meta.image_name}]  |  "
+            f"axes={meta.axes}  |  shape={meta.shape}  |  dtype={meta.dtype}",
+            "INFO",
+        )
+
+    def _load_tiff(self, path: str) -> None:
+        self._status_label.setText(f"Opening TIFF {Path(path).name}…")
+        self._state.log(f"Opening TIFF: {path}", "INFO")
+        resolved = str(Path(path).resolve())
         try:
             from ..core.tiff_source import TiffImageSource
-            from .tiff_viewer_window import TiffViewerWindow
 
-            source = TiffImageSource(path)
-            win = TiffViewerWindow(source)
-            win.destroyed.connect(lambda _=None, k=key: self._tiff_windows.pop(k, None))
-            self._tiff_windows[key] = win
-            win.show()
-            win.raise_()
-            win.activateWindow()
+            # One window per file; multi-series files switch via the in-window
+            # Series dropdown (no separate chooser dialog).
+            self._open_image_viewer(TiffImageSource(path), f"{resolved}#img")
             try:
-                self._state._record_recent(key)
+                self._state._record_recent(resolved)
                 self._populate_recent_menu()
             except Exception:
                 pass
-            meta = source.metadata
             self._status_label.setText(f"TIFF opened: {Path(path).name}")
-            self._state.log(
-                f"Opened TIFF image viewer: {Path(path).name}  |  "
-                f"axes={meta.axes}  |  shape={meta.shape}  |  dtype={meta.dtype}",
-                "INFO",
-            )
         except Exception as exc:
             self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
             QMessageBox.critical(self, "Load error", str(exc))
@@ -1383,11 +1627,15 @@ class MainWindow(QMainWindow):
             placeholder.setEnabled(False)
             return
 
+        from .command_finder import source_of
         for entry in entries:
             act = QAction(entry.name, self)
             if entry.tooltip:
                 act.setToolTip(entry.tooltip)
                 act.setStatusTip(entry.tooltip)
+            # Record the plugin's implementing file so the Command Finder can show
+            # it in the Source column.
+            act.setProperty("command_source", source_of(entry.launch))
             # Capture `entry` per-iteration with a default argument so the
             # lambda doesn't all point at the last one.
             act.triggered.connect(
@@ -1803,24 +2051,18 @@ class MainWindow(QMainWindow):
     def _segment_npc_2d(self) -> None:
         """Analyze › Segmentation › NPC › 2D — detect NPC centres by ring-kernel
         convolution and add a rectangle ROI around each into the ROI Manager."""
-        import numpy as np
-
         idx = self._state.active_idx
         if idx is None or self._state.active_dataset is None:
             self._no_data_warning()
             return
         ds = self._state.datasets[idx]
-        try:
-            loc = np.asarray(ds.loc_nm, dtype=float)
-        except Exception:
-            loc = np.empty((0, 3))
-        if loc.ndim != 2 or loc.shape[0] < 3 or loc.shape[1] < 2:
+        # Detect in display coordinates (loc_nm + overlay transform), the frame
+        # ROIs live in, so NPC ROIs land correctly on an overlay channel.
+        from ..core.roi_crop import display_xy_filtered
+        xy = display_xy_filtered(ds)
+        if xy.shape[0] < 3:
             QMessageBox.information(self, "NPC Segmentation", "The active dataset has no localizations to segment.")
             return
-        mask = np.asarray(ds.filter_mask, dtype=bool)
-        if mask.shape[0] == loc.shape[0]:
-            loc = loc[mask]
-        xy = loc[:, :2]
 
         from .npc_segmentation_dialog import NpcSegmentationDialog
         dlg = NpcSegmentationDialog(self, defaults=getattr(self, "_npc_seg_defaults", None))
@@ -1913,6 +2155,39 @@ class MainWindow(QMainWindow):
         from .curvilinear_segmentation_dialog import CurvilinearSegmentationWindow
         from .modeless import show_modeless
         win = CurvilinearSegmentationWindow(self._state, idx, owner=self)
+        show_modeless(win, self)
+
+    def _show_straightened_volume_skeleton(self) -> None:
+        """Analyze › Segmentation › Straightened Volume along Skeleton… —
+        experimental centerline-straightened projection of a 3-D point cloud.
+
+        The skeleton is supplied by selected 3-D point/polyline ROI records in
+        the ROI Manager.
+        """
+        import numpy as np
+
+        idx = self._state.active_idx
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        ds = self._state.datasets[idx]
+        try:
+            loc = np.asarray(ds.loc_nm, dtype=float)
+        except Exception:
+            loc = np.empty((0, 2))
+        z = loc[:, 2] if loc.ndim == 2 and loc.shape[1] >= 3 else np.empty(0)
+        z = z[np.isfinite(z)]
+        if loc.ndim != 2 or loc.shape[1] < 3 or z.size == 0 or float(np.ptp(z)) <= 0:
+            QMessageBox.information(
+                self, "Straightened Volume along Skeleton",
+                "The active dataset does not provide a non-degenerate Z coordinate. "
+                "This experimental tool needs a 3-D localization dataset.")
+            return
+        self._show_render(idx)
+        self._show_roi_manager()
+        from .modeless import show_modeless
+        from .straightened_volume_dialog import StraightenedVolumeAlongSkeletonWindow
+        win = StraightenedVolumeAlongSkeletonWindow(self._state, idx, owner=self)
         show_modeless(win, self)
 
     def add_segmentation_rois(self, idx: int, centers, *, side_nm: float,
@@ -2016,7 +2291,7 @@ class MainWindow(QMainWindow):
                                      log_message: str | None = None) -> int | None:
         """Build a dataset from an averaged particle's pooled localizations
         (``(N, 3)`` nm, already centred/aligned), register it, and open its render
-        + scatter views (3-D-ready). Returns the new dataset index."""
+        view (3-D-ready). Returns the new dataset index."""
         import uuid
 
         import numpy as np
@@ -2055,13 +2330,74 @@ class MainWindow(QMainWindow):
             self._state.rois.deselect()
         except Exception:
             pass
-        # A freshly-appended dataset gets a new index, so its render/scatter are
-        # created fresh (stale windows from closed datasets are handled by the
-        # re-index path). Do NOT close/recreate the auto-opened render here — its
-        # async tile workers would deliver into a deleted window and crash.
+        # A freshly-appended dataset gets a new index, so its render is created
+        # fresh (stale windows from closed datasets are handled by the re-index
+        # path). Do NOT close/recreate the auto-opened render here — its async tile
+        # workers would deliver into a deleted window and crash. Only the render
+        # view is opened by default; the user can open a scatter plot on demand.
         self._show_render(idx)
-        self._show_scatter(idx)
         return idx
+
+    def add_particle_average_overlay(self, channels: dict, *, luts: dict, name: str,
+                                     log_message: str | None = None) -> int | None:
+        """Add a **multi-channel** averaged overlay: ``channels`` = ``{name: (N,3) nm}``
+        (reference channel first). The reference is centred on its median and the
+        **same** offset is applied to every channel so they stay aligned; each
+        channel becomes an overlay dataset (shared group, per-channel LUT)."""
+        import uuid
+
+        import numpy as np
+
+        from ..core.dataset import build_localization_dataset
+        from ..core.overlay import overlay_color_cycle
+
+        items = []
+        for cname, pts in channels.items():
+            arr = np.asarray(pts, dtype=float).reshape(-1, 3)
+            arr = arr[np.all(np.isfinite(arr), axis=1)]
+            if arr.shape[0]:
+                items.append((str(cname), arr))
+        if not items:
+            return None
+        ref_off = np.median(items[0][1], axis=0)          # centre by the reference channel
+        overlay_id = f"pa:{uuid.uuid4().hex}"
+        overlay_index = int(getattr(self, "_next_overlay_index", 1))
+        self._next_overlay_index = overlay_index + 1
+        cycle = overlay_color_cycle(self._state.prefs)
+        prev_suspend = getattr(self._state, "suspend_auto_render", False)
+        self._state.suspend_auto_render = True
+        made: list[int] = []
+        try:
+            for order, (cname, pts) in enumerate(items, start=1):
+                p = pts - ref_off
+                ds = build_localization_dataset(
+                    name=f"{name} · {cname}", x_nm=p[:, 0], y_nm=p[:, 1], z_nm=p[:, 2],
+                    source_version="particle_average", prefs=self._state.prefs)
+                ds.file.folder = f"<particle-average>/{uuid.uuid4().hex}"
+                ds.metadata["particle_average"] = True
+                try:
+                    ds.set_rimf(1.0, source="2D (no z correction)")
+                    ds.derived["rimf"] = 1.0
+                except Exception:
+                    pass
+                lut = (luts or {}).get(cname) or cycle[(order - 1) % len(cycle)]
+                ds.state.update({
+                    "overlay_id": overlay_id, "render_group_id": overlay_id,
+                    "overlay_index": overlay_index, "overlay_order": order,
+                    "overlay_lut": lut, "render_channel_lut": lut})
+                ds.metadata["overlay_id"] = overlay_id
+                made.append(self._state.add_dataset(ds))
+        finally:
+            self._state.suspend_auto_render = prev_suspend
+        if log_message:
+            self._state.log(log_message)
+        try:
+            self._state.rois.deselect()
+        except Exception:
+            pass
+        if made:
+            self._show_render(made[0])
+        return made[0] if made else None
 
     def _npc_detect_wanlu(self) -> None:
         """Analyze › Segmentation › NPC detection wanlu — ring-convolution NPC
@@ -2075,11 +2411,12 @@ class MainWindow(QMainWindow):
             return
         ds = self._state.datasets[idx]
         from ..core.loader import attr_values_1d
+        from ..core.roi_crop import display_coords
         tid = attr_values_1d(ds, "tid")
-        try:
-            loc = np.asarray(ds.loc_nm, dtype=float)
-        except Exception:
-            loc = np.empty((0, 3))
+        # Display coordinates (loc_nm + overlay transform) so detected centre ROIs
+        # land correctly on an overlay channel; per-NPC re-zeroing in averaging
+        # makes the stored raw6 frame irrelevant to the fit.
+        loc = display_coords(ds)
         if loc.ndim != 2 or loc.shape[0] < 10 or tid is None:
             QMessageBox.information(self, "NPC detection wanlu",
                                     "Needs a MINFLUX dataset with trace ids and localizations.")
@@ -2198,6 +2535,7 @@ class MainWindow(QMainWindow):
         if pct != getattr(self, "_wanlu_avg_last_pct", -1):  # throttle to whole percent
             self._wanlu_avg_last_pct = pct
             self._state.log_progress(format_progress_bar(done / total))
+            self._state.status_progress("Averaging NPCs (two-ring fit)", done / total)
 
     def _on_wanlu_avg_done(self, pts, _desc: str) -> None:
         import numpy as np
@@ -2205,6 +2543,7 @@ class MainWindow(QMainWindow):
         from ..core.app_state import format_progress_bar
         self._wanlu_avg_task = None
         self._state.log_progress(format_progress_bar(1.0, done=True), final=True)
+        self._state.status_message.emit("NPC averaging: done.")
         pts = np.asarray(pts)
         holder = getattr(self, "_wanlu_avg_holder", {}) or {}
         if pts.ndim != 2 or pts.shape[0] == 0:
@@ -2218,18 +2557,17 @@ class MainWindow(QMainWindow):
     def _on_wanlu_avg_failed(self, msg: str) -> None:
         self._wanlu_avg_task = None
         self._state.log_progress("=" * 10 + "  FAILED  " + "=" * 10, final=True)
+        self._state.status_message.emit("NPC averaging: failed.")
         QMessageBox.warning(self, "NPC average wanlu", f"Averaging failed: {msg}")
 
     def _show_particle_average(self) -> None:
         """Analyze › Segmentation › Particle Average… — open the particle-averaging
-        tool for the active dataset + ROI Manager box ROIs."""
-        idx = self._state.active_idx
-        if idx is None or not (0 <= idx < len(self._state.datasets)):
-            self._no_data_warning()
-            return
+        tool. No active dataset is required: particles can be collected from the
+        active dataset + ROI Manager box ROIs, or loaded from saved particle sets /
+        data+ROI pairs."""
         from .modeless import show_modeless
         from .particle_average_dialog import ParticleAverageWindow
-        win = ParticleAverageWindow(self._state, idx, owner=self)
+        win = ParticleAverageWindow(self._state, self._state.active_idx, owner=self)
         show_modeless(win, self)
 
     def _notify_view_state_changed(self) -> None:
@@ -2367,13 +2705,26 @@ class MainWindow(QMainWindow):
         return self._log_win
 
     def _on_log_message(self, message: str, level: str) -> None:
-        was_missing = self._log_win is None
-        win = self._ensure_log_window(show=True, raise_window=False)
-        if was_missing and win is not None:
-            try:
-                win._append(message, level)
-            except Exception:
-                pass
+        """Auto-open the Log window the first time anything is logged — but placed
+        so it does NOT cover the main window's menu, and without stealing focus.
+
+        Only fires once (subsequent messages append via the window's own signal
+        connection). If the user has closed the window, it is not forced back."""
+        if self._log_win is not None:
+            return
+        from .log_window import LogWindow
+        from .modeless import place_beside
+        # LogWindow.__init__ replays state.log_history, so the just-logged message
+        # (already in history before the signal fired) appears without a manual add.
+        self._log_win = LogWindow(self._state)
+        # Dock below the main window (falling back to right/above/left, then
+        # clamped) so the menu bar at the top stays uncovered on any screen size.
+        place_beside(self._log_win, self, prefer=("below", "right", "above", "left"))
+        self._log_win.show()
+        # Keep the main window in front/active so its menus remain accessible; the
+        # log sits beside/below it, visible but not on top of the menu.
+        self.raise_()
+        self.activateWindow()
 
     def _show_console(self) -> None:
         """Open (or raise) the Console window — raw stdout / stderr stream."""
@@ -2385,6 +2736,27 @@ class MainWindow(QMainWindow):
         self._console_win.raise_()
         self._console_win.activateWindow()
 
+    def _render_window_for_dataset(self, idx: int | None):
+        """The open render window showing dataset *idx* — either keyed by it, or
+        (in an **overlay**) one whose channels include it. None if none is open.
+
+        An overlay render window is stored in ``_render_windows`` under only its
+        anchor/primary dataset index, but displays every channel. Keying strictly
+        by the active index therefore misses the window when a non-primary channel
+        is active — the cause of a duplicate overlay view being spawned."""
+        if idx is None:
+            return None
+        win = self._render_windows.get(idx)
+        if win is not None:
+            return win
+        for win in self._render_windows.values():
+            try:
+                if any(ch.get("dataset_idx") == idx for ch in getattr(win, "_channels", [])):
+                    return win
+            except Exception:
+                continue
+        return None
+
     def _show_brightness_contrast(self) -> None:
         """
         Forward to the render window of the currently active dataset.
@@ -2394,11 +2766,13 @@ class MainWindow(QMainWindow):
             self._no_data_warning()
             return
         idx = self._state.active_idx
-        rwin = self._render_windows.get(idx)
+        # Find the window that already displays this dataset (incl. as an overlay
+        # channel) before opening a new one — otherwise pressing Shift+C on a
+        # non-primary overlay channel spawns a duplicate overlay view.
+        rwin = self._render_window_for_dataset(idx)
         if rwin is None:
-            # Ensure a render window exists, then open B&C on it
             self._show_render(idx)
-            rwin = self._render_windows.get(idx)
+            rwin = self._render_window_for_dataset(idx)
         if rwin is not None:
             rwin._show_brightness_contrast()
             rwin.raise_()
@@ -2733,6 +3107,77 @@ class MainWindow(QMainWindow):
         self._state.log(
             f"Split channel overlay into {len(group_indices)} separate render view(s)."
         )
+
+    def _flatten_active_channel_group(self) -> None:
+        """Process › Channel › Flatten — combine the active multi-channel overlay
+        into a single non-overlay dataset.
+
+        Each channel's localizations are concatenated **in place** (overlay
+        transform baked into display nm), trace ids are remapped to stay distinct,
+        and combinable per-loc attributes are merged; conflicting / stale ones are
+        dropped and reported to the Log. The result renders with the ``hot`` LUT
+        and can feed convolution / particle analysis on the combined cloud."""
+        import uuid
+
+        from ..core.channel_flatten import flatten_overlay
+        from ..core.dataset import build_localization_dataset
+        from ..core.overlay import dataset_group_id, overlay_members
+
+        active_idx = self._state.active_idx
+        if active_idx is None or not (0 <= active_idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        active = self._state.datasets[active_idx]
+        if not dataset_group_id(active):
+            QMessageBox.information(
+                self, "Flatten channels",
+                "The active dataset is not part of a multi-channel overlay.")
+            return
+        members = overlay_members(self._state, active_idx)
+        if len(members) < 2:
+            QMessageBox.information(
+                self, "Flatten channels",
+                "The active overlay contains only one dataset.")
+            return
+
+        datasets = [ds for _, ds in members]
+        res = flatten_overlay(datasets)
+        if res.coords_nm.shape[0] == 0:
+            QMessageBox.information(
+                self, "Flatten channels",
+                "No localizations to flatten (all filtered out?).")
+            return
+
+        base = getattr(active, "name", "overlay")
+        ds = build_localization_dataset(
+            name=f"{base} (flattened {len(members)}ch)",
+            x_nm=res.coords_nm[:, 0], y_nm=res.coords_nm[:, 1], z_nm=res.coords_nm[:, 2],
+            tid=res.tid, attrs=res.attrs, source_version="flattened",
+            prefs=self._state.prefs)
+        ds.file.folder = f"<flattened>/{uuid.uuid4().hex}"
+        ds.metadata["flattened_overlay"] = True
+        ds.metadata["flattened_channels"] = [getattr(d, "name", "") for d in datasets]
+        ds.state["render_channel_lut"] = "hot"     # single-channel render LUT
+        # Coordinates are final display nm (each channel's RIMF already baked) —
+        # pin RIMF to 1.0 and suppress the post-load auto-z estimate.
+        try:
+            ds.set_rimf(1.0, source="flattened (z baked)")
+            ds.derived["rimf"] = 1.0
+        except Exception:
+            pass
+
+        r = res.report
+        self._state.log(
+            f"Flatten channels: combined {r.n_channels} channel(s) → {r.n_kept:,} of "
+            f"{r.n_total:,} localization(s), {r.n_traces:,} trace(s). "
+            f"Kept attributes: {', '.join(r.kept_attrs) or 'none'}.")
+        for note in r.notes:
+            self._state.log(f"Flatten: {note}.")
+        for attr, reason in r.dropped:
+            self._state.log(f"Flatten: dropped '{attr}' — {reason}.", "WARN")
+
+        idx = self._state.add_dataset(ds)
+        self._show_render(idx)
 
     def _current_group_luts(self, group_indices: list[int]) -> dict[int, str]:
         """Return current render LUTs for group members, if a render is open."""
@@ -3313,7 +3758,10 @@ class MainWindow(QMainWindow):
         if idx is None:
             return
 
-        win = self._render_windows.get(idx)
+        # An overlay render window is keyed only by its anchor index but displays
+        # every channel; reuse it (raise, don't spawn a duplicate) when idx is one
+        # of its non-anchor channels — e.g. segmentation adding ROIs on channel 2.
+        win = self._render_windows.get(idx) or self._render_window_for_dataset(idx)
         if win is not None:
             self._install_window_shortcuts(win)
             try:
@@ -3393,6 +3841,47 @@ class MainWindow(QMainWindow):
             "Saved:\n" + "\n".join(str(p) for p in written),
         )
 
+    def _export_to_msr(self) -> None:
+        """Write the active dataset (and its overlay channels) to a round-trippable
+        ``.msr``. Any attached MBM fiducial beads are written to ``grd/mbm/points``.
+
+        This is our own OBF/MFXDTA writer — the file reopens in minflux-viewer but
+        is **not** guaranteed to open in Imspector (see the backlog for why a native
+        Abberior writer is not attempted)."""
+        from ..core.overlay import overlay_members
+
+        active_idx = self._state.active_idx
+        if active_idx is None or not (0 <= active_idx < len(self._state.datasets)):
+            QMessageBox.information(self, "Export to .msr", "No active dataset to export.")
+            return
+        active = self._state.datasets[active_idx]
+        members = overlay_members(self._state, active_idx) or [(active_idx, active)]
+        datasets = [ds for _, ds in members]
+
+        default_dir = self._state.prefs["file"].get("default_folder", str(Path.home()))
+        stem = (getattr(active, "name", "") or "dataset").split("/")[-1]
+        default_path = str(Path(default_dir) / f"{stem}.msr")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export to .msr", default_path,
+            "Imspector MINFLUX (*.msr);;OBF (*.obf);;All files (*)")
+        if not path:
+            return
+        from ..msr.writer import write_datasets_msr
+
+        try:
+            out = write_datasets_msr(path, datasets)
+        except Exception as exc:
+            self._state.log(f"Export to .msr failed: {exc}", "ERROR")
+            QMessageBox.critical(self, "Export to .msr", f"Could not write .msr:\n{exc}")
+            return
+        n_beads = sum(1 for ds in datasets
+                      if getattr(ds, "metadata", {}).get("mbm_points") is not None)
+        bead_note = f", {n_beads} with MBM beads" if n_beads else ""
+        self._state.log(
+            f"Exported {len(datasets)} channel(s){bead_note} to '{out.name}' "
+            "(round-trippable .msr; reopen via the MSR reader).", "INFO")
+        QMessageBox.information(self, "Export to .msr", f"Wrote:\n{out}")
+
     # ------------------------------------------------------------------
     # AppState signal handlers
     # ------------------------------------------------------------------
@@ -3406,7 +3895,20 @@ class MainWindow(QMainWindow):
         self._populate_recent_menu()
 
         data_prefs = self._state.prefs.get("data", {})
+
+        # Open the render view first (when requested, unless a batch importer will
+        # open a grouped render view) so the data-info window can be placed *beside*
+        # it rather than on top of it.
+        if data_prefs.get("show_render", True) and not getattr(self._state, "suspend_auto_render", False):
+            self._show_render(idx)
+
         if data_prefs.get("show_data_info", True):
+            from .modeless import place_beside
+            # Anchor to this dataset's render view if it opened, else the main
+            # window; try right → below → left → above, staying on-screen.
+            anchor = self._render_windows.get(idx) or self
+            win.adjustSize()                              # realise its fixed size
+            place_beside(win, anchor, prefer=("right", "below", "left", "above"))
             win.show()
 
         if data_prefs.get("show_attr_plot", False):
@@ -3416,10 +3918,6 @@ class MainWindow(QMainWindow):
         if data_prefs.get("show_scatter", False):
             self._show_scatter(idx)
 
-        # Auto-open a render window for this dataset only when requested,
-        # unless a batch importer will open one grouped render view.
-        if data_prefs.get("show_render", True) and not getattr(self._state, "suspend_auto_render", False):
-            self._show_render(idx)
         self._schedule_post_load_computations(idx)
 
     def _schedule_post_load_computations(self, idx: int) -> None:
@@ -3449,6 +3947,7 @@ class MainWindow(QMainWindow):
         )
         if needs:
             self._state.log(f"Post-load processing of '{ds.name}' (RIMF, precision, density)…")
+            self._state.status_progress(f"Processing '{ds.name}'")
         # Schedule (don't call) the first step so the line above paints first.
         self._post_load_next(ds, self._post_load_rimf)
 
@@ -3487,6 +3986,7 @@ class MainWindow(QMainWindow):
                 # Heavy estimate: announce now and run it on the next event-loop
                 # turn so this line is painted before the (sub-second) compute.
                 self._state.log(f"Estimating anisotropy / RIMF of '{ds.name}'…")
+                self._state.status_progress(f"Estimating anisotropy of '{ds.name}'")
                 self._post_load_next(ds, self._post_load_rimf_estimate)
                 return
         self._post_load_next(ds, self._post_load_loc_prec)
@@ -3531,6 +4031,12 @@ class MainWindow(QMainWindow):
     def _post_load_loc_prec(self, ds) -> None:
         if self._post_load_index(ds) is None:
             return
+        # A pooled averaged particle has no real traces — its ``tid`` is a per-loc
+        # placeholder (each localization its own "trace"), so per-trace precision is
+        # meaningless and iterating the N single-point traces is pure wasted work.
+        if ds.metadata.get("particle_average"):
+            self._post_load_next(ds, self._post_load_density)
+            return
         data_prefs = self._state.prefs.get("data", {})
         if data_prefs.get("compute_loc_prec", True) and "sigma_per_trace_nm" not in ds.derived:
             try:
@@ -3538,6 +4044,7 @@ class MainWindow(QMainWindow):
 
                 import numpy as np
                 self._state.log(f"Computing localization precision of '{ds.name}'…")
+                self._state.status_progress(f"Computing localization precision of '{ds.name}'")
                 t0 = time.perf_counter()
                 from ..analysis.localization_precision import stddev_per_trace
                 from ..core.loader import attr_values_1d
@@ -3566,11 +4073,22 @@ class MainWindow(QMainWindow):
     def _post_load_density(self, ds) -> None:
         if self._post_load_index(ds) is None:
             return
+        # A pooled averaged particle is a dense superposition centred at the origin.
+        # The KD-tree range-count auto→voxel heuristic estimates work from the
+        # bounding-box *volume* assuming uniform density; the averaged cloud is the
+        # opposite (dense core, box-sized extent), so the estimate can undershoot and
+        # run the exact all-core KD-tree at ≈O(N²) for minutes (the reported freeze).
+        # Local density of a synthetic super-particle is not a standard measurement
+        # anyway — skip on load; the user can compute it on demand.
+        if ds.metadata.get("particle_average"):
+            self._post_load_next(ds, self._post_load_finalize)
+            return
         data_prefs = self._state.prefs.get("data", {})
         if data_prefs.get("compute_local_density", True) and "den" not in ds.attr:
             try:
                 import time
                 self._state.log(f"Computing local density of '{ds.name}'…")
+                self._state.status_progress(f"Computing local density of '{ds.name}'")
                 t0 = time.perf_counter()
                 from ..analysis.local_density import compute_local_density_for_dataset
                 density, method, detail = compute_local_density_for_dataset(ds, self._state.prefs)
@@ -3651,6 +4169,7 @@ class MainWindow(QMainWindow):
                     self._state.notify_filter_changed(idx)
             except Exception as exc:
                 self._state.log(f"Restoring filters for '{ds.name}' failed: {exc}", "WARN")
+        self._state.status_message.emit(f"Finished processing '{ds.name}'.")
 
     def _on_dataset_removed(self, idx: int) -> None:
         for mapping in (
@@ -3758,10 +4277,12 @@ class MainWindow(QMainWindow):
         if self._state.active_dataset is None:
             self._no_data_warning(); return
         idx = self._state.active_idx
-        rwin = self._render_windows.get(idx)
+        # Reuse the window already displaying this dataset (incl. as an overlay
+        # channel) so a non-primary channel doesn't spawn a duplicate overlay view.
+        rwin = self._render_window_for_dataset(idx)
         if rwin is None:
             self._show_render(idx)
-            rwin = self._render_windows.get(idx)
+            rwin = self._render_window_for_dataset(idx)
         if rwin is None or not hasattr(rwin, "open_lut_dialog"):
             QMessageBox.information(
                 self, "LUT",
@@ -3866,16 +4387,6 @@ class MainWindow(QMainWindow):
             self._no_data_warning(); return
         from ..analysis.trace_analysis import show_anisotropy_dialog
         show_anisotropy_dialog(self, self._state.active_dataset, self._state)
-
-    def _show_trace_viewer(self) -> None:
-        if self._state.active_dataset is None:
-            self._no_data_warning(); return
-        from .trace_viewer import TraceViewer
-        idx = self._state.active_idx
-        win = TraceViewer(self._state, dataset_idx=idx)
-        win.show()
-        win.raise_()
-        win.activateWindow()
 
     def _install_toolbar_icons(self) -> None:
         """Attach PNG icons to the toolbar QActions (item #5)."""
@@ -4000,13 +4511,162 @@ class MainWindow(QMainWindow):
         expander.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tb.addWidget(expander)
 
-        self._toolbar_search = QLineEdit()
+        from .command_finder import SearchLineEdit
+        self._toolbar_search = SearchLineEdit()
         self._toolbar_search.setPlaceholderText("type here to search")
         self._toolbar_search.setClearButtonEnabled(True)
+        self._toolbar_search.setToolTip(
+            "Search commands (Fiji-style). Type to filter; double-click for the "
+            "full Command Finder.")
         fm = self._toolbar_search.fontMetrics()
         width = fm.horizontalAdvance("x" * 25) + 24   # ~25 letters + padding/clear button
         self._toolbar_search.setFixedWidth(int(width))
         tb.addWidget(self._toolbar_search)
+        self._setup_command_search()
+
+    def _setup_command_search(self) -> None:
+        """Wire the toolbar search field: a live completer of menu commands + a
+        double-click full Command Finder dialog (Fiji-style)."""
+        from PyQt6.QtWidgets import QCompleter
+
+        from .command_finder import WideCompleterPopup
+
+        self._command_entries: list = []
+        self._command_finder = None
+        self._search_display_map: dict = {}
+
+        completer = QCompleter(self)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        completer.setMaxVisibleItems(15)
+        # A wider, self-widening dropdown so full "Command · Menu path" text shows.
+        completer.setPopup(WideCompleterPopup())
+        completer.popup().setTextElideMode(Qt.TextElideMode.ElideNone)
+        completer.activated[str].connect(self._on_search_activated)
+        self._search_completer = completer
+        self._toolbar_search.setCompleter(completer)
+
+        self._toolbar_search.focusedIn.connect(self._refresh_command_index)
+        self._toolbar_search.doubleClicked.connect(
+            lambda: self._open_command_finder(self._toolbar_search.text()))
+        self._toolbar_search.returnPressed.connect(self._on_search_return)
+        self._apply_command_meta()
+
+    def _apply_command_meta(self) -> None:
+        """Stamp every menu command with its metadata from ``ui.command_meta`` so the
+        Command Finder can show a Source and match on keywords/tags — e.g. the leaf
+        *Segmentation › NPC › 2D* is findable by ``npc``, *Convolution* by
+        ``matched filter``. The registry is keyed by QAction attribute name (resolved
+        on either this window or the generated UI); plugin actions are tagged
+        separately in ``_populate_plugins_menu`` via ``source_of``. Adding a new
+        command means adding one ``COMMAND_META`` entry (missing ⇒ blank Source)."""
+        from .command_meta import COMMAND_META
+        u = self._ui
+        for key, meta in COMMAND_META.items():
+            if key.startswith("_"):
+                continue                                   # group meta (e.g. _roi_convert)
+            act = getattr(self, key, None) or getattr(u, key, None)
+            if act is None:
+                continue
+            if meta.source:
+                act.setProperty("command_source", meta.source)
+            if meta.keywords:
+                act.setProperty("command_keywords", " ".join(meta.keywords))
+        # ROI Convert sub-actions are created in a loop (no per-action attribute),
+        # so tag the whole submenu's leaves as one group.
+        conv = COMMAND_META.get("_roi_convert")
+        menu = getattr(self, "menuRoiConvert", None)
+        if conv is not None and menu is not None:
+            for act in menu.actions():
+                if act.isSeparator() or act.menu() is not None:
+                    continue
+                act.setProperty("command_source", conv.source)
+                act.setProperty("command_keywords", " ".join(conv.keywords))
+
+    def _refresh_command_index(self) -> None:
+        from PyQt6.QtCore import QStringListModel
+
+        from .command_finder import collect_commands
+        self._command_entries = collect_commands(self.menuBar())
+        self._search_display_map = {}
+        displays = []
+        for e in self._command_entries:
+            disp = f"{e.text}   ·   {e.path}" if e.path else e.text
+            base, k = disp, 2
+            while disp in self._search_display_map:   # keep displays unique for the map
+                disp = f"{base} ({k})"; k += 1
+            self._search_display_map[disp] = e
+            displays.append(disp)
+        self._search_completer.setModel(QStringListModel(displays, self._search_completer))
+        # Widen the dropdown to the longest command so full text is readable (the
+        # popup is a top-level widget, so it may extend past the window; capped to
+        # the screen, and WideCompleterPopup nudges it back on-screen).
+        popup = self._search_completer.popup()
+        fm = popup.fontMetrics()
+        longest = max((fm.horizontalAdvance(d) for d in displays), default=0)
+        try:
+            from PyQt6.QtGui import QGuiApplication
+            cap = QGuiApplication.primaryScreen().availableGeometry().width() - 40
+        except Exception:
+            cap = 2000
+        popup.setMinimumWidth(min(longest + 40, max(cap, 200)))
+
+    def _on_search_activated(self, text: str) -> None:
+        entry = self._search_display_map.get(text)
+        if entry is None:
+            return
+        self._toolbar_search.clear()
+        if entry.enabled:
+            entry.action.trigger()
+        else:
+            self._state.log(f"'{entry.text}' is currently unavailable (needs a dataset?).", "WARN")
+
+    def _on_search_return(self) -> None:
+        # Enter with the completer popup open is handled by the completer; otherwise
+        # open the full Command Finder on the current text.
+        try:
+            if self._search_completer.popup().isVisible():
+                return
+        except Exception:
+            pass
+        text = self._toolbar_search.text().strip()
+        if text:
+            self._open_command_finder(text)
+
+    def _on_command_finder_destroyed(self, *_args) -> None:
+        # The dialog is WA_DeleteOnClose; drop the stale reference so a later open
+        # doesn't touch a deleted C++ object (RuntimeError).
+        self._command_finder = None
+
+    def _command_finder_alive(self) -> bool:
+        dlg = self._command_finder
+        if dlg is None:
+            return False
+        try:
+            dlg.isVisible()          # touches the C++ object; raises if deleted
+            return True
+        except RuntimeError:
+            self._command_finder = None
+            return False
+
+    def _open_command_finder(self, initial: str = "") -> None:
+        from .command_finder import CommandFinderDialog, collect_commands
+        from .modeless import show_modeless
+        provider = lambda: collect_commands(self.menuBar())
+        if not self._command_finder_alive():
+            self._command_finder = CommandFinderDialog(provider, owner=self, initial=initial)
+            self._command_finder.destroyed.connect(self._on_command_finder_destroyed)
+            show_modeless(self._command_finder, self)
+        else:
+            self._command_finder.refresh()
+            self._command_finder.set_query(initial)   # overwrite the dialog's filter
+            self._command_finder.show()
+            self._command_finder.raise_()
+            self._command_finder.activateWindow()
+        # The dialog is now the active finder — reset the toolbar field to its
+        # placeholder so it's clearly out of the way (it still works if re-typed).
+        self._toolbar_search.clear()
 
     def _align_toolbar_to_menu(self) -> None:
         """Size the leading spacer so the first ROI button's left edge roughly

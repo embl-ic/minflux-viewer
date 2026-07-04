@@ -20,7 +20,7 @@ does not pin it above the owner in Z-order.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QDialog, QWidget
 
 # Fallback registry when no owner is supplied — keyed by object identity so
 # entries can be discarded safely even after the C++ object is destroyed.
@@ -81,6 +81,74 @@ def ensure_on_screen(window: QWidget, owner: QWidget | None = None, *, margin: i
         pass
 
 
+def beside_position(anchor, avail, size, *, margin: int = 12,
+                    prefer: tuple[str, ...] = ("right", "below", "left", "above")):
+    """Pure geometry: top-left ``(x, y)`` to place a ``size=(w, h)`` window beside
+    ``anchor`` within ``avail``.
+
+    ``anchor`` and ``avail`` are exclusive ``(left, top, right, bottom)`` rects.
+    Returns the first side in *prefer* where the window fits **fully** inside
+    ``avail``; if none fit, the first preferred side **clamped** on-screen (so an
+    anchor in the extreme top-left goes right/below, one in the bottom-right goes
+    left/above, always staying on the monitor).
+    """
+    al, at, ar, ab = anchor
+    vl, vt, vr, vb = avail
+    w, h = size
+    cands = {
+        "right": (ar + margin, at),
+        "left": (al - margin - w, at),
+        "below": (al, ab + margin),
+        "above": (al, at - margin - h),
+    }
+
+    def fits(xy) -> bool:
+        x, y = xy
+        return x >= vl and y >= vt and x + w <= vr and y + h <= vb
+
+    for side in prefer:
+        if side in cands and fits(cands[side]):
+            return cands[side]
+    x, y = cands.get(prefer[0], (ar + margin, at))
+    x = min(max(x, vl), max(vl, vr - w))
+    y = min(max(y, vt), max(vt, vb - h))
+    return (x, y)
+
+
+def place_beside(window: QWidget, anchor: QWidget | None, *, margin: int = 12,
+                 prefer: tuple[str, ...] = ("right", "below", "left", "above")) -> None:
+    """Move *window* next to *anchor* on *anchor*'s screen (best effort).
+
+    Thin Qt wrapper over :func:`beside_position`. Call after both windows have a
+    realistic size (``anchor`` shown; ``window`` ``resize``d or ``adjustSize()``-d).
+    Falls back to :func:`ensure_on_screen` if *anchor* is missing; never throws.
+    """
+    try:
+        from PyQt6.QtGui import QCursor, QGuiApplication
+        if anchor is None:
+            ensure_on_screen(window)
+            return
+        try:
+            screen = anchor.window().screen()
+        except Exception:
+            screen = None
+        if screen is None:
+            screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        av = screen.availableGeometry()
+        a = anchor.frameGeometry()
+        f = window.frameGeometry()
+        anchor_rect = (a.left(), a.top(), a.left() + a.width(), a.top() + a.height())
+        avail_rect = (av.left(), av.top(), av.left() + av.width(), av.top() + av.height())
+        x, y = beside_position(anchor_rect, avail_rect, (f.width(), f.height()),
+                               margin=margin, prefer=prefer)
+        # move() positions the client area; compensate for frame margins.
+        window.move(x + (window.x() - f.x()), y + (window.y() - f.y()))
+    except Exception:
+        pass
+
+
 def show_modeless(window: QWidget, owner: QWidget | None = None) -> QWidget:
     """Show *window* as a modeless, non-owned top-level window.
 
@@ -88,7 +156,10 @@ def show_modeless(window: QWidget, owner: QWidget | None = None) -> QWidget:
     *owner* (pruning closed entries) so the window survives the call, then
     shows and raises it. Returns *window* for convenience.
     """
-    window.setModal(False)
+    # ``setModal`` is QDialog-only; ``setWindowModality`` is the QWidget-level
+    # API and covers the non-modal intent for any top-level widget.
+    if isinstance(window, QDialog):
+        window.setModal(False)
     try:
         window.setWindowModality(Qt.WindowModality.NonModal)
     except Exception:

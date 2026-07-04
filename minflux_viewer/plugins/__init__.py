@@ -77,9 +77,11 @@ def ensure_loaded() -> None:
         return
     _LOADED = True
 
-    # Built-in plugins — add more imports here as new plugins are authored.
+    # Built-in plugins — registration (and thus Plugins-menu) order follows the
+    # import order here.
     from . import msr_reader      # noqa: F401
     from . import paraview        # noqa: F401
-    from . import script_editor   # noqa: F401
+    from . import data_simulator  # noqa: F401  (immediately under ParaView)
     from . import trace_viewer    # noqa: F401
     from . import generate_method_text  # noqa: F401
+    from . import script_editor   # noqa: F401  (moved to the bottom of the list)

@@ -111,6 +111,35 @@ def display_coords(ds) -> np.ndarray:
     return apply_display_transform_nm(loc[:, :3], transform)
 
 
+def display_xy_filtered(ds) -> np.ndarray:
+    """(M, 2) finite **display-nm** XY with the filter mask applied.
+
+    This is the coordinate frame ROIs live in (loc_nm + overlay transform), so
+    detection tools that place ROIs on a dataset (NPC / convolution segmentation)
+    must run here — using raw ``loc_nm`` puts ROIs at the wrong place for an
+    overlay channel whose transform ≠ identity."""
+    loc = display_coords(ds)
+    if loc.ndim != 2 or loc.shape[0] == 0 or loc.shape[1] < 2:
+        return np.empty((0, 2), dtype=float)
+    mask = np.asarray(getattr(ds, "filter_mask", np.ones(loc.shape[0], bool)), dtype=bool)
+    if mask.shape[0] == loc.shape[0]:
+        loc = loc[mask]
+    xy = loc[:, :2]
+    return xy[np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])]
+
+
+def display_xyz_filtered(ds) -> np.ndarray:
+    """(M, 3) finite **display-nm** XYZ with the filter mask applied (3-D segmentation)."""
+    loc = display_coords(ds)
+    if loc.ndim != 2 or loc.shape[0] == 0 or loc.shape[1] < 3:
+        return np.empty((0, 3), dtype=float)
+    mask = np.asarray(getattr(ds, "filter_mask", np.ones(loc.shape[0], bool)), dtype=bool)
+    if mask.shape[0] == loc.shape[0]:
+        loc = loc[mask]
+    xyz = loc[:, :3]
+    return xyz[np.all(np.isfinite(xyz), axis=1)]
+
+
 def _trace_ids(ds, n: int) -> np.ndarray:
     from .loader import attr_values_1d
     tid = attr_values_1d(ds, "tid")

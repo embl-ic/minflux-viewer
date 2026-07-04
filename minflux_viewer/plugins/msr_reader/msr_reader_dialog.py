@@ -692,11 +692,14 @@ class AlignmentSaveDialog(QDialog):
 
 
 class FieldDialog(QDialog):
-    def __init__(self, datasets: list[dict], prechecked: Optional[dict[str, dict]] = None, parent=None):
+    def __init__(self, datasets: list[dict], prechecked: Optional[dict[str, dict]] = None,
+                 parent=None, image_series: Optional[list[dict]] = None,
+                 prechecked_images: Optional[set] = None):
         super().__init__(parent)
         self.setWindowTitle("Datasets / Fields included…")
         self.resize(max(500, 320 * max(1, len(datasets))), 520)
         self._vars: dict[str, dict[str, Any]] = {}
+        self._image_checks: dict[int, QCheckBox] = {}
 
         root = QVBoxLayout(self)
         outer = QHBoxLayout()
@@ -750,6 +753,23 @@ class FieldDialog(QDialog):
                 "mbm": mbm_checks,
             }
 
+        # Image series (OBF stacks) → opened in the standalone image viewer, not
+        # as MINFLUX datasets. Checked ones open on "Open in MINFLUX viewer".
+        if image_series:
+            pre_img = set(prechecked_images or set())
+            img_box = QGroupBox("Image series (open in image viewer)")
+            img_layout = QVBoxLayout(img_box)
+            for s in image_series:
+                raw = int(s.get("raw_index"))
+                extra = "  ·  ".join(p for p in (s.get("shape_str", ""), s.get("dtype", "")) if p)
+                cb = QCheckBox(f"{s.get('name', f'Series {raw}')}"
+                               + (f"    [{extra}]" if extra else ""))
+                cb.setChecked(raw in pre_img)
+                img_layout.addWidget(cb)
+                self._image_checks[raw] = cb
+            img_layout.addStretch(1)
+            outer.addWidget(img_box)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -764,6 +784,10 @@ class FieldDialog(QDialog):
                 "mbm": None if vv["mbm_all"].isChecked() else {name for name, cb in vv["mbm"].items() if cb.isChecked()},
             }
         return out
+
+    def image_payload(self) -> set:
+        """Raw OBF stack indices of the checked image series."""
+        return {raw for raw, cb in self._image_checks.items() if cb.isChecked()}
 
 
 # Sentinel: user cancelled the alignment dialog -> abort the whole
@@ -1544,6 +1568,7 @@ class MsrReaderDialog(QWidget):
 
         self.parsed: dict[str, Any] = {}
         self.field_selection = {}
+        self.image_field_selection: set = set()   # raw OBF stack indices to open as images
         # gri-IDs the user excluded via "Show Beads Drift". Alignment always
         # starts from metadata-marked used beads; these exclusions further
         # narrow that set after the user applies a manual selection.
@@ -1641,6 +1666,7 @@ class MsrReaderDialog(QWidget):
                 "zarr": bool(self.fmt_zarr.isChecked()),
             },
             "field_selection": clean_selection(self.field_selection),
+            "image_field_selection": sorted(int(i) for i in (self.image_field_selection or set())),
             "alignment_save": dict(self._alignment_save_options or {}),
         }
         try:
@@ -1768,6 +1794,7 @@ class MsrReaderDialog(QWidget):
 
         self.logbox = None
         self.field_selection = settings.get("field_selection") or {}
+        self.image_field_selection = set(settings.get("image_field_selection") or [])
         self._alignment_save_options = settings.get("alignment_save") or {}
 
         bottom = QHBoxLayout()
@@ -2001,9 +2028,15 @@ class MsrReaderDialog(QWidget):
             series_root = QTreeWidgetItem(["Series", "", "", ""])
             root_item.addChild(series_root)
             for s in result.get("legacy_series_tree") or []:
-                name = s.get("display_name", f"Series {int(s.get('index', 0)) + 1}")
-                item = QTreeWidgetItem([f"- Series {int(s.get('index', 0)) + 1}: {name}", "", s.get("shape_str", ""), s.get("dtype", "")])
+                idx = int(s.get("index", 0))
+                name = s.get("display_name", f"Series {idx + 1}")
+                shape_str = s.get("shape_str", "")
+                item = QTreeWidgetItem([f"- Series {idx + 1}: {name}", "", shape_str, s.get("dtype", "")])
                 series_root.addChild(item)
+                # ndim >= 2 (a shape like "A x B") ⇒ a viewable image series.
+                if "x" in str(shape_str):
+                    self.nodeinfo[self._item_id(item)] = {
+                        "type": "legacy_series", "index": idx, "name": name}
             meta_item = QTreeWidgetItem(["<metadata>", "", "", ""])
             self._set_item_tooltip(
                 meta_item,
@@ -2204,6 +2237,14 @@ class MsrReaderDialog(QWidget):
         menu = QMenu(self)
         selected_arrays = self._selected_array_items()
         can_export = bool(selected_arrays)
+        image_series = [self.nodeinfo.get(self._item_id(it), {}) for it in self._selected_items()]
+        image_series = [info for info in image_series if info.get("type") == "legacy_series"]
+        open_image = None
+        if image_series:
+            open_image = menu.addAction(
+                "Open as image" if len(image_series) == 1
+                else f"Open {len(image_series)} series as images")
+            menu.addSeparator()
         preview = menu.addAction("Preview")
         plot = menu.addAction("Plot…")
         export_csv = menu.addAction("Export to CSV…")
@@ -2217,7 +2258,9 @@ class MsrReaderDialog(QWidget):
         show_meta.setEnabled(any(self._can_show_metadata(selected) for selected in self._selected_items()))
 
         action = menu.exec(self.tree.viewport().mapToGlobal(pos))
-        if action == preview:
+        if open_image is not None and action == open_image:
+            self._ctx_open_as_image([info["index"] for info in image_series])
+        elif action == preview:
             self._ctx_preview()
         elif action == plot:
             self._ctx_plot()
@@ -2290,7 +2333,27 @@ class MsrReaderDialog(QWidget):
         if shown == 0:
             QMessageBox.information(self, "Metadata", "No Zarr metadata is available for the selected node(s).")
 
+    def _ctx_open_as_image(self, raw_indices):
+        """Open the selected OBF series (by raw stack index) in the standalone
+        TIFF/image viewer."""
+        opened = sum(1 for raw in raw_indices if self._open_obf_series(raw))
+        if opened == 0:
+            QMessageBox.information(
+                self, "Open as image",
+                "The selected series could not be opened as an image.")
+
+    def _selected_image_series_indices(self) -> list[int]:
+        return [
+            int(info["index"])
+            for it in self._selected_items()
+            if (info := self.nodeinfo.get(self._item_id(it), {})).get("type") == "legacy_series"
+        ]
+
     def _ctx_preview(self):
+        # Previewing an image series as a table is useless — open the image viewer.
+        image_series = self._selected_image_series_indices()
+        for raw in image_series:
+            self._open_obf_series(raw)
         shown = 0
         for item in self._selected_array_items():
             path, arr, err = self._resolve_context_array(item)
@@ -2300,7 +2363,7 @@ class MsrReaderDialog(QWidget):
             label = self._plot_label_for_path(item, path)
             self._show_child_dialog(ArrayPreviewDialog(f"Preview: {label}", arr, self._preview_rows_limit(), self))
             shown += 1
-        if shown == 0:
+        if shown == 0 and not image_series:
             QMessageBox.information(self, "Preview", "Choose one or more field or array nodes.")
 
     def _ctx_plot(self):
@@ -2439,15 +2502,60 @@ class MsrReaderDialog(QWidget):
         return datasets
 
     def on_fields_dialog(self):
-        ds_list = self._gather_datasets_for_dialog()
-        if not ds_list:
+        # Drop empty placeholder datasets (e.g. the "legacy" entry of an image-only
+        # file has no mfx/mbm fields) so only real datasets + image series show.
+        ds_list = [d for d in self._gather_datasets_for_dialog()
+                   if d.get("mfx_fields") or d.get("mbm_fields")]
+        image_series = self._gather_image_series_for_dialog()
+        if not ds_list and not image_series:
             QMessageBox.information(self, "No datasets", "No datasets loaded to select fields from.")
             return
-        dlg = FieldDialog(ds_list, self.field_selection or None, self)
+        dlg = FieldDialog(ds_list, self.field_selection or None, self,
+                          image_series=image_series,
+                          prechecked_images=self.image_field_selection or None)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.field_selection = dlg.result_payload()
+            self.image_field_selection = dlg.image_payload()
             self._save_settings()
             self.log("[select] updated datasets/fields selection.")
+
+    def _gather_image_series_for_dialog(self) -> list[dict]:
+        """The viewable OBF image series of the parsed .msr (both legacy and modern
+        files may carry confocal images), for the Fields dialog + Open-in-viewer."""
+        msr_path = self.parsed.get("msr")
+        if not msr_path:
+            return []
+        try:
+            from ...core.obf_image_source import list_obf_image_series
+            return list_obf_image_series(msr_path)
+        except Exception as exc:
+            self.log(f"[image] could not list image series: {exc}")
+            return []
+
+    def _open_obf_series(self, raw_index) -> bool:
+        """Open one OBF image series (by raw stack index) in the standalone image
+        viewer — preferring the main window's registry (dedup/persist), else held
+        as a child of this dialog."""
+        msr_path = self.parsed.get("msr")
+        if not msr_path:
+            return False
+        try:
+            from ...core.obf_image_source import ObfImageSource
+            from ...ui.tiff_viewer_window import TiffViewerWindow
+            source = ObfImageSource(msr_path, raw_stack_index=int(raw_index))
+        except Exception as exc:
+            self.log(f"[image] stack {raw_index}: {exc}")
+            return False
+        owner = self._owner
+        key = f"{Path(msr_path).resolve()}#obf{int(raw_index)}"
+        if owner is not None and hasattr(owner, "_open_image_viewer"):
+            try:
+                owner._open_image_viewer(source, key)
+                return True
+            except Exception as exc:
+                self.log(f"[image] {exc}")
+        self._show_child_dialog(TiffViewerWindow(source))
+        return True
 
     def _derive_global_field_filters(self):
         sel = self.field_selection or {}
@@ -3406,9 +3514,20 @@ class MsrReaderDialog(QWidget):
             QMessageBox.warning(self, "Not connected", "Not connected to a viewer instance.")
             return
 
+        # Image series selected in "Datasets / Fields included…" open in the
+        # standalone image viewer (they are not MINFLUX datasets).
+        image_raws = sorted(int(i) for i in (self.image_field_selection or set()))
+        opened_images = sum(1 for raw in image_raws if self._open_obf_series(raw))
+        if opened_images:
+            self.log(f"[viewer] opened {opened_images} image series in the image viewer.")
+
         datasets_info = self.parsed.get("datasets", [])
         if not datasets_info:
-            QMessageBox.warning(self, "No datasets", "No modern datasets found. Parse an .msr file first.")
+            if opened_images == 0:
+                QMessageBox.warning(
+                    self, "No datasets",
+                    "No MINFLUX datasets found. Select image series in "
+                    "'Datasets / Fields included…' to open them as images.")
             return
         import_plan = self._viewer_import_plan()
         if not import_plan:

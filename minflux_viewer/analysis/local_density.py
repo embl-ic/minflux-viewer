@@ -13,15 +13,19 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
+    QMenu,
     QMessageBox,
     QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -58,10 +62,11 @@ _AUTO_KDTREE_MAX_POINTS = 10_000_000
 
 def local_density_kdtree(points_nm: np.ndarray, radius_nm: float) -> np.ndarray:
     """
-    Count neighbours within ``radius_nm`` for each localization.
-
-    The point itself is excluded, matching MATLAB ``length(x)-1`` after
-    ``rangesearch([x,y,z], [x,y,z], range)``.
+    Count localizations within ``radius_nm`` of each localization, **including
+    the point itself**, so an isolated localization reports 1 (not 0) — this
+    distinguishes "a single point in empty space" from genuinely void space.
+    (This differs from MATLAB ``length(...)-1`` after ``rangesearch``, which
+    excludes the centre point.)
 
     The range count runs in parallel across all CPU cores (``workers=-1``) and
     only returns neighbour *counts* (``return_length=True``), never the lists —
@@ -78,7 +83,7 @@ def local_density_kdtree(points_nm: np.ndarray, radius_nm: float) -> np.ndarray:
     counts = tree.query_ball_point(
         pts, r=radius_nm, return_length=True, workers=-1,
     )
-    return np.asarray(counts, dtype=float) - 1.0
+    return np.asarray(counts, dtype=float)
 
 
 def _estimate_radius_query_work(
@@ -215,8 +220,9 @@ def local_density_voxel_radius_count(
 
     Points are binned into a regular 2D/3D grid. A binary disk/ball kernel whose
     physical radius is ``radius_nm`` is convolved with that grid, then each point
-    receives the convolved value at its voxel. One self-count is subtracted to
-    match :func:`local_density_kdtree` semantics.
+    receives the convolved value at its voxel. The centre point is **included**
+    (the kernel covers its own voxel), matching :func:`local_density_kdtree`
+    semantics so an isolated localization reports 1.
     """
     dims = max(2, min(int(dimensions), 3))
     pts = _finite_points(points_nm, force_3d=False)
@@ -253,7 +259,7 @@ def local_density_voxel_radius_count(
         )
         for d in range(dims)
     )
-    result = values[bin_idx].astype(float) - 1.0
+    result = values[bin_idx].astype(float)
     return np.maximum(result, 0.0)
 
 
@@ -394,8 +400,12 @@ def compute_local_density(
     voxel_size_nm: float | None = None,
     smooth_sigma: float = 1.0,
     use_filter: bool = True,
-) -> tuple[np.ndarray, str, str, np.ndarray, tuple[np.ndarray, np.ndarray]]:
-    """Compute local density and a 2D density image for display."""
+) -> tuple[np.ndarray, str, str, np.ndarray, tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray]:
+    """Compute local density, a 2D density image, and the valid points+values.
+
+    Returns ``(density_full, method, detail, image, edges, points_valid, density_valid)``
+    where ``points_valid`` (nm, 2-D or 3-D) + ``density_valid`` feed the result
+    window's optional 3-D scatter."""
     points = np.asarray(ds.loc_nm, dtype=float)
     mask = (
         np.asarray(ds.filter_mask, dtype=bool)
@@ -412,8 +422,30 @@ def compute_local_density(
         voxel_size_nm=voxel_nm,
         smooth_sigma=smooth_sigma,
     )
-    image, edges = density_image_xy(points[valid], density_full[valid], pixel_size_nm=voxel_nm)
-    return density_full, method_label, detail, image, edges
+    points_valid = points[valid]
+    density_valid = density_full[valid]
+    # Display the density map at a pixel FINER than the computation radius, so a
+    # large radius (e.g. 100 nm) doesn't produce a blocky "cubic"-looking heatmap.
+    # (The KD-tree neighbourhood itself is a sphere/ball of the given radius.)
+    image_pixel_nm = _image_pixel_nm(points_valid, radius_nm)
+    image, edges = density_image_xy(points_valid, density_valid, pixel_size_nm=image_pixel_nm)
+    return density_full, method_label, detail, image, edges, points_valid, density_valid
+
+
+def _image_pixel_nm(points_nm: np.ndarray, radius_nm: float,
+                    *, max_cells: int = 4_000_000, min_pixel: float = 1.0) -> float:
+    """A display pixel ≈ radius/5 (smooth heatmap), enlarged only if the image
+    would exceed *max_cells* — decoupled from the computation radius."""
+    pixel = max(float(radius_nm) / 5.0, float(min_pixel))
+    pts = _finite_points(points_nm, force_3d=False)
+    if pts.shape[0] < 2:
+        return pixel
+    span_x, span_y = float(np.ptp(pts[:, 0])), float(np.ptp(pts[:, 1]))
+    if span_x <= 0 or span_y <= 0:
+        return pixel
+    while (span_x / pixel) * (span_y / pixel) > max_cells:
+        pixel *= 1.5
+    return pixel
 
 
 def density_image_xy(
@@ -447,23 +479,18 @@ def run_local_density(parent, state) -> None:
     if ds is None:
         return
 
+    # The dialog seeds its fields from the Preferences (a sensible starting
+    # point), but the plugin is for ad-hoc exploration at different radii — it
+    # must NOT write its choices back. The `data.local_density_*` preferences are
+    # user-owned and drive the on-load `den` derived attribute; they change only
+    # via the Preferences dialog. (Previously each run overwrote + saved them.)
     dialog = LocalDensityOptionsDialog(ds, state.prefs, parent=parent)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return
     opts = dialog.options()
-    data_prefs = state.prefs.setdefault("data", {})
-    data_prefs["local_density_dimensions"] = int(opts["dimensions"])
-    data_prefs["local_density_radius"] = float(opts["radius_nm"])
-    data_prefs["local_density_method"] = str(opts["method"])
-    data_prefs["local_density_voxel_size"] = float(opts["voxel_size_nm"])
-    data_prefs["local_density_smooth_sigma"] = float(opts["smooth_sigma"])
-    try:
-        state.save_prefs()
-    except Exception:
-        pass
 
     try:
-        density, method, detail, image, edges = compute_local_density(ds, **opts)
+        density, method, detail, image, edges, pts_valid, dens_valid = compute_local_density(ds, **opts)
     except Exception as exc:
         state.log(f"Local density failed: {exc}", "ERROR")
         QMessageBox.critical(parent, "Local Density", str(exc))
@@ -478,10 +505,12 @@ def run_local_density(parent, state) -> None:
             ds.prop.attr_names.append(name)
 
     finite = density[np.isfinite(density)]
+    shape = "ball" if int(opts["dimensions"]) == 3 else "disk"
     msg = (
-        f"Computed local density for '{ds.name}' using {method} ({detail}). "
-        f"Valid values: {finite.size:,}; median={np.nanmedian(finite):.3g}, "
-        f"mean={np.nanmean(finite):.3g}."
+        f"Local density of '{ds.name}': neighbours within a {opts['radius_nm']:g} nm "
+        f"{shape} ({method}, {detail}). "
+        f"median={np.nanmedian(finite):.3g}, mean={np.nanmean(finite):.3g} "
+        f"over {finite.size:,} localizations."
         if finite.size
         else f"Computed local density for '{ds.name}', but no finite values were produced."
     )
@@ -495,6 +524,9 @@ def run_local_density(parent, state) -> None:
         edges,
         title=f"Local Density — {ds.name}",
         info=msg,
+        points_nm=pts_valid,
+        density_values=dens_valid,
+        dimensions=int(opts["dimensions"]),
         parent=None,
     )
     # Modeless + non-owned, but registered on the owner so it is closed with the
@@ -533,9 +565,9 @@ class LocalDensityOptionsDialog(QDialog):
         form.addRow("Local density radius", self._radius)
 
         self._method = QComboBox()
-        self._method.addItem("KD-tree range search", "kdtree")
-        self._method.addItem("Voxel histogram", "voxel_histogram")
-        self._method.addItem("Voxel disk/ball radius count", "voxel_radius")
+        self._method.addItem("KD-tree ball — exact, spherical (recommended)", "kdtree")
+        self._method.addItem("Voxel ball radius count — fast, spherical", "voxel_radius")
+        self._method.addItem("Voxel histogram — fastest, cubic voxel", "voxel_histogram")
         idx = self._method.findData(data_prefs.get("local_density_method", "kdtree"))
         self._method.setCurrentIndex(max(idx, 0))
         form.addRow("Method", self._method)
@@ -562,22 +594,23 @@ class LocalDensityOptionsDialog(QDialog):
         }
 
     def _update_method_state(self) -> None:
-        is_3d = int(self._dimensions.currentData()) == 3
+        shape = "ball (sphere)" if int(self._dimensions.currentData()) == 3 else "disk (circle)"
         self._hint.setText(
-            "KD-tree counts neighbours within the radius (exact, parallelised). "
-            "Histogram bins counts into voxels (faster, coarser). "
-            "Voxel disk/ball counts neighbouring voxels inside the radius "
-            "(fast approximation). "
-            "The result image shows an XY projection of the density."
-            if is_3d
-            else "KD-tree is exact; histogram is a voxel proxy; voxel disk/ball is a fast radius-count approximation."
+            f"Counts each localization's neighbours inside a {shape} of the given "
+            "radius. KD-tree is exact + parallelised (recommended); voxel ball is a "
+            "fast spherical approximation; voxel histogram is fastest but uses a "
+            "cubic voxel (coarser). The result window shows the XY density heatmap "
+            "(plus a 3-D scatter coloured by density for 3-D data)."
         )
 
 
 class LocalDensityImageWindow(QWidget):
-    """Display a local-density image with a hot/red colormap."""
+    """Local-density result viewer: a 2-D XY heatmap and (for 3-D data) a 3-D
+    scatter of the localizations coloured by density, in the app's viewer style."""
 
     TAG = "local_density_image"
+    _CMAPS = ["hot", "inferno", "magma", "plasma", "viridis", "turbo", "jet", "gray"]
+    _MAX_3D_POINTS = 400_000
 
     def __init__(
         self,
@@ -586,36 +619,194 @@ class LocalDensityImageWindow(QWidget):
         *,
         title: str,
         info: str,
+        points_nm: np.ndarray | None = None,
+        density_values: np.ndarray | None = None,
+        dimensions: int = 2,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setWindowFlags(Qt.WindowType.Window)
-        self.resize(760, 620)
+        try:
+            from .. import resource_path
+            self.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
+        except Exception:
+            pass
+        self.resize(820, 720)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
+        self._cmap = "hot"
+        self._img = np.asarray(image, dtype=float)
+        if self._img.size == 0:
+            self._img = np.zeros((1, 1), dtype=float)
+        self._edges = edges
+        self._pts3d, self._dens3d, self._anchor = self._prepare_3d(points_nm, density_values, dimensions)
+        self._gl_view = None
+        self._gl_scatter = None
+
         root = QVBoxLayout(self)
-        self._view = pg.ImageView()
-        self._view.ui.roiBtn.hide()
-        self._view.ui.menuBtn.hide()
-        self._view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        root.addWidget(self._view, stretch=1)
+        # View selector — a 3-D scatter is offered only when the data is 3-D.
+        top = QHBoxLayout()
+        self._view_label = QLabel("View:")
+        top.addWidget(self._view_label)
+        self._view_combo = QComboBox()
+        self._view_combo.addItem("2D heatmap", "2d")
+        if self._pts3d is not None:
+            self._view_combo.addItem("3D scatter (coloured by density)", "3d")
+        self._view_combo.currentIndexChanged.connect(self._on_view_changed)
+        top.addWidget(self._view_combo)
+        top.addSpacing(12)
+        top.addWidget(QLabel("Colormap:"))
+        self._cmap_combo = QComboBox()
+        for name in self._CMAPS:
+            self._cmap_combo.addItem(name)
+        self._cmap_combo.setCurrentText(self._cmap)
+        self._cmap_combo.currentTextChanged.connect(self._set_cmap)
+        top.addWidget(self._cmap_combo)
+        top.addStretch(1)
+        root.addLayout(top)
+        # hide the view selector (leave the colormap) when there is no 3-D data
+        self._view_label.setVisible(self._pts3d is not None)
+        self._view_combo.setVisible(self._pts3d is not None)
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._build_2d_widget())        # index 0
+        root.addWidget(self._stack, stretch=1)
 
         label = QLabel(info)
         label.setWordWrap(True)
         label.setStyleSheet("color: gray;")
         root.addWidget(label)
 
-        img = np.asarray(image, dtype=float)
-        if img.size == 0:
-            img = np.zeros((1, 1), dtype=float)
-        self._view.setImage(img.T, autoLevels=True)
-        self._view.setColorMap(make_colormap("hot"))
-        x_edges, y_edges = edges
+        self._apply_image(fit=True)
+
+    # -- 3-D data prep -------------------------------------------------------
+    def _prepare_3d(self, points_nm, density_values, dimensions):
+        """(pts (M,3), dens (M,), anchor) for the 3-D scatter, or (None, None, None)
+        when there is no usable 3-D data (2-D request or flat Z)."""
+        if points_nm is None or density_values is None or int(dimensions) != 3:
+            return None, None, None
+        pts = np.asarray(points_nm, dtype=float)
+        if pts.ndim != 2 or pts.shape[0] == 0 or pts.shape[1] < 3:
+            return None, None, None
+        dens = np.asarray(density_values, dtype=float).ravel()
+        keep = np.all(np.isfinite(pts[:, :3]), axis=1) & np.isfinite(dens)
+        pts, dens = pts[keep, :3], dens[keep]
+        if pts.shape[0] == 0 or float(np.ptp(pts[:, 2])) <= 0:
+            return None, None, None                            # flat Z ⇒ 2-D only
+        if pts.shape[0] > self._MAX_3D_POINTS:                 # decimate for GL
+            step = int(np.ceil(pts.shape[0] / self._MAX_3D_POINTS))
+            pts, dens = pts[::step], dens[::step]
+        return pts, dens, pts.mean(axis=0)
+
+    # -- 2-D heatmap ---------------------------------------------------------
+    def _build_2d_widget(self) -> QWidget:
+        self._view = pg.ImageView(view=pg.PlotItem())
+        self._view.ui.roiBtn.hide()
+        self._view.ui.menuBtn.hide()
+        self._view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._plot = self._view.getView()
+        self._plot.setAspectLocked(True)
+        self._plot.setLabel("bottom", "X", units="nm")
+        self._plot.setLabel("left", "Y", units="nm")
+        try:
+            self._plot.getViewBox().setMenuEnabled(False)     # use our context menu
+        except Exception:
+            pass
+        gv = self._view.ui.graphicsView
+        gv.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        gv.customContextMenuRequested.connect(self._show_context_menu)
+        return self._view
+
+    def _apply_image(self, *, fit: bool) -> None:
+        # autoRange=False so we can place the image at nm coordinates (setRect)
+        # and THEN fit the view to it — otherwise the view stays ranged to the
+        # pixel grid and the image sits off-screen (the old "need View All" bug).
+        self._view.setImage(self._img.T, autoRange=False, autoLevels=True)
+        self._view.setColorMap(make_colormap(self._cmap))
+        x_edges, y_edges = self._edges
         if len(x_edges) > 1 and len(y_edges) > 1:
             item = self._view.getImageItem()
-            item.setRect(float(x_edges[0]), float(y_edges[0]), float(x_edges[-1] - x_edges[0]), float(y_edges[-1] - y_edges[0]))
-            self._view.getView().setAspectLocked(True)
+            item.setRect(float(x_edges[0]), float(y_edges[0]),
+                         float(x_edges[-1] - x_edges[0]), float(y_edges[-1] - y_edges[0]))
+        if fit:
+            self._plot.getViewBox().autoRange()
+
+    # -- 3-D scatter ---------------------------------------------------------
+    def _scatter_colors(self) -> np.ndarray:
+        """RGBA (float32) per point from the density values (1–99 % robust range)."""
+        d = self._dens3d
+        finite = np.isfinite(d)
+        if finite.any():
+            lo, hi = np.percentile(d[finite], [1.0, 99.0])
+        else:
+            lo, hi = 0.0, 1.0
+        if hi <= lo:
+            hi = lo + 1.0
+        norm = np.clip((d - lo) / (hi - lo), 0.0, 1.0)
+        norm[~finite] = 0.0
+        cols = make_colormap(self._cmap).map(norm.astype(float), mode="float")
+        return np.asarray(cols, dtype=np.float32)
+
+    def _build_3d_widget(self) -> QWidget:
+        try:
+            import pyqtgraph.opengl as gl
+        except Exception as exc:                               # OpenGL unavailable
+            fallback = QLabel(f"3-D view unavailable: {exc}")
+            fallback.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            fallback.setStyleSheet("color: gray;")
+            return fallback
+        pts = (self._pts3d - self._anchor).astype(np.float32)
+        view = gl.GLViewWidget()
+        view.setBackgroundColor("k")
+        self._gl_scatter = gl.GLScatterPlotItem(
+            pos=pts, color=self._scatter_colors(), size=3.0, pxMode=True)
+        view.addItem(self._gl_scatter)
+        span = float(np.ptp(pts)) or 100.0
+        view.setCameraPosition(distance=span * 1.4)
+        grid = gl.GLGridItem()
+        grid.setSize(span * 1.5, span * 1.5)
+        grid.setSpacing(max(span / 10.0, 1.0), max(span / 10.0, 1.0))
+        view.addItem(grid)
+        try:
+            view.addItem(gl.GLAxisItem(size=pg.Vector(span / 2, span / 2, span / 2)))
+        except Exception:
+            pass
+        self._gl_view = view
+        return view
+
+    # -- view switching / colormap ------------------------------------------
+    def _on_view_changed(self, *_a) -> None:
+        if self._view_combo.currentData() == "3d":
+            if self._stack.count() < 2:                        # lazy-build on first use
+                self._stack.addWidget(self._build_3d_widget())
+            self._stack.setCurrentIndex(1)
+        else:
+            self._stack.setCurrentIndex(0)
+
+    def _show_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+        cmap_menu = menu.addMenu("Colormap")
+        for name in self._CMAPS:
+            act = cmap_menu.addAction(name)
+            act.setCheckable(True)
+            act.setChecked(self._cmap == name)
+            act.triggered.connect(lambda _=False, n=name: self._set_cmap(n))
+        menu.addAction("Reset view", lambda: self._plot.getViewBox().autoRange())
+        menu.exec(self._view.ui.graphicsView.mapToGlobal(pos))
+
+    def _set_cmap(self, name: str) -> None:
+        self._cmap = name
+        if self._cmap_combo.currentText() != name:             # keep the combo in sync
+            self._cmap_combo.blockSignals(True)
+            self._cmap_combo.setCurrentText(name)
+            self._cmap_combo.blockSignals(False)
+        self._view.setColorMap(make_colormap(name))
+        if self._gl_scatter is not None:                       # recolour the 3-D scatter
+            try:
+                self._gl_scatter.setData(color=self._scatter_colors())
+            except Exception:
+                pass
 
 
 def _finite_points(points_nm: np.ndarray, *, force_3d: bool = True) -> np.ndarray:

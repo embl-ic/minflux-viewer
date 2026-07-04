@@ -121,6 +121,37 @@ def test_snapshot_writes_each_format(tmp_path, fmt):
     assert any(p.name.endswith("_metadata.json") for p in written)
 
 
+@pytest.mark.parametrize("fmt,loader,expect_ver", [
+    ("mat", L.load_dataset, "m2410"),
+    ("npy", L.load_npy, "m2410"),
+    ("json", L.load_json, "json"),
+    ("csv", L.load_csv, "csv"),
+])
+def test_simulated_dataset_saves_all_formats(tmp_path, fmt, loader, expect_ver):
+    """A coordinate-built (e.g. simulated) dataset saves to .mat/.npy/.json/.csv;
+    .mat/.npy carry the canonical **m2410** structured mfx (loc/itr/vld synthesised)
+    and re-import as m2410. (.msr has no writer — the OBF reader is read-only.)"""
+    from minflux_viewer.core.dataset import build_localization_dataset
+    from minflux_viewer.core.simulate import simulate_localizations
+
+    coords, tid, attrs = simulate_localizations("npc", n_points=200, seed=0)
+    ds = build_localization_dataset(
+        name="sim", x_nm=coords[:, 0], y_nm=coords[:, 1], z_nm=coords[:, 2],
+        tid=tid, attrs=attrs, source_version="simulation")
+
+    mfx = dataset_to_mfx_array(ds)                       # m2410 structured mfx
+    assert {"loc", "itr", "vld", "tid"} <= set(mfx.dtype.names)
+    assert mfx["loc"].shape[1] == 3 and mfx["itr"].ndim == 1
+
+    paths = save_processed(ds, data_path=tmp_path / f"sim.{fmt}", fmt=fmt,
+                           content="raw", include={"recipe": False})
+    d2 = loader(str(paths[0]))
+    assert d2.prop.num_loc == ds.prop.num_loc            # all localizations round-trip
+    assert str(d2.metadata.get("source_version", "")).lower() == expect_ver
+    for k in ("efo", "cfr", "tid"):                      # attributes preserved
+        assert k in d2.attr.keys()
+
+
 def test_raw_csv_is_flattened(tmp_path):
     ds = _dataset()
     data_path, _ = save_processed(ds, data_path=tmp_path / "raw", fmt="csv",

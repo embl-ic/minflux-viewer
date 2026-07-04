@@ -304,6 +304,8 @@ def _version_text(ds: MinfluxDataset) -> str:
     version = str(ds.metadata.get("source_version", "")).lower()
     if version in {"m2410", "m2205", "legacy"}:
         base = version
+    elif version == "simulation":
+        base = "simulation"
     elif version in {"csv", "spreadsheet", "imported", "plain_array", "json"}:
         base = "MINFLUX (imported)"
     else:

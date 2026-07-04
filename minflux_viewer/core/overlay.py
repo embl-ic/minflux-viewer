@@ -137,6 +137,44 @@ def apply_display_transform_nm(points_nm: np.ndarray, transform: dict | None) ->
     return pts.copy()
 
 
+def transform_to_matrix4(transform) -> np.ndarray | None:
+    """The 4×4 display matrix of a *transform*, or ``None`` if not resolvable.
+
+    Accepts a ``display_transform_record`` **dict** (``matrix_4x4`` / ``matrix_3x3``),
+    a raw 4×4 array, or a 3×3 XY affine (embedded into 4×4). Overlay datasets store
+    the transform as a dict, so callers that want the bare matrix must go through
+    this rather than ``np.asarray(transform)`` (which raises on a dict)."""
+    def _embed3(a: np.ndarray) -> np.ndarray:
+        out = np.eye(4, dtype=np.float64)
+        out[:2, :2] = a[:2, :2]
+        out[:2, 3] = a[:2, 2]
+        return out
+
+    if transform is None:
+        return None
+    if isinstance(transform, dict):
+        m4 = transform.get("matrix_4x4")
+        if m4 is not None:
+            arr = np.asarray(m4, dtype=np.float64)
+            if arr.shape == (4, 4):
+                return arr
+        m3 = transform.get("matrix_3x3")
+        if m3 is not None:
+            arr = np.asarray(m3, dtype=np.float64)
+            if arr.shape == (3, 3):
+                return _embed3(arr)
+        return None
+    try:
+        arr = np.asarray(transform, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if arr.shape == (4, 4):
+        return arr
+    if arr.shape == (3, 3):
+        return _embed3(arr)
+    return None
+
+
 def transform_key(transform: dict | None) -> tuple:
     if not isinstance(transform, dict):
         return ()

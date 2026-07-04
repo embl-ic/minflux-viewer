@@ -108,6 +108,39 @@ class TiffImageSource:
         except Exception:
             pass
 
+    # -- series ---------------------------------------------------------------
+    @property
+    def series_count(self) -> int:
+        return len(self._tf.series)
+
+    def series_names(self) -> list[str]:
+        return [
+            str(getattr(s, "name", "") or f"Series {i + 1}")
+            for i, s in enumerate(self._tf.series)
+        ]
+
+    def series_summaries(self) -> list[dict]:
+        """One row per series for the series chooser: index, name, shape, dtype."""
+        out: list[dict] = []
+        for i, s in enumerate(self._tf.series):
+            shape = tuple(int(v) for v in getattr(s, "shape", ()) or ())
+            out.append({
+                "index": i,
+                "name": str(getattr(s, "name", "") or f"Series {i + 1}"),
+                "shape_str": " x ".join(str(v) for v in shape),
+                "dtype": str(getattr(s, "dtype", "")),
+            })
+        return out
+
+    def set_series(self, index: int) -> None:
+        """Switch to another series in the same file (rebuilds metadata)."""
+        index = int(index)
+        if not (0 <= index < len(self._tf.series)):
+            raise IndexError(f"TIFF series index {index} is out of range")
+        self.series_index = index
+        self._series = self._tf.series[self.series_index]
+        self.metadata = self._build_metadata()
+
     def axis_size(self, axis: str) -> int:
         return self.metadata.axis_size(axis)
 

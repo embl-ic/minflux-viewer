@@ -108,6 +108,40 @@ _CHANNEL_COLORS = {
 }
 
 
+def pure_color_ramp(norm, color, *, white_bg: bool = False) -> np.ndarray:
+    """Map normalized intensity ``[0,1]`` to a **toned** RGB ramp for a pure colour.
+
+    Black background (default): ``black → colour → white`` (two linear segments), so
+    the perceived **lightness** spans the full range like an 8-bit grayscale —
+    different pixel values stay distinguishable even for a saturated hue (a plain
+    ``norm·hue`` ramp keeps a saturated colour perceptually dark: e.g. full red is
+    only ~30 % as light as white). Gray/white (all components ≈1) degenerate to a
+    plain ``black → white`` ramp.
+
+    White background (``white_bg=True``): the inverse, ``white → colour → black`` —
+    no signal is white (the page), signal darkens toward the hue and then to black
+    (gray → plain ``white → black``, the classic inverted publication render).
+
+    Returns a ``(..., 3)`` float32 array (same leading shape as ``norm``).
+    """
+    n = np.asarray(norm, dtype=np.float32)[..., None]
+    col = np.asarray(color, dtype=np.float32)
+    is_gray = float(col.min()) >= 0.999
+    if not white_bg:
+        if is_gray:                                     # gray → linear black → white
+            return np.clip(n * col, 0.0, 1.0).astype(np.float32)
+        lo = np.minimum(2.0 * n, 1.0)                   # black → colour over [0, 0.5]
+        hi = np.clip(2.0 * n - 1.0, 0.0, 1.0)           # colour → white over [0.5, 1]
+        return np.clip(col * lo + (1.0 - col) * hi, 0.0, 1.0).astype(np.float32)
+    if is_gray:                                         # gray → linear white → black
+        g = np.clip(1.0 - n, 0.0, 1.0)
+        return np.broadcast_to(g, g.shape[:-1] + (3,)).astype(np.float32)
+    s = np.clip(2.0 * n, 0.0, 1.0)                      # white → colour over [0, 0.5]
+    t = np.clip(2.0 * n - 1.0, 0.0, 1.0)                # colour → black over [0.5, 1]
+    first = (1.0 - s) + s * col                         # white → colour
+    return np.clip(first * (1.0 - t), 0.0, 1.0).astype(np.float32)
+
+
 def _luminance_clamped(rgb, max_lum: float = 0.72) -> tuple[float, float, float]:
     """Darken a colour (preserving hue) if it is too bright to read on a white
     background. Colours at/under *max_lum* (Red, Green, Blue, Magenta, hot's
@@ -692,6 +726,8 @@ class RenderWindow(QWidget):
         # Manual levels override (set by B&C). None → pyqtgraph autoLevels.
         self._manual_levels: tuple[float, float] | None = None
         self._auto_bc: bool = True
+        # White vs black render background (subtractive vs additive composite).
+        self._white_bg: bool = False
         self._bc_auto_threshold: int = 0
         self._bc_dialog = None
         self._roi_overlay = None
@@ -2028,6 +2064,16 @@ class RenderWindow(QWidget):
         )
         self._redraw_roi_highlight()
 
+    def _set_white_background(self, checked: bool) -> None:
+        """Toggle a white render background (subtractive composite) vs black."""
+        self._white_bg = bool(checked)
+        try:
+            self._image_view.ui.graphicsView.setBackground("w" if self._white_bg else "k")
+        except Exception:
+            pass
+        # Recompose from the cached scalar tiles (falls back to a full re-render).
+        self._compose_from_cache()
+
     def _current_render_pixel_size_nm(self) -> float:
         if self._last_px_nm and self._last_px_nm > 0:
             return self._last_px_nm
@@ -2039,21 +2085,40 @@ class RenderWindow(QWidget):
             return np.zeros((1, 1, 4), dtype=np.float32)
         c, h, w = scalar.shape
         visible = [i for i, ch in enumerate(self._channels[:c]) if ch["visible"]]
+        bg = 1.0 if self._white_bg else 0.0
         if not visible:
-            rgba = np.zeros((h, w, 4), dtype=np.float32)
+            rgba = np.full((h, w, 4), bg, dtype=np.float32)
             rgba[..., 3] = 1.0
             return rgba
 
-        rgb = np.zeros((h, w, 3), dtype=np.float32)
-        for idx in visible:
-            tile = self._transformed_tile(scalar[idx], self._channels[idx])
-            norm = self._normalized_tile(tile, self._channels[idx])
-            rgb += self._map_norm_to_rgb(norm, self._channels[idx]["lut"])
+        if self._white_bg:
+            # Subtractive: start from white, each channel *multiplies* it toward its
+            # own white→colour→black ramp — no signal stays white, signal darkens,
+            # overlaps darken further (ink-on-paper / inverted-LUT model).
+            rgb = np.ones((h, w, 3), dtype=np.float32)
+            for idx in visible:
+                tile = self._transformed_tile(scalar[idx], self._channels[idx])
+                norm = self._normalized_tile(tile, self._channels[idx])
+                rgb *= self._channel_rgb_white(norm, self._channels[idx]["lut"])
+        else:
+            # Additive: start from black, channels add light (bright-on-black).
+            rgb = np.zeros((h, w, 3), dtype=np.float32)
+            for idx in visible:
+                tile = self._transformed_tile(scalar[idx], self._channels[idx])
+                norm = self._normalized_tile(tile, self._channels[idx])
+                rgb += self._map_norm_to_rgb(norm, self._channels[idx]["lut"])
         np.clip(rgb, 0.0, 1.0, out=rgb)
 
         rgba = np.ones((h, w, 4), dtype=np.float32)
         rgba[..., :3] = rgb
         return rgba
+
+    def _channel_rgb_white(self, norm: np.ndarray, lut: str) -> np.ndarray:
+        """Per-channel RGB for a **white** background: pure colours use the inverted
+        ``white→colour→black`` ramp; named colormaps are inverted (low ≈ white)."""
+        if lut in _CHANNEL_COLORS:
+            return pure_color_ramp(norm, _CHANNEL_COLORS[lut], white_bg=True)
+        return np.clip(1.0 - self._map_norm_to_rgb(norm, lut), 0.0, 1.0).astype(np.float32)
 
     def _transformed_tile(self, tile: np.ndarray, ch: dict) -> np.ndarray:
         transform = ch.get("transform") or {}
@@ -2122,7 +2187,9 @@ class RenderWindow(QWidget):
 
     def _map_norm_to_rgb(self, norm: np.ndarray, lut: str) -> np.ndarray:
         if lut in _CHANNEL_COLORS:
-            return norm[..., None] * np.asarray(_CHANNEL_COLORS[lut], dtype=np.float32)
+            # black → colour → white so a pure colour spans a grayscale-like tonal
+            # (lightness) range; different pixel values stay appreciable.
+            return pure_color_ramp(norm, _CHANNEL_COLORS[lut])
         try:
             cmap = pg.colormap.get(lut)
         except Exception:
@@ -2447,6 +2514,11 @@ class RenderWindow(QWidget):
                 action.triggered.connect(
                     lambda _checked=False, value=orientation: self._set_orientation(value)
                 )
+        view_menu.addSeparator()
+        wb_action = view_menu.addAction("White background")
+        wb_action.setCheckable(True)
+        wb_action.setChecked(self._white_bg)
+        wb_action.triggered.connect(self._set_white_background)
 
         cmap_menu = menu.addMenu("Colormap")
         for name in _COLORMAPS:

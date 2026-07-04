@@ -12,6 +12,7 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QComboBox,
     QDialog,
     QGridLayout,
     QHBoxLayout,
@@ -19,14 +20,23 @@ from PyQt6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QPushButton,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from typing import TYPE_CHECKING
+
 from .. import resource_path
-from ..core.tiff_source import TiffImageSource
 from .render_window import _CHANNEL_COLORS, _COLORMAPS, _PURE_COLOR_LUTS
+
+if TYPE_CHECKING:
+    from ..core.obf_image_source import ObfImageSource
+    from ..core.tiff_source import TiffImageSource
+
+    # Any source with metadata / axis_size / read_plane / close (+ series helpers).
+    ImageSource = TiffImageSource | ObfImageSource
 
 _IMAGEJ_AUTO_THRESHOLD = 5000
 _IMAGEJ_AUTO_RESET_THRESHOLD = 10
@@ -36,7 +46,7 @@ _IMAGEJ_AUTO_HIST_BINS = 256
 class TiffViewerWindow(QWidget):
     """Fiji-like single-file TIFF viewer backed by lazy plane reads."""
 
-    def __init__(self, source: TiffImageSource, parent: QWidget | None = None) -> None:
+    def __init__(self, source: "ImageSource", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._source = source
         self._plane: np.ndarray | None = None
@@ -46,8 +56,9 @@ class TiffViewerWindow(QWidget):
         self._bc_dialog = None
         self._info_window: TiffInfoWindow | None = None
         self._active_cmap = "gray"
+        self._show_axes = False          # axes/ticks hidden by default (right-click › Axis)
 
-        self.setWindowTitle(source.path.name)
+        self.setWindowTitle(self._title_text())
         self.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
         self.setWindowFlags(Qt.WindowType.Window)
         self.resize(880, 920)
@@ -90,7 +101,9 @@ class TiffViewerWindow(QWidget):
             pass
         self._view_box = self._image_view.view.vb
         self._view_box.setAspectLocked(True)
-        self._view_box.invertY(False)
+        # Fiji / render-view convention: low Y on top, high Y at the bottom.
+        self._view_box.invertY(True)
+        self._set_axes_visible(self._show_axes)
         self._image_view.ui.graphicsView.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu
         )
@@ -104,15 +117,37 @@ class TiffViewerWindow(QWidget):
         control.setContentsMargins(0, 0, 0, 0)
         control.setSpacing(8)
 
+        # Series picker (multi-series TIFF, or OBF stacks in a .msr) — switch
+        # series in-place without reopening the file.
+        self._series_label = QLabel("Series:")
+        self._series_combo = QComboBox()
+        self._series_combo.setMinimumWidth(180)
+        for name in self._source.series_names():
+            self._series_combo.addItem(str(name))
+        self._series_combo.setCurrentIndex(int(self._source.metadata.series_index))
+        self._series_combo.currentIndexChanged.connect(self._on_series_changed)
+        control.addWidget(self._series_label)
+        control.addWidget(self._series_combo)
+
         self._t_spin = self._make_axis_spin("T")
         self._c_spin = self._make_axis_spin("C")
-        self._z_spin = self._make_axis_spin("Z")
-        for label, spin in (("T:", self._t_spin), ("C:", self._c_spin), ("Z:", self._z_spin)):
-            lbl = QLabel(label)
-            lbl.setProperty("axis_label", label[0])
-            control.addWidget(lbl)
-            control.addWidget(spin)
-        control.addStretch()
+        self._t_label = QLabel("T:")
+        self._c_label = QLabel("C:")
+        control.addWidget(self._t_label)
+        control.addWidget(self._t_spin)
+        control.addWidget(self._c_label)
+        control.addWidget(self._c_spin)
+
+        # Z as a horizontal slice slider (render-view style) + a value read-out.
+        self._z_label = QLabel("Z:")
+        self._z_slider = QSlider(Qt.Orientation.Horizontal)
+        self._z_slider.setMinimum(1)
+        self._z_slider.setMaximum(1)
+        self._z_slider.valueChanged.connect(lambda _v: self._on_axis_changed("Z"))
+        self._z_value = QLabel("1/1")
+        control.addWidget(self._z_label)
+        control.addWidget(self._z_slider, 1)
+        control.addWidget(self._z_value)
         root.addWidget(self._control_row)
 
         self._info_label = QLabel("")
@@ -138,8 +173,12 @@ class TiffViewerWindow(QWidget):
 
     def _refresh_controls(self) -> None:
         axes = self._source.metadata.axes
-        any_visible = False
-        for axis, spin in (("T", self._t_spin), ("C", self._c_spin), ("Z", self._z_spin)):
+        multi_series = int(self._source.metadata.series_count) > 1
+        self._series_label.setVisible(multi_series)
+        self._series_combo.setVisible(multi_series)
+        any_visible = multi_series
+        for axis, spin, lbl in (("T", self._t_spin, self._t_label),
+                                ("C", self._c_spin, self._c_label)):
             size = self._source.axis_size(axis)
             spin.blockSignals(True)
             spin.setRange(1, max(size, 1))
@@ -147,21 +186,69 @@ class TiffViewerWindow(QWidget):
             spin.blockSignals(False)
             visible = axis in axes and size > 1
             spin.setVisible(visible)
-            for label in self._control_row.findChildren(QLabel):
-                if label.property("axis_label") == axis:
-                    label.setVisible(visible)
+            lbl.setVisible(visible)
             any_visible = any_visible or visible
+        # Z slice slider
+        z_size = self._source.axis_size("Z")
+        self._z_slider.blockSignals(True)
+        self._z_slider.setMinimum(1)
+        self._z_slider.setMaximum(max(z_size, 1))
+        self._z_slider.setValue(1)
+        self._z_slider.blockSignals(False)
+        self._z_value.setText(f"1/{max(z_size, 1)}")
+        z_visible = "Z" in axes and z_size > 1
+        self._z_label.setVisible(z_visible)
+        self._z_slider.setVisible(z_visible)
+        self._z_value.setVisible(z_visible)
+        any_visible = any_visible or z_visible
         self._control_row.setVisible(any_visible)
 
-    def _on_axis_changed(self, _axis: str) -> None:
+    def _set_axes_visible(self, show: bool) -> None:
+        """Show/hide the plot axes + ticks (right-click › Axis). Hidden by default."""
+        self._show_axes = bool(show)
+        view = self._image_view.view
+        for ax in ("left", "bottom"):
+            try:
+                view.showAxis(ax, self._show_axes)
+            except Exception:
+                pass
+        if self._show_axes:
+            try:
+                view.setLabel("bottom", "X (nm)")
+                view.setLabel("left", "Y (nm)")
+            except Exception:
+                pass
+
+    def _title_text(self) -> str:
+        meta = self._source.metadata
+        if int(meta.series_count) > 1:
+            return f"{self._source.path.name} — {meta.image_name}"
+        return self._source.path.name
+
+    def _on_series_changed(self, index: int) -> None:
+        try:
+            self._source.set_series(int(index))
+        except Exception:
+            return
+        # Fresh series → drop manual levels and re-auto, refit the view.
+        self._manual_levels = None
+        self._auto_bc = True
         self._bc_auto_threshold = 0
+        self.setWindowTitle(self._title_text())
+        self._refresh_controls()
+        self._load_current_plane(fit_view=True)
+
+    def _on_axis_changed(self, axis: str) -> None:
+        self._bc_auto_threshold = 0
+        if axis == "Z":
+            self._z_value.setText(f"{self._z_slider.value()}/{self._z_slider.maximum()}")
         self._load_current_plane(fit_view=False)
 
     def _load_current_plane(self, *, fit_view: bool) -> None:
         self._plane = self._source.read_plane(
             t=self._t_spin.value() - 1,
             c=self._c_spin.value() - 1,
-            z=self._z_spin.value() - 1,
+            z=self._z_slider.value() - 1,
         )
         if self._auto_bc and not self._is_color_plane(self._plane):
             levels = self._compute_auto_levels(self._plane)
@@ -214,9 +301,9 @@ class TiffViewerWindow(QWidget):
 
     def _position_text(self) -> str:
         parts = []
-        for axis, spin in (("T", self._t_spin), ("C", self._c_spin), ("Z", self._z_spin)):
-            if spin.isVisible():
-                parts.append(f"{axis}={spin.value()}/{spin.maximum()}")
+        for axis, w in (("T", self._t_spin), ("C", self._c_spin), ("Z", self._z_slider)):
+            if w.isVisible():
+                parts.append(f"{axis}={w.value()}/{w.maximum()}")
         return "  |  " + ", ".join(parts) if parts else ""
 
     @staticmethod
@@ -238,6 +325,10 @@ class TiffViewerWindow(QWidget):
             action.setChecked(self._active_cmap == name)
             action.triggered.connect(lambda _checked=False, value=name: self._on_cmap_changed(value))
         menu.addAction("Brightness/Contrast", self._show_brightness_contrast)
+        axis_action = menu.addAction("Axis")
+        axis_action.setCheckable(True)
+        axis_action.setChecked(self._show_axes)
+        axis_action.triggered.connect(self._set_axes_visible)
         menu.addAction("Show Info", self._show_info_window)
         menu.addAction("Reset View", self._reset_view)
         menu.exec(self._image_view.ui.graphicsView.mapToGlobal(pos))

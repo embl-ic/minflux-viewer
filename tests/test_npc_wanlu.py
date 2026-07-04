@@ -183,6 +183,46 @@ def test_average_reports_progress_per_npc():
     assert calls[-1] == (5, 5)                   # monotone to total
 
 
+# --- goodness-of-fit metrics + gate -------------------------------------------
+def test_fit_metrics_on_good_fit():
+    lo, up = _two_ring_points(radius=37.5, inter=25.0, seed=2)
+    opt = dict(max_xy=20, max_z=8, tilt_max=15, r_bounds=(30, 45), d_bounds=(18, 35),
+               rim=20, k=3, min_fit_pts=3, max_iter=4000, max_fev=12000)
+    fit = nw.fit_two_ring(lo, up, np.zeros(3), opt)
+    m = nw._fit_metrics(fit, lo, up)
+    assert np.isfinite([m["radius"], m["rim"], m["inter"], m["tilt"],
+                        m["gof"], m["rmse"], m["nrmse"]]).all()
+    assert 0.5 < m["gof"] <= 1.0                 # a real two-ring explains most spread
+    assert m["rmse"] > 0
+    assert np.isclose(m["nrmse"], m["rmse"] / m["radius"])
+
+
+def test_average_table_and_gof_gate():
+    rng = np.random.default_rng(7)
+    rows, tid0 = [], 0
+    for i in range(8):
+        cx, cy, cz = rng.uniform(-2000, 2000), rng.uniform(-2000, 2000), rng.uniform(-40, 40)
+        raw, tid0 = _raw6_npc(cx, cy, cz, i + 1, rot=rng.uniform(0, 2 * np.pi),
+                              seed=i, tid0=tid0)
+        rows.append(raw)
+    raw6 = np.vstack(rows)
+    kw = dict(diameter_bounds=(65, 85), inter_ring_bounds=(20, 32), expected_inter_ring=25)
+
+    permissive = nw.average_npc_wanlu(raw6, min_gof=-10.0, **kw)
+    table = permissive["table"]
+    assert len(table) == permissive["n_npc"]
+    for r in table:                              # every reported column present
+        for k in ("npc_id", "n_locs", "radius", "rim", "inter", "tilt",
+                  "gof", "rmse", "nrmse", "accepted"):
+            assert k in r
+    assert all(r["accepted"] for r in table)     # nothing gated when min_gof=-10
+    assert permissive["n_accepted"] == sum(r["accepted"] for r in table)
+
+    strict = nw.average_npc_wanlu(raw6, min_gof=0.999, **kw)   # near-perfect required
+    assert strict["n_accepted"] <= permissive["n_accepted"]
+    assert strict["n_accepted"] == sum(r["accepted"] for r in strict["table"])
+
+
 def test_empty_inputs_safe():
     assert nw.detect_npc_wanlu(np.empty((0, 3)), np.empty(0))["n_npc"] == 0
     assert nw.average_npc_wanlu(np.empty((0, 6)))["n_accepted"] == 0

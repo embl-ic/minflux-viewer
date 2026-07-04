@@ -88,12 +88,20 @@ class LogWindow(QWidget):
 
         self._build_ui()
 
-        # Connect to AppState log signals
+        # Post a startup banner, then replay events already logged while the window
+        # was closed (they accumulate in state.log_history). The Log window is no
+        # longer auto-shown on the first message, so opening it later must still
+        # show the full history rather than only messages from this point on.
+        self._append("MINFLUX Data Viewer started", Level.INFO)
+        try:
+            for entry in state.log_history:
+                self._append(str(entry.get("message", "")), entry.get("level", Level.INFO))
+        except Exception:
+            pass
+
+        # Connect to AppState log signals for live updates
         state.log_message.connect(self._append)
         state.progress_log.connect(self._set_progress_line)
-
-        # Post a startup banner
-        self._append(f"MINFLUX Data Viewer started", Level.INFO)
 
     # ------------------------------------------------------------------
     # UI

@@ -20,7 +20,8 @@ def test_local_density_kdtree_counts_neighbours_within_radius():
 
     density = local_density_kdtree(points, radius_nm=5.0)
 
-    np.testing.assert_array_equal(density, [1.0, 1.0, 0.0])
+    # Centre point is counted: lone point -> 1, a pair within radius -> 2 each.
+    np.testing.assert_array_equal(density, [2.0, 2.0, 1.0])
 
 
 def test_local_density_kdtree_parallel_matches_serial():
@@ -32,7 +33,7 @@ def test_local_density_kdtree_parallel_matches_serial():
     serial = np.asarray(
         cKDTree(points).query_ball_point(points, r=80.0, return_length=True),
         dtype=float,
-    ) - 1.0
+    )
     np.testing.assert_array_equal(local_density_kdtree(points, radius_nm=80.0), serial)
 
 
@@ -113,7 +114,7 @@ def test_voxel_radius_count_uses_ball_in_3d():
         points, dimensions=3, radius_nm=10.0, voxel_size_nm=10.0,
     )
 
-    np.testing.assert_array_equal(density, [3.0, 1.0, 1.0, 1.0, 0.0])
+    np.testing.assert_array_equal(density, [4.0, 2.0, 2.0, 2.0, 1.0])
 
 
 def test_voxel_radius_count_supported_via_density_values():
@@ -130,7 +131,7 @@ def test_voxel_radius_count_supported_via_density_values():
     assert label == "2D voxel disk radius count"
     assert "radius=10" in detail
     np.testing.assert_array_equal(valid, [True, True])
-    np.testing.assert_array_equal(values, [1.0, 1.0])
+    np.testing.assert_array_equal(values, [2.0, 2.0])
 
 
 def test_auto_load_density_falls_back_to_voxel_radius_when_kdtree_work_is_too_large(

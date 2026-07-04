@@ -160,36 +160,59 @@ class ScaleBarItem(pg.GraphicsObject):
             pass
         return 1.0, 1.0
 
+    def _axis_inverted(self) -> tuple[bool, bool]:
+        """(y_inverted, x_inverted) of the host ViewBox (both default False)."""
+        try:
+            return bool(self._vb.yInverted()), bool(self._vb.xInverted())
+        except Exception:
+            return False, False
+
     def _content_rect(self) -> QRectF:
         """Local bounding rect enclosing bar + label (+ padding)."""
         bw, bh = self._bar_size()
         px, py = self._pixel_size()
+        y_inv, x_inv = self._axis_inverted()
         fm = QFontMetricsF(self._font)
         lw = fm.horizontalAdvance(self._text) * px
         lh = fm.height() * py
         pad_x, pad_y = _PAD_PX * px, _PAD_PX * py
         gap_x, gap_y = _GAP_PX * px, _GAP_PX * py
         if self._horizontal:
+            up = -1.0 if y_inv else 1.0            # data direction that is up on screen
             x0 = min(-bw / 2.0, -lw / 2.0) - pad_x
             x1 = max(bw / 2.0, lw / 2.0) + pad_x
-            y0 = -bh / 2.0 - pad_y
-            y1 = bh / 2.0 + gap_y + lh + pad_y
+            near = -up * (bh / 2.0)                 # bar edge opposite the label
+            far = up * (bh / 2.0 + gap_y + lh)      # far edge of the label
+            y0 = min(near, far) - pad_y
+            y1 = max(near, far) + pad_y
         else:
-            x0 = -bw / 2.0 - pad_x
-            x1 = bw / 2.0 + gap_x + lw + pad_x
+            right = -1.0 if x_inv else 1.0          # data direction that is right on screen
+            near = -right * (bw / 2.0)
+            far = right * (bw / 2.0 + gap_x + lw)
+            x0 = min(near, far) - pad_x
+            x1 = max(near, far) + pad_x
             y0 = min(-bh / 2.0, -lh / 2.0) - pad_y
             y1 = max(bh / 2.0, lh / 2.0) + pad_y
         return QRectF(x0, y0, x1 - x0, y1 - y0)
 
     def _relayout(self) -> None:
+        # Keep the label just outside the bar ON SCREEN (anchor = the text edge
+        # nearest the bar), so it never hides behind a thick bar when zoomed in.
+        # A TextItem always draws upright, so with a bottom anchor the text sits
+        # above its position on screen — we just place that position at the bar's
+        # screen-top edge, flipping the data-offset sign when the axis is inverted
+        # (in a y-inverted view "up on screen" is -y in data).
         bw, bh = self._bar_size()
         px, py = self._pixel_size()
+        y_inv, x_inv = self._axis_inverted()
         if self._horizontal:
+            up = -1.0 if y_inv else 1.0
             self._label.setAnchor((0.5, 1.0))
-            self._label.setPos(0.0, bh / 2.0 + _GAP_PX * py)
+            self._label.setPos(0.0, up * (bh / 2.0 + _GAP_PX * py))
         else:
+            right = -1.0 if x_inv else 1.0
             self._label.setAnchor((0.0, 0.5))
-            self._label.setPos(bw / 2.0 + _GAP_PX * px, 0.0)
+            self._label.setPos(right * (bw / 2.0 + _GAP_PX * px), 0.0)
 
     def _on_range_changed(self, *_args) -> None:
         self.prepareGeometryChange()

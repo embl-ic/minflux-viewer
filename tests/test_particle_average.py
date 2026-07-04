@@ -158,9 +158,145 @@ def test_empty_particles_safe():
     assert res["n_particles"] == 0
 
 
+# --- axial tilt (3-D) ----------------------------------------------------------
+def _tilt_points(P, deg, axis="x"):
+    th = np.deg2rad(deg)
+    c, s = np.cos(th), np.sin(th)
+    R = (np.array([[1, 0, 0], [0, c, -s], [0, s, c]]) if axis == "x"
+         else np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]]))
+    return (R @ np.asarray(P, float).T).T
+
+
+def test_estimate_tilt_normal_planar_is_zero():
+    rng = np.random.default_rng(0)
+    P = np.column_stack([rng.normal(0, 40, 300), rng.normal(0, 40, 300), np.zeros(300)])
+    normal, tilt = pa.estimate_tilt_normal(P)
+    assert tilt < 1.0 and abs(abs(normal[2]) - 1.0) < 1e-6
+
+
+def test_flatten_tilt_recovers_tilt_angle():
+    rng = np.random.default_rng(1)
+    disk = np.column_stack([rng.normal(0, 40, 500), rng.normal(0, 40, 500), rng.normal(0, 2, 500)])
+    tilted = _tilt_points(disk, 20.0, axis="x")
+    flat, tilt = pa.flatten_tilt(tilted)
+    assert abs(tilt - 20.0) < 3.0
+    assert np.std(flat[:, 2]) < 0.5 * np.std(tilted[:, 2])     # flattened in Z
+
+
+def test_template_free_correct_tilt_flattens_3d():
+    parts = []
+    for i in range(8):
+        r = np.random.default_rng(i)
+        th = r.uniform(0, 2 * np.pi, 200)
+        ring = np.column_stack([50 * np.cos(th), 50 * np.sin(th), r.normal(0, 2, 200)])
+        ring = pa.transform_points(ring, r.uniform(0, 360))        # in-plane rotation
+        ring = _tilt_points(ring, r.uniform(10, 25), axis="x")     # random out-of-plane tilt
+        parts.append(ring)
+    off = pa.average_template_free(parts, box_nm=160, pixel_nm=3, n_angles=36, n_iter=3,
+                                   correct_tilt=False)
+    on = pa.average_template_free(parts, box_nm=160, pixel_nm=3, n_angles=36, n_iter=3,
+                                  correct_tilt=True)
+    assert on["mean_tilt_deg"] > 5.0
+    assert np.std(on["points"][:, 2]) < np.std(off["points"][:, 2])   # tilt removed
+
+
+def test_particle_transforms_reproduce_pool_and_map_channels():
+    """Multi-channel enabler: the exported per-particle 4×4 transforms reproduce the
+    reference pool exactly and, applied to a second channel, preserve its offset."""
+    parts = []
+    for i in range(6):
+        r = np.random.default_rng(i)
+        a = np.arange(8) * 2 * np.pi / 8
+        ring = np.column_stack([50 * np.cos(a), 50 * np.sin(a), np.zeros(8)])
+        ring = pa.transform_points(ring, r.uniform(0, 360))
+        ring = _tilt_points(ring, r.uniform(5, 20), axis="x")
+        parts.append(ring + r.uniform(-20, 20, 3))
+    # tilt-corrected: the exported transforms reproduce the pool exactly (they
+    # encode the per-particle untilt + centring + 2-D alignment)
+    res = pa.average_template_free(parts, box_nm=200, pixel_nm=4, n_angles=36, n_iter=3,
+                                   correct_tilt=True)
+    mats = res["particle_transforms"]
+    assert len(mats) == len(parts)
+    repro = pa.pool_transformed(parts, mats)
+    np.testing.assert_allclose(np.sort(repro, axis=0), np.sort(res["points"], axis=0), atol=1e-6)
+
+    # no-tilt replay: a second channel offset by pure +Z keeps that Z offset in the
+    # averaged frame (the 2-D transform passes Z through) — the multi-channel promise
+    res2 = pa.average_template_free(parts, box_nm=200, pixel_nm=4, n_angles=36, n_iter=3,
+                                    correct_tilt=False)
+    mats2 = res2["particle_transforms"]
+    ch2 = [p + np.array([0.0, 0.0, 12.0]) for p in parts]
+    pooled2 = pa.pool_transformed(ch2, mats2)
+    assert pooled2.shape == res2["points"].shape
+    assert abs(float(np.mean(pooled2[:, 2] - res2["points"][:, 2])) - 12.0) < 1e-6
+
+
 def test_geometry_template_image_shapes():
     for kind, params in (("ring", {"diameter_nm": 100, "rim_nm": 15}),
                          ("disk", {"diameter_nm": 80}), ("gaussian", {"fwhm_nm": 40})):
         img = pa.geometry_template_image(kind, params, box_nm=150, pixel_nm=3)
         assert img.shape == (50, 50)
         assert np.isfinite(img).all() and img.max() > 0
+
+
+# --- NPC 8-fold template model -------------------------------------------------
+def _corner_ring(seed, radius=50.0, corners=8, per=25, csig=3.0, rot=None):
+    """A ring of `corners` Gaussian blobs at a random rotation (2-D)."""
+    r = np.random.default_rng(seed)
+    rot = r.uniform(0, 2 * np.pi) if rot is None else rot
+    pts = []
+    for k in range(corners):
+        a = rot + 2 * np.pi * k / corners
+        cx, cy = radius * np.cos(a), radius * np.sin(a)
+        pts.append(np.column_stack([r.normal(cx, csig, per), r.normal(cy, csig, per)]))
+    return np.vstack(pts)
+
+
+def _ring_profile_harmonic(img, box_nm=160.0, pixel_nm=2.0, radius=50.0, m=720):
+    """Dominant angular Fourier harmonic of the template sampled on a ring."""
+    half, n = box_nm / 2.0, img.shape[0]
+    c = np.linspace(-half + pixel_nm / 2, half - pixel_nm / 2, n)
+    ang = np.linspace(0, 2 * np.pi, m, endpoint=False)
+    ix = np.abs(c[:, None] - radius * np.cos(ang)[None, :]).argmin(0)
+    iy = np.abs(c[:, None] - radius * np.sin(ang)[None, :]).argmin(0)
+    prof = img[ix, iy]
+    return int(np.argmax(np.abs(np.fft.rfft(prof - prof.mean()))))
+
+
+def _dominant_angular_harmonic(xy, bins=180):
+    ang = np.arctan2(xy[:, 1], xy[:, 0])
+    h, _ = np.histogram(ang, bins=bins, range=(-np.pi, np.pi))
+    return int(np.argmax(np.abs(np.fft.rfft(h - h.mean()))[1:17]) + 1)
+
+
+def test_geometry_template_image_npc_is_n_fold():
+    for fold in (6, 8, 12):
+        img = pa.geometry_template_image("npc", {"diameter_nm": 100.0, "corner_nm": 8.0,
+                                                 "symmetry": fold}, box_nm=160, pixel_nm=2.0)
+        assert img.shape == (80, 80) and img.max() > 0
+        assert _ring_profile_harmonic(img) == fold        # sub-units break C∞ → Cn
+
+
+def test_template_provided_npc_phase_locks_corners():
+    parts = [_corner_ring(i) for i in range(12)]
+    tmpl = pa.geometry_template_image("npc", {"diameter_nm": 100.0, "corner_nm": 10.0,
+                                             "symmetry": 8}, box_nm=160, pixel_nm=2.0, sigma_nm=2.0)
+    res = pa.average_particles(parts, mode="template", template_img=tmpl, box_nm=160,
+                               pixel_nm=2.0, n_angles=72, sigma_nm=2.0)
+    assert res["mode"] == "template"
+    assert _dominant_angular_harmonic(res["points"]) == 8   # pooled corners cluster 8-fold
+
+
+def test_template_provided_npc_with_tilt_runs_3d():
+    parts = []
+    for i in range(8):
+        p = _corner_ring(i)
+        z = np.random.default_rng(i).normal(0, 2, p.shape[0])
+        p = _tilt_points(np.column_stack([p, z]), np.random.default_rng(i + 99).uniform(10, 25))
+        parts.append(p)
+    tmpl = pa.geometry_template_image("npc", {"diameter_nm": 100.0, "corner_nm": 10.0,
+                                             "symmetry": 8}, box_nm=160, pixel_nm=2.0, sigma_nm=2.0)
+    res = pa.average_particles(parts, mode="template", template_img=tmpl, box_nm=160,
+                               pixel_nm=2.0, n_angles=72, sigma_nm=2.0, correct_tilt=True)
+    assert res["mean_tilt_deg"] > 5.0
+    assert res["points"].shape[1] == 3

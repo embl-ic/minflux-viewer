@@ -41,8 +41,9 @@ def format_progress_bar(fraction: float, *, width: int = 10, done: bool = False)
 class _TaskProgress:
     """Handle yielded by :meth:`AppState.task` — call ``update(fraction)``."""
 
-    def __init__(self, state: "AppState") -> None:
+    def __init__(self, state: "AppState", header: str = "") -> None:
         self._state = state
+        self._header = header
         self._last_pct = -1
 
     def update(self, fraction: float) -> None:
@@ -50,6 +51,8 @@ class _TaskProgress:
         if pct != self._last_pct:                  # throttle: only on % change
             self._last_pct = pct
             self._state.log_progress(format_progress_bar(fraction))
+            if self._header:                       # mirror into the status bar
+                self._state.status_progress(self._header, fraction)
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +510,19 @@ class AppState(QObject):
         """
         self.progress_log.emit(text, final)
 
+    def status_progress(self, header: str, fraction: float | None = None) -> None:
+        """Push a concise progress line to the **main-window status bar** so a
+        long computation can be traced there (not just in the Log window).
+
+        ``fraction`` (0..1) appends a percentage; omit it for an indeterminate
+        "<header>…" line. Safe to call from a signal slot on the GUI thread."""
+        head = str(header).rstrip("… ").rstrip(".")
+        if fraction is None:
+            self.status_message.emit(f"{head}…")
+        else:
+            pct = int(round(max(0.0, min(1.0, fraction)) * 100.0))
+            self.status_message.emit(f"{head}…  {pct}%")
+
     @contextmanager
     def task(self, message: str):
         """Log *message* as a header, then a refreshing ASCII progress bar.
@@ -519,16 +535,20 @@ class AppState(QObject):
                     t.update((i + 1) / n)        # → "==========  N % =========="
             # the bar is finalized to DONE (or FAILED on exception) on exit
         """
+        header = str(message).rstrip("… ").rstrip(".")
         self.log(message)
         self.log_progress(format_progress_bar(0.0))
-        handle = _TaskProgress(self)
+        self.status_progress(header)
+        handle = _TaskProgress(self, header)
         try:
             yield handle
         except BaseException:
             self.log_progress("=" * 10 + "  FAILED  " + "=" * 10, final=True)
+            self.status_message.emit(f"{header}: failed.")
             raise
         else:
             self.log_progress(format_progress_bar(1.0, done=True), final=True)
+            self.status_message.emit(f"{header}: done.")
 
     # ------------------------------------------------------------------
     # Preferences

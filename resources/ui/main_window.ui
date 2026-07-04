@@ -110,7 +110,6 @@
     <widget class="QMenu" name="menuTracking">
      <property name="title"><string>&amp;Tracking</string></property>
      <addaction name="actionParticleTracking"/>
-     <addaction name="actionTraceViewer"/>
      <addaction name="actionMsdAnalysis"/>
     </widget>
    </widget>

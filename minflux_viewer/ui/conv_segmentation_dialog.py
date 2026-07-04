@@ -226,14 +226,16 @@ class ConvSegmentationWindow(QDialog):
         center = QVBoxLayout()
         layers = QHBoxLayout()
         layers.addWidget(QLabel("Show:"))
+        # Default layers: Detection + Data on, Response off (restored from prefs if
+        # the user changed them — see _restore_prefs / _save_prefs).
         self._show_detection = QCheckBox("Detection")
         self._show_detection.setChecked(True)
         self._show_detection.toggled.connect(self._update_layer_visibility)
         self._show_response = QCheckBox("Response")
-        self._show_response.setChecked(True)
+        self._show_response.setChecked(False)
         self._show_response.toggled.connect(self._update_layer_visibility)
         self._show_image = QCheckBox("Data")
-        self._show_image.setChecked(False)
+        self._show_image.setChecked(True)
         self._show_image.toggled.connect(self._update_layer_visibility)
         layers.addWidget(self._show_detection)
         layers.addWidget(self._show_response)
@@ -393,17 +395,10 @@ class ConvSegmentationWindow(QDialog):
         ds = self._dataset()
         if ds is None:
             return np.empty((0, 2))
-        try:
-            loc = np.asarray(ds.loc_nm, dtype=float)
-        except Exception:
-            return np.empty((0, 2))
-        if loc.ndim != 2 or loc.shape[0] == 0 or loc.shape[1] < 2:
-            return np.empty((0, 2))
-        mask = np.asarray(ds.filter_mask, dtype=bool)
-        if mask.shape[0] == loc.shape[0]:
-            loc = loc[mask]
-        xy = loc[:, :2]
-        return xy[np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])]
+        # Detect in display coordinates (loc_nm + overlay transform) — the frame
+        # ROIs live in — so detections land correctly on an overlay channel.
+        from ..core.roi_crop import display_xy_filtered
+        return display_xy_filtered(ds)
 
     def _model_key(self) -> str:
         return self._model_combo.currentData()
@@ -472,7 +467,10 @@ class ConvSegmentationWindow(QDialog):
             if "max_detections" in cfg:
                 self._max_spin.setValue(int(cfg["max_detections"]))
             for chk, key in ((self._zero_mean, "zero_mean"), (self._sqrt, "sqrt"),
-                             (self._dog, "dog"), (self._ring_validate, "ring_validate")):
+                             (self._dog, "dog"), (self._ring_validate, "ring_validate"),
+                             (self._show_detection, "show_detection"),
+                             (self._show_response, "show_response"),
+                             (self._show_image, "show_data")):
                 if key in cfg:
                     chk.setChecked(bool(cfg[key]))
         finally:
@@ -496,6 +494,9 @@ class ConvSegmentationWindow(QDialog):
             "max_outside": self._max_outside.value(),
             "box_size": self._box_size.value(),
             "model_params": self._model_params,
+            "show_detection": self._show_detection.isChecked(),
+            "show_response": self._show_response.isChecked(),
+            "show_data": self._show_image.isChecked(),
         }
         try:
             self._state.save_prefs()

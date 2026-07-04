@@ -134,9 +134,13 @@ class BrightnessContrastDialog(QDialog):
         self._levels_initialized = False
 
         self.setWindowTitle("Brightness / Contrast")
+        # A Tool palette *owned* by its opener (render / TIFF / segmentation window):
+        # it floats above its owner and shares the owner's virtual desktop. It is
+        # deliberately NOT WindowStaysOnTopHint — a WS_EX_TOPMOST window is shown on
+        # *every* Windows virtual desktop (it "follows" you across desktops), which
+        # is unwanted. Ownership already keeps it above its opener without topmost.
         self.setWindowFlags(
             self.windowFlags()
-            | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
         self.resize(230, 230)

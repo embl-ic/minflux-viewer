@@ -168,7 +168,6 @@ class Ui_MainWindow(object):
         self.menuLocPrecision.addAction(self.actionLocPrecisionCrlb)
         self.menuLocPrecision.addAction(self.actionLocPrecisionStdDev)
         self.menuTracking.addAction(self.actionParticleTracking)
-        self.menuTracking.addAction(self.actionTraceViewer)
         self.menuTracking.addAction(self.actionMsdAnalysis)
         self.menuHelp.addAction(self.actionConsole)
         self.menuHelp.addAction(self.actionMemoryMonitor)
