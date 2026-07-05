@@ -15,6 +15,10 @@ from PyQt6.QtWidgets import QApplication
 from ..core.roi import RoiRecord, RoiStore
 from ..core.roi_selection import ROI_MASKS_STATE_KEY, store_roi_mask
 
+# Polyline-family shapes whose vertices can be added/deleted via the right-click
+# menu (rectangle/oval/point/line/angle have fixed or handle-defined geometry).
+_VERTEX_EDIT_TYPES = {"polygon", "freehand", "polyline", "freehand_line", "magnetic_lasso"}
+
 # For a 2-D view plane, which two XYZ columns are plotted (i, j) and which is the
 # out-of-plane "depth" column (k). Used to give a drawn ROI a full 3-D position:
 # the in-plane coords come from the click, the depth coord from the centre of the
@@ -452,7 +456,7 @@ class RoiOverlayController(QObject):
             hit = self._record_at(pos) if pos is not None else None
             if hit is not None:
                 self.activate()
-                self._show_roi_context_menu(hit, event.globalPosition().toPoint())
+                self._show_roi_context_menu(hit, event.globalPosition().toPoint(), pos)
                 return True
             return False
         if event.type() == QEvent.Type.FocusIn:
@@ -1271,7 +1275,8 @@ class RoiOverlayController(QObject):
                 return True
         return False
 
-    def _show_roi_context_menu(self, hit: tuple[str, RoiRecord], global_pos) -> None:
+    def _show_roi_context_menu(self, hit: tuple[str, RoiRecord], global_pos,
+                               view_pos: tuple[float, float] | None = None) -> None:
         from PyQt6.QtWidgets import QMenu
 
         from ..core.roi_convert import (
@@ -1289,6 +1294,15 @@ class RoiOverlayController(QObject):
         if kind == "session":
             add_all_action = menu.addAction("Add all session points to Manager")
             add_all_action.setEnabled(len(self._session_points) > 0)
+        # Vertex editing for polyline-family shapes: add a point on the nearest
+        # edge, or delete the vertex nearest the right-click.
+        add_point_action = delete_point_action = None
+        if kind in {"draft", "stored"} and record.type in _VERTEX_EDIT_TYPES and view_pos is not None:
+            menu.addSeparator()
+            add_point_action = menu.addAction("Add point")
+            delete_point_action = menu.addAction("Delete point")
+            can_del, _vi = self._vertex_delete_candidate(record, view_pos)
+            delete_point_action.setEnabled(can_del)
         menu.addSeparator()
         convert_actions = {}
         targets = available_conversions(record)
@@ -1311,6 +1325,10 @@ class RoiOverlayController(QObject):
             self._add_hit_to_manager(kind, record)
         elif add_all_action is not None and chosen is add_all_action:
             self._add_all_session_points_to_manager()
+        elif add_point_action is not None and chosen is add_point_action:
+            self._add_vertex_hit(kind, record, view_pos)
+        elif delete_point_action is not None and chosen is delete_point_action:
+            self._delete_vertex_hit(kind, record, view_pos)
         elif chosen in convert_actions:
             self._convert_hit(kind, record, convert_actions[chosen])
         elif chosen is resize_action:
@@ -1345,6 +1363,72 @@ class RoiOverlayController(QObject):
             return
         if kind == "session":
             self._remove_session_point(record.id)
+        self.replace_draft(new_record)
+
+    # ------------------------------------------------------- vertex editing
+    def _is_closed(self, record: RoiRecord) -> bool:
+        """Whether a polyline-family record forms a closed loop (mirrors _make_item)."""
+        g = record.geometry
+        if record.type in {"polyline", "freehand_line"}:
+            return bool(g.get("closed", False))
+        return bool(g.get("closed", record.type != "line"))
+
+    def _vertex_delete_candidate(self, record: RoiRecord,
+                                 view_pos: tuple[float, float]) -> tuple[bool, int]:
+        """(can_delete, vertex_index): a vertex may be deleted when the right-click
+        is within hit tolerance of it and the shape stays above its minimum count."""
+        from ..core.roi_vertex_edit import min_vertices, nearest_vertex
+
+        projected = self._project_points(record)
+        pts = record.geometry.get("points", [])
+        if len(projected) != len(pts) or len(projected) < 2:
+            return False, -1
+        idx, dist = nearest_vertex(projected, view_pos)
+        if idx < 0:
+            return False, -1
+        if len(pts) <= min_vertices(self._is_closed(record)):
+            return False, idx
+        return dist <= self._hit_tolerance(), idx
+
+    def _add_vertex_hit(self, kind: str, record: RoiRecord,
+                        view_pos: tuple[float, float]) -> None:
+        from ..core.roi_vertex_edit import insert_vertex, nearest_edge
+
+        projected = self._project_points(record)
+        pts = record.geometry.get("points", [])
+        if len(projected) != len(pts) or len(pts) < 2:
+            return
+        seg, t = nearest_edge(projected, view_pos, closed=self._is_closed(record))
+        if seg < 0:
+            return
+        new_pts = insert_vertex(pts, seg, t)
+        self._commit_vertex_edit(kind, record, new_pts)
+
+    def _delete_vertex_hit(self, kind: str, record: RoiRecord,
+                           view_pos: tuple[float, float]) -> None:
+        from ..core.roi_vertex_edit import delete_vertex
+
+        can_del, idx = self._vertex_delete_candidate(record, view_pos)
+        if not can_del:
+            return
+        new_pts = delete_vertex(record.geometry.get("points", []), idx)
+        self._commit_vertex_edit(kind, record, new_pts)
+
+    def _commit_vertex_edit(self, kind: str, record: RoiRecord,
+                            new_points: list[list[float]]) -> None:
+        """Apply an edited vertex list. Same type/name/colour as the source — a
+        *stored* ROI is updated in place (like Convert/Resize); a *draft* stays an
+        editable draft in the view."""
+        from dataclasses import replace
+
+        new_geom = {**record.geometry, "points": new_points}
+        new_record = replace(record, geometry=new_geom)
+        if kind == "stored":
+            self._delete_mask_for_record(record)  # geometry changed → old mask is stale
+            new_record.name = record.name          # vertex edit keeps type → keep name
+            self.store.update(record.id, new_record)
+            self.store.select([record.id])
+            return
         self.replace_draft(new_record)
 
     def _roi_size_for_conversion(self, record: RoiRecord, target: str):
