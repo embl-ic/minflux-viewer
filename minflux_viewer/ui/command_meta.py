@@ -131,6 +131,13 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "Skeletonize a region ROI to its centreline.", "process"),
     "actionRoiConvexHull": CommandMeta(C + "roi_convert.py", ("roi", "hull", "convex"),
                               "Convex hull of a polygon/freehand ROI.", "process"),
+    "actionRoi3D": CommandMeta(U + "roi_3d_dialog.py",
+                              ("roi", "3d", "volume", "extrude", "orthogonal", "xy", "xz", "yz",
+                               "crop", "select", "region", "intersection"),
+                              "Draw a 3-D ROI by intersecting 2-D shapes extruded from the "
+                              "XY/XZ/YZ ortho views; crop the active dataset to it.",
+                              "process", inputs=("active dataset (loc)",),
+                              outputs=("cropped dataset (localizations inside the 3-D ROI)",)),
     # Convert sub-menu actions are tagged as a group (see _apply_command_meta).
     "_roi_convert": CommandMeta(C + "roi_convert.py", ("roi", "convert", "rectangle", "oval", "point", "line", "region"),
                               "Convert an ROI to another type.", "process"),

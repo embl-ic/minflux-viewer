@@ -469,6 +469,10 @@ class MainWindow(QMainWindow):
         self.actionRoiConvexHull = QAction("Convex Hull", self)
         self.actionRoiConvexHull.triggered.connect(self._convex_hull_active_roi)
         self.menuProcessRoi.addAction(self.actionRoiConvexHull)
+        self.menuProcessRoi.addSeparator()
+        self.actionRoi3D = QAction("3D ROI", self)
+        self.actionRoi3D.triggered.connect(self._show_roi_3d)
+        self.menuProcessRoi.addAction(self.actionRoi3D)
 
         # Help menu
         u.actionAbout.triggered.connect(self._show_about)
@@ -737,6 +741,7 @@ class MainWindow(QMainWindow):
             self.actionRoiResize,
             self.actionRoiSkeletonize,
             self.actionRoiConvexHull,
+            self.actionRoi3D,
             u.menuBatchProcessing.menuAction(),
             u.actionBatchRender,
             u.actionBatchExport,
@@ -2134,6 +2139,19 @@ class MainWindow(QMainWindow):
         from .conv_segmentation_3d_dialog import ConvSegmentation3DWindow
         from .modeless import show_modeless
         win = ConvSegmentation3DWindow(self._state, idx, owner=self)
+        show_modeless(win, self)
+
+    def _show_roi_3d(self) -> None:
+        """Process › ROI › 3D ROI — draw a 3-D ROI by intersecting 2-D shapes
+        extruded from the XY / XZ / YZ ortho views, and crop the active dataset
+        to the selected localizations."""
+        idx = self._state.active_idx
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        from .modeless import show_modeless
+        from .roi_3d_dialog import Roi3DWindow
+        win = Roi3DWindow(self._state, idx, owner=self)
         show_modeless(win, self)
 
     def _show_curvilinear_segmentation(self) -> None:
