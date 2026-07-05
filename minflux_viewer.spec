@@ -29,6 +29,11 @@ EXE_ICON = str(ROOT / "resources" / "icons" / "minflux_viewer_logo.png") \
 _ICNS = ROOT / "resources" / "icons" / "minflux_viewer_logo.icns"
 MAC_ICON = str(_ICNS) if _ICNS.exists() else None
 
+# UPX shrinks the Windows build, but on macOS it corrupts Mach-O binaries — a
+# UPX-compressed libpython fails to load at boot with
+# "PYI-xxxxx:ERROR: failed to load python shared library" — so disable it there.
+USE_UPX = sys.platform != "darwin"
+
 # ---------------------------------------------------------------------------
 # Data files to bundle
 # ---------------------------------------------------------------------------
@@ -140,7 +145,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=USE_UPX,
     console=False,          # no console window (GUI app)
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -158,7 +163,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=USE_UPX,
     upx_exclude=[],
     name="minflux_viewer",
 )
