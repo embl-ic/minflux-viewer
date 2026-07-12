@@ -8,6 +8,7 @@ from minflux_viewer.analysis.localization_precision import (
     FRC_THRESHOLD,
     MIN_LOCS_PER_TRACE,
     crlb_precision,
+    excess_precision,
     frc_resolution,
     stddev_per_trace,
 )
@@ -252,3 +253,30 @@ def test_crlb_no_valid_counts():
     assert r.n_locs == 0
     assert not np.isfinite(r.median_sigma_ideal)
     assert r.status
+
+
+# ---------------------------------------------------------------------------
+# Precision budget — STD² = σ_fl² + σ_CRB² (Marin & Ries 2026 decomposition)
+# ---------------------------------------------------------------------------
+
+def test_excess_precision_decomposition():
+    # σ_fl = sqrt(STD² − σ_CRB²): 10² = 8² + 6²
+    assert excess_precision(10.0, 6.0) == pytest.approx(8.0)
+    # round-trips: STD = sqrt(σ_CRB² + σ_fl²)
+    crb, fl = 6.0, 8.0
+    assert np.hypot(crb, excess_precision(10.0, crb)) == pytest.approx(10.0)
+
+
+def test_excess_precision_photon_limited_clamps_to_zero():
+    # measured spread at/below the bound → no excess (photon-limited)
+    assert excess_precision(6.0, 10.0) == 0.0
+    assert excess_precision(5.0, 5.0) == 0.0
+
+
+def test_excess_precision_invalid_inputs_are_nan():
+    for bad in (np.nan, np.inf):
+        assert not np.isfinite(excess_precision(bad, 6.0))
+        assert not np.isfinite(excess_precision(10.0, bad))
+    # non-positive measured spread → NaN (nothing to decompose)
+    assert not np.isfinite(excess_precision(0.0, 6.0))
+    assert not np.isfinite(excess_precision(-1.0, 6.0))

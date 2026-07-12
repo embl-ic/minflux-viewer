@@ -22,48 +22,35 @@ def _points(bead_ids: list[int]) -> np.ndarray:
 
 def test_align_channel_filters_raw_mbm_points_to_metadata_used_beads():
     pytest.importorskip("PyQt6")
-    from minflux_viewer.msr import state as msr_state
     from minflux_viewer.msr.alignment import align_channels_from_arrays
     from minflux_viewer.plugins.msr_reader.msr_reader_dialog import MsrReaderDialog
 
-    old_meta = getattr(msr_state, "mbm_meta_map", None)
-    try:
-        msr_state.mbm_meta_map = {
-            "ref": {
-                "points_by_gri": {
-                    str(g): {"gri": g, "name": f"R{g}"}
-                    for g in (1, 2, 3, 4)
-                },
-                "used": ["R1", "R3"],
-            },
-            "moving": {
-                "points_by_gri": {
-                    str(g): {"gri": g, "name": f"R{g}"}
-                    for g in (1, 2, 3, 4)
-                },
-                "used": ["R1", "R3"],
-            },
-        }
-        dlg = MsrReaderDialog.__new__(MsrReaderDialog)
-        dlg.parsed = {}
-        logs: list[str] = []
-        dlg.log = logs.append
+    dlg = MsrReaderDialog.__new__(MsrReaderDialog)
+    dlg.parsed = {}
+    # Per-instance parsed maps (each reader keeps its own — the dialog no longer
+    # reads the shared module-global msr.state for bead metadata).
+    dlg._mfx_map = {}
+    dlg._mbm_map = {}
+    dlg._mbm_meta_map = {
+        "ref": {
+            "points_by_gri": {str(g): {"gri": g, "name": f"R{g}"} for g in (1, 2, 3, 4)},
+            "used": ["R1", "R3"],
+        },
+        "moving": {
+            "points_by_gri": {str(g): {"gri": g, "name": f"R{g}"} for g in (1, 2, 3, 4)},
+            "used": ["R1", "R3"],
+        },
+    }
+    logs: list[str] = []
+    dlg.log = logs.append
 
-        ref = dlg._filter_mbm_points_to_used_beads("ref", _points([1, 2, 3, 4]), log_prefix="[align]")
-        moving = dlg._filter_mbm_points_to_used_beads("moving", _points([1, 2, 3, 4]), log_prefix="[align]")
-        result = align_channels_from_arrays("ref", ref, "moving", moving)
+    ref = dlg._filter_mbm_points_to_used_beads("ref", _points([1, 2, 3, 4]), log_prefix="[align]")
+    moving = dlg._filter_mbm_points_to_used_beads("moving", _points([1, 2, 3, 4]), log_prefix="[align]")
+    result = align_channels_from_arrays("ref", ref, "moving", moving)
 
-        assert result.bead_ids.tolist() == [1, 3]
-        assert {int(g) for g in np.unique(ref["gri"])} == {1, 3}
-        assert {int(g) for g in np.unique(moving["gri"])} == {1, 3}
-    finally:
-        if old_meta is None:
-            try:
-                del msr_state.mbm_meta_map
-            except AttributeError:
-                pass
-        else:
-            msr_state.mbm_meta_map = old_meta
+    assert result.bead_ids.tolist() == [1, 3]
+    assert {int(g) for g in np.unique(ref["gri"])} == {1, 3}
+    assert {int(g) for g in np.unique(moving["gri"])} == {1, 3}
 
 
 def test_alignment_plot_3d_builds_visible_gl_layers():

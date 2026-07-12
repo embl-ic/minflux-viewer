@@ -56,22 +56,20 @@ COMMAND_META: dict[str, CommandMeta] = {
     # ---- File -----------------------------------------------------------------
     "actionOpen": CommandMeta(C + "loader.py", ("import", "load", "mat", "npy", "csv", "json"),
                               "Open a MINFLUX/localization dataset.", "file"),
-    "actionOpenSpreadsheet": CommandMeta(U + "spreadsheet_import_dialog.py",
-                              ("import", "csv", "xlsx", "excel", "table", "columns"),
-                              "Import a spreadsheet with column→attribute mapping.", "file"),
-    "actionOpenTiff": CommandMeta(U + "tiff_viewer_window.py",
-                              ("image", "tif", "tiff", "stack", "series", "obf", "bioformat", "ome"),
-                              "Open a TIFF (or .msr OBF) image / stack in the series-aware image viewer.", "file"),
-    "actionSave": CommandMeta(C + "save.py", ("export", "write", "processed", "snapshot", "mat", "npy", "csv", "zarr"),
-                              "Save/export processed data (raw canonical or snapshot).", "file"),
-    "actionExportMsr": CommandMeta("minflux_viewer/msr/writer.py",
-                              ("export", "write", "msr", "obf", "imspector", "mfxdta", "beads", "mbm", "fiducial"),
-                              "Export the active dataset (+ overlay channels + MBM beads) to a "
-                              "round-trippable .msr the viewer can reopen (not Imspector-native).", "file"),
-    "actionClose": CommandMeta(U + "main_window.py", ("close", "remove"),
+    # Spreadsheet (.csv/.xlsx) and TIFF (.tif) files open by drag-and-drop only —
+    # no dedicated File-menu commands, so no command-finder entries.
+    "actionSave": CommandMeta(C + "save.py",
+                              ("export", "write", "processed", "snapshot", "mat", "npy", "csv", "zarr", "msr"),
+                              "Save/export the active dataset (raw canonical or snapshot; any "
+                              "enabled format incl. a custom .msr writer).", "file"),
+    "actionClose": CommandMeta(U + "main_window.py", ("close", "remove", "dataset"),
                                "Close the active dataset and its windows.", "file"),
-    "actionCloseAll": CommandMeta(U + "main_window.py", ("close", "remove", "all"),
-                                  "Close all datasets.", "file"),
+    "actionCloseAll": CommandMeta(U + "main_window.py", ("close", "remove", "all", "datasets"),
+                                  "Close all datasets and their windows.", "file"),
+    "actionCloseAllWindows": CommandMeta(U + "main_window.py",
+                                  ("close", "all", "windows", "dialogs", "particle", "everything"),
+                                  "Close all datasets and every plugin/analysis dialog, "
+                                  "keeping only the Log and Console.", "file"),
     "actionQuit": CommandMeta(U + "main_window.py", ("exit", "quit"), "Quit the application.", "file"),
 
     # ---- Edit -----------------------------------------------------------------
@@ -151,8 +149,10 @@ COMMAND_META: dict[str, CommandMeta] = {
     # ---- Analyze › Measure ----------------------------------------------------
     "actionScaleBar": CommandMeta(U + "scale_bar.py", ("scale bar", "ruler", "measure", "nm"),
                               "Add a draggable scale bar to a 2-D view.", "analysis"),
-    "actionPlotProfile": CommandMeta(U + "main_window.py", ("profile", "line", "intensity", "measure"),
-                              "Plot an intensity profile (placeholder).", "analysis"),
+    "actionPlotProfile": CommandMeta(U + "plot_profile_dialog.py",
+                              ("profile", "line", "intensity", "measure", "imagej", "fiji", "width"),
+                              "Plot the localization-density profile along a line/polyline/freehand-line "
+                              "ROI in a render or scatter view (live, ImageJ-style, tunable width).", "analysis"),
     "actionSetMeasurements": CommandMeta(U + "set_measurements_dialog.py", ("measure", "settings"),
                               "Configure which measurements are reported.", "analysis"),
 

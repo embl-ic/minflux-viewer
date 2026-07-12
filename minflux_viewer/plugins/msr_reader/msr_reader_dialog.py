@@ -1567,6 +1567,14 @@ class MsrReaderDialog(QWidget):
         self._worker: _ParseWorker | None = None
 
         self.parsed: dict[str, Any] = {}
+        # Per-instance parsed arrays (name -> array). Each reader keeps its OWN
+        # copy so several dialogs (or a multi-file drop) don't clobber each other
+        # through the shared module-global ``msr.state`` map. Read via
+        # ``self._msr_state()``, which every data method uses in place of the
+        # global ``state`` module.
+        self._mfx_map: dict[str, Any] = {}
+        self._mbm_map: dict[str, Any] = {}
+        self._mbm_meta_map: dict[str, dict] = {}
         self.field_selection = {}
         self.image_field_selection: set = set()   # raw OBF stack indices to open as images
         # gri-IDs the user excluded via "Show Beads Drift". Alignment always
@@ -1586,6 +1594,11 @@ class MsrReaderDialog(QWidget):
         self._build_ui(settings)
 
         if msr_path:
+            # Opened for a specific file (drag-drop / File open) — it is a single
+            # file, so force single-file mode and auto-parse it (no button click).
+            if os.path.isfile(msr_path):
+                self.mode_file.setChecked(True)
+            self._on_mode_changed()
             self.input_path_edit.setText(msr_path)
             self._last_input_dir = str(Path(msr_path).parent)
             self._save_settings()
@@ -1715,18 +1728,24 @@ class MsrReaderDialog(QWidget):
         self.mode_folder = QRadioButton("Folder (batch)")
         self.mode_folder.setChecked(bool(settings.get("mode_folder", False)))
         self.mode_file.setChecked(not self.mode_folder.isChecked())
+        self.mode_file.toggled.connect(lambda _checked: self._on_mode_changed())
         input_type_row.addWidget(self.mode_file)
         input_type_row.addWidget(self.mode_folder)
         input_type_row.addStretch(1)
         root.addLayout(input_type_row)
 
         self.input_path_edit = QLineEdit()
+        # Enter in the path field parses a single file (same as Browse / drop).
+        self.input_path_edit.returnPressed.connect(self._auto_parse_single_input)
         self._last_input_dir = settings.get("last_input_dir") or str(Path.home())
         root.addLayout(self._browse_row("MSR file or folder:", self.input_path_edit, self.browse_input))
 
         action_row = QHBoxLayout()
-        self._parse_button = QPushButton("Parse MSR file")
-        self._parse_button.clicked.connect(self.on_parse)
+        # A single .msr file auto-parses (on drop / Browse / Enter). This button is
+        # only meaningful in Folder (batch) mode, where it lets the user pick which
+        # file in the folder to parse & preview.
+        self._parse_button = QPushButton("Select a file to view content")
+        self._parse_button.clicked.connect(self.on_select_view_file)
         action_row.addWidget(self._parse_button)
         action_row.addWidget(QLabel("Preview"))
         self.preview_all_rows_check = QCheckBox("all rows")
@@ -1820,6 +1839,10 @@ class MsrReaderDialog(QWidget):
         bottom.addWidget(export_button)
         root.addLayout(bottom)
 
+        # Set the initial "Select a file to view content" button state for the
+        # persisted input mode (enabled only in Folder (batch) mode).
+        self._on_mode_changed()
+
     def _browse_row(self, label: str, lineedit: QLineEdit, callback):
         row = QHBoxLayout()
         row.addWidget(QLabel(label))
@@ -1848,7 +1871,8 @@ class MsrReaderDialog(QWidget):
 
     def browse_input(self):
         start_dir = self._last_input_dir if os.path.exists(str(self._last_input_dir)) else str(Path.home())
-        if self.mode_file.isChecked():
+        single = self.mode_file.isChecked()
+        if single:
             path, _ = QFileDialog.getOpenFileName(self, "Choose an .msr file", start_dir, "Imspector .msr (*.msr);;All files (*.*)")
         else:
             path = QFileDialog.getExistingDirectory(self, "Choose a folder of .msr files", start_dir)
@@ -1856,6 +1880,9 @@ class MsrReaderDialog(QWidget):
             self.input_path_edit.setText(path)
             self._last_input_dir = str(Path(path).parent if Path(path).is_file() else Path(path))
             self._save_settings()
+            # A single .msr file parses immediately (no button click).
+            if single and os.path.isfile(path):
+                self._parse_specific_file(path)
 
     def browse_out(self):
         path = QFileDialog.getExistingDirectory(self, "Choose output folder", self.out_dir_edit.text().strip() or self._temp_dir())
@@ -1918,15 +1945,30 @@ class MsrReaderDialog(QWidget):
     # Parse (async)
     # ------------------------------------------------------------------
 
-    def on_parse(self):
+    def _reset_parse_state(self) -> None:
+        """Clear the tree + parsed data before a new parse."""
         self.tree.clear()
         self.parsed = {}
+        self._mfx_map = {}
+        self._mbm_map = {}
+        self._mbm_meta_map = {}
         self.nodeinfo.clear()
         self.fullpath_by_item.clear()
         self.datasetnode_info.clear()
 
+    def _parse_specific_file(self, msr: str) -> None:
+        """Reset + parse one specific ``.msr`` file (async)."""
+        if not msr or not os.path.isfile(msr):
+            self.log("[error] not a valid .msr file.")
+            return
+        self._reset_parse_state()
+        self.log(f"[parse] using: {msr}")
+        self._start_parse_worker(msr, self._temp_dir())
+
+    def on_parse(self):
+        """Parse the current input — a single file, or the first ``.msr`` in a
+        folder. Used by the auto-parse triggers (drop / Browse / Enter)."""
         ipath = self.input_path_edit.text().strip()
-        tmp = self._temp_dir()
         if not ipath or not os.path.exists(ipath):
             self.log("[error] set an input .msr file (or folder) first.")
             return
@@ -1934,10 +1976,50 @@ class MsrReaderDialog(QWidget):
         if not msr:
             self.log("no msr file found!")
             return
-
-        self.log(f"[parse] using: {msr}")
         self._save_settings()
-        self._start_parse_worker(msr, tmp)
+        self._parse_specific_file(msr)
+
+    def _auto_parse_single_input(self) -> None:
+        """Parse immediately when the input is a single ``.msr`` file (drop /
+        Browse / Enter) — no button press needed."""
+        if not self.mode_file.isChecked():
+            return
+        ipath = self.input_path_edit.text().strip()
+        if ipath and os.path.isfile(ipath):
+            self.on_parse()
+
+    def on_select_view_file(self) -> None:
+        """Button handler ("Select a file to view content"). In Folder (batch)
+        mode, choose which ``.msr`` in the folder to parse & preview (the batch
+        folder input is left unchanged). In single-file mode the file already
+        auto-parses, so this just (re)parses the current file."""
+        if not self.mode_folder.isChecked():
+            self.on_parse()
+            return
+        folder = self.input_path_edit.text().strip()
+        if folder and os.path.isdir(folder):
+            start = folder
+        elif os.path.exists(str(self._last_input_dir)):
+            start = str(self._last_input_dir)
+        else:
+            start = str(Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select a .msr file to view content", start,
+            "Imspector .msr (*.msr);;All files (*.*)")
+        if path:
+            self._parse_specific_file(path)
+
+    def _on_mode_changed(self) -> None:
+        """Keep the button meaningful per input type: a single file auto-parses,
+        so "Select a file to view content" is only enabled in Folder (batch)
+        mode (where it picks which file in the folder to preview)."""
+        folder = self.mode_folder.isChecked()
+        self._parse_button.setEnabled(folder)
+        self._parse_button.setToolTip(
+            "Pick which .msr file in the folder to parse and preview."
+            if folder else
+            "A single .msr file parses automatically on drop / Browse / Enter. "
+            "Switch to Folder (batch) mode to pick a file to preview.")
 
     def _start_parse_worker(self, msr: str, tmp: str):
         self._parse_button.setEnabled(False)
@@ -1947,25 +2029,47 @@ class MsrReaderDialog(QWidget):
         self._worker.failed.connect(self._on_parse_failed)
         self._worker.start()
 
-    def _on_parse_done(self, result: dict):
-        from ...msr import state as MFSTATE
+    def _store_parse_result(self, result: dict) -> None:
+        """Adopt a parse result as this dialog's data. The per-parse ``mfx_map`` /
+        ``mbm_map`` / ``mbm_meta_map`` (built by the parser from that file alone)
+        become the dialog's own copy, so it is independent of the shared global
+        ``msr.state`` (which only ever reflects the most-recently-parsed file)."""
+        self.parsed = result or {}
+        self._mfx_map = dict(self.parsed.get("mfx_map") or {})
+        self._mbm_map = dict(self.parsed.get("mbm_map") or {})
+        self._mbm_meta_map = dict(self.parsed.get("mbm_meta_map") or {})
 
-        self.parsed = result
+    def _msr_state(self):
+        """A per-instance stand-in for the module-global ``msr.state`` — exposes
+        ``mfx_map`` / ``mbm_map`` / ``mbm_meta_map`` plus ``mfx`` / ``mbm`` (the
+        first array) over THIS dialog's parsed data. Data methods use this instead
+        of ``from ...msr import state`` so multiple reader dialogs stay independent."""
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            mfx_map=self._mfx_map,
+            mbm_map=self._mbm_map,
+            mbm_meta_map=self._mbm_meta_map,
+            mfx=next(iter(self._mfx_map.values()), None),
+            mbm=next(iter(self._mbm_map.values()), None),
+        )
+
+    def _on_parse_done(self, result: dict):
+        self._store_parse_result(result)
         self._parse_button.setEnabled(True)
         self._build_tree_from_result(result)
 
-        if getattr(MFSTATE, "mfx_map", {}):
-            self.log(f"[global] mfx datasets: {len(MFSTATE.mfx_map)}")
-            for key, arr in MFSTATE.mfx_map.items():
+        if self._mfx_map:
+            self.log(f"[parsed] mfx datasets: {len(self._mfx_map)}")
+            for key, arr in self._mfx_map.items():
                 self.log(f"          - {key}: shape={arr.shape}, dtype={arr.dtype}")
         else:
-            self.log("[global] mfx is empty")
-        if getattr(MFSTATE, "mbm_map", {}):
-            self.log(f"[global] mbm datasets: {len(MFSTATE.mbm_map)}")
-            for key, arr in MFSTATE.mbm_map.items():
+            self.log("[parsed] mfx is empty")
+        if self._mbm_map:
+            self.log(f"[parsed] mbm datasets: {len(self._mbm_map)}")
+            for key, arr in self._mbm_map.items():
                 self.log(f"          - {key}: shape={arr.shape}, dtype={arr.dtype}")
         else:
-            self.log("[global] mbm is empty")
+            self.log("[parsed] mbm is empty")
 
     def _on_parse_failed(self, error: str):
         self.log(f"[ERROR] {error}")
@@ -2476,7 +2580,7 @@ class MsrReaderDialog(QWidget):
     # ------------------------------------------------------------------
 
     def _gather_datasets_for_dialog(self) -> list[dict]:
-        from ...msr import state as MFSTATE
+        MFSTATE = self._msr_state()
         datasets = []
         if self.parsed.get("mode") == "modern":
             for ds in self.parsed.get("datasets") or []:
@@ -2585,7 +2689,7 @@ class MsrReaderDialog(QWidget):
         return arr
 
     def _export_current_parsed(self, out_dir: str, formats: list[str], mfx_sel_global=None, mbm_sel_global=None):
-        from ...msr import state as MFSTATE
+        MFSTATE = self._msr_state()
         os.makedirs(out_dir, exist_ok=True)
 
         # dataset display-name -> in-memory zarr store (for the .zarr export)
@@ -2801,7 +2905,7 @@ class MsrReaderDialog(QWidget):
         return mode, ref_name
 
     def _viewer_mbm_alignment_available(self, selected: list[str]) -> tuple[bool, str]:
-        from ...msr import state as MFSTATE
+        MFSTATE = self._msr_state()
         from ...msr.alignment import MIN_BEADS_FOR_ALIGNMENT, extract_bead_summaries
 
         if len(selected) < 2:
@@ -2847,7 +2951,7 @@ class MsrReaderDialog(QWidget):
         self, name: str, *, log_prefix: str = "[viewer align]"
     ) -> set[int] | None:
         # Prefer translated legacy MBM metadata (gri↔R-ID map + used list).
-        from ...msr import state as MFSTATE
+        MFSTATE = self._msr_state()
         meta = (getattr(MFSTATE, "mbm_meta_map", {}) or {}).get(name)
         if meta:
             pbg = meta.get("points_by_gri") or {}
@@ -2947,7 +3051,7 @@ class MsrReaderDialog(QWidget):
         return filtered
 
     def _viewer_dataset_looks_3d(self, name: str) -> bool:
-        from ...msr import state as MFSTATE
+        MFSTATE = self._msr_state()
 
         mfx = MFSTATE.mfx_map.get(name)
         try:
@@ -2983,7 +3087,7 @@ class MsrReaderDialog(QWidget):
         mode: str,
         ref_name: str | None = None,
     ) -> dict[str, dict]:
-        from ...msr import state as MFSTATE
+        MFSTATE = self._msr_state()
         from ...msr.alignment import align_channels_from_arrays
 
         selected = self._viewer_selected_dataset_names(import_plan)
@@ -3068,7 +3172,7 @@ class MsrReaderDialog(QWidget):
         return None
 
     def _viewer_fallback_alignment_transforms(self, selected: list[str], mode: str) -> dict[str, dict]:
-        from ...msr import state as MFSTATE
+        MFSTATE = self._msr_state()
 
         if not selected:
             return {}
@@ -3151,7 +3255,7 @@ class MsrReaderDialog(QWidget):
             QMessageBox.critical(self, "Align channel", "Choose a valid .msr file first.")
             return False
         self.log(f"[align] parsing before alignment: {msr}")
-        self.parsed = parse_msr_general(msr, tmp, log=self.log)
+        self._store_parse_result(parse_msr_general(msr, tmp, log=self.log))
         return True
 
     def _channel_alignment_defaults(self):
@@ -3210,7 +3314,7 @@ class MsrReaderDialog(QWidget):
         """Bead points for *name* with beads excluded via "Show Beads Drift"
         removed. An empty selection (the default) returns all beads unchanged, so
         the alignment behaves exactly as before unless the user made a choice."""
-        from ...msr import state as MFSTATE
+        MFSTATE = self._msr_state()
 
         points = MFSTATE.mbm_map.get(name)
         if not self._bead_unchecked_gris or points is None:
@@ -3227,7 +3331,7 @@ class MsrReaderDialog(QWidget):
     def _bead_gri_to_rid(self, names) -> dict[int, str]:
         """Map ``gri`` (numeric bead ID) → R-ID (the ``points_by_gri`` "name",
         e.g. ``R113``) across *names*, for human-readable bead reporting."""
-        from ...msr import state as MFSTATE
+        MFSTATE = self._msr_state()
         meta_map = getattr(MFSTATE, "mbm_meta_map", {}) or {}
         out: dict[int, str] = {}
         for name in names:
@@ -3261,12 +3365,14 @@ class MsrReaderDialog(QWidget):
         return ", ".join(parts) if parts else "(none)"
 
     def _on_show_beads_drift(self):
-        from ...msr import state as MFSTATE
+        MFSTATE = self._msr_state()
         from .beads_drift import gather_msr_bead_drift
         from .beads_drift_dialog import BeadsDriftDialog
 
         datasets = (self.parsed or {}).get("datasets") or []
-        bead_data = gather_msr_bead_drift(datasets, getattr(MFSTATE, "mbm_map", {}))
+        bead_data = gather_msr_bead_drift(
+            datasets, getattr(MFSTATE, "mbm_map", {}),
+            meta_map=getattr(MFSTATE, "mbm_meta_map", {}))
         if not bead_data:
             QMessageBox.information(
                 self, "Show beads drift",
@@ -3313,7 +3419,7 @@ class MsrReaderDialog(QWidget):
         ``(N, 2/3)`` array is used as-is. Returns ``(min_xyz, max_xyz)`` in nm
         (z padded with 0 for 2-D data), or ``None`` when no coordinates exist.
         """
-        from ...msr import state as MFSTATE
+        MFSTATE = self._msr_state()
 
         mins: list[np.ndarray] = []
         maxs: list[np.ndarray] = []
@@ -3341,7 +3447,7 @@ class MsrReaderDialog(QWidget):
         return np.min(np.vstack(mins), axis=0), np.max(np.vstack(maxs), axis=0)
 
     def on_align_channel(self):
-        from ...msr import state as MFSTATE
+        MFSTATE = self._msr_state()
         from ...msr.alignment import MIN_BEADS_FOR_ALIGNMENT, align_channels_from_arrays
 
         if not self._ensure_single_file_parsed():
@@ -3484,7 +3590,7 @@ class MsrReaderDialog(QWidget):
                     sub_out = Path(out_dir) / msr_path.stem
                     os.makedirs(sub_out, exist_ok=True)
                     self.log(f"[batch {idx}/{len(files)}] parse & export: {msr_path} -> {sub_out}")
-                    self.parsed = parse_msr_general(str(msr_path), tmp, log=self.log)
+                    self._store_parse_result(parse_msr_general(str(msr_path), tmp, log=self.log))
                     self._export_current_parsed(str(sub_out), formats, mfx_sel_global, mbm_sel_global)
                     QApplication.processEvents()
                 except Exception as exc:
@@ -3497,7 +3603,7 @@ class MsrReaderDialog(QWidget):
             if not msr:
                 self.log("no msr file found!")
                 return
-            self.parsed = parse_msr_general(msr, tmp, log=self.log)
+            self._store_parse_result(parse_msr_general(msr, tmp, log=self.log))
         self._export_current_parsed(out_dir, formats)
         self.log("[done] Export complete.")
 
@@ -3506,7 +3612,7 @@ class MsrReaderDialog(QWidget):
     # ------------------------------------------------------------------
 
     def _on_open_in_viewer(self):
-        from ...msr import state as MFSTATE
+        MFSTATE = self._msr_state()
         from ...core.loader import load_from_mfx_array
         from ...core.overlay import overlay_color_cycle
 
@@ -3781,21 +3887,42 @@ def msr_unavailable_message() -> str:
     )
 
 
+def register_msr_dialog(owner, dlg) -> None:
+    """Retain *dlg* on *owner* so it is not garbage-collected (an MSR reader is an
+    unowned, ``WA_DeleteOnClose`` top-level window that needs a live Python
+    reference). **Multiple** dialogs are supported — they are kept in a list and
+    dropped when destroyed — so opening the plugin again, or dropping several
+    ``.msr`` files at once, spawns independent readers instead of replacing the
+    previous one. ``owner._plugin_msr_reader_dialog`` is kept pointing at the most
+    recent one for back-compat."""
+    if owner is None:
+        return
+    dialogs = getattr(owner, "_plugin_msr_reader_dialogs", None)
+    if dialogs is None:
+        dialogs = []
+        owner._plugin_msr_reader_dialogs = dialogs
+    dialogs.append(dlg)
+    owner._plugin_msr_reader_dialog = dlg          # back-compat single-attr alias
+
+    def _forget(_obj=None, d=dlg, lst=dialogs):
+        try:
+            lst.remove(d)
+        except ValueError:
+            pass
+    dlg.destroyed.connect(_forget)
+
+
 def open_msr(
     msr_path: str,
     state=None,
     parent: QWidget | None = None,
 ) -> None:
-    """Open the MSR reader dialog for *msr_path*."""
+    """Open a new MSR reader dialog for *msr_path* (auto-parses a single file)."""
     if not msr_available():
         QMessageBox.warning(parent, "MSR reader not available", msr_unavailable_message())
         return
     dlg = MsrReaderDialog(state=state, msr_path=msr_path, parent=parent)
-    # The dialog is an unowned top-level window (so it does not sit permanently
-    # in front of the viewer); keep a reference on the owner so it is not
-    # garbage-collected once this function returns.
-    if parent is not None:
-        parent._plugin_msr_reader_dialog = dlg
+    register_msr_dialog(parent, dlg)
     dlg.show()
     dlg.raise_()
     dlg.activateWindow()

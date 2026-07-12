@@ -140,6 +140,55 @@ def display_xyz_filtered(ds) -> np.ndarray:
     return xyz[np.all(np.isfinite(xyz), axis=1)]
 
 
+_PLANE_AXES = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
+
+
+def plane_localizations(state, channels, plane) -> np.ndarray:
+    """``(M, 2)`` filtered **display-nm** localizations of the visible localization
+    *channels* projected into *plane* (``XY``/``XZ``/``YZ``) — the same frame ROIs
+    live in. Concatenates every visible non-image channel; used by the Plot Profile
+    so the profile is decided by the data (not any render viewport)."""
+    axes = _PLANE_AXES.get(plane)
+    if axes is None:
+        return np.zeros((0, 2))
+    i, j = axes
+    parts = []
+    for ch in channels or []:
+        if not ch.get("visible", True) or ch.get("kind") == "image":
+            continue
+        di = ch.get("dataset_idx")
+        if di is None or not (0 <= di < len(state.datasets)):
+            continue
+        xyz = display_xyz_filtered(state.datasets[di])
+        if xyz.shape[0]:
+            parts.append(xyz[:, [i, j]])
+    return np.concatenate(parts) if parts else np.zeros((0, 2))
+
+
+def plane_localizations_version(state, channels, plane):
+    """A cheap token that changes only when :func:`plane_localizations` would
+    (dataset / filter mask / RIMF / channel visibility / plane) — **not** on
+    zoom/pan — so a poller can skip re-fetching while idle. ``None`` off-plane."""
+    if plane not in _PLANE_AXES:
+        return None
+    toks: list = [plane]
+    for ch in channels or []:
+        if ch.get("kind") == "image":
+            continue
+        di = ch.get("dataset_idx")
+        if di is None or not (0 <= di < len(state.datasets)):
+            continue
+        ds = state.datasets[di]
+        mask = getattr(ds, "filter_mask", None)
+        mtok = None
+        if mask is not None:
+            mask = np.asarray(mask, dtype=bool)
+            mtok = (int(mask.sum()), int(mask.shape[0]))
+        rimf = round(float(getattr(getattr(ds, "cali", None), "RIMF", 1.0) or 1.0), 6)
+        toks.append((di, bool(ch.get("visible", True)), mtok, rimf))
+    return tuple(toks)
+
+
 def _trace_ids(ds, n: int) -> np.ndarray:
     from .loader import attr_values_1d
     tid = attr_values_1d(ds, "tid")

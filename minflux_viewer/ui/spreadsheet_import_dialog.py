@@ -18,7 +18,6 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
-    QFileDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -35,12 +34,13 @@ from ..core.spreadsheet_loader import (
     ROLES,
     AutoImportAmbiguity,
     SpreadsheetTable,
-    auto_import,
     build_dataset_from_mapping,
     guess_mapping,
+    guess_time_unit,
     guess_units,
     read_table,
     representative_row_indices,
+    table_stats,
 )
 
 # Role → (display label, required?)
@@ -50,29 +50,45 @@ _ROLE_LABELS: dict[str, tuple[str, bool]] = {
     "z": ("z (→ znm)", False),
     "prec_xy": ("precision xy", False),
     "prec_z": ("precision z", False),
-    "id": ("trace id (tid)", False),
-    "frame": ("frame / time", False),
+    "id": ("trace id (→ tid)", False),
+    "frame": ("time / frame (→ tim)", False),
     "photons": ("photons", False),
 }
 # Display unit ↔ internal unit token.
 _UNIT_CHOICES = (("nm", "nm"), ("µm", "um"), ("mm", "mm"), ("m", "m"), ("pixel", "px"))
+# Time unit for the frame → tim column (None = frame index, kept as-is).
+_TIME_CHOICES = (("frames", None), ("s", "s"), ("ms", "ms"))
 _NONE = "<none>"
 
 
 class SpreadsheetMappingDialog(QDialog):
-    """Map spreadsheet columns to localization roles and build a dataset."""
+    """Map spreadsheet columns to localization roles and build a dataset.
+
+    Roles, coordinate/time units, and the pixel size are **pre-filled** from the
+    loader's value-based best guess (headers first, then column statistics), so
+    a headerless MINFLUX-like table opens with x/y/z/tid/tim already populated —
+    the user only confirms or corrects, then imports.
+    """
 
     def __init__(self, table: SpreadsheetTable,
                  mapping: dict[str, str | None] | None = None,
                  units: dict[str, str] | None = None,
-                 *, pixel_size_nm: float | None = None, parent=None) -> None:
+                 *, time_unit: str | None = None,
+                 pixel_size_nm: float | None = None,
+                 prefs: dict | None = None, parent=None) -> None:
         super().__init__(parent)
         self._table = table
-        self._mapping0 = mapping or guess_mapping(table)
-        self._units0 = units or guess_units(table, self._mapping0)
-        self._pixel0 = pixel_size_nm or DEFAULT_PIXEL_SIZE_NM
+        self._stats = table_stats(table)                 # cheap per-column stats
+        self._mapping0 = mapping or guess_mapping(table, use_values=True, stats_map=self._stats)
+        self._units0 = units or guess_units(table, self._mapping0, stats_map=self._stats)
+        self._time_unit0 = time_unit if time_unit is not None else \
+            guess_time_unit(table, self._mapping0, stats_map=self._stats)
+        pref_px = ((prefs or {}).get("data", {}) or {}).get("pixel_size_nm")
+        self._pixel0 = pixel_size_nm or pref_px or DEFAULT_PIXEL_SIZE_NM
+        self._prefs = prefs
         self._role_combos: dict[str, QComboBox] = {}
         self._unit_combos: dict[str, QComboBox] = {}
+        self._time_combo: QComboBox | None = None
 
         self.setWindowTitle(f"Open spreadsheet — {Path(table.path).name}")
         self.resize(940, 620)
@@ -99,11 +115,14 @@ class SpreadsheetMappingDialog(QDialog):
 
             combo = QComboBox()
             combo.addItem(_NONE, None)
-            for name in col_names:
+            for i, name in enumerate(col_names, start=1):
                 combo.addItem(name, name)
+                combo.setItemData(i, self._stats_tooltip(name), Qt.ItemDataRole.ToolTipRole)
             chosen = self._mapping0.get(role)
             idx = combo.findData(chosen) if chosen else 0
             combo.setCurrentIndex(max(0, idx))
+            combo.currentIndexChanged.connect(lambda _i, cb=combo: self._sync_combo_tooltip(cb))
+            self._sync_combo_tooltip(combo)
             grid.addWidget(combo, r, 1)
             self._role_combos[role] = combo
 
@@ -116,6 +135,16 @@ class SpreadsheetMappingDialog(QDialog):
                 ucombo.currentIndexChanged.connect(self._update_pixel_enabled)
                 grid.addWidget(ucombo, r, 2)
                 self._unit_combos[role] = ucombo
+            elif role == "frame":
+                tcombo = QComboBox()
+                tcombo.setToolTip("Unit of the time column — 'ms' is rescaled to "
+                                  "seconds; 'frames' keeps the raw index.")
+                for disp, tok in _TIME_CHOICES:
+                    tcombo.addItem(disp, tok)
+                tidx = tcombo.findData(self._time_unit0)
+                tcombo.setCurrentIndex(max(0, tidx))
+                grid.addWidget(tcombo, r, 2)
+                self._time_combo = tcombo
         grid.setColumnStretch(1, 1)
         root.addWidget(grp)
 
@@ -167,6 +196,22 @@ class SpreadsheetMappingDialog(QDialog):
         self._px_label.setEnabled(needs)
         self._px_spin.setEnabled(needs)
 
+    def _stats_tooltip(self, name: str | None) -> str:
+        """Human-readable value statistics for column *name* (dtype · range ·
+        median step · unique count), used as a hover hint on the role dropdowns."""
+        st = self._stats.get(name) if name else None
+        if st is None or st.n_finite == 0:
+            return ""
+        parts = ["int" if st.is_integer else "float",
+                 f"range [{st.vmin:.4g}, {st.vmax:.4g}]"]
+        if st.median_abs_diff == st.median_abs_diff:      # not NaN
+            parts.append(f"median step {st.median_abs_diff:.4g}")
+        parts.append(f"{st.n_unique:,} unique")
+        return " · ".join(parts)
+
+    def _sync_combo_tooltip(self, cb: QComboBox) -> None:
+        cb.setToolTip(self._stats_tooltip(cb.currentData()))
+
     # -------------------------------------------------------------- result
     def _current_mapping(self) -> dict[str, str | None]:
         return {role: cb.currentData() for role, cb in self._role_combos.items()}
@@ -183,28 +228,28 @@ class SpreadsheetMappingDialog(QDialog):
         mapping = self._current_mapping()
         units = {role: cb.currentData() for role, cb in self._unit_combos.items()}
         pixel = float(self._px_spin.value()) if self._px_spin.isEnabled() else None
+        time_unit = self._time_combo.currentData() if self._time_combo is not None else None
         return build_dataset_from_mapping(
-            self._table, mapping, units=units, pixel_size_nm=pixel)
+            self._table, mapping, units=units, pixel_size_nm=pixel,
+            time_unit=time_unit, prefs=self._prefs)
 
 
-def open_mapping_dialog(ambiguity: AutoImportAmbiguity, parent=None):
-    """Show the mapping dialog for an :class:`AutoImportAmbiguity`; return a
-    dataset or ``None`` if cancelled."""
-    dlg = SpreadsheetMappingDialog(
-        ambiguity.table, ambiguity.mapping, ambiguity.units, parent=parent)
+def import_spreadsheet(path, *, prefs: dict | None = None, parent=None):
+    """Read *path*, pre-fill the mapping dialog from the value-based best guess,
+    and build the dataset on OK. Always shows the dialog for confirmation (never a
+    silent import); returns the dataset, or ``None`` if cancelled."""
+    table = read_table(path)
+    dlg = SpreadsheetMappingDialog(table, prefs=prefs, parent=parent)
     if dlg.exec() != QDialog.DialogCode.Accepted:
         return None
     return dlg.build_dataset()
 
 
-def choose_spreadsheet_and_import(parent=None):
-    """File picker → auto-import, falling back to the mapping dialog."""
-    path, _ = QFileDialog.getOpenFileName(
-        parent, "Open spreadsheet data", "",
-        "Spreadsheet (*.csv *.tsv *.txt *.xlsx *.xlsm);;All files (*)")
-    if not path:
+def open_mapping_dialog(ambiguity: "AutoImportAmbiguity", parent=None):
+    """Show the mapping dialog for an :class:`AutoImportAmbiguity` (from the
+    headless :func:`auto_import`); return a dataset or ``None`` if cancelled."""
+    dlg = SpreadsheetMappingDialog(
+        ambiguity.table, ambiguity.mapping, ambiguity.units, parent=parent)
+    if dlg.exec() != QDialog.DialogCode.Accepted:
         return None
-    dataset, ambiguity = auto_import(path)
-    if dataset is not None:
-        return dataset
-    return open_mapping_dialog(ambiguity, parent=parent)
+    return dlg.build_dataset()

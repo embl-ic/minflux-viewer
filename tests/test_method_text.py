@@ -67,6 +67,21 @@ def test_crlb_without_axial():
     assert mt.CITE_CRLB[0] in txt
 
 
+CRLB_BUDGET_MSG = ("Localization precision (CRLB, Marin-Ries): median σ_xy = 5.20 nm "
+                   "(background-limited), 3.10 nm (ideal), L = 50 nm, σ_q = 250 nm, "
+                   "median N = 200 photons; measured σ_r = 9.50 nm (StdDev/trace) → "
+                   "excess σ_fl = 7.95 nm.")
+
+
+def test_crlb_precision_budget_excess_cites_simuflux():
+    txt = mt.generate_method_text(_state(), [_ev(CRLB_BUDGET_MSG)])
+    assert "excess error of σ_fl = 7.95 nm" in txt
+    assert "σ_fl² + σ_CRB²" in txt
+    assert mt.CITE_SIMUFLUX[0] in txt   # SimuFLUX cited only when the budget is present
+    # the plain CRLB line (no budget) must NOT cite SimuFLUX
+    assert mt.CITE_SIMUFLUX[0] not in mt.generate_method_text(_state(), [_ev(CRLB_2D_MSG)])
+
+
 def test_frc_two_citations():
     txt = mt.generate_method_text(_state(), [_ev(FRC_MSG)])
     assert "Fourier ring correlation" in txt

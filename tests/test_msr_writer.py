@@ -95,6 +95,11 @@ def test_write_minflux_msr_roundtrips_mfx(tmp_path):
     name = res["datasets"][0]["display_name"]
     assert name == "sim ch1"                                  # from did→label map
 
+    # The result carries its OWN per-parse maps (each reader dialog keeps
+    # independent data) alongside the global back-compat mirror.
+    assert set(res["mfx_map"]) == {name}
+    np.testing.assert_array_equal(res["mfx_map"][name], S.mfx_map[name])
+
     mfx2 = S.mfx_map[name]
     assert mfx2.shape[0] == mfx.shape[0]
     np.testing.assert_allclose(mfx2["loc"], mfx["loc"])

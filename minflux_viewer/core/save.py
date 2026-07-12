@@ -31,9 +31,11 @@ import numpy as np
 #: Tag identifying the metadata sidecar JSON (a dict; filter/data JSON are lists).
 METADATA_JSON_MARKER = "minflux_viewer_metadata"
 
-DATA_FORMATS = ("mat", "npy", "npz", "json", "csv", "zarr")
+DATA_FORMATS = ("mat", "npy", "npz", "json", "csv", "zarr", "msr")
 _EXT = {"mat": ".mat", "npy": ".npy", "npz": ".npz", "json": ".json",
-        "csv": ".csv", "zarr": ".zarr"}
+        "csv": ".csv", "zarr": ".zarr", "msr": ".msr"}
+#: Formats that only carry the **canonical raw** data (no processed snapshot).
+_RAW_ONLY_FORMATS = {"msr"}
 #: Formats that take a flat columns dict (rest take the structured mfx array).
 _COLUMN_FORMATS = {"csv", "npz", "zarr"}
 #: Derived attributes offered in a processed snapshot when "freeze derived" is on.
@@ -425,7 +427,17 @@ def save_processed(
         if fmt not in _EXT:
             raise ValueError(f"Unsupported data format: {fmt!r}")
         data_path = Path(data_path).with_suffix(_EXT[fmt])
-        if content == "snapshot":
+        if fmt in _RAW_ONLY_FORMATS and content == "snapshot":
+            raise ValueError(
+                f".{fmt} stores canonical raw data (it round-trips through the "
+                "parser) and cannot bake a processed snapshot — choose 'raw' "
+                "content, or save the snapshot to another format.")
+        if fmt == "msr":
+            # Our custom OBF/MFXDTA writer: a round-trippable .msr that reopens in
+            # this viewer via the MSR reader (raw canonical mfx + any MBM beads).
+            from ..msr.writer import write_datasets_msr
+            write_datasets_msr(data_path, [ds])
+        elif content == "snapshot":
             columns, dropped = build_snapshot_table(
                 ds, include_attrs=inc_attrs, include_derived=inc_derived,
                 filter_mode=filter_mode)

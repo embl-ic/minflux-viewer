@@ -138,11 +138,20 @@ class GeneralMSRParser:
                     idx, desc, blob, collect_zarr_fields, label_map, log)) is not None
             ]
             if datasets:
+                # Per-parse maps (name -> array) assembled from the entries, so a
+                # reader dialog can keep its own copy independent of the shared
+                # module-global ``state`` (which only holds the last parse).
+                mfx_map = {d["display_name"]: d["_mfx"] for d in datasets if d.get("_mfx") is not None}
+                mbm_map = {d["display_name"]: d["_mbm"] for d in datasets if d.get("_mbm") is not None}
+                mbm_meta_map = {d["display_name"]: d["_mbm_meta"] for d in datasets if d.get("_mbm_meta")}
                 return {
                     "mode": "modern",
                     "msr": str(msr_file),
                     "datasets": datasets,
                     "source_format": SOURCE_FORMAT,
+                    "mfx_map": mfx_map,
+                    "mbm_map": mbm_map,
+                    "mbm_meta_map": mbm_meta_map,
                 }
             log(f"[parse] {SOURCE_FORMAT} detected but could not be decoded")
 
@@ -172,6 +181,8 @@ class GeneralMSRParser:
         if "mfx" not in arch:
             log(f"  [warn] stack {stack_idx}: no 'mfx' array in store")
             return None
+        mbm_arr = None
+        mbm_meta = None
         try:
             mfx_node = arch["mfx"]
             did = str(getattr(mfx_node, "attrs", {}).get("did", "") or "")
@@ -182,6 +193,7 @@ class GeneralMSRParser:
             if "grd/mbm/points" in arch:
                 beads = arch["grd/mbm/points"][:]
                 if getattr(beads, "size", 0):
+                    mbm_arr = beads
                     set_mbm_for(name, beads)
                     log(f"    [mbm] loaded key='{name}' shape={beads.shape}")
             else:
@@ -192,8 +204,10 @@ class GeneralMSRParser:
                 if legacy is not None:
                     pts, pbg, used = legacy
                     if getattr(pts, "size", 0):
+                        mbm_arr = pts
                         set_mbm_for(name, pts)
-                    set_mbm_meta_for(name, {"points_by_gri": pbg, "used": used})
+                    mbm_meta = {"points_by_gri": pbg, "used": used}
+                    set_mbm_meta_for(name, mbm_meta)
         except Exception as e:
             log(f"    [warn] stack {stack_idx}: mfx load failed: {e}")
             return None
@@ -204,6 +218,12 @@ class GeneralMSRParser:
             "fields": collect_zarr_fields(store),
             "source_format": SOURCE_FORMAT,
             "mfxdta_version": container_version(blob),
+            # Per-parse arrays carried on the entry so each reader dialog keeps its
+            # OWN parsed data (the module-global ``state.mfx_map`` holds only the
+            # most-recently-parsed file — multiple readers would clobber it).
+            "_mfx": arr,
+            "_mbm": mbm_arr,
+            "_mbm_meta": mbm_meta,
         }
 
 

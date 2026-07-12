@@ -64,7 +64,7 @@ class SimulateConfigWidget(QWidget):
         self._beads = QCheckBox("Include MBM fiducial beads")
         self._beads.setToolTip(
             "Generate synthetic drift-tracking fiducial beads (grd/mbm/points) and "
-            "attach them to the dataset, so they are written out when you Export to .msr.")
+            "attach them to the dataset, so they are written out when you save to .msr.")
         self._seed = QSpinBox(); self._seed.setRange(-1, 2_000_000_000); self._seed.setValue(-1)
         self._seed.setSpecialValueText("random"); self._seed.setToolTip("Fixed seed for reproducibility; 'random' = new each generate.")
         sform.addRow("Molecules:", self._n_points)

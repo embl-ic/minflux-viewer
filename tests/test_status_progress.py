@@ -55,9 +55,15 @@ def test_roi_status_readout_text(_app):
     assert f("rectangle", {"bounds": [49, 183, 37, 33]}) == "Rectangle X=49, Y=183, W=37, H=33"
     assert "angle=12°" in f("rectangle", {"bounds": [0, 0, 100, 100], "angle": 12.0})
     assert f("oval", {"bounds": [49, 183, 37, 33]}) == "Oval X=49, Y=183, W=37, H=33"
-    # other shapes: type + vertex count + bounding box (origin + size)
+    # straight line: start point + length + angle from the +X axis in (-180, 180]
     assert f("line", {"points": [[0, 0], [300, 400]]}) == \
-        "Line  2 vertices  Bounding Box X=0, Y=0, W=300, H=400"
+        "Line 2 vertices, X=0, Y=0, length=500, angle=53.1°"
+    # angle sign follows atan2(dy, dx): pointing down-left → -135°
+    assert "angle=-135.0°" in f("line", {"points": [[0, 0], [-10, -10]]})
+    # 3-D line vertices carry a depth — index [0]/[1], never unpack
+    assert f("line", {"points": [[575, -149, 5], [658, -94, 5]]}).startswith(
+        "Line 2 vertices, X=575, Y=-149, length=")
+    # other multi-vertex shapes keep type + vertex count + bounding box (origin + size)
     poly = f("polygon", {"points": [[10, 20], [110, 20], [110, 120], [10, 120]]})
     assert "4 vertices" in poly and "Bounding Box X=10, Y=20, W=100, H=100" in poly
     assert "3 vertices" in f("polyline", {"points": [[0, 0], [100, 0], [100, 100]]})

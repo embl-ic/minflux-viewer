@@ -99,7 +99,7 @@ _EXPORT_FORMATS = [
     (".mat", "mat"), (".npy", "npy"), (".npz", "npz"),
     (".json", "json"), (".csv", "csv"), (".zarr", "zarr"),
 ]
-_EXPORT_FORMAT_DEFAULTS = ["mat", "npy", "npz", "json", "csv", "zarr"]
+_EXPORT_FORMAT_DEFAULTS = ["mat", "npy", "npz", "json", "csv", "zarr", "msr"]
 
 _MBM_TRANSFORM_TYPES = [
     "rigid XY + translational Z",
@@ -144,8 +144,6 @@ _SHORTCUT_LABELS = {
     "next_dataset": "Next dataset",
     "previous_dataset": "Previous dataset",
     "open": "Open",
-    "open_spreadsheet": "Open spreadsheet data",
-    "open_tiff": "Open .tif file",
     "save": "Save processed data",
     "render": "Render",
     "brightness_contrast": "Brightness / Contrast",
@@ -564,6 +562,20 @@ class PreferencesDialog(QDialog):
             fmt_row.addWidget(cb)
         fmt_row.addStretch()
         root.addLayout(fmt_row)
+
+        # .msr on its own row (custom writer) with a disclaimer.
+        msr_row = QHBoxLayout()
+        msr_row.addSpacing(18)
+        msr_cb = QCheckBox(".msr")
+        self._export_format_checks["msr"] = msr_cb
+        msr_row.addWidget(msr_cb)
+        msr_note = QLabel(
+            "(with custom .msr writer — reopens in this viewer; may not open in "
+            "Abberior Imspector)")
+        msr_note.setStyleSheet("color: gray; font-size: 11px;")
+        msr_note.setWordWrap(True)
+        msr_row.addWidget(msr_note, 1)
+        root.addLayout(msr_row)
 
         content_row = QHBoxLayout()
         content_row.addSpacing(18)

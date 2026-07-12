@@ -1,4 +1,4 @@
-"""ImageJ-inspired ROI Manager window."""
+"""ImageJ-style ROI Manager window."""
 
 from __future__ import annotations
 

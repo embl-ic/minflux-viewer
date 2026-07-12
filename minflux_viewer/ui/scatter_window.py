@@ -1514,6 +1514,27 @@ class ScatterWindow(QWidget):
             return None
         return self._plot_2d.getPlotItem().getViewBox()
 
+    def _profile_channels(self):
+        return self._channels or [
+            {"dataset_idx": self._dataset_idx, "visible": True, "kind": "localizations"}]
+
+    def profile_localizations(self):
+        """``(M, 2)`` filtered, visible localizations projected into the current 2-D
+        scatter projection (display nm), for the Plot Profile. ``None`` in 3-D mode."""
+        if self.roi_view_plane() is None:
+            return None
+        from ..core.roi_crop import plane_localizations
+        return plane_localizations(self._state, self._profile_channels(), self.roi_view_plane())
+
+    def profile_locs_version(self):
+        """Cheap token — changes only when :meth:`profile_localizations` would
+        (dataset / filter / RIMF / visibility / projection), never on zoom/pan."""
+        if self.roi_view_plane() is None:
+            return None
+        from ..core.roi_crop import plane_localizations_version
+        return plane_localizations_version(
+            self._state, self._profile_channels(), self.roi_view_plane())
+
     def roi_depth_center(self) -> float | None:
         """Centre of the data extent of the out-of-plane (depth) axis — the
         value a drawn ROI gets in the dimension not shown in this projection.

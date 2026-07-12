@@ -40,9 +40,20 @@ CITE_STDDEV = (
     "Ostersehlt et al., Nat. Methods 19:1072 (2022)",
     "https://doi.org/10.1038/s41592-022-01577-1",
 )
+# The CRLB here is the MINFLUX targeted-donut Cramér-Rao bound (Balzarotti 2017;
+# background-aware closed form of Marin & Ries 2024) — NOT the camera/Gaussian
+# bound (Mortensen 2010).
 CITE_CRLB = (
-    "Mortensen et al., Nat. Methods 7:377 (2010)",
-    "https://doi.org/10.1038/nmeth.1447",
+    "Balzarotti et al., Science 355:606 (2017)",
+    "https://doi.org/10.1126/science.aak9913",
+)
+CITE_CRLB_MARIN = (
+    "Marin & Ries, arXiv:2410.12427 (2024)",
+    "https://arxiv.org/abs/2410.12427",
+)
+CITE_SIMUFLUX = (
+    "Marin & Ries, Nat. Commun. 17:246 (2026)",
+    "https://doi.org/10.1038/s41467-025-66952-w",
 )
 CITE_FRC_BANTERLE = (
     "Banterle et al., J. Struct. Biol. 183:363 (2013)",
@@ -298,7 +309,14 @@ def _render_crlb(m, ev, state):
         s += f", with an axial precision (σ_z) of {m.group('sz')} nm"
     s += (f", for a targeting-pattern diameter L = {m.group('L')} nm and a median of "
           f"{m.group('N')} detected photons.")
-    return s, [CITE_CRLB]
+    cites = [CITE_CRLB, CITE_CRLB_MARIN]
+    if m.groupdict().get("fl"):
+        s += (f" Relative to the measured per-trace spread (σ_r = {m.group('mr')} nm), an "
+              f"excess error of σ_fl = {m.group('fl')} nm beyond the photon-limited bound "
+              "was identified (STD² = σ_fl² + σ_CRB²), attributable to fluorophore "
+              "flickering, drift, vibration or misalignment rather than photon statistics.")
+        cites.append(CITE_SIMUFLUX)
+    return s, cites
 
 
 def _render_frc(m, ev, state):
@@ -323,7 +341,9 @@ RULES = [
     (re.compile(r"Localization precision \(CRLB[^)]*\): median σ_xy = (?P<sxy>[\d.]+) nm "
                 r"\(background-limited\), (?P<ideal>[\d.]+) nm \(ideal\)"
                 r"(?:, σ_z = (?P<sz>[\d.]+) nm[^,]*)?, L = (?P<L>[\d.]+) nm.*?"
-                r"median N = (?P<N>[\d.]+) photons"), "analysis", _render_crlb),
+                r"median N = (?P<N>[\d.]+) photons"
+                r"(?:; measured σ_r = (?P<mr>[\d.]+) nm \(StdDev/trace\) → "
+                r"excess σ_fl = (?P<fl>[\d.]+) nm)?"), "analysis", _render_crlb),
     (re.compile(r"Localization precision \(FRC\): resolution = (?P<res>[\d.]+) nm "
                 r"\(1/7 threshold, (?P<mode>[^,]+), (?P<n>[\d,]+) points, "
                 r"pixel (?P<px>[\d.]+) nm\)"), "analysis", _render_frc),

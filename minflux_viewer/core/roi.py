@@ -282,8 +282,11 @@ def record_to_points(record: RoiRecord) -> np.ndarray:
         # A point may carry a third (depth) coordinate; ImageJ/2-D paths use x,y.
         pt = g.get("point", [0.0, 0.0])
         return np.asarray([[float(pt[0]), float(pt[1])]], dtype=float)
-    pts = np.asarray(g.get("points", []), dtype=float)
-    return pts[:, :2] if pts.ndim == 2 and pts.shape[1] >= 2 else pts   # drop depth
+    raw = g.get("points", [])
+    if not len(raw):
+        return np.empty((0, 2), dtype=float)
+    # Take (x, y) per vertex — robust to a mix of 2-D / 3-D points (drops depth).
+    return np.array([[float(p[0]), float(p[1])] for p in raw], dtype=float)
 
 
 def _rotated_outline_points(record: RoiRecord) -> np.ndarray:
@@ -395,11 +398,12 @@ def _bounds(geometry: dict[str, Any]) -> tuple[float, float, float, float]:
     if "bounds" in geometry:
         x, y, w, h = geometry["bounds"]
         return float(x), float(y), float(w), float(h)
-    pts = np.asarray(geometry.get("points", []), dtype=float)
-    if pts.size == 0:
+    raw = geometry.get("points", [])
+    if not len(raw):
         return 0.0, 0.0, 0.0, 0.0
-    if pts.ndim == 2 and pts.shape[1] > 2:
-        pts = pts[:, :2]          # line/polyline vertices may carry a depth coord
+    # (x, y) per vertex — robust to a mix of 2-D / 3-D points (a raw np.asarray on
+    # an inhomogeneous list raises ValueError).
+    pts = np.array([[float(p[0]), float(p[1])] for p in raw], dtype=float)
     x0, y0 = pts.min(axis=0)
     x1, y1 = pts.max(axis=0)
     return float(x0), float(y0), float(x1 - x0), float(y1 - y0)

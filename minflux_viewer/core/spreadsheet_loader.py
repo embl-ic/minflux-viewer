@@ -194,6 +194,43 @@ def _column_from_cells(name: str, cells: list[str]) -> SpreadsheetColumn:
     )
 
 
+def _ordinal(n: int) -> str:
+    """``1`` → ``"1st"``, ``2`` → ``"2nd"``, ``3`` → ``"3rd"``, ``4`` → ``"4th"``, …"""
+    suffix = "th" if 10 <= (n % 100) <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _is_header_row(cells) -> bool:
+    """True when the first row looks like a **text header**, not data. A row whose
+    every non-empty cell parses as a number is treated as data → no header row (so
+    that first row of numbers is kept as data, and columns are named positionally)."""
+    vals = [str(c).strip() for c in cells if str(c).strip() != ""]
+    if not vals:
+        return True
+    n_numeric = 0
+    for c in vals:
+        try:
+            float(c)
+            n_numeric += 1
+        except ValueError:
+            pass
+    return n_numeric < len(vals)          # any non-numeric cell ⇒ header
+
+
+def _headers_and_data(rows: list[list], to_str) -> tuple[list[str], list[list]]:
+    """Split *rows* into (headers, data rows). If the first row is not a text
+    header, synthesise positional names (``"1st column"``, ``"2nd column"``, …)
+    and keep the first row as data."""
+    if _is_header_row(rows[0]):
+        headers = [to_str(h) for h in rows[0]]
+        data = rows[1:]
+    else:
+        n_cols = max(len(r) for r in rows)
+        headers = [f"{_ordinal(i + 1)} column" for i in range(n_cols)]
+        data = rows
+    return headers, data
+
+
 def _read_delimited(path: Path) -> tuple[list[str], list[list[str]], str]:
     """Read a delimited text file → (headers, column-major cells, delimiter)."""
     with open(path, newline="", encoding="utf-8-sig") as fh:
@@ -210,10 +247,10 @@ def _read_delimited(path: Path) -> tuple[list[str], list[list[str]], str]:
         rows = [r for r in reader if any(str(c).strip() for c in r)]
     if not rows:
         raise ValueError(f"'{path.name}' has no rows.")
-    headers = [str(h).strip() for h in rows[0]]
+    headers, data = _headers_and_data(rows, lambda h: str(h).strip())
     n_cols = len(headers)
     cols: list[list[str]] = [[] for _ in range(n_cols)]
-    for row in rows[1:]:
+    for row in data:
         for c in range(n_cols):
             cols[c].append(row[c] if c < len(row) else "")
     return headers, cols, delimiter
@@ -226,15 +263,16 @@ def _read_excel(path: Path) -> tuple[list[str], list[list[str]]]:
         raise ImportError("openpyxl is required to open Excel spreadsheets.") from exc
     wb = load_workbook(path, read_only=True, data_only=True)
     ws = wb[wb.sheetnames[0]]
-    values = list(ws.iter_rows(values_only=True))
+    values = [list(r) for r in ws.iter_rows(values_only=True)]
     wb.close()
     if not values:
         raise ValueError(f"'{path.name}' is empty.")
-    headers = [str(v).strip() if v is not None else f"Column{i+1}"
-               for i, v in enumerate(values[0])]
+    headers, data = _headers_and_data(
+        values, lambda v: str(v).strip() if v is not None else "")
+    headers = [h or f"{_ordinal(i + 1)} column" for i, h in enumerate(headers)]
     n_cols = len(headers)
     cols: list[list[str]] = [[] for _ in range(n_cols)]
-    for row in values[1:]:
+    for row in data:
         for c in range(n_cols):
             v = row[c] if c < len(row) else None
             cols[c].append("" if v is None else str(v))
@@ -274,15 +312,145 @@ def read_table(path: str | Path) -> SpreadsheetTable:
 
 
 # ---------------------------------------------------------------------------
+# Per-column statistics (cheap: vectorised numpy, no per-row Python)
+# ---------------------------------------------------------------------------
+
+#: Largest coordinate span (nm) considered a valid MINFLUX FOV (also the wrong-
+#: unit guard). A localization field of view is at most ~10 µm.
+SANE_MAX_SPREAD_NM: float = 1.0e5
+#: MINFLUX localization coordinate constraints (used for value-based detection).
+COORD_MAX_SPAN_NM: float = 1.0e4     # x/y/z spread within 10 000 nm
+COORD_MIN_SPAN_NM: float = 5.0       # below this a z axis reads as flat → 2-D
+#: A ``tid`` groups localizations into traces: many traces, each repeated.
+TID_MIN_TRACES, TID_MAX_TRACES = 10, 10_000
+TID_MIN_MEAN_COUNT, TID_MAX_MEAN_COUNT = 2.0, 1000.0
+#: A monotonic non-decreasing column (this fraction of steps ≥ 0) is a time /
+#: frame axis, not a scattered coordinate — the key signal distinguishing a
+#: timestamp (which increases) from an x/y/z coordinate (which scatters).
+MONOTONIC_FRAC: float = 0.9
+
+
+@dataclass
+class ColumnStats:
+    """Cheap value statistics for one numeric column, used to guess its role and
+    unit when the header text is missing or unrecognised."""
+    n_finite: int
+    is_integer: bool
+    vmin: float
+    vmax: float
+    ptp: float                 # value range (max − min)
+    median_abs_diff: float     # median |consecutive row difference|, NaN if < 2
+    n_unique: int
+    mean_count_per_unique: float
+    frac_increasing: float     # fraction of consecutive steps that are ≥ 0 (monotonicity)
+
+
+def column_stats(col: SpreadsheetColumn) -> ColumnStats:
+    """Vectorised value statistics for *col* (dtype guess, range, median step,
+    unique count, monotonicity). Non-numeric / empty columns return a zeroed stat."""
+    v = col.values[np.isfinite(col.values)]
+    if v.size == 0:
+        return ColumnStats(0, False, float("nan"), float("nan"), 0.0,
+                           float("nan"), 0, 0.0, 0.0)
+    vmin, vmax = float(v.min()), float(v.max())
+    is_int = bool(np.all(v == np.rint(v)))
+    if v.size >= 2:
+        d = np.diff(v)
+        med = float(np.median(np.abs(d)))
+        frac_inc = float(np.mean(d >= 0.0))
+    else:
+        med, frac_inc = float("nan"), 0.0
+    n_unique = int(np.unique(v).size)
+    return ColumnStats(
+        n_finite=int(v.size), is_integer=is_int, vmin=vmin, vmax=vmax,
+        ptp=float(vmax - vmin), median_abs_diff=med,
+        n_unique=n_unique, mean_count_per_unique=v.size / max(n_unique, 1),
+        frac_increasing=frac_inc,
+    )
+
+
+def table_stats(table: SpreadsheetTable) -> dict[str, ColumnStats]:
+    """``column name → ColumnStats`` for every numeric column."""
+    return {c.name: column_stats(c) for c in table.numeric_columns()}
+
+
+def guess_length_unit_from_span(ptp: float) -> str:
+    """Coarsest length unit (``m`` > ``mm`` > ``um`` > ``nm``) whose span stays
+    within :data:`SANE_MAX_SPREAD_NM`. This disambiguates the unit from the value
+    magnitude: nm data (span ~10³) stays nm, µm data (~10⁰) reads µm, and metre
+    data (~10⁻⁶) reads m, because a coarser unit would overshoot 10 µm."""
+    if not np.isfinite(ptp) or ptp <= 0:
+        return "nm"
+    for unit in ("m", "mm", "um", "nm"):
+        if ptp * _UNIT_TO_NM[unit] <= SANE_MAX_SPREAD_NM:
+            return unit
+    return "nm"
+
+
+def _is_monotonic(stats: ColumnStats) -> bool:
+    """A non-decreasing axis (a timestamp / frame index increases; a coordinate
+    scatters). This is the primary discriminator for the ``frame`` role."""
+    return stats.n_finite >= 3 and stats.frac_increasing >= MONOTONIC_FRAC
+
+
+def _is_coordinate_like(stats: ColumnStats) -> bool:
+    """A **scattered** numeric column whose span fits a MINFLUX FOV (≤ 10 000 nm)
+    in some length unit, above the flat-axis threshold (so a 2-D z is excluded).
+    A monotonic column is a time/frame axis, not a coordinate → excluded."""
+    if stats.n_finite < 3 or not np.isfinite(stats.ptp) or stats.ptp <= 0:
+        return False
+    if not np.isfinite(stats.median_abs_diff) or stats.median_abs_diff <= 0:
+        return False                         # constant column → not a coordinate
+    if _is_monotonic(stats):
+        return False                         # monotonic → time/index, not a coordinate
+    unit = guess_length_unit_from_span(stats.ptp)
+    span_nm = stats.ptp * _UNIT_TO_NM[unit]
+    return COORD_MIN_SPAN_NM <= span_nm <= COORD_MAX_SPAN_NM
+
+
+def _is_tid_like(stats: ColumnStats) -> bool:
+    """Integer trace id: 10–10 000 distinct values, each repeated on average."""
+    return (stats.is_integer and stats.n_finite > 0
+            and TID_MIN_TRACES < stats.n_unique < TID_MAX_TRACES
+            and TID_MIN_MEAN_COUNT <= stats.mean_count_per_unique <= TID_MAX_MEAN_COUNT)
+
+
+def time_unit_guess(stats: ColumnStats) -> str | None:
+    """Time **unit** (``"s"`` / ``"ms"``) for an identified time column, from its
+    median step magnitude — sub-0.1 s steps read as seconds (MINFLUX inter-loc
+    intervals are ms, so a *seconds* column steps by ≪1 s), 0.1–50 read as
+    milliseconds. Returns ``None`` for an **integer** column (a bare frame index,
+    kept as-is) or a step outside both ranges."""
+    if stats.is_integer:
+        return None                          # integer counter → frame index, no s/ms
+    m = stats.median_abs_diff
+    if not np.isfinite(m) or m <= 0:
+        return None
+    if m < 0.1:
+        return "s"                           # sub-0.1 s steps → seconds
+    if m <= 50.0:
+        return "ms"                          # 0.1–50 → milliseconds
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Auto-mapping
 # ---------------------------------------------------------------------------
 
-def guess_mapping(table: SpreadsheetTable) -> dict[str, str | None]:
+def guess_mapping(table: SpreadsheetTable, *, use_values: bool = False,
+                  stats_map: dict[str, ColumnStats] | None = None) -> dict[str, str | None]:
     """Best-guess column name for each role, or ``None``.
 
     Matches each numeric column's normalised key against the per-role synonym
     sets. The first numeric column matching a role wins; a column is assigned to
     at most one role (earlier roles in :data:`ROLES` take priority).
+
+    With ``use_values=True`` (the interactive dialog path), any **required
+    localization role still unfilled after header matching** — ``x``/``y``/``z``
+    (coordinates), ``id`` (tid) and ``frame`` (tim) — is guessed from the column
+    **value statistics** (:func:`column_stats`): coordinate-like spans, an
+    integer repeating trace id, and a millisecond-scale time step. Header matches
+    always win over value guesses.
     """
     mapping: dict[str, str | None] = {role: None for role in ROLES}
     used: set[str] = set()
@@ -295,24 +463,97 @@ def guess_mapping(table: SpreadsheetTable) -> dict[str, str | None]:
                 mapping[role] = col.name
                 used.add(col.name)
                 break
+    if not use_values:
+        return mapping
+
+    stats_map = stats_map or table_stats(table)
+
+    def unmapped() -> list[SpreadsheetColumn]:
+        return [c for c in table.columns if c.numeric and c.name not in used]
+
+    # tid: an integer, repeating trace id (assigned first — very distinctive).
+    if mapping["id"] is None:
+        for c in unmapped():
+            if _is_tid_like(stats_map[c.name]):
+                mapping["id"] = c.name
+                used.add(c.name)
+                break
+    # frame / time: the first monotonic (non-decreasing) column — a timestamp /
+    # frame axis increases while a coordinate scatters. Detected BEFORE coordinates
+    # so a timestamp (whose span can look coordinate-like) is claimed here instead
+    # of being mistaken for x.
+    if mapping["frame"] is None:
+        for c in unmapped():
+            if _is_monotonic(stats_map[c.name]):
+                mapping["frame"] = c.name
+                used.add(c.name)
+                break
+    # x / y: the first two coordinate-like (scattered) columns, in file order.
+    xy_targets = [r for r in ("x", "y") if mapping[r] is None]
+    if xy_targets:
+        coords = [c for c in unmapped() if _is_coordinate_like(stats_map[c.name])]
+        for role, c in zip(xy_targets, coords):
+            mapping[role] = c.name
+            used.add(c.name)
+    # z: the numeric column immediately after y, when it reads as a real out-of-plane
+    # axis in the SHARED coordinate unit (x/y/z are one coordinate system). A flat
+    # axis (span < COORD_MIN_SPAN_NM in that unit) stays 2-D → z unmapped.
+    if mapping["z"] is None and mapping.get("x") and mapping.get("y"):
+        shared = guess_length_unit_from_span(stats_map[mapping["x"]].ptp)
+        cols = table.columns
+        yi = next((i for i, c in enumerate(cols) if c.name == mapping["y"]), None)
+        for c in (cols[yi + 1:] if yi is not None else []):
+            if not c.numeric or c.name in used:
+                continue
+            span_nm = stats_map[c.name].ptp * _UNIT_TO_NM[shared]
+            if COORD_MIN_SPAN_NM <= span_nm <= COORD_MAX_SPAN_NM:
+                mapping["z"] = c.name
+                used.add(c.name)
+            break                     # only the column right after y is a z candidate
     return mapping
 
 
-def guess_units(table: SpreadsheetTable, mapping: dict[str, str | None]) -> dict[str, str]:
-    """Per-coordinate length unit, from the column annotation or the detected tool.
+def guess_units(table: SpreadsheetTable, mapping: dict[str, str | None],
+                *, stats_map: dict[str, ColumnStats] | None = None) -> dict[str, str]:
+    """Per-coordinate length unit, from the column annotation, the detected tool,
+    or (for a bare header with no unit) the **value magnitude**.
 
-    Falls back to the tool default (Picasso → ``px``, others → ``nm``).
+    Priority: an explicit header unit (``x [nm]``, ``xnm``) wins; else Picasso →
+    ``px``; else :func:`guess_length_unit_from_span` picks ``nm``/``um``/``m`` from
+    the coordinate's spread (so a bare ``x`` column of micrometre values reads µm).
     """
-    tool_default = "px" if table.detected_tool == "picasso" else "nm"
+    picasso = table.detected_tool == "picasso"
+    stats_map = stats_map or table_stats(table)
+    # One shared value-based unit for all coordinate axes lacking a header unit,
+    # taken from the axis with the LARGEST span (most reliable) — so a small
+    # 3-D z inherits x/y's unit instead of being independently mis-scaled.
+    spans = [stats_map[c.name].ptp for axis in COORD_ROLES
+             if (c := table.by_name(mapping.get(axis))) is not None
+             and not c.unit and not picasso and c.name in stats_map]
+    shared = guess_length_unit_from_span(max(spans)) if spans else "nm"
     units: dict[str, str] = {}
     for axis in COORD_ROLES:
         col = table.by_name(mapping.get(axis))
-        units[axis] = (col.unit if col and col.unit else tool_default)
+        if col is None:
+            units[axis] = "px" if picasso else "nm"   # unmapped → tool default
+        elif col.unit:
+            units[axis] = col.unit               # explicit header unit
+        elif picasso:
+            units[axis] = "px"
+        else:
+            units[axis] = shared                 # shared value-based unit
     return units
 
 
-#: Spreads larger than this (in nm) flag a wrong length-unit guess (100 µm).
-SANE_MAX_SPREAD_NM: float = 1.0e5
+def guess_time_unit(table: SpreadsheetTable, mapping: dict[str, str | None],
+                    *, stats_map: dict[str, ColumnStats] | None = None) -> str | None:
+    """``"s"`` / ``"ms"`` for the mapped ``frame`` (→ tim) column from its step
+    magnitude, or ``None`` when it isn't time-like (e.g. a bare frame index)."""
+    col = table.by_name(mapping.get("frame"))
+    if col is None:
+        return None
+    st = (stats_map or {}).get(col.name) or column_stats(col)
+    return time_unit_guess(st)
 
 
 @dataclass
@@ -433,6 +674,7 @@ def build_dataset_from_mapping(
     folder: str | None = None,
     units: dict[str, str] | None = None,
     pixel_size_nm: float | None = None,
+    time_unit: str | None = None,
     prefs: dict | None = None,
 ):
     """Build a :class:`MinfluxDataset` from a table + a column→role mapping.
@@ -442,6 +684,10 @@ def build_dataset_from_mapping(
     as the native loaders) so render, scatter, filters, and the precision
     analyses all work. Precision/id/frame/photons map to attributes; remaining
     numeric columns are carried through under sanitised names.
+
+    ``time_unit`` (``"s"`` / ``"ms"`` / ``None``) rescales the ``frame`` column to
+    the canonical ``tim`` in **seconds** (``"ms"`` → ÷1000; ``"s"``/``None`` kept),
+    so the derived ``dt`` / ``spd`` attributes come out in sensible units.
     """
     from .dataset import build_localization_dataset
 
@@ -470,7 +716,11 @@ def build_dataset_from_mapping(
     cid = col("id")
     tid = np.asarray(cid.values[:n]) if cid is not None else None
     cframe = col("frame")
-    tim = np.asarray(cframe.values[:n], dtype=float) if cframe is not None else None
+    tim = None
+    if cframe is not None:
+        tim = np.asarray(cframe.values[:n], dtype=float)
+        if time_unit == "ms":                       # → canonical seconds
+            tim = tim / 1000.0
 
     # Precision is in the lateral coordinate unit unless it carries an explicit
     # bracket unit (e.g. ThunderSTORM "uncertainty_xy [nm]").

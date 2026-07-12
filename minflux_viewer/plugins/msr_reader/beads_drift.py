@@ -78,16 +78,21 @@ def extract_bead_drift(points, points_by_gri, used_rids, *, min_points: int = 1)
     return beads
 
 
-def gather_msr_bead_drift(datasets, mbm_map) -> list[dict]:
+def gather_msr_bead_drift(datasets, mbm_map, meta_map=None) -> list[dict]:
     """Collect ``{"name", "beads"}`` per dataset that has bead data.
 
     *datasets* is the MSR parse result's ``datasets`` list (each with
     ``display_name`` + ``zroot``); *mbm_map* maps name → ``grd/mbm/points`` array.
+    *meta_map* (name → translated legacy MBM metadata) is passed by the caller so
+    the reader dialog stays independent of the shared global ``state``; it falls
+    back to that global when not given (back-compat).
     """
-    from ...msr import state as _state
     from ...msr.io import read_zarr_attrs
 
-    meta_map = getattr(_state, "mbm_meta_map", {}) or {}
+    if meta_map is None:
+        from ...msr import state as _state
+        meta_map = getattr(_state, "mbm_meta_map", {}) or {}
+    meta_map = meta_map or {}
     out: list[dict] = []
     for d in datasets or []:
         name = d.get("display_name") or d.get("did") or "dataset"

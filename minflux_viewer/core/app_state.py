@@ -95,7 +95,7 @@ DEFAULT_PREFS: dict = {
         "show_histogram": False,
         "show_render": True,
         # When saving/exporting a data file (defaults that shrink the Save dialog):
-        "export_formats": ["mat", "npy", "npz", "json", "csv", "zarr"],  # offered in the dialog
+        "export_formats": ["mat", "npy", "npz", "json", "csv", "zarr", "msr"],  # offered in the dialog
         "export_content": ["raw", "snapshot"],   # raw canonical / processed snapshot
         "export_include_attrs": True,            # original properties & attributes
         "export_include_derived": False,         # freeze derived attributes (snapshot)
@@ -142,8 +142,6 @@ DEFAULT_PREFS: dict = {
         "previous_dataset": "Ctrl+Shift+Tab",
         "open": "Ctrl+O",
         "open_msr": "",
-        "open_spreadsheet": "",
-        "open_tiff": "",
         "save": "Ctrl+S",
         "render": "Ctrl+R",
         "brightness_contrast": "Shift+C",

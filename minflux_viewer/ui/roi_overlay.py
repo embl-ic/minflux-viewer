@@ -109,6 +109,69 @@ class FilledRotateHandle(Handle):
         p.drawPath(self.shape())
 
 
+def _mark_line_end_handle(item) -> None:
+    """Restyle an open line ROI's **last** vertex handle as a larger **oval** so
+    the line's direction (begin → end, which the Plot Profile follows) is visible;
+    the start / intermediate vertices keep their square edit handles.
+
+    Done **in place** by swapping the handle's local ``path`` to an ellipse and
+    enlarging it — the handle's underlying sip/C++ type is left untouched and it
+    stays an ordinary draggable free handle (performs no rotation). A previous
+    ``handle.__class__ = …`` swap **crashed** the app under the rapid
+    create/destroy churn of a live draft drag, so never reassign ``__class__`` on
+    a pyqtgraph handle. No-op for a closed loop, a single vertex, or an
+    already-marked handle."""
+    handles = getattr(item, "handles", None)
+    if not handles or len(handles) < 2 or getattr(item, "closed", False):
+        return
+    entry = handles[-1]
+    h = entry.get("item") if isinstance(entry, dict) else None
+    if not isinstance(h, Handle) or getattr(h, "_is_line_end_marker", False):
+        return
+    try:
+        r = float(h.radius) * 1.5             # a bit larger so the end stands out
+        h.radius = r
+        path = QPainterPath()
+        path.addEllipse(QRectF(-r, -r, r * 2.0, r * 2.0))
+        h.path = path
+        h._shape = None                       # force shape() to regenerate from the ellipse
+        h._is_line_end_marker = True
+        h.update()
+    except Exception:
+        pass
+
+
+def _add_box_handles(roi, y_axis_inverted: bool) -> None:
+    """Add the shared bounding-box edit handles — 8 scale handles (4 corners +
+    4 edge midpoints) and a top rotate handle — used by **both** the rectangle
+    and the oval, so an oval resizes / rotates via its bounding box exactly like
+    a rectangle."""
+    center = [0.5, 0.5]
+    for pos, opposite in (
+        ([0.0, 0.5], [1.0, 0.5]),
+        ([1.0, 0.5], [0.0, 0.5]),
+        ([0.5, 0.0], [0.5, 1.0]),
+        ([0.5, 1.0], [0.5, 0.0]),
+        ([0.0, 0.0], [1.0, 1.0]),
+        ([1.0, 0.0], [0.0, 1.0]),
+        ([1.0, 1.0], [0.0, 0.0]),
+        ([0.0, 1.0], [1.0, 0.0]),
+    ):
+        roi.addScaleHandle(pos, opposite)
+    rotate_handle = FilledRotateHandle(
+        float(roi.handleSize),
+        typ="r",
+        pen=roi.handlePen,
+        hoverPen=roi.handleHoverPen,
+        parent=roi,
+        antialias=roi._antialias,
+    )
+    # Keep the rotate adornment at the top of the monitor. With an ImageJ-style
+    # top-left origin, data Y is inverted, so data-space "above" is local -Y.
+    rotate_y = -0.22 if y_axis_inverted else 1.22
+    roi.addRotateHandle([0.5, rotate_y], center, item=rotate_handle, name="rotate")
+
+
 class FilledRectROI(pg.ROI):
     """Rectangle ROI with a visible translucent face and edit handles."""
 
@@ -125,30 +188,7 @@ class FilledRectROI(pg.ROI):
         super().__init__(pos, size, angle=angle, **kwargs)
         self._fill_color = pg.mkColor(fill_color)
         self._fill_color.setAlpha(32)
-        center = [0.5, 0.5]
-        for pos, opposite in (
-            ([0.0, 0.5], [1.0, 0.5]),
-            ([1.0, 0.5], [0.0, 0.5]),
-            ([0.5, 0.0], [0.5, 1.0]),
-            ([0.5, 1.0], [0.5, 0.0]),
-            ([0.0, 0.0], [1.0, 1.0]),
-            ([1.0, 0.0], [0.0, 1.0]),
-            ([1.0, 1.0], [0.0, 0.0]),
-            ([0.0, 1.0], [1.0, 0.0]),
-        ):
-            self.addScaleHandle(pos, opposite)
-        rotate_handle = FilledRotateHandle(
-            float(self.handleSize),
-            typ="r",
-            pen=self.handlePen,
-            hoverPen=self.handleHoverPen,
-            parent=self,
-            antialias=self._antialias,
-        )
-        # Keep the edit adornment at the top of the monitor. With an ImageJ-style
-        # top-left origin, data Y is inverted, so data-space "above" is local -Y.
-        rotate_y = -0.22 if y_axis_inverted else 1.22
-        self.addRotateHandle([0.5, rotate_y], center, item=rotate_handle, name="rotate")
+        _add_box_handles(self, y_axis_inverted)
 
     def setFillColor(self, color, alpha: int = 32) -> None:
         self._fill_color = pg.mkColor(color)
@@ -169,12 +209,21 @@ class FilledRectROI(pg.ROI):
 
 
 class FilledEllipseROI(pg.EllipseROI):
-    """Ellipse ROI with a visible translucent face."""
+    """Ellipse ROI with a visible translucent face.
 
-    def __init__(self, pos, size, *, fill_color="#ffff00", **kwargs) -> None:
+    Uses the **rectangle's bounding-box handles** (8 scale + a top rotate handle)
+    rather than ``EllipseROI``'s default single scale + rotate handle, so an oval
+    is resized and rotated via its bounding box like a rectangle."""
+
+    def __init__(self, pos, size, *, fill_color="#ffff00", y_axis_inverted: bool = False, **kwargs) -> None:
+        # Set before super().__init__ — EllipseROI.__init__ calls _addHandles().
+        self._y_axis_inverted = bool(y_axis_inverted)
         super().__init__(pos, size, **kwargs)
         self._fill_color = pg.mkColor(fill_color)
         self._fill_color.setAlpha(32)
+
+    def _addHandles(self) -> None:
+        _add_box_handles(self, getattr(self, "_y_axis_inverted", False))
 
     def setFillColor(self, color, alpha: int = 32) -> None:
         self._fill_color = pg.mkColor(color)
@@ -315,6 +364,14 @@ class RoiOverlayController(QObject):
         # One-shot callback invoked with the next finished rectangle draft (used
         # by the Scale Bar "At Selection" draw-then-place flow).
         self._rect_request = None
+        # Which sub-element the arrow keys act on for the active ROI: "move"
+        # (translate whole ROI), "rotate", ("scale", fx, fy) or ("vertex", i). Set
+        # by clicking that handle in edit mode; default whole-ROI move.
+        self._kbd_handle = "move"
+        # Identity of the ROI the current _kbd_handle refers to (reset to "move"
+        # when the active target changes) + the active session point for arrows.
+        self._kbd_target_id: str | None = None
+        self._active_session_point_id: str | None = None
         self._selection_timer = QTimer(self)
         self._selection_timer.setSingleShot(True)
         self._selection_timer.setInterval(120)
@@ -322,6 +379,11 @@ class RoiOverlayController(QObject):
 
         target = self._event_target()
         target.installEventFilter(self)
+        # Key presses are delivered to the focus widget (the graphics view), not
+        # its mouse-event viewport, so filter the view widget too — that is where
+        # the arrow-key rectangle nudge/rotate is picked up.
+        if self.view_widget is not target:
+            self.view_widget.installEventFilter(self)
         store.changed.connect(self.refresh)
         store.selection_changed.connect(self.refresh)
         self.refresh()
@@ -331,6 +393,40 @@ class RoiOverlayController(QObject):
 
     def current_record(self) -> RoiRecord | None:
         return self.draft
+
+    def active_open_line_record(self) -> RoiRecord | None:
+        """The open-line ROI (``line`` / ``polyline`` / ``freehand_line``) the Plot
+        Profile acts on: the current draft if it is one, else the single selected
+        stored one; else ``None``."""
+        line_types = {"line", "polyline", "freehand_line"}
+        if self.draft is not None and self.draft.type in line_types:
+            return self.draft
+        selected = list(self.store.selected_ids)
+        if len(selected) == 1:
+            for rec in self.store.records:
+                if rec.id == selected[0] and rec.type in line_types:
+                    return rec
+        return None
+
+    def active_open_line_points(self):
+        """Current projected 2-D vertices ``(N, 2)`` of the active open-line ROI,
+        read from its **live** pyqtgraph item so they track a drag *in progress*
+        (the record geometry only commits on release, via
+        ``sigRegionChangeFinished``). Falls back to the record geometry projected
+        into the view plane. ``None`` when no open-line ROI is active."""
+        record = self.active_open_line_record()
+        if record is None:
+            return None
+        item = self.draft_item if (self.draft is not None and self.draft is record) \
+            else self.items.get(record.id)
+        if item is not None:
+            try:
+                pts = item_to_geometry(record.type, item).get("points", [])
+                if len(pts) >= 2:
+                    return [[float(p[0]), float(p[1])] for p in pts]
+            except Exception:
+                pass
+        return project_points(record.geometry.get("points", []), self._view_plane())
 
     def consume_draft(self) -> RoiRecord | None:
         record = self.draft
@@ -389,7 +485,7 @@ class RoiOverlayController(QObject):
                 record.id in self.items
                 and (
                     (plane_changed and record.type in {"line", "polyline", "freehand_line"})
-                    or (y_orientation_changed and record.type == "rectangle")
+                    or (y_orientation_changed and record.type in {"rectangle", "oval"})
                 )
             ):
                 self.plot_item.removeItem(self.items.pop(record.id))
@@ -420,7 +516,7 @@ class RoiOverlayController(QObject):
             and self.draft_item is not None
             and (
                 (plane_changed and self.draft.type in {"line", "polyline", "freehand_line"})
-                or (y_orientation_changed and self.draft.type == "rectangle")
+                or (y_orientation_changed and self.draft.type in {"rectangle", "oval"})
             )
         ):
             try:
@@ -437,6 +533,16 @@ class RoiOverlayController(QObject):
             target = self._event_target()
         except RuntimeError:
             return False
+        if obj is not target and obj is not self.view_widget:
+            return False
+        # Keyboard editing of the active ROI (arrow nudge / resize / rotate, and the
+        # Fiji-style 't' → add to the ROI Manager), delivered to whichever of the
+        # view widget / its viewport currently holds keyboard focus.
+        if event.type() == QEvent.Type.KeyPress:
+            if self._handle_arrow_key(event):
+                return True
+            if self._handle_add_to_manager_key(event):
+                return True
         if obj is not target:
             return False
         if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
@@ -464,6 +570,14 @@ class RoiOverlayController(QObject):
             return False
         tool = self.store.active_tool
         if not tool:
+            # Edit mode: note which sub-element a left click selects on the active
+            # ROI (body → move, corner/side → resize, rotation handle → rotate,
+            # vertex → move that vertex) so a following arrow key behaves
+            # accordingly. The event is not consumed — pyqtgraph still drives the
+            # interactive edit.
+            if (event.type() == QEvent.Type.MouseButtonPress
+                    and event.button() == Qt.MouseButton.LeftButton):
+                self._track_kbd_handle_selection(event)
             return False
         if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             self.activate()
@@ -572,6 +686,330 @@ class RoiOverlayController(QObject):
                     return True
         return False
 
+    # ------------------------------------------------------------------
+    # Keyboard fine-adjust for the active ROI (arrow keys)
+    # ------------------------------------------------------------------
+    # Arrow keys mirror what the mouse would do on the selected handle of the
+    # active ROI (the current draft, else the single selected stored ROI, else the
+    # active session point):
+    #   • body / no handle → translate the whole ROI 1 nm;
+    #   • rectangle/oval corner or side handle → nudge that handle 1 nm (resize,
+    #     opposite corner anchored); rotation handle → rotate 1° about the centre;
+    #   • line/polyline/polygon/freehand/freehand_line/angle vertex → move that
+    #     vertex 1 nm;  point → translate the marker 1 nm.
+    _KBD_STEP_NM = 1.0
+    _KBD_ROTATE_DEG = 1.0
+    _KBD_MIN_SIZE_NM = 1.0
+    #: Local fractional positions of the eight scale handles (matches _add_box_handles).
+    _SCALE_FRACS = (
+        (0.0, 0.5), (1.0, 0.5), (0.5, 0.0), (0.5, 1.0),
+        (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0),
+    )
+
+    def _kbd_target(self):
+        """``(item, record, kind)`` the arrow keys act on: the current draft, else
+        the single selected stored ROI, else the active session point; else
+        ``None``."""
+        if self.draft is not None and self.draft_item is not None:
+            return self.draft_item, self.draft, "draft"
+        selected = list(self.store.selected_ids)
+        if len(selected) == 1:
+            rid = selected[0]
+            for rec in self.store.records:
+                if rec.id == rid:
+                    if rid in self.items:
+                        return self.items[rid], rec, "stored"
+                    break
+        sid = self._active_session_point_id
+        if sid is not None and sid in self._session_items:
+            for rec in self._session_points:
+                if rec.id == sid:
+                    return self._session_items[sid], rec, "session"
+        return None
+
+    def _kbd_role_at(self, record: RoiRecord, pos):
+        """Which sub-element a click at *pos* selects on the active ROI:
+        rect/oval → ``"rotate"`` / ``("scale", fx, fy)`` / ``"move"``; point →
+        ``"move"``; vertex ROIs → ``("vertex", i)`` / ``"move"``; else ``None``."""
+        if record is None:
+            return None
+        if record.type in {"rectangle", "oval"}:
+            return self._rect_handle_role_at(record, pos)
+        if record.type == "point":
+            px, py = self._project_point(record)
+            tol = self._hit_tolerance() * 3.0
+            if abs(pos[0] - px) <= tol and abs(pos[1] - py) <= tol:
+                return "move"
+            return None
+        # vertex-based: line / polyline / freehand_line / polygon / freehand / angle
+        from ..core.roi_vertex_edit import nearest_vertex
+
+        projected = self._project_points(record)
+        if projected:
+            idx, dist = nearest_vertex(projected, pos)
+            if idx >= 0 and dist <= self._hit_tolerance() * 3.0:
+                return ("vertex", int(idx))
+        if self._point_hits_record(pos, record, self._hit_tolerance()):
+            return "move"
+        return None
+
+    def _rect_handle_role_at(self, record: RoiRecord, pos):
+        """Which handle a click at *pos* selects on rectangle / oval *record*:
+        ``"rotate"`` near the rotation handle, ``("scale", fx, fy)`` near one of
+        the corner / side scale handles, ``"move"`` elsewhere on the body, else
+        ``None`` (the click missed the ROI)."""
+        if record is None or record.type not in {"rectangle", "oval"}:
+            return None
+        x, y, w, h = _bounds(record.geometry)
+        cx, cy = x + w / 2.0, y + h / 2.0
+        half_w = max(w / 2.0, 0.0)
+        half_h = max(h / 2.0, 0.0)
+        angle = float(record.geometry.get("angle", 0.0) or 0.0)
+        theta = np.deg2rad(angle)
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        tol = self._hit_tolerance()
+        # Rotation handle: mirror the offset used by _make_item / _point_hits_record
+        # (test both sides so the y-axis orientation does not matter here).
+        handle_offset = max(half_h * 0.22, tol * 2.0)
+        rot_radius = max(tol * 3.0, min(half_w, half_h) * 0.18)
+        for rotation_y in (-half_h - handle_offset, half_h + handle_offset):
+            rot_x = cx + (-sin_t * rotation_y)
+            rot_y = cy + (cos_t * rotation_y)
+            if (float(pos[0]) - rot_x) ** 2 + (float(pos[1]) - rot_y) ** 2 <= rot_radius ** 2:
+                return "rotate"
+        # Nearest corner / side scale handle on the (rotated) box boundary. Cap the
+        # pick radius to half the smaller half-extent so a click in the body centre
+        # of a thin box is never mistaken for an edge handle (stays "move").
+        pick_radius = max(tol * 3.0, min(half_w, half_h) * 0.2)
+        pick_radius = min(pick_radius, min(half_w, half_h) * 0.5)
+        best = None
+        best_d2 = pick_radius ** 2
+        for fx, fy in self._SCALE_FRACS:
+            ox, oy = (fx - 0.5) * w, (fy - 0.5) * h
+            hx = cx + cos_t * ox - sin_t * oy
+            hy = cy + sin_t * ox + cos_t * oy
+            d2 = (float(pos[0]) - hx) ** 2 + (float(pos[1]) - hy) ** 2
+            if d2 <= best_d2:
+                best_d2 = d2
+                best = (fx, fy)
+        if best is not None:
+            return ("scale", best[0], best[1])
+        dx = float(pos[0]) - cx
+        dy = float(pos[1]) - cy
+        local_x = cos_t * dx + sin_t * dy
+        local_y = -sin_t * dx + cos_t * dy
+        if abs(local_x) <= half_w + tol and abs(local_y) <= half_h + tol:
+            return "move"
+        return None
+
+    def _track_kbd_handle_selection(self, event) -> None:
+        """On a left click in edit mode, record which sub-element of the active ROI
+        the user selected (and, for a clicked session point, make it the active
+        keyboard target), so a following arrow key behaves accordingly."""
+        pos = self._event_to_view(event)
+        if pos is None:
+            return
+        tol = self._hit_tolerance() * 3.0
+        # A click on a session point makes it the active (movable) keyboard target.
+        for rec in reversed(self._session_points):
+            px, py = self._project_point(rec)
+            if abs(pos[0] - px) <= tol and abs(pos[1] - py) <= tol:
+                self._active_session_point_id = rec.id
+                self._kbd_target_id = rec.id
+                self._kbd_handle = "move"
+                return
+        target = self._kbd_target()
+        if target is None:
+            return
+        _item, record, _kind = target
+        role = self._kbd_role_at(record, pos)
+        if role is not None:
+            self._kbd_handle = role
+            self._kbd_target_id = record.id
+
+    def _handle_arrow_key(self, event) -> bool:
+        """Arrow-key move / resize / rotate for the active ROI. Returns ``True``
+        when the key was consumed."""
+        key = event.key()
+        if key not in (Qt.Key.Key_Left, Qt.Key.Key_Right,
+                       Qt.Key.Key_Up, Qt.Key.Key_Down):
+            return False
+        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                | Qt.KeyboardModifier.AltModifier
+                                | Qt.KeyboardModifier.MetaModifier):
+            return False
+        target = self._kbd_target()
+        if target is None:
+            return False
+        item, record, kind = target
+        # Switching the active ROI resets the selected sub-element to whole-ROI move.
+        if record.id != getattr(self, "_kbd_target_id", None):
+            self._kbd_target_id = record.id
+            self._kbd_handle = "move"
+        role = getattr(self, "_kbd_handle", "move")
+        if record.type in {"rectangle", "oval"}:
+            if role == "rotate":
+                self._rotate_active_rect(item, kind, record, key)
+            elif isinstance(role, tuple) and len(role) == 3 and role[0] == "scale":
+                self._resize_active_rect(item, kind, record, key, role[1], role[2])
+            else:
+                self._move_whole_roi(item, kind, record, key)
+        elif record.type == "point":
+            self._move_point(item, kind, record, key)
+        elif isinstance(role, tuple) and len(role) == 2 and role[0] == "vertex":
+            self._move_vertex(item, kind, record, key, role[1])
+        else:
+            self._move_whole_roi(item, kind, record, key)
+        return True
+
+    def _handle_add_to_manager_key(self, event) -> bool:
+        """Fiji-style ``t``: add the active ROI to the ROI Manager. Returns ``True``
+        when the key was consumed."""
+        if event.key() != Qt.Key.Key_T:
+            return False
+        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                | Qt.KeyboardModifier.AltModifier
+                                | Qt.KeyboardModifier.MetaModifier):
+            return False
+        return self._add_active_roi_to_manager()
+
+    def _add_active_roi_to_manager(self) -> bool:
+        """Add the active ROI — the current draft, else the active session point —
+        to the ROI Manager, opening one if none is visible (``_add_hit_to_manager``
+        → ``_show_manager_if_needed`` + ``store.add``). Returns ``True`` if a ROI
+        was added."""
+        if self.draft is not None:
+            self.activate()
+            self._add_hit_to_manager("draft", self.draft)
+            return True
+        sid = self._active_session_point_id
+        if sid is not None:
+            for rec in list(self._session_points):
+                if rec.id == sid:
+                    self.activate()
+                    self._add_hit_to_manager("session", rec)
+                    return True
+        return False
+
+    def _arrow_data_delta(self, key) -> tuple[float, float]:
+        """Data-space (dx, dy) for a 1 nm step in the arrow's *screen* direction —
+        Up is up on screen for either y-axis orientation."""
+        step = self._KBD_STEP_NM
+        up_sign = -1.0 if self._view_y_inverted() else 1.0
+        if key == Qt.Key.Key_Left:
+            return -step, 0.0
+        if key == Qt.Key.Key_Right:
+            return step, 0.0
+        if key == Qt.Key.Key_Up:
+            return 0.0, step * up_sign
+        if key == Qt.Key.Key_Down:
+            return 0.0, -step * up_sign
+        return 0.0, 0.0
+
+    def _move_whole_roi(self, item, kind: str, record, key) -> None:
+        """Translate the whole active ROI one 1 nm step in the arrow direction
+        (body / no specific handle selected)."""
+        dx, dy = self._arrow_data_delta(key)
+        try:
+            item.translate((dx, dy), finish=True)
+        except Exception:
+            return
+        self._after_roi_key_edit(item, kind, record)
+
+    def _move_point(self, item, kind: str, record, key) -> None:
+        """Translate a point marker one 1 nm step in the arrow direction, keeping
+        its out-of-plane (depth) coordinate."""
+        dx, dy = self._arrow_data_delta(key)
+        try:
+            pos = item.pos()
+            new_xy = (float(pos.x()) + dx, float(pos.y()) + dy)
+            item.setPos(pg.Point(*new_xy))
+        except Exception:
+            return
+        # Draft / session records are ours to update in place; a stored point is a
+        # live-edit copy (committed only on Manager Update).
+        if kind in {"draft", "session"}:
+            old = record.geometry.get("point", [0.0, 0.0])
+            record.geometry = {"point": update_point_in_plane(new_xy, old, self._view_plane())}
+        self._emit_status(self._roi_status_text("point", {"point": [new_xy[0], new_xy[1]]}))
+
+    def _move_vertex(self, item, kind: str, record, key, idx: int) -> None:
+        """Nudge the selected vertex of a line / polyline / polygon / freehand /
+        angle ROI 1 nm in the arrow direction (mirrors dragging that handle)."""
+        dx, dy = self._arrow_data_delta(key)
+        handles = getattr(item, "handles", None) or []
+        if idx < 0 or idx >= len(handles):
+            return
+        try:
+            _name, scene = item.getSceneHandlePositions(idx)
+            parent = item.mapSceneToParent(scene)
+            item.movePoint(handles[idx]["item"],
+                           pg.Point(float(parent.x()) + dx, float(parent.y()) + dy),
+                           coords="parent", finish=True)
+        except Exception:
+            return
+        self._after_roi_key_edit(item, kind, record)
+
+    def _resize_active_rect(self, item, kind: str, record, key, fx: float, fy: float) -> None:
+        """Nudge the selected corner / side handle 1 nm in the arrow direction,
+        resizing the rectangle / oval with the opposite corner anchored — the
+        keyboard equivalent of dragging that scale handle. Handles rotation via
+        the item's own transform-aware :meth:`setSize`."""
+        dx, dy = self._arrow_data_delta(key)
+        try:
+            size = item.size()
+            w, h = float(size.x()), float(size.y())
+            theta = np.deg2rad(float(item.angle()))
+        except Exception:
+            return
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        # Component of the move along the box's own (rotated) width / height axes.
+        du = cos_t * dx + sin_t * dy
+        dv = -sin_t * dx + cos_t * dy
+        s_x = 1.0 if fx >= 0.999 else (-1.0 if fx <= 0.001 else 0.0)
+        s_y = 1.0 if fy >= 0.999 else (-1.0 if fy <= 0.001 else 0.0)
+        w2 = max(w + du * s_x, self._KBD_MIN_SIZE_NM)
+        h2 = max(h + dv * s_y, self._KBD_MIN_SIZE_NM)
+        try:
+            # centerLocal = the opposite handle in old-size local coords → anchored.
+            item.setSize([w2, h2], centerLocal=[(1.0 - fx) * w, (1.0 - fy) * h],
+                         finish=True)
+        except Exception:
+            return
+        self._after_roi_key_edit(item, kind, record)
+
+    def _rotate_active_rect(self, item, kind: str, record, key) -> None:
+        """Rotate the active rectangle / oval 1° per press about its centre. Right /
+        Up turn clockwise on screen, Left / Down counter-clockwise (either y-axis
+        orientation)."""
+        # +delta reads as clockwise-on-screen in a y-inverted view (the render
+        # default), counter-clockwise otherwise.
+        cw_delta = self._KBD_ROTATE_DEG if self._view_y_inverted() else -self._KBD_ROTATE_DEG
+        clockwise = key in (Qt.Key.Key_Right, Qt.Key.Key_Up)
+        delta = cw_delta if clockwise else -cw_delta
+        try:
+            item.rotate(delta, center=[0.5, 0.5], finish=True)
+        except Exception:
+            return
+        self._after_roi_key_edit(item, kind, record)
+
+    def _after_roi_key_edit(self, item, kind: str, record) -> None:
+        """Finish a keyboard ROI edit. For a draft the ``sigRegionChangeFinished``
+        handler has already re-read the geometry, rebuilt the item and re-queued
+        the selection; a stored ROI is a live-edit copy (committed only on Manager
+        Update), so just refresh the read-out."""
+        if kind != "stored":
+            return
+        try:
+            if record.type == "point":
+                p = item.pos()
+                geom = {"point": [float(p.x()), float(p.y())]}
+            else:
+                geom = item_to_geometry(record.type, item)
+            self._emit_status(self._roi_status_text(record.type, geom))
+        except Exception:
+            pass
+
     def _commit_point(self, pos) -> None:
         """Drop a point marker at *pos*.  Points are a multi-shot tool: the point
         tool stays active after each click (the toolbar button stays pressed) so
@@ -602,6 +1040,11 @@ class RoiOverlayController(QObject):
 
     def _add_session_point(self, record: RoiRecord) -> None:
         self._session_points.append(record)
+        # The just-placed point becomes the active arrow-key target so it can be
+        # nudged 1 nm at a time without leaving the point tool.
+        self._active_session_point_id = record.id
+        self._kbd_target_id = record.id
+        self._kbd_handle = "move"
         item = self._make_item(record)
         self._session_items[record.id] = item
         self.plot_item.addItem(item)
@@ -626,6 +1069,8 @@ class RoiOverlayController(QObject):
 
     def _remove_session_point(self, roi_id: str) -> None:
         self._session_points = [r for r in self._session_points if r.id != roi_id]
+        if self._active_session_point_id == roi_id:
+            self._active_session_point_id = None
         item = self._session_items.pop(roi_id, None)
         if item is not None:
             try:
@@ -645,6 +1090,7 @@ class RoiOverlayController(QObject):
                 except Exception:
                     pass
         self._session_points = []
+        self._active_session_point_id = None
         self._show_manager_if_needed()
         for rec in records:
             self.store.add(rec)
@@ -726,7 +1172,16 @@ class RoiOverlayController(QObject):
         preserving each vertex's out-of-plane (depth) axis."""
         new_xy = item_to_geometry(roi_type, item).get("points", [])
         old = old_geometry.get("points", [])
-        pts = update_points_in_plane(new_xy, old, self._view_plane())
+        if len(new_xy) == len(old):
+            # A pure move / reshape: pair 1:1 and keep each vertex's depth.
+            pts = update_points_in_plane(new_xy, old, self._view_plane())
+        else:
+            # A vertex was added or removed (e.g. pyqtgraph's segment-click adds a
+            # vertex when the line is clicked): the index pairing is invalid, so
+            # re-derive a **consistent** 3-D geometry (data-aware depth) from the
+            # item's 2-D vertices — never leave a mix of 2-D/3-D points (which
+            # crashed np.asarray in _bounds).
+            pts = self._points_to_3d([[float(p[0]), float(p[1])] for p in new_xy])
         return {"points": pts, "closed": bool(old_geometry.get("closed", False))}
 
     def _maybe_release_tool(self, modifiers) -> None:
@@ -928,9 +1383,10 @@ class RoiOverlayController(QObject):
     @staticmethod
     def _roi_status_text(roi_type: str, geometry: dict) -> str:
         """Concise live geometry read-out (integer nm) for a draft ROI: origin +
-        size for rectangle/oval, type + vertex count + bounding box for other
-        shapes, X/Y for a point. Coordinates may carry a depth (3-D) — always index
-        ``[0]``/``[1]``, never ``x, y = p``."""
+        size for rectangle/oval, start point + length + angle for a straight line,
+        type + vertex count + bounding box for other shapes, X/Y for a point.
+        Coordinates may carry a depth (3-D) — always index ``[0]``/``[1]``, never
+        ``x, y = p``."""
         g = geometry or {}
         if roi_type == "angle":
             return ""                                   # angle has its own read-out
@@ -945,6 +1401,15 @@ class RoiOverlayController(QObject):
             p = g.get("point") or [0.0, 0.0, 0.0]
             return f"Point X={float(p[0]):.0f}, Y={float(p[1]):.0f}"
         pts = g.get("points") or []                     # line/polyline/polygon/freehand…
+        if roi_type == "line" and len(pts) >= 2:
+            # Straight line: start point, length, and the vector's angle from the
+            # +X axis in (-180, 180] (start treated as the polar origin).
+            x0, y0 = float(pts[0][0]), float(pts[0][1])
+            x1, y1 = float(pts[-1][0]), float(pts[-1][1])
+            length = float(np.hypot(x1 - x0, y1 - y0))
+            angle = float(np.degrees(np.arctan2(y1 - y0, x1 - x0)))
+            return (f"Line {len(pts)} vertices, X={x0:.0f}, Y={y0:.0f}, "
+                    f"length={length:.0f}, angle={angle:.1f}°")
         if len(pts) >= 1:
             arr = np.asarray([[float(p[0]), float(p[1])] for p in pts], dtype=float)
             x0, y0 = float(arr[:, 0].min()), float(arr[:, 1].min())
@@ -1037,23 +1502,33 @@ class RoiOverlayController(QObject):
                                      y_axis_inverted=self._view_y_inverted(),
                                      movable=True)
             return FilledEllipseROI([px, py], size, angle=angle,
-                                    fill_color=record.stroke_color, movable=True)
+                                    fill_color=record.stroke_color,
+                                    y_axis_inverted=self._view_y_inverted(),
+                                    movable=True)
         if record.type == "line":
             pts = self._project_points(record) or [[0, 0], [1, 1]]
-            return pg.LineSegmentROI(pts[:2], movable=True)
+            item = pg.LineSegmentROI(pts[:2], movable=True)
+            _mark_line_end_handle(item)           # oval marker on the end vertex
+            return item
         if record.type == "point":
             x, y = self._project_point(record)
             return PointMarkerItem((x, y))
         if record.type == "angle":
             pts = g.get("points", [[0, 0], [1, 0], [2, 1]])
-            return pg.PolyLineROI([p[:2] for p in pts[:3]], closed=False, movable=True)
+            item = pg.PolyLineROI([p[:2] for p in pts[:3]], closed=False, movable=True)
+            _mark_line_end_handle(item)           # round the end (C) vertex
+            return item
         if record.type in {"polyline", "freehand_line"}:
             # open curves (no fill / no enclosed region) — but a region→Line
             # conversion yields a *closed* outline (still a line type, no mask).
             pts = self._project_points(record)
             if len(pts) < 2:
                 pts = [[0, 0], [1, 1]]
-            return pg.PolyLineROI(pts, closed=bool(g.get("closed", False)), movable=True)
+            closed = bool(g.get("closed", False))
+            item = pg.PolyLineROI(pts, closed=closed, movable=True)
+            if not closed:                        # open line → mark the end vertex
+                _mark_line_end_handle(item)
+            return item
         pts = g.get("points", [])
         if len(pts) < 2:
             pts = [[0, 0], [1, 1]]
@@ -1518,6 +1993,26 @@ class RoiOverlayController(QObject):
         self._show_manager_if_needed()
         self.store.add(record)
         self.store.deselect()            # the drawn ROI disappears from the view
+        # The draft is now a stored, deselected ROI: drop the dataset's "active
+        # draft" marker so its persistent in-ROI highlight clears with it (the
+        # stored mask is kept, so re-selecting the ROI re-highlights).
+        self._demote_active_draft_marker(record)
+
+    def _demote_active_draft_marker(self, record: RoiRecord) -> None:
+        """Clear the ``active_roi_draft_id`` marker for *record* (a draft that has
+        become a stored ROI) on every dataset that carries it, keeping the stored
+        selection mask, and notify so render/scatter re-draw their highlights —
+        otherwise the active-draft highlight lingers after the ROI is filed away
+        (`_roi_masks_for_dataset` highlights the active draft regardless of
+        selection)."""
+        state = getattr(self.owner, "_state", None)
+        datasets = getattr(state, "datasets", []) if state is not None else []
+        notify = getattr(state, "notify_roi_selection_changed", None)
+        for idx, ds in enumerate(datasets):
+            if ds.state.get("active_roi_draft_id") == record.id:
+                ds.state.pop("active_roi_draft_id", None)
+                if callable(notify):
+                    notify(idx)
 
     def _delete_hit_roi(self, kind: str, record: RoiRecord) -> None:
         self._clear_status()                         # deleted ROI → clear its read-out
@@ -1698,11 +2193,12 @@ def _bounds(geometry: dict[str, Any]) -> tuple[float, float, float, float]:
     if "point" in geometry:
         pt = geometry["point"]                       # may carry a 3rd (depth) coord
         return float(pt[0]), float(pt[1]), 0.0, 0.0
-    pts = np.asarray(geometry.get("points", []), dtype=float)
-    if pts.size == 0:
+    raw = geometry.get("points", [])
+    if not len(raw):
         return 0.0, 0.0, 0.0, 0.0
-    if pts.ndim == 2 and pts.shape[1] > 2:
-        pts = pts[:, :2]                          # vertices may carry a depth coord
+    # Take (x, y) from each vertex explicitly — robust to a mix of 2-D / 3-D
+    # points (a raw ``np.asarray`` on an inhomogeneous list raises ValueError).
+    pts = np.array([[float(p[0]), float(p[1])] for p in raw], dtype=float)
     x0, y0 = pts.min(axis=0)
     x1, y1 = pts.max(axis=0)
     return float(x0), float(y0), float(x1 - x0), float(y1 - y0)

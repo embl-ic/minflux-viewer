@@ -4,34 +4,32 @@ minflux_viewer.analysis.localization_precision
 Localization precision estimators.
 
 Three independent measures are exposed in the *Analysis → Localization
-Precision* menu:
+Precision* menu, all fully implemented:
+
+* **StdDev per trace** — the *measured* precision: sample standard deviation of
+  the localization coordinates within each trace (one molecule observed multiple
+  times). Ostersehlt et al., *Nat. Methods* 19:1072, 2022 (see also Schmidt
+  et al., *Nat. Methods* 19:1246, 2022). Groups localizations by trace ID
+  (``tid``), computes σx / σy / σz per trace, then summarises across all traces
+  with at least :data:`MIN_LOCS_PER_TRACE` repeats (nm; raw z, no RIMF). Also
+  written to ``dataset.attr`` for follow-up work.
+
+* **CRLB** — the *theoretical* MINFLUX Cramér-Rao bound for the targeted-donut
+  measurement model (Balzarotti et al., *Science* 355:606, 2017; Marin & Ries,
+  arXiv:2410.12427, 2024) — **not** the camera/Gaussian bound (Mortensen 2010).
+  Per-localization σ from the photon count (``eco``), the measured SBR
+  (``efo``/``fbg``) and the user's pattern diameter ``L`` / donut steepness ``σ_q``.
 
 * **FRC** — Fourier Ring Correlation (Banterle et al., *J. Struct. Biol.*
-  183:363, 2013; Nieuwenhuizen et al., *Nat. Methods* 10:557, 2013).
-  Renders two independent half-images, computes the radial Fourier ring
-  correlation, finds the spatial frequency at which the correlation
-  drops below the 1/7 threshold. **Stub for Phase 4** — the menu entry
-  shows an info dialog citing the references; full implementation will
-  follow in a dedicated session.
+  183:363, 2013; Nieuwenhuizen et al., *Nat. Methods* 10:557, 2013): the radial
+  Fourier ring correlation of two independent half-images, resolution read off at
+  the 1/7 crossing.
 
-* **CRLB** — Cramér-Rao lower bound. Per-localization analytical bound
-  on σ given photon counts, background, and PSF width
-  (Mortensen et al., *Nat. Methods* 7:377, 2010). **Stub for Phase 4**
-  for the same reason as FRC.
-
-* **StdDev per trace** — Standard deviation of the localization
-  coordinates within each trace (i.e. each individual molecule
-  observed multiple times). This is the precision measure used in
-  Schmidt et al., *Nat. Methods* 19:1246, 2022 (MINFLUX paper, see
-  https://www.nature.com/articles/s41592-022-01577-1#Sec2 ). **Fully
-  implemented here.**
-
-The StdDev routine groups localizations by trace ID (``tid``), computes
-σx / σy / σz per trace, then summarises across all traces with at
-least :data:`MIN_LOCS_PER_TRACE` repeats. Results are reported in nm
-(after multiplying the metres-stored coordinates by 1e9), shown in a
-dialog and also written to ``dataset.attr`` so they're available for
-follow-up work (export, plotting, journal entry).
+The CRLB dialog also reports a **precision budget** relating the two: by the
+variance decomposition of Marin & Ries (*Nat. Commun.* 17:246, 2026, SimuFLUX),
+``STD(measured)² = σ_fl² + σ_CRB²``, so the excess ``σ_fl = √(STD² − σ_CRB²)``
+is the photon-count-independent error (flickering / drift / vibration /
+misalignment) beyond the photon-limited bound (see :func:`excess_precision`).
 """
 
 from __future__ import annotations
@@ -649,8 +647,61 @@ def crlb_precision(
 
 
 # ---------------------------------------------------------------------------
+# Precision budget — measured spread vs the photon-limited bound
+# ---------------------------------------------------------------------------
+
+def excess_precision(std_nm: float, crb_nm: float) -> float:
+    """Excess (non-photon-limited) localization error σ_fl beyond the CRB.
+
+    From the variance decomposition of Marin & Ries (*Nat. Commun.* 17:246,
+    2026, SimuFLUX), the measured per-localization spread combines the
+    photon-limited Cramér-Rao bound with a photon-count-**independent** error
+    from fluorophore flickering, drift, vibration and misalignment:
+
+        STD(r, N)² = σ_fl(r)² + σ_CRB(N)²   ⇒   σ_fl = √( STD² − σ_CRB² ).
+
+    Returns σ_fl in nm — ``0`` when the measured spread is at or below the bound
+    (i.e. the localization is essentially photon-limited), or NaN if either input
+    is not finite / not positive.
+    """
+    s = float(std_nm)
+    c = float(crb_nm)
+    if not (np.isfinite(s) and np.isfinite(c)) or s <= 0.0:
+        return float("nan")
+    return float(np.sqrt(max(s * s - c * c, 0.0)))
+
+
+# ---------------------------------------------------------------------------
 # UI launchers — these are what the menu items call
 # ---------------------------------------------------------------------------
+
+def _measured_trace_precision(ds) -> dict | None:
+    """Median per-trace measured σ (StdDev per trace, raw z) for the CRLB dialog's
+    precision budget; ``None`` when there are no usable traces / no trace IDs."""
+    try:
+        from ..core.loader import attr_values_1d
+        lx = np.asarray(attr_values_1d(ds, "loc_x"), dtype=float)
+        ly = np.asarray(attr_values_1d(ds, "loc_y"), dtype=float)
+        _z = attr_values_1d(ds, "loc_z")
+        lz = np.zeros_like(lx) if _z is None else np.asarray(_z, dtype=float)
+        _tid = attr_values_1d(ds, "tid")
+    except Exception:
+        return None
+    if _tid is None or lx.size == 0:
+        return None
+    tid = np.asarray(_tid)
+    ftr = np.asarray(ds.filter_mask, dtype=bool)
+    if ftr.shape[0] == lx.shape[0]:
+        lx, ly, lz, tid = lx[ftr], ly[ftr], lz[ftr], tid[ftr]
+    sd = stddev_per_trace(np.column_stack([lx, ly, lz]), tid)
+    if sd["n_traces_used"] == 0:
+        return None
+    return {
+        "sigma_r": float(sd["median_sigma_r"]),
+        "sigma_z": float(sd["median_sigma_xyz"][2]),
+        "n_traces": int(sd["n_traces_used"]),
+    }
+
 
 def run_crlb(parent, state) -> None:
     """Compute the MINFLUX CRB precision for the active dataset, show a dialog."""
@@ -697,21 +748,32 @@ def run_crlb(parent, state) -> None:
         efo=efo, fbg=fbg,
         L_z_nm=CRLB_DEFAULT_LZ_NM if num_dim >= 3 else None,
     )
+    # Measured per-trace spread → the CRLB dialog's precision budget (measured vs
+    # the photon-limited bound; excess σ_fl per Marin & Ries 2026).
+    measured = _measured_trace_precision(ds)
 
     if np.isfinite(result.median_sigma_bg):
         z_txt = (f", σ_z = {result.median_sigma_z_bg:.2f} nm (L_z = "
                  f"{result.L_z_nm:.0f} nm)" if result.has_z else "")
+        budget_txt = ""
+        if measured is not None:
+            fl_r = excess_precision(measured["sigma_r"], result.median_sigma_bg)
+            budget_txt = (f"; measured σ_r = {measured['sigma_r']:.2f} nm "
+                          f"(StdDev/trace) → excess σ_fl = {fl_r:.2f} nm")
         _try_journal(
             state,
             f"Localization precision (CRLB, Marin-Ries): median σ_xy = "
             f"{result.median_sigma_bg:.2f} nm (background-limited), "
             f"{result.median_sigma_ideal:.2f} nm (ideal){z_txt}, "
             f"L = {result.L_nm:.0f} nm, σ_q = {result.sigma_q_nm:.0f} nm, "
-            f"median N = {result.median_n:.0f} photons."
+            f"median N = {result.median_n:.0f} photons{budget_txt}."
         )
 
     from ..ui.modeless import show_modeless
-    show_modeless(CRLBResultDialog(result, eco, efo, fbg, num_dim=num_dim), parent)
+    show_modeless(
+        CRLBResultDialog(result, eco, efo, fbg, num_dim=num_dim, measured=measured),
+        parent,
+    )
 
 
 def run_frc(parent, state) -> None:
@@ -1218,10 +1280,12 @@ class CRLBResultDialog(QDialog):
 
     def __init__(self, result: "CRLBResult", eco: np.ndarray,
                  efo: np.ndarray | None = None, fbg: np.ndarray | None = None,
-                 num_dim: int = 2, parent=None) -> None:
+                 num_dim: int = 2, measured: dict | None = None, parent=None) -> None:
         super().__init__(parent)
         self._eco, self._efo, self._fbg = eco, efo, fbg
         self._num_dim = int(num_dim)
+        # Measured per-trace σ (StdDev/trace) for the precision budget, or None.
+        self._measured = measured
         self.setWindowTitle("Localization Precision — CRLB (MINFLUX)")
         self.setModal(False)
         self.resize(1120 if self._num_dim >= 3 else 880, 680)
@@ -1315,6 +1379,9 @@ class CRLBResultDialog(QDialog):
             grid.setColumnStretch(col, 1)
         root.addWidget(grp)
 
+        # Precision budget — measured spread vs the photon-limited bound.
+        self._add_precision_budget(root, result)
+
         # Distributions — σ_xy [· σ_z for 3-D] · photon count N, in one row.
         try:
             from .trace_analysis import _value_hist_plot
@@ -1357,6 +1424,28 @@ class CRLBResultDialog(QDialog):
             "&nbsp;&nbsp;L<sub>z</sub> — axial pattern size &nbsp;(user input; σ<sub>qz</sub> "
             "cancels in the SBR form, so the axial PSF width is not needed)<br>"
         ) if result.has_z else ""
+
+        # References + an optional precision-budget note (its decomposition source).
+        refs = [
+            "<a href='https://arxiv.org/abs/2410.12427'>Marin &amp; Ries, "
+            "<i>arXiv</i>:2410.12427 (2024)</a> (Eq. 44/45 lateral, Eq. 28 axial)",
+            "<a href='https://doi.org/10.1126/science.aak9913'>Balzarotti "
+            "<i>et al.</i>, <i>Science</i> 355:606 (2017)</a>",
+        ]
+        budget_note = ""
+        if self._measured:
+            budget_note = (
+                "<br><b>Precision budget</b>: the measured per-trace spread and this "
+                "bound combine as STD² = σ<sub>fl</sub>² + σ<sub>CRB</sub>², so the "
+                "excess σ<sub>fl</sub> = √(STD² − σ<sub>CRB</sub>²) is the "
+                "photon-count-independent error (flickering / drift / vibration / "
+                "misalignment) beyond the photon limit."
+            )
+            refs.append(
+                "<a href='https://www.nature.com/articles/s41467-025-66952-w'>Marin "
+                "&amp; Ries, <i>Nat. Commun.</i> 17:246 (2026)</a> (SimuFLUX; precision "
+                "decomposition)"
+            )
         note = QLabel(
             "<b>Formulas</b> (emitter at the pattern centre):<br>"
             "&nbsp;&nbsp;σ<sub>xy</sub> = L ∕ ( 2·√(2N) ) · "
@@ -1376,12 +1465,8 @@ class CRLBResultDialog(QDialog):
             "Per-coordinate precision at the centre — a best-case lower bound; background "
             "enters through the measured SBR. The axial channel reuses N and the lateral "
             "SBR (an approximation, since the z exposures may carry a different SBR)."
-            + _references_html(
-                "<a href='https://arxiv.org/abs/2410.12427'>Marin &amp; Ries, "
-                "<i>arXiv</i>:2410.12427 (2024)</a> (Eq. 44/45 lateral, Eq. 28 axial)",
-                "<a href='https://doi.org/10.1126/science.aak9913'>Balzarotti "
-                "<i>et al.</i>, <i>Science</i> 355:606 (2017)</a>",
-            )
+            + budget_note
+            + _references_html(*refs)
         )
         note.setWordWrap(True)
         note.setOpenExternalLinks(True)
@@ -1390,6 +1475,64 @@ class CRLBResultDialog(QDialog):
         root.addWidget(note)
 
         self._add_controls(root, result)
+
+    def _add_precision_budget(self, root, result: "CRLBResult") -> None:
+        """Measured spread (StdDev/trace) vs the photon-limited bound → the excess
+        error σ_fl = √(STD² − σ_CRB²) (Marin & Ries 2026 decomposition). Shown only
+        when per-trace measured precision is available; recomputes with L/σ_q."""
+        m = self._measured
+        if not m:
+            return
+        crb_xy = result.median_sigma_bg if result.has_background else result.median_sigma_ideal
+        if not np.isfinite(crb_xy):
+            return
+        rows = [("lateral (xy)", m.get("sigma_r"), crb_xy,
+                 excess_precision(m.get("sigma_r"), crb_xy))]
+        if result.has_z:
+            crb_z = (result.median_sigma_z_bg if result.has_background
+                     else result.median_sigma_z_ideal)
+            if np.isfinite(crb_z):
+                rows.append(("axial (z)", m.get("sigma_z"), crb_z,
+                             excess_precision(m.get("sigma_z"), crb_z)))
+
+        grp = QGroupBox(
+            f"Precision budget — measured vs photon limit  "
+            f"({m.get('n_traces', 0):,} traces, ≥ {MIN_LOCS_PER_TRACE} loc, raw z)")
+        grid = QGridLayout(grp)
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(4)
+        for col, h in enumerate(("", "measured σ (StdDev/trace)",
+                                 "σ<sub>CRB</sub> (photon limit)", "excess σ<sub>fl</sub>")):
+            lbl = QLabel(f"<b>{h}</b>")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignLeft if col == 0
+                             else Qt.AlignmentFlag.AlignCenter)
+            grid.addWidget(lbl, 0, col)
+        for r, (name, meas, crb, fl) in enumerate(rows, start=1):
+            grid.addWidget(QLabel(f"<b>{name}:</b>"), r, 0)
+            for col, v in enumerate((meas, crb, fl), start=1):
+                cell = QLabel(_res(v))
+                cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                grid.addWidget(cell, r, col)
+        for col in (1, 2, 3):
+            grid.setColumnStretch(col, 1)
+        root.addWidget(grp)
+
+        # One-line interpretation of the lateral budget.
+        meas_r, fl_r = rows[0][1], rows[0][3]
+        if np.isfinite(fl_r) and meas_r and meas_r > 0:
+            if fl_r <= 0.15 * crb_xy:
+                verdict = "measured precision is essentially photon-limited (at the bound)"
+            else:
+                frac = 100.0 * fl_r / float(meas_r)
+                verdict = (f"an excess of σ<sub>fl</sub> = {fl_r:.1f} nm "
+                           f"(~{frac:.0f}% of the measured spread) is <b>not</b> "
+                           "photon-limited — attributable to flickering, drift, "
+                           "vibration or misalignment (not reducible by more photons)")
+            tip = QLabel(f"Lateral: {verdict}.")
+            tip.setWordWrap(True)
+            tip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            tip.setStyleSheet("color: #8ab4d8; font-size: 11px;")
+            root.addWidget(tip)
 
     def _add_controls(self, root, result: "CRLBResult") -> None:
         """Editable L + σ_q + Recompute row (also shown on the error path)."""

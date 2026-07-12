@@ -278,24 +278,30 @@ class MainWindow(QMainWindow):
         # File menu  (.msr opens via drag-drop / the Plugins > MSR Reader entry,
         # so there is no dedicated File > "Open .msr" item.)
         u.actionOpen.triggered.connect(self._open_dialog)
-        self.actionOpenSpreadsheet = QAction("Open spreadsheet data...", self)
-        self.actionOpenSpreadsheet.triggered.connect(self._open_spreadsheet_dialog)
-        self.actionOpenTiff = QAction("Open .tif file...", self)
-        self.actionOpenTiff.triggered.connect(self._open_tiff_dialog)
+        # Spreadsheet (.csv/.tsv/.txt/.xlsx/.xlsm) and TIFF (.tif/.tiff) files open
+        # via drag-and-drop (routed through _load_spreadsheet / _load_tiff); there
+        # are deliberately no dedicated File-menu entries for them.
         # Sample data is a submenu of user-editable presets (Data Simulator plugin);
         # exclude from the command finder like the recent-files list.
         self.menuOpenSample = QMenu("Open Sample Data", self)
         self.menuOpenSample.setProperty("command_finder_exclude", True)
         u.actionSave.triggered.connect(self._save_data)
         u.actionQuit.triggered.connect(self.close)
-        self.actionClose = QAction("Close", self)
+        self.actionClose = QAction("Close Dataset", self)
         self.actionClose.setShortcut(QKeySequence("Ctrl+W"))
         self.actionClose.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self.actionClose.triggered.connect(self._close_active_dataset)
-        self.actionCloseAll = QAction("Close All", self)
-        self.actionCloseAll.setShortcut(QKeySequence("Ctrl+Shift+W"))
+        # Shift+W — close every dataset and all its windows.
+        self.actionCloseAll = QAction("Close All Datasets", self)
+        self.actionCloseAll.setShortcut(QKeySequence("Shift+W"))
         self.actionCloseAll.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self.actionCloseAll.triggered.connect(self._close_all_datasets)
+        # Ctrl+Shift+W — close everything (datasets, viewers, plugin/analysis
+        # dialogs) and keep only the Log and Console windows.
+        self.actionCloseAllWindows = QAction("Close All Windows", self)
+        self.actionCloseAllWindows.setShortcut(QKeySequence("Ctrl+Shift+W"))
+        self.actionCloseAllWindows.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.actionCloseAllWindows.triggered.connect(self._close_all_windows)
 
         # Edit menu
         u.actionDatasetManager.triggered.connect(self._show_dataset_manager)
@@ -322,9 +328,7 @@ class MainWindow(QMainWindow):
         self.actionScaleBar = QAction("Scale Bar", self)
         self.actionScaleBar.triggered.connect(self._show_scale_bar)
         self.actionPlotProfile = QAction("Plot Profile", self)
-        self.actionPlotProfile.triggered.connect(
-            lambda: self._placeholder("Plot Profile", "a later implementation")
-        )
+        self.actionPlotProfile.triggered.connect(self._show_plot_profile)
         self.menuMeasure.addAction(self.actionScaleBar)
         self.menuMeasure.addAction(self.actionPlotProfile)
         self.actionSetMeasurements = QAction("Set Measurements...", self)
@@ -486,11 +490,6 @@ class MainWindow(QMainWindow):
         )
         u.menuHelp.insertAction(u.actionAbout, self.actionCheckUpdates)
         u.menuHelp.insertSeparator(u.actionAbout)
-        self.actionExportMsr = QAction("Export to .msr…", self)
-        self.actionExportMsr.setStatusTip(
-            "Write the active dataset (and any overlay channels + MBM beads) to an .msr "
-            "file this viewer can reopen — round-trip, not Imspector-native.")
-        self.actionExportMsr.triggered.connect(self._export_to_msr)
 
         # Toolbar tools — LUT and Color (the silent-failure bug fix)
         u.toolLut.triggered.connect(self._show_lut)
@@ -599,8 +598,6 @@ class MainWindow(QMainWindow):
         self.actionChannelSeparateDcr.setText("Separate Channel by DCR")
         self.menuProcessRoi.setTitle("ROI")
         self.actionRoiManager.setText("ROI Manager")
-        self.actionOpenSpreadsheet.setText("Open Spreadsheet Data...")
-        self.actionOpenTiff.setText("Open .tif File...")
         u.menuOpenRecent.setTitle("Open Recent")
         u.menuBatchProcessing.setTitle("Batch Processing")
         u.menuAnalysis.setTitle("Analyze")
@@ -610,16 +607,14 @@ class MainWindow(QMainWindow):
 
         u.menuFile.clear()
         u.menuFile.addAction(u.actionOpen)
-        u.menuFile.addAction(self.actionOpenSpreadsheet)
-        u.menuFile.addAction(self.actionOpenTiff)
         u.menuFile.addAction(self.menuOpenSample.menuAction())
         u.menuFile.addAction(u.menuOpenRecent.menuAction())
         u.menuFile.addSeparator()
         u.menuFile.addAction(u.actionSave)
-        u.menuFile.addAction(self.actionExportMsr)
         u.menuFile.addSeparator()
         u.menuFile.addAction(self.actionClose)
         u.menuFile.addAction(self.actionCloseAll)
+        u.menuFile.addAction(self.actionCloseAllWindows)
         u.menuFile.addSeparator()
         u.menuFile.addAction(u.actionQuit)
         self._rebuild_sample_menu()          # populate File › Open Sample Data presets
@@ -675,8 +670,6 @@ class MainWindow(QMainWindow):
 
         self._shortcut_actions = {
             "open": u.actionOpen,
-            "open_spreadsheet": self.actionOpenSpreadsheet,
-            "open_tiff": self.actionOpenTiff,
             "save": u.actionSave,
             "filter": u.actionFilter,
             "duplicate": u.actionDuplicate,
@@ -726,21 +719,19 @@ class MainWindow(QMainWindow):
         u = self._ui
         actions = [
             u.actionSave,
-            self.actionOpenSpreadsheet,
-            self.actionOpenTiff,
             self.menuProcessChannel.menuAction(),
             self.actionChannelTool,
             self.actionChannelCombine,
             self.actionChannelSplit,
             self.actionChannelOverlay,
             self.actionChannelSeparateDcr,
-            self.menuProcessRoi.menuAction(),
-            self.actionRoiManager,
-            self.menuRoiConvert.menuAction(),
-            *self._roi_convert_actions.values(),
-            self.actionRoiResize,
+            #self.menuProcessRoi.menuAction(),
+            #self.actionRoiManager,
+            #self.menuRoiConvert.menuAction(),
+            #self._roi_convert_actions.values(),
+            #self.actionRoiResize,
             self.actionRoiSkeletonize,
-            self.actionRoiConvexHull,
+            #self.actionRoiConvexHull,
             self.actionRoi3D,
             u.menuBatchProcessing.menuAction(),
             u.actionBatchRender,
@@ -1163,7 +1154,7 @@ class MainWindow(QMainWindow):
             pass
         # Attach the acquisition's shared fiducial beads (one set per Generate
         # call, so every channel of an overlay carries the same beads) — written
-        # to grd/mbm/points on Export to .msr.
+        # to grd/mbm/points when saved to .msr.
         spec = getattr(self, "_sim_bead_spec", None)
         if spec is not None:
             pts, pbg, used = spec
@@ -1185,7 +1176,7 @@ class MainWindow(QMainWindow):
 
         When ``include_beads`` is set, one shared set of synthetic fiducial beads
         is generated for this call and attached to every produced dataset (so
-        Export to .msr writes ``grd/mbm/points``)."""
+        saving to .msr writes ``grd/mbm/points``)."""
         from ..core.sample_presets import normalize_preset
         from ..core.simulate import sim_kind
         p = normalize_preset(config)
@@ -1323,27 +1314,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Data Simulator", str(exc))
             self._status_label.setText("Sample data failed.")
 
-    def _open_spreadsheet_dialog(self) -> None:
-        try:
-            from .spreadsheet_import_dialog import choose_spreadsheet_and_import
-            dataset = choose_spreadsheet_and_import(self)
-            if dataset is not None:
-                self._state.add_dataset(dataset)
-        except Exception as exc:
-            self._state.log(f"Failed to open spreadsheet data: {exc}", "ERROR")
-            QMessageBox.critical(self, "Open spreadsheet data", str(exc))
-
-    def _open_tiff_dialog(self) -> None:
-        default = self._state.prefs["file"].get("default_folder", str(Path.home()))
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open TIFF image",
-            default,
-            "TIFF image (*.tif *.tiff);;All files (*)",
-        )
-        if path:
-            self._load_tiff(path)
-
     def _route_file(self, path: str) -> None:
         """
         Route a single file path to the correct loader based on extension.
@@ -1434,26 +1404,20 @@ class MainWindow(QMainWindow):
         self._load_spreadsheet(path)
 
     def _load_spreadsheet(self, path: str) -> None:
+        # Always open the column-mapping dialog (pre-filled from a value-based
+        # best guess of x/y/z/tid/tim + units) so the user confirms/corrects the
+        # mapping before importing — never a silent auto-import.
         self._status_label.setText(f"Loading {Path(path).name}…")
         self._state.log(f"Opening spreadsheet: {path}", "INFO")
         try:
-            from ..core.spreadsheet_loader import auto_import
-            dataset, ambiguity = auto_import(path, prefs=self._state.prefs)
-            if dataset is not None:
-                self._state.log(
-                    f"Auto-mapped '{Path(path).name}' "
-                    f"({dataset.prop.num_loc:,} localizations).", "INFO")
-                self._state.add_dataset(dataset)
-                return
-            # Ambiguous columns → let the user map them manually.
-            self._state.log(
-                f"'{Path(path).name}': {ambiguity.reason} Opening the column "
-                "mapping dialog.", "INFO")
-            from .spreadsheet_import_dialog import open_mapping_dialog
-            dataset = open_mapping_dialog(ambiguity, parent=self)
+            from .spreadsheet_import_dialog import import_spreadsheet
+            dataset = import_spreadsheet(path, prefs=self._state.prefs, parent=self)
             if dataset is None:
                 self._status_label.setText("Spreadsheet import cancelled.")
                 return
+            self._state.log(
+                f"Imported '{Path(path).name}' "
+                f"({dataset.prop.num_loc:,} localizations).", "INFO")
             self._state.add_dataset(dataset)
         except Exception as exc:
             self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
@@ -2789,6 +2753,41 @@ class MainWindow(QMainWindow):
                 break
         return best
 
+    def _show_plot_profile(self) -> None:
+        """ImageJ-style Plot Profile: localization density along a line / polyline /
+        freehand-line ROI in a **render or scatter** view, live-updating with the ROI
+        and a tunable width band. Samples the localizations directly, so it is
+        independent of the render viewport/zoom."""
+        idx = self._state.active_idx
+        if self._state.active_dataset is None or idx is None:
+            QMessageBox.information(self, "Plot Profile", "Open a dataset first.")
+            return
+        # Prefer the focused 2-D coordinate view (render or scatter); fall back to the
+        # active dataset's render window.
+        win = self._active_coordinate_view()
+        if win is None or not hasattr(win, "profile_localizations"):
+            win = self._render_windows.get(idx) or self._render_window_for_dataset(idx)
+        if win is None or win.coordinate_view_box() is None or not hasattr(win, "profile_localizations"):
+            self._state.log("Plot Profile: no 2-D localization view for the active dataset.", "WARN")
+            QMessageBox.information(
+                self, "Plot Profile",
+                "Open a render or scatter view of the active dataset in a 2-D "
+                "orientation (XY / XZ / YZ) first.")
+            return
+        # No open-line ROI yet → activate the line tool so the user can draw one and
+        # watch the profile appear live.
+        overlay = getattr(win, "_roi_overlay", None)
+        if overlay is not None and overlay.active_open_line_record() is None:
+            try:
+                overlay.activate()
+                self._state.rois.set_tool("line")
+                self._state.log("Plot Profile: draw a line on the view to profile it.", "INFO")
+            except Exception:
+                pass
+        from . import modeless
+        from .plot_profile_dialog import PlotProfileDialog
+        modeless.show_modeless(PlotProfileDialog(win, owner=self), self)
+
     def _show_scale_bar(self) -> None:
         if self._state.active_dataset is None:
             self._state.log("Scale bar: open a dataset first.", "WARN")
@@ -3117,6 +3116,16 @@ class MainWindow(QMainWindow):
         for idx in range(n - 1, -1, -1):
             self._state.remove_dataset(idx)
         self.setWindowTitle(self.APP_NAME)
+
+    def _close_all_windows(self) -> None:
+        """``Ctrl+Shift+W`` — close **everything**: all datasets, their viewer
+        windows, and every plugin / analysis / tool dialog (particle average, MSR
+        reader, ROI manager, dataset manager, …). Only the **Log** and **Console**
+        windows are kept."""
+        self._close_all_datasets()
+        self._close_all_child_windows(keep_log_console=True)
+        self.setWindowTitle(self.APP_NAME)
+        self._status_label.setText("Closed all windows (kept Log / Console).")
 
     def _duplicate_active_dataset(self) -> None:
         """Edit → Duplicate / ``Shift+D``.
@@ -3637,13 +3646,19 @@ class MainWindow(QMainWindow):
     # ParaView
     # ------------------------------------------------------------------
 
-    def _save_data(self) -> None:
+    def _save_data(self, *args) -> None:
+        """File › Save Processed Data — save the **active** dataset."""
         ds = self._state.active_dataset
         if ds is None:
             QMessageBox.information(
                 self, "Save processed data", "No active dataset to save."
             )
             return
+        self.save_dataset(ds)
+
+    def save_dataset(self, ds) -> None:
+        """Open the Save / Export dialog for *ds* (the active dataset from File ›
+        Save Processed Data, or a right-clicked one from the Dataset Manager)."""
         from .save_dialog import SaveProcessedDataDialog
 
         # A dataset is "file-backed" when it has a physical data file that, when
@@ -3688,47 +3703,6 @@ class MainWindow(QMainWindow):
             self, "Save processed data",
             "Saved:\n" + "\n".join(str(p) for p in written),
         )
-
-    def _export_to_msr(self) -> None:
-        """Write the active dataset (and its overlay channels) to a round-trippable
-        ``.msr``. Any attached MBM fiducial beads are written to ``grd/mbm/points``.
-
-        This is our own OBF/MFXDTA writer — the file reopens in minflux-viewer but
-        is **not** guaranteed to open in Imspector (see the backlog for why a native
-        Abberior writer is not attempted)."""
-        from ..core.overlay import overlay_members
-
-        active_idx = self._state.active_idx
-        if active_idx is None or not (0 <= active_idx < len(self._state.datasets)):
-            QMessageBox.information(self, "Export to .msr", "No active dataset to export.")
-            return
-        active = self._state.datasets[active_idx]
-        members = overlay_members(self._state, active_idx) or [(active_idx, active)]
-        datasets = [ds for _, ds in members]
-
-        default_dir = self._state.prefs["file"].get("default_folder", str(Path.home()))
-        stem = (getattr(active, "name", "") or "dataset").split("/")[-1]
-        default_path = str(Path(default_dir) / f"{stem}.msr")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export to .msr", default_path,
-            "Imspector MINFLUX (*.msr);;OBF (*.obf);;All files (*)")
-        if not path:
-            return
-        from ..msr.writer import write_datasets_msr
-
-        try:
-            out = write_datasets_msr(path, datasets)
-        except Exception as exc:
-            self._state.log(f"Export to .msr failed: {exc}", "ERROR")
-            QMessageBox.critical(self, "Export to .msr", f"Could not write .msr:\n{exc}")
-            return
-        n_beads = sum(1 for ds in datasets
-                      if getattr(ds, "metadata", {}).get("mbm_points") is not None)
-        bead_note = f", {n_beads} with MBM beads" if n_beads else ""
-        self._state.log(
-            f"Exported {len(datasets)} channel(s){bead_note} to '{out.name}' "
-            "(round-trippable .msr; reopen via the MSR reader).", "INFO")
-        QMessageBox.information(self, "Export to .msr", f"Wrote:\n{out}")
 
     # ------------------------------------------------------------------
     # AppState signal handlers
@@ -4597,13 +4571,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _close_all_child_windows(self) -> None:
+    def _close_all_child_windows(self, *, keep_log_console: bool = False) -> None:
         """
         Close every floating / tool window this main window has created.
 
         Safe to call repeatedly. Uses ``close()`` (not ``deleteLater``) so
         each child runs its own ``closeEvent`` (saves its settings, etc.)
         before being torn down by Qt on the main window's destruction.
+
+        With ``keep_log_console=True`` the Log and Console windows are left open
+        (used by the *Close All Windows* command, which clears everything else).
         """
         # Per-dataset windows
         for win in list(self._data_windows.values()):
@@ -4628,12 +4605,15 @@ class MainWindow(QMainWindow):
             pass
 
         # Singleton tool windows
-        for attr in (
+        singletons = [
             "_attr_3d_mpl_win",
             "_filter_dlg",  "_ds_manager",
             "_log_win",     "_console_win", "_memory_win", "_roi_manager_win",
             "_script_editor_win",
-        ):
+        ]
+        if keep_log_console:
+            singletons = [a for a in singletons if a not in ("_log_win", "_console_win")]
+        for attr in singletons:
             w = getattr(self, attr, None)
             if w is not None:
                 try:
@@ -4643,10 +4623,14 @@ class MainWindow(QMainWindow):
                         w.close()
                 except Exception: pass
 
-        # Plugin dialogs that stashed themselves on the main window
-        plugin_attr = "_plugin_msr_reader_dialog"
-        w = getattr(self, plugin_attr, None)
-        if w is not None:
+        # Plugin dialogs that stashed themselves on the main window. Several MSR
+        # reader dialogs can be open at once — close every one in the registry
+        # (plus the legacy single-attr alias, for safety).
+        msr_dialogs = list(getattr(self, "_plugin_msr_reader_dialogs", None) or [])
+        legacy = getattr(self, "_plugin_msr_reader_dialog", None)
+        if legacy is not None and legacy not in msr_dialogs:
+            msr_dialogs.append(legacy)
+        for w in msr_dialogs:
             try: w.close()
             except Exception: pass
 

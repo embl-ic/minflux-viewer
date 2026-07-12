@@ -186,3 +186,36 @@ def test_snapshot_csv_roundtrips_without_double_rimf(tmp_path):
     assert re.prop.num_loc == cols["xnm"].size
     np.testing.assert_allclose(
         np.sort(np.asarray(re.loc_nm)[:, 0]), np.sort(cols["xnm"]), atol=1e-2)
+
+
+# --- .msr as a first-class save format ----------------------------------------
+def test_msr_is_a_data_format():
+    from minflux_viewer.core.save import DATA_FORMATS, _EXT
+    assert "msr" in DATA_FORMATS and _EXT["msr"] == ".msr"
+
+
+def test_save_msr_raw_roundtrips(tmp_path):
+    from minflux_viewer.msr import state as S
+    from minflux_viewer.msr.msr_parser import GeneralMSRParser
+
+    ds = _dataset(n=40)
+    written = save_processed(ds, data_path=tmp_path / "out.msr", fmt="msr",
+                             content="raw", include={"recipe": False})
+    out = written[0]
+    assert out.suffix == ".msr" and out.is_file()
+    GeneralMSRParser().parse(str(out), log=lambda *a: None)
+    name = ds.file.name
+    assert name in S.mfx_map                         # one channel written
+    assert S.mfx_map[name].shape[0] == ds.prop.num_loc   # all localizations recovered
+
+
+def test_save_msr_rejects_snapshot(tmp_path):
+    ds = _dataset()
+    with pytest.raises(ValueError, match="raw"):
+        save_processed(ds, data_path=tmp_path / "s.msr", fmt="msr", content="snapshot")
+
+
+def test_save_msr_writes_recipe_sidecar_by_default(tmp_path):
+    ds = _dataset()
+    written = save_processed(ds, data_path=tmp_path / "out.msr", fmt="msr", content="raw")
+    assert any(p.name.endswith("_metadata.json") for p in written)

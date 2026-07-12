@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QTableWidget,
@@ -109,6 +110,8 @@ class DatasetManager(QDialog):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self._table.doubleClicked.connect(self._on_double_click)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_context_menu)
         root.addWidget(self._table)
 
         # ── Button row ────────────────────────────────────────────
@@ -229,6 +232,30 @@ class DatasetManager(QDialog):
             return
         idx = rows[0].row()
         self._state.remove_dataset(idx)
+
+    def _show_context_menu(self, pos) -> None:
+        """Right-click menu on a dataset row: Save as… (save that dataset to disk)."""
+        index = self._table.indexAt(pos)
+        row = index.row()
+        if not (0 <= row < len(self._state.datasets)):
+            return
+        menu = QMenu(self)
+        save_action = menu.addAction("Save as…")
+        chosen = menu.exec(self._table.viewport().mapToGlobal(pos))
+        if chosen is save_action:
+            self._save_dataset(row)
+
+    def _save_dataset(self, row: int) -> None:
+        """Open the main window's Save / Export dialog for the row's dataset (same
+        as File › Save Processed Data, but targeting the selected dataset)."""
+        if not (0 <= row < len(self._state.datasets)):
+            return
+        ds = self._state.datasets[row]
+        saver = getattr(self._owner, "save_dataset", None)
+        if callable(saver):
+            saver(ds)
+        else:
+            self._state.log("Save as…: no save handler is available.", "WARN")
 
     # ------------------------------------------------------------------
     # Slots

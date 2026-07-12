@@ -10,7 +10,10 @@ from minflux_viewer.core.roi import (
     RoiRecord,
     record_from_imagej,
     record_to_imagej,
+    record_to_points,
 )
+from minflux_viewer.core.roi import _bounds as _core_bounds
+from minflux_viewer.ui.roi_overlay import _bounds as _ov_bounds
 from minflux_viewer.ui.roi_overlay import (
     points_to_3d,
     project_points,
@@ -67,6 +70,22 @@ def test_imagej_export_drops_depth():
     ij = record_to_imagej(rec)
     coords = ij.coordinates()
     assert len(coords[0]) == 2
+
+
+# --- robustness: a vertex-add (pyqtgraph segment click) can transiently leave a
+#     mix of 2-D / 3-D vertices; geometry readers must not raise on that ---------
+@pytest.mark.parametrize("fn", [_ov_bounds, _core_bounds])
+def test_bounds_tolerates_mixed_2d_3d_points(fn):
+    geom = {"points": [[0.0, 0.0, 5.0], [10.0, 4.0], [2.0, 8.0, 5.0]]}   # 3-D, 2-D, 3-D
+    assert fn(geom) == (0.0, 0.0, 10.0, 8.0)                             # no ValueError
+
+
+def test_record_to_points_tolerates_mixed_points():
+    rec = RoiRecord.create(
+        "freehand_line", {"points": [[0, 0, 5], [10, 4], [2, 8, 5]], "closed": False})
+    pts = record_to_points(rec)
+    assert pts.shape == (3, 2)
+    assert pts[1].tolist() == [10.0, 4.0]
 
 
 # Note: the polyline *drawing mechanism* (every left click registers a vertex even

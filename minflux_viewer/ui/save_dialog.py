@@ -40,14 +40,18 @@ from PyQt6.QtWidgets import (
 _FORMAT_LABELS = {
     "mat": "MATLAB (.mat)", "npy": "NumPy (.npy)", "npz": "NumPy zip (.npz)",
     "json": "JSON (.json)", "csv": "CSV (.csv)", "zarr": "Zarr (.zarr)",
+    "msr": "MINFLUX (.msr)",
 }
 _EXT = {"mat": ".mat", "npy": ".npy", "npz": ".npz", "json": ".json",
-        "csv": ".csv", "zarr": ".zarr"}
+        "csv": ".csv", "zarr": ".zarr", "msr": ".msr"}
 _FILTERS = {
     "mat": "MATLAB (*.mat)", "npy": "NumPy (*.npy)", "npz": "NumPy zip (*.npz)",
     "json": "JSON (*.json)", "csv": "CSV (*.csv)", "zarr": "Zarr (*.zarr)",
+    "msr": "MINFLUX (*.msr)",
 }
-_ALL_FORMATS = ["mat", "npy", "npz", "json", "csv", "zarr"]
+_ALL_FORMATS = ["mat", "npy", "npz", "json", "csv", "zarr", "msr"]
+#: Formats that only carry the canonical raw data (no processed snapshot).
+_RAW_ONLY_FORMATS = {"msr"}
 # A file-backed dataset can skip re-writing raw only for reloadable raw formats.
 _RELOADABLE_RAW_EXT = (".mat", ".npy", ".json")
 
@@ -143,6 +147,13 @@ class SaveProcessedDataDialog(QDialog):
         browse.clicked.connect(self._on_browse)
         browse_row.addWidget(browse)
         pbox.addLayout(browse_row)
+        self._msr_note = QLabel(
+            "<span style='color:gray'>.msr uses a custom writer — reopens in this "
+            "viewer via the MSR reader; may not open in Abberior Imspector. Saves "
+            "raw canonical data.</span>")
+        self._msr_note.setWordWrap(True)
+        self._msr_note.setVisible(False)
+        pbox.addWidget(self._msr_note)
         root.addWidget(self._path_box)
 
         # ── More options… ────────────────────────────────────────────
@@ -208,9 +219,22 @@ class SaveProcessedDataDialog(QDialog):
         self.adjustSize()
 
     def _sync_location(self) -> None:
-        ext = _EXT[self._format.currentData()]
+        fmt = self._format.currentData()
+        ext = _EXT[fmt]
         if self._chosen_path is not None:
             self._loc_lbl.setText(f"Location: {self._chosen_path.with_suffix(ext).parent}")
+        # .msr is raw-only: show its disclaimer and pin the content to raw.
+        note = getattr(self, "_msr_note", None)
+        if note is not None:
+            is_msr = fmt in _RAW_ONLY_FORMATS
+            note.setVisible(is_msr)
+            if is_msr:
+                i = self._content_combo.findData("raw")
+                if i >= 0:
+                    self._content_combo.setCurrentIndex(i)
+                self._content_combo.setEnabled(False)
+            else:
+                self._content_combo.setEnabled(self._content_combo.count() > 1)
 
     def _on_browse(self) -> None:
         fmt = self._format.currentData()
@@ -243,6 +267,8 @@ class SaveProcessedDataDialog(QDialog):
             return {"data_path": None, "fmt": None, "content": "raw",
                     "include": {**include, "recipe": True}, "filter_mode": filter_mode}
         fmt = self._format.currentData()
+        if fmt in _RAW_ONLY_FORMATS:
+            content = "raw"                  # .msr carries only canonical raw data
         ext = _EXT[fmt]
         if self._chosen_path is not None:
             data_path = self._chosen_path.with_suffix(ext)

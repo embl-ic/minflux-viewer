@@ -3135,6 +3135,29 @@ class RenderWindow(QWidget):
             return None
         return locs if locs.ndim == 2 and locs.shape[1] >= 3 and locs.shape[0] else None
 
+    def _profile_channels(self):
+        return self._channels or [
+            {"dataset_idx": self._idx, "visible": True, "kind": "localizations"}]
+
+    def profile_localizations(self):
+        """``(M, 2)`` filtered, visible localizations projected into the current 2-D
+        view plane (display nm), for the Plot Profile — sampled from the **data**,
+        independent of the render viewport / zoom / LOD. ``None`` when this isn't a
+        2-D localization view."""
+        if self._render_mode != "localizations" or self.roi_view_plane() is None:
+            return None
+        from ..core.roi_crop import plane_localizations
+        return plane_localizations(self._state, self._profile_channels(), self.roi_view_plane())
+
+    def profile_locs_version(self):
+        """Cheap token that changes only when :meth:`profile_localizations` would
+        (dataset / filter / RIMF / visibility / plane), never on zoom/pan."""
+        if self._render_mode != "localizations" or self.roi_view_plane() is None:
+            return None
+        from ..core.roi_crop import plane_localizations_version
+        return plane_localizations_version(
+            self._state, self._profile_channels(), self.roi_view_plane())
+
     def snap_to_density(self, x_nm: float, y_nm: float, *,
                         window_nm: float = 60.0, iterations: int = 3):
         """Snap an in-plane cursor (nm) to the local high-density centre by

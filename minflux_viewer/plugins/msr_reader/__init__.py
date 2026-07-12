@@ -19,13 +19,12 @@ from .. import PluginEntry, register
 def _launch(state, parent=None) -> None:
     # Import lazily so importing the plugin package does not pull in Qt
     # machinery until the user actually opens the dialog.
-    from .msr_reader_dialog import MsrReaderDialog
+    from .msr_reader_dialog import MsrReaderDialog, register_msr_dialog
     dlg = MsrReaderDialog(state, parent=parent)
-    # Store on the parent so it survives the scope of this function (the dialog
-    # is an unowned top-level window — see MsrReaderDialog.__init__); closing it
-    # deletes it via WA_DeleteOnClose.
-    if parent is not None:
-        parent._plugin_msr_reader_dialog = dlg
+    # Retain on the parent so it survives this function (the dialog is an unowned,
+    # WA_DeleteOnClose top-level window). register_msr_dialog keeps a *list*, so
+    # each menu launch opens an independent reader instead of replacing the last.
+    register_msr_dialog(parent, dlg)
     dlg.show()
     dlg.raise_()
     dlg.activateWindow()
