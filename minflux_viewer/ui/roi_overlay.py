@@ -109,18 +109,43 @@ class FilledRotateHandle(Handle):
         p.drawPath(self.shape())
 
 
-def _mark_line_end_handle(item) -> None:
-    """Restyle an open line ROI's **last** vertex handle as a larger **oval** so
-    the line's direction (begin → end, which the Plot Profile follows) is visible;
-    the start / intermediate vertices keep their square edit handles.
+class SquareHandle(Handle):
+    """Scale handle drawn as an axis-aligned **square** (ImageJ-style) instead of
+    pyqtgraph's default diamond. ``buildPath`` is regenerated on every device
+    transform, so overriding it (rather than poking ``.path``) keeps it square."""
 
-    Done **in place** by swapping the handle's local ``path`` to an ellipse and
-    enlarging it — the handle's underlying sip/C++ type is left untouched and it
-    stays an ordinary draggable free handle (performs no rotation). A previous
-    ``handle.__class__ = …`` swap **crashed** the app under the rapid
-    create/destroy churn of a live draft drag, so never reassign ``__class__`` on
-    a pyqtgraph handle. No-op for a closed loop, a single vertex, or an
-    already-marked handle."""
+    def buildPath(self) -> None:
+        r = float(self.radius)
+        self.path = QPainterPath()
+        self.path.addRect(QRectF(-r, -r, r * 2.0, r * 2.0))
+
+
+class SolidSquareHandle(SquareHandle):
+    """Square handle with a **filled** face in the ROI colour — marks the drawing
+    origin / rotation-anchor corner of a rotated rectangle / ellipse."""
+
+    def paint(self, p, opt, widget) -> None:
+        fill = pg.mkColor(self.currentPen.color())
+        fill.setAlpha(200)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, self._antialias)
+        p.setPen(self.currentPen)
+        p.setBrush(pg.mkBrush(fill))
+        p.drawPath(self.shape())
+
+
+def _mark_line_end_handle(item) -> None:
+    """Restyle an open line ROI's **last** vertex handle as a round (**oval**) marker
+    so the line's direction (begin → end, which the Plot Profile follows) is visible;
+    the start / intermediate vertices keep their square edit handles. The circle is
+    kept the **same size** as the square start handle (only the shape differs), not
+    enlarged.
+
+    Done **in place** by swapping the handle's local ``path`` to an ellipse — the
+    handle's underlying sip/C++ type is left untouched and it stays an ordinary
+    draggable free handle (performs no rotation). A previous ``handle.__class__ = …``
+    swap **crashed** the app under the rapid create/destroy churn of a live draft
+    drag, so never reassign ``__class__`` on a pyqtgraph handle. No-op for a closed
+    loop, a single vertex, or an already-marked handle."""
     handles = getattr(item, "handles", None)
     if not handles or len(handles) < 2 or getattr(item, "closed", False):
         return
@@ -129,8 +154,7 @@ def _mark_line_end_handle(item) -> None:
     if not isinstance(h, Handle) or getattr(h, "_is_line_end_marker", False):
         return
     try:
-        r = float(h.radius) * 1.5             # a bit larger so the end stands out
-        h.radius = r
+        r = float(h.radius)                   # same size as the square start handle
         path = QPainterPath()
         path.addEllipse(QRectF(-r, -r, r * 2.0, r * 2.0))
         h.path = path
@@ -141,35 +165,110 @@ def _mark_line_end_handle(item) -> None:
         pass
 
 
-def _add_box_handles(roi, y_axis_inverted: bool) -> None:
-    """Add the shared bounding-box edit handles — 8 scale handles (4 corners +
-    4 edge midpoints) and a top rotate handle — used by **both** the rectangle
-    and the oval, so an oval resizes / rotates via its bounding box exactly like
-    a rectangle."""
-    center = [0.5, 0.5]
-    for pos, opposite in (
-        ([0.0, 0.5], [1.0, 0.5]),
-        ([1.0, 0.5], [0.0, 0.5]),
-        ([0.5, 0.0], [0.5, 1.0]),
-        ([0.5, 1.0], [0.5, 0.0]),
-        ([0.0, 0.0], [1.0, 1.0]),
-        ([1.0, 0.0], [0.0, 1.0]),
-        ([1.0, 1.0], [0.0, 0.0]),
-        ([0.0, 1.0], [1.0, 0.0]),
-    ):
-        roi.addScaleHandle(pos, opposite)
-    rotate_handle = FilledRotateHandle(
-        float(roi.handleSize),
-        typ="r",
-        pen=roi.handlePen,
-        hoverPen=roi.handleHoverPen,
-        parent=roi,
-        antialias=roi._antialias,
+#: Scale factor on pyqtgraph's default ROI handle size for the rectangle / oval
+#: bounding-box handles — smaller (≈ half) square + circle corners.
+_BOX_HANDLE_SIZE_SCALE = 0.5
+#: Bounding-box fraction of the ellipse's 45° point (≈0.854): the oval's diagonal
+#: handles sit **on the curve** here rather than at the bbox corner (1.0).
+_CURVE_FRAC = 0.5 + 0.5 / np.sqrt(2.0)
+
+
+def box_scale_fracs(*, on_curve: bool) -> tuple[tuple[float, float], ...]:
+    """The 8 scale-handle bbox fractions (4 edge midpoints + 4 diagonals). With
+    ``on_curve`` the diagonals sit on the inscribed ellipse (≈0.854) — the oval's
+    N/S/E/W/NE/NW/SE/SW handles; otherwise at the bbox corners — the rectangle's."""
+    d = _CURVE_FRAC if on_curve else 1.0
+    lo = 1.0 - d
+    return (
+        (0.0, 0.5), (1.0, 0.5), (0.5, 0.0), (0.5, 1.0),   # W, E, S, N (edge mids)
+        (lo, lo), (d, lo), (d, d), (lo, d),               # SW, SE, NE, NW (corners / curve)
     )
-    # Keep the rotate adornment at the top of the monitor. With an ImageJ-style
-    # top-left origin, data Y is inverted, so data-space "above" is local -Y.
-    rotate_y = -0.22 if y_axis_inverted else 1.22
-    roi.addRotateHandle([0.5, rotate_y], center, item=rotate_handle, name="rotate")
+
+
+#: minor:major axis ratio for the rotated-rectangle / ellipse default perpendicular
+#: dimension — the golden ratio (√5−1)/2, so a long-axis drag gives a 1 : 0.618 box.
+GOLDEN_MINOR = 0.6180339887498949
+
+
+def normalize_angle_deg(angle: float) -> float:
+    """Wrap an angle in degrees to ``(-180, 180]``. Rotation is periodic mod 360, so
+    this only affects display/storage — the geometry is unchanged. Guards the ROI
+    read-out against a pyqtgraph rotate handle that accumulates past ±360 when the
+    ROI is spun several turns (e.g. an ellipse reporting -7140°)."""
+    a = (float(angle) + 180.0) % 360.0 - 180.0
+    return 180.0 if a <= -180.0 + 1e-9 else a
+
+
+def center_axis_box(x0: float, y0: float, x1: float, y1: float,
+                    *, minor_ratio: float = GOLDEN_MINOR):
+    """Rotated box from a long-axis drag P0→P1: the drag **is** the long *centre*
+    axis (its length + direction set the length + rotation); the perpendicular side
+    = ``minor_ratio × length``, centred on the axis. Returns
+    ``(bounds=[x, y, w, h], angle_deg)`` where *bounds* is the **unrotated**,
+    centre-consistent axis-aligned box (its centre = the drag midpoint = the
+    rotation centre) and *w* is the long (drag) dimension."""
+    dx, dy = float(x1 - x0), float(y1 - y0)
+    length = float(np.hypot(dx, dy)) or 1e-9
+    minor = length * float(minor_ratio)
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    angle = float(np.degrees(np.arctan2(dy, dx)))
+    return [cx - length / 2.0, cy - minor / 2.0, length, minor], angle
+
+
+#: Handle fractions for the rotated-variant layouts (used by both `_make_item`'s
+#: handle builders and the arrow-key role detection so they never drift). Each is
+#: ``(rotate_frac, (scale_fracs…))`` — the solid pivot rotates about the centre, the
+#: rest resize. **Both** variants (Fiji-style) put their 4 handles at the **edge
+#: midpoints / axis endpoints**: the solid pivot at ``(0, 0.5)`` = the drawing-origin
+#: edge middle (the click point, `center_axis_box`'s P0), the opposite edge middle
+#: ``(1, 0.5)`` + the two perpendicular edge middles ``(0.5, 0)``/``(0.5, 1)``.
+_ROTATED_RECT_HANDLES = ((0.0, 0.5), ((1.0, 0.5), (0.5, 0.0), (0.5, 1.0)))
+_ROTATED_OVAL_HANDLES = ((0.0, 0.5), ((1.0, 0.5), (0.5, 0.0), (0.5, 1.0)))
+
+
+def rotated_variant_handles(roi_type: str):
+    """``(rotate_frac, scale_fracs)`` for a rotated *rectangle* / *oval* variant."""
+    return _ROTATED_OVAL_HANDLES if roi_type == "oval" else _ROTATED_RECT_HANDLES
+
+
+def _add_rotated_variant_handles(roi, roi_type: str) -> None:
+    """Build the 4-handle rotated-variant layout: one **solid** pivot handle that
+    rotates the ROI about its centre when dragged, plus 3 square scale handles. Both
+    the rotated rectangle and the ellipse put all four at the edge midpoints / axis
+    endpoints — the pivot at the drawing-origin edge middle (the click point), the
+    other three at the remaining edge middles (Fiji-style)."""
+    roi.handleSize = float(roi.handleSize) * _BOX_HANDLE_SIZE_SCALE
+    center = [0.5, 0.5]
+    rotate_frac, scale_fracs = rotated_variant_handles(roi_type)
+    pivot = SolidSquareHandle(
+        float(roi.handleSize), typ="r", pen=roi.handlePen,
+        hoverPen=roi.handleHoverPen, parent=roi, antialias=roi._antialias)
+    roi.addRotateHandle(list(rotate_frac), center, item=pivot, name="rotate")
+    for fx, fy in scale_fracs:
+        handle = SquareHandle(
+            float(roi.handleSize), typ="s", pen=roi.handlePen,
+            hoverPen=roi.handleHoverPen, parent=roi, antialias=roi._antialias)
+        roi.addScaleHandle([fx, fy], [1.0 - fx, 1.0 - fy], item=handle)
+
+
+def _add_box_handles(roi, y_axis_inverted: bool, *, on_curve: bool = False) -> None:
+    """Add the shared bounding-box edit handles — 8 **square** scale handles (4 edge
+    midpoints + 4 corners) — used by **both** the rectangle and the oval. With
+    ``on_curve`` (oval) the 4 diagonal handles sit on the ellipse curve (ImageJ-style)
+    instead of the bbox corners. Handles are ≈ half the pyqtgraph default size.
+
+    There is **no** rotate handle: an axis-aligned rectangle / oval is not rotatable
+    — rotation is provided by the **Rotated Rectangle / Ellipse** tool variants (their
+    solid pivot handle). ``y_axis_inverted`` is retained for signature compatibility
+    (it only ever positioned the removed rotate handle)."""
+    del y_axis_inverted                    # no longer used (rotate handle removed)
+    # Shrink every scale handle this ROI creates (addHandle builds each at handleSize).
+    roi.handleSize = float(roi.handleSize) * _BOX_HANDLE_SIZE_SCALE
+    for fx, fy in box_scale_fracs(on_curve=on_curve):
+        handle = SquareHandle(
+            float(roi.handleSize), typ="s", pen=roi.handlePen,
+            hoverPen=roi.handleHoverPen, parent=roi, antialias=roi._antialias)
+        roi.addScaleHandle([fx, fy], [1.0 - fx, 1.0 - fy], item=handle)
 
 
 class FilledRectROI(pg.ROI):
@@ -183,12 +282,16 @@ class FilledRectROI(pg.ROI):
         angle: float = 0.0,
         fill_color="#ffff00",
         y_axis_inverted: bool = False,
+        variant: str = "",
         **kwargs,
     ) -> None:
         super().__init__(pos, size, angle=angle, **kwargs)
         self._fill_color = pg.mkColor(fill_color)
         self._fill_color.setAlpha(32)
-        _add_box_handles(self, y_axis_inverted)
+        if variant == "rotated":
+            _add_rotated_variant_handles(self, "rectangle")
+        else:
+            _add_box_handles(self, y_axis_inverted)
 
     def setFillColor(self, color, alpha: int = 32) -> None:
         self._fill_color = pg.mkColor(color)
@@ -215,15 +318,20 @@ class FilledEllipseROI(pg.EllipseROI):
     rather than ``EllipseROI``'s default single scale + rotate handle, so an oval
     is resized and rotated via its bounding box like a rectangle."""
 
-    def __init__(self, pos, size, *, fill_color="#ffff00", y_axis_inverted: bool = False, **kwargs) -> None:
+    def __init__(self, pos, size, *, fill_color="#ffff00", y_axis_inverted: bool = False,
+                 variant: str = "", **kwargs) -> None:
         # Set before super().__init__ — EllipseROI.__init__ calls _addHandles().
         self._y_axis_inverted = bool(y_axis_inverted)
+        self._variant = str(variant or "")
         super().__init__(pos, size, **kwargs)
         self._fill_color = pg.mkColor(fill_color)
         self._fill_color.setAlpha(32)
 
     def _addHandles(self) -> None:
-        _add_box_handles(self, getattr(self, "_y_axis_inverted", False))
+        if getattr(self, "_variant", "") == "rotated":
+            _add_rotated_variant_handles(self, "oval")     # 4 axis handles, solid pivot
+        else:
+            _add_box_handles(self, getattr(self, "_y_axis_inverted", False), on_curve=True)
 
     def setFillColor(self, color, alpha: int = 32) -> None:
         self._fill_color = pg.mkColor(color)
@@ -379,9 +487,12 @@ class RoiOverlayController(QObject):
 
         target = self._event_target()
         target.installEventFilter(self)
-        # Key presses are delivered to the focus widget (the graphics view), not
-        # its mouse-event viewport, so filter the view widget too — that is where
-        # the arrow-key rectangle nudge/rotate is picked up.
+        # Key presses (arrow nudge / rotate, 't' → add) are delivered to whichever
+        # widget holds keyboard focus, which is often NOT the mouse-event viewport.
+        # Filter the view widget too, and allow the owner to register extra key
+        # sources (e.g. the render window's pg.ImageView, which otherwise eats the
+        # arrow keys for its unused timeline before they reach the ROI).
+        self._extra_key_sources: set = set()
         if self.view_widget is not target:
             self.view_widget.installEventFilter(self)
         store.changed.connect(self.refresh)
@@ -390,6 +501,16 @@ class RoiOverlayController(QObject):
 
     def activate(self) -> None:
         self.store.set_active_adapter(self)
+
+    def add_key_event_source(self, widget) -> None:
+        """Also catch keyboard events (arrow nudge, ``t``) when *widget* holds
+        focus. Used by the render window to register its ``pg.ImageView`` — whose
+        own ``keyPressEvent`` otherwise consumes the arrow keys (for an unused
+        timeline) before they reach the ROI controller."""
+        if widget is None or widget in self._extra_key_sources:
+            return
+        self._extra_key_sources.add(widget)
+        widget.installEventFilter(self)
 
     def current_record(self) -> RoiRecord | None:
         return self.draft
@@ -454,7 +575,7 @@ class RoiOverlayController(QObject):
         elif record.type in {"line", "polyline", "freehand_line"}:
             record.geometry = self._open_line_geometry_from_item(item, record.geometry, record.type)
         else:
-            record.geometry = item_to_geometry(record.type, item)
+            record.geometry = item_to_geometry(record.type, item, prev=record.geometry)
         record.selection_dirty = True
         record = self._normalize_record(record)
         self._queue_selection_update(record)
@@ -500,7 +621,8 @@ class RoiOverlayController(QObject):
                 # XZ/YZ, instead of reusing its in-plane coordinate).
                 px, py = self._project_point(record)
                 self.items[record.id].setPos(pg.Point(px, py))
-            self._style_item(self.items[record.id], record, record.id in selected)
+            self._style_item(self.items[record.id], record, record.id in selected,
+                             manager_highlight=record.id in selected)
             self._sync_label(record)
         for roi_id in list(self.items):
             if roi_id not in wanted:
@@ -533,11 +655,11 @@ class RoiOverlayController(QObject):
             target = self._event_target()
         except RuntimeError:
             return False
-        if obj is not target and obj is not self.view_widget:
+        if obj is not target and obj is not self.view_widget and obj not in self._extra_key_sources:
             return False
         # Keyboard editing of the active ROI (arrow nudge / resize / rotate, and the
         # Fiji-style 't' → add to the ROI Manager), delivered to whichever of the
-        # view widget / its viewport currently holds keyboard focus.
+        # view widget / its viewport / registered key source currently holds focus.
         if event.type() == QEvent.Type.KeyPress:
             if self._handle_arrow_key(event):
                 return True
@@ -653,7 +775,7 @@ class RoiOverlayController(QObject):
             if pos is not None:
                 self._update_drag_draft(pos)
             self._drag_start = None
-            if tool in {"rectangle", "oval", "freehand"}:
+            if tool in {"rectangle", "oval", "freehand", "rotated_rectangle", "ellipse"}:
                 self._finalize_draft_selection(update_item=True)
             elif tool == "line":
                 self._finish_line()
@@ -700,11 +822,9 @@ class RoiOverlayController(QObject):
     _KBD_STEP_NM = 1.0
     _KBD_ROTATE_DEG = 1.0
     _KBD_MIN_SIZE_NM = 1.0
-    #: Local fractional positions of the eight scale handles (matches _add_box_handles).
-    _SCALE_FRACS = (
-        (0.0, 0.5), (1.0, 0.5), (0.5, 0.0), (0.5, 1.0),
-        (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0),
-    )
+    # Scale-handle fractions come from module-level ``box_scale_fracs(on_curve=…)``
+    # so the rectangle (corners) and oval (on-curve) share one source of truth with
+    # ``_add_box_handles``.
 
     def _kbd_target(self):
         """``(item, record, kind)`` the arrow keys act on: the current draft, else
@@ -757,7 +877,11 @@ class RoiOverlayController(QObject):
         """Which handle a click at *pos* selects on rectangle / oval *record*:
         ``"rotate"`` near the rotation handle, ``("scale", fx, fy)`` near one of
         the corner / side scale handles, ``"move"`` elsewhere on the body, else
-        ``None`` (the click missed the ROI)."""
+        ``None`` (the click missed the ROI).
+
+        A **rotated variant** (``geometry["variant"] == "rotated"``) has a solid
+        pivot handle (rotate about centre) at a corner / axis endpoint and 3 scale
+        handles; the classic layout has 8 scale handles + a rotate handle above."""
         if record is None or record.type not in {"rectangle", "oval"}:
             return None
         x, y, w, h = _bounds(record.geometry)
@@ -768,15 +892,22 @@ class RoiOverlayController(QObject):
         theta = np.deg2rad(angle)
         cos_t, sin_t = np.cos(theta), np.sin(theta)
         tol = self._hit_tolerance()
-        # Rotation handle: mirror the offset used by _make_item / _point_hits_record
-        # (test both sides so the y-axis orientation does not matter here).
-        handle_offset = max(half_h * 0.22, tol * 2.0)
-        rot_radius = max(tol * 3.0, min(half_w, half_h) * 0.18)
-        for rotation_y in (-half_h - handle_offset, half_h + handle_offset):
-            rot_x = cx + (-sin_t * rotation_y)
-            rot_y = cy + (cos_t * rotation_y)
-            if (float(pos[0]) - rot_x) ** 2 + (float(pos[1]) - rot_y) ** 2 <= rot_radius ** 2:
+
+        def _handle_xy(fx, fy):
+            ox, oy = (fx - 0.5) * w, (fy - 0.5) * h
+            return cx + cos_t * ox - sin_t * oy, cy + sin_t * ox + cos_t * oy
+
+        variant = str(record.geometry.get("variant") or "")
+        if variant == "rotated":
+            rotate_frac, scale_fracs = rotated_variant_handles(record.type)
+            rot_radius = max(tol * 3.0, min(half_w, half_h) * 0.2)
+            hx, hy = _handle_xy(*rotate_frac)
+            if (float(pos[0]) - hx) ** 2 + (float(pos[1]) - hy) ** 2 <= rot_radius ** 2:
                 return "rotate"
+        else:
+            # No rotate handle on a plain (axis-aligned) rectangle / oval — rotation
+            # is only via the Rotated Rectangle / Ellipse variants (pivot above).
+            scale_fracs = box_scale_fracs(on_curve=record.type == "oval")
         # Nearest corner / side scale handle on the (rotated) box boundary. Cap the
         # pick radius to half the smaller half-extent so a click in the body centre
         # of a thin box is never mistaken for an edge handle (stays "move").
@@ -784,10 +915,8 @@ class RoiOverlayController(QObject):
         pick_radius = min(pick_radius, min(half_w, half_h) * 0.5)
         best = None
         best_d2 = pick_radius ** 2
-        for fx, fy in self._SCALE_FRACS:
-            ox, oy = (fx - 0.5) * w, (fy - 0.5) * h
-            hx = cx + cos_t * ox - sin_t * oy
-            hy = cy + sin_t * ox + cos_t * oy
+        for fx, fy in scale_fracs:
+            hx, hy = _handle_xy(fx, fy)
             d2 = (float(pos[0]) - hx) ** 2 + (float(pos[1]) - hy) ** 2
             if d2 <= best_d2:
                 best_d2 = d2
@@ -966,8 +1095,11 @@ class RoiOverlayController(QObject):
         # Component of the move along the box's own (rotated) width / height axes.
         du = cos_t * dx + sin_t * dy
         dv = -sin_t * dx + cos_t * dy
-        s_x = 1.0 if fx >= 0.999 else (-1.0 if fx <= 0.001 else 0.0)
-        s_y = 1.0 if fy >= 0.999 else (-1.0 if fy <= 0.001 else 0.0)
+        # Which side each fraction is on: >0.5 grows the +axis edge, <0.5 the −axis,
+        # ≈0.5 (an edge-midpoint handle) leaves that axis unchanged. Works for both
+        # the rectangle's corners (fx∈{0,1}) and the oval's on-curve diagonals (≈0.854).
+        s_x = 1.0 if fx > 0.5 + 1e-3 else (-1.0 if fx < 0.5 - 1e-3 else 0.0)
+        s_y = 1.0 if fy > 0.5 + 1e-3 else (-1.0 if fy < 0.5 - 1e-3 else 0.0)
         w2 = max(w + du * s_x, self._KBD_MIN_SIZE_NM)
         h2 = max(h + dv * s_y, self._KBD_MIN_SIZE_NM)
         try:
@@ -1224,6 +1356,15 @@ class RoiOverlayController(QObject):
             x, y = min(x0, x1), min(y0, y1)
             w, h = abs(x1 - x0), abs(y1 - y0)
             self._set_draft(RoiRecord.create(tool, {"bounds": [x, y, w, h]}, **self._record_kwargs()))
+        elif tool in {"rotated_rectangle", "ellipse"}:
+            # The drag is the long *centre* axis (length + rotation); the short side
+            # is the golden ratio of it. The record type stays rectangle/oval (masks
+            # & I/O unchanged) — geometry["variant"] only drives the handle layout.
+            bounds, angle = center_axis_box(x0, y0, x1, y1)
+            rtype = "rectangle" if tool == "rotated_rectangle" else "oval"
+            self._set_draft(RoiRecord.create(
+                rtype, {"bounds": bounds, "angle": angle, "variant": "rotated"},
+                **self._record_kwargs()))
         elif tool == "line":
             self._set_draft(RoiRecord.create("line", {"points": [[x0, y0], [x1, y1]], "closed": False}, **self._record_kwargs()))
         elif tool == "freehand":
@@ -1393,7 +1534,7 @@ class RoiOverlayController(QObject):
         if roi_type in {"rectangle", "oval"}:
             b = g.get("bounds") or [0, 0, 0, 0]
             x, y, w, h = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
-            ang = float(g.get("angle", 0.0) or 0.0)
+            ang = normalize_angle_deg(float(g.get("angle", 0.0) or 0.0))  # (-180, 180]
             label = "Rectangle" if roi_type == "rectangle" else "Oval"
             text = f"{label} X={x:.0f}, Y={y:.0f}, W={w:.0f}, H={h:.0f}"
             return text + (f", angle={ang:.0f}°" if abs(ang) > 1e-6 else "")
@@ -1441,6 +1582,19 @@ class RoiOverlayController(QObject):
         self._emit_status(self._roi_status_text(self.draft.type, geom))
 
     def _set_draft(self, record: RoiRecord) -> None:
+        # A previous *region* draft's data highlight must not linger when the draft
+        # is replaced by a **non-region** ROI (e.g. drawing a line after a
+        # rectangle/oval selection): a non-region draft runs no selection pass, so
+        # it never clears the old active-draft mask — drop the old highlight here.
+        # (A region→region replacement is handled by _replace_active_draft_mask in
+        # the selection recompute, so it is skipped to avoid redundant work while a
+        # new region is being drag-drawn.)
+        old = self.draft
+        if (old is not None and old is not record and old.id != record.id
+                and old.type in self._REGION_TYPES
+                and record.type not in self._REGION_TYPES
+                and old.id not in {r.id for r in self.store.records}):
+            self._delete_mask_for_record(old)
         self.draft = record
         if self.draft_item is not None:
             self.plot_item.removeItem(self.draft_item)
@@ -1496,15 +1650,16 @@ class RoiOverlayController(QObject):
             else:
                 px, py = x, y
             size = [max(w, 1e-9), max(h, 1e-9)]
+            variant = str(g.get("variant") or "")
             if record.type == "rectangle":
                 return FilledRectROI([px, py], size, angle=angle,
                                      fill_color=record.stroke_color,
                                      y_axis_inverted=self._view_y_inverted(),
-                                     movable=True)
+                                     variant=variant, movable=True)
             return FilledEllipseROI([px, py], size, angle=angle,
                                     fill_color=record.stroke_color,
                                     y_axis_inverted=self._view_y_inverted(),
-                                    movable=True)
+                                    variant=variant, movable=True)
         if record.type == "line":
             pts = self._project_points(record) or [[0, 0], [1, 1]]
             item = pg.LineSegmentROI(pts[:2], movable=True)
@@ -1537,8 +1692,13 @@ class RoiOverlayController(QObject):
             fill_color=record.stroke_color, movable=True,
         )
 
-    def _style_item(self, item, record: RoiRecord, selected: bool) -> None:
-        color = record.stroke_color or "#ffff00"
+    #: Distinct outline/fill colour for a ROI **selected in the ROI Manager**, so it
+    #: stands out from the other displayed (Show-all) ROIs drawn in their own colour.
+    MANAGER_SELECT_COLOR = "#00e5ff"          # bright cyan — reads on black & white bg
+
+    def _style_item(self, item, record: RoiRecord, selected: bool,
+                    *, manager_highlight: bool = False) -> None:
+        color = self.MANAGER_SELECT_COLOR if manager_highlight else (record.stroke_color or "#ffff00")
         width = record.line_width + (1.5 if selected else 0.0)
         pen = pg.mkPen(color, width=width)
         try:
@@ -1586,7 +1746,7 @@ class RoiOverlayController(QObject):
         if self.draft.type in {"line", "polyline", "freehand_line"}:
             self.draft.geometry = self._open_line_geometry_from_item(item, self.draft.geometry, self.draft.type)
             return
-        self.draft.geometry = item_to_geometry(self.draft.type, item)
+        self.draft.geometry = item_to_geometry(self.draft.type, item, prev=self.draft.geometry)
         if self.draft.type in {"rectangle", "oval", "polygon", "freehand"}:
             self._finalize_draft_selection(update_item=True)
 
@@ -2092,7 +2252,7 @@ class RoiOverlayController(QObject):
         if t in {"rectangle", "oval"}:
             x, y, w, h = _bounds(g)
             text = f"X={f(x)}, Y={f(y)}, W={f(w)}, H={f(h)}"
-            angle = float(g.get("angle", 0.0) or 0.0)
+            angle = normalize_angle_deg(float(g.get("angle", 0.0) or 0.0))  # (-180, 180]
             if abs(angle) > 1e-9:
                 text += f", angle={angle:.1f}°"
             return text
@@ -2151,7 +2311,7 @@ class RoiOverlayController(QObject):
         return record.name
 
 
-def item_to_geometry(roi_type: str, item) -> dict[str, Any]:
+def item_to_geometry(roi_type: str, item, prev: dict[str, Any] | None = None) -> dict[str, Any]:
     if roi_type == "point":
         pos = item.pos()                     # PointMarkerItem (TargetItem): centre
         return {"point": [float(pos.x()), float(pos.y())]}
@@ -2164,8 +2324,16 @@ def item_to_geometry(roi_type: str, item) -> dict[str, Any]:
         centre = item.mapToParent(pg.Point(w / 2.0, h / 2.0))
         cx, cy = float(centre.x()), float(centre.y())
         geometry = {"bounds": [cx - w / 2.0, cy - h / 2.0, w, h]}
-        if abs(angle) > 1e-9:
-            geometry["angle"] = angle
+        # Normalize to (-180, 180]: a pyqtgraph rotate handle accumulates the raw
+        # angle across full turns (an ellipse spun several times reported -7140°).
+        norm = normalize_angle_deg(angle)
+        if abs(norm) > 1e-9:
+            geometry["angle"] = norm
+        # Preserve the rotated-variant marker across a re-read (it drives the
+        # 4-handle layout; item geometry alone can't distinguish it from a plain
+        # rotated rectangle/oval).
+        if prev and prev.get("variant"):
+            geometry["variant"] = prev["variant"]
         return geometry
     # Multi-vertex shapes (line / polyline / freehand line / polygon / freehand /
     # angle): read each handle in *scene* coords and map to parent, so a body

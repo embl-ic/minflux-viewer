@@ -994,7 +994,7 @@ class ConvSegmentation3DWindow(QDialog):
             f"added 3-D point ROIs.")
         n = self._owner.add_point_rois_3d(
             self._idx, centers, name_prefix=self._name_prefix(),
-            source="conv_segmentation_3d", stroke_color=_ROI_STROKE,
+            source="conv_segmentation_3d",   # stroke_color defaults to the system ROI colour
             names=names, log_message=log)
         if n:
             self._status_label.setText(f"Added {n} point ROI(s) to the ROI Manager.")

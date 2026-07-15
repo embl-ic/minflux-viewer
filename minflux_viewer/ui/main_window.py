@@ -92,6 +92,27 @@ _LINE_FAMILY: tuple[tuple[str, str, str], ...] = (
     ("Freehand Line", "freehand_line", "freeline.png"),
 )
 
+#: Rectangle / oval / polygon families hosted on their toolbar button (same
+#: Fiji-style right-click switch as the Line family). The **rotated** variant reuses
+#: the base icon turned 45° (no new asset). (label, tool, icon file, icon rotation °).
+#: The 2-D members draw a ``rectangle`` / ``oval`` / ``polygon`` record carrying
+#: ``geometry["variant"]``; the **3-D** members (``cuboid`` / ``sphere`` /
+#: ``polyhedron``) are placeholders — their icons are wired here now, their drawing
+#: actions are implemented later (they are not yet in ``core.roi.ROI_TOOLS``).
+_RECT_FAMILY: tuple[tuple[str, str, str, float], ...] = (
+    ("Rectangle", "rectangle", "rec.png", 0.0),
+    ("Rotated Rectangle", "rotated_rectangle", "rec.png", 45.0),
+    ("Cuboid (3D)", "cuboid", "cube.png", 0.0),
+)
+_OVAL_FAMILY: tuple[tuple[str, str, str, float], ...] = (
+    ("Oval", "oval", "ellipse.png", 0.0),
+    ("Ellipse", "ellipse", "ellipse.png", 45.0),
+    ("Sphere (3D)", "sphere", "sphere.png", 0.0),
+)
+_POLY_FAMILY: tuple[tuple[str, str, str, float], ...] = (
+    ("Polygon", "polygon", "polygon.png", 0.0),
+    ("Polyhedron (3D)", "polyhedron", "polyhedron.png", 0.0),
+)
 
 _AI_UNAPPROVED_MENU_TEXT = QColor("#404040")
 
@@ -502,16 +523,26 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             self._roi_tool_group.setExclusive(False)
-        # Fiji-style: the Line toolbar button hosts a *family* (straight / poly /
-        # freehand line); right-click it to switch, left-click activates the
-        # current variant. ``_line_variant`` tracks the active member.
+        # Fiji-style: the Line / Rectangle / Oval / Polygon toolbar buttons each
+        # host a family. Right-click switches variants; left-click activates the
+        # current variant, tracked by ``_*_variant``.
         self._line_variant = "line"
+        self._rect_variant = "rectangle"
+        self._oval_variant = "oval"
+        self._poly_variant = "polygon"
+        _variant_getters = {
+            "line": lambda: self._line_variant,
+            "rectangle": lambda: self._rect_variant,
+            "oval": lambda: self._oval_variant,
+            "polygon": lambda: self._poly_variant,
+        }
         for _label, tool, attr in _ROI_TOOL_DEFS:
             action = getattr(u, attr)
             self._roi_tool_actions[tool] = action
             self._roi_tool_group.addAction(action)
-            if tool == "line":
-                action.triggered.connect(lambda checked: self._on_roi_tool(self._line_variant, checked))
+            getter = _variant_getters.get(tool)
+            if getter is not None:
+                action.triggered.connect(lambda checked, g=getter: self._on_roi_tool(g(), checked))
             else:
                 action.triggered.connect(lambda checked, t=tool: self._on_roi_tool(t, checked))
         # Angle tool (ImageJ-style; not in the generated .ui). It's a measurement
@@ -934,8 +965,11 @@ class MainWindow(QMainWindow):
                 and event.button() == Qt.MouseButton.RightButton
                 and obj in getattr(self, "_roi_tool_buttons", {})):
             pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
-            if self._roi_tool_buttons[obj] == "line":
+            key = self._roi_tool_buttons[obj]
+            if key == "line":
                 self._show_line_family_menu(obj, pos)
+            elif key in ("rectangle", "oval", "polygon"):
+                self._show_shape_family_menu(obj, pos, key)
             else:
                 self._show_roi_tool_menu(obj, pos)
             return True
@@ -2053,7 +2087,7 @@ class MainWindow(QMainWindow):
             rec = RoiRecord.create(
                 "rectangle",
                 {"bounds": [float(cx) - side / 2.0, float(cy) - side / 2.0, side, side]},
-                name=f"NPC {i}", coordinate_space="plot", stroke_color="#ffcc00")
+                name=f"NPC {i}", coordinate_space="plot", stroke_color=self._system_roi_color())
             rec.context = {"dataset_idx": idx, "source": "npc_segmentation_2d"}
             self._state.rois.add(rec)
         self._state.rois.set_show_all(True)     # reveal every detected NPC at once
@@ -2163,16 +2197,25 @@ class MainWindow(QMainWindow):
         win = StraightenedVolumeAlongSkeletonWindow(self._state, idx, owner=self)
         show_modeless(win, self)
 
+    def _system_roi_color(self) -> str:
+        """The user's configured default ROI colour (Preferences ▸ Appearance ▸ ROI,
+        default ``Yellow``). Auto-generated ROIs (segmentation / detection) use this
+        as their base stroke so they match manually drawn ROIs; the bright cyan
+        ``RoiOverlayController.MANAGER_SELECT_COLOR`` is reserved for the ROI-Manager
+        selection highlight only (so a selected ROI stays distinguishable)."""
+        return self._state.prefs.get("plot", {}).get("roi_color", "Yellow") or "Yellow"
+
     def add_segmentation_rois(self, idx: int, centers, *, side_nm: float,
-                              name_prefix: str, source: str, stroke_color: str,
+                              name_prefix: str, source: str, stroke_color: str | None = None,
                               names: list[str] | None = None,
                               log_message: str | None = None) -> int:
         """Add a rectangle ROI of side ``side_nm`` centred on each ``(x, y)`` in
         *centers* to the ROI Manager, reveal them, and show render + manager.
 
         ``names`` (if given, one per centre) sets each ROI's name; otherwise they
-        are auto-numbered ``"<name_prefix> <i>"``. Shared by the convolution
-        segmentation tool; returns the count added."""
+        are auto-numbered ``"<name_prefix> <i>"``. ``stroke_color`` defaults to the
+        system ROI colour. Shared by the convolution segmentation tool; returns the
+        count added."""
         import numpy as np
 
         from ..core.roi import RoiRecord
@@ -2180,6 +2223,7 @@ class MainWindow(QMainWindow):
         centers = np.asarray(centers, dtype=float).reshape(-1, 2)
         if centers.shape[0] == 0 or not (0 <= idx < len(self._state.datasets)):
             return 0
+        stroke = stroke_color or self._system_roi_color()
         side = max(float(side_nm), 1.0)
         for i, (cx, cy) in enumerate(centers, start=1):
             name = names[i - 1] if names is not None and i - 1 < len(names) else f"{name_prefix} {i}"
@@ -2187,7 +2231,7 @@ class MainWindow(QMainWindow):
                 "rectangle",
                 {"bounds": [float(cx) - side / 2.0, float(cy) - side / 2.0, side, side]},
                 name=name, coordinate_space="plot",
-                stroke_color=stroke_color)
+                stroke_color=stroke)
             rec.context = {"dataset_idx": idx, "source": source}
             self._state.rois.add(rec)
         self._state.rois.set_show_all(True)
@@ -2198,12 +2242,12 @@ class MainWindow(QMainWindow):
         return int(centers.shape[0])
 
     def add_point_rois_3d(self, idx: int, centers, *, name_prefix: str, source: str,
-                          stroke_color: str, names: list[str] | None = None,
+                          stroke_color: str | None = None, names: list[str] | None = None,
                           log_message: str | None = None) -> int:
         """Add a 3-D point ROI (full ``[x, y, z]`` nm geometry) for each centre in
         *centers* ``(K, 3)`` to the ROI Manager, reveal them, and show render +
-        manager. Used by the 3-D convolution segmentation tool; returns the count
-        added."""
+        manager. ``stroke_color`` defaults to the system ROI colour. Used by the 3-D
+        convolution segmentation tool; returns the count added."""
         import numpy as np
 
         from ..core.roi import RoiRecord
@@ -2211,11 +2255,12 @@ class MainWindow(QMainWindow):
         centers = np.asarray(centers, dtype=float).reshape(-1, 3)
         if centers.shape[0] == 0 or not (0 <= idx < len(self._state.datasets)):
             return 0
+        stroke = stroke_color or self._system_roi_color()
         for i, (cx, cy, cz) in enumerate(centers, start=1):
             name = names[i - 1] if names is not None and i - 1 < len(names) else f"{name_prefix} {i}"
             rec = RoiRecord.create(
                 "point", {"point": [float(cx), float(cy), float(cz)]},
-                name=name, coordinate_space="plot", stroke_color=stroke_color)
+                name=name, coordinate_space="plot", stroke_color=stroke)
             rec.context = {"dataset_idx": idx, "source": source}
             self._state.rois.add(rec)
         self._state.rois.set_show_all(True)
@@ -2226,11 +2271,12 @@ class MainWindow(QMainWindow):
         return int(centers.shape[0])
 
     def add_polyline_rois(self, idx: int, paths, *, name_prefix: str, source: str,
-                          stroke_color: str, names: list[str] | None = None,
+                          stroke_color: str | None = None, names: list[str] | None = None,
                           log_message: str | None = None) -> int:
         """Add an open poly-line (``freehand_line``) ROI tracing each path in
         *paths* (each an ``(M, 2)`` array of ``(x, y)`` nm vertices) to the ROI
-        Manager, reveal them, and show render + manager. Returns the count added.
+        Manager, reveal them, and show render + manager. ``stroke_color`` defaults to
+        the system ROI colour. Returns the count added.
 
         Used by the curvilinear segmentation tool for traced centre lines."""
         import numpy as np
@@ -2239,6 +2285,7 @@ class MainWindow(QMainWindow):
 
         if not (0 <= idx < len(self._state.datasets)):
             return 0
+        stroke = stroke_color or self._system_roi_color()
         added = 0
         for i, path in enumerate(paths, start=1):
             pts = np.asarray(path, dtype=float).reshape(-1, 2)
@@ -2248,7 +2295,7 @@ class MainWindow(QMainWindow):
             rec = RoiRecord.create(
                 "freehand_line",
                 {"points": pts.tolist(), "closed": False},
-                name=name, coordinate_space="plot", stroke_color=stroke_color)
+                name=name, coordinate_space="plot", stroke_color=stroke)
             rec.context = {"dataset_idx": idx, "source": source}
             self._state.rois.add(rec)
             added += 1
@@ -2436,14 +2483,37 @@ class MainWindow(QMainWindow):
 
     def _sync_roi_tool_actions(self, tool: str = "") -> None:
         active_tool = tool or self._state.rois.active_tool or ""
-        family = {t for _l, t, _ic in _LINE_FAMILY}
-        if active_tool in family:
+        rect_family = {t for _l, t, _ic, _r in _RECT_FAMILY}
+        oval_family = {t for _l, t, _ic, _r in _OVAL_FAMILY}
+        poly_family = {t for _l, t, _ic, _r in _POLY_FAMILY}
+        line_family = {t for _l, t, _ic in _LINE_FAMILY}
+        # Track the active family member + refresh that button's variant icon.
+        if active_tool in line_family:
             self._line_variant = active_tool
             self._update_line_button_icon()
+        elif active_tool in rect_family:
+            self._rect_variant = active_tool
+            self._update_shape_button_icon("rectangle")
+        elif active_tool in oval_family:
+            self._oval_variant = active_tool
+            self._update_shape_button_icon("oval")
+        elif active_tool in poly_family:
+            self._poly_variant = active_tool
+            self._update_shape_button_icon("polygon")
         for name, action in self._roi_tool_actions.items():
             blocked = action.blockSignals(True)
-            # The single Line button stays checked for any of its family members.
-            action.setChecked(active_tool in family if name == "line" else name == active_tool)
+            # A family button stays checked for any of its variants.
+            if name == "line":
+                checked = active_tool in line_family
+            elif name == "rectangle":
+                checked = active_tool in rect_family
+            elif name == "oval":
+                checked = active_tool in oval_family
+            elif name == "polygon":
+                checked = active_tool in poly_family
+            else:
+                checked = name == active_tool
+            action.setChecked(checked)
             action.blockSignals(blocked)
 
     def _update_line_button_icon(self) -> None:
@@ -2457,17 +2527,22 @@ class MainWindow(QMainWindow):
                 + " — right-click to switch (straight / poly / freehand line)")
 
     def _install_roi_tool_menus(self) -> None:
-        # Only the Line button gets a right-click menu — the Fiji-style switch
-        # between straight / poly / freehand line. The other ROI buttons have no
-        # right-click menu. A QToolButton in a QToolBar swallows
+        # The Line / Rectangle / Oval / Polygon buttons get a right-click family
+        # switcher (Fiji-style). A QToolButton in a QToolBar swallows
         # ``customContextMenuRequested``, so we intercept the right mouse press
         # with an event filter instead (reliable).
         self._roi_tool_buttons: dict = {}
-        line_action = getattr(self._ui, "toolLine", None)
-        button = self._ui.toolbar.widgetForAction(line_action) if line_action is not None else None
-        if button is not None:
-            self._roi_tool_buttons[button] = "line"
-            button.installEventFilter(self)
+        for attr, key in (
+            ("toolLine", "line"),
+            ("toolRect", "rectangle"),
+            ("toolOval", "oval"),
+            ("toolPolygon", "polygon"),
+        ):
+            action = getattr(self._ui, attr, None)
+            button = self._ui.toolbar.widgetForAction(action) if action is not None else None
+            if button is not None:
+                self._roi_tool_buttons[button] = key
+                button.installEventFilter(self)
 
     def _show_line_family_menu(self, widget: QWidget, pos) -> None:
         """Fiji-style right-click switcher on the Line button."""
@@ -2484,6 +2559,98 @@ class MainWindow(QMainWindow):
         self._line_variant = tool
         self._update_line_button_icon()
         self._activate_roi_tool(tool)
+
+    # --- Rectangle / Oval / Polygon family switchers ---
+    def _shape_family(self, kind: str):
+        if kind == "rectangle":
+            return _RECT_FAMILY
+        if kind == "oval":
+            return _OVAL_FAMILY
+        if kind == "polygon":
+            return _POLY_FAMILY
+        return ()
+
+    def _shape_variant(self, kind: str) -> str:
+        if kind == "rectangle":
+            return self._rect_variant
+        if kind == "oval":
+            return self._oval_variant
+        if kind == "polygon":
+            return self._poly_variant
+        return kind
+
+    def _show_shape_family_menu(self, widget: QWidget, pos, kind: str) -> None:
+        """Fiji-style right-click switcher on a shape-family toolbar button."""
+        menu = QMenu(widget)
+        active = self._state.rois.active_tool
+        current = self._shape_variant(kind)
+        for label, tool, _ic, _rot in self._shape_family(kind):
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(tool == active or (active is None and tool == current))
+            action.triggered.connect(
+                lambda _checked=False, k=kind, t=tool: self._select_shape_variant(k, t))
+        menu.exec(widget.mapToGlobal(pos))
+
+    def _select_shape_variant(self, kind: str, tool: str) -> None:
+        if kind == "rectangle":
+            self._rect_variant = tool
+        elif kind == "oval":
+            self._oval_variant = tool
+        elif kind == "polygon":
+            self._poly_variant = tool
+        self._update_shape_button_icon(kind)
+        self._activate_roi_tool(tool)
+
+    def _rotated_icon(self, path: str, rotate_deg: float) -> "QIcon":
+        """A QIcon from *path*, optionally turned *rotate_deg*° (the rotated rectangle
+        / ellipse variants reuse the base icon at 45°, no separate asset).
+
+        The base toolbar icons are opaque black-on-white with **no alpha**, so
+        rotating them leaves the new corner triangles transparent — which shows the
+        toolbar background as visible notches. Composite the rotated icon onto a
+        white canvas so it keeps the same white background as every other icon."""
+        if abs(rotate_deg) < 1e-6:
+            return QIcon(path)
+        from PyQt6.QtGui import QColor, QPainter, QPixmap, QTransform
+        pix = QPixmap(path)
+        if pix.isNull():
+            return QIcon(path)
+        rotated = pix.transformed(
+            QTransform().rotate(rotate_deg), Qt.TransformationMode.SmoothTransformation)
+        canvas = QPixmap(rotated.size())
+        canvas.fill(QColor("white"))
+        painter = QPainter(canvas)
+        painter.drawPixmap(0, 0, rotated)
+        painter.end()
+        return QIcon(canvas)
+
+    def _update_shape_button_icon(self, kind: str) -> None:
+        from .. import resource_path
+        action_name = {
+            "rectangle": "toolRect",
+            "oval": "toolOval",
+            "polygon": "toolPolygon",
+        }.get(kind)
+        action = getattr(self._ui, action_name, None) if action_name else None
+        if action is None:
+            return
+        current = self._shape_variant(kind)
+        entry = {t: (ic, rot) for _l, t, ic, rot in self._shape_family(kind)}.get(current)
+        label = {t: lbl for lbl, t, _ic, _rot in self._shape_family(kind)}.get(current, kind.title())
+        if entry is None:
+            return
+        icon_file, rot = entry
+        path = resource_path("icons", icon_file)
+        if not path.exists():
+            return
+        action.setIcon(self._rotated_icon(str(path), rot))
+        switch = {
+            "rectangle": "rectangle / rotated / cuboid",
+            "oval": "oval / ellipse / sphere",
+            "polygon": "polygon / polyhedron",
+        }.get(kind, kind)
+        action.setToolTip(f"{label} — right-click to switch ({switch})")
 
     def _show_roi_tool_menu(self, widget: QWidget, pos) -> None:
         menu = QMenu(widget)

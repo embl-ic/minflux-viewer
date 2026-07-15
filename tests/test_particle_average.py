@@ -114,6 +114,28 @@ def test_template_free_converges():
     assert h[-1] >= h[0] - 1e-6                    # non-decreasing overall
 
 
+def test_parallel_alignment_matches_serial():
+    """Multi-core alignment (``n_workers``) only distributes the per-particle work,
+    so it must produce results identical to the single-core path (both use the same
+    batched-over-angles search). Guards the parallelisation against drift."""
+    parts = _random_particles(k=12, seed=5, with_z=True)
+    kw = dict(box_nm=180, pixel_nm=4, n_angles=36, n_iter=4, sigma_nm=4)
+    serial = pa.average_template_free(parts, n_workers=1, **kw)
+    parallel = pa.average_template_free(parts, n_workers=4, **kw)
+    assert np.allclose([[*t] for t in serial["transforms"]],
+                       [[*t] for t in parallel["transforms"]], atol=1e-9)
+    assert np.allclose(serial["template"], parallel["template"], atol=1e-9)
+    assert np.allclose(serial["average_image"], parallel["average_image"], atol=1e-9)
+
+    tmpl = pa.geometry_template_image("ring", {"diameter_nm": 80, "rim_nm": 12}, 180, 4)
+    s2 = pa.average_template_provided(parts, tmpl, box_nm=180, pixel_nm=4,
+                                      n_angles=36, n_workers=1)
+    p2 = pa.average_template_provided(parts, tmpl, box_nm=180, pixel_nm=4,
+                                      n_angles=36, n_workers=4)
+    assert np.allclose([[*t] for t in s2["transforms"]],
+                       [[*t] for t in p2["transforms"]], atol=1e-9)
+
+
 def test_template_provided_aligns_to_ring():
     rng = np.random.default_rng(7)
 

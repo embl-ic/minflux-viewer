@@ -282,6 +282,9 @@ class ScatterWindow(QWidget):
             self._plot_2d.getPlotItem(),
             coordinate_space="plot",
         )
+        # Also catch arrow-nudge / 't' when focus is on the window itself (not the
+        # inner graphics view), so ROI keyboard editing works regardless of focus.
+        self._roi_overlay.add_key_event_source(self)
         # 3D view added lazily by _ensure_3d_built()
 
         self._channel_area = QScrollArea()

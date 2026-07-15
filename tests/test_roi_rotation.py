@@ -14,7 +14,11 @@ from PyQt6.QtWidgets import QApplication, QWidget
 
 from minflux_viewer.core.roi import RoiRecord, RoiStore
 from minflux_viewer.core.roi_selection import oval_mask, rectangle_mask
-from minflux_viewer.ui.roi_overlay import RoiOverlayController, item_to_geometry
+from minflux_viewer.ui.roi_overlay import (
+    RoiOverlayController,
+    item_to_geometry,
+    normalize_angle_deg,
+)
 
 
 @pytest.fixture(scope="module")
@@ -86,22 +90,39 @@ def test_rotated_rectangle_hit_test(_app):
     assert ctrl._point_hits_record((200.0, 200.0), rec, 0.5) is False
 
 
-def test_rectangle_rotate_handle_stays_screen_top_when_y_axis_inverts(_app):
+@pytest.mark.parametrize("roi_type", ["rectangle", "oval"])
+def test_plain_rect_oval_have_no_rotate_handle(_app, roi_type):
+    """A plain (axis-aligned) rectangle / oval is not rotatable — the rotate handle
+    was removed; rotation is via the Rotated Rectangle / Ellipse variants."""
     ctrl = _ctrl(_app)
-    rec = RoiRecord.create("rectangle", {"bounds": [0.0, 0.0, 100.0, 50.0]})
+    item = ctrl._make_item(RoiRecord.create(roi_type, {"bounds": [0.0, 0.0, 100.0, 50.0]}))
+    assert len(item.handles) == 8
+    assert not any(h.get("type") == "r" for h in item.handles)
 
-    ctrl.store.add(rec)
-    ctrl.store.set_show_all(True)
-    ctrl.refresh()
-    normal = ctrl.items[rec.id]
-    normal_handle = next(h for h in normal.handles if h.get("name") == "rotate")
-    assert float(normal_handle["item"].pos().y()) > 50.0
 
-    ctrl.view_box.invertY(True)
-    ctrl.refresh()
-    inverted = ctrl.items[rec.id]
-    inverted_handle = next(h for h in inverted.handles if h.get("name") == "rotate")
-    assert float(inverted_handle["item"].pos().y()) < 0.0
+def test_normalize_angle_deg_wraps_to_bounded_range():
+    """A pyqtgraph rotate handle accumulates the raw angle across full turns; the
+    read-out must wrap to (-180, 180] (the ellipse reported -7140° before)."""
+    assert normalize_angle_deg(30.0) == pytest.approx(30.0, abs=1e-6)
+    assert normalize_angle_deg(360.0) == pytest.approx(0.0, abs=1e-6)
+    assert normalize_angle_deg(190.0) == pytest.approx(-170.0, abs=1e-6)
+    assert normalize_angle_deg(-180.0) == pytest.approx(180.0, abs=1e-6)   # (-180, 180]
+    assert normalize_angle_deg(180.0) == pytest.approx(180.0, abs=1e-6)
+    # Big accumulated angles: bounded AND congruent to the input mod 360.
+    for raw in (-7140.0, -3680.0, 99999.0, 750.0):
+        w = normalize_angle_deg(raw)
+        assert -180.0 < w <= 180.0
+        assert abs((w - raw) / 360.0 - round((w - raw) / 360.0)) < 1e-9
+
+
+def test_item_to_geometry_normalizes_accumulated_angle(_app):
+    """A rotated variant spun several turns stores a wrapped angle (not e.g. 750°)."""
+    ctrl = _ctrl(_app)
+    item = ctrl._make_item(RoiRecord.create(
+        "oval", {"bounds": [0.0, 0.0, 100.0, 62.0], "angle": 30.0, "variant": "rotated"}))
+    item.rotate(720.0)                                   # spin two full extra turns
+    ang = item_to_geometry("oval", item, prev={"variant": "rotated"}).get("angle")
+    assert -180.0 < ang <= 180.0 and ang == pytest.approx(30.0, abs=1e-6)
 
 
 def test_stored_roi_edit_does_not_mutate_record_until_update(_app):

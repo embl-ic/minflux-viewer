@@ -22,6 +22,12 @@ ROI_TYPES = {
     "polyline", "freehand_line", "magnetic_lasso",
 }
 
+#: Drawing-tool names accepted by ``set_tool``. Superset of ``ROI_TYPES`` with the
+#: variant tools that produce an existing record type (a rotated rectangle is a
+#: ``rectangle`` record + ``geometry["variant"]``; an ellipse is a rotated ``oval``),
+#: so they are valid *tools* but never record *types*.
+ROI_TOOLS = ROI_TYPES | {"rotated_rectangle", "ellipse"}
+
 #: Open multi-vertex curve types (no enclosed area; drawn as open polylines).
 OPEN_LINE_TYPES = {"polyline", "freehand_line"}
 
@@ -94,7 +100,7 @@ class RoiStore(QObject):
         self.changed.emit()
 
     def set_tool(self, tool: str | None) -> None:
-        if tool is not None and tool not in ROI_TYPES:
+        if tool is not None and tool not in ROI_TOOLS:
             return
         self.active_tool = tool
         self.tool_changed.emit(tool or "")
@@ -147,15 +153,16 @@ class RoiStore(QObject):
         self.selection_changed.emit()
 
     def deselect(self) -> None:
+        # Selection-only change → emit *only* selection_changed. Emitting `changed`
+        # too would make the ROI Manager rebuild its whole list, which resets the
+        # current item and breaks arrow-key navigation through the ROIs.
         self.selected_ids = []
         self.selection_changed.emit()
-        self.changed.emit()
 
     def select(self, ids: list[str]) -> None:
         valid = {r.id for r in self.records}
         self.selected_ids = [i for i in ids if i in valid]
-        self.selection_changed.emit()
-        self.changed.emit()
+        self.selection_changed.emit()      # not `changed` — see deselect()
 
     def rename(self, roi_id: str, name: str) -> None:
         for record in self.records:

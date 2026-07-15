@@ -38,6 +38,30 @@ def test_roi_store_order_selection_rename_delete() -> None:
     assert store.selected_ids == []
 
 
+def test_select_and_deselect_emit_only_selection_changed() -> None:
+    """A selection-only change must NOT emit ``changed`` — that would make the ROI
+    Manager rebuild its whole list, resetting the current item and breaking
+    arrow-key navigation through the ROIs. Adds/deletes still emit ``changed``."""
+    store = RoiStore()
+    a = _record("a")
+    b = _record("b")
+    store.add(a)
+    store.add(b)
+    changed: list[int] = []
+    selection: list[int] = []
+    store.changed.connect(lambda: changed.append(1))
+    store.selection_changed.connect(lambda: selection.append(1))
+
+    store.select([a.id])
+    assert selection == [1] and changed == []
+    store.deselect()
+    assert selection == [1, 1] and changed == []
+
+    # add still emits changed (records set changed → list must rebuild)
+    store.add(_record("c"))
+    assert changed == [1]
+
+
 def test_roi_show_flags_and_combine() -> None:
     store = RoiStore()
     a = _record("a")

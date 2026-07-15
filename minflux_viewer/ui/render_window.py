@@ -823,6 +823,11 @@ class RenderWindow(QWidget):
             self._image_view.view,
             coordinate_space="plot",
         )
+        # The pg.ImageView's own keyPressEvent grabs the arrow keys for its (unused)
+        # timeline; register it (and this window) as ROI key sources so the arrow
+        # nudge / 't' reach the ROI controller no matter which of these holds focus.
+        self._roi_overlay.add_key_event_source(self._image_view)
+        self._roi_overlay.add_key_event_source(self)
 
         self._channel_area = QScrollArea()
         self._channel_area.setWidgetResizable(True)
@@ -2498,6 +2503,18 @@ class RenderWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _show_context_menu(self, pos) -> None:
+        # A right-click on a ROI is handled by the ROI controller (its own context
+        # menu). Don't also pop the render View menu over/instead of it.
+        ctrl = getattr(self, "_roi_overlay", None)
+        if ctrl is not None:
+            try:
+                vp = self._view_box.mapSceneToView(
+                    self._image_view.ui.graphicsView.mapToScene(pos))
+                if ctrl._record_at((float(vp.x()), float(vp.y()))) is not None:
+                    return
+            except Exception:
+                pass
+
         menu = QMenu(self)
 
         view_menu = menu.addMenu("View")

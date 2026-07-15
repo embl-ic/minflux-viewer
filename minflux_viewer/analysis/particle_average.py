@@ -29,6 +29,9 @@ Pure NumPy/SciPy — Qt-free and unit-testable. Distances are in nm.
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import numpy as np
 
 from .geometry import rotation_a_to_b
@@ -37,6 +40,16 @@ DEFAULT_BOX_NM = 150.0
 DEFAULT_PIXEL_NM = 3.0
 DEFAULT_N_ANGLES = 36
 DEFAULT_N_ITERS = 5
+
+
+def _resolve_workers(n_workers, n_tasks: int) -> int:
+    """Number of parallel alignment workers: ``None`` → all logical CPUs, capped to
+    the task count (no point spawning more threads than particles). The per-particle
+    alignment is FFT/histogram-bound and numpy/scipy release the GIL, so threads
+    parallelise well without pickling the (potentially large) particle clouds."""
+    if n_workers is None:
+        n_workers = os.cpu_count() or 1
+    return max(1, min(int(n_workers), max(1, int(n_tasks))))
 
 
 # --------------------------------------------------------------------------- #
@@ -320,19 +333,76 @@ def geometry_template_image(kind: str, params: dict, box_nm: float,
 # --------------------------------------------------------------------------- #
 # Alignment
 # --------------------------------------------------------------------------- #
-def _xcorr_shift(source: np.ndarray, template: np.ndarray):
-    """Pixel shift to apply to *source* (its points translated by +shift) so it
-    best matches *template*, plus a normalised correlation score."""
-    shape = np.array(source.shape)
-    f = np.fft.rfft2(template)
+def _xcorr_shift_pre(source: np.ndarray, template_f: np.ndarray,
+                     template_norm: float, shape):
+    """Like :func:`_xcorr_shift` but with the template's ``rfft2`` and Frobenius
+    norm **precomputed** — the template is constant across every particle and angle
+    within one alignment pass, so its FFT/norm are computed once (not per angle)."""
     g = np.fft.rfft2(source)
-    cc = np.fft.irfft2(f * np.conj(g), s=source.shape)
+    cc = np.fft.irfft2(template_f * np.conj(g), s=shape)
     peak = np.array(np.unravel_index(int(np.argmax(cc)), cc.shape), dtype=float)
     for i in range(peak.size):                       # wrap to [-N/2, N/2)
         if peak[i] > shape[i] / 2:
             peak[i] -= shape[i]
-    denom = float(np.linalg.norm(source) * np.linalg.norm(template)) or 1.0
+    denom = float(np.linalg.norm(source) * template_norm) or 1.0
     return peak, float(cc.max() / denom)
+
+
+def _xcorr_shift(source: np.ndarray, template: np.ndarray):
+    """Pixel shift to apply to *source* (its points translated by +shift) so it
+    best matches *template*, plus a normalised correlation score."""
+    return _xcorr_shift_pre(source, np.fft.rfft2(template),
+                            float(np.linalg.norm(template)), source.shape)
+
+
+def _align_one(pts, template_f, template_norm, shape, box_nm, pixel_nm, angles, sigma_nm):
+    """Core rotation search for one particle against a precomputed template FFT.
+    Returns ``(theta_deg, dx_nm, dy_nm, score)``.
+
+    **Batched over all angles**: instead of a Python loop that renders + FFTs one
+    rotation at a time (tens of thousands of tiny numpy calls with dominant Python
+    overhead), all ``A`` rotations are rendered in a single ``histogramdd`` + one
+    ``gaussian_filter`` + one batched ``rfft2``/``irfft2`` over the angle-stack. Same
+    result as the per-angle search (points are still rotated in point space), an
+    order of magnitude less overhead. Falls back to the per-angle loop only for the
+    degenerate empty particle."""
+    pts = np.asarray(pts, dtype=float)
+    angles = np.asarray(angles, dtype=float)
+    A = int(angles.size)
+    n = int(shape[0])
+    if pts.shape[0] == 0 or A == 0:
+        return (float(angles[0]) if A else 0.0, 0.0, 0.0, 0.0)
+    half = box_nm / 2.0
+    edges = np.linspace(-half, half, n + 1)
+    th = np.deg2rad(angles)
+    cos, sin = np.cos(th)[:, None], np.sin(th)[:, None]        # (A, 1)
+    x, y = pts[:, 0][None, :], pts[:, 1][None, :]              # (1, M)
+    xr = cos * x - sin * y                                     # (A, M) rotated in point space
+    yr = sin * x + cos * y
+    # One (A, n, n) histogram stack (angle axis + the two spatial axes).
+    a_idx = np.repeat(np.arange(A), pts.shape[0])
+    H, _ = np.histogramdd(
+        np.column_stack([a_idx, xr.ravel(), yr.ravel()]),
+        bins=[np.arange(A + 1) - 0.5, edges, edges])          # (A, n, n)
+    if sigma_nm:
+        from scipy.ndimage import gaussian_filter
+        s = max(sigma_nm / pixel_nm, 0.5)
+        H = gaussian_filter(H, sigma=(0.0, s, s))             # blur only the spatial axes
+    g = np.fft.rfft2(H, axes=(-2, -1))                        # batched source FFTs
+    cc = np.fft.irfft2(template_f[None] * np.conj(g), s=shape, axes=(-2, -1))  # (A, n, n)
+    flat = cc.reshape(A, -1)
+    peak_lin = np.argmax(flat, axis=1)                        # first max per angle (C-order)
+    peak_val = flat[np.arange(A), peak_lin]
+    src_norm = np.sqrt(np.einsum("aij,aij->a", H, H))         # ‖source‖ per angle
+    denom = src_norm * template_norm
+    denom[denom == 0.0] = 1.0
+    scores = peak_val / denom
+    best_a = int(np.argmax(scores))                          # first angle achieving the max
+    py, px = np.unravel_index(int(peak_lin[best_a]), shape)
+    py = py - n if py > n / 2 else py                        # wrap shift to [-n/2, n/2)
+    px = px - n if px > n / 2 else px
+    return (float(angles[best_a]), float(py * pixel_nm), float(px * pixel_nm),
+            float(scores[best_a]))
 
 
 def align_particle(points_xy, template_img, *, box_nm: float, pixel_nm: float,
@@ -342,15 +412,39 @@ def align_particle(points_xy, template_img, *, box_nm: float, pixel_nm: float,
     Rotation is searched over ``angles`` (degrees) in point space; translation
     comes from the image cross-correlation at each angle. Returns
     ``(theta_deg, dx_nm, dy_nm, score)``."""
-    pts = np.asarray(points_xy, dtype=float)
-    best = (0.0, 0.0, 0.0, -np.inf)
-    for a in angles:
-        rp = transform_points(pts, a)
-        img = render_points(rp, box_nm, pixel_nm, sigma_nm)
-        shift, score = _xcorr_shift(img, template_img)
-        if score > best[3]:
-            best = (float(a), float(shift[0] * pixel_nm), float(shift[1] * pixel_nm), score)
-    return best
+    template_f = np.fft.rfft2(template_img)
+    template_norm = float(np.linalg.norm(template_img))
+    return _align_one(np.asarray(points_xy, dtype=float), template_f, template_norm,
+                      template_img.shape, box_nm, pixel_nm, angles, sigma_nm)
+
+
+def _align_all(particles_c, template, *, box_nm, pixel_nm, angles, sigma_nm,
+               executor, on_done=None):
+    """Align every particle's XY to ``template`` (rotation search + FFT shift),
+    optionally in parallel via *executor*. The template ``rfft2`` + norm are
+    computed **once** here and shared across all particles. ``on_done()`` (if given)
+    is called once per finished particle, in the calling thread (so it is safe for
+    progress reporting). Returns a list of transforms in particle order."""
+    template_f = np.fft.rfft2(template)
+    template_norm = float(np.linalg.norm(template))
+    shape = template.shape
+    transforms: list = [None] * len(particles_c)
+    if executor is None:
+        for i, p in enumerate(particles_c):
+            transforms[i] = _align_one(p[:, :2], template_f, template_norm, shape,
+                                       box_nm, pixel_nm, angles, sigma_nm)
+            if on_done is not None:
+                on_done()
+    else:
+        futures = {
+            executor.submit(_align_one, p[:, :2], template_f, template_norm, shape,
+                            box_nm, pixel_nm, angles, sigma_nm): i
+            for i, p in enumerate(particles_c)}
+        for fut in as_completed(futures):
+            transforms[futures[fut]] = fut.result()
+            if on_done is not None:
+                on_done()
+    return transforms
 
 
 def _aligned_image(particle_c, transform, box_nm, pixel_nm, sigma_nm):
@@ -374,21 +468,32 @@ def _pool(particles_c, transforms) -> np.ndarray:
 def average_template_provided(particles, template_img, *, box_nm=DEFAULT_BOX_NM,
                               pixel_nm=DEFAULT_PIXEL_NM, n_angles=DEFAULT_N_ANGLES,
                               sigma_nm: float | None = None, correct_tilt: bool = False,
-                              progress=None) -> dict:
+                              progress=None, n_workers=None) -> dict:
     """Align every particle to a fixed template image and pool them.
 
     ``correct_tilt`` first PCA-untilts each particle (3-D data); ``progress(done,
-    total)`` (optional) is called once per aligned particle."""
+    total)`` (optional) is called once per aligned particle. ``n_workers`` (``None``
+    → all CPUs) parallelises the per-particle alignment across cores."""
     angles = np.linspace(0.0, 360.0, int(n_angles), endpoint=False)
     sigma_nm = pixel_nm if sigma_nm is None else sigma_nm
     particles_c, tilts, prep_mats = _prepare_particles(particles, correct_tilt)
-    transforms = []
     total = len(particles_c)
-    for i, p in enumerate(particles_c, start=1):
+    done = [0]
+
+    def _tick():
+        done[0] += 1
         if progress is not None:
-            progress(i, total)
-        transforms.append(align_particle(p[:, :2], template_img, box_nm=box_nm,
-                                         pixel_nm=pixel_nm, angles=angles, sigma_nm=sigma_nm))
+            progress(done[0], total)
+
+    workers = _resolve_workers(n_workers, total)
+    executor = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
+    try:
+        transforms = _align_all(particles_c, template_img, box_nm=box_nm,
+                                pixel_nm=pixel_nm, angles=angles, sigma_nm=sigma_nm,
+                                executor=executor, on_done=_tick)
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True)
     pooled = _pool(particles_c, transforms)
     avg_img = render_points(pooled[:, :2], box_nm, pixel_nm, sigma_nm) if pooled.size else \
         np.zeros_like(template_img)
@@ -405,13 +510,15 @@ def average_template_provided(particles, template_img, *, box_nm=DEFAULT_BOX_NM,
 def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_PIXEL_NM,
                           n_angles=DEFAULT_N_ANGLES, n_iter=DEFAULT_N_ITERS,
                           sigma_nm: float | None = None, seed: int = 0,
-                          correct_tilt: bool = False, progress=None) -> dict:
+                          correct_tilt: bool = False, progress=None, n_workers=None) -> dict:
     """Reference-free 2-D averaging: seed the reference from one particle, then
     iterate *align-all → mean → repeat*.
 
     ``correct_tilt`` first PCA-untilts each particle (3-D data); ``progress(done,
     total)`` (optional) is called per particle-alignment across all iterations
-    (``total = n_iter × n_particles``)."""
+    (``total = n_iter × n_particles``). ``n_workers`` (``None`` → all CPUs)
+    parallelises the per-particle alignment within each iteration across cores;
+    iterations stay sequential (each needs the previous mean)."""
     angles = np.linspace(0.0, 360.0, int(n_angles), endpoint=False)
     sigma_nm = pixel_nm if sigma_nm is None else sigma_nm
     particles_c, tilts, prep_mats = _prepare_particles(particles, correct_tilt)
@@ -427,20 +534,27 @@ def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_
     history = []
     n_it = max(int(n_iter), 1)
     total = n_it * len(particles_c)
-    step = 0
-    for _ in range(n_it):
-        transforms = []
-        for p in particles_c:
-            step += 1
-            if progress is not None:
-                progress(step, total)
-            transforms.append(align_particle(p[:, :2], template, box_nm=box_nm,
-                                             pixel_nm=pixel_nm, angles=angles, sigma_nm=sigma_nm))
-        imgs = [_aligned_image(p, t, box_nm, pixel_nm, sigma_nm)
-                for p, t in zip(particles_c, transforms)]
-        new_template = np.mean(imgs, axis=0)
-        history.append(float(np.mean([t[3] for t in transforms])))
-        template = new_template
+    done = [0]
+
+    def _tick():
+        done[0] += 1
+        if progress is not None:
+            progress(done[0], total)
+
+    workers = _resolve_workers(n_workers, len(particles_c))
+    executor = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
+    try:
+        for _ in range(n_it):
+            transforms = _align_all(particles_c, template, box_nm=box_nm,
+                                    pixel_nm=pixel_nm, angles=angles, sigma_nm=sigma_nm,
+                                    executor=executor, on_done=_tick)
+            imgs = [_aligned_image(p, t, box_nm, pixel_nm, sigma_nm)
+                    for p, t in zip(particles_c, transforms)]
+            template = np.mean(imgs, axis=0)
+            history.append(float(np.mean([t[3] for t in transforms])))
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True)
     pooled = _pool(particles_c, transforms)
     avg_img = render_points(pooled[:, :2], box_nm, pixel_nm, sigma_nm)
     mats4 = [_matrix_2d(t[0], t[1], t[2]) @ M for t, M in zip(transforms, prep_mats)]

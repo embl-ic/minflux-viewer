@@ -557,7 +557,7 @@ class CurvilinearSegmentationWindow(QDialog):
             f"min length={self._min_length.value():.0f} nm{opts_str}); added poly-line ROIs.")
         n = self._owner.add_polyline_rois(
             self._idx, paths, name_prefix="Segment", source="curvilinear_segmentation_2d",
-            stroke_color=_ROI_STROKE, names=names, log_message=log)
+            names=names, log_message=log)   # stroke_color defaults to the system ROI colour
         if n:
             self._status_label.setText(f"Added {n} centre line(s) to the ROI Manager.")
 
