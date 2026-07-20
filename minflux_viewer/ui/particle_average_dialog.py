@@ -228,7 +228,17 @@ class ParticleAverageWindow(QDialog):
         self._box_size = self._dspin(8.0, 5000.0, 150.0, 0, 5.0, " nm")
         self._pixel = self._dspin(0.5, 50.0, 3.0, 1, 0.5, " nm")
         self._angles = QSpinBox(); self._angles.setRange(4, 360); self._angles.setValue(36)
-        self._iters = QSpinBox(); self._iters.setRange(1, 30); self._iters.setValue(5)
+        self._iters = QSpinBox(); self._iters.setRange(1, 100); self._iters.setValue(30)
+        self._iters.setToolTip(
+            "Maximum align→average iterations (template-free), a safety cap. Iteration "
+            "normally stops earlier when the alignment score converges — see "
+            "Convergence tol.")
+        self._conv_tol = self._dspin(0.0, 0.1, 0.0001, 5, 0.0001, "")
+        self._conv_tol.setToolTip(
+            "Early-stop tolerance (template-free): stop when the relative improvement in "
+            "the mean alignment score between iterations falls below this — the EM/MLE "
+            "convergence rule (cf. scikit-learn GaussianMixture(tol=…)). 0 disables early "
+            "stop (always run Max iterations).")
         self._tilt_correct = QCheckBox("Correct axial tilt (3-D, per-particle PCA)")
         self._tilt_correct.setToolTip(
             "Un-tilt each particle onto its best-fit plane (PCA) before 2-D "
@@ -244,7 +254,8 @@ class ParticleAverageWindow(QDialog):
         ib.addRow("Average box:", self._box_size)
         ib.addRow("Pixel size:", self._pixel)
         ib.addRow("Rotation steps:", self._angles)
-        ib.addRow("Iterations:", self._iters)
+        ib.addRow("Max iterations:", self._iters)
+        ib.addRow("Convergence tol:", self._conv_tol)
         ib.addRow("", self._tilt_correct)
         ib.addRow("", self._multichannel)
         ib.addRow("", self._image_group)
@@ -703,12 +714,15 @@ class ParticleAverageWindow(QDialog):
                     return res["points"], f"template '{key_label}'{tilt_tag}", _extra(res, (key, params))
             else:
                 n_iter = int(self._iters.value())
+                conv_tol = float(self._conv_tol.value())
 
                 def compute(progress):
                     res = pa.average_particles(particles, mode="free", box_nm=box, pixel_nm=px,
-                                               n_angles=n_ang, n_iter=n_iter, sigma_nm=px,
-                                               correct_tilt=tilt, progress=progress)
-                    return (res["points"], f"template-free, {res.get('iterations', 0)} iter{tilt_tag}",
+                                               n_angles=n_ang, n_iter=n_iter, tol=conv_tol,
+                                               sigma_nm=px, correct_tilt=tilt, progress=progress)
+                    conv = " (converged)" if res.get("converged") else " (max iter)"
+                    return (res["points"],
+                            f"template-free, {res.get('iterations', 0)} iter{conv}{tilt_tag}",
                             _extra(res, None))
 
         self._pending = {"n_in": n_in, "method": method, "sources": self._n_sources(),

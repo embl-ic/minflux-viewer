@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSpinBox,
+    QSplitter,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -895,14 +896,48 @@ class ViewerAlignmentDialog(QDialog):
 
 
 class AlignmentPlotWindow(QDialog):
-    def __init__(self, results, parent=None, data_bounds_nm=None):
+    def __init__(self, results, parent=None, data_bounds_nm=None,
+                 requested_transform_type=None):
         super().__init__(parent)
         self.setWindowTitle("Beads and alignment result")
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
-        self.resize(1150, 760)
+        self.resize(1150, 800)
+        self._owner = parent
         self.results = results
-        self.datasets = self._build_plot_datasets(results)
+        # Requested MBM-handling mode (may be downgraded per bead count when re-fit);
+        # falls back to the effective mode already on the results.
+        from ...msr.alignment import TRANSFORM_RIGID_XY_Z
+        self._requested_transform_type = (
+            requested_transform_type
+            or (getattr(results[0], "transform_type", "") if results else "")
+            or TRANSFORM_RIGID_XY_Z
+        )
+        # Immutable per-moving-channel bead data (all matched beads); the live re-fit
+        # works on subsets of this without re-parsing the raw MBM point arrays.
+        self._base = [
+            {
+                "ref_name": r.channel1_name,
+                "mov_name": r.channel2_name,
+                "bead_ids": np.asarray(r.bead_ids, dtype=np.uint32),
+                "ref_xyz": np.asarray(r.channel1_xyz, dtype=np.float64),
+                "mov_xyz": np.asarray(r.channel2_xyz, dtype=np.float64),
+                "ref_counts": np.asarray(getattr(r, "channel1_counts", np.zeros(np.asarray(r.bead_ids).size)), dtype=np.int32),
+                "mov_counts": np.asarray(getattr(r, "channel2_counts", np.zeros(np.asarray(r.bead_ids).size)), dtype=np.int32),
+            }
+            for r in results
+        ]
+        self._excluded_gris: set[int] = set()
+        # Beads the owner had already excluded before this window opened (they are not
+        # among the passed-in results). Writeback unions them so a window exclusion adds
+        # to — never replaces — the existing selection.
+        self._owner_prior_excluded = set(
+            int(g) for g in (getattr(parent, "_bead_unchecked_gris", None) or set()))
+        self._current: list[dict] = []
+        self._row_order: list[tuple[int, int, int]] = []
+        self._label_items: list = []
+        self._label_items_3d: list = []
+        self._suspend_bead_signals = False
         # (min_xyz, max_xyz) nm bounding box of all datasets' raw localizations,
         # drawn as a view-aware wireframe data-range box. None = bead bounds.
         self.data_bounds_nm = data_bounds_nm
@@ -919,6 +954,9 @@ class AlignmentPlotWindow(QDialog):
         self._show_3d_axis = True
         self._show_3d_bounding_box = True
 
+        self._recompute_current()
+        self.datasets = self._build_plot_datasets()
+
         import pyqtgraph as pg
 
         layout = QVBoxLayout(self)
@@ -931,9 +969,19 @@ class AlignmentPlotWindow(QDialog):
             self.visibility[key] = cb
             controls.addWidget(cb)
         controls.addStretch(1)
-        self.hover_label = QLabel("Hover near a point to see bead ID, channel, and coordinates (µm).")
+        self.hover_label = QLabel("Hover near a point to see channel and coordinates (µm).")
         controls.addWidget(self.hover_label)
         layout.addLayout(controls)
+
+        # Readout #1: fit-quality banner (RMSE per moving channel + a warning when
+        # the fiducial registration is poor). Refreshed live on bead selection change.
+        self.quality_banner = QLabel()
+        self.quality_banner.setWordWrap(True)
+        self.quality_banner.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        layout.addWidget(self.quality_banner)
 
         self.plot = pg.PlotWidget(background="w")
         try:
@@ -952,40 +1000,356 @@ class AlignmentPlotWindow(QDialog):
         self.plot.getAxis("left").setTextPen("k")
         self._stack = QStackedWidget()
         self._stack.addWidget(self.plot)
-        layout.addWidget(self._stack, stretch=1)
+        self._stack.setMinimumHeight(160)
+
+        # Readout #2: per-bead residual table (worst-first) with a per-bead "Bead"
+        # checkbox — un/re-checking a bead re-fits the alignment live and updates the
+        # banner + plot. Δ = raw per-bead offset (reference − moving); resid = error
+        # remaining after the fitted transform.
+        table_panel = QWidget()
+        table_layout = QVBoxLayout(table_panel)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        self.resid_caption = QLabel(
+            "Per-bead residuals (worst first) — tick/untick a bead to exclude/include it "
+            "in the fit (updates live). Δ = raw offset (ref − mov); resid = error remaining "
+            "after the fitted transform, in nm:"
+        )
+        self.resid_caption.setWordWrap(True)
+        table_layout.addWidget(self.resid_caption)
+        self.resid_table = QTableWidget()
+        self.resid_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.resid_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.resid_table.setAlternatingRowColors(True)
+        self.resid_table.setMinimumHeight(70)
+        self.resid_table.setToolTip(
+            "Tick a bead to include it in the alignment fit; untick to exclude it.\n"
+            "Δ = raw per-bead offset (reference − moving), nm.\n"
+            "resid = error remaining after the fitted transform (aligned − reference), nm.\n"
+            "Large, inconsistent residuals mean the beads disagree with each other, so a "
+            "single transform cannot register the channels accurately."
+        )
+        table_layout.addWidget(self.resid_table)
+
+        # Draggable split between the scatter plot and the residual table, so the user
+        # can give the table more height to show more rows (drag the handle between them,
+        # not just the dialog border).
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(self._stack)
+        split.addWidget(table_panel)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 1)
+        split.setChildrenCollapsible(False)
+        split.setHandleWidth(6)
+        split.setSizes([540, 220])
+        self._split = split
+        layout.addWidget(split, stretch=1)
+
+        self._build_residual_table_structure()
+        self.resid_table.itemChanged.connect(self._on_bead_item_changed)
+
         self.plot.scene().sigMouseMoved.connect(self._on_hover)
         self._draw()
+        self._refresh_readouts()
 
-    def _build_plot_datasets(self, results):
+    def _build_plot_datasets(self):
         cmap = ["#d62728", "#2ca02c", "#1f77b4", "#ff7f0e", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
-        reference = results[0]
+        reference = self._current[0]
         datasets = {
             "reference_original": {
-                "label": f"{reference.channel1_name} original",
+                "label": f"{reference['ref_name']} original",
                 "color": cmap[0],
-                "xyz_nm": np.asarray(reference.channel1_xyz, dtype=np.float64),
-                "bead_ids": np.asarray(reference.bead_ids),
+                "xyz_nm": np.asarray(reference["ref_xyz"], dtype=np.float64),
+                "bead_ids": np.asarray(reference["bead_ids"]),
                 "symbol": "o",
             }
         }
-        for idx, result in enumerate(results, start=1):
+        for idx, result in enumerate(self._current, start=1):
             color = cmap[idx % len(cmap)]
             base = f"channel_{idx+1}"
             datasets[f"{base}_original"] = {
-                "label": f"{result.channel2_name} original",
+                "label": f"{result['mov_name']} original",
                 "color": color,
-                "xyz_nm": np.asarray(result.channel2_xyz, dtype=np.float64),
-                "bead_ids": np.asarray(result.bead_ids),
+                "xyz_nm": np.asarray(result["mov_xyz"], dtype=np.float64),
+                "bead_ids": np.asarray(result["bead_ids"]),
                 "symbol": "o",
             }
             datasets[f"{base}_aligned"] = {
-                "label": f"{result.channel2_name} aligned",
+                "label": f"{result['mov_name']} aligned",
                 "color": color,
-                "xyz_nm": np.asarray(result.channel2_aligned_xyz, dtype=np.float64),
-                "bead_ids": np.asarray(result.bead_ids),
+                "xyz_nm": np.asarray(result["aligned_all"], dtype=np.float64),
+                "bead_ids": np.asarray(result["bead_ids"]),
                 "symbol": "star",
             }
         return datasets
+
+    # ------------------------------------------------------------------
+    # Live re-fit on a bead subset
+    # ------------------------------------------------------------------
+
+    def _recompute_current(self):
+        """(Re)fit each moving channel using only the currently-included beads,
+        and record aligned positions + residuals for ALL matched beads so excluded
+        beads still show how far they fall from the fit."""
+        from ...msr.alignment import (
+            MIN_BEADS_FOR_ALIGNMENT,
+            align_channels_from_bead_positions,
+            apply_homogeneous_transform,
+        )
+
+        excluded = np.asarray(sorted(self._excluded_gris), dtype=np.uint32)
+        self._current = []
+        for b in self._base:
+            ids = b["bead_ids"]
+            inc = ~np.isin(ids, excluded) if excluded.size else np.ones(ids.size, dtype=bool)
+            cur = {
+                "ref_name": b["ref_name"], "mov_name": b["mov_name"],
+                "bead_ids": ids, "ref_xyz": b["ref_xyz"], "mov_xyz": b["mov_xyz"],
+                "included": inc,
+            }
+            if int(inc.sum()) >= MIN_BEADS_FOR_ALIGNMENT:
+                res = align_channels_from_bead_positions(
+                    b["ref_name"], b["mov_name"], ids[inc],
+                    b["ref_xyz"][inc], b["mov_xyz"][inc],
+                    b["ref_counts"][inc], b["mov_counts"][inc],
+                    transform_type=self._requested_transform_type)
+                matrix = np.asarray(res.matrix_4x4, dtype=np.float64)
+                cur["transform_type"] = res.transform_type
+                cur["valid"] = True
+            else:
+                matrix = np.eye(4, dtype=np.float64)
+                cur["transform_type"] = self._requested_transform_type
+                cur["valid"] = False
+            aligned_all = apply_homogeneous_transform(b["mov_xyz"], matrix)
+            residual_all = aligned_all - b["ref_xyz"]
+            cur["matrix_4x4"] = matrix
+            cur["aligned_all"] = aligned_all
+            cur["residual_all"] = residual_all
+            cur["n_used"] = int(inc.sum())
+            inc_res = residual_all[inc]
+            if inc_res.shape[0] and cur["valid"]:
+                cur["rmse_xy_nm"] = float(np.sqrt(np.mean(inc_res[:, 0] ** 2 + inc_res[:, 1] ** 2)))
+                cur["rmse_z_nm"] = float(np.sqrt(np.mean(inc_res[:, 2] ** 2)))
+            else:
+                cur["rmse_xy_nm"] = cur["rmse_z_nm"] = float("nan")
+            self._current.append(cur)
+
+    def _recompute_and_refresh(self):
+        self._recompute_current()
+        self.datasets = self._build_plot_datasets()
+        self._draw()
+        self._refresh_readouts()
+        self._writeback_selection()
+
+    def _writeback_selection(self):
+        """Persist the current bead selection to the owning MSR-reader dialog so a
+        subsequent Align/Open uses it (matches the 'Show beads drift' selection)."""
+        owner = self._owner
+        if owner is None or not hasattr(owner, "_bead_unchecked_gris"):
+            return
+        try:
+            combined = set(self._owner_prior_excluded) | set(int(g) for g in self._excluded_gris)
+            owner._bead_unchecked_gris = combined
+            if hasattr(owner, "log"):
+                owner.log(f"[align] bead selection updated from result window: "
+                          f"{len(combined)} bead(s) excluded "
+                          f"{sorted(combined) if combined else ''}")
+        except Exception:
+            pass
+
+    def _bead_label_points(self) -> dict:
+        """{gri: reference-position (nm)} for the bead-ID labels (union over channels)."""
+        pts: dict[int, np.ndarray] = {}
+        for cur in self._current:
+            for i, g in enumerate(cur["bead_ids"]):
+                pts.setdefault(int(g), cur["ref_xyz"][i])
+        return pts
+
+    # ------------------------------------------------------------------
+    # Readouts (banner + per-bead residual table)
+    # ------------------------------------------------------------------
+
+    def _current_reports(self) -> list[dict]:
+        from ...msr.alignment import RMSE_WARN_NM
+
+        reports = []
+        for cur in self._current:
+            warn = bool(cur["valid"]) and np.isfinite(cur["rmse_xy_nm"]) and cur["rmse_xy_nm"] > RMSE_WARN_NM
+            reports.append({
+                "reference": cur["ref_name"], "moving": cur["mov_name"],
+                "n_beads": cur["n_used"], "transform_type": cur["transform_type"],
+                "rmse_xy_nm": cur["rmse_xy_nm"], "rmse_z_nm": cur["rmse_z_nm"],
+                "warn": warn, "valid": bool(cur["valid"]),
+            })
+        return reports
+
+    def _refresh_readouts(self):
+        from ...msr.alignment import RMSE_WARN_NM
+
+        reports = self._current_reports()
+        self._render_quality_banner(reports, RMSE_WARN_NM)
+        self._update_residual_table_values()
+
+    def _render_quality_banner(self, reports, warn_nm):
+        lines = []
+        any_warn = False
+        any_invalid = False
+        for rep in reports:
+            if not rep["valid"]:
+                any_invalid = True
+                lines.append(
+                    f"⛔ <b>{rep['moving']}</b> → {rep['reference']}: only {rep['n_beads']} "
+                    f"bead(s) selected — need at least 2 to align. Re-check beads below.")
+                continue
+            warn = bool(rep["warn"])
+            any_warn = any_warn or warn
+            icon = "⚠" if warn else "✓"
+            note = ""
+            if rep["n_beads"] <= 3:
+                note = (f" &nbsp;<i>(only {rep['n_beads']} bead(s) → {rep['transform_type']})</i>")
+            lines.append(
+                f"{icon} <b>{rep['moving']}</b> → {rep['reference']}: "
+                f"{rep['n_beads']} beads, RMSE&nbsp;XY&nbsp;=&nbsp;{rep['rmse_xy_nm']:.1f}&nbsp;nm, "
+                f"Z&nbsp;=&nbsp;{rep['rmse_z_nm']:.1f}&nbsp;nm{note}"
+            )
+        if any_warn:
+            lines.append(
+                f"<span style='color:#a00'>Fiducial registration is poor "
+                f"(RMSE &gt; {warn_nm:.0f}&nbsp;nm, well above MINFLUX localization "
+                f"precision). The beads disagree among themselves, so no single transform "
+                f"can register the channels accurately. If your sample contains a common "
+                f"feature/fiducial, try the <b>data centroid</b> alignment; otherwise untick "
+                f"the largest-residual beads below.</span>"
+            )
+        if any_warn or any_invalid:
+            self.quality_banner.setStyleSheet(
+                "QLabel { background:#fff4f4; border:1px solid #d88; "
+                "border-radius:4px; padding:6px; }"
+            )
+        else:
+            self.quality_banner.setStyleSheet(
+                "QLabel { background:#f2fbf2; border:1px solid #8c8; "
+                "border-radius:4px; padding:6px; }"
+            )
+        self.quality_banner.setText("<br>".join(lines))
+
+    def _build_residual_table_structure(self):
+        """Build the residual-table rows + per-bead checkboxes once, in a fixed order
+        (worst residual at the initial full-bead fit first). Values are filled by
+        _update_residual_table_values; row order stays stable so ticking a checkbox
+        does not make the row jump."""
+        self._multi = len(self._current) > 1
+        # fixed row order: (channel_index, bead_index, gri), worst initial |resid| first
+        order = []
+        for ci, cur in enumerate(self._current):
+            rxy = np.hypot(cur["residual_all"][:, 0], cur["residual_all"][:, 1])
+            for bi in np.argsort(-rxy):
+                order.append((ci, int(bi), int(cur["bead_ids"][bi])))
+        self._row_order = order
+
+        headers = (["Moving"] if self._multi else []) + [
+            "Bead", "Δx", "Δy", "Δz", "resid x", "resid y", "resid z", "|resid xy|", "Comment"]
+        self._comment_col = len(headers) - 1
+        self._suspend_bead_signals = True
+        self.resid_table.clear()
+        self.resid_table.setColumnCount(len(headers))
+        self.resid_table.setHorizontalHeaderLabels(headers)
+        self.resid_table.setRowCount(len(order))
+        bead_col = 1 if self._multi else 0
+        for row, (ci, bi, gri) in enumerate(order):
+            col = 0
+            if self._multi:
+                mv = QTableWidgetItem(str(self._current[ci]["mov_name"]))
+                self.resid_table.setItem(row, col, mv)
+                col += 1
+            bead_item = QTableWidgetItem(str(gri))
+            bead_item.setFlags(bead_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            bead_item.setCheckState(Qt.CheckState.Checked)
+            bead_item.setData(Qt.ItemDataRole.UserRole, gri)
+            self.resid_table.setItem(row, col, bead_item)
+            for c in range(col + 1, len(headers)):
+                cell = QTableWidgetItem("")
+                if c == self._comment_col:  # wide text column, left-aligned
+                    cell.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                else:
+                    cell.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.resid_table.setItem(row, c, cell)
+        header = self.resid_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # The numeric columns hug their (2-3 digit) content; the wide "Comment" column
+        # takes the remaining width so it, not "|resid xy|", absorbs the slack.
+        header.setStretchLastSection(True)
+        self._bead_col = bead_col
+        self._suspend_bead_signals = False
+
+    def _update_residual_table_values(self):
+        from PyQt6.QtGui import QBrush, QColor
+
+        from ...msr.alignment import RMSE_WARN_NM, bead_residual_comment
+
+        excluded_bg = QColor("#eeeeee")
+        warn_bg = QColor("#fbeaea")
+        normal_bg = QBrush(Qt.GlobalColor.transparent)
+        grey_fg = QBrush(QColor("#999999"))
+        black_fg = QBrush(QColor("#202020"))
+        self._suspend_bead_signals = True
+        for row, (ci, bi, gri) in enumerate(self._row_order):
+            cur = self._current[ci]
+            off = cur["ref_xyz"][bi] - cur["mov_xyz"][bi]
+            res = cur["residual_all"][bi]
+            rxy = float(np.hypot(res[0], res[1]))
+            included = bool(cur["included"][bi])
+            texts = [f"{off[0]:.0f}", f"{off[1]:.0f}", f"{off[2]:.0f}",
+                     f"{res[0]:.0f}", f"{res[1]:.0f}", f"{res[2]:.0f}", f"{rxy:.0f}"]
+            first_num = self._bead_col + 1
+            for k, text in enumerate(texts):
+                item = self.resid_table.item(row, first_num + k)
+                if item is not None:
+                    item.setText(text)
+            # evaluation comment (helper for keep/exclude decisions)
+            comment = bead_residual_comment(
+                off, res, included=included, rmse_xy_nm=cur.get("rmse_xy_nm"))
+            comment_item = self.resid_table.item(row, self._comment_col)
+            if comment_item is not None:
+                comment_item.setText(comment)
+            # keep the Bead checkbox in sync (covers duplicate-gri rows on multi-channel)
+            bead_item = self.resid_table.item(row, self._bead_col)
+            if bead_item is not None:
+                bead_item.setCheckState(
+                    Qt.CheckState.Checked if included else Qt.CheckState.Unchecked)
+            # row styling: greyed if excluded; light red when an included bead's
+            # residual is large (helps spot the outliers to untick)
+            highlight = included and rxy > RMSE_WARN_NM
+            for c in range(self.resid_table.columnCount()):
+                cell = self.resid_table.item(row, c)
+                if cell is None:
+                    continue
+                cell.setForeground(grey_fg if not included else black_fg)
+                cell.setBackground(excluded_bg if not included else (warn_bg if highlight else normal_bg))
+        self._suspend_bead_signals = False
+
+    def _on_bead_item_changed(self, item):
+        if self._suspend_bead_signals:
+            return
+        gri = item.data(Qt.ItemDataRole.UserRole)
+        if gri is None:
+            return
+        checked = item.checkState() == Qt.CheckState.Checked
+        if checked:
+            self._excluded_gris.discard(int(gri))
+        else:
+            self._excluded_gris.add(int(gri))
+        self._recompute_and_refresh()
+
+    def closeEvent(self, event):
+        # Stop the live-refit callback and disconnect the table signal before Qt tears
+        # the widgets down; otherwise itemChanged emitted during destruction re-enters
+        # the recompute/redraw on already-dying C++ objects and hangs.
+        self._suspend_bead_signals = True
+        try:
+            self.resid_table.itemChanged.disconnect(self._on_bead_item_changed)
+        except (TypeError, RuntimeError):
+            pass
+        super().closeEvent(event)
 
     @staticmethod
     def _to_um(values_nm):
@@ -1005,26 +1369,59 @@ class AlignmentPlotWindow(QDialog):
         x_idx, y_idx = self._axis_indices
         for key, meta in self.datasets.items():
             xyz = self._to_um(meta["xyz_nm"])
-            brush = pg.mkBrush(meta["color"] + "80")
-            pen = pg.mkPen(meta["color"], width=1)
+            # Excluded beads stay visible but faint, so the user can see which beads
+            # were taken out of the fit (per-point brush/pen alpha).
+            excluded = self._excluded_bead_mask(meta["bead_ids"])
+            inc_brush = pg.mkBrush(meta["color"] + "80")
+            exc_brush = pg.mkBrush(meta["color"] + "1e")
+            inc_pen = pg.mkPen(meta["color"], width=1)
+            exc_pen = pg.mkPen(meta["color"] + "40", width=1)
+            brushes = [exc_brush if ex else inc_brush for ex in excluded]
+            pens = [exc_pen if ex else inc_pen for ex in excluded]
             item = pg.ScatterPlotItem(
                 xyz[:, x_idx],
                 xyz[:, y_idx],
                 size=9,
                 symbol=meta["symbol"],
-                brush=brush,
-                pen=pen,
+                brush=brushes,
+                pen=pens,
                 name=meta["label"],
             )
             item.setVisible(self.visibility[key].isChecked())
             self.plot.addItem(item)
             self._items[key] = item
+        self._draw_bead_id_labels()
         self._draw_data_range_box()
         labels = self._axis_labels()
         self.plot.setLabel("bottom", labels[0], units="µm")
         self.plot.setLabel("left", labels[1], units="µm")
         self.plot.setTitle("Bead positions before and after channel alignment")
         self._set_equal_range()
+
+    def _excluded_bead_mask(self, bead_ids) -> np.ndarray:
+        """Boolean mask (per bead in *bead_ids*) of beads excluded from the fit."""
+        gris = np.asarray(bead_ids, dtype=np.int64)
+        if not self._excluded_gris:
+            return np.zeros(gris.size, dtype=bool)
+        return np.isin(gris, np.asarray(sorted(self._excluded_gris), dtype=np.int64))
+
+    def _draw_bead_id_labels(self):
+        """Draw the gri bead-ID next to each bead (reference position), like the
+        ROI-ID labels in the ROI Manager. self.plot.clear() in _draw() removes the
+        previous labels, so they are simply re-added each draw."""
+        import pyqtgraph as pg
+
+        x_idx, y_idx = self._axis_indices
+        excluded = self._excluded_gris
+        for gri, xyz_nm in self._bead_label_points().items():
+            xyz = self._to_um(xyz_nm)
+            if not (np.isfinite(xyz[x_idx]) and np.isfinite(xyz[y_idx])):
+                continue
+            # dim the label of an excluded bead to match its faint markers
+            color = (170, 170, 170) if int(gri) in excluded else (40, 40, 40)
+            text = pg.TextItem(str(gri), color=color, anchor=(-0.15, 1.15))
+            text.setPos(float(xyz[x_idx]), float(xyz[y_idx]))
+            self.plot.addItem(text)
 
     def _data_box_xy(self):
         """(x0, y0, x1, y1) of the data-range box for the current view, or None."""
@@ -1433,13 +1830,18 @@ class AlignmentPlotWindow(QDialog):
         self._items_3d = {}
         self._clear_3d_items(self._axis_3d_items)
         self._clear_3d_items(self._box_3d_items)
+        self._clear_3d_items(self._label_items_3d)
         for key, meta in self.datasets.items():
             xyz = self._to_um(meta["xyz_nm"])
-            xyz = xyz[np.all(np.isfinite(xyz), axis=1)]
+            finite = np.all(np.isfinite(xyz), axis=1)
+            xyz = xyz[finite]
             if xyz.size == 0:
                 continue
             color = pg.mkColor(meta["color"])
             rgba = np.tile(self._visible_3d_rgba(color), (xyz.shape[0], 1)).astype(np.float32)
+            # excluded beads stay visible but faint (low alpha)
+            excluded = self._excluded_bead_mask(np.asarray(meta["bead_ids"])[finite])
+            rgba[excluded, 3] = 0.12
             point_size = 10.5 if meta.get("symbol") == "star" else 8.5
             item = gl.GLScatterPlotItem(pxMode=True, size=point_size)
             try:
@@ -1455,6 +1857,10 @@ class AlignmentPlotWindow(QDialog):
             item.setVisible(self.visibility[key].isChecked())
             self._view_3d.addItem(item)
             self._items_3d[key] = item
+        for gri, xyz_nm in self._bead_label_points().items():
+            xyz = self._to_um(xyz_nm)
+            if np.all(np.isfinite(xyz[:3])):
+                self._add_3d_text(self._label_items_3d, xyz[:3], str(gri))
         self._configure_3d_reference_items()
         self._reset_3d_camera()
         self.hover_label.setText("3D view: use mouse to rotate, pan, and zoom. Coordinates are displayed in µm.")
@@ -1502,7 +1908,7 @@ class AlignmentPlotWindow(QDialog):
         target = self._best_hover_target(scene_pos)
         if target is None or target["dist2"] > 0.0004:
             if self._view_mode != "3D":
-                self.hover_label.setText("Hover near a point to see bead ID, channel, and coordinates (µm).")
+                self.hover_label.setText("Hover near a point to see channel and coordinates (µm).")
             return
         key = target["key"]
         idx = target["index"]
@@ -3148,6 +3554,32 @@ class MsrReaderDialog(QWidget):
             )
         return transforms
 
+    def _warn_if_poor_viewer_alignment(self, mode: str, transforms: dict) -> None:
+        """Warn (Log + a non-blocking box) when a bead-based ("mbm info") overlay
+        alignment has a poor fiducial fit, so a large registration error is not
+        applied silently. No-op for the fallback modes (they carry no bead RMSE)."""
+        if mode != "mbm info" or not transforms:
+            return
+        from ...msr.alignment import RMSE_WARN_NM
+
+        poor = []
+        for name, tf in transforms.items():
+            rmse = float(tf.get("rmse_xy_nm", 0.0) or 0.0)
+            if int(tf.get("matched_bead_count", 0) or 0) > 0 and rmse > RMSE_WARN_NM:
+                poor.append((name, rmse, int(tf.get("matched_bead_count", 0))))
+        if not poor:
+            return
+        detail = ", ".join(f"{n} ({r:.1f} nm, {b} beads)" for n, r, b in poor)
+        msg = (
+            f"Bead (mbm info) channel alignment has a poor fiducial fit "
+            f"(RMSE XY > {RMSE_WARN_NM:.0f} nm) for: {detail}. The beads disagree among "
+            f"themselves, so the overlaid channels may be misregistered. If your sample "
+            f"contains a common feature/fiducial, re-open with 'data centroid'; or exclude "
+            f"suspect beads in 'Show beads drift'."
+        )
+        self.log("[viewer align] WARNING: " + msg)
+        QMessageBox.warning(self, "Open in MINFLUX viewer", msg)
+
     def _ask_viewer_alignment_fallback(self, reason: str) -> str | None:
         box = QMessageBox(self)
         box.setWindowTitle("Open in MINFLUX viewer")
@@ -3540,15 +3972,31 @@ class MsrReaderDialog(QWidget):
         if payload["show_plot"]:
             data_bounds = self._combined_loc_bounds_nm(loc_bound_names)
             self._show_child_dialog(
-                AlignmentPlotWindow(results, self, data_bounds_nm=data_bounds)
+                AlignmentPlotWindow(results, self, data_bounds_nm=data_bounds,
+                                    requested_transform_type=transform_type)
             )
+        from ...msr.alignment import RMSE_WARN_NM, alignment_quality_report
+
+        reports = [alignment_quality_report(r) for r in results]
         summary = [f"Reference channel: {ref_name}"] + [
             f"{result.channel2_name}: matched {result.bead_ids.size}, translation ({result.translation[0]:.3f}, {result.translation[1]:.3f}) nm, RMSE XY {result.rmse:.3f} nm"
             for result in results
         ]
+        poor = [rep for rep in reports if rep["warn"]]
+        if poor:
+            warn_text = (
+                f"Poor fiducial registration (RMSE XY > {RMSE_WARN_NM:.0f} nm) for: "
+                + ", ".join(f"{rep['moving']} ({rep['rmse_xy_nm']:.1f} nm)" for rep in poor)
+                + ". The beads disagree among themselves; a single transform cannot register "
+                "the channels accurately. Consider 'data centroid' alignment if the sample has a "
+                "common feature, or exclude suspect beads in 'Show beads drift'."
+            )
+            summary.append("WARNING: " + warn_text)
+            self.log("[align] WARNING: " + warn_text)
         self.log("[align] completed. " + " | ".join(summary))
         if not payload["show_plot"]:
-            QMessageBox.information(self, "Align channel", "Alignment completed.\n\n" + "\n".join(summary))
+            box = QMessageBox.warning if poor else QMessageBox.information
+            box(self, "Align channel", "Alignment completed.\n\n" + "\n".join(summary))
 
     # ------------------------------------------------------------------
     # Export
@@ -3666,6 +4114,7 @@ class MsrReaderDialog(QWidget):
                 viewer_transforms = self._viewer_channel_alignment_transforms(
                     import_plan, alignment_mode, reference_name,
                 )
+                self._warn_if_poor_viewer_alignment(alignment_mode, viewer_transforms)
             except Exception as exc:
                 self.log(f"[viewer align] failed: {exc}")
                 QMessageBox.warning(

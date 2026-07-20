@@ -39,7 +39,11 @@ from .geometry import rotation_a_to_b
 DEFAULT_BOX_NM = 150.0
 DEFAULT_PIXEL_NM = 3.0
 DEFAULT_N_ANGLES = 36
-DEFAULT_N_ITERS = 5
+DEFAULT_N_ITERS = 30
+#: EM-style early-stop tolerance: stop when the relative improvement in the mean
+#: alignment score (the objective) between iterations falls below this (like
+#: scikit-learn ``GaussianMixture(tol=...)``). ``n_iter`` is then only a safety cap.
+DEFAULT_CONV_TOL = 1e-4
 
 
 def _resolve_workers(n_workers, n_tasks: int) -> int:
@@ -509,16 +513,23 @@ def average_template_provided(particles, template_img, *, box_nm=DEFAULT_BOX_NM,
 
 def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_PIXEL_NM,
                           n_angles=DEFAULT_N_ANGLES, n_iter=DEFAULT_N_ITERS,
-                          sigma_nm: float | None = None, seed: int = 0,
+                          tol=DEFAULT_CONV_TOL, sigma_nm: float | None = None, seed: int = 0,
                           correct_tilt: bool = False, progress=None, n_workers=None) -> dict:
     """Reference-free 2-D averaging: seed the reference from one particle, then
-    iterate *align-all → mean → repeat*.
+    iterate *align-all → mean → repeat* until convergence.
+
+    This is an EM-style coordinate ascent — each round maximises the mean alignment
+    **score** (cross-correlation) against the current reference, then rebuilds the
+    reference as the mean, so the score is monotonically non-decreasing and reaches
+    a fixed point. **Early stop:** iteration ends when the relative score
+    improvement drops below ``tol`` (like ``GaussianMixture(tol=)``); ``n_iter`` is
+    then only a safety cap. ``tol <= 0`` disables early stop (always run ``n_iter``).
 
     ``correct_tilt`` first PCA-untilts each particle (3-D data); ``progress(done,
-    total)`` (optional) is called per particle-alignment across all iterations
-    (``total = n_iter × n_particles``). ``n_workers`` (``None`` → all CPUs)
-    parallelises the per-particle alignment within each iteration across cores;
-    iterations stay sequential (each needs the previous mean)."""
+    total)`` (optional) is called per particle-alignment (``total = n_iter ×
+    n_particles``; the bar simply finishes early on convergence). ``n_workers``
+    (``None`` → all CPUs) parallelises the per-particle alignment within each
+    iteration; iterations stay sequential (each needs the previous mean)."""
     angles = np.linspace(0.0, 360.0, int(n_angles), endpoint=False)
     sigma_nm = pixel_nm if sigma_nm is None else sigma_nm
     particles_c, tilts, prep_mats = _prepare_particles(particles, correct_tilt)
@@ -526,13 +537,14 @@ def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_
         return {"points": np.empty((0, 3)), "average_image": np.zeros((8, 8)),
                 "template": np.zeros((8, 8)), "transforms": [], "particle_transforms": [],
                 "scores": np.empty(0), "table": [], "n_particles": 0, "iterations": 0,
-                "box_nm": box_nm, "pixel_nm": pixel_nm, "mode": "free"}
+                "converged": False, "box_nm": box_nm, "pixel_nm": pixel_nm, "mode": "free"}
     # seed reference from the particle with the most localizations (most defined)
     seed_idx = int(np.argmax([p.shape[0] for p in particles_c]))
     template = render_points(particles_c[seed_idx][:, :2], box_nm, pixel_nm, sigma_nm)
     transforms = [(0.0, 0.0, 0.0, 0.0)] * len(particles_c)
-    history = []
+    history: list[float] = []
     n_it = max(int(n_iter), 1)
+    tol = float(tol)
     total = n_it * len(particles_c)
     done = [0]
 
@@ -543,7 +555,9 @@ def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_
 
     workers = _resolve_workers(n_workers, len(particles_c))
     executor = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
+    converged = False
     try:
+        prev = None
         for _ in range(n_it):
             transforms = _align_all(particles_c, template, box_nm=box_nm,
                                     pixel_nm=pixel_nm, angles=angles, sigma_nm=sigma_nm,
@@ -551,7 +565,14 @@ def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_
             imgs = [_aligned_image(p, t, box_nm, pixel_nm, sigma_nm)
                     for p, t in zip(particles_c, transforms)]
             template = np.mean(imgs, axis=0)
-            history.append(float(np.mean([t[3] for t in transforms])))
+            score = float(np.mean([t[3] for t in transforms]))
+            history.append(score)
+            # EM-style convergence: relative gain in the objective below tol → the
+            # reference has stabilised and further iterations reproduce it.
+            if tol > 0 and prev is not None and (score - prev) <= tol * max(abs(prev), 1e-12):
+                converged = True
+                break
+            prev = score
     finally:
         if executor is not None:
             executor.shutdown(wait=True)
@@ -563,8 +584,9 @@ def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_
             "scores": np.array([t[3] for t in transforms]),
             "table": image_particle_table(transforms, particles_c, tilts),
             "n_particles": len(particles_c), "iterations": len(history),
-            "score_history": history, "box_nm": box_nm, "pixel_nm": pixel_nm,
-            "mode": "free", "mean_tilt_deg": float(np.mean(tilts)) if tilts else 0.0}
+            "converged": converged, "score_history": history, "box_nm": box_nm,
+            "pixel_nm": pixel_nm, "mode": "free",
+            "mean_tilt_deg": float(np.mean(tilts)) if tilts else 0.0}
 
 
 def average_particles(particles, *, mode="free", template_img=None, **kwargs) -> dict:

@@ -29,15 +29,24 @@ REGION_TYPES = {"rectangle", "oval", "polygon", "freehand"}
 LINE_TYPES = {"line", "polyline", "freehand_line", "magnetic_lasso"}
 
 #: Friendly label for each conversion target token (right-click submenu).
+#: Shape-fit family: ``bounding_box`` = axis-aligned rectangle; ``rectangle`` =
+#: minimum-area *oriented* rectangle (rotated variant); ``oval`` = bounding/oriented
+#: oval; ``ellipse`` = minimum-area enclosing ellipse (rotated variant).
 TARGET_LABELS = {
     "point": "to Point",
+    "bounding_box": "to Bounding Box",
     "rectangle": "to Rectangle",
     "oval": "to Oval",
+    "ellipse": "to Ellipse",
     "polygon": "to Polygon",
     "convex_hull": "to Convex Hull",
     "region": "to Region",
     "line": "to Line",
 }
+
+#: Shape-fit targets that produce a rectangle/oval box (need a width/height when the
+#: source is a point, which has no extent to fit).
+_SHAPE_TARGETS = ("bounding_box", "rectangle", "oval", "ellipse")
 
 
 def _points_2d(record: RoiRecord) -> np.ndarray:
@@ -83,10 +92,12 @@ def available_conversions(record: RoiRecord) -> list[str]:
     if t != "point":          # a point → point conversion is meaningless
         out.append("point")
     if t in REGION_TYPES:
+        out.append("bounding_box")            # axis-aligned rectangle
         if t != "rectangle":
-            out.append("rectangle")
+            out.append("rectangle")           # min-area *oriented* rectangle
         if t != "oval":
-            out.append("oval")
+            out.append("oval")                # bounding / oriented oval
+        out.append("ellipse")                 # min-area enclosing ellipse
         if t in {"polygon", "freehand"}:
             out.append("convex_hull")
         out.append("line")  # region → skeleton line
@@ -96,7 +107,7 @@ def available_conversions(record: RoiRecord) -> list[str]:
         if t in OPEN_LINE_TYPES or t == "magnetic_lasso":
             out.append("polygon")
     elif t == "point":
-        out.append("rectangle")
+        out.append("bounding_box")            # size-based box / oval (no extent to fit)
         out.append("oval")
     return out
 
@@ -369,6 +380,74 @@ def region_skeleton_polyline(record: RoiRecord, *, max_pixels_long_axis: int = 2
     return [[float(xs[c]), float(ys[r])] for (r, c) in path]
 
 
+def _shape_fit_points(record: RoiRecord) -> np.ndarray:
+    """The (N, 2) outline points a shape fit is computed over: rectangle → 4 corners,
+    oval → sampled ellipse, polygon/freehand → its own vertices (rotation honoured
+    via ``region_outline_points``)."""
+    pts = np.asarray(region_outline_points(record), dtype=float)
+    if pts.ndim == 2 and pts.shape[0] >= 1 and pts.shape[1] >= 2:
+        return pts[:, :2]
+    return _points_2d(record)
+
+
+def _convert_to_shape(record: RoiRecord, target: str,
+                      width: float | None, height: float | None) -> RoiRecord:
+    """Fit a rectangle/oval to *record*'s outline for the shape-fit family:
+
+    * ``bounding_box`` → **axis-aligned** rectangle (min/max box);
+    * ``rectangle``    → **minimum-area oriented** rectangle (rotated variant);
+    * ``oval``         → bounding oval (rect/oval keep box+angle; polygon/freehand →
+      PCA-oriented) — unchanged legacy behaviour;
+    * ``ellipse``      → **minimum-area enclosing** ellipse (rotated variant).
+
+    A **point** source has no extent, so ``width``/``height`` (nm) size the box/oval.
+    """
+    from .min_enclosing import (
+        axis_aligned_enclosing_ellipse,
+        min_area_rectangle,
+        min_enclosing_ellipse,
+    )
+
+    t = record.type
+    out_type = "oval" if target in {"oval", "ellipse"} else "rectangle"
+
+    if t == "point":
+        if not width or not height or width <= 0 or height <= 0:
+            raise ValueError(f"point → {target} needs a positive width and height")
+        cx, cy = _centroid(record)
+        geom = {"bounds": [cx - width / 2.0, cy - height / 2.0, float(width), float(height)],
+                "angle": 0.0}
+        if target in {"rectangle", "ellipse"}:
+            geom["variant"] = "rotated"
+        return _derive(record, out_type, geom)
+
+    pts = _shape_fit_points(record)
+    if pts.shape[0] == 0:
+        raise ValueError(f"could not derive a {target} from this ROI")
+
+    if target == "bounding_box":
+        x0, y0 = pts.min(axis=0)
+        x1, y1 = pts.max(axis=0)
+        geom = {"bounds": [float(x0), float(y0), float(x1 - x0), float(y1 - y0)], "angle": 0.0}
+        return _derive(record, "rectangle", geom)
+
+    if target == "oval":                               # axis-aligned enclosing ellipse
+        cx, cy, w, h = axis_aligned_enclosing_ellipse(pts)
+        geom = {"bounds": [cx - w / 2.0, cy - h / 2.0, w, h], "angle": 0.0}
+        return _derive(record, "oval", geom)
+
+    if target == "rectangle":                          # minimum-area oriented rectangle
+        center, w, h, angle = min_area_rectangle(pts)
+        geom = {"bounds": [center[0] - w / 2.0, center[1] - h / 2.0, w, h],
+                "angle": angle, "variant": "rotated"}
+        return _derive(record, "rectangle", geom)
+
+    # ellipse — minimum-area enclosing ellipse
+    cx, cy, w, h, angle = min_enclosing_ellipse(pts)
+    geom = {"bounds": [cx - w / 2.0, cy - h / 2.0, w, h], "angle": angle, "variant": "rotated"}
+    return _derive(record, "oval", geom)
+
+
 def convert_roi(
     record: RoiRecord,
     target: str,
@@ -387,22 +466,8 @@ def convert_roi(
         cx, cy = _centroid(record)
         return _derive(record, "point", {"point": [cx, cy, _depth_of(record)]})
 
-    if target in {"rectangle", "oval"}:
-        if t == "point":
-            if not width or not height or width <= 0 or height <= 0:
-                raise ValueError("point → rectangle/oval needs a positive width and height")
-            cx, cy = _centroid(record)
-            geom = {"bounds": [cx - width / 2.0, cy - height / 2.0, float(width), float(height)],
-                    "angle": 0.0}
-        elif t in {"rectangle", "oval"}:
-            # rectangle ↔ oval: keep the same box + rotation.
-            x, y, w, h = _bounds(record.geometry)
-            geom = {"bounds": [x, y, w, h], "angle": float(record.geometry.get("angle", 0.0) or 0.0)}
-        else:
-            # polygon / freehand → best-fit *oriented* (rotated) box.
-            center, w, h, angle = _oriented_bbox(_points_2d(record))
-            geom = {"bounds": [center[0] - w / 2.0, center[1] - h / 2.0, w, h], "angle": angle}
-        return _derive(record, target, geom)
+    if target in _SHAPE_TARGETS:
+        return _convert_to_shape(record, target, width, height)
 
     if target == "polygon":
         pts = [[float(p[0]), float(p[1])] for p in _points_2d(record)]

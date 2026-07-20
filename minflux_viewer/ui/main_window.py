@@ -474,8 +474,10 @@ class MainWindow(QMainWindow):
         self.menuRoiConvert = QMenu("Convert", self)
         self._roi_convert_actions = {}
         for label, target in (
+            ("to Bounding Box", "bounding_box"),
             ("to Rectangle", "rectangle"),
             ("to Oval", "oval"),
+            ("to Ellipse", "ellipse"),
             ("Line to Region", "region"),
             ("Region to Line", "line"),
             ("to Point", "point"),
@@ -1850,8 +1852,9 @@ class MainWindow(QMainWindow):
                 f"Cannot convert a {record.type} ROI ('{record.name}') to {target}.")
             return
         width = height = None
+        from ..core.roi_convert import _SHAPE_TARGETS
         from .roi_convert_dialog import RoiSizeDialog
-        if record.type == "point" and target in {"rectangle", "oval"}:
+        if record.type == "point" and target in _SHAPE_TARGETS:
             dlg = RoiSizeDialog(self, title=f"Point → {target}", need_height=True)
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return

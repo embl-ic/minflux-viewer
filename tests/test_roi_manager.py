@@ -119,3 +119,43 @@ def test_selected_stored_roi_uses_manager_highlight_colour(_app):
     store.deselect()                             # still shown (Show-all) but not selected
     item = ctrl.items[rec.id]
     assert item.pen.color().name().lower() == "#ffff00"   # back to its own colour
+
+
+# --------------------------------------------- convert rebuilds the displayed item
+
+def test_converting_stored_roi_rebuilds_the_displayed_item(_app):
+    """Converting a *displayed stored* ROI (right-click Convert to…) must rebuild the
+    view item to the new type. Regression: on the cropped-view carried ROI, convert
+    silently changed the record type but the old shape lingered because `refresh`
+    reused the cached item by id (the record object was replaced by store.update)."""
+    from minflux_viewer.core.roi_convert import convert_roi
+
+    ctrl = _ctrl(_app)
+    rec = RoiRecord.create("freehand", {"points": [[0, 0], [100, 0], [100, 100], [0, 100]],
+                                        "closed": True}, coordinate_space="pixel")
+    ctrl.store.add(rec)
+    ctrl.store.set_show_all(True)
+    assert type(ctrl.items[rec.id]).__name__ == "FilledPolyLineROI"
+
+    ctrl._replace_hit("stored", rec, convert_roi(rec, "oval"))    # freehand → oval
+    rid = ctrl.store.records[0].id
+    assert ctrl.store.records[0].type == "oval"
+    assert type(ctrl.items[rid]).__name__ == "FilledEllipseROI"   # rebuilt, not the stale poly
+
+    rec2 = ctrl.store.records[0]
+    ctrl._replace_hit("stored", rec2, convert_roi(rec2, "rectangle"))  # oval → rectangle
+    assert type(ctrl.items[ctrl.store.records[0].id]).__name__ == "FilledRectROI"
+
+
+def test_stored_roi_live_drag_survives_refresh(_app):
+    """A live-edit drag of a stored ROI must NOT be reset by an unrelated refresh —
+    the record object is unchanged, so the item is preserved (only a store.update
+    replaces the record and triggers a rebuild)."""
+    ctrl = _ctrl(_app)
+    rec = _rect("r")
+    ctrl.store.add(rec)
+    ctrl.store.set_show_all(True)
+    item = ctrl.items[rec.id]
+    item.setPos(pg.Point(500.0, 500.0))          # user drags the displayed copy
+    ctrl.store.selection_changed.emit()          # some unrelated refresh
+    assert ctrl.items[rec.id] is item            # same item — drag preserved

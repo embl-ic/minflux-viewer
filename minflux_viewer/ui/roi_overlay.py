@@ -454,6 +454,11 @@ class RoiOverlayController(QObject):
         self.view_box = plot_item.vb
         self.coordinate_space = coordinate_space
         self.items: dict[str, Any] = {}
+        # The record object each displayed item was built from — a stored ROI is
+        # replaced by a *new* record on convert / resize / vertex-edit (store.update),
+        # so `refresh` rebuilds the item when the identity no longer matches (else a
+        # convert silently changes the type but keeps the old shape on screen).
+        self._item_records: dict[str, Any] = {}
         self.labels: dict[str, pg.TextItem] = {}
         self.draft: RoiRecord | None = None
         self.draft_item = None
@@ -600,12 +605,16 @@ class RoiOverlayController(QObject):
             if not self.store.show_all and record.id not in selected:
                 continue
             wanted.add(record.id)
-            # On a view-plane flip, rebuild 3-D line/polyline/freehand-line items so
-            # their vertices re-project onto the new plane (points use cheap setPos).
+            # Rebuild the item when the store record was replaced (convert / resize /
+            # vertex-edit → new object, possibly a different type/shape), or on a
+            # view-plane flip so 3-D line vertices re-project (points use cheap setPos).
+            record_replaced = (record.id in self.items
+                               and self._item_records.get(record.id) is not record)
             if (
                 record.id in self.items
                 and (
-                    (plane_changed and record.type in {"line", "polyline", "freehand_line"})
+                    record_replaced
+                    or (plane_changed and record.type in {"line", "polyline", "freehand_line"})
                     or (y_orientation_changed and record.type in {"rectangle", "oval"})
                 )
             ):
@@ -613,6 +622,7 @@ class RoiOverlayController(QObject):
             if record.id not in self.items:
                 item = self._make_item(record)
                 self.items[record.id] = item
+                self._item_records[record.id] = record
                 self.plot_item.addItem(item)
                 self._connect_edit(item, record)
             elif record.type == "point":
@@ -627,6 +637,7 @@ class RoiOverlayController(QObject):
         for roi_id in list(self.items):
             if roi_id not in wanted:
                 self.plot_item.removeItem(self.items.pop(roi_id))
+                self._item_records.pop(roi_id, None)
         for roi_id in list(self.labels):
             if roi_id not in wanted:
                 self.plot_item.removeItem(self.labels.pop(roi_id))
@@ -2069,9 +2080,10 @@ class RoiOverlayController(QObject):
     def _roi_size_for_conversion(self, record: RoiRecord, target: str):
         """Prompt for the width/height a conversion needs; ``None`` = cancelled,
         ``()`` = no size required."""
+        from ..core.roi_convert import _SHAPE_TARGETS
         from .roi_convert_dialog import RoiSizeDialog
 
-        if record.type == "point" and target in {"rectangle", "oval"}:
+        if record.type == "point" and target in _SHAPE_TARGETS:
             dlg = RoiSizeDialog(self.view_widget, title=f"Point → {target}", need_height=True)
             if dlg.exec() != dlg.DialogCode.Accepted:
                 return None

@@ -34,10 +34,11 @@ def _point(x=10, y=20):
 # -- available_conversions ------------------------------------------------
 
 def test_available_conversions_by_type():
-    assert set(available_conversions(_rect())) >= {"point", "oval", "line"}
-    assert "rectangle" not in available_conversions(_rect())  # already a rectangle
-    # a point can't convert to a point (same-type is meaningless)
-    assert set(available_conversions(_point())) == {"rectangle", "oval"}
+    rect_targets = set(available_conversions(_rect()))
+    assert rect_targets >= {"point", "bounding_box", "oval", "ellipse", "line"}
+    assert "rectangle" not in rect_targets       # already a rectangle (min-area = itself)
+    # a point has no extent → the size-based shape fits (axis box / oval)
+    assert set(available_conversions(_point())) == {"bounding_box", "oval"}
     # line types only grow into a region (box/oval not allowed)
     poly_targets = set(available_conversions(_polyline([[0, 0], [10, 0], [10, 10]])))
     assert poly_targets == {"point", "region", "polygon"}
@@ -61,20 +62,110 @@ def test_polygon_to_point_vertex_mean():
 
 # -- bounding box / oval --------------------------------------------------
 
-def test_oval_to_bounding_rectangle():
-    out = convert_roi(_oval(0, 0, 100, 200), "rectangle")
+def test_oval_to_bounding_box_is_axis_aligned():
+    out = convert_roi(_oval(0, 0, 100, 200), "bounding_box")
     assert out.type == "rectangle"
     assert out.geometry["bounds"] == [0.0, 0.0, 100.0, 200.0]
+    assert float(out.geometry.get("angle", 0.0)) == 0.0
+    assert out.geometry.get("variant") is None
 
 
-def test_polygon_to_bounding_oval_oriented():
-    # axis-aligned 40×60 rectangle polygon → oriented box of the same area/extent
-    out = convert_roi(_polygon([[0, 0], [40, 0], [40, 60], [0, 60]]), "oval")
-    assert out.type == "oval"
+def test_oval_to_min_area_rectangle_is_rotated_variant():
+    # 'rectangle' is the minimum-area *oriented* rectangle (rotated variant); for an
+    # axis-aligned oval it coincides with the bounding box (up to a 90° axis swap).
+    out = convert_roi(_oval(0, 0, 100, 200), "rectangle")
+    assert out.type == "rectangle"
+    assert out.geometry.get("variant") == "rotated"
     x, y, w, h = out.geometry["bounds"]
-    assert sorted((round(w), round(h))) == [40, 60]            # same side lengths
-    assert (x + w / 2, y + h / 2) == pytest.approx((20.0, 30.0))  # same centre
-    assert "angle" in out.geometry
+    assert sorted((round(w), round(h))) == [100, 200]
+    assert (x + w / 2, y + h / 2) == pytest.approx((50.0, 100.0), abs=1.0)
+
+
+def _rotated_polygon(w, h, angle_deg, cx=200.0, cy=100.0, n=40):
+    """Vertices of an ellipse-like blob (w×h) rotated by angle about (cx, cy)."""
+    th = np.radians(angle_deg)
+    R = np.array([[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]])
+    t = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    pts = np.column_stack([(w / 2) * np.cos(t), (h / 2) * np.sin(t)]) @ R.T + [cx, cy]
+    return _polygon(pts.tolist())
+
+
+def _encloses_box(points, geom) -> bool:
+    x, y, w, h = geom["bounds"]
+    cen = np.array([x + w / 2, y + h / 2])
+    a = np.radians(float(geom.get("angle", 0.0)))
+    ex = np.array([np.cos(a), np.sin(a)]); ey = np.array([-ex[1], ex[0]])
+    d = np.asarray(points, float) - cen
+    return bool(np.all(np.abs(d @ ex) <= w / 2 + 1e-6) and np.all(np.abs(d @ ey) <= h / 2 + 1e-6))
+
+
+def test_freehand_to_bounding_box_axis_aligned():
+    poly = _rotated_polygon(120, 40, 25.0)
+    pts = poly.geometry["points"]
+    out = convert_roi(poly, "bounding_box")
+    assert out.type == "rectangle" and float(out.geometry.get("angle", 0.0)) == 0.0
+    assert out.geometry.get("variant") is None
+    x, y, w, h = out.geometry["bounds"]
+    P = np.asarray(pts)
+    assert (x, y) == pytest.approx((P[:, 0].min(), P[:, 1].min()), abs=1e-6)  # min/max box
+
+
+def test_freehand_to_rectangle_is_min_area_oriented_and_encloses():
+    poly = _rotated_polygon(120, 40, 25.0)
+    pts = poly.geometry["points"]
+    out = convert_roi(poly, "rectangle")
+    assert out.type == "rectangle" and out.geometry.get("variant") == "rotated"
+    ang = float(out.geometry["angle"]) % 90.0
+    assert min(ang, 90 - ang) == pytest.approx(25.0, abs=3.0)   # recovers orientation
+    assert _encloses_box(pts, out.geometry)
+    # min-area rectangle is tighter than the axis-aligned bounding box
+    bb = convert_roi(poly, "bounding_box").geometry["bounds"]
+    assert out.geometry["bounds"][2] * out.geometry["bounds"][3] < bb[2] * bb[3] + 1e-6
+
+
+def test_freehand_to_ellipse_is_rotated_oval_and_encloses():
+    from minflux_viewer.core.min_enclosing import min_enclosing_ellipsoid, ellipse_from_matrix
+
+    poly = _rotated_polygon(120, 40, 25.0)
+    pts = np.asarray(poly.geometry["points"], float)
+    out = convert_roi(poly, "ellipse")
+    assert out.type == "oval" and out.geometry.get("variant") == "rotated"
+    # every vertex is inside the fitted ellipse: (x-c)^T A (x-c) <= 1
+    c, A = min_enclosing_ellipsoid(pts)
+    d = pts - c
+    assert np.all(np.einsum("ij,jk,ik->i", d, A, d) <= 1.0 + 1e-6)
+
+
+def test_oval_is_axis_aligned_and_encloses():
+    """'Oval' = the axis-aligned enclosing ellipse (angle 0, no variant) — the oval
+    counterpart of 'Bounding Box'. Every vertex lands inside it."""
+    out = convert_roi(_rotated_polygon(120, 40, 25.0), "oval")
+    assert out.type == "oval"
+    assert float(out.geometry.get("angle", 0.0)) == 0.0        # always axis-aligned
+    assert out.geometry.get("variant") is None
+    x, y, w, h = out.geometry["bounds"]
+    cen = np.array([x + w / 2, y + h / 2])
+    d = np.asarray(_rotated_polygon(120, 40, 25.0).geometry["points"], float) - cen
+    assert np.all((d[:, 0] / (w / 2)) ** 2 + (d[:, 1] / (h / 2)) ** 2 <= 1.0 + 1e-6)
+
+
+def test_oval_differs_from_ellipse_for_a_rotated_shape():
+    """The redundancy is gone: for an oriented structure the axis-aligned Oval and
+    the oriented (min-enclosing) Ellipse differ."""
+    poly = _rotated_polygon(120, 40, 25.0)
+    ov = convert_roi(poly, "oval").geometry
+    el = convert_roi(poly, "ellipse").geometry
+    assert float(ov.get("angle", 0.0)) == 0.0
+    assert abs(float(el["angle"])) > 5.0                       # ellipse is oriented
+    assert ov["bounds"] != el["bounds"]
+
+
+def test_rotated_rectangle_to_oval_drops_rotation():
+    """Axis-aligned rule: a rotated rectangle → Oval is axis-aligned (no rotation)."""
+    rect = RoiRecord.create("rectangle", {"bounds": [-60, -20, 120, 40], "angle": 30.0},
+                            coordinate_space="pixel")
+    out = convert_roi(rect, "oval")
+    assert out.type == "oval" and float(out.geometry.get("angle", 0.0)) == 0.0
 
 
 def test_polygon_to_rectangle_oriented_for_rotated_shape():

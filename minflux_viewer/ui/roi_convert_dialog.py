@@ -129,8 +129,8 @@ class RoiConvertDialog(QDialog):
         root.addWidget(intro)
         form = QFormLayout()
         self._target = QComboBox()
-        for tok in (targets or ["point", "rectangle", "oval", "polygon", "convex_hull",
-                                "region", "line"]):
+        for tok in (targets or ["point", "bounding_box", "rectangle", "oval", "ellipse",
+                                "polygon", "convex_hull", "region", "line"]):
             self._target.addItem(TARGET_LABELS.get(tok, tok), tok)
         form.addRow("Convert to:", self._target)
         self._w = QDoubleSpinBox()

@@ -209,6 +209,91 @@ def solve_channel_transform(src_xyz: np.ndarray, dst_xyz: np.ndarray, transform_
     return rot3[:2, :2], t3[:2], float(t3[2]), matrix_3x3, matrix_4x4, aligned, float(rmse)
 
 
+#: Bead-fit XY RMSE (nm) above which the fiducial registration is flagged as poor.
+#: MINFLUX localization precision is ~1-5 nm and a good two-colour bead registration
+#: is typically well under this; a larger residual means the beads disagree among
+#: themselves and a single transform cannot register the channels accurately.
+RMSE_WARN_NM = 20.0
+
+
+def alignment_quality_report(result: ChannelAlignmentResult) -> dict:
+    """Per-bead residual diagnostics for a channel-alignment result.
+
+    Returns a plain dict (Qt-free, so it is unit-testable and reusable by any UI):
+    the raw per-bead offset (reference − moving), the post-fit residual
+    (aligned − reference), XY/Z RMSE recomputed consistently from the residuals
+    (``result.rmse`` is XY-only for the default mode but 3-D for the others), and a
+    ``warn`` flag set when the XY RMSE exceeds :data:`RMSE_WARN_NM`.
+    """
+    ref = np.asarray(result.channel1_xyz, dtype=np.float64)
+    mov = np.asarray(result.channel2_xyz, dtype=np.float64)
+    aligned = np.asarray(result.channel2_aligned_xyz, dtype=np.float64)
+    bead_ids = np.asarray(result.bead_ids)
+    raw_offset = ref - mov          # what the user inspects in "Show beads drift"
+    residual = aligned - ref        # remaining error after the fitted transform
+    if residual.shape[0]:
+        resid_xy = np.hypot(residual[:, 0], residual[:, 1])
+        rmse_xy = float(np.sqrt(np.mean(residual[:, 0] ** 2 + residual[:, 1] ** 2)))
+        rmse_z = float(np.sqrt(np.mean(residual[:, 2] ** 2)))
+    else:
+        resid_xy = np.zeros(0, dtype=np.float64)
+        rmse_xy = rmse_z = 0.0
+    return {
+        "reference": result.channel1_name,
+        "moving": result.channel2_name,
+        "transform_type": getattr(result, "transform_type", "") or "",
+        "n_beads": int(bead_ids.size),
+        "rmse_xy_nm": rmse_xy,
+        "rmse_z_nm": rmse_z,
+        "warn": rmse_xy > RMSE_WARN_NM,
+        "bead_ids": bead_ids,
+        "raw_offset_nm": raw_offset,
+        "residual_nm": residual,
+        "residual_xy_nm": resid_xy,
+    }
+
+
+def bead_residual_comment(
+    raw_offset_nm,
+    residual_nm,
+    *,
+    included: bool = True,
+    rmse_xy_nm: float | None = None,
+    warn_nm: float = RMSE_WARN_NM,
+) -> str:
+    """A short plain-language evaluation of one bead, to help the user decide whether
+    to keep or exclude it. Reads the raw per-bead offset (reference − moving) and the
+    post-fit residual (aligned − reference); ``rmse_xy_nm`` is the current fit's XY
+    RMSE, used to judge whether a bead is a *standout* relative to the whole set (in
+    an incoherent field every bead has a large residual, so "outlier" must be relative,
+    not absolute).
+    """
+    dx, dy, dz = (float(v) for v in np.asarray(raw_offset_nm, dtype=np.float64).reshape(-1)[:3])
+    rx, ry, rz = (float(v) for v in np.asarray(residual_nm, dtype=np.float64).reshape(-1)[:3])
+    rxy = float(np.hypot(rx, ry))
+    raw_xy = float(np.hypot(dx, dy))
+    if not included:
+        return f"Excluded — would sit {rxy:.0f} nm from the current fit."
+
+    has_rmse = rmse_xy_nm is not None and np.isfinite(rmse_xy_nm) and rmse_xy_nm > 0
+    standout = max(2.0 * warn_nm, 1.5 * rmse_xy_nm) if has_rmse else 2.0 * warn_nm
+    if rxy <= warn_nm:
+        parts = [f"Good — consistent with the fit ({rxy:.0f} nm)."]
+    elif rxy >= standout:
+        parts = [f"Outlier ({rxy:.0f} nm) — disagrees with the fit; excluding may help."]
+    elif has_rmse and rxy <= rmse_xy_nm:
+        parts = [f"Near the fit's average ({rxy:.0f} nm ≈ RMSE {rmse_xy_nm:.0f} nm)."]
+    else:
+        tail = f"; fit is poor overall (RMSE {rmse_xy_nm:.0f} nm)" if has_rmse else ""
+        parts = [f"Elevated residual ({rxy:.0f} nm){tail}."]
+
+    if abs(rz) > warn_nm and abs(rz) >= rxy:
+        parts.append(f"Z error dominates ({rz:+.0f} nm).")
+    if raw_xy > 500.0:
+        parts.append(f"Unusually large raw offset ({raw_xy:.0f} nm) — check bead.")
+    return " ".join(parts)
+
+
 def align_channels_from_arrays(
     channel1_name: str,
     channel1_points: np.ndarray,
@@ -226,6 +311,35 @@ def align_channels_from_arrays(
     channel2_xyz = np.vstack([ch2[int(b)].median_xyz for b in bead_ids]) * NM_PER_M
     channel1_counts = np.array([ch1[int(b)].count_used for b in bead_ids], dtype=np.int32)
     channel2_counts = np.array([ch2[int(b)].count_used for b in bead_ids], dtype=np.int32)
+    return align_channels_from_bead_positions(
+        channel1_name, channel2_name, bead_ids, channel1_xyz, channel2_xyz,
+        channel1_counts=channel1_counts, channel2_counts=channel2_counts,
+        transform_type=transform_type)
+
+
+def align_channels_from_bead_positions(
+    channel1_name: str,
+    channel2_name: str,
+    bead_ids: np.ndarray,
+    channel1_xyz: np.ndarray,
+    channel2_xyz: np.ndarray,
+    channel1_counts: np.ndarray | None = None,
+    channel2_counts: np.ndarray | None = None,
+    transform_type: str = TRANSFORM_RIGID_XY_Z,
+) -> ChannelAlignmentResult:
+    """Solve a channel alignment from already-extracted per-bead median positions
+    (nm). Splits the fit step out of :func:`align_channels_from_arrays` so a UI can
+    cheaply re-fit on a bead *subset* without re-parsing the raw MBM point arrays.
+    """
+    bead_ids = np.asarray(bead_ids, dtype=np.uint32)
+    channel1_xyz = np.asarray(channel1_xyz, dtype=np.float64)
+    channel2_xyz = np.asarray(channel2_xyz, dtype=np.float64)
+    if bead_ids.size == 0:
+        raise ValueError("no beads were provided for alignment")
+    if channel1_counts is None:
+        channel1_counts = np.zeros(bead_ids.size, dtype=np.int32)
+    if channel2_counts is None:
+        channel2_counts = np.zeros(bead_ids.size, dtype=np.int32)
     # Downgrade the requested mode to what this many matched beads can support
     # (overriding the preference for low bead counts — see effective_transform_type).
     transform_type = effective_transform_type(transform_type, int(bead_ids.size))
@@ -239,8 +353,8 @@ def align_channels_from_arrays(
         channel1_xyz=channel1_xyz,
         channel2_xyz=channel2_xyz,
         channel2_aligned_xyz=channel2_aligned_xyz,
-        channel1_counts=channel1_counts,
-        channel2_counts=channel2_counts,
+        channel1_counts=np.asarray(channel1_counts, dtype=np.int32),
+        channel2_counts=np.asarray(channel2_counts, dtype=np.int32),
         rotation=rotation,
         translation=translation,
         z_translation=z_translation,

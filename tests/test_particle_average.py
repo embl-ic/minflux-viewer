@@ -108,10 +108,23 @@ def test_template_free_sharper_than_unaligned():
 
 def test_template_free_converges():
     parts = _random_particles(k=10, seed=3)
-    res = pa.average_template_free(parts, box_nm=200, pixel_nm=3, n_angles=48, n_iter=5)
+    res = pa.average_template_free(parts, box_nm=200, pixel_nm=3, n_angles=48, n_iter=5, tol=0.0)
     h = res["score_history"]
-    assert len(h) == 5
+    assert len(h) == 5                             # tol=0 → run the full count
     assert h[-1] >= h[0] - 1e-6                    # non-decreasing overall
+
+
+def test_template_free_early_stops_on_convergence():
+    """With a tolerance, iteration stops once the alignment score plateaus — well
+    before the (safety-cap) max iterations, and flags ``converged``."""
+    parts = _random_particles(k=10, seed=3)
+    res = pa.average_template_free(parts, box_nm=200, pixel_nm=3, n_angles=48,
+                                   n_iter=100, tol=1e-4)
+    assert res["converged"] is True
+    assert res["iterations"] < 100                 # stopped early
+    # last score improvement was below tolerance
+    h = res["score_history"]
+    assert (h[-1] - h[-2]) <= 1e-4 * max(abs(h[-2]), 1e-12)
 
 
 def test_parallel_alignment_matches_serial():
@@ -163,8 +176,8 @@ def test_average_reports_progress():
     parts = _random_particles(k=6, seed=5)
     free_calls = []
     pa.average_particles(parts, mode="free", box_nm=200, pixel_nm=4, n_angles=24,
-                         n_iter=3, progress=lambda d, t: free_calls.append((d, t)))
-    assert free_calls[-1] == (3 * 6, 3 * 6)        # n_iter × n_particles
+                         n_iter=3, tol=0.0, progress=lambda d, t: free_calls.append((d, t)))
+    assert free_calls[-1] == (3 * 6, 3 * 6)        # n_iter × n_particles (tol=0 → full run)
     tmpl = pa.geometry_template_image("ring", {"diameter_nm": 100, "rim_nm": 12},
                                       box_nm=160, pixel_nm=4)
     tmpl_calls = []

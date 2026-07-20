@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.3.6
+
+### Two-channel bead alignment — quality feedback & interactive bead selection (MSR reader)
+The **"Beads and alignment result"** window (from *Align channel* / *Show beads drift*) now tells you how good the fiducial-bead registration actually is, and lets you tune it:
+- **Fit-quality banner** — shows the alignment **RMSE** (XY and Z) and matched-bead count per channel, and turns red with a ⚠ warning when the registration is poor (the beads disagree with each other and no single transform can register the channels well). Opening an overlay or running *Align channel* with a poor bead fit now **warns you** instead of silently applying it.
+- **Per-bead residual table** — one row per bead showing the raw offset (Δ) and the leftover error after the fit (residual), worst-first, with a plain-language **Comment** column that evaluates each bead to help you decide whether to keep or exclude it.
+- **Interactive include/exclude** — tick/untick a bead's checkbox to add or remove it from the fit; the transform, the RMSE, and the aligned bead positions all **update live**. Your selection carries over to the next align/open.
+- **Bead IDs are labelled** next to each bead (2-D and 3-D), and **excluded beads are shown faint** so you can see at a glance which beads are out of the computation.
+- The plot / table split is **draggable**, so you can give the table more room to show all beads.
+
+### ROI conversion — enclosing-shape family
+- **Convert any ROI to a fitted shape:** axis-aligned **bounding box**, **minimum-area oriented rectangle**, **axis-aligned enclosing ellipse**, **minimum-area oriented ellipse**, **convex hull**, **region ↔ line**, **skeletonize**, and **to point** — each guaranteed to enclose the source outline.
+- **Fixed:** converting a *stored* ROI (e.g. freehand → oval) now updates the shape shown on screen instead of leaving the old outline behind.
+
+### Particle averaging
+- **Template-free averaging now stops automatically when it converges** (new *convergence tolerance* control), rather than always running a fixed iteration count — faster, with the max-iterations spin now acting as a safety cap. The result label reports the actual iterations and whether it converged.
+
+---
+
 ## v0.3.4
 
 ### Particle averaging — major overhaul
