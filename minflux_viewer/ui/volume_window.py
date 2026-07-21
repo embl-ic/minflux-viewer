@@ -177,6 +177,134 @@ def make_volume_payload(
     )
 
 
+def lut_rgb(name: str) -> tuple[float, float, float]:
+    """Representative 0..1 RGB for an overlay channel LUT name.
+
+    Pure-colour LUTs (Red/Green/…) map to their colour; a named colormap is
+    sampled near its bright end. Used to colour each overlay channel in the
+    multi-channel volume composite.
+    """
+    from ..core.overlay import PURE_COLOR_RGB
+    if name in PURE_COLOR_RGB:
+        r, g, b = PURE_COLOR_RGB[name]
+        return (r / 255.0, g / 255.0, b / 255.0)
+    try:
+        import matplotlib as mpl
+        rgba = mpl.colormaps.get_cmap(name)(0.85)
+        return (float(rgba[0]), float(rgba[1]), float(rgba[2]))
+    except Exception:
+        return (1.0, 1.0, 1.0)
+
+
+def _volume_grid(all_locs: np.ndarray, xy_voxel_nm: float, z_voxel_nm: float,
+                 max_dim: int, max_voxels: int):
+    """Shared voxel grid (edges/counts/voxel size) for a set of localisations."""
+    lo = np.nanmin(all_locs, axis=0)
+    hi = np.nanmax(all_locs, axis=0)
+    span = hi - lo
+    if float(span[2]) <= 1.0:
+        raise ValueError("The data does not have a usable 3-D Z range.")
+    pad = np.maximum(span * 0.02, 0.5)
+    lo = lo - pad
+    hi = hi + pad
+    span = np.maximum(hi - lo, 1.0)
+    xy_voxel = max(float(xy_voxel_nm), 0.001)
+    z_voxel = max(float(z_voxel_nm), 0.001)
+    voxel_req = np.array([xy_voxel, xy_voxel, z_voxel], dtype=np.float64)
+    max_dim = max(int(max_dim), 8)
+    max_voxels = max(int(max_voxels), 8)
+    counts = np.maximum(np.ceil(span / voxel_req).astype(int), 2)
+    scale = max(
+        float(counts.max()) / float(max_dim),
+        float(np.prod(counts, dtype=np.float64) / max_voxels) ** (1.0 / 3.0),
+        1.0,
+    )
+    if scale > 1.0:
+        voxel_req *= scale * 1.01
+        counts = np.maximum(np.ceil(span / voxel_req).astype(int), 2)
+    edges = [np.linspace(float(lo[i]), float(hi[i]), int(counts[i]) + 1, dtype=np.float64)
+             for i in range(3)]
+    voxel_xyz = tuple(float(edges[i][1] - edges[i][0]) for i in range(3))
+    return edges, counts, voxel_xyz
+
+
+def make_multichannel_volume_payload(
+    channel_locs_nm: list,
+    channel_rgb: list,
+    *,
+    xy_voxel_nm: float,
+    z_voxel_nm: float,
+    max_dim: int,
+    max_voxels: int = _DEFAULT_MAX_VOXELS,
+    opacity: float = 0.45,
+    sigma_nm_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
+) -> VolumePayload:
+    """Composite several overlay channels into one RGBA volume.
+
+    Each channel's ``(N, 3)`` nm localisations are voxelised on a **shared** grid,
+    normalised to its own 99.7-percentile, and **additively coloured** by its LUT
+    colour (so e.g. red + green overlap → yellow). Per-voxel alpha is the maximum
+    channel response, so a voxel visible in any channel shows.
+    """
+    valid = []
+    for locs, rgb in zip(channel_locs_nm, channel_rgb):
+        arr = np.asarray(locs, dtype=np.float64)
+        if arr.ndim == 2 and arr.shape[1] == 3 and arr.shape[0] > 0:
+            valid.append((arr, np.asarray(rgb, dtype=np.float64).ravel()[:3]))
+    if not valid:
+        raise ValueError("No localisations pass the current filter.")
+
+    all_locs = np.vstack([a for a, _ in valid])
+    edges, counts, voxel_xyz = _volume_grid(
+        all_locs, xy_voxel_nm, z_voxel_nm, max_dim, max_voxels)
+    shape = (int(counts[0]), int(counts[1]), int(counts[2]))
+
+    sigma_px = []
+    for sigma_nm, step_nm in zip(sigma_nm_xyz, voxel_xyz):
+        sigma_px.append(max(float(sigma_nm) / max(step_nm, 1e-12), 0.0)
+                        if sigma_nm > 0.0 else 0.75)
+
+    rgb_accum = np.zeros((*shape, 3), dtype=np.float32)
+    alpha_accum = np.zeros(shape, dtype=np.float32)
+    scalar_sum = np.zeros(shape, dtype=np.float32)
+    n_total = 0
+    op = float(np.clip(opacity, 0.0, 1.0))
+    for locs, rgb in valid:
+        hist, _ = np.histogramdd(locs, bins=edges)
+        vol = hist.astype(np.float32, copy=False)
+        if max(sigma_px) >= 0.1:
+            vol = gaussian_filter(vol, sigma=tuple(sigma_px), mode="constant")
+        nz = vol[vol > 0.0]
+        vmax = float(np.percentile(nz, 99.7)) if nz.size else 1.0
+        vmax = max(vmax, 1e-12)
+        norm = np.clip(vol / vmax, 0.0, 1.0)
+        for k in range(3):
+            rgb_accum[..., k] += float(rgb[k]) * norm
+        alpha_accum = np.maximum(alpha_accum, np.power(norm, 0.75))
+        scalar_sum += vol
+        n_total += int(locs.shape[0])
+
+    rgb_accum = np.clip(rgb_accum, 0.0, 1.0)
+    rgba = np.zeros((*shape, 4), dtype=np.uint8)
+    rgba[..., :3] = (rgb_accum * 255.0).astype(np.uint8)
+    alpha = (alpha_accum * op * 255.0).astype(np.uint8)
+    alpha[alpha_accum <= 0.0] = 0
+    rgba[..., 3] = alpha
+
+    smax = float(scalar_sum.max()) if scalar_sum.size else 1.0
+    norm_out = np.clip(scalar_sum / max(smax, 1e-12), 0.0, 1.0)
+    return VolumePayload(
+        scalar=np.ascontiguousarray(scalar_sum, dtype=np.float32),
+        norm=np.ascontiguousarray(norm_out, dtype=np.float32),
+        rgba=np.ascontiguousarray(rgba, dtype=np.uint8),
+        origin_nm=(float(edges[0][0]), float(edges[1][0]), float(edges[2][0])),
+        voxel_nm=voxel_xyz,
+        counts=shape,
+        n_locs=n_total,
+        intensity_max=max(smax, 1e-12),
+    )
+
+
 class VolumeRenderWindow(QWidget):
     """Experimental pyqtgraph GLVolumeItem render view."""
 
@@ -313,15 +441,48 @@ class VolumeRenderWindow(QWidget):
         root.addWidget(self._info_label)
         self._on_mode_changed(self._mode_combo.currentText())
 
+    def _overlay_channels(self):
+        """Visible overlay channels as ``[(locs_nm, rgb01), …]`` (display-space,
+        each channel's transform applied), or ``None`` when the dataset is not a
+        multi-channel overlay."""
+        from ..core.overlay import (
+            apply_display_transform_nm, dataset_group_id, overlay_members)
+
+        if not (0 <= self._idx < len(self._state.datasets)):
+            return None
+        if not dataset_group_id(self._state.datasets[self._idx]):
+            return None
+        members = overlay_members(self._state, self._idx)
+        if len(members) < 2:
+            return None
+        out = []
+        for _, ds in members:
+            locs = _finite_filtered_locs(ds)
+            if locs.shape[0] == 0:
+                continue
+            locs = apply_display_transform_nm(
+                locs, ds.state.get("overlay_transform")
+                or ds.state.get("render_transform_2d"))
+            rgb = lut_rgb(str(ds.state.get("overlay_lut")
+                             or ds.state.get("render_channel_lut") or "Gray"))
+            out.append((np.ascontiguousarray(locs[:, :3], dtype=np.float64), rgb))
+        return out or None
+
     def refresh_from_dataset(self) -> None:
         if self._idx < 0 or self._idx >= len(self._state.datasets):
             self._info_label.setText("No active dataset.")
             return
         ds = self._state.datasets[self._idx]
-        self.setWindowTitle(f"3D Volume Preview - {ds.name}")
-        locs = _finite_filtered_locs(ds)
-        if locs.shape[0] > 0:
-            span = np.ptp(locs, axis=0)
+        channels = self._overlay_channels()
+        if channels:
+            self.setWindowTitle(
+                f"3D Volume Preview - {ds.name} (+{len(channels) - 1} channel(s))")
+            all_locs = np.vstack([c[0] for c in channels])
+        else:
+            self.setWindowTitle(f"3D Volume Preview - {ds.name}")
+            all_locs = _finite_filtered_locs(ds)
+        if all_locs.shape[0] > 0:
+            span = np.ptp(all_locs, axis=0)
             suggested_xy = max(float(ds.cali.pixel_size), float(max(span[0], span[1])) / 160.0, 0.5)
             suggested_z = max(float(ds.cali.pixel_size), float(span[2]) / 96.0, 0.5)
             if not getattr(self, "_voxel_initialised", False):
@@ -335,16 +496,27 @@ class VolumeRenderWindow(QWidget):
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            payload = make_volume_payload(
-                locs,
-                xy_voxel_nm=float(self._xy_voxel_spin.value()),
-                z_voxel_nm=float(self._z_voxel_spin.value()),
-                max_dim=int(self._max_dim_spin.value()),
-                max_voxels=_DEFAULT_MAX_VOXELS,
-                cmap_name=self._cmap_combo.currentText(),
-                opacity=float(self._opacity_spin.value()),
-                sigma_nm_xyz=self._sigma_nm_xyz,
-            )
+            if channels:
+                payload = make_multichannel_volume_payload(
+                    [c[0] for c in channels], [c[1] for c in channels],
+                    xy_voxel_nm=float(self._xy_voxel_spin.value()),
+                    z_voxel_nm=float(self._z_voxel_spin.value()),
+                    max_dim=int(self._max_dim_spin.value()),
+                    max_voxels=_DEFAULT_MAX_VOXELS,
+                    opacity=float(self._opacity_spin.value()),
+                    sigma_nm_xyz=self._sigma_nm_xyz,
+                )
+            else:
+                payload = make_volume_payload(
+                    all_locs,
+                    xy_voxel_nm=float(self._xy_voxel_spin.value()),
+                    z_voxel_nm=float(self._z_voxel_spin.value()),
+                    max_dim=int(self._max_dim_spin.value()),
+                    max_voxels=_DEFAULT_MAX_VOXELS,
+                    cmap_name=self._cmap_combo.currentText(),
+                    opacity=float(self._opacity_spin.value()),
+                    sigma_nm_xyz=self._sigma_nm_xyz,
+                )
         except Exception as exc:
             QApplication.restoreOverrideCursor()
             self._info_label.setText(str(exc))
@@ -360,8 +532,9 @@ class VolumeRenderWindow(QWidget):
             self._reset_camera()
         nx, ny, nz = payload.counts
         vx, vy, vz = payload.voxel_nm
+        ch_txt = f"  |  {len(channels)} channels" if channels else ""
         self._info_label.setText(
-            f"{payload.n_locs:,} filtered locs  |  volume {nx} x {ny} x {nz}  |  "
+            f"{payload.n_locs:,} filtered locs{ch_txt}  |  volume {nx} x {ny} x {nz}  |  "
             f"voxel=({vx:.1f}, {vy:.1f}, {vz:.1f}) nm  |  "
             f"mode={self._mode_combo.currentText()}  |  intensity max~{payload.intensity_max:.3g}"
         )

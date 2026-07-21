@@ -486,7 +486,7 @@ _LN2 = float(np.log(2.0))
 class CRLBResult:
     per_loc_sigma_ideal: np.ndarray   # lateral σ_xy at SBR→∞ (no background), nm
     per_loc_sigma_bg: np.ndarray      # lateral σ_xy with the measured per-loc SBR, nm
-    per_loc_n_total: np.ndarray       # N = eco
+    per_loc_n_total: np.ndarray       # N_xy = eco at the final lateral iteration
     per_loc_sbr: np.ndarray           # (efo − fbg)/fbg per localization
     median_sigma_ideal: float
     mean_sigma_ideal: float
@@ -508,6 +508,10 @@ class CRLBResult:
     mean_sigma_z_ideal: float = float("nan")
     median_sigma_z_bg: float = float("nan")
     mean_sigma_z_bg: float = float("nan")
+    # N_z = eco at the final axial iteration (equals median_n unless a distinct
+    # per-dimension photon count was supplied).
+    median_n_z: float = float("nan")
+    per_dimension_photons: bool = False   # True when N_xy and N_z differ by design
 
 
 def crlb_precision(
@@ -518,6 +522,9 @@ def crlb_precision(
     efo: np.ndarray | None = None,
     fbg: np.ndarray | None = None,
     L_z_nm: float | None = None,
+    eco_z: np.ndarray | None = None,
+    efo_z: np.ndarray | None = None,
+    fbg_z: np.ndarray | None = None,
 ) -> CRLBResult:
     """Background-aware MINFLUX Cramér-Rao precision bound, per localization.
 
@@ -547,10 +554,19 @@ def crlb_precision(
         Axial pattern size L_z. When given (> 0) the axial z bound is also
         computed (reusing N and the lateral SBR; σ_qz cancels in the SBR form).
     """
-    n = np.asarray(eco, dtype=float).ravel()
-    finite = np.isfinite(n) & (n > 0)
-    n = n[finite]
+    n_full = np.asarray(eco, dtype=float).ravel()
+    finite = np.isfinite(n_full) & (n_full > 0)
+    n = n_full[finite]
     n_locs = int(n.size)
+    # Axial photon count N_z (final axial iteration). Defaults to the lateral N
+    # → backward-compatible single-eco behaviour. Per-dimension when a distinct
+    # eco_z is supplied (final lateral vs final axial iteration photons differ).
+    per_dim = eco_z is not None
+    if per_dim:
+        n_z_full = np.asarray(eco_z, dtype=float).ravel()
+        n_z = n_z_full[finite] if n_z_full.shape == finite.shape else n
+    else:
+        n_z = n
     L = float(L_nm)
     sq = float(sigma_q_nm)
     Lz = None if L_z_nm is None or L_z_nm <= 0 else float(L_z_nm)
@@ -586,19 +602,32 @@ def crlb_precision(
     # σ_ideal: no-background limit (Eq. 45), per localization via N.
     sigma_ideal = L / (2.0 * np.sqrt(2.0 * n) * grad_denom)
 
-    # SBR from the measured rates (per localization) — shared by xy and z.
-    has_bg = False
-    sbr_per = np.full(n_locs, np.nan)
-    ok = np.zeros(n_locs, dtype=bool)
-    sbr = np.empty(0)
-    if efo is not None and fbg is not None:
-        ef = np.asarray(efo, dtype=float).ravel()[finite]
-        bg = np.asarray(fbg, dtype=float).ravel()[finite]
-        ok = np.isfinite(ef) & np.isfinite(bg) & (bg > 0) & (ef > bg)
-        if ok.any():
-            has_bg = True
-            sbr = np.clip((ef[ok] - bg[ok]) / bg[ok], 1e-3, None)
-            sbr_per[ok] = sbr
+    # SBR from the measured rates (per localization). Lateral uses efo/fbg;
+    # axial uses efo_z/fbg_z when given (final axial iteration rates), else efo/fbg.
+    def _sbr(efo_arr, fbg_arr):
+        has = False
+        sbr_p = np.full(n_locs, np.nan)
+        okm = np.zeros(n_locs, dtype=bool)
+        vals = np.empty(0)
+        if efo_arr is not None and fbg_arr is not None:
+            ef = np.asarray(efo_arr, dtype=float).ravel()
+            bg = np.asarray(fbg_arr, dtype=float).ravel()
+            if ef.shape == finite.shape and bg.shape == finite.shape:
+                ef = ef[finite]
+                bg = bg[finite]
+                okm = np.isfinite(ef) & np.isfinite(bg) & (bg > 0) & (ef > bg)
+                if okm.any():
+                    has = True
+                    vals = np.clip((ef[okm] - bg[okm]) / bg[okm], 1e-3, None)
+                    sbr_p[okm] = vals
+        return has, okm, vals, sbr_p
+
+    has_bg, ok, sbr, sbr_per = _sbr(efo, fbg)
+    if per_dim and (efo_z is not None or fbg_z is not None):
+        has_bg_z, ok_z, sbr_z, _ = _sbr(
+            efo_z if efo_z is not None else efo, fbg_z if fbg_z is not None else fbg)
+    else:
+        has_bg_z, ok_z, sbr_z = has_bg, ok, sbr
 
     # Lateral xy bound — background degradation (Eq. 44).
     sigma_bg = sigma_ideal.copy()
@@ -608,22 +637,30 @@ def crlb_precision(
 
     # Axial z bound (1-D quadratic minimum, Eq. 28 → SBR form), 3-D only.
     if Lz is not None:
-        sigma_z_ideal = Lz / (4.0 * np.sqrt(n))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            sigma_z_ideal = Lz / (4.0 * np.sqrt(n_z))     # NaN where N_z invalid
         sigma_z_bg = sigma_z_ideal.copy()
-        if has_bg:
-            factor_z = np.sqrt((1.0 + 1.0 / sbr) * (1.0 + 2.0 / (3.0 * sbr)))
-            sigma_z_bg[ok] = sigma_z_ideal[ok] * factor_z
-        z_fields = dict(
-            has_z=True, L_z_nm=Lz,
-            per_loc_sigma_z_ideal=sigma_z_ideal,
-            per_loc_sigma_z_bg=sigma_z_bg,
-            median_sigma_z_ideal=float(np.median(sigma_z_ideal)),
-            mean_sigma_z_ideal=float(sigma_z_ideal.mean()),
-            median_sigma_z_bg=float(np.median(sigma_z_bg)),
-            mean_sigma_z_bg=float(sigma_z_bg.mean()),
-        )
+        if has_bg_z:
+            factor_z = np.sqrt((1.0 + 1.0 / sbr_z) * (1.0 + 2.0 / (3.0 * sbr_z)))
+            sigma_z_bg[ok_z] = sigma_z_ideal[ok_z] * factor_z
+        with np.errstate(invalid="ignore"):
+            z_fields = dict(
+                has_z=True, L_z_nm=Lz,
+                per_loc_sigma_z_ideal=sigma_z_ideal,
+                per_loc_sigma_z_bg=sigma_z_bg,
+                median_sigma_z_ideal=float(np.nanmedian(sigma_z_ideal)),
+                mean_sigma_z_ideal=float(np.nanmean(sigma_z_ideal)),
+                median_sigma_z_bg=float(np.nanmedian(sigma_z_bg)),
+                mean_sigma_z_bg=float(np.nanmean(sigma_z_bg)),
+                median_n_z=float(np.nanmedian(n_z)) if n_z.size else float("nan"),
+                per_dimension_photons=bool(per_dim),
+            )
     else:
-        z_fields = dict(has_z=False, L_z_nm=0.0)
+        z_fields = dict(
+            has_z=False, L_z_nm=0.0,
+            median_n_z=float(np.nanmedian(n_z)) if (per_dim and n_z.size) else float("nan"),
+            per_dimension_photons=bool(per_dim),
+        )
 
     sbr_finite = sbr_per[np.isfinite(sbr_per)]
     return CRLBResult(
@@ -724,9 +761,10 @@ def run_crlb(parent, state) -> None:
     # materialized ``ds.attr`` already IS that selection we use it (so the
     # interactive filter applies); otherwise route through the raw store's
     # last-valid selection (as the anisotropy estimator does).
-    if attr_matches_last_valid(ds) and ds.attr.get("eco") is not None:
-        ftr = np.asarray(ds.filter_mask, dtype=bool)
+    use_attr = attr_matches_last_valid(ds) and ds.attr.get("eco") is not None
+    ftr = np.asarray(ds.filter_mask, dtype=bool) if use_attr else None
 
+    if use_attr:
         def _col(name: str):
             v = ds.attr.get(name)
             if v is None:
@@ -738,16 +776,46 @@ def run_crlb(parent, state) -> None:
             v = mfx_get(ds, name, itr="last", vld_only=True)
             return None if v is None else np.asarray(v, dtype=float).ravel()
 
-    eco = _col("eco")
+    # ``_col`` gives the materialized (final = axial iteration) per-loc values.
+    eco = _col("eco")          # N_z: photons at the final axial (z) iteration
     efo = _col("efo")
     fbg = _col("fbg")
     num_dim = int(getattr(ds.prop, "num_dim", 2) or 2)
 
-    result = crlb_precision(
-        eco, L_nm=CRLB_DEFAULT_L_NM, sigma_q_nm=CRLB_DEFAULT_SIGMA_Q_NM,
-        efo=efo, fbg=fbg,
-        L_z_nm=CRLB_DEFAULT_LZ_NM if num_dim >= 3 else None,
-    )
+    # Per-dimension photon budget: the lateral (xy) CRLB must use the photons of
+    # the final LATERAL iteration, not the materialized final (axial) one. Detect
+    # the lateral/axial iterations and gather the lateral eco aligned to the same
+    # last-valid rows; fall back to the single materialized eco otherwise.
+    eco_xy = None
+    try:
+        from ..core.loader import iteration_attr_values_1d
+        from ..core.mfx_sequence import photon_iterations_for_dataset
+        pit = photon_iterations_for_dataset(ds)
+        if (pit.lateral_iter is not None and pit.axial_iter is not None
+                and pit.lateral_iter != pit.axial_iter):
+            v = iteration_attr_values_1d(ds, "eco", pit.lateral_iter,
+                                         itr="last", vld_only=True)
+            if v is not None:
+                v = np.asarray(v, dtype=float).ravel()
+                if use_attr and ftr is not None and ftr.shape[0] == v.shape[0]:
+                    v = v[ftr]
+                eco_xy = v
+    except Exception:
+        eco_xy = None
+
+    if eco_xy is not None and eco is not None and eco_xy.shape == eco.shape:
+        # N_xy = final lateral iteration photons; N_z = final axial (materialized).
+        result = crlb_precision(
+            eco_xy, L_nm=CRLB_DEFAULT_L_NM, sigma_q_nm=CRLB_DEFAULT_SIGMA_Q_NM,
+            efo=efo, fbg=fbg,
+            L_z_nm=CRLB_DEFAULT_LZ_NM if num_dim >= 3 else None,
+            eco_z=eco)
+        eco = eco_xy      # display / budget use the lateral photon count
+    else:
+        result = crlb_precision(
+            eco, L_nm=CRLB_DEFAULT_L_NM, sigma_q_nm=CRLB_DEFAULT_SIGMA_Q_NM,
+            efo=efo, fbg=fbg,
+            L_z_nm=CRLB_DEFAULT_LZ_NM if num_dim >= 3 else None)
     # Measured per-trace spread → the CRLB dialog's precision budget (measured vs
     # the photon-limited bound; excess σ_fl per Marin & Ries 2026).
     measured = _measured_trace_precision(ds)
@@ -760,13 +828,18 @@ def run_crlb(parent, state) -> None:
             fl_r = excess_precision(measured["sigma_r"], result.median_sigma_bg)
             budget_txt = (f"; measured σ_r = {measured['sigma_r']:.2f} nm "
                           f"(StdDev/trace) → excess σ_fl = {fl_r:.2f} nm")
+        if result.per_dimension_photons and np.isfinite(result.median_n_z):
+            n_txt = (f"median N = {result.median_n:.0f} photons (final lateral "
+                     f"iteration; axial N_z = {result.median_n_z:.0f})")
+        else:
+            n_txt = f"median N = {result.median_n:.0f} photons"
         _try_journal(
             state,
             f"Localization precision (CRLB, Marin-Ries): median σ_xy = "
             f"{result.median_sigma_bg:.2f} nm (background-limited), "
             f"{result.median_sigma_ideal:.2f} nm (ideal){z_txt}, "
             f"L = {result.L_nm:.0f} nm, σ_q = {result.sigma_q_nm:.0f} nm, "
-            f"median N = {result.median_n:.0f} photons{budget_txt}."
+            f"{n_txt}{budget_txt}."
         )
 
     from ..ui.modeless import show_modeless
@@ -1309,9 +1382,14 @@ class CRLBResultDialog(QDialog):
 
         sbr_txt = (f" &nbsp;|&nbsp; median SBR = {result.median_sbr:.1f}"
                    if result.has_background and np.isfinite(result.median_sbr) else "")
+        if result.per_dimension_photons and np.isfinite(result.median_n_z):
+            n_txt = (f"median N<sub>xy</sub> = <b>{result.median_n:.0f}</b>, "
+                     f"N<sub>z</sub> = <b>{result.median_n_z:.0f}</b> photons")
+        else:
+            n_txt = f"median N = <b>{result.median_n:.0f}</b> photons"
         info = QLabel(
             f"<b>{result.n_locs:,}</b> localizations &nbsp;|&nbsp; "
-            f"median N = <b>{result.median_n:.0f}</b> photons &nbsp;|&nbsp; "
+            f"{n_txt} &nbsp;|&nbsp; "
             f"L = <b>{result.L_nm:.0f}</b> nm &nbsp;|&nbsp; "
             f"σ<sub>q</sub> = <b>{result.sigma_q_nm:.0f}</b> nm{sbr_txt}"
         )

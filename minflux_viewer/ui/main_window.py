@@ -114,7 +114,57 @@ _POLY_FAMILY: tuple[tuple[str, str, str, float], ...] = (
     ("Polyhedron (3D)", "polyhedron", "polyhedron.png", 0.0),
 )
 
-_AI_UNAPPROVED_MENU_TEXT = QColor("#404040")
+_AI_UNAPPROVED_MENU_MIX = 0.28
+
+
+def _luminance(color: QColor) -> float:
+    """Approximate perceived luminance in sRGB space."""
+    return (
+        0.2126 * color.redF()
+        + 0.7152 * color.greenF()
+        + 0.0722 * color.blueF()
+    )
+
+
+def _contrast_ratio(a: QColor, b: QColor) -> float:
+    light = max(_luminance(a), _luminance(b)) + 0.05
+    dark = min(_luminance(a), _luminance(b)) + 0.05
+    return light / dark
+
+
+def _blend_color(foreground: QColor, background: QColor, fraction: float) -> QColor:
+    fraction = max(0.0, min(1.0, float(fraction)))
+    inv = 1.0 - fraction
+    return QColor(
+        round(foreground.red() * inv + background.red() * fraction),
+        round(foreground.green() * inv + background.green() * fraction),
+        round(foreground.blue() * inv + background.blue() * fraction),
+        foreground.alpha(),
+    )
+
+
+def _ai_unapproved_menu_text(option: QStyleOptionMenuItem) -> QColor:
+    """Muted menu text that remains readable on light and dark palettes."""
+    selected = bool(option.state & QStyle.StateFlag.State_Selected)
+    text_role = (
+        QPalette.ColorRole.HighlightedText
+        if selected
+        else QPalette.ColorRole.Text
+    )
+    bg_role = (
+        QPalette.ColorRole.Highlight
+        if selected
+        else QPalette.ColorRole.Window
+    )
+    base = option.palette.color(text_role)
+    background = option.palette.color(bg_role)
+    muted = _blend_color(base, background, _AI_UNAPPROVED_MENU_MIX)
+    if _contrast_ratio(muted, background) >= 4.5:
+        return muted
+    fallback = _blend_color(base, background, 0.12)
+    if _contrast_ratio(fallback, background) >= 4.5:
+        return fallback
+    return base
 
 
 class _AiMenuStyle(QProxyStyle):
@@ -129,12 +179,14 @@ class _AiMenuStyle(QProxyStyle):
             action = widget.actionAt(option.rect.center())
             if action is not None and action.property("ai_unapproved"):
                 opt = QStyleOptionMenuItem(option)
+                text_color = _ai_unapproved_menu_text(option)
                 for role in (
                     QPalette.ColorRole.Text,
                     QPalette.ColorRole.WindowText,
                     QPalette.ColorRole.ButtonText,
+                    QPalette.ColorRole.HighlightedText,
                 ):
-                    opt.palette.setColor(role, _AI_UNAPPROVED_MENU_TEXT)
+                    opt.palette.setColor(role, text_color)
                 return super().drawControl(element, opt, painter, widget)
         return super().drawControl(element, option, painter, widget)
 
@@ -501,6 +553,10 @@ class MainWindow(QMainWindow):
         self.actionRoi3D.triggered.connect(self._show_roi_3d)
         self.menuProcessRoi.addAction(self.actionRoi3D)
 
+        # Aggregate localizations (Imspector-style per-trace photon binning).
+        self.actionAggregate = QAction("Aggregate Localizations…", self)
+        self.actionAggregate.triggered.connect(self._aggregate_active_dataset)
+
         # Help menu
         u.actionAbout.triggered.connect(self._show_about)
         u.actionMemoryMonitor.triggered.connect(self._show_memory_monitor)
@@ -675,6 +731,7 @@ class MainWindow(QMainWindow):
         u.menuProcess.clear()
         u.menuProcess.addAction(self.menuProcessChannel.menuAction())
         u.menuProcess.addAction(self.menuProcessRoi.menuAction())
+        u.menuProcess.addAction(self.actionAggregate)
         u.menuProcess.addSeparator()
         u.menuProcess.addAction(u.menuBatchProcessing.menuAction())
 
@@ -3196,6 +3253,227 @@ class MainWindow(QMainWindow):
         idx = self._state.add_dataset(ds)
         self._show_render(idx)
 
+    def _aggregate_active_dataset(self) -> None:
+        """Process › Aggregate Localizations — Imspector-style per-trace photon
+        binning of the active dataset into a new aggregated dataset.
+
+        Within each trace, valid final localizations are accumulated in time order
+        until their combined photon count (``eco`` over the final-scale iterations)
+        reaches the threshold, then emitted as one averaged localization. The
+        original dataset is kept; the result is a new ``(aggregated)`` dataset.
+        Reproduces Abberior Imspector's *Aggregation* to ≈99 %."""
+        import uuid
+
+        from ..core.dataset_kind import is_minflux
+        from ..core.mfx_sequence import photon_iterations_for_dataset
+        from ..core.overlay import dataset_group_id, overlay_members
+        from ..analysis.aggregation import raw_dict_from_dataset
+
+        active_idx = self._state.active_idx
+        if active_idx is None or not (0 <= active_idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        ds = self._state.datasets[active_idx]
+        if not is_minflux(ds):
+            QMessageBox.information(
+                self, "Aggregate Localizations",
+                "The active dataset is not a MINFLUX dataset (no trace ids).")
+            return
+        if raw_dict_from_dataset(ds) is None:
+            QMessageBox.information(
+                self, "Aggregate Localizations",
+                "Aggregation needs the raw all-iteration data (with the final-"
+                "iteration flag 'fnl'), which this dataset doesn't provide. Load "
+                "the original .msr / raw .mat and try again.")
+            return
+
+        # Overlay → aggregate every channel with the same threshold and keep them
+        # linked as a new overlay; single dataset → just that one.
+        group_id = dataset_group_id(ds)
+        if group_id:
+            members = [m for _, m in overlay_members(self._state, active_idx)]
+        else:
+            members = [ds]
+        aggregatable = [m for m in members
+                        if is_minflux(m) and raw_dict_from_dataset(m) is not None]
+        if not aggregatable:
+            QMessageBox.information(
+                self, "Aggregate Localizations",
+                "No channel in this overlay has the raw data aggregation needs.")
+            return
+
+        pit = photon_iterations_for_dataset(ds)
+        thr = self._ask_aggregation_threshold(ds, pit, n_channels=len(aggregatable))
+        if thr is None:
+            return
+
+        self._state.status_progress("Aggregating localizations")
+        if not group_id:
+            new = self._build_aggregated_dataset(ds, thr)
+            if new is None:
+                self._state.status_progress("Aggregation produced no localizations")
+                QMessageBox.information(self, "Aggregate Localizations",
+                                        "No valid localizations to aggregate.")
+                return
+            idx = self._state.add_dataset(new)
+            self._state.status_progress("Aggregation done", 1.0)
+            self._show_render(idx)
+            return
+
+        # Multi-channel overlay: aggregate each channel, re-link as a new overlay
+        # (preserving each channel's LUT + alignment transform).
+        new_overlay_id = f"agg:{uuid.uuid4().hex}"
+        overlay_index = int(getattr(self, "_next_overlay_index", 1))
+        self._next_overlay_index = overlay_index + 1
+        prev_suspend = getattr(self._state, "suspend_auto_render", False)
+        self._state.suspend_auto_render = True
+        made: list[int] = []
+        skipped: list[str] = []
+        try:
+            for order, m in enumerate(members, start=1):
+                if m not in aggregatable:
+                    skipped.append(getattr(m, "name", "?"))
+                    continue
+                new = self._build_aggregated_dataset(m, thr)
+                if new is None:
+                    skipped.append(getattr(m, "name", "?"))
+                    continue
+                lut = m.state.get("overlay_lut") or m.state.get("render_channel_lut")
+                new.state.update({
+                    "overlay_id": new_overlay_id, "render_group_id": new_overlay_id,
+                    "overlay_index": overlay_index,
+                    "overlay_order": int(m.state.get("overlay_order", order)),
+                })
+                if lut:
+                    new.state["overlay_lut"] = lut
+                    new.state["render_channel_lut"] = lut
+                # Carry the channel's alignment (applied at display time) so the
+                # aggregated channels stay registered exactly as before.
+                for tkey in ("overlay_transform", "render_transform_2d"):
+                    tval = m.state.get(tkey)
+                    if tval is not None:
+                        new.state[tkey] = tval
+                        new.metadata[tkey] = tval
+                new.metadata["overlay_id"] = new_overlay_id
+                made.append(self._state.add_dataset(new))
+        finally:
+            self._state.suspend_auto_render = prev_suspend
+
+        if not made:
+            self._state.status_progress("Aggregation produced no localizations")
+            QMessageBox.information(self, "Aggregate Localizations",
+                                    "No valid localizations to aggregate.")
+            return
+        if skipped:
+            self._state.log(
+                f"Aggregation: skipped {len(skipped)} channel(s) without usable "
+                f"raw data: {', '.join(skipped)}.", "WARN")
+        self._state.log(
+            f"Aggregated overlay: {len(made)} channel(s) at photon threshold "
+            f"{int(thr)} → new overlay.")
+        self._state.status_progress("Aggregation done", 1.0)
+        self._show_render(made[0])
+
+    def _build_aggregated_dataset(self, ds, thr):
+        """Build (not add) an aggregated dataset from *ds* at photon threshold
+        *thr*, with the RIMF + aggregation provenance but no overlay state.
+        Returns the new dataset, or ``None`` when nothing aggregates."""
+        import uuid
+
+        import numpy as np
+
+        from ..core.dataset import build_localization_dataset
+        from ..core.mfx_sequence import photon_iterations_for_dataset
+        from ..analysis.aggregation import aggregate_dataset
+
+        pit = photon_iterations_for_dataset(ds)
+        res = aggregate_dataset(ds, photon_threshold=float(thr),
+                                photon_iters=pit.photon_iters)
+        if res is None or res["tid"].size == 0:
+            return None
+
+        loc = res["loc"]                       # metres, (M, 3) — raw (un-RIMF) z
+        attrs = {"eco": res["eco"], "n_agg": res["n"].astype(float)}
+        for key in ("ecc", "efo", "efc", "fbg", "dcr"):
+            if key in res:
+                attrs[key] = res[key]
+        source_rimf = float(getattr(ds.cali, "RIMF", 1.0) or 1.0)
+
+        new = build_localization_dataset(
+            name=f"{ds.name} (aggregated {int(thr)})",
+            x_nm=loc[:, 0] * 1e9, y_nm=loc[:, 1] * 1e9, z_nm=loc[:, 2] * 1e9,
+            tid=res["tid"], tim=res["tim"], attrs=attrs,
+            source_version="aggregated", prefs=self._state.prefs)
+        try:
+            new.set_rimf(source_rimf, source="aggregated (from raw z)")
+            new.derived["rimf"] = np.asarray([source_rimf], dtype=float)
+        except Exception:
+            pass
+        new.file.folder = f"<aggregated>/{uuid.uuid4().hex}"
+        new.metadata["aggregated"] = True
+        new.metadata["aggregation"] = {
+            "photon_threshold": float(thr),
+            "photon_iterations": list(pit.photon_iters),
+            "photon_iter_source": pit.source,
+            "source": ds.name,
+            "n_in": int(ds.prop.num_loc),
+            "n_out": int(res["tid"].size),
+        }
+        self._state.log(
+            f"Aggregated '{ds.name}' → '{new.name}': {ds.prop.num_loc:,} → "
+            f"{res['tid'].size:,} localizations (photon threshold {int(thr)}, "
+            f"photon iterations {pit.photon_iters} [{pit.source}]).",
+            dataset_idx=None)
+        return new
+
+    def _ask_aggregation_threshold(self, ds, pit, n_channels: int = 1) -> "int | None":
+        """Modal photon-threshold picker for aggregation (default 3000)."""
+        from PyQt6.QtWidgets import (
+            QDialog, QDialogButtonBox, QLabel, QSpinBox, QVBoxLayout)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Aggregate Localizations")
+        lay = QVBoxLayout(dlg)
+        ax = "" if pit.axial_iter is None else f", axial itr {pit.axial_iter}"
+        overlay_note = (f"<i>Overlay: all {n_channels} channels will be aggregated "
+                        f"and kept as an overlay.</i><br>" if n_channels > 1 else "")
+        info = QLabel(
+            f"<b>{ds.name}</b><br>{overlay_note}{ds.prop.num_loc:,} localizations · "
+            f"{ds.prop.num_traces:,} traces · {ds.prop.num_dim}-D<br>"
+            f"Photon count = eco over iterations {pit.photon_iters} "
+            f"(lateral itr {pit.lateral_iter}{ax}; {pit.source}).<br><br>"
+            "Within each trace, localizations are binned in time order until "
+            "their combined photon count reaches the threshold below.")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        row = QLabel("Photon threshold per aggregated localization:")
+        lay.addWidget(row)
+        spin = QSpinBox()
+        spin.setRange(1, 10_000_000)
+        spin.setSingleStep(500)
+        # Remember the last-used threshold across sessions (default 3000).
+        try:
+            last = int(self._state.prefs.get("aggregation", {}).get(
+                "photon_threshold", 3000))
+        except Exception:
+            last = 3000
+        spin.setValue(max(1, min(10_000_000, last)))
+        lay.addWidget(spin)
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        value = int(spin.value())
+        try:
+            self._state.prefs.setdefault("aggregation", {})["photon_threshold"] = value
+            self._state.save_prefs()
+        except Exception:
+            pass
+        return value
+
     def _current_group_luts(self, group_indices: list[int]) -> dict[int, str]:
         """Return current render LUTs for group members, if a render is open."""
         luts: dict[int, str] = {}
@@ -4464,6 +4742,10 @@ class MainWindow(QMainWindow):
             f"<h3>MINFLUX Data Viewer v{__version__}</h3>"
             "<p>A Python/Qt GUI tool for reading, filtering, and visualization of"
             " Abberior MINFLUX nanoscopy data.</p>"
+
+            "<p>Under active development, Source code on GitHub:<br>"
+            "<a href='https://github.com/embl-ic/minflux-viewer'>https://github.com/embl-ic/minflux-viewer</a></p>"
+
             "<p>The viewer was originally developed in MATLAB to support user "
             "projects at "
             "<a href='https://www.embl.org/about/info/imaging-centre/super-resolution-imaging/#vf-tabs__section-c46b219a-947a-467f-a169-838b85a0d06b'>" \

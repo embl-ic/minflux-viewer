@@ -174,7 +174,7 @@ class ScatterWindow(QWidget):
         self._3d_camera_initialised = False
         self._last_axis_text = "XY"
         self._channels: list[dict] = []
-        self._channel_rows: list[tuple[QLabel, QComboBox]] = []
+        self._channel_rows: list[tuple[QLabel, QLabel]] = []
         self._roi_highlight_2d = None
         self._roi_highlight_3d = None
 
@@ -409,45 +409,81 @@ class ScatterWindow(QWidget):
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
 
-        colour_menu = menu.addMenu("Colour by")
-        for i in range(self._cbar_combo.count()):
-            text = self._cbar_combo.itemText(i)
-            action = colour_menu.addAction(text)
-            action.setCheckable(True)
-            action.setChecked(text == self._cbar_combo.currentText())
-            action.triggered.connect(lambda _=False, value=text: self._cbar_combo.setCurrentText(value))
-
-        cmap_menu = menu.addMenu("Colormap")
-        current_cmap = self._cmap_combo.currentText()
-        for text in _NAMED_CMAPS:
-            action = cmap_menu.addAction(text)
-            action.setCheckable(True)
-            action.setChecked(text == current_cmap)
-            action.triggered.connect(lambda _=False, v=text: self._cmap_combo.setCurrentText(v))
-        cmap_menu.addSeparator()
-        solid_menu = cmap_menu.addMenu("Solid color")
-        for color_name in _SOLID_COLOR_NAMES:
-            action = solid_menu.addAction(color_name)
-            action.setCheckable(True)
-            action.setChecked(current_cmap == f"solid:{color_name}")
-            action.triggered.connect(lambda _=False, cn=color_name: self._cmap_combo.setCurrentText(f"solid:{cn}"))
-        solid_menu.addSeparator()
-        custom_action = solid_menu.addAction("Custom...")
-        custom_action.setCheckable(True)
-        custom_action.setChecked(current_cmap.startswith("solid:custom:"))
-        custom_action.triggered.connect(self._pick_solid_color)
-
-        bg_action = menu.addAction("Black Background")
-        bg_action.setCheckable(True)
-        bg_action.setChecked(self._background_is_black())
-        bg_action.triggered.connect(self._set_black_background)
-
         axis_menu = menu.addMenu("View")
         for axis in _AXIS_OPTIONS:
             action = axis_menu.addAction(axis)
             action.setCheckable(True)
             action.setChecked(axis == self._axis_combo.currentText())
             action.triggered.connect(lambda _checked=False, value=axis: self._axis_combo.setCurrentText(value))
+        menu.addSeparator()
+
+        is_overlay = len(self._channels) > 1
+        active_ci = self._active_channel_index() if is_overlay else None
+
+        if is_overlay and active_ci is not None:
+            # Overlay: right-click actions target the **active** channel (click a
+            # channel row to make it active). Its per-channel dropdown is gone.
+            ch = self._channels[active_ci]
+            active_color_by = ch.get("color_by")
+
+            # Colour by attribute (active channel); a solid-colour pick reverts it.
+            colour_menu = menu.addMenu(f"Colour by  (active channel {active_ci + 1})")
+            solid_action = colour_menu.addAction("Solid colour")
+            solid_action.setCheckable(True)
+            solid_action.setChecked(not active_color_by)
+            solid_action.triggered.connect(
+                lambda _=False, ci=active_ci: self._set_channel_color_by(ci, None))
+            colour_menu.addSeparator()
+            for i in range(self._cbar_combo.count()):
+                text = self._cbar_combo.itemText(i)
+                action = colour_menu.addAction(text)
+                action.setCheckable(True)
+                action.setChecked(text == active_color_by)
+                action.triggered.connect(
+                    lambda _=False, value=text, ci=active_ci: self._set_channel_color_by(ci, value))
+
+            # Solid colour of the active channel — same options as the render dropdown.
+            current_lut = str(ch.get("lut", "Gray"))
+            cmap_menu = menu.addMenu(f"Colormap  (active channel {active_ci + 1})")
+            for lut_name in CHANNEL_LUTS:
+                action = cmap_menu.addAction(lut_name)
+                action.setCheckable(True)
+                action.setChecked(not active_color_by and lut_name == current_lut)
+                action.triggered.connect(
+                    lambda _=False, v=lut_name, ci=active_ci: self._on_channel_lut(ci, v))
+        else:
+            colour_menu = menu.addMenu("Colour by")
+            for i in range(self._cbar_combo.count()):
+                text = self._cbar_combo.itemText(i)
+                action = colour_menu.addAction(text)
+                action.setCheckable(True)
+                action.setChecked(text == self._cbar_combo.currentText())
+                action.triggered.connect(lambda _=False, value=text: self._cbar_combo.setCurrentText(value))
+
+            cmap_menu = menu.addMenu("Colormap")
+            current_cmap = self._cmap_combo.currentText()
+            for text in _NAMED_CMAPS:
+                action = cmap_menu.addAction(text)
+                action.setCheckable(True)
+                action.setChecked(text == current_cmap)
+                action.triggered.connect(lambda _=False, v=text: self._cmap_combo.setCurrentText(v))
+            cmap_menu.addSeparator()
+            solid_menu = cmap_menu.addMenu("Solid color")
+            for color_name in _SOLID_COLOR_NAMES:
+                action = solid_menu.addAction(color_name)
+                action.setCheckable(True)
+                action.setChecked(current_cmap == f"solid:{color_name}")
+                action.triggered.connect(lambda _=False, cn=color_name: self._cmap_combo.setCurrentText(f"solid:{cn}"))
+            solid_menu.addSeparator()
+            custom_action = solid_menu.addAction("Custom...")
+            custom_action.setCheckable(True)
+            custom_action.setChecked(current_cmap.startswith("solid:custom:"))
+            custom_action.triggered.connect(self._pick_solid_color)
+
+        bg_action = menu.addAction("Black Background")
+        bg_action.setCheckable(True)
+        bg_action.setChecked(self._background_is_black())
+        bg_action.triggered.connect(self._set_black_background)
 
         if self._axis_combo.currentText() == "3D":
             menu.addSeparator()
@@ -784,7 +820,9 @@ class ScatterWindow(QWidget):
 
     def _build_channels(self) -> None:
         previous = {
-            ch.get("dataset_idx"): {"visible": ch.get("visible", True), "lut": ch.get("lut")}
+            ch.get("dataset_idx"): {"visible": ch.get("visible", True),
+                                    "lut": ch.get("lut"),
+                                    "color_by": ch.get("color_by")}
             for ch in self._channels
         }
         self._channels = []
@@ -797,6 +835,7 @@ class ScatterWindow(QWidget):
                 "name": ds.name,
                 "visible": bool(prev.get("visible", True)),
                 "lut": prev.get("lut") or ds.state.get("overlay_lut") or ds.state.get("render_channel_lut") or CHANNEL_LUTS[pos % len(CHANNEL_LUTS)],
+                "color_by": prev.get("color_by"),   # None = solid; else attribute
             })
 
     def _rebuild_channel_ui(self) -> None:
@@ -806,6 +845,7 @@ class ScatterWindow(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._channel_rows = []
+        active_idx = self._active_channel_index()
         for ch_idx, ch in enumerate(self._channels):
             row = QWidget()
             row.mousePressEvent = lambda event, i=ch_idx, r=row: self._on_channel_row_pressed(r, event, i)
@@ -815,16 +855,40 @@ class ScatterWindow(QWidget):
             vis_cb.setChecked(bool(ch["visible"]))
             vis_cb.toggled.connect(lambda checked, i=ch_idx: self._on_channel_visible(i, checked))
             lay.addWidget(vis_cb)
+            # Colour swatch replaces the per-channel colormap dropdown: the colour
+            # is defined in the render view (overlay_lut) and can be changed here
+            # only for the ACTIVE channel via the right-click Colormap menu.
+            swatch = QLabel()
+            swatch.setFixedSize(14, 14)
+            self._style_channel_swatch(swatch, str(ch["lut"]))
+            lay.addWidget(swatch)
             name_lbl = QLabel(f"{ch_idx + 1}: {ch['name']}")
+            font = name_lbl.font()
+            font.setBold(ch_idx == active_idx)
+            name_lbl.setFont(font)
             lay.addWidget(name_lbl, stretch=1)
-            lut = QComboBox()
-            lut.addItems(CHANNEL_LUTS)
-            lut.setCurrentText(str(ch["lut"]))
-            lut.currentTextChanged.connect(lambda text, i=ch_idx: self._on_channel_lut(i, text))
-            lay.addWidget(lut)
             self._channel_layout.addWidget(row)
-            self._channel_rows.append((name_lbl, lut))
+            self._channel_rows.append((name_lbl, swatch))
         self._channel_area.setVisible(len(self._channels) > 1)
+
+    def _style_channel_swatch(self, swatch: QLabel, lut: str) -> None:
+        r, g, b, _ = self._lut_color(lut)
+        swatch.setStyleSheet(
+            f"background-color: rgb({r},{g},{b}); border: 1px solid #888;")
+
+    def _active_channel_index(self) -> "int | None":
+        for i, ch in enumerate(self._channels):
+            if ch.get("dataset_idx") == self._dataset_idx:
+                return i
+        return 0 if self._channels else None
+
+    def _refresh_channel_highlight(self) -> None:
+        """Bold the active channel's name (the one the right-click menu targets)."""
+        active_idx = self._active_channel_index()
+        for i, (name_lbl, _swatch) in enumerate(self._channel_rows):
+            font = name_lbl.font()
+            font.setBold(i == active_idx)
+            name_lbl.setFont(font)
 
     def _on_channel_row_pressed(self, row: QWidget, event, ch_idx: int) -> None:
         if event.button() == Qt.MouseButton.LeftButton and 0 <= ch_idx < len(self._channels):
@@ -833,6 +897,7 @@ class ScatterWindow(QWidget):
                 self._dataset_idx = ds_idx
                 self._state.set_active(ds_idx)
                 self._update_overlay_title()
+                self._refresh_channel_highlight()
         QWidget.mousePressEvent(row, event)
 
     def _on_channel_visible(self, ch_idx: int, visible: bool) -> None:
@@ -843,10 +908,20 @@ class ScatterWindow(QWidget):
     def _on_channel_lut(self, ch_idx: int, lut: str) -> None:
         if 0 <= ch_idx < len(self._channels):
             self._channels[ch_idx]["lut"] = lut
+            self._channels[ch_idx]["color_by"] = None    # solid colour picked
             ds_idx = self._channels[ch_idx]["dataset_idx"]
             if 0 <= ds_idx < len(self._state.datasets):
                 self._state.datasets[ds_idx].state["render_channel_lut"] = lut
                 self._state.datasets[ds_idx].state["overlay_lut"] = lut
+            if 0 <= ch_idx < len(self._channel_rows):
+                self._style_channel_swatch(self._channel_rows[ch_idx][1], lut)
+            self._redraw_current(save_state=False)
+
+    def _set_channel_color_by(self, ch_idx: int, attr: "str | None") -> None:
+        """Colour an overlay channel by an attribute (``attr``) or, when ``None``,
+        revert it to its solid channel colour."""
+        if 0 <= ch_idx < len(self._channels):
+            self._channels[ch_idx]["color_by"] = attr
             self._redraw_current(save_state=False)
 
     def _update_overlay_title(self) -> None:
@@ -1155,8 +1230,14 @@ class ScatterWindow(QWidget):
             y = locs[indices, cj]
             xs.append(x)
             ys.append(y)
-            color = self._lut_color(str(ch.get("lut", "Gray")))
-            brushes.extend([pg.mkBrush(*color)] * indices.size)
+            color_by = ch.get("color_by")
+            if color_by:
+                _v, bins, _lbl, _lo, _hi = self._color_bins_for_points(
+                    x, y, None, ds, indices, attr=color_by)
+                brushes.extend(self._brushes_for_bins(bins))
+            else:
+                color = self._lut_color(str(ch.get("lut", "Gray")))
+                brushes.extend([pg.mkBrush(*color)] * indices.size)
             total += int(np.count_nonzero(mask))
         if not xs:
             self._scatter_2d.setData([], [])
@@ -1188,9 +1269,16 @@ class ScatterWindow(QWidget):
             if indices.size == 0:
                 continue
             pos_parts.append(locs[indices, :3])
-            r, g, b, a = self._lut_color(str(ch.get("lut", "Gray")), alpha=220)
-            rgba = np.tile(np.array([[r / 255.0, g / 255.0, b / 255.0, a / 255.0]], dtype=np.float32), (indices.size, 1))
-            rgba_parts.append(rgba)
+            color_by = ch.get("color_by")
+            if color_by:
+                p = locs[indices, :3]
+                _v, bins, _lbl, _lo, _hi = self._color_bins_for_points(
+                    p[:, 0], p[:, 1], p[:, 2], ds, indices, attr=color_by)
+                rgba_parts.append(self._rgba_for_bins(bins, for_3d=True).astype(np.float32))
+            else:
+                r, g, b, a = self._lut_color(str(ch.get("lut", "Gray")), alpha=220)
+                rgba = np.tile(np.array([[r / 255.0, g / 255.0, b / 255.0, a / 255.0]], dtype=np.float32), (indices.size, 1))
+                rgba_parts.append(rgba)
             total += int(np.count_nonzero(mask))
         if not pos_parts:
             self._3d_scatter.setData(pos=np.empty((0, 3)))
@@ -1347,10 +1435,13 @@ class ScatterWindow(QWidget):
 
     def _color_bins_for_points(
         self, x: np.ndarray, y: np.ndarray, z: np.ndarray | None,
-        ds, indices: np.ndarray,
+        ds, indices: np.ndarray, attr: "str | None" = None,
     ) -> tuple[np.ndarray, np.ndarray, str, float, float]:
-        """Return values, uint8 color bins, label, and display levels."""
-        c_name = self._cbar_combo.currentText()
+        """Return values, uint8 color bins, label, and display levels.
+
+        ``attr`` overrides the window's colour-by combo (used to colour one
+        overlay channel by a chosen attribute)."""
+        c_name = attr if attr is not None else self._cbar_combo.currentText()
         # Resolve through _color_cache_for_dataset (→ attr_values_1d), not a bare
         # ``c_name in ds.attr`` check: coordinate views xnm/ynm/znm are NOT keys
         # in ds.attr (the store holds loc_x/loc_y/loc_z), so that check wrongly

@@ -6,6 +6,7 @@ Fiji-style Brightness & Contrast dialog for rendered scalar tiles.
 
 from __future__ import annotations
 
+import sys
 from typing import Callable
 
 import numpy as np
@@ -134,15 +135,23 @@ class BrightnessContrastDialog(QDialog):
         self._levels_initialized = False
 
         self.setWindowTitle("Brightness / Contrast")
-        # A Tool palette *owned* by its opener (render / TIFF / segmentation window):
-        # it floats above its owner and shares the owner's virtual desktop. It is
-        # deliberately NOT WindowStaysOnTopHint — a WS_EX_TOPMOST window is shown on
-        # *every* Windows virtual desktop (it "follows" you across desktops), which
-        # is unwanted. Ownership already keeps it above its opener without topmost.
-        self.setWindowFlags(
-            self.windowFlags()
-            | Qt.WindowType.Tool
-        )
+        # A palette *owned* by its opener (render / TIFF / segmentation window,
+        # passed as ``parent``): being owned it floats above its owner in z-order
+        # and gets no taskbar/Dock button, without needing WindowStaysOnTopHint
+        # (a WS_EX_TOPMOST window is shown on *every* Windows virtual desktop and
+        # follows you across desktops -- unwanted).
+        #
+        # Window type is platform-gated. On Windows we must NOT add ``Qt.Tool``:
+        # it sets WS_EX_TOOLWINDOW, and a tool window is shown on *every* virtual
+        # desktop (documented Windows behavior for tool windows, independent of
+        # WindowStaysOnTopHint). A plain owned dialog is instead bound to the
+        # desktop it was created on and only moves if the user drags it there --
+        # which is what we want. On macOS/Linux ``Qt.Tool`` gives the desired thin
+        # utility-palette look and has no multi-desktop issue, so keep it there.
+        flags = self.windowFlags()
+        if not sys.platform.startswith("win"):
+            flags |= Qt.WindowType.Tool
+        self.setWindowFlags(flags)
         self.resize(230, 230)
         self._build_ui()
 

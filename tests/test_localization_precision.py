@@ -242,6 +242,28 @@ def test_crlb_axial_background_factor():
     assert r.median_sigma_z_bg > r.median_sigma_z_ideal
 
 
+def test_crlb_per_dimension_photons():
+    """N_xy (lateral) drives σ_xy; N_z (axial) drives σ_z — independently."""
+    eco_xy = np.full(4, 200.0)          # final lateral iteration photons
+    eco_z = np.full(4, 100.0)           # final axial iteration photons
+    r = crlb_precision(eco_xy, L_nm=50.0, sigma_q_nm=250.0, L_z_nm=60.0, eco_z=eco_z)
+    assert r.per_dimension_photons is True
+    assert r.median_n == pytest.approx(200.0)          # N_xy
+    assert r.median_n_z == pytest.approx(100.0)        # N_z
+    # σ_xy uses N_xy=200, σ_z uses N_z=100.
+    assert np.allclose(r.per_loc_sigma_ideal, 50.0 / (2.0 * np.sqrt(2.0 * 200.0)
+                       * (1.0 - 50.0**2 * np.log(2.0) / 250.0**2)))
+    assert np.allclose(r.per_loc_sigma_z_ideal, 60.0 / (4.0 * np.sqrt(100.0)))
+
+
+def test_crlb_backward_compatible_single_eco():
+    """Without eco_z, N_z equals N_xy (old behaviour) and per_dimension is False."""
+    eco = np.full(4, 150.0)
+    r = crlb_precision(eco, L_nm=50.0, sigma_q_nm=250.0, L_z_nm=60.0)
+    assert r.per_dimension_photons is False
+    assert np.allclose(r.per_loc_sigma_z_ideal, 60.0 / (4.0 * np.sqrt(150.0)))
+
+
 def test_crlb_no_axial_when_lz_absent():
     r = crlb_precision(np.full(4, 150.0), L_nm=50.0, sigma_q_nm=250.0)
     assert not r.has_z

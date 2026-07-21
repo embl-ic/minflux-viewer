@@ -1330,6 +1330,36 @@ def effective_attr_values_1d(ds: "MinfluxDataset", attr: str) -> "np.ndarray | N
     return None
 
 
+def iteration_attr_values_1d(
+    ds: "MinfluxDataset",
+    attr: str,
+    iter_index: int,
+    *,
+    itr: "str | int" = "last",
+    vld_only: bool = True,
+) -> "np.ndarray | None":
+    """Per-localization value of *attr* taken from a **specific iteration**.
+
+    Gathers each localization's value of *attr* from its ``itr == iter_index``
+    raw row and lays it onto the ``itr``/``vld_only`` materialized selection
+    (default the last-valid rows, i.e. the order of
+    ``mfx_get(ds, …, itr="last", vld_only=True)`` / ``ds.attr`` when materialized
+    last-valid). Used e.g. to read the photon count (``eco``) at the final
+    *lateral* iteration for the lateral CRLB bound, since the materialized value
+    is the final *axial* iteration. ``None`` when the raw store is empty or the
+    attribute/iteration is unavailable. NaN for localizations lacking that
+    iteration.
+    """
+    raw = getattr(ds, "mfx_raw", None)
+    if raw is None or len(raw) == 0:
+        return None
+    target_mask = mfx_row_mask(raw, itr=itr, vld_only=vld_only)
+    source_mask = mfx_row_mask(raw, itr=int(iter_index), vld_only=False)
+    if target_mask is None or source_mask is None:
+        return None
+    return _gather_iteration_values(raw, attr, source_mask, target_mask)
+
+
 def mfx_get(
     ds: "MinfluxDataset",
     attr: str,

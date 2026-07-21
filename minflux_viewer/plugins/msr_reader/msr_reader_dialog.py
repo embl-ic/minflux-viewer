@@ -4174,6 +4174,19 @@ class MsrReaderDialog(QWidget):
                     dataset.metadata["msr_source_path"] = str(msr_path)
                     dataset.metadata["msr_dataset_key"] = key
                     dataset.metadata["msr_dataset_name"] = key
+                    # Record the acquisition sequence so the photon-bearing
+                    # iterations (used by aggregation and per-dimension CRLB) can
+                    # be detected from the beam scale rather than a heuristic.
+                    try:
+                        from ...msr.io import read_zarr_attrs
+                        from ...core.mfx_sequence import extract_sequence_from_zattrs
+                        _zroot = ds.get("zroot")
+                        if _zroot is not None:
+                            _seq = extract_sequence_from_zattrs(read_zarr_attrs(_zroot, "mfx"))
+                            if _seq:
+                                dataset.metadata["mfx_sequence"] = _seq
+                    except Exception:
+                        pass
                     if not individual:
                         dataset.metadata["overlay_id"] = render_group_id
                         dataset.metadata["overlay_index"] = overlay_index
