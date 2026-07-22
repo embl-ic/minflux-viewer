@@ -22,13 +22,11 @@ from PyQt6.QtCore import QEvent, QObject, QPoint, QRunnable, QThreadPool, QTimer
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
-    QColor,
     QDragEnterEvent,
     QDropEvent,
     QIcon,
     QKeySequence,
     QShortcut,
-    QPalette,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -47,7 +45,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStyle,
-    QStyleOptionMenuItem,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -114,83 +111,6 @@ _POLY_FAMILY: tuple[tuple[str, str, str, float], ...] = (
     ("Polyhedron (3D)", "polyhedron", "polyhedron.png", 0.0),
 )
 
-_AI_UNAPPROVED_MENU_MIX = 0.28
-
-
-def _luminance(color: QColor) -> float:
-    """Approximate perceived luminance in sRGB space."""
-    return (
-        0.2126 * color.redF()
-        + 0.7152 * color.greenF()
-        + 0.0722 * color.blueF()
-    )
-
-
-def _contrast_ratio(a: QColor, b: QColor) -> float:
-    light = max(_luminance(a), _luminance(b)) + 0.05
-    dark = min(_luminance(a), _luminance(b)) + 0.05
-    return light / dark
-
-
-def _blend_color(foreground: QColor, background: QColor, fraction: float) -> QColor:
-    fraction = max(0.0, min(1.0, float(fraction)))
-    inv = 1.0 - fraction
-    return QColor(
-        round(foreground.red() * inv + background.red() * fraction),
-        round(foreground.green() * inv + background.green() * fraction),
-        round(foreground.blue() * inv + background.blue() * fraction),
-        foreground.alpha(),
-    )
-
-
-def _ai_unapproved_menu_text(option: QStyleOptionMenuItem) -> QColor:
-    """Muted menu text that remains readable on light and dark palettes."""
-    selected = bool(option.state & QStyle.StateFlag.State_Selected)
-    text_role = (
-        QPalette.ColorRole.HighlightedText
-        if selected
-        else QPalette.ColorRole.Text
-    )
-    bg_role = (
-        QPalette.ColorRole.Highlight
-        if selected
-        else QPalette.ColorRole.Window
-    )
-    base = option.palette.color(text_role)
-    background = option.palette.color(bg_role)
-    muted = _blend_color(base, background, _AI_UNAPPROVED_MENU_MIX)
-    if _contrast_ratio(muted, background) >= 4.5:
-        return muted
-    fallback = _blend_color(base, background, 0.12)
-    if _contrast_ratio(fallback, background) >= 4.5:
-        return fallback
-    return base
-
-
-class _AiMenuStyle(QProxyStyle):
-    """Draw unverified QAction text grey without replacing native menu rows."""
-
-    def drawControl(self, element, option, painter, widget=None):  # noqa: N802 - Qt API
-        if (
-            element == QStyle.ControlElement.CE_MenuItem
-            and isinstance(option, QStyleOptionMenuItem)
-            and isinstance(widget, QMenu)
-        ):
-            action = widget.actionAt(option.rect.center())
-            if action is not None and action.property("ai_unapproved"):
-                opt = QStyleOptionMenuItem(option)
-                text_color = _ai_unapproved_menu_text(option)
-                for role in (
-                    QPalette.ColorRole.Text,
-                    QPalette.ColorRole.WindowText,
-                    QPalette.ColorRole.ButtonText,
-                    QPalette.ColorRole.HighlightedText,
-                ):
-                    opt.palette.setColor(role, text_color)
-                return super().drawControl(element, opt, painter, widget)
-        return super().drawControl(element, option, painter, widget)
-
-
 class _ScrollableMenuStyle(QProxyStyle):
     """Make an over-tall menu scroll (arrows at the top/bottom edges, which
     auto-scroll on hover) instead of wrapping into multiple columns. Used for
@@ -256,7 +176,6 @@ class MainWindow(QMainWindow):
         self._script_editor_win = None
         self._shortcut_actions: dict[str, QAction] = {}
         self._roi_tool_actions: dict[str, QAction] = {}
-        self._ai_menu_styles: list[_AiMenuStyle] = []
         self._window_cycle_index = -1
         # One render window per dataset: {dataset_idx: RenderWindow}
         self._render_windows: dict[int, "RenderWindow"] = {}
@@ -851,40 +770,16 @@ class MainWindow(QMainWindow):
         for action in actions:
             self._mark_action_ai_unapproved(action)
 
-        for menu in (
-            u.menuFile,
-            u.menuView,
-            self.menuProcessChannel,
-            self.menuProcessRoi,
-            self.menuRoiConvert,
-            u.menuBatchProcessing,
-            u.menuAnalysis,
-            self.menuMeasure,
-            self.menuAnalyzeClustering,
-            self.menuHlyBPair,
-            self.menuAnalyzeSegmentation,
-            self.menuSegNPC,
-            u.menuTracking,
-            u.menuHelp,
-        ):
-            self._install_ai_menu_style(menu)
-
     def _mark_action_ai_unapproved(self, action: QAction) -> None:
-        action.setProperty("ai_unapproved", True)
+        """Flag an AI-generated/unapproved action with a status-bar hover note.
+
+        The action's appearance is left untouched — approved and unapproved
+        menu entries render identically; only the status-bar tip differs.
+        """
         tip = action.statusTip() or action.toolTip()
         note = "AI-generated; pending human approval."
         action.setStatusTip(f"{tip} {note}".strip() if tip else note)
         self.addAction(action)
-
-    def _install_ai_menu_style(self, menu: QMenu) -> None:
-        """Keep menu rows native-aligned while painting unapproved actions grey."""
-        if menu.property("ai_menu_style_installed"):
-            return
-        style = _AiMenuStyle(menu.style())
-        style.setParent(menu)
-        menu.setStyle(style)
-        menu.setProperty("ai_menu_style_installed", True)
-        self._ai_menu_styles.append(style)
 
     def _apply_shortcuts(self) -> None:
         shortcuts = self._state.prefs.get("shortcuts", {})
@@ -1672,7 +1567,6 @@ class MainWindow(QMainWindow):
         plugins.ensure_loaded()
         menu = self._ui.menuPlugins
         menu.clear()
-        self._install_ai_menu_style(menu)
 
         entries = plugins.available()
         if not entries:
@@ -4757,8 +4651,9 @@ class MainWindow(QMainWindow):
             "<p>The interface deliberately follows an ImageJ-like design, in hope that users "
             "can more easily adapt to it.</p>"
             "<p>To support user judgment, functions generated by AI agents that "
-            "have not yet been fully approved by a human are shown in grey. Human-approved "
-            "or human-scripted functions remain in black.</p>"
+            "have not yet been fully approved by a human show a note in the status "
+            "bar (\"AI-generated; pending human approval.\") when you hover over "
+            "them.</p>"
             "<p>EMBL Imaging Centre<br>"
             "<a href='mailto:ziqiang.huang@embl.de'>ziqiang.huang@embl.de</a></p>",
         )
@@ -4795,7 +4690,9 @@ class MainWindow(QMainWindow):
         fm = self._toolbar_search.fontMetrics()
         width = fm.horizontalAdvance("x" * 25) + 24   # ~25 letters + padding/clear button
         self._toolbar_search.setFixedWidth(int(width))
-        tb.addWidget(self._toolbar_search)
+        #tb.addWidget(self._toolbar_search)
+        self._toolbar_search_action = tb.addWidget(self._toolbar_search)
+        self._toolbar_search_action.setVisible(False)          # <-- for the moment (2026.07.22) the search is disabled until the command finder is fully implemented, so hide the field to avoid confusion.
         self._setup_command_search()
 
     def _setup_command_search(self) -> None:

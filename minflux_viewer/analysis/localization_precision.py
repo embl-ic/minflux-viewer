@@ -1185,8 +1185,10 @@ class FRCResultDialog(QDialog):
         if result.mode == "combined":
             pts_txt = (f"<b>{result.n_points:,}</b> combined positions "
                        f"(from {result.n_locs:,} localizations)")
+            mode_txt = "per-trace combined"
         else:
             pts_txt = f"<b>{result.n_locs:,}</b> localizations"
+            mode_txt = "per-localization"
         info = QLabel(
             f"{pts_txt} &nbsp;|&nbsp; {result.n_repeats}× averaged "
             f"&nbsp;|&nbsp; {result.image_px}² px @ {result.pixel_size_nm:.2f} nm/px"
@@ -1196,7 +1198,7 @@ class FRCResultDialog(QDialog):
 
         headline = QLabel(
             f"<span style='font-size:18px'><b>FRC resolution = {_res(res)}</b></span>"
-            "<span style='color:gray'> &nbsp;(1/7 threshold)</span>"
+            f"<span style='color:gray'> &nbsp;({mode_txt}, 1/7 threshold)</span>"
         )
         headline.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(headline)
@@ -1231,9 +1233,11 @@ class FRCResultDialog(QDialog):
             "high-frequency tail cut at 0.8·q<sub>max</sub>.<br>"
             "resolution = 1 ∕ q<sub>c</sub> , with q<sub>c</sub> the frequency where "
             "FRC first drops below 1/7.<br>"
-            "<i>points</i>: <b>per localization</b> uses every localization (optimistic "
-            "when emitters are localized many times); <b>combined</b> first collapses "
-            "each trace to its mean position — the honest MINFLUX resolution."
+            "<i>FRC mode</i>: <b>per localization</b> uses every localization and is "
+            "kept as the default for continuity, but can be optimistic when emitters "
+            "are localized many times; <b>per-trace combined</b> first collapses each "
+            "trace to its mean position and is closer to the endpoint image-resolution "
+            "number reported by pyMINFLUX."
             + _references_html(
                 "<a href='https://www.nature.com/articles/s41592-019-0688-0'>Gwosch "
                 "<i>et al.</i>, <i>Nat. Methods</i> 17:217 (2020)</a>",
@@ -1247,23 +1251,23 @@ class FRCResultDialog(QDialog):
         note.setStyleSheet("color: gray; font-size: 11px;")
         root.addWidget(note)
 
-        # -- controls: points mode + editable pixel size + recompute ------
+        # -- controls: FRC mode + editable pixel size + recompute ---------
         btn_row = QHBoxLayout()
         self._status_lbl = QLabel("")
         self._status_lbl.setStyleSheet("color: #6c6;")
         btn_row.addWidget(self._status_lbl)
         btn_row.addStretch()
-        btn_row.addWidget(QLabel("points:"))
+        btn_row.addWidget(QLabel("FRC mode:"))
         self._mode_combo = QComboBox()
-        self._mode_combo.addItem("per localization", "localization")
-        self._mode_combo.addItem("combined (per trace)", "combined")
+        self._mode_combo.addItem("per localization (default)", "localization")
+        self._mode_combo.addItem("per-trace combined", "combined")
         has_tid = self._tid is not None
         self._mode_combo.model().item(1).setEnabled(has_tid)
         idx = self._mode_combo.findData(result.mode if has_tid else "localization")
         self._mode_combo.setCurrentIndex(max(0, idx))
         self._mode_combo.setToolTip(
-            "Run FRC on every localization, or on one mean position per trace "
-            "(combined) — the honest MINFLUX resolution. Needs trace IDs.")
+            "Choose the point set used for FRC. Per localization is the default; "
+            "per-trace combined uses one mean position per trace and needs trace IDs.")
         btn_row.addWidget(self._mode_combo)
         btn_row.addSpacing(8)
         btn_row.addWidget(QLabel("pixel (nm):"))
@@ -1275,7 +1279,7 @@ class FRCResultDialog(QDialog):
         self._px_spin.setToolTip("Super-resolution render pixel size for the FRC images.")
         btn_row.addWidget(self._px_spin)
         recompute = QPushButton("Recompute")
-        recompute.setToolTip("Re-run FRC with the chosen points mode and pixel size.")
+        recompute.setToolTip("Re-run FRC with the chosen mode and pixel size.")
         recompute.clicked.connect(self._recompute)
         btn_row.addWidget(recompute)
         close_btn = QPushButton("Close")
