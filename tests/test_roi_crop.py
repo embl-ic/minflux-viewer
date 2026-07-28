@@ -132,3 +132,27 @@ def test_subset_preserves_native_z_no_rimf_bake():
     mask = RC.compute_crop_mask(ds, _rect(0, 0, 1000, 1000))  # keep both
     sub = RC.subset_dataset(ds, mask, name="CROP")
     np.testing.assert_allclose(sorted(np.asarray(sub.attr["loc_z"]) * 1e9), [40.0, 120.0], atol=1e-6)
+
+
+def test_crop_options_defaults_for_roi_duplicate():
+    # Defaults the Duplicate/crop dialog opens with on an active ROI region.
+    o = RC.CropOptions()
+    assert o.exact_shape is True       # "duplicate only the ROI region" checked
+    assert o.clip is False             # trace-complete, not clipped
+    assert o.z_all is True             # All Z checked
+    assert o.spatial_filter is False   # Model B subset, not a filter
+    assert o.stop_asking is False
+
+
+def test_auto_z_bounds_trims_sparse_tails():
+    from minflux_viewer.ui.crop_dialog import auto_z_bounds
+
+    rng = np.random.default_rng(0)
+    z = np.concatenate([rng.normal(50.0, 12.0, 5000), [-300.0, 300.0, 305.0]])
+    counts, edges = np.histogram(z, bins=64)
+    lo, hi = auto_z_bounds(counts, edges)
+    assert z.min() < lo < 50.0 < hi < z.max()   # brackets the bulk, trims outliers
+    assert (hi - lo) < 150.0                     # much tighter than the ~600 nm extent
+
+    # Degenerate inputs fall back to the full extent.
+    assert auto_z_bounds(np.zeros(4), np.linspace(0.0, 8.0, 5)) == (0.0, 8.0)

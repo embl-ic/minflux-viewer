@@ -174,3 +174,36 @@ def test_plot_window_live_refit_and_writeback():
     win._recompute_current()
     assert win._current[0]["valid"] is False
     assert win._current[0]["n_used"] == 1
+
+
+def test_plot_window_single_channel_shows_bead_drift():
+    """Single-channel 'Align channel': no alignment, but the beads + their per-axis
+    drift are recorded so the scatter/table/banner can show them. Exercised at the
+    logic level (the drift branch of `_recompute_current` is Qt-free)."""
+    pytest.importorskip("PyQt6")
+    from minflux_viewer.plugins.msr_reader.msr_reader_dialog import AlignmentPlotWindow
+
+    ids = np.array([1, 2, 3], dtype=np.uint32)
+    pos_nm = np.array([[0.0, 0.0, 0.0], [500.0, 0.0, 0.0], [0.0, 500.0, 0.0]])
+    drift_nm = np.array([[3.0, 2.0, 1.0], [20.0, 10.0, 5.0], [4.0, 3.0, 2.0]])
+    data = {"name": "560", "bead_ids": ids, "rids": ["R1", "R2", "R3"],
+            "pos_nm": pos_nm, "drift_nm": drift_nm}
+
+    win = AlignmentPlotWindow.__new__(AlignmentPlotWindow)
+    win._single_channel = data
+    win._excluded_gris = set()
+
+    win._recompute_current()
+    cur = win._current[0]
+    assert cur["valid"] is True
+    assert cur["ref_name"] == cur["mov_name"] == "560"
+    assert cur["rids"] == ["R1", "R2", "R3"]
+    np.testing.assert_allclose(cur["drift"], drift_nm)      # drift carried through, not re-fit
+    np.testing.assert_array_equal(cur["included"], [True, True, True])
+    assert "mov_xyz" not in cur                             # no alignment inputs for one channel
+
+    # excluding a bead drops it from the included mask (drift summary), values unchanged
+    win._excluded_gris.add(2)
+    win._recompute_current()
+    np.testing.assert_array_equal(win._current[0]["included"], [True, False, True])
+    np.testing.assert_allclose(win._current[0]["drift"], drift_nm)

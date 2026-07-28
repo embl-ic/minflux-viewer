@@ -42,6 +42,34 @@ def test_close_action_shortcuts(_app):
     w.close()
 
 
+def test_file_menu_save_as_layout(_app):
+    w = MainWindow(AppState())
+    actions = [a for a in w._ui.menuFile.actions() if not a.isSeparator()]
+    texts = [a.text() for a in actions]
+
+    assert texts[:6] == [
+        "Open...",
+        "Open Sample Data",
+        "Open Recent",
+        "Close Dataset",
+        "Close All Datasets",
+        "Close All Windows",
+    ]
+    assert texts[6:8] == ["Save...", "Save As"]
+
+    save_as = w.menuSaveAs
+    assert [a.text() for a in save_as.actions()] == [
+        "MINFLUX data formats (.mat; .npy; .json)",
+        "MINFLUX .msr file (experimental)",
+        "Spreadsheet (.csv)",
+        "Zarr (.zarr v2) format",
+        "HDF5...",
+        "OME-TIFF...",
+        "OME-NGFF 0.5 / Zarr v3...",
+    ]
+    w.close()
+
+
 def test_close_all_windows_keeps_log_and_console_closes_dialogs(_app):
     w = MainWindow(AppState())
     w._ensure_log_window(show=True)

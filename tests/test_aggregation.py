@@ -9,9 +9,11 @@ import numpy as np
 import pytest
 
 from minflux_viewer.analysis.aggregation import (
+    aggregate_dataset,
     aggregate_localizations,
     event_ids,
     localization_photons,
+    raw_dict_from_dataset,
 )
 from minflux_viewer.core import mfx_sequence as seq
 
@@ -102,9 +104,27 @@ def test_photon_threshold_binning_and_flags():
     assert list(res["bot"]) == [1, 0]
     assert list(res["eot"]) == [0, 1]
     assert list(res["n"]) == [3, 1]
-    # position = mean of member positions (x = mean(0,10,20)=10 for chunk1).
+    # Equal photon weights make the weighted position the arithmetic mean.
     assert np.isclose(res["loc"][0, 0], 10.0)
     assert np.isclose(res["loc"][1, 0], 30.0)
+
+
+def test_position_and_modern_time_are_photon_weighted():
+    events = [
+        (1, 2.0, (0.0, 0.0, 0.0), 100.0),
+        (1, 4.0, (10.0, 20.0, 0.0), 300.0),
+    ]
+    raw = _make_raw(events)
+    res = aggregate_localizations(
+        raw,
+        photon_threshold=1000,
+        photon_iters=[8, 9],
+        carry_attrs=False,
+    )
+
+    assert np.isclose(res["eco"][0], 400.0)
+    assert np.isclose(res["tim"][0], 3.5)
+    assert np.allclose(res["loc"][0], [7.5, 15.0, 0.0])
 
 
 def test_invalid_and_nonfinal_rows_excluded():
@@ -149,6 +169,36 @@ def test_two_traces_stay_separate():
                                   carry_attrs=False)
     # Each trace's single 6000-photon event exceeds threshold -> one point each.
     assert sorted(res["tid"].tolist()) == [1, 2]
+
+
+def test_raw_dict_infers_fnl_for_legacy_raw_store():
+    """Older nested/m2205 raw stores do not carry fnl; infer final event rows."""
+    raw = {
+        "itr": np.tile(np.arange(3), 2),
+        "vld": np.ones(6, dtype=bool),
+        "eco": np.array([10, 20, 30, 40, 50, 60], dtype=float),
+        "tid": np.repeat([7, 7], 3),
+        "tim": np.repeat([1.0, 2.0], 3),
+        "loc_x": np.repeat([1.0e-9, 3.0e-9], 3),
+        "loc_y": np.repeat([2.0e-9, 4.0e-9], 3),
+        "loc_z": np.zeros(6),
+    }
+    ds = type("Dataset", (), {"mfx_raw": raw})()
+
+    prepared = raw_dict_from_dataset(ds)
+    assert prepared is not None
+    assert prepared["fnl"].tolist() == [0, 0, 1, 0, 0, 1]
+
+    res = aggregate_dataset(
+        ds,
+        photon_threshold=1000,
+        photon_iters=[2],
+    )
+    assert res["tid"].tolist() == [7]
+    assert np.isclose(res["eco"][0], 90.0)
+    assert res["n"][0] == 2
+    assert np.isclose(res["tim"][0], 1.0)
+    assert np.allclose(res["loc"][0, :2], [7.0e-9 / 3.0, 10.0e-9 / 3.0])
 
 
 # ---------------------------------------------------------------------------

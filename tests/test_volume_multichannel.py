@@ -6,9 +6,84 @@ import numpy as np
 import pytest
 
 from minflux_viewer.ui.volume_window import (
+    _clip_region,
+    _precision_volume_3d,
     lut_rgb,
     make_multichannel_volume_payload,
+    make_volume_payload,
 )
+
+
+def _grid_edges(lo, hi, n):
+    return [np.linspace(lo[i], hi[i], n[i] + 1) for i in range(3)]
+
+
+def test_volume_render_methods_differ_and_conserve_mass():
+    rng = np.random.default_rng(1)
+    n = 8000
+    locs = np.column_stack(
+        [rng.normal(0, 150, n), rng.normal(0, 150, n), rng.normal(0, 50, n)]
+    )
+    sigma = np.column_stack(
+        [rng.uniform(2, 5, n), rng.uniform(2, 5, n), rng.uniform(4, 9, n)]
+    )
+    common = dict(xy_voxel_nm=3.0, z_voxel_nm=3.0, max_dim=512, max_voxels=4_000_000)
+    peaks = {}
+    for method in ("histogram", "bilinear", "bicubic", "basic", "fixed_gaussian"):
+        p = make_volume_payload(
+            locs, render_method=method, sigma_nm_xyz=(5.0, 5.0, 5.0), **common
+        )
+        assert np.isclose(p.scalar.sum(), n, rtol=1e-4)   # mass-conserving
+        peaks[method] = float(p.scalar.max())
+    prec = make_volume_payload(
+        locs, render_method="precision_gaussian", precision_sigma_nm=sigma, **common
+    )
+    assert np.isclose(prec.scalar.sum(), n, rtol=1e-4)
+    # Histogram is crisp (highest peak); the smoothing methods spread it out.
+    assert peaks["histogram"] > peaks["bilinear"]
+    assert peaks["histogram"] > peaks["basic"]
+
+
+def test_precision_volume_uses_per_localization_sigma():
+    # Two identical points, one with tiny sigma (stays sharp) and one large
+    # (spreads): the large-sigma point must occupy more voxels.
+    edges = _grid_edges([-50, -50, -50], [50, 50, 50], [50, 50, 50])
+    sharp = _precision_volume_3d(
+        np.array([[0.0, 0.0, 0.0]]), np.array([[0.5, 0.5, 0.5]]), edges, (2.0, 2.0, 2.0)
+    )
+    broad = _precision_volume_3d(
+        np.array([[0.0, 0.0, 0.0]]), np.array([[8.0, 8.0, 8.0]]), edges, (2.0, 2.0, 2.0)
+    )
+    assert np.count_nonzero(broad) > np.count_nonzero(sharp)
+
+
+def test_volume_black_white_percentiles_control_contrast():
+    rng = np.random.default_rng(3)
+    n = 6000
+    locs = np.column_stack(
+        [rng.normal(0, 120, n), rng.normal(0, 120, n), rng.normal(0, 40, n)]
+    )
+    common = dict(xy_voxel_nm=4.0, z_voxel_nm=4.0, max_dim=512, max_voxels=2_000_000,
+                  render_method="histogram")
+    lo_white = make_volume_payload(locs, white_pct=50.0, **common)
+    hi_white = make_volume_payload(locs, white_pct=99.7, **common)
+    # A lower white percentile saturates sooner → brighter (higher mean norm)
+    # and a lower reported intensity_max (the white point).
+    assert lo_white.norm.mean() > hi_white.norm.mean()
+    assert lo_white.intensity_max < hi_white.intensity_max
+    # Raising the black point suppresses low voxels → fewer lit voxels.
+    black = make_volume_payload(locs, black_pct=80.0, white_pct=99.7, **common)
+    assert np.count_nonzero(black.norm) < np.count_nonzero(hi_white.norm)
+
+
+def test_clip_region_keeps_aligned_sigma():
+    locs = np.array([[0.0, 0, 0], [100, 0, 0], [0, 0, 100]])
+    sigma = np.array([[1.0, 1, 1], [2, 2, 2], [3, 3, 3]])
+    lc, sc = _clip_region(locs, sigma, (-10, 10, -10, 10, -10, 10))
+    assert lc.shape[0] == 1 and np.allclose(lc[0], [0, 0, 0])
+    assert np.allclose(sc[0], [1, 1, 1])
+    lc2, sc2 = _clip_region(locs, None, (-10, 10, -10, 10, -10, 10))
+    assert sc2 is None and lc2.shape[0] == 1
 
 
 def test_lut_rgb_pure_colors():

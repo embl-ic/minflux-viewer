@@ -22,6 +22,7 @@ Design (per project decision):
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 from typing import Any
@@ -230,6 +231,16 @@ def build_snapshot_table(
         for name in _DERIVED_FOR_SNAPSHOT:
             v = mfx_get(ds, name, itr="last", vld_only=True)
             if v is None:
+                # Local-density and plugin results can live only in ``derived``
+                # while still aligning exactly to the materialized last-valid
+                # rows. Include them in a frozen snapshot when that contract is
+                # explicit from their length.
+                candidate = ds.derived.get(name)
+                if candidate is not None:
+                    candidate = np.asarray(candidate)
+                    if candidate.ndim == 1 and candidate.size == n:
+                        v = candidate
+            if v is None:
                 continue
             v = np.asarray(v)
             if v.ndim == 1 and v.size == n:
@@ -355,6 +366,94 @@ def _write_csv(path: Path, columns: dict[str, np.ndarray]) -> None:
                comments="", fmt="%.10g")
 
 
+def spreadsheet_export_columns(ds) -> dict[str, np.ndarray]:
+    """Return selectable columns for a processed spreadsheet export.
+
+    The table uses the current filtered, last-valid view. Coordinates are
+    RIMF/overlay-transform aware and expressed in nanometres.
+    """
+    from .loader import mfx_filter_mask, mfx_get
+
+    columns, _dropped = build_snapshot_table(
+        ds,
+        include_attrs=True,
+        include_derived=True,
+        filter_mode="apply",
+    )
+    full_n = np.asarray(mfx_get(ds, "xnm", itr="last", vld_only=True)).size
+    fm = mfx_filter_mask(ds, itr="last", vld_only=True)
+    mask = np.asarray(fm[0], dtype=bool) if fm and fm[0] is not None else None
+    for name in ("itr", "vld", "idx"):
+        values = mfx_get(ds, name, itr="last", vld_only=True)
+        if values is None:
+            continue
+        values = np.asarray(values)
+        if values.ndim != 1 or values.size != full_n:
+            continue
+        if mask is not None and mask.size == full_n:
+            values = values[mask]
+        expected_n = len(next(iter(columns.values()))) if columns else values.size
+        if values.size == expected_n:
+            columns[name] = values
+    return columns
+
+
+def decode_csv_separator(value: str) -> str:
+    """Decode a user-entered CSV delimiter (including the literal ``\\t``)."""
+    text = str(value)
+    separator = "\t" if text == r"\t" else text
+    if len(separator) != 1 or separator in {"\r", "\n"}:
+        raise ValueError("The separator must be one character (or \\t for a tab).")
+    return separator
+
+
+def write_spreadsheet_csv(
+    ds,
+    path: str | Path,
+    *,
+    column_headers: list[tuple[str, str]],
+    separator: str = ",",
+) -> Path:
+    """Write selected processed attributes with editable column headers."""
+    delimiter = decode_csv_separator(separator)
+    if not column_headers:
+        raise ValueError("Select at least one attribute to export.")
+
+    columns = spreadsheet_export_columns(ds)
+    selected: list[tuple[str, str, np.ndarray]] = []
+    n_rows: int | None = None
+    for attribute, header in column_headers:
+        name = str(attribute)
+        label = str(header).strip()
+        if name not in columns:
+            raise ValueError(f"Attribute {name!r} is not available for export.")
+        if not label:
+            raise ValueError(f"The header for {name!r} cannot be empty.")
+        values = np.asarray(columns[name])
+        if values.ndim != 1:
+            raise ValueError(f"Attribute {name!r} is not a one-dimensional column.")
+        if n_rows is None:
+            n_rows = values.size
+        elif values.size != n_rows:
+            raise ValueError(f"Attribute {name!r} does not align with the export rows.")
+        selected.append((name, label, values))
+
+    output = Path(path)
+    if output.suffix.lower() != ".csv":
+        output = output.with_suffix(".csv")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter=delimiter, lineterminator="\n")
+        writer.writerow([header for _name, header, _values in selected])
+        for row_idx in range(n_rows or 0):
+            row = []
+            for _name, _header, values in selected:
+                value = values[row_idx]
+                row.append(value.item() if isinstance(value, np.generic) else value)
+            writer.writerow(row)
+    return output
+
+
 def _write_npz(path: Path, columns: dict[str, np.ndarray]) -> None:
     np.savez(str(path), **{str(k): np.asarray(v) for k, v in columns.items()})
 
@@ -382,6 +481,178 @@ def _write_columns(fmt: str, path: Path, columns: dict[str, np.ndarray]) -> None
         _WRITERS[fmt](path, columns_to_structured(columns))
     else:
         raise ValueError(f"Unsupported data format: {fmt!r}")
+
+
+# --- Picasso localization HDF5 ---------------------------------------------
+def _scale_precision_to_nm(values: np.ndarray) -> np.ndarray:
+    """Conservatively infer metres vs nanometres for precision-like columns."""
+    arr = np.asarray(values, dtype=np.float64).ravel()
+    finite = np.abs(arr[np.isfinite(arr)])
+    median = float(np.median(finite)) if finite.size else 1.0
+    return arr * (1.0e9 if median < 1.0e-3 else 1.0)
+
+
+def _first_column(columns: dict[str, np.ndarray], names: tuple[str, ...]) -> np.ndarray | None:
+    for name in names:
+        value = columns.get(name)
+        if value is not None:
+            return np.asarray(value).ravel()
+    return None
+
+
+def _picasso_precision_nm(columns: dict[str, np.ndarray], axis: str, n: int) -> np.ndarray:
+    if axis == "x":
+        names = ("lpx_nm", "precision_x_nm", "sigma_x_nm", "sx_nm", "loc_precision_x")
+    elif axis == "y":
+        names = ("lpy_nm", "precision_y_nm", "sigma_y_nm", "sy_nm", "loc_precision_y")
+    else:
+        names = ("lpz_nm", "precision_z_nm", "sigma_z_nm", "sz_nm", "loc_precision_z")
+    values = _first_column(columns, names)
+    if values is None and axis in {"x", "y"}:
+        values = _first_column(columns, ("loc_precision_xy", "precision_xy_nm", "sigma_xy_nm"))
+    if values is None:
+        return np.ones(n, dtype=np.float64)
+    arr = _scale_precision_to_nm(values)
+    if arr.size != n:
+        return np.ones(n, dtype=np.float64)
+    arr[~np.isfinite(arr) | (arr <= 0.0)] = 1.0
+    return arr
+
+
+def _picasso_frame(columns: dict[str, np.ndarray], n: int) -> np.ndarray:
+    tim = columns.get("tim")
+    if tim is not None:
+        t = np.asarray(tim, dtype=np.float64).ravel()
+        if t.size == n and np.any(np.isfinite(t)):
+            order = np.argsort(np.where(np.isfinite(t), t, np.inf), kind="stable")
+            frame = np.empty(n, dtype=np.uint64)
+            frame[order] = np.arange(n, dtype=np.uint64)
+            return frame
+    return np.arange(n, dtype=np.uint64)
+
+
+def _yaml_scalar(value: Any) -> str:
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _write_simple_yaml_documents(path: Path, docs: list[dict[str, Any]]) -> None:
+    chunks = []
+    for doc in docs:
+        lines = ["---"]
+        for key, value in doc.items():
+            lines.append(f"{key}: {_yaml_scalar(_sanitize(value))}")
+        chunks.append("\n".join(lines))
+    path.write_text("\n".join(chunks) + "\n", encoding="utf-8")
+
+
+def write_picasso_hdf5(
+    ds,
+    path: str | Path,
+    *,
+    pixel_size_nm: float = 1.0,
+) -> list[Path]:
+    """Write the active, filtered dataset as a Picasso Render localization file.
+
+    Picasso expects an HDF5 table at ``/locs`` plus a same-stem ``.yaml`` sidecar.
+    The x/y columns are in camera pixels, while z is in nm. For MINFLUX data we
+    define a virtual camera pixel size (default 1 nm), shift x/y to a positive
+    field-of-view origin, and record the original nm origin in the YAML sidecar.
+    """
+    import h5py
+
+    pixel_size_nm = float(pixel_size_nm)
+    if not np.isfinite(pixel_size_nm) or pixel_size_nm <= 0.0:
+        raise ValueError("pixel_size_nm must be a positive finite value")
+
+    columns, _dropped = build_snapshot_table(
+        ds, include_attrs=True, include_derived=False, filter_mode="apply"
+    )
+    xnm = np.asarray(columns.get("xnm"), dtype=np.float64).ravel()
+    ynm = np.asarray(columns.get("ynm"), dtype=np.float64).ravel()
+    znm = np.asarray(columns.get("znm", np.zeros_like(xnm)), dtype=np.float64).ravel()
+    finite = np.isfinite(xnm) & np.isfinite(ynm) & np.isfinite(znm)
+    if not np.any(finite):
+        raise ValueError("No finite localizations to export.")
+    xnm, ynm, znm = xnm[finite], ynm[finite], znm[finite]
+    n = xnm.size
+
+    x0 = float(np.min(xnm))
+    y0 = float(np.min(ynm))
+    x_px = (xnm - x0) / pixel_size_nm
+    y_px = (ynm - y0) / pixel_size_nm
+    width = int(np.ceil(float(np.max(x_px))) + 1)
+    height = int(np.ceil(float(np.max(y_px))) + 1)
+    width = max(width, 1)
+    height = max(height, 1)
+    is_3d = float(np.max(znm) - np.min(znm)) > 1.0
+
+    lpx = _picasso_precision_nm(columns, "x", len(finite))[finite] / pixel_size_nm
+    lpy = _picasso_precision_nm(columns, "y", len(finite))[finite] / pixel_size_nm
+    lpz = _picasso_precision_nm(columns, "z", len(finite))[finite]
+    photons = _first_column(columns, ("photons", "eco", "efo"))
+    if photons is None or photons.size != len(finite):
+        photons_out = np.ones(n, dtype=np.float32)
+    else:
+        photons_out = np.asarray(photons, dtype=np.float64)[finite]
+        photons_out[~np.isfinite(photons_out) | (photons_out < 0.0)] = 0.0
+    bg = _first_column(columns, ("bg", "fbg"))
+    bg_out = np.zeros(n, dtype=np.float32) if bg is None or bg.size != len(finite) else np.asarray(bg, dtype=np.float64)[finite]
+    bg_out[~np.isfinite(bg_out) | (bg_out < 0.0)] = 0.0
+    tid = _first_column(columns, ("tid",))
+    group = None if tid is None or tid.size != len(finite) else np.asarray(tid)[finite]
+
+    fields = [
+        ("frame", np.uint64),
+        ("x", np.float32),
+        ("y", np.float32),
+        ("photons", np.float32),
+        ("lpx", np.float32),
+        ("lpy", np.float32),
+        ("bg", np.float32),
+    ]
+    if is_3d:
+        fields.extend([("z", np.float32), ("lpz", np.float32)])
+    if group is not None:
+        fields.append(("group", np.int64))
+    locs = np.zeros(n, dtype=np.dtype(fields))
+    locs["frame"] = _picasso_frame(columns, len(finite))[finite]
+    locs["x"] = x_px.astype(np.float32)
+    locs["y"] = y_px.astype(np.float32)
+    locs["photons"] = photons_out.astype(np.float32)
+    locs["lpx"] = lpx.astype(np.float32)
+    locs["lpy"] = lpy.astype(np.float32)
+    locs["bg"] = bg_out.astype(np.float32)
+    if is_3d:
+        locs["z"] = znm.astype(np.float32)
+        locs["lpz"] = lpz.astype(np.float32)
+    if group is not None:
+        locs["group"] = group.astype(np.int64, copy=False)
+
+    path = Path(path).with_suffix(".hdf5")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(str(path), "w") as h5:
+        h5.create_dataset("locs", data=locs)
+
+    yaml_path = path.with_suffix(".yaml")
+    _write_simple_yaml_documents(
+        yaml_path,
+        [{
+            "Width": width,
+            "Height": height,
+            "Frames": int(np.max(locs["frame"])) + 1 if n else 1,
+            "Pixelsize": pixel_size_nm,
+            "Generated by": "MINFLUX Viewer Picasso HDF5 export",
+            "Source dataset": getattr(ds, "name", ""),
+            "MINFLUX Viewer x_origin_nm": x0,
+            "MINFLUX Viewer y_origin_nm": y0,
+            "MINFLUX Viewer z_unit": "nm",
+        }],
+    )
+    return [path, yaml_path]
 
 
 # ---------------------------------------------------------------------------

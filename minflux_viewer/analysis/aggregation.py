@@ -8,8 +8,8 @@ Imspector's *Aggregation* post-processing bins each trace's localizations by a
 in time order until their combined photon count reaches ``N`` (the ``aggN`` in
 the exported filename, e.g. ``agg3000``), then emitted as one **averaged**
 localization. This was reverse-engineered from reference raw/aggregated file
-pairs and reproduces Imspector's output to ≈99 % (exact photon match, sub-nm
-positions, exact begin/end flags) directly from the ``.msr`` raw stream.
+pairs. The supplied 2-D 500/1000-photon exports match exactly in row count,
+photons, timestamps, and positions.
 
 Algorithm
 ---------
@@ -20,9 +20,11 @@ Algorithm
    :mod:`minflux_viewer.core.mfx_sequence`) — for the standard 3-D sequence the
    final lateral (xy) + final axial (z) iterations.
 3. Group by trace id (``tid``); walk each trace in time order, accumulating the
-   photon count; when it reaches the threshold, emit one aggregated point
-   (mean position, summed photons, mean time) and reset. The trailing remainder
-   is emitted as a final point.
+   photon count; when it reaches the threshold, emit one aggregated point with
+   a photon-weighted position and summed photons. Modern flat records also use
+   a photon-weighted timestamp; legacy nested records use the first
+   localization's timestamp. The trailing remainder is emitted as a final
+   point.
 4. Flag ``bot`` on the first aggregated point of each trace and ``eot`` on the
    last.
 
@@ -77,6 +79,7 @@ def aggregate_localizations(
     photon_threshold: float,
     photon_iters: Sequence[int],
     carry_attrs: bool = True,
+    time_mode: str = "photon_weighted",
 ) -> dict:
     """Aggregate valid final localizations by the Imspector photon-threshold rule.
 
@@ -94,13 +97,16 @@ def aggregate_localizations(
     carry_attrs :
         Also aggregate the standard per-localization attributes
         (``ecc/efo/efc/fbg/cfr/dcr``) as group means.
+    time_mode :
+        ``"photon_weighted"`` for modern flat Imspector records, or ``"first"``
+        for legacy nested records.
 
     Returns
     -------
-    dict with aggregated 1-D arrays ``tid``, ``eco`` (summed photons), ``tim``
-    (mean), ``n`` (localizations per point), ``bot``/``eot`` flags, and ``loc``
-    (``(M, 3)`` mean position), plus carried mean attributes. Empty arrays when
-    there are no valid localizations.
+    dict with aggregated 1-D arrays ``tid``, ``eco`` (summed photons), ``tim``,
+    ``n`` (localizations per point), ``bot``/``eot`` flags, and ``loc``
+    (``(M, 3)`` photon-weighted position), plus carried mean attributes. Empty
+    arrays when there are no valid localizations.
     """
     itr = np.asarray(raw["itr"]).ravel()
     fnl = np.asarray(raw["fnl"]).astype(np.int64).ravel()
@@ -111,6 +117,8 @@ def aggregate_localizations(
     loc = np.asarray(raw["loc"], dtype=float).reshape(-1, 3)
 
     thr = float(photon_threshold)
+    if time_mode not in {"first", "photon_weighted"}:
+        raise ValueError(f"Unsupported aggregation time mode: {time_mode!r}")
     ev_photon, eid = localization_photons(itr, fnl, eco, photon_iters)
 
     # Valid final localizations (one row per localization event).
@@ -181,11 +189,22 @@ def aggregate_localizations(
             chunks.append((start, j))
         for ci, (a, b) in enumerate(chunks):
             sl = slice(a, b)
+            chunk_photons = float(sph[sl].sum())
             out_tid.append(st[i])
-            out_eco.append(float(sph[sl].sum()))
-            out_tim.append(float(stm[sl].mean()))
+            out_eco.append(chunk_photons)
             out_n.append(b - a)
-            out_loc.append(slc[sl].mean(axis=0))
+            # Imspector weights each final localization by the same photon count
+            # used for thresholding. A zero-photon trailing group has no defined
+            # weighted centroid, so retain its arithmetic centroid.
+            if np.isfinite(chunk_photons) and chunk_photons != 0.0:
+                out_loc.append(np.average(slc[sl], axis=0, weights=sph[sl]))
+                chunk_time = np.average(stm[sl], weights=sph[sl])
+            else:
+                out_loc.append(slc[sl].mean(axis=0))
+                chunk_time = stm[sl].mean()
+            out_tim.append(
+                float(stm[a]) if time_mode == "first" else float(chunk_time)
+            )
             out_bot.append(1 if ci == 0 else 0)
             out_eot.append(1 if ci == len(chunks) - 1 else 0)
             for key, vv in s_scalar.items():
@@ -212,17 +231,60 @@ def aggregate_localizations(
     return result
 
 
+def _final_flags_from_raw(raw) -> np.ndarray | None:
+    """Return one final-row flag per raw localization group.
+
+    Newer flat exports carry this as ``fnl``. Older m2205/nested exports do not,
+    but their raw store has enough iteration structure to infer the final row of
+    each localization group.
+    """
+    itr_val = raw.get("itr") if raw is not None else None
+    if itr_val is None:
+        return None
+    n = np.asarray(itr_val).ravel().shape[0]
+    fnl = raw.get("fnl")
+    if fnl is not None:
+        arr = np.asarray(fnl).astype(np.int64).ravel()
+        if arr.shape[0] == n:
+            return arr
+
+    try:
+        from ..core.loader import _raw_loc_id
+
+        loc_id = _raw_loc_id(raw)
+    except Exception:
+        loc_id = None
+    if loc_id is None:
+        return None
+    loc_id = np.asarray(loc_id).ravel()
+    if loc_id.shape[0] != n or n == 0:
+        return None
+
+    flags = np.zeros(n, dtype=np.int8)
+    order = np.argsort(loc_id, kind="stable")
+    sorted_id = loc_id[order]
+    starts = np.r_[0, np.flatnonzero(sorted_id[1:] != sorted_id[:-1]) + 1]
+    stops = np.r_[starts[1:], order.size]
+    flags[order[stops - 1]] = 1
+    return flags
+
+
 def raw_dict_from_dataset(ds) -> Optional[dict]:
     """Assemble the raw-iteration arrays aggregation needs from ``ds.mfx_raw``.
 
     Returns ``None`` when the dataset lacks the all-iteration raw store or the
-    final-iteration flag (``fnl``) required to identify localization events.
+    fields required to identify localization events. For older/nested formats
+    without a stored ``fnl`` column, the final row is inferred from the canonical
+    raw localization grouping.
     """
     raw = getattr(ds, "mfx_raw", None)
     if raw is None or len(raw) == 0:
         return None
-    need = ("itr", "fnl", "vld", "eco", "tid", "tim", "loc_x", "loc_y")
+    need = ("itr", "vld", "eco", "tid", "tim", "loc_x", "loc_y")
     if any(raw.get(k) is None for k in need):
+        return None
+    fnl = _final_flags_from_raw(raw)
+    if fnl is None:
         return None
     loc_z = raw.get("loc_z")
     n = np.asarray(raw.get("loc_x")).ravel().shape[0]
@@ -231,7 +293,7 @@ def raw_dict_from_dataset(ds) -> Optional[dict]:
         np.asarray(raw.get("loc_y"), dtype=float).ravel(),
         (np.asarray(loc_z, dtype=float).ravel() if loc_z is not None else np.zeros(n)),
     ])
-    out = {"itr": raw.get("itr"), "fnl": raw.get("fnl"), "vld": raw.get("vld"),
+    out = {"itr": raw.get("itr"), "fnl": fnl, "vld": raw.get("vld"),
            "eco": raw.get("eco"), "tid": raw.get("tid"), "tim": raw.get("tim"),
            "loc": loc}
     for name in _MEAN_SCALAR_ATTRS:
@@ -250,12 +312,22 @@ def raw_dict_from_dataset(ds) -> Optional[dict]:
     return out
 
 
+def aggregation_time_mode(ds) -> str:
+    """Return the Imspector timestamp convention for a loaded dataset."""
+    source_raw = getattr(ds, "mfx_raw", None)
+    native_fnl = source_raw.get("fnl") if source_raw is not None else None
+    return "photon_weighted" if native_fnl is not None else "first"
+
+
 def aggregate_dataset(ds, *, photon_threshold: float,
-                      photon_iters: Optional[Sequence[int]] = None) -> Optional[dict]:
+                      photon_iters: Optional[Sequence[int]] = None,
+                      time_mode: Optional[str] = None) -> Optional[dict]:
     """Aggregate a loaded dataset (metres coordinates in the result's ``loc``).
 
     ``photon_iters`` defaults to the dataset's detected photon iterations
     (:func:`minflux_viewer.core.mfx_sequence.photon_iterations_for_dataset`).
+    ``time_mode`` defaults to photon-weighted time for modern records carrying
+    native ``fnl`` flags and first-localization time for legacy nested records.
     Returns ``None`` when the raw store is unusable.
     """
     raw = raw_dict_from_dataset(ds)
@@ -264,8 +336,10 @@ def aggregate_dataset(ds, *, photon_threshold: float,
     if photon_iters is None:
         from ..core.mfx_sequence import photon_iterations_for_dataset
         photon_iters = photon_iterations_for_dataset(ds).photon_iters
+    if time_mode is None:
+        time_mode = aggregation_time_mode(ds)
     return aggregate_localizations(raw, photon_threshold=photon_threshold,
-                                   photon_iters=photon_iters)
+                                   photon_iters=photon_iters, time_mode=time_mode)
 
 
 def _empty_result(width: int = 3) -> dict:

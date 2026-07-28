@@ -110,6 +110,11 @@ def test_skeleton_to_paths_splits_at_junction():
     skel[16:28, 20] = True
     paths = cv.skeleton_to_paths(skel, min_length_px=3)
     assert len(paths) >= 2                      # junction split into branches
+    junction = np.array([15.0, 20.0])
+    assert any(
+        min(np.linalg.norm(path[0] - junction), np.linalg.norm(path[-1] - junction)) <= np.sqrt(2)
+        for path in paths
+    )
 
 
 # --- end-to-end ----------------------------------------------------------------
@@ -138,6 +143,46 @@ def test_directional_option_runs_end_to_end():
         pts, pixel_size_nm=8.0, scale_min_nm=12.0, scale_max_nm=20.0, n_scales=2,
         directional={"length_nm": 80.0, "width_nm": 16.0, "n_angles": 12})
     assert len(res["paths"]) >= 1
+
+
+def test_point_cloud_spline_traces_unbranched_filament():
+    rng = np.random.default_rng(3)
+    t = rng.uniform(0.0, 1.0, 2400)
+    x = 1000.0 * t
+    y = 70.0 * np.sin(2.0 * np.pi * t)
+    pts = np.column_stack([
+        x + rng.normal(0.0, 6.0, t.size),
+        y + rng.normal(0.0, 6.0, t.size),
+    ])
+
+    paths = cv.point_cloud_spline_paths(
+        pts,
+        pixel_size_nm=50.0,
+        min_length_nm=400.0,
+        sample_step_nm=25.0,
+        smoothing_nm=10.0,
+        min_points_per_bin=8,
+    )
+
+    assert len(paths) >= 1
+    longest = max(paths, key=lambda p: p.shape[0])
+    assert np.ptp(longest[:, 0]) > 700.0
+    assert np.ptp(longest[:, 1]) > 70.0
+
+
+def test_segment_curvilinear_point_spline_method():
+    pts = _line_points((0.0, 0.0), (900.0, 0.0), n=1800, width=4.0, seed=4)
+    res = cv.segment_curvilinear(
+        pts,
+        pixel_size_nm=50.0,
+        method="point_spline",
+        min_length_nm=300.0,
+        spline_step_nm=25.0,
+        spline_min_points_per_bin=8,
+    )
+    assert res["method"] == "point_spline"
+    assert len(res["paths"]) >= 1
+    assert res["skeleton"].shape == res["image"].shape
 
 
 # --- width measurement (FWHM perpendicular profile) ---------------------------

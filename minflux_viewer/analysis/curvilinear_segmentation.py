@@ -44,6 +44,7 @@ DEFAULT_BETA = 0.5
 DEFAULT_THRESHOLD = 0.10           # fraction of the max ridge response
 DEFAULT_MIN_LENGTH_NM = 200.0
 RIDGE_METHODS = ("frangi", "sato")
+SEGMENTATION_METHODS = ("frangi", "sato", "point_spline")
 _MAX_THIN_ITERS = 200
 
 
@@ -246,26 +247,70 @@ def _neighbour_count(skel: np.ndarray) -> np.ndarray:
 
 
 def skeleton_to_paths(skel, min_length_px: int = 0) -> list[np.ndarray]:
-    """Split a skeleton at junctions and trace each branch into an ordered path.
+    """Split a skeleton at junctions and trace each graph branch.
 
     Returns a list of ``(M, 2)`` arrays of ``(row, col)`` pixel coordinates; only
-    paths with at least ``min_length_px`` pixels are kept.
+    paths with at least ``min_length_px`` pixels are kept. Junction pixels are
+    retained as branch endpoints, so useful candidate segments are not shortened
+    by erasing every high-degree skeleton pixel.
     """
-    from scipy.ndimage import label
 
     skel = np.asarray(skel) > 0
     if skel.sum() == 0:
         return []
     nbc = _neighbour_count(skel)
-    branch = skel & (nbc >= 3)            # junction pixels
-    simple = skel & ~branch               # remove junctions → simple arcs
-    lbl, n = label(simple, structure=np.ones((3, 3)))
+    nodes = set(map(tuple, np.argwhere(skel & (nbc != 2))))
+    coords = set(map(tuple, np.argwhere(skel)))
+
+    def neighbours(p):
+        r, c = p
+        out = []
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                q = (r + dr, c + dc)
+                if q in coords:
+                    out.append(q)
+        return out
+
     paths: list[np.ndarray] = []
+    min_px = max(int(min_length_px), 1)
+    visited_edges: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+
+    for start in sorted(nodes):
+        for first in neighbours(start):
+            edge = tuple(sorted((start, first)))
+            if edge in visited_edges:
+                continue
+            path = [start, first]
+            visited_edges.add(edge)
+            prev, cur = start, first
+            while cur not in nodes:
+                nxts = [q for q in neighbours(cur) if q != prev]
+                if not nxts:
+                    break
+                nxt = nxts[0]
+                edge = tuple(sorted((cur, nxt)))
+                if edge in visited_edges:
+                    break
+                visited_edges.add(edge)
+                path.append(nxt)
+                prev, cur = cur, nxt
+            if len(path) >= min_px:
+                paths.append(np.array(path, dtype=float))
+
+    if paths:
+        return paths
+
+    # Closed loops have no endpoint/junction nodes. Fall back to connected arcs.
+    from scipy.ndimage import label
+
+    lbl, n = label(skel, structure=np.ones((3, 3)))
     for k in range(1, n + 1):
         rc = np.argwhere(lbl == k)
-        if rc.shape[0] < max(int(min_length_px), 1):
-            continue
-        paths.append(_order_path(rc))
+        if rc.shape[0] >= min_px:
+            paths.append(_order_path(rc))
     return paths
 
 
@@ -299,6 +344,164 @@ def _order_path(rc: np.ndarray) -> np.ndarray:
     return np.array(order, dtype=float)
 
 
+def fit_spline_path(path_nm, *, sample_step_nm: float = 20.0,
+                    smoothing_nm: float = 0.0) -> np.ndarray:
+    """Fit a cubic smoothing spline to a polyline and resample it in nm."""
+    pts = np.asarray(path_nm, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] < 2:
+        return np.empty((0, 2), dtype=float)
+    pts = pts[:, :2]
+    pts = pts[np.all(np.isfinite(pts), axis=1)]
+    if pts.shape[0] < 2:
+        return np.empty((0, 2), dtype=float)
+    seg = np.hypot(np.diff(pts[:, 0]), np.diff(pts[:, 1]))
+    keep = np.concatenate([[True], seg > 1e-9])
+    pts = pts[keep]
+    if pts.shape[0] < 2:
+        return np.empty((0, 2), dtype=float)
+    arc = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(pts[:, 0]), np.diff(pts[:, 1])))])
+    total = float(arc[-1])
+    step = max(float(sample_step_nm), 1.0e-6)
+    sample = np.arange(0.0, total, step, dtype=float)
+    if sample.size == 0 or not np.isclose(sample[-1], total):
+        sample = np.concatenate([sample, [total]])
+    if pts.shape[0] < 3:
+        return np.column_stack([
+            np.interp(sample, arc, pts[:, 0]),
+            np.interp(sample, arc, pts[:, 1]),
+        ])
+
+    from scipy.interpolate import splev, splprep
+
+    degree = min(3, pts.shape[0] - 1)
+    weights = np.ones(pts.shape[0], dtype=float)
+    weights[[0, -1]] = 1.0e6
+    smooth_bound = pts.shape[0] * max(float(smoothing_nm), 0.0) ** 2
+    try:
+        tck, _u = splprep(
+            [pts[:, 0], pts[:, 1]],
+            u=arc,
+            w=weights,
+            k=degree,
+            s=smooth_bound,
+            per=False,
+        )
+        out = np.column_stack(splev(sample, tck))
+    except Exception:
+        out = np.column_stack([
+            np.interp(sample, arc, pts[:, 0]),
+            np.interp(sample, arc, pts[:, 1]),
+        ])
+    out[0] = pts[0]
+    out[-1] = pts[-1]
+    return out
+
+
+def fit_spline_paths(paths, *, sample_step_nm: float = 20.0,
+                     smoothing_nm: float = 0.0) -> list[np.ndarray]:
+    """Fit and resample every input path, dropping degenerate outputs."""
+    out: list[np.ndarray] = []
+    for path in paths:
+        fitted = fit_spline_path(
+            path,
+            sample_step_nm=sample_step_nm,
+            smoothing_nm=smoothing_nm,
+        )
+        if fitted.shape[0] >= 2:
+            out.append(fitted)
+    return out
+
+
+def point_cloud_spline_paths(
+    xy_nm,
+    *,
+    pixel_size_nm: float = 50.0,
+    count_threshold: int = 2,
+    min_length_nm: float = DEFAULT_MIN_LENGTH_NM,
+    sample_step_nm: float = 20.0,
+    smoothing_nm: float = 15.0,
+    min_points_per_bin: int = 3,
+) -> list[np.ndarray]:
+    """Fit MATLAB-style splines directly to localization point-cloud components.
+
+    The point cloud is coarsely rasterized to split disconnected structures.
+    Each component is PCA-rotated, sorted along its principal axis, summarized in
+    arc bins by centroid, then cubic-spline fitted and uniformly resampled.
+    This mirrors the old MATLAB script's rotate/sort/bin-centroid/cscvn logic and
+    is best for isolated, mostly unbranched filaments.
+    """
+    from scipy.ndimage import label
+
+    px = max(float(pixel_size_nm), 1.0e-6)
+    xy = np.asarray(xy_nm, dtype=float)
+    if xy.ndim != 2 or xy.shape[1] < 2:
+        xy = xy.reshape(-1, 2) if xy.size else np.empty((0, 2))
+    xy = xy[:, :2]
+    xy = xy[np.all(np.isfinite(xy), axis=1)]
+    if xy.shape[0] < max(int(min_points_per_bin), 3):
+        return []
+
+    H, xedge, yedge = render_histogram_2d(xy[:, 0], xy[:, 1], px)
+    binary = H >= max(int(count_threshold), 1)
+    lbl, n = label(binary, structure=np.ones((3, 3)))
+    if n == 0:
+        return []
+
+    xi = np.clip(np.searchsorted(xedge, xy[:, 0], side="right") - 1, 0, H.shape[0] - 1)
+    yi = np.clip(np.searchsorted(yedge, xy[:, 1], side="right") - 1, 0, H.shape[1] - 1)
+    comp_id = lbl[xi, yi]
+    paths: list[np.ndarray] = []
+    for k in range(1, n + 1):
+        pts = xy[comp_id == k]
+        if pts.shape[0] < max(int(min_points_per_bin) * 3, 6):
+            continue
+        centre = np.mean(pts, axis=0)
+        centred = pts - centre
+        try:
+            _, _, vh = np.linalg.svd(centred, full_matrices=False)
+            along = vh[0]
+        except Exception:
+            along = np.array([1.0, 0.0])
+        if along[0] < 0:
+            along = -along
+        across = np.array([-along[1], along[0]])
+        t = centred @ along
+        u = centred @ across
+        order = np.argsort(t, kind="stable")
+        t, u = t[order], u[order]
+        span = float(t[-1] - t[0]) if t.size else 0.0
+        if span < float(min_length_nm):
+            continue
+        bin_step = max(float(sample_step_nm), px)
+        edges = np.arange(t[0], t[-1] + bin_step, bin_step)
+        if edges.size < 2:
+            continue
+        guide: list[tuple[float, float]] = []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            take = (t >= lo) & (t < hi if hi < edges[-1] else t <= hi)
+            if int(take.sum()) >= int(min_points_per_bin):
+                guide.append((float(np.mean(t[take])), float(np.mean(u[take]))))
+        if len(guide) < 2:
+            continue
+        guide_arr = np.asarray(guide, dtype=float)
+        guide_xy = centre + guide_arr[:, [0]] * along + guide_arr[:, [1]] * across
+        fitted = fit_spline_path(
+            guide_xy,
+            sample_step_nm=sample_step_nm,
+            smoothing_nm=smoothing_nm,
+        )
+        if fitted.shape[0] >= 2 and _path_length_nm(fitted) >= float(min_length_nm):
+            paths.append(fitted)
+    return paths
+
+
+def _path_length_nm(path: np.ndarray) -> float:
+    path = np.asarray(path, dtype=float)
+    if path.ndim != 2 or path.shape[0] < 2:
+        return 0.0
+    return float(np.sum(np.hypot(np.diff(path[:, 0]), np.diff(path[:, 1]))))
+
+
 # --------------------------------------------------------------------------- #
 # End-to-end
 # --------------------------------------------------------------------------- #
@@ -310,7 +513,10 @@ def segment_curvilinear(xy_nm, *, pixel_size_nm: float = DEFAULT_PIXEL_NM,
                         threshold: float = DEFAULT_THRESHOLD, use_otsu: bool = False,
                         min_length_nm: float = DEFAULT_MIN_LENGTH_NM,
                         sqrt_stabilize: bool = False,
-                        directional: dict | None = None) -> dict:
+                        directional: dict | None = None,
+                        spline_step_nm: float = 20.0,
+                        spline_smoothing_nm: float = 15.0,
+                        spline_min_points_per_bin: int = 3) -> dict:
     """Detect curvilinear structures and trace their centre lines.
 
     Returns a dict with ``ridge_map`` (0–1), ``skeleton`` (bool), ``binary``,
@@ -322,14 +528,36 @@ def segment_curvilinear(xy_nm, *, pixel_size_nm: float = DEFAULT_PIXEL_NM,
         xy = xy.reshape(-1, 2) if xy.size else np.empty((0, 2))
     xy = xy[np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])]
 
+    method = str(method).strip().lower()
+    if method not in SEGMENTATION_METHODS:
+        raise ValueError(f"Unknown curvilinear segmentation method: {method!r}.")
+
     out = {"ridge_map": np.zeros((0, 0)), "skeleton": np.zeros((0, 0), dtype=bool),
            "binary": np.zeros((0, 0), dtype=bool), "image": np.zeros((0, 0)),
            "xedge": np.zeros(0), "yedge": np.zeros(0), "paths": [],
+           "segment_paths": [], "spline_paths": [],
            "pixel_size_nm": px, "method": method}
     if xy.shape[0] < 3:
         return out
 
     H, xedge, yedge = render_histogram_2d(xy[:, 0], xy[:, 1], px)
+    if method == "point_spline":
+        paths = point_cloud_spline_paths(
+            xy,
+            pixel_size_nm=max(px, 1.0),
+            count_threshold=2,
+            min_length_nm=min_length_nm,
+            sample_step_nm=spline_step_nm,
+            smoothing_nm=spline_smoothing_nm,
+            min_points_per_bin=spline_min_points_per_bin,
+        )
+        empty_skeleton = np.zeros_like(H, dtype=bool)
+        out.update(image=H, xedge=xedge, yedge=yedge,
+                   skeleton=empty_skeleton, binary=empty_skeleton,
+                   ridge_map=np.zeros_like(H, dtype=float), paths=paths,
+                   segment_paths=paths, spline_paths=paths)
+        return out
+
     image = stabilize_histogram(H, sqrt_stabilize)
     if directional:
         image = directional_filter(
@@ -349,8 +577,14 @@ def segment_curvilinear(xy_nm, *, pixel_size_nm: float = DEFAULT_PIXEL_NM,
     ycenter = 0.5 * (yedge[:-1] + yedge[1:])
     paths = [np.column_stack([xcenter[p[:, 0].astype(int)], ycenter[p[:, 1].astype(int)]])
              for p in paths_rc]
+    spline_paths = fit_spline_paths(
+        paths,
+        sample_step_nm=spline_step_nm,
+        smoothing_nm=spline_smoothing_nm,
+    )
     out.update(ridge_map=ridge, skeleton=skel, binary=binary, image=H,
-               xedge=xedge, yedge=yedge, paths=paths)
+               xedge=xedge, yedge=yedge, paths=paths,
+               segment_paths=paths, spline_paths=spline_paths)
     return out
 
 

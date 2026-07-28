@@ -37,12 +37,12 @@ class CropOptions:
     """
 
     only_roi: bool = True               # retained for compat; region ROI ⇒ always crops
-    exact_shape: bool = False           # True = exact ROI shape; False = bounding box
+    exact_shape: bool = True            # True = exact ROI shape; False = bounding box
     clip: bool = False                  # True = per-loc clip; False = trace-complete
     channels: list[int] = field(default_factory=list)  # 1-based; empty = active only
     z_all: bool = True
     z_range: tuple[float, float] | None = None
-    spatial_filter: bool = True         # Model A (gate); False = subset (Model B)
+    spatial_filter: bool = False        # False = subset (Model B); True = Model A (gate)
     stop_asking: bool = False
 
 

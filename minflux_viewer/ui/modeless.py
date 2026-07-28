@@ -35,8 +35,32 @@ def _alive(window: QWidget) -> bool:
         return False
 
 
-def ensure_on_screen(window: QWidget, owner: QWidget | None = None, *, margin: int = 24) -> None:
-    """Cap *window* to the available screen area and center it fully on-screen.
+def corner_position(avail, size, *, align: str = "center", margin: int = 24):
+    """Pure geometry: top-left ``(x, y)`` to place a ``size=(w, h)`` window at an
+    anchor of the exclusive ``(left, top, right, bottom)`` rect *avail*.
+
+    ``align`` is ``"center"`` (default), ``"top_right"``, ``"top_left"``,
+    ``"bottom_right"`` or ``"bottom_left"``. The result is always clamped so the
+    window sits fully inside *avail* (assuming it is not larger than *avail*).
+    """
+    vl, vt, vr, vb = avail
+    w, h = size
+    right = "right" in align
+    bottom = "bottom" in align
+    if align == "center":
+        x = vl + (vr - vl - w) // 2
+        y = vt + (vb - vt - h) // 2
+    else:
+        x = (vr - margin - w) if right else (vl + margin)
+        y = (vb - margin - h) if bottom else (vt + margin)
+    x = min(max(x, vl), max(vl, vr - w))
+    y = min(max(y, vt), max(vt, vb - h))
+    return (x, y)
+
+
+def ensure_on_screen(window: QWidget, owner: QWidget | None = None, *,
+                     margin: int = 24, align: str = "center") -> None:
+    """Cap *window* to the available screen area and place it fully on-screen.
 
     Unparented top-level windows (the MSR reader, Dataset Manager, modeless
     result/plugin windows) get no automatic placement relative to a parent, so a
@@ -44,7 +68,9 @@ def ensure_on_screen(window: QWidget, owner: QWidget | None = None, *, margin: i
     laptop / scaled screens or when the taskbar shrinks the available height.
     Call this **after** ``show()`` so the window frame geometry is known. The
     target screen is the owner's screen, else the screen under the cursor, else
-    the primary screen. No-op on any failure.
+    the primary screen. *align* (see :func:`corner_position`) chooses where on
+    that screen — ``"center"`` by default, e.g. ``"top_right"`` for the main
+    window. No-op on any failure.
     """
     try:
         from PyQt6.QtGui import QCursor, QGuiApplication
@@ -70,11 +96,10 @@ def ensure_on_screen(window: QWidget, owner: QWidget | None = None, *, margin: i
             window.resize(max(320, window.width() - max(0, overflow_w)),
                           max(200, window.height() - max(0, overflow_h)))
             frame = window.frameGeometry()
-        # Center the frame, then clamp its top-left inside the available area.
-        x = avail.left() + (avail.width() - frame.width()) // 2
-        y = avail.top() + (avail.height() - frame.height()) // 2
-        x = min(max(x, avail.left()), max(avail.left(), avail.right() - frame.width()))
-        y = min(max(y, avail.top()), max(avail.top(), avail.bottom() - frame.height()))
+        avail_rect = (avail.left(), avail.top(), avail.right() + 1, avail.bottom() + 1)
+        x, y = corner_position(
+            avail_rect, (frame.width(), frame.height()), align=align, margin=margin
+        )
         # move() positions the client area; compensate for the frame margins.
         window.move(x + (window.x() - frame.x()), y + (window.y() - frame.y()))
     except Exception:

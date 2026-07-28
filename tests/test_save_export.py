@@ -16,6 +16,9 @@ from minflux_viewer.core.save import (
     dataset_to_mfx_array,
     flatten_mfx_array,
     save_processed,
+    spreadsheet_export_columns,
+    write_picasso_hdf5,
+    write_spreadsheet_csv,
 )
 
 
@@ -161,6 +164,45 @@ def test_raw_csv_is_flattened(tmp_path):
     assert "efo" in header and "tid" in header
 
 
+def test_spreadsheet_csv_selected_columns_headers_and_separator(tmp_path):
+    ds = _dataset(n=20)
+    available = spreadsheet_export_columns(ds)
+    assert {"xnm", "tid", "efo", "itr", "vld", "idx"} <= set(available)
+
+    path = write_spreadsheet_csv(
+        ds,
+        tmp_path / "selected",
+        column_headers=[("tid", "Trace"), ("xnm", "X position [nm]")],
+        separator=";",
+    )
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert path.name == "selected.csv"
+    assert lines[0] == "Trace;X position [nm]"
+    assert len(lines) == ds.prop.num_loc + 1
+    assert len(lines[1].split(";")) == 2
+
+
+def test_spreadsheet_csv_accepts_tab_escape_and_applies_filter(tmp_path):
+    ds = _dataset(n=20)
+    ds.state["filter_specs"] = [{
+        "attribute": "tid",
+        "mode": "per loc",
+        "lo": 1,
+        "hi": 2,
+        "lo_inc": True,
+        "hi_inc": True,
+    }]
+    expected = spreadsheet_export_columns(ds)["tid"].size
+    path = write_spreadsheet_csv(
+        ds,
+        tmp_path / "filtered.csv",
+        column_headers=[("tid", "tid"), ("efo", "efo")],
+        separator=r"\t",
+    )
+    assert len(path.read_text(encoding="utf-8").splitlines()) == expected + 1
+    assert path.read_text(encoding="utf-8").splitlines()[0] == "tid\tefo"
+
+
 # --- snapshot recipe + round-trip ---------------------------------------------
 def test_snapshot_recipe_pins_rimf_one(tmp_path):
     ds = _dataset()
@@ -219,3 +261,25 @@ def test_save_msr_writes_recipe_sidecar_by_default(tmp_path):
     ds = _dataset()
     written = save_processed(ds, data_path=tmp_path / "out.msr", fmt="msr", content="raw")
     assert any(p.name.endswith("_metadata.json") for p in written)
+
+
+def test_picasso_hdf5_export_writes_locs_and_yaml(tmp_path):
+    import h5py
+
+    ds = _dataset(n=20)
+    written = write_picasso_hdf5(ds, tmp_path / "picasso.hdf5", pixel_size_nm=2.0)
+    h5_path, yaml_path = written
+
+    assert h5_path.suffix == ".hdf5" and h5_path.exists()
+    assert yaml_path.name == "picasso.yaml" and yaml_path.exists()
+    with h5py.File(h5_path, "r") as h5:
+        locs = h5["locs"][:]
+    assert {"frame", "x", "y", "lpx", "lpy", "photons", "z"} <= set(locs.dtype.names)
+    assert locs["x"].min() >= 0.0 and locs["y"].min() >= 0.0
+    assert np.all(locs["lpx"] > 0.0) and np.all(locs["lpy"] > 0.0)
+
+    yaml_text = yaml_path.read_text(encoding="utf-8")
+    assert "Width:" in yaml_text
+    assert "Height:" in yaml_text
+    assert "Frames:" in yaml_text
+    assert "Pixelsize: 2.0" in yaml_text

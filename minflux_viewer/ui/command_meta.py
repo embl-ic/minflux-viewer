@@ -62,6 +62,23 @@ COMMAND_META: dict[str, CommandMeta] = {
                               ("export", "write", "processed", "snapshot", "mat", "npy", "csv", "zarr", "msr"),
                               "Save/export the active dataset (raw canonical or snapshot; any "
                               "enabled format incl. a custom .msr writer).", "file"),
+    "actionSaveAsMinflux": CommandMeta(C + "save.py", ("save as", "mat", "npy", "json", "minflux"),
+                              "Save raw canonical MINFLUX data as .mat, .npy, or .json.", "file"),
+    "actionSaveAsMsr": CommandMeta(C + "save.py", ("save as", "msr", "experimental", "minflux"),
+                              "Save raw canonical MINFLUX data as an experimental .msr file.", "file"),
+    "actionSaveAsSpreadsheet": CommandMeta(C + "save.py",
+                              ("save as", "spreadsheet", "csv", "delimiter", "columns"),
+                              "Export selected processed attributes to a configurable CSV table.", "file"),
+    "actionSaveAsZarr": CommandMeta(C + "save.py", ("save as", "zarr", "v2"),
+                              "Save raw canonical MINFLUX data as a Zarr v2 directory.", "file"),
+    "actionSaveAsHdf5": CommandMeta(C + "save.py", ("save as", "hdf5", "picasso", "render"),
+                              "Export the active dataset as Picasso-compatible HDF5 + YAML.", "file"),
+    "actionSaveAsOmeTiff": CommandMeta(C + "tiff_export.py", ("save as", "ome", "tiff", "render", "imagej"),
+                              "Export the active render as an OME-TIFF stack.", "file"),
+    "actionSaveAsOmeZarr": CommandMeta(C + "ome_zarr.py",
+                              ("save as", "ome", "ngff", "zarr", "v3", "provenance", "roi"),
+                              "Export an OME-NGFF 0.5 density pyramid and versioned "
+                              "MINFLUX localization package as Zarr v3.", "file"),
     "actionClose": CommandMeta(U + "main_window.py", ("close", "remove", "dataset"),
                                "Close the active dataset and its windows.", "file"),
     "actionCloseAll": CommandMeta(U + "main_window.py", ("close", "remove", "all", "datasets"),
@@ -93,8 +110,10 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "Attribute histogram.", "view"),
     "actionScatter": CommandMeta(U + "scatter_window.py", ("points", "localizations", "xy", "xz", "yz", "3d"),
                               "Localization scatter plot.", "view"),
-    "actionRender": CommandMeta(U + "render_window.py", ("image", "reconstruction", "histogram", "gaussian"),
-                              "Rendered localization image.", "view"),
+    "actionRender": CommandMeta(U + "render_window.py",
+                              ("image", "reconstruction", "histogram", "gaussian", "advanced", "precision", "bilinear"),
+                              "Rendered localization image (right-click › View › Render Mode "
+                              "switches Basic ↔ Advanced precision reconstruction).", "view"),
     "actionLog": CommandMeta(U + "log_window.py", ("events", "messages"), "Event log window.", "view"),
 
     # ---- Process › Channel ----------------------------------------------------
@@ -110,8 +129,6 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "(transforms baked, trace ids remapped) for combined analysis.", "process",
                               inputs=("active multi-channel overlay",),
                               outputs=("single flattened dataset (hot LUT)",)),
-    "actionChannelOverlay": CommandMeta(U + "channel_combine_dialog.py", ("channel", "overlay", "multicolor"),
-                              "Overlay datasets as channels.", "process"),
     "actionChannelSeparateDcr": CommandMeta(A + "dcr_em.py",
                               ("dcr", "two color", "2 color", "spectral", "em", "gaussian mixture", "unmix"),
                               "Separate two colours by a Gaussian-mixture (EM) fit of the DCR distribution; "
@@ -119,6 +136,12 @@ COMMAND_META: dict[str, CommandMeta] = {
                               params=(ParamMeta("n_components", "int", 2, "", "mixture components"),),
                               inputs=("active dataset with dcr",),
                               outputs=("red/green/(unassigned) overlay datasets",)),
+    "actionChannelSeparateTime": CommandMeta(U + "time_channel_dialog.py",
+                              ("time", "window", "split", "exchange paint", "multiplex", "channel"),
+                              "Separate the active dataset into an overlay of "
+                              "filtered acquisition-time channels.", "process",
+                              inputs=("active dataset with tim",),
+                              outputs=("time-window overlay datasets",)),
 
     # ---- Process › ROI --------------------------------------------------------
     "actionRoiManager": CommandMeta(U + "roi_manager.py", ("roi", "regions", "manager"),
@@ -136,9 +159,25 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "XY/XZ/YZ ortho views; crop the active dataset to it.",
                               "process", inputs=("active dataset (loc)",),
                               outputs=("cropped dataset (localizations inside the 3-D ROI)",)),
-    # Convert sub-menu actions are tagged as a group (see _apply_command_meta).
+    "actionRoiRestore": CommandMeta(U + "main_window.py",
+                              ("roi", "restore", "recover", "undo delete", "bring back", "sync", "views"),
+                              "Restore the active ROI onto another view (render ↔ scatter), "
+                              "or bring back the last active ROI after an accidental delete.",
+                              "process"),
+    # Convert / Fit sub-menu actions are tagged as a group (see _apply_command_meta).
     "_roi_convert": CommandMeta(C + "roi_convert.py", ("roi", "convert", "rectangle", "oval", "point", "line", "region"),
                               "Convert an ROI to another type.", "process"),
+    "_roi_fit": CommandMeta(C + "roi_fit.py",
+                              ("roi", "fit", "rectangle", "circle", "ellipse", "polygon", "convex hull",
+                               "spline", "interpolate", "minimum enclosing", "circumscribed", "moment"),
+                              "Fit a shape to the localizations a region ROI highlights "
+                              "(or spline-fit / interpolate its outline).", "process"),
+    "actionAggregate": CommandMeta(A + "aggregation.py",
+                              ("aggregate", "localizations", "imspector", "trace", "photon", "binning"),
+                              "Aggregate valid final MINFLUX localizations per trace using a "
+                              "photon threshold and photon-weighted spatial centroids.",
+                              "process", inputs=("active MINFLUX dataset",),
+                              outputs=("aggregated dataset",)),
 
     # ---- Process › Batch ------------------------------------------------------
     "actionBatchRender": CommandMeta(U + "main_window.py", ("batch", "render", "export"),
