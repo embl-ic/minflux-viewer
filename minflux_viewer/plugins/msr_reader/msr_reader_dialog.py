@@ -896,10 +896,17 @@ class ViewerAlignmentDialog(QDialog):
 
 
 class AlignmentPlotWindow(QDialog):
+    _single_channel = None   # class default so bypass-__init__ tests see None
+
     def __init__(self, results, parent=None, data_bounds_nm=None,
-                 requested_transform_type=None):
+                 requested_transform_type=None, single_channel=None):
         super().__init__(parent)
-        self.setWindowTitle("Beads and alignment result")
+        # single_channel (dict: name/bead_ids/rids/pos_nm/drift_nm) → no alignment;
+        # show the beads + data region + a per-bead drift table.
+        self._single_channel = single_channel
+        self.setWindowTitle(
+            "Beads and data region" if single_channel is not None
+            else "Beads and alignment result")
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
         self.resize(1150, 800)
@@ -1052,6 +1059,17 @@ class AlignmentPlotWindow(QDialog):
         self._refresh_readouts()
 
     def _build_plot_datasets(self):
+        if self._single_channel is not None:
+            cur = self._current[0]
+            return {
+                "beads": {
+                    "label": f"{cur['ref_name']} beads",
+                    "color": "#1f77b4",
+                    "xyz_nm": np.asarray(cur["ref_xyz"], dtype=np.float64),
+                    "bead_ids": np.asarray(cur["bead_ids"]),
+                    "symbol": "o",
+                }
+            }
         cmap = ["#d62728", "#2ca02c", "#1f77b4", "#ff7f0e", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
         reference = self._current[0]
         datasets = {
@@ -1090,6 +1108,20 @@ class AlignmentPlotWindow(QDialog):
         """(Re)fit each moving channel using only the currently-included beads,
         and record aligned positions + residuals for ALL matched beads so excluded
         beads still show how far they fall from the fit."""
+        if self._single_channel is not None:
+            sc = self._single_channel
+            ids = np.asarray(sc["bead_ids"], dtype=np.uint32)
+            excluded = np.asarray(sorted(self._excluded_gris), dtype=np.uint32)
+            inc = ~np.isin(ids, excluded) if excluded.size else np.ones(ids.size, dtype=bool)
+            self._current = [{
+                "ref_name": sc["name"], "mov_name": sc["name"],
+                "bead_ids": ids,
+                "rids": list(sc.get("rids") or [str(int(g)) for g in ids]),
+                "ref_xyz": np.asarray(sc["pos_nm"], dtype=np.float64),
+                "drift": np.asarray(sc["drift_nm"], dtype=np.float64),
+                "included": inc, "valid": True,
+            }]
+            return
         from ...msr.alignment import (
             MIN_BEADS_FOR_ALIGNMENT,
             align_channels_from_bead_positions,
@@ -1183,11 +1215,90 @@ class AlignmentPlotWindow(QDialog):
         return reports
 
     def _refresh_readouts(self):
+        if self._single_channel is not None:
+            self._render_single_channel_banner()
+            self._update_single_channel_table_values()
+            return
         from ...msr.alignment import RMSE_WARN_NM
 
         reports = self._current_reports()
         self._render_quality_banner(reports, RMSE_WARN_NM)
         self._update_residual_table_values()
+
+    def _render_single_channel_banner(self):
+        """Banner above the table for the single-channel (no-alignment) view:
+        bead count + drift (peak-to-peak) summary over the included beads."""
+        cur = self._current[0]
+        inc = np.asarray(cur["included"], dtype=bool)
+        drift = np.asarray(cur["drift"], dtype=np.float64)
+        n_total = int(inc.size)
+        n_inc = int(inc.sum())
+        lines = [
+            f"<b>{cur['ref_name']}</b> — single channel, so <b>no alignment</b> is "
+            f"needed. Showing {n_total} bead(s) and the data region; "
+            f"{n_inc} bead(s) included in the drift summary."
+        ]
+        if n_inc:
+            dxyz = np.sqrt((drift[inc] ** 2).sum(axis=1))
+            med = float(np.median(dxyz))
+            worst_i = int(np.argmax(dxyz))
+            rids = cur.get("rids") or [str(int(g)) for g in cur["bead_ids"]]
+            inc_idx = np.flatnonzero(inc)
+            worst_rid = rids[inc_idx[worst_i]]
+            lines.append(
+                f"Per-bead drift (peak-to-peak over the acquisition): "
+                f"median&nbsp;Δxyz&nbsp;=&nbsp;{med:.1f}&nbsp;nm, "
+                f"max&nbsp;=&nbsp;{float(dxyz[worst_i]):.1f}&nbsp;nm (bead&nbsp;{worst_rid})."
+            )
+        self.quality_banner.setStyleSheet(
+            "QLabel { background:#f4f7fb; border:1px solid #99b; "
+            "border-radius:4px; padding:6px; }"
+        )
+        self.quality_banner.setText("<br>".join(lines))
+
+    def _update_single_channel_table_values(self):
+        from PyQt6.QtGui import QBrush, QColor
+
+        cur = self._current[0]
+        drift = np.asarray(cur["drift"], dtype=np.float64)
+        excluded_bg = QColor("#eeeeee")
+        normal_bg = QBrush(Qt.GlobalColor.transparent)
+        grey_fg = QBrush(QColor("#999999"))
+        black_fg = QBrush(QColor("#202020"))
+        inc_mask = np.asarray(cur["included"], dtype=bool)
+        dxyz_all = np.sqrt((drift ** 2).sum(axis=1))
+        med = float(np.median(dxyz_all[inc_mask])) if inc_mask.any() else 0.0
+        self._suspend_bead_signals = True
+        for row, (ci, bi, gri) in enumerate(self._row_order):
+            dx, dy, dz = drift[bi]
+            dxy = float(np.hypot(dx, dy))
+            dxyz = float(np.hypot(np.hypot(dx, dy), dz))
+            included = bool(cur["included"][bi])
+            # Δx Δy Δz Δxy Δxyz, then the (empty) resid x/y/z/|resid xy| columns.
+            texts = [f"{dx:.0f}", f"{dy:.0f}", f"{dz:.0f}", f"{dxy:.0f}", f"{dxyz:.0f}",
+                     "", "", "", ""]
+            first_num = self._bead_col + 1
+            for k, text in enumerate(texts):
+                item = self.resid_table.item(row, first_num + k)
+                if item is not None:
+                    item.setText(text)
+            comment = ""
+            if included and med > 0 and dxyz > 2.0 * med:
+                comment = "high drift (outlier)"
+            comment_item = self.resid_table.item(row, self._comment_col)
+            if comment_item is not None:
+                comment_item.setText(comment)
+            bead_item = self.resid_table.item(row, self._bead_col)
+            if bead_item is not None:
+                bead_item.setCheckState(
+                    Qt.CheckState.Checked if included else Qt.CheckState.Unchecked)
+            for c in range(self.resid_table.columnCount()):
+                cell = self.resid_table.item(row, c)
+                if cell is None:
+                    continue
+                cell.setForeground(grey_fg if not included else black_fg)
+                cell.setBackground(excluded_bg if not included else normal_bg)
+        self._suspend_bead_signals = False
 
     def _render_quality_banner(self, reports, warn_nm):
         lines = []
@@ -1237,6 +1348,48 @@ class AlignmentPlotWindow(QDialog):
         (worst residual at the initial full-bead fit first). Values are filled by
         _update_residual_table_values; row order stays stable so ticking a checkbox
         does not make the row jump."""
+        if self._single_channel is not None:
+            self._multi = False
+            self._bead_col = 0
+            cur = self._current[0]
+            drift = np.asarray(cur["drift"], dtype=np.float64)
+            dxyz = np.sqrt((drift ** 2).sum(axis=1))
+            self._row_order = [
+                (0, int(bi), int(cur["bead_ids"][bi])) for bi in np.argsort(-dxyz)]
+            rids = cur.get("rids") or [str(int(g)) for g in cur["bead_ids"]]
+            headers = ["Bead", "Δx", "Δy", "Δz", "Δxy", "Δxyz",
+                       "resid x", "resid y", "resid z", "|resid xy|", "Comment"]
+            self._comment_col = len(headers) - 1
+            self.resid_caption.setText(
+                "Per-bead drift (peak-to-peak per axis over the acquisition), nm. "
+                "Δxy/Δxyz combine the axes; the resid columns are N/A (single channel, "
+                "no alignment). Untick a bead to drop it from the drift summary.")
+            self.resid_table.setToolTip(
+                "Δ = total drift distance of the bead per axis (max − min over the "
+                "acquisition), nm; Δxy/Δxyz combine axes.\nresid columns are empty "
+                "(no channel alignment for a single channel).")
+            self._suspend_bead_signals = True
+            self.resid_table.clear()
+            self.resid_table.setColumnCount(len(headers))
+            self.resid_table.setHorizontalHeaderLabels(headers)
+            self.resid_table.setRowCount(len(self._row_order))
+            for row, (_ci, bi, gri) in enumerate(self._row_order):
+                bead_item = QTableWidgetItem(str(rids[bi]))
+                bead_item.setFlags(bead_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                bead_item.setCheckState(Qt.CheckState.Checked)
+                bead_item.setData(Qt.ItemDataRole.UserRole, gri)
+                self.resid_table.setItem(row, 0, bead_item)
+                for c in range(1, len(headers)):
+                    cell = QTableWidgetItem("")
+                    align = (Qt.AlignmentFlag.AlignLeft if c == self._comment_col
+                             else Qt.AlignmentFlag.AlignRight)
+                    cell.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
+                    self.resid_table.setItem(row, c, cell)
+            header = self.resid_table.horizontalHeader()
+            header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            header.setStretchLastSection(True)
+            self._suspend_bead_signals = False
+            return
         self._multi = len(self._current) > 1
         # fixed row order: (channel_index, bead_index, gri), worst initial |resid| first
         order = []
@@ -1395,7 +1548,9 @@ class AlignmentPlotWindow(QDialog):
         labels = self._axis_labels()
         self.plot.setLabel("bottom", labels[0], units="µm")
         self.plot.setLabel("left", labels[1], units="µm")
-        self.plot.setTitle("Bead positions before and after channel alignment")
+        self.plot.setTitle(
+            "Bead positions and the data region" if self._single_channel is not None
+            else "Bead positions before and after channel alignment")
         self._set_equal_range()
 
     def _excluded_bead_mask(self, bead_ids) -> np.ndarray:
@@ -1437,17 +1592,33 @@ class AlignmentPlotWindow(QDialog):
 
     def _draw_data_range_box(self):
         import pyqtgraph as pg
+        from PyQt6.QtCore import QRectF
+        from PyQt6.QtWidgets import QGraphicsRectItem
 
         box = self._data_box_xy()
         if box is None:
             return
         x0, y0, x1, y1 = box
+        # The MBM fiducial beads can be spread across the whole stage while the
+        # measured data region is a small patch, so a thin outline is easy to miss.
+        # Draw a translucent fill (behind the beads) + a label so the region reads
+        # clearly as a region.
+        lo_x, hi_x = min(x0, x1), max(x0, x1)
+        lo_y, hi_y = min(y0, y1), max(y0, y1)
+        fill = QGraphicsRectItem(QRectF(lo_x, lo_y, hi_x - lo_x, hi_y - lo_y))
+        fill.setPen(pg.mkPen(None))
+        fill.setBrush(pg.mkBrush(230, 200, 0, 60))
+        fill.setZValue(-10)                       # behind the bead markers
+        self.plot.addItem(fill)
         self.plot.plot(
             [x0, x1, x1, x0, x0],
             [y0, y0, y1, y1, y0],
             pen=pg.mkPen((230, 200, 0), width=2),
-            name="data range",
+            name="data region",
         )
+        label = pg.TextItem("data region", color=(150, 125, 0), anchor=(0.5, 1.25))
+        label.setPos((lo_x + hi_x) / 2.0, hi_y)
+        self.plot.addItem(label)
 
     def _update_visibility(self):
         for key, item in self._items.items():
@@ -2096,13 +2267,32 @@ class MsrReaderDialog(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # Non-owned top-level window: place it fully on the active screen on
-        # first show (it is tall — 860 px — and otherwise opens with its title
-        # bar above the screen top on shorter / scaled displays).
+        # Non-owned top-level window. Cap it to the active screen (it is large —
+        # 980×860 — and would otherwise open with its title bar above the top on
+        # shorter / scaled displays), then drop it into the top corner OPPOSITE
+        # the main window's side, so it clears the main window and the Log window
+        # (which stack together on one side) instead of centering on top of them.
+        # The main window is a wide strip, so both can't sit fully side by side on
+        # a 1080p monitor; the opposite corner leaves them fully clear on a wide
+        # monitor and only a thin top strip overlapping on a narrow one.
         if not self._positioned:
             self._positioned = True
             from ...ui.modeless import ensure_on_screen
-            ensure_on_screen(self, self._owner)
+
+            align = "top_left"
+            try:
+                from PyQt6.QtGui import QGuiApplication
+
+                owner_win = self._owner.window() if self._owner is not None else None
+                screen = owner_win.screen() if owner_win is not None else None
+                screen = screen or QGuiApplication.primaryScreen()
+                if owner_win is not None and screen is not None:
+                    avail = screen.availableGeometry()
+                    owner_cx = owner_win.frameGeometry().center().x()
+                    align = "top_left" if owner_cx >= avail.center().x() else "top_right"
+            except Exception:
+                align = "top_left"
+            ensure_on_screen(self, self._owner, align=align)
 
     def closeEvent(self, event):
         self._save_settings()
@@ -3888,8 +4078,13 @@ class MsrReaderDialog(QWidget):
             QMessageBox.information(self, "Align channel", "Channel alignment is available only for modern MINFLUX datasets.")
             return
         datasets = self.parsed.get("datasets") or []
-        if len(datasets) < 2:
-            QMessageBox.critical(self, "Align channel", f"Expected at least 2 datasets for channel alignment, found {len(datasets)}.")
+        if not datasets:
+            QMessageBox.critical(self, "Align channel", "No datasets found.")
+            return
+        if len(datasets) == 1:
+            # Single channel → no alignment to compute; just show the beads +
+            # data region and their drift (skip the save-outputs dialog).
+            self._show_single_channel_beads(datasets[0])
             return
         ref_name = datasets[0].get("display_name") or datasets[0].get("did") or "channel_1"
         ref_mbm = self._aligned_mbm_points(ref_name)
@@ -3997,6 +4192,42 @@ class MsrReaderDialog(QWidget):
         if not payload["show_plot"]:
             box = QMessageBox.warning if poor else QMessageBox.information
             box(self, "Align channel", "Alignment completed.\n\n" + "\n".join(summary))
+
+    def _show_single_channel_beads(self, ds):
+        """Single-channel 'Align channel': no alignment to compute, so show the
+        channel's beads + the data region as a scatter and a per-bead **drift**
+        table (peak-to-peak per axis; resid columns are N/A). Skips the
+        save-outputs dialog."""
+        import numpy as np
+
+        from .beads_drift import gather_msr_bead_drift
+        MFSTATE = self._msr_state()
+        name = ds.get("display_name") or ds.get("did") or "channel_1"
+        gathered = gather_msr_bead_drift(
+            [ds], MFSTATE.mbm_map, getattr(MFSTATE, "mbm_meta_map", None))
+        beads = gathered[0]["beads"] if gathered else []
+        if not beads:
+            QMessageBox.information(
+                self, "Align channel",
+                f"No bead (grd/mbm/points) data to show for the single channel '{name}'.")
+            return
+        ids = np.array([b["gri"] for b in beads], dtype=np.uint32)
+        rids = [b.get("rid", str(b["gri"])) for b in beads]
+        pos = np.array([b["pos_nm"] for b in beads], dtype=float)
+        drift = np.array([
+            (np.ptp(np.asarray(b["xyz_nm"]), axis=0)
+             if np.asarray(b["xyz_nm"]).shape[0] else np.zeros(3))
+            for b in beads], dtype=float)
+        data = {"name": name, "bead_ids": ids, "rids": rids,
+                "pos_nm": pos, "drift_nm": drift}
+        bounds = self._combined_loc_bounds_nm([name])
+        excluded = sorted(int(g) for g in (self._bead_unchecked_gris or set()))
+        self.log(
+            f"[align] single channel '{name}': no alignment needed — showing "
+            f"{len(ids)} bead(s) + the data region (per-bead drift). "
+            f"user-excluded {len(excluded)} bead(s).")
+        self._show_child_dialog(
+            AlignmentPlotWindow([], self, data_bounds_nm=bounds, single_channel=data))
 
     # ------------------------------------------------------------------
     # Export

@@ -67,6 +67,8 @@ class CurvilinearSegmentationWindow(QDialog):
         self._skeleton = np.zeros((0, 0), dtype=bool)
         self._xedge = np.zeros(0)
         self._yedge = np.zeros(0)
+        self._segment_paths: list[np.ndarray] = []
+        self._spline_paths: list[np.ndarray] = []
         self._paths: list[np.ndarray] = []
         self._lengths = np.empty(0)
         self._labels: list[str] = []
@@ -84,6 +86,7 @@ class CurvilinearSegmentationWindow(QDialog):
         self._retrace_timer.timeout.connect(self._retrace)
 
         self._build_ui()
+        self._on_method_changed()
         self._recompute()
 
     # ------------------------------------------------------------------ UI
@@ -109,10 +112,11 @@ class CurvilinearSegmentationWindow(QDialog):
         self._pixel_spin.valueChanged.connect(self._schedule_recompute)
         form.addRow("Pixel size:", self._pixel_spin)
         self._method_combo = QComboBox()
-        self._method_combo.addItem("Frangi (vesselness)", "frangi")
-        self._method_combo.addItem("Sato (tubeness)", "sato")
-        self._method_combo.currentIndexChanged.connect(self._schedule_recompute)
-        form.addRow("Ridge filter:", self._method_combo)
+        self._method_combo.addItem("Frangi ridge + skeleton", "frangi")
+        self._method_combo.addItem("Sato tubeness + skeleton", "sato")
+        self._method_combo.addItem("Point-cloud spline", "point_spline")
+        self._method_combo.currentIndexChanged.connect(lambda *_: self._on_method_changed())
+        form.addRow("Method:", self._method_combo)
         self._scale_min = self._spin(1.0, 1000.0, cv.DEFAULT_SCALE_MIN_NM, 1, 1.0, " nm")
         self._scale_min.setToolTip("Smallest filament half-width (Hessian scale) to detect.")
         self._scale_min.valueChanged.connect(self._schedule_recompute)
@@ -131,6 +135,20 @@ class CurvilinearSegmentationWindow(QDialog):
         self._beta.setToolTip("Frangi blobness sensitivity β (lower = stricter on line-likeness).")
         self._beta.valueChanged.connect(self._schedule_recompute)
         form.addRow("Frangi β:", self._beta)
+        self._spline_step = self._spin(2.0, 2000.0, 20.0, 1, 2.0, " nm")
+        self._spline_step.setToolTip("Resampling step for fitted spline ROI vertices.")
+        self._spline_step.valueChanged.connect(self._schedule_recompute)
+        form.addRow("Spline step:", self._spline_step)
+        self._spline_smooth = self._spin(0.0, 1000.0, 15.0, 1, 2.0, " nm")
+        self._spline_smooth.setToolTip("Approximate spline smoothing distance.")
+        self._spline_smooth.valueChanged.connect(self._schedule_recompute)
+        form.addRow("Spline smooth:", self._spline_smooth)
+        self._spline_min_pts = QSpinBox()
+        self._spline_min_pts.setRange(1, 100)
+        self._spline_min_pts.setValue(3)
+        self._spline_min_pts.setToolTip("Minimum localizations in a PCA bin for point-cloud spline fitting.")
+        self._spline_min_pts.valueChanged.connect(self._schedule_recompute)
+        form.addRow("Min loc/bin:", self._spline_min_pts)
         self._sqrt = QCheckBox("√ counts (stabilize)")
         self._sqrt.setToolTip("Convolve the square root of the histogram (down-weight aggregates).")
         self._sqrt.toggled.connect(self._schedule_recompute)
@@ -169,11 +187,11 @@ class CurvilinearSegmentationWindow(QDialog):
         detect.addRow("", self._otsu)
         self._threshold = self._spin(0.0, 1.0, cv.DEFAULT_THRESHOLD, 2, 0.01, "")
         self._threshold.setToolTip("Ridge-map threshold as a fraction of its max.")
-        self._threshold.valueChanged.connect(lambda *_: self._schedule_retrace())
+        self._threshold.valueChanged.connect(lambda *_: self._schedule_result_update())
         detect.addRow("Threshold:", self._threshold)
         self._min_length = self._spin(0.0, 100000.0, cv.DEFAULT_MIN_LENGTH_NM, 0, 50.0, " nm")
         self._min_length.setToolTip("Discard traced centre lines shorter than this.")
-        self._min_length.valueChanged.connect(lambda *_: self._schedule_retrace())
+        self._min_length.valueChanged.connect(lambda *_: self._schedule_result_update())
         detect.addRow("Min length:", self._min_length)
         left.addLayout(detect)
 
@@ -217,6 +235,7 @@ class CurvilinearSegmentationWindow(QDialog):
         self._plot.setAspectLocked(True)
         self._plot.setLabel("bottom", "X (nm)")
         self._plot.setLabel("left", "Y (nm)")
+        self._apply_y_axis_direction()
 
         self._ridge_img = pg.ImageItem()
         self._ridge_img.setZValue(0)
@@ -264,6 +283,24 @@ class CurvilinearSegmentationWindow(QDialog):
         hint.setStyleSheet("color:#888;")
         hint.setWordWrap(True)
         right.addWidget(hint)
+        export_form = QFormLayout()
+        self._export_combo = QComboBox()
+        self._export_combo.addItem("Skeleton branches", "skeleton")
+        self._export_combo.addItem("Line segments", "segments")
+        self._export_combo.addItem("Fitted splines", "splines")
+        self._export_combo.currentIndexChanged.connect(lambda *_: self._refresh_result_paths())
+        export_form.addRow("Result:", self._export_combo)
+        self._roi_type_combo = QComboBox()
+        self._roi_type_combo.addItem("Freehand line", "freehand_line")
+        self._roi_type_combo.addItem("Polyline", "polyline")
+        self._roi_type_combo.addItem("Line when possible", "line")
+        export_form.addRow("ROI type:", self._roi_type_combo)
+        self._vertex_step = QSpinBox()
+        self._vertex_step.setRange(1, 100)
+        self._vertex_step.setValue(1)
+        self._vertex_step.setToolTip("Keep every Nth vertex when adding ROI Manager records.")
+        export_form.addRow("Vertex step:", self._vertex_step)
+        right.addLayout(export_form)
         self._add_btn = QPushButton("Add to Manager")
         self._add_btn.clicked.connect(self._add_to_manager)
         right.addWidget(self._add_btn)
@@ -353,7 +390,26 @@ class CurvilinearSegmentationWindow(QDialog):
 
     def _on_otsu_toggled(self, on: bool) -> None:
         self._threshold.setEnabled(not on)
-        self._schedule_retrace()
+        self._schedule_result_update()
+
+    def _on_method_changed(self) -> None:
+        is_point_spline = self._method_combo.currentData() == "point_spline"
+        for widget in (
+            self._scale_min, self._scale_max, self._n_scales, self._sqrt,
+            self._dir_enable, self._dir_len, self._dir_width, self._dir_angles,
+            self._otsu,
+        ):
+            widget.setEnabled(not is_point_spline)
+        self._threshold.setEnabled((not is_point_spline) and (not self._otsu.isChecked()))
+        self._beta.setEnabled(self._method_combo.currentData() == "frangi")
+        self._spline_min_pts.setEnabled(is_point_spline)
+        self._schedule_recompute()
+
+    def _schedule_result_update(self) -> None:
+        if self._method_combo.currentData() == "point_spline":
+            self._schedule_recompute()
+        else:
+            self._schedule_retrace()
 
     def _directional(self) -> dict | None:
         if not self._dir_enable.isChecked():
@@ -377,6 +433,26 @@ class CurvilinearSegmentationWindow(QDialog):
             return
 
         self._H, self._xedge, self._yedge = cv.render_histogram_2d(xy[:, 0], xy[:, 1], px)
+        if self._method_combo.currentData() == "point_spline":
+            self._ridge = np.zeros_like(self._H, dtype=float)
+            self._skeleton = np.zeros_like(self._H, dtype=bool)
+            self._segment_paths = cv.point_cloud_spline_paths(
+                xy,
+                pixel_size_nm=max(px, 1.0),
+                min_length_nm=float(self._min_length.value()),
+                sample_step_nm=float(self._spline_step.value()),
+                smoothing_nm=float(self._spline_smooth.value()),
+                min_points_per_bin=int(self._spline_min_pts.value()),
+            )
+            self._spline_paths = list(self._segment_paths)
+            self._info_label.setText(
+                f"{xy.shape[0]:,} localizations · {self._H.shape[0]}×{self._H.shape[1]} px")
+            self._draw_images()
+            self._draw_skeleton()
+            self._refresh_result_paths()
+            self._status_label.setText("")
+            return
+
         image = cv.stabilize_histogram(self._H, self._sqrt.isChecked())
         directional = self._directional()
         if directional:
@@ -408,22 +484,25 @@ class CurvilinearSegmentationWindow(QDialog):
         paths_rc = cv.skeleton_to_paths(self._skeleton, int(max(self._min_length.value() / px, 1.0)))
         xc = 0.5 * (self._xedge[:-1] + self._xedge[1:])
         yc = 0.5 * (self._yedge[:-1] + self._yedge[1:])
-        self._paths = [np.column_stack([xc[p[:, 0].astype(int)], yc[p[:, 1].astype(int)]])
-                       for p in paths_rc]
-        self._lengths = np.array([self._path_length(p) for p in self._paths])
-        self._labels = [f"Segment {i}" for i in range(1, len(self._paths) + 1)]
+        self._segment_paths = [
+            np.column_stack([xc[p[:, 0].astype(int)], yc[p[:, 1].astype(int)]])
+            for p in paths_rc
+        ]
+        self._spline_paths = cv.fit_spline_paths(
+            self._segment_paths,
+            sample_step_nm=float(self._spline_step.value()),
+            smoothing_nm=float(self._spline_smooth.value()),
+        )
         self._draw_skeleton()
-        self._draw_paths()
-        self._populate_list()
+        self._refresh_result_paths()
         self._status_label.setText("")
-        has_paths = len(self._paths) > 0
-        self._add_btn.setEnabled(has_paths)
-        self._width_btn.setEnabled(has_paths)
 
     def _reset(self, status: str) -> None:
         self._H = np.zeros((0, 0))
         self._ridge = np.zeros((0, 0))
         self._skeleton = np.zeros((0, 0), dtype=bool)
+        self._segment_paths = []
+        self._spline_paths = []
         self._paths = []
         self._lengths = np.empty(0)
         self._labels = []
@@ -442,11 +521,51 @@ class CurvilinearSegmentationWindow(QDialog):
             return 0.0
         return float(np.sum(np.hypot(np.diff(path[:, 0]), np.diff(path[:, 1]))))
 
+    def _refresh_result_paths(self) -> None:
+        if not hasattr(self, "_export_combo"):
+            return
+        mode = self._export_combo.currentData()
+        if mode == "splines":
+            source = self._spline_paths
+        elif mode == "segments":
+            source = [
+                np.vstack([path[0], path[-1]])
+                for path in self._segment_paths
+                if np.asarray(path).reshape(-1, 2).shape[0] >= 2
+            ]
+        else:
+            source = self._segment_paths
+        self._paths = [np.asarray(path, dtype=float) for path in source]
+        self._lengths = np.array([self._path_length(p) for p in self._paths])
+        prefix = {
+            "splines": "Spline",
+            "segments": "Line",
+            "skeleton": "Skeleton",
+        }.get(str(mode), "Segment")
+        self._labels = [f"{prefix} {i}" for i in range(1, len(self._paths) + 1)]
+        self._draw_paths()
+        self._populate_list()
+        has_paths = len(self._paths) > 0
+        self._add_btn.setEnabled(has_paths)
+        self._width_btn.setEnabled(has_paths)
+
     # ----------------------------------------------------------- drawing
     def _image_rect(self) -> QRectF:
         return QRectF(float(self._xedge[0]), float(self._yedge[0]),
                       float(self._xedge[-1] - self._xedge[0]),
                       float(self._yedge[-1] - self._yedge[0]))
+
+    def _xy_origin_top_left(self) -> bool:
+        value = str(
+            self._state.prefs.get("plot", {}).get("render_xy_origin", "top_left")
+        ).lower()
+        return value != "bottom_left"
+
+    def _apply_y_axis_direction(self) -> None:
+        try:
+            self._plot.getViewBox().invertY(self._xy_origin_top_left())
+        except Exception:
+            pass
 
     def _draw_images(self) -> None:
         if self._ridge.size == 0:
@@ -491,7 +610,8 @@ class CurvilinearSegmentationWindow(QDialog):
         return np.concatenate(xs), np.concatenate(ys)
 
     def _update_layer_visibility(self) -> None:
-        self._ridge_img.setVisible(self._show_ridge.isChecked() and self._ridge.size > 0)
+        has_ridge = self._method_combo.currentData() != "point_spline"
+        self._ridge_img.setVisible(self._show_ridge.isChecked() and has_ridge and self._ridge.size > 0)
         self._hist_img.setVisible(self._show_image.isChecked() and self._H.size > 0)
         self._skel_img.setVisible(self._show_skeleton.isChecked() and self._skeleton.size > 0)
         det = self._show_detection.isChecked()
@@ -539,27 +659,59 @@ class CurvilinearSegmentationWindow(QDialog):
         if not sel or self._owner is None or not hasattr(self._owner, "add_polyline_rois"):
             return
         ds = self._dataset()
-        paths = [self._paths[i] for i in sel]
+        step = max(int(self._vertex_step.value()), 1)
+        paths = [self._decimate_path(self._paths[i], step) for i in sel]
         names = [self._labels[i] for i in sel]
         opts = []
-        if self._sqrt.isChecked():
+        method = str(self._method_combo.currentData())
+        if method != "point_spline" and self._sqrt.isChecked():
             opts.append("sqrt-stabilized")
-        if self._dir_enable.isChecked():
+        if method != "point_spline" and self._dir_enable.isChecked():
             opts.append("directional pre-filter")
+        if self._export_combo.currentData() == "splines":
+            opts.append(f"spline step={self._spline_step.value():.1f} nm")
+            opts.append(f"smoothing={self._spline_smooth.value():.1f} nm")
+        if step > 1:
+            opts.append(f"vertex step={step}")
         opts_str = (", " + ", ".join(opts)) if opts else ""
+        if method == "point_spline":
+            method_text = "point-cloud spline"
+            detail = (
+                f"pixel={self._pixel_spin.value():.1f} nm, "
+                f"min length={self._min_length.value():.0f} nm, "
+                f"min loc/bin={self._spline_min_pts.value()}"
+            )
+        else:
+            method_text = f"{method} ridge"
+            detail = (
+                f"pixel={self._pixel_spin.value():.1f} nm, "
+                f"width {self._scale_min.value():.0f}-{self._scale_max.value():.0f} nm × "
+                f"{self._n_scales.value()} scales, "
+                f"threshold={'Otsu' if self._otsu.isChecked() else f'{self._threshold.value():.2f}'}, "
+                f"min length={self._min_length.value():.0f} nm"
+            )
+        result_label = self._export_combo.currentText().lower()
         log = (
             f"Curvilinear segmentation: added {len(paths)} of {len(self._paths)} "
             f"centre line(s) on '{ds.name if ds else '?'}' "
-            f"({self._method_combo.currentData()} ridge, pixel={self._pixel_spin.value():.1f} nm, "
-            f"width {self._scale_min.value():.0f}-{self._scale_max.value():.0f} nm × "
-            f"{self._n_scales.value()} scales, "
-            f"threshold={'Otsu' if self._otsu.isChecked() else f'{self._threshold.value():.2f}'}, "
-            f"min length={self._min_length.value():.0f} nm{opts_str}); added poly-line ROIs.")
+            f"({method_text}, {detail}{opts_str}); added {result_label} as "
+            f"{self._roi_type_combo.currentText().lower()} ROI(s).")
         n = self._owner.add_polyline_rois(
             self._idx, paths, name_prefix="Segment", source="curvilinear_segmentation_2d",
-            names=names, log_message=log)   # stroke_color defaults to the system ROI colour
+            names=names, log_message=log,
+            roi_type=str(self._roi_type_combo.currentData()))
         if n:
             self._status_label.setText(f"Added {n} centre line(s) to the ROI Manager.")
+
+    @staticmethod
+    def _decimate_path(path: np.ndarray, step: int) -> np.ndarray:
+        pts = np.asarray(path, dtype=float).reshape(-1, 2)
+        if step <= 1 or pts.shape[0] <= 2:
+            return pts
+        out = pts[::step]
+        if not np.allclose(out[-1], pts[-1]):
+            out = np.vstack([out, pts[-1]])
+        return out
 
     def _measure_width(self) -> None:
         """Measure FWHM of the perpendicular intensity profile of the selected

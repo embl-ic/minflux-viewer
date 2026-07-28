@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from minflux_viewer.ui.modeless import beside_position
+from minflux_viewer.ui.modeless import beside_position, corner_position
 
 # 1920×1080 available screen (exclusive right/bottom).
 AVAIL = (0, 0, 1920, 1080)
@@ -54,3 +54,25 @@ def test_top_left_anchor_never_goes_offscreen_left_or_up():
     # left/above are off-screen → must pick right/below (on-screen)
     assert x >= 0 and y >= 0
     assert not _overlaps(anchor, (300, 200), (x, y))
+
+
+def test_corner_top_right_anchors_to_upper_right_with_margin():
+    x, y = corner_position(AVAIL, (900, 150), align="top_right", margin=24)
+    assert (x, y) == (1920 - 24 - 900, 24)          # right-aligned, near the top
+    assert x + 900 <= 1920 and y >= 0
+
+
+def test_corner_center_is_centered():
+    x, y = corner_position(AVAIL, (600, 400), align="center")
+    assert (x, y) == ((1920 - 600) // 2, (1080 - 400) // 2)
+
+
+def test_corner_never_goes_offscreen_when_window_too_wide():
+    # A window wider than the screen still clamps its top-left on-screen.
+    x, y = corner_position(AVAIL, (2000, 150), align="top_right", margin=24)
+    assert x == 0 and y == 24
+
+
+def test_corner_bottom_left():
+    x, y = corner_position(AVAIL, (500, 300), align="bottom_left", margin=24)
+    assert x == 24 and y == 1080 - 24 - 300

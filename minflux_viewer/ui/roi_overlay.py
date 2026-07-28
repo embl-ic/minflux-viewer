@@ -1776,6 +1776,7 @@ class RoiOverlayController(QObject):
             self._connect_draft_edit(self.draft_item)
             self.plot_item.addItem(self.draft_item)
         self._queue_selection_update(record)
+        self._remember_active_roi(record)   # for Process › ROI › Restore ROI
         # One-shot: hand a freshly drawn rectangle to a pending requester.
         cb = self._rect_request
         if cb is not None and record.type == "rectangle":
@@ -1985,6 +1986,19 @@ class RoiOverlayController(QObject):
             self._delete_hit_roi(kind, record)
         elif chosen is properties_action:
             self._show_roi_properties(record)
+
+    def _remember_active_roi(self, record: RoiRecord) -> None:
+        """Notify the main window so Process › ROI › Restore ROI can bring this
+        ROI back (across views, or after an accidental delete)."""
+        try:
+            mw = self.owner._state.mfv._main_window
+        except Exception:
+            mw = None
+        if mw is not None and hasattr(mw, "_remember_roi_for_restore"):
+            try:
+                mw._remember_roi_for_restore(self.owner, record)
+            except Exception:
+                pass
 
     def replace_draft(self, new_record: RoiRecord) -> None:
         """Show *new_record* as the current editable draft. Convert / Enlarge /

@@ -148,6 +148,70 @@ class _UpdateCheckTask(QRunnable):
             self.signals.done.emit(result)
 
 
+class _OmeZarrCancelled(RuntimeError):
+    pass
+
+
+class _OmeZarrSignals(QObject):
+    progress = pyqtSignal(float, str)
+    done = pyqtSignal(object)
+    failed = pyqtSignal(str)
+    cancelled = pyqtSignal()
+
+
+class _OmeZarrTask(QRunnable):
+    """Run an OME-Zarr export off the UI thread with cancellable progress."""
+
+    def __init__(self, fn) -> None:
+        super().__init__()
+        self._fn = fn
+        self._cancelled = False
+        self.signals = _OmeZarrSignals()
+        self.last_percent = -1
+        self.last_stage = ""
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:  # noqa: N802 - Qt API
+        def report(fraction: float, stage: str) -> None:
+            if self._cancelled:
+                raise _OmeZarrCancelled()
+            self.signals.progress.emit(float(fraction), str(stage))
+
+        try:
+            result = self._fn(report)
+        except _OmeZarrCancelled:
+            self.signals.cancelled.emit()
+        except Exception as exc:
+            if self._cancelled:
+                self.signals.cancelled.emit()
+            else:
+                self.signals.failed.emit(str(exc))
+        else:
+            if not self._cancelled:
+                self.signals.done.emit(result)
+
+
+def _human_bytes(value: int) -> str:
+    amount = float(max(0, int(value)))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if amount < 1024.0 or unit == "PiB":
+            return f"{amount:.1f} {unit}" if unit != "B" else f"{int(amount)} B"
+        amount /= 1024.0
+    return f"{amount:.1f} PiB"
+
+
+def _human_duration(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds < 60.0:
+        return f"{seconds:.0f} s"
+    minutes = seconds / 60.0
+    if minutes < 60.0:
+        return f"{minutes:.1f} min"
+    return f"{minutes / 60.0:.1f} h"
+
+
 class MainWindow(QMainWindow):
     """Top-level application window."""
 
@@ -156,6 +220,7 @@ class MainWindow(QMainWindow):
     def __init__(self, state: AppState) -> None:
         super().__init__()
         self._state = state
+        self._apply_menu_separator_style()
         self._data_windows: dict[int, DataWindow] = {}
 
         # One reusable plot window per dataset.
@@ -179,6 +244,9 @@ class MainWindow(QMainWindow):
         self._window_cycle_index = -1
         # One render window per dataset: {dataset_idx: RenderWindow}
         self._render_windows: dict[int, "RenderWindow"] = {}
+        # Advanced render windows are deliberately kept separate so alternate
+        # reconstruction methods cannot replace or mutate the production renderer.
+        self._advanced_render_windows: dict[int, QWidget] = {}
         # Standalone TIFF viewers are not MINFLUX datasets and never appear in
         # the dataset manager.
         self._tiff_windows: dict[str, QWidget] = {}
@@ -226,9 +294,11 @@ class MainWindow(QMainWindow):
         # Its entries are file paths, not commands — keep them out of the toolbar
         # command finder (command_finder.collect_commands skips flagged menus).
         self._recent_menu.setProperty("command_finder_exclude", True)
-        # Scroll (don't wrap into columns) when the history is long.
-        # setStyle() doesn't take ownership, so keep a reference alive.
-        self._recent_menu_style = _ScrollableMenuStyle(self._recent_menu.style())
+        # Scroll (don't wrap into columns) when the history is long. A
+        # QProxyStyle takes ownership of an explicitly supplied base style, so
+        # never pass the QApplication-owned QWidget.style() here.
+        self._recent_menu_style = _ScrollableMenuStyle()
+        self._recent_menu_style.setParent(self._recent_menu)
         self._recent_menu.setStyle(self._recent_menu_style)
 
         # Wire actions to handlers (previously spread across _build_menu/_toolbar)
@@ -247,11 +317,15 @@ class MainWindow(QMainWindow):
         # Remembered ROI duplicate/crop options, per dataset (session-only,
         # keyed by dataset identity — "use the same setup and stop asking").
         self._roi_crop_setup: dict = {}
+        # Last active ROI draft per dataset index, for Process › ROI › Restore ROI
+        # (restore across views / after an accidental delete).
+        self._roi_last_active: dict = {}
 
         # Tier-A in-app update check (opt-out via Preferences > File). Delayed so
         # it never slows startup; silent unless a newer release exists.
         self._is_shutting_down = False
         self._update_tasks: set = set()
+        self._ome_zarr_tasks: set = set()
         if state.prefs.get("file", {}).get("check_updates_on_startup", False):
             QTimer.singleShot(3000, self._maybe_startup_update_check)
 
@@ -278,6 +352,25 @@ class MainWindow(QMainWindow):
         self.menuOpenSample = QMenu("Open Sample Data", self)
         self.menuOpenSample.setProperty("command_finder_exclude", True)
         u.actionSave.triggered.connect(self._save_data)
+        self.menuSaveAs = QMenu("Save As", self)
+        self.actionSaveAsMinflux = QAction("MINFLUX data formats (.mat; .npy; .json)", self)
+        self.actionSaveAsMinflux.triggered.connect(self._save_as_minflux_formats)
+        self.actionSaveAsMsr = QAction("MINFLUX .msr file (experimental)", self)
+        self.actionSaveAsMsr.triggered.connect(
+            lambda _checked=False: self._save_as_format("msr", "MINFLUX .msr file")
+        )
+        self.actionSaveAsSpreadsheet = QAction("Spreadsheet (.csv)", self)
+        self.actionSaveAsSpreadsheet.triggered.connect(self._save_as_spreadsheet)
+        self.actionSaveAsZarr = QAction("Zarr (.zarr v2) format", self)
+        self.actionSaveAsZarr.triggered.connect(
+            lambda _checked=False: self._save_as_format("zarr", "Zarr v2")
+        )
+        self.actionSaveAsHdf5 = QAction("HDF5...", self)
+        self.actionSaveAsHdf5.triggered.connect(self._save_as_picasso_hdf5)
+        self.actionSaveAsOmeTiff = QAction("OME-TIFF...", self)
+        self.actionSaveAsOmeTiff.triggered.connect(self._save_as_ome_tiff)
+        self.actionSaveAsOmeZarr = QAction("OME-NGFF 0.5 / Zarr v3...", self)
+        self.actionSaveAsOmeZarr.triggered.connect(self._save_as_ome_zarr)
         u.actionQuit.triggered.connect(self.close)
         self.actionClose = QAction("Close Dataset", self)
         self.actionClose.setShortcut(QKeySequence("Ctrl+W"))
@@ -308,6 +401,8 @@ class MainWindow(QMainWindow):
         self.actionAttributePlot3DMatplotlib = QAction("Attribute Plot 3D (Matplotlib)", self)
         self.actionAttributePlot3DMatplotlib.triggered.connect(self._show_attr_plot_3d_matplotlib)
         u.actionRender.triggered.connect(self._show_render)        # was Process > Render image
+        # The advanced render view is reached via the render window's right-click
+        # View › Render Mode › Advanced switch, not a standalone menu entry.
         u.actionShowInfo.triggered.connect(self._show_info_for_active)
         u.actionLog.triggered.connect(self._show_log)
         u.actionConsole.triggered.connect(self._show_console)
@@ -422,18 +517,20 @@ class MainWindow(QMainWindow):
         self.actionChannelSplit.triggered.connect(self._split_active_channel_group)
         self.actionChannelFlatten = QAction("Flatten", self)
         self.actionChannelFlatten.triggered.connect(self._flatten_active_channel_group)
-        self.actionChannelOverlay = QAction("Overlay", self)
-        self.actionChannelOverlay.triggered.connect(
-            lambda: self._placeholder("Channel overlay", "a later implementation")
-        )
         self.actionChannelSeparateDcr = QAction("Separate Channel by DCR", self)
         self.actionChannelSeparateDcr.triggered.connect(self._show_channel_separation)
+        self.actionChannelSeparateTime = QAction(
+            "Separate Channels from Time Windows", self
+        )
+        self.actionChannelSeparateTime.triggered.connect(
+            self._show_time_channel_separation
+        )
         self.menuProcessChannel.addAction(self.actionChannelTool)
         self.menuProcessChannel.addAction(self.actionChannelCombine)
         self.menuProcessChannel.addAction(self.actionChannelSplit)
         self.menuProcessChannel.addAction(self.actionChannelFlatten)
-        self.menuProcessChannel.addAction(self.actionChannelOverlay)
         self.menuProcessChannel.addAction(self.actionChannelSeparateDcr)
+        self.menuProcessChannel.addAction(self.actionChannelSeparateTime)
 
         self.menuProcessRoi = QMenu("ROI", self)
         self.actionRoiManager = QAction("ROI Manager", self)
@@ -458,6 +555,30 @@ class MainWindow(QMainWindow):
             self.menuRoiConvert.addAction(act)
             self._roi_convert_actions[target] = act
         self.menuProcessRoi.addMenu(self.menuRoiConvert)
+        # Fit submenu (right under Convert): fit a shape to the localizations the
+        # active region ROI highlights; Spline/Interpolate act on the ROI outline.
+        self.menuRoiFit = QMenu("Fit", self)
+        self._roi_fit_actions = {}
+        for label, target in (
+            ("Fit Rectangle", "rectangle"),
+            ("Fit Circle", "circle"),
+            ("Fit Ellipse", "ellipse"),
+            ("Fit Polygon", "polygon"),
+            ("Fit Convex Hull", "convex_hull"),
+        ):
+            act = QAction(label, self)
+            act.triggered.connect(lambda _checked=False, t=target: self._fit_active_roi(t))
+            self.menuRoiFit.addAction(act)
+            self._roi_fit_actions[target] = act
+        self.menuRoiFit.addSeparator()
+        self.actionRoiFitSpline = QAction("Fit Spline", self)
+        self.actionRoiFitSpline.triggered.connect(self._spline_fit_active_roi)
+        self.menuRoiFit.addAction(self.actionRoiFitSpline)
+        self.actionRoiInterpolate = QAction("Interpolate", self)
+        self.actionRoiInterpolate.triggered.connect(self._interpolate_active_roi)
+        self.menuRoiFit.addAction(self.actionRoiInterpolate)
+        self.menuProcessRoi.addMenu(self.menuRoiFit)
+
         self.actionRoiResize = QAction("Enlarge / Shrink…", self)
         self.actionRoiResize.triggered.connect(self._resize_active_roi)
         self.menuProcessRoi.addAction(self.actionRoiResize)
@@ -467,6 +588,11 @@ class MainWindow(QMainWindow):
         self.actionRoiConvexHull = QAction("Convex Hull", self)
         self.actionRoiConvexHull.triggered.connect(self._convex_hull_active_roi)
         self.menuProcessRoi.addAction(self.actionRoiConvexHull)
+        self.menuProcessRoi.addSeparator()
+        # Restore ROI: bring the active ROI back on another view / after a delete.
+        self.actionRoiRestore = QAction("Restore ROI", self)
+        self.actionRoiRestore.triggered.connect(self._restore_roi)
+        self.menuProcessRoi.addAction(self.actionRoiRestore)
         self.menuProcessRoi.addSeparator()
         self.actionRoi3D = QAction("3D ROI", self)
         self.actionRoi3D.triggered.connect(self._show_roi_3d)
@@ -568,7 +694,7 @@ class MainWindow(QMainWindow):
         u = self._ui
 
         u.actionOpen.setText("Open...")
-        u.actionSave.setText("Save Processed Data...")
+        u.actionSave.setText("Save...")
         u.actionQuit.setText("Quit")
         u.actionDatasetManager.setText("Dataset Manager")
         u.actionFilter.setText("Filter...")
@@ -602,11 +728,19 @@ class MainWindow(QMainWindow):
         self.actionChannelTool.setText("Channel Tool")
         self.actionChannelCombine.setText("Combine...")
         self.actionChannelSplit.setText("Split...")
-        self.actionChannelOverlay.setText("Overlay")
         self.actionChannelSeparateDcr.setText("Separate Channel by DCR")
+        self.actionChannelSeparateTime.setText("Separate Channels from Time Windows")
         self.menuProcessRoi.setTitle("ROI")
         self.actionRoiManager.setText("ROI Manager")
         u.menuOpenRecent.setTitle("Open Recent")
+        self.menuSaveAs.setTitle("Save As")
+        self.actionSaveAsMinflux.setText("MINFLUX data formats (.mat; .npy; .json)")
+        self.actionSaveAsMsr.setText("MINFLUX .msr file (experimental)")
+        self.actionSaveAsSpreadsheet.setText("Spreadsheet (.csv)")
+        self.actionSaveAsZarr.setText("Zarr (.zarr v2) format")
+        self.actionSaveAsHdf5.setText("HDF5...")
+        self.actionSaveAsOmeTiff.setText("OME-TIFF...")
+        self.actionSaveAsOmeZarr.setText("OME-NGFF 0.5 / Zarr v3...")
         u.menuBatchProcessing.setTitle("Batch Processing")
         u.menuAnalysis.setTitle("Analyze")
         u.menuLocPrecision.setTitle("Localization Precision")
@@ -618,11 +752,20 @@ class MainWindow(QMainWindow):
         u.menuFile.addAction(self.menuOpenSample.menuAction())
         u.menuFile.addAction(u.menuOpenRecent.menuAction())
         u.menuFile.addSeparator()
-        u.menuFile.addAction(u.actionSave)
-        u.menuFile.addSeparator()
         u.menuFile.addAction(self.actionClose)
         u.menuFile.addAction(self.actionCloseAll)
         u.menuFile.addAction(self.actionCloseAllWindows)
+        u.menuFile.addSeparator()
+        u.menuFile.addAction(u.actionSave)
+        self.menuSaveAs.clear()
+        self.menuSaveAs.addAction(self.actionSaveAsMinflux)
+        self.menuSaveAs.addAction(self.actionSaveAsMsr)
+        self.menuSaveAs.addAction(self.actionSaveAsSpreadsheet)
+        self.menuSaveAs.addAction(self.actionSaveAsZarr)
+        self.menuSaveAs.addAction(self.actionSaveAsHdf5)
+        self.menuSaveAs.addAction(self.actionSaveAsOmeTiff)
+        self.menuSaveAs.addAction(self.actionSaveAsOmeZarr)
+        u.menuFile.addAction(self.menuSaveAs.menuAction())
         u.menuFile.addSeparator()
         u.menuFile.addAction(u.actionQuit)
         self._rebuild_sample_menu()          # populate File › Open Sample Data presets
@@ -727,42 +870,41 @@ class MainWindow(QMainWindow):
         """Visually separate AI-generated/unapproved actions from approved UI."""
         u = self._ui
         actions = [
-            u.actionSave,
-            self.menuProcessChannel.menuAction(),
+            #u.actionSave,
+            #self.menuProcessChannel.menuAction(),
             self.actionChannelTool,
-            self.actionChannelCombine,
-            self.actionChannelSplit,
-            self.actionChannelOverlay,
-            self.actionChannelSeparateDcr,
+            #self.actionChannelCombine,
+            #self.actionChannelSplit,
+            #self.actionChannelSeparateDcr,
             #self.menuProcessRoi.menuAction(),
             #self.actionRoiManager,
             #self.menuRoiConvert.menuAction(),
             #self._roi_convert_actions.values(),
             #self.actionRoiResize,
-            self.actionRoiSkeletonize,
+            #self.actionRoiSkeletonize,
             #self.actionRoiConvexHull,
             self.actionRoi3D,
             u.menuBatchProcessing.menuAction(),
             u.actionBatchRender,
             u.actionBatchExport,
             u.actionBatchFilter,
-            self.menuMeasure.menuAction(),
-            self.actionPlotProfile,
-            self.actionSetMeasurements,
+            #self.menuMeasure.menuAction(),
+            #self.actionPlotProfile,
+            #self.actionSetMeasurements,
             self.actionDbscan,
             self.actionKNearestNeighbour,
-            self.menuHlyBPair.menuAction(),
-            self.actionHlyB2D,
-            self.actionHlyB3D,
-            self.actionHlyBTemplate3D,
-            self.menuAnalyzeSegmentation.menuAction(),
-            self.actionSegNpc2D,
-            self.actionSegNpc3D,
-            self.actionSegConvolution,
-            self.actionSegCurvilinear,
-            self.actionSegParticleAverage,
+            #self.menuHlyBPair.menuAction(),
+            #self.actionHlyB2D,
+            #self.actionHlyB3D,
+            #self.actionHlyBTemplate3D,
+            #self.menuAnalyzeSegmentation.menuAction(),
+            #self.actionSegNpc2D,
+            #self.actionSegNpc3D,
+            #self.actionSegConvolution,
+            #self.actionSegCurvilinear,
+            #self.actionSegParticleAverage,
             u.menuTracking.menuAction(),
-            u.actionParticleTracking,
+            #u.actionParticleTracking,
             u.actionMsdAnalysis,
             u.actionMemoryMonitor,
             self.actionAttributePlot3DMatplotlib,
@@ -1888,6 +2030,161 @@ class MainWindow(QMainWindow):
         self._commit_roi_replacement(record, kind, adapter, new_record)
         self._state.log(f"Converted ROI '{record.name}' ({old_type}) → convex hull.")
 
+    # ------------------------------------------------------------------
+    # Process › ROI › Fit  (data-point fits + spline/interpolate)
+    # ------------------------------------------------------------------
+    _REGION_ROI_TYPES = {"rectangle", "oval", "polygon", "freehand"}
+
+    def _roi_highlighted_points(self, record, ds):
+        """(M, 2) localizations the region *record* highlights, in the ROI's plane
+        (display nm, filter applied)."""
+        import numpy as np
+        from ..core.roi_crop import display_xyz_filtered
+        from ..core.roi_selection import roi_region_mask
+
+        plane = "XY"
+        if isinstance(record.context, dict):
+            plane = record.context.get("view_plane") or "XY"
+        axes = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}.get(plane, (0, 1))
+        xyz = display_xyz_filtered(ds)
+        if xyz.shape[0] == 0:
+            return np.empty((0, 2), dtype=float)
+        x, y = xyz[:, axes[0]], xyz[:, axes[1]]
+        mask = np.asarray(roi_region_mask(x, y, record), dtype=bool)
+        return np.column_stack([x[mask], y[mask]])
+
+    def _fit_active_roi(self, target: str) -> None:
+        """Process › ROI › Fit ▸ Rectangle/Circle/Ellipse/Polygon/Convex Hull —
+        fit the shape to the localizations the active region ROI highlights."""
+        from ..core.roi_fit import data_fit
+
+        record, kind, adapter = self._active_roi()
+        if record is None or record.type not in self._REGION_ROI_TYPES:
+            return  # region ROI only; silently ignore otherwise
+        ds = self._state.active_dataset
+        if ds is None:
+            self._no_data_warning()
+            return
+        pts = self._roi_highlighted_points(record, ds)
+        if pts.shape[0] < 3:
+            self._state.log(
+                "Fit: fewer than 3 localizations highlighted by the ROI.", "WARN")
+            return
+        try:
+            new_record = data_fit(record, pts, target)
+        except Exception as exc:
+            self._state.log(f"Fit {target} failed: {exc}", "ERROR")
+            return
+        old_type = record.type
+        self._commit_roi_replacement(record, kind, adapter, new_record)
+        self._state.log(
+            f"Fit {target.replace('_', ' ')} on ROI '{record.name}' ({old_type}) "
+            f"using {pts.shape[0]} localization(s).")
+
+    def _spline_fit_active_roi(self) -> None:
+        """Process › ROI › Fit ▸ Fit Spline — smooth the active ROI outline."""
+        from ..core.roi_fit import spline_fit
+
+        record, kind, adapter = self._active_roi()
+        if record is None:
+            return
+        try:
+            new_record = spline_fit(record)
+        except Exception as exc:
+            self._state.log(f"Spline fit failed: {exc}", "ERROR")
+            return
+        self._commit_roi_replacement(record, kind, adapter, new_record)
+        self._state.log(f"Spline-fit ROI '{record.name}'.")
+
+    def _interpolate_active_roi(self) -> None:
+        """Process › ROI › Fit ▸ Interpolate — resample the active ROI outline at
+        an even arc-length interval (nm), ImageJ-style."""
+        from PyQt6.QtWidgets import QInputDialog
+        from ..core.roi_fit import interpolate_outline
+
+        record, kind, adapter = self._active_roi()
+        if record is None:
+            return
+        interval, ok = QInputDialog.getDouble(
+            self, "Interpolate ROI", "Interval (nm):", 20.0, 0.1, 1e6, 1)
+        if not ok:
+            return
+        try:
+            new_record = interpolate_outline(record, interval_nm=float(interval))
+        except Exception as exc:
+            self._state.log(f"Interpolate failed: {exc}", "ERROR")
+            return
+        self._commit_roi_replacement(record, kind, adapter, new_record)
+        self._state.log(f"Interpolated ROI '{record.name}' at {interval:g} nm.")
+
+    # ------------------------------------------------------------------
+    # Process › ROI › Restore ROI
+    # ------------------------------------------------------------------
+    def _coordinate_views_for_dataset(self, idx):
+        """Open render / advanced-render / scatter windows for dataset *idx*."""
+        wins = []
+        for reg in (self._render_windows, self._advanced_render_windows,
+                    self._scatter_windows):
+            w = reg.get(idx)
+            if w is not None:
+                wins.append(w)
+        return wins
+
+    def _remember_roi_for_restore(self, window, record) -> None:
+        """Cache the active ROI draft (called from the overlay controller) so
+        Restore ROI can bring it back after a delete."""
+        import copy
+        idx = getattr(window, "_idx", None)
+        if isinstance(idx, int) and record is not None:
+            self._roi_last_active[idx] = copy.deepcopy(record)
+
+    def _restore_roi(self) -> None:
+        """Process › ROI › Restore ROI — put the active ROI draft onto the other
+        open coordinate views of the dataset (render ↔ scatter), or, if none is
+        active, restore the last active draft (e.g. after an accidental delete)."""
+        import copy
+        idx = self._state.active_idx
+        ds = self._state.active_dataset
+        if idx is None or ds is None:
+            self._no_data_warning()
+            return
+        views = self._coordinate_views_for_dataset(idx)
+        source = None
+        source_ctrl = None
+        for win in views:
+            ctrl = getattr(win, "_roi_overlay", None)
+            if ctrl is None:
+                continue
+            try:
+                rec = ctrl.current_record()
+            except Exception:
+                rec = None
+            if rec is not None:
+                source, source_ctrl = rec, ctrl
+                break
+        if source is None:
+            source = self._roi_last_active.get(idx)   # deleted / last → restore
+        if source is None:
+            self._state.log(
+                "Restore ROI: no active or remembered ROI for this dataset.", "WARN")
+            return
+        self._roi_last_active[idx] = copy.deepcopy(source)
+        applied = 0
+        for win in views:
+            ctrl = getattr(win, "_roi_overlay", None)
+            if ctrl is None or ctrl is source_ctrl:
+                continue   # skip the view the source draft already lives on
+            try:
+                ctrl.replace_draft(copy.deepcopy(source))
+                applied += 1
+            except Exception:
+                pass
+        if applied:
+            self._state.log(f"Restored ROI '{source.name}' to {applied} view(s).")
+        else:
+            self._state.log(
+                "Restore ROI: no other coordinate view open to restore onto.", "WARN")
+
     def _run_hlyb_pair_analysis(self, mode: str = "3D") -> None:
         """Analyze › Clustering › HlyB subunit pair analysis › 2D/3D/template — detect
         protein sub-units from traces, cluster them into HlyB structures and
@@ -1931,9 +2228,16 @@ class MainWindow(QMainWindow):
             analyze_hlyb_template3d,
         )
 
+        # The analysis reads RAW z (never RIMF-baked) and applies this z-scaling
+        # factor itself, so the dialog default must track the dataset's CURRENT
+        # RIMF — otherwise re-running after changing RIMF reused a stale cached
+        # z-scale and left the result unchanged. Other tweaked parameters persist.
+        current_rimf = float(getattr(ds.cali, "RIMF", 0.67) or 0.67)
         defaults = getattr(self, "_hlyb_cfg", None)
         if defaults is None:
-            defaults = HlyBConfig(z_scaling_factor=float(getattr(ds.cali, "RIMF", 0.67) or 0.67))
+            defaults = HlyBConfig(z_scaling_factor=current_rimf)
+        else:
+            defaults = HlyBConfig(**{**vars(defaults), "z_scaling_factor": current_rimf})
         dlg = HlyBClusteringDialog(self, defaults=defaults, mode=mode)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -2226,7 +2530,8 @@ class MainWindow(QMainWindow):
 
     def add_polyline_rois(self, idx: int, paths, *, name_prefix: str, source: str,
                           stroke_color: str | None = None, names: list[str] | None = None,
-                          log_message: str | None = None) -> int:
+                          log_message: str | None = None,
+                          roi_type: str = "freehand_line") -> int:
         """Add an open poly-line (``freehand_line``) ROI tracing each path in
         *paths* (each an ``(M, 2)`` array of ``(x, y)`` nm vertices) to the ROI
         Manager, reveal them, and show render + manager. ``stroke_color`` defaults to
@@ -2240,14 +2545,20 @@ class MainWindow(QMainWindow):
         if not (0 <= idx < len(self._state.datasets)):
             return 0
         stroke = stroke_color or self._system_roi_color()
+        requested = str(roi_type or "freehand_line").strip().lower()
+        if requested not in {"freehand_line", "polyline", "line"}:
+            requested = "freehand_line"
         added = 0
         for i, path in enumerate(paths, start=1):
             pts = np.asarray(path, dtype=float).reshape(-1, 2)
             if pts.shape[0] < 2:
                 continue
             name = names[i - 1] if names is not None and i - 1 < len(names) else f"{name_prefix} {i}"
+            record_type = requested
+            if requested == "line":
+                record_type = "line" if pts.shape[0] == 2 else "polyline"
             rec = RoiRecord.create(
-                "freehand_line",
+                record_type,
                 {"points": pts.tolist(), "closed": False},
                 name=name, coordinate_space="plot", stroke_color=stroke)
             rec.context = {"dataset_idx": idx, "source": source}
@@ -2399,7 +2710,11 @@ class MainWindow(QMainWindow):
         if group_id:
             overlay_idx = ds.state.get("overlay_index")
             visible_overlay = False
-            for win in list(self._render_windows.values()) + list(self._scatter_windows.values()):
+            for win in (
+                list(self._render_windows.values())
+                + list(self._advanced_render_windows.values())
+                + list(self._scatter_windows.values())
+            ):
                 try:
                     channels = getattr(win, "_channels", None)
                     if channels and any(ch.get("dataset_idx") == idx and ch.get("visible", True) for ch in channels):
@@ -2412,7 +2727,14 @@ class MainWindow(QMainWindow):
                 for other in self._state.datasets
             ):
                 return f"Overlay {overlay_idx}" if overlay_idx else "Overlay"
-        own_maps = (self._render_windows, self._scatter_windows, self._histogram_windows, self._attr_windows, self._filter_dlgs)
+        own_maps = (
+            self._render_windows,
+            self._advanced_render_windows,
+            self._scatter_windows,
+            self._histogram_windows,
+            self._attr_windows,
+            self._filter_dlgs,
+        )
         for mapping in own_maps:
             win = mapping.get(idx)
             if win is not None:
@@ -2702,7 +3024,17 @@ class MainWindow(QMainWindow):
         # Find the window that already displays this dataset (incl. as an overlay
         # channel) before opening a new one — otherwise pressing Shift+C on a
         # non-primary overlay channel spawns a duplicate overlay view.
-        rwin = self._render_window_for_dataset(idx)
+        active = QApplication.activeWindow()
+        if (
+            getattr(active, "TAG", None) == "render_window"
+            and any(
+                ch.get("dataset_idx") == idx
+                for ch in getattr(active, "_channels", [])
+            )
+        ):
+            rwin = active
+        else:
+            rwin = self._render_window_for_dataset(idx)
         if rwin is None:
             self._show_render(idx)
             rwin = self._render_window_for_dataset(idx)
@@ -3176,9 +3508,9 @@ class MainWindow(QMainWindow):
         if raw_dict_from_dataset(ds) is None:
             QMessageBox.information(
                 self, "Aggregate Localizations",
-                "Aggregation needs the raw all-iteration data (with the final-"
-                "iteration flag 'fnl'), which this dataset doesn't provide. Load "
-                "the original .msr / raw .mat and try again.")
+                "Aggregation needs raw all-iteration MINFLUX data with trace, "
+                "time, photon and coordinate fields. Load the original .msr / "
+                "raw .mat and try again.")
             return
 
         # Overlay → aggregate every channel with the same threshold and keep them
@@ -3210,6 +3542,7 @@ class MainWindow(QMainWindow):
                                         "No valid localizations to aggregate.")
                 return
             idx = self._state.add_dataset(new)
+            self._log_aggregated_dataset(new, idx)
             self._state.status_progress("Aggregation done", 1.0)
             self._show_render(idx)
             return
@@ -3249,7 +3582,9 @@ class MainWindow(QMainWindow):
                         new.state[tkey] = tval
                         new.metadata[tkey] = tval
                 new.metadata["overlay_id"] = new_overlay_id
-                made.append(self._state.add_dataset(new))
+                new_idx = self._state.add_dataset(new)
+                made.append(new_idx)
+                self._log_aggregated_dataset(new, new_idx)
         finally:
             self._state.suspend_auto_render = prev_suspend
 
@@ -3278,15 +3613,18 @@ class MainWindow(QMainWindow):
 
         from ..core.dataset import build_localization_dataset
         from ..core.mfx_sequence import photon_iterations_for_dataset
-        from ..analysis.aggregation import aggregate_dataset
+        from ..analysis.aggregation import aggregate_dataset, aggregation_time_mode
 
         pit = photon_iterations_for_dataset(ds)
+        time_mode = aggregation_time_mode(ds)
         res = aggregate_dataset(ds, photon_threshold=float(thr),
-                                photon_iters=pit.photon_iters)
+                                photon_iters=pit.photon_iters,
+                                time_mode=time_mode)
         if res is None or res["tid"].size == 0:
             return None
 
         loc = res["loc"]                       # metres, (M, 3) — raw (un-RIMF) z
+        n_contributing = int(np.asarray(res["n"], dtype=np.int64).sum())
         attrs = {"eco": res["eco"], "n_agg": res["n"].astype(float)}
         for key in ("ecc", "efo", "efc", "fbg", "dcr"):
             if key in res:
@@ -3309,35 +3647,76 @@ class MainWindow(QMainWindow):
             "photon_threshold": float(thr),
             "photon_iterations": list(pit.photon_iters),
             "photon_iter_source": pit.source,
+            "photon_attribute": "eco",
+            "coordinate_mode": "photon_weighted_centroid",
+            "timestamp_mode": time_mode,
+            "grouping": "per_trace_time_order",
+            "valid_final_only": True,
+            "trailing_remainder": "retained",
             "source": ds.name,
-            "n_in": int(ds.prop.num_loc),
+            "n_in": n_contributing,
             "n_out": int(res["tid"].size),
         }
-        self._state.log(
-            f"Aggregated '{ds.name}' → '{new.name}': {ds.prop.num_loc:,} → "
-            f"{res['tid'].size:,} localizations (photon threshold {int(thr)}, "
-            f"photon iterations {pit.photon_iters} [{pit.source}]).",
-            dataset_idx=None)
         return new
+
+    def _log_aggregated_dataset(self, ds, dataset_idx: int) -> None:
+        """Record a parseable, result-tagged aggregation event in the Log."""
+        agg = ds.metadata.get("aggregation", {})
+        threshold = float(agg.get("photon_threshold", 0.0))
+        threshold_text = f"{threshold:g}"
+        self._state.log(
+            f"Aggregated '{agg.get('source', 'the source dataset')}' into '{ds.name}': "
+            f"{int(agg.get('n_in', 0)):,} -> {int(agg.get('n_out', 0)):,} "
+            f"localizations; photon threshold = {threshold_text} photons per "
+            f"aggregated localization; photon iterations = "
+            f"{list(agg.get('photon_iterations', []))} "
+            f"({agg.get('photon_iter_source', 'unknown')}); position = "
+            f"photon-weighted centroid; timestamp mode = "
+            f"{agg.get('timestamp_mode', 'photon_weighted')}; valid final "
+            f"localizations grouped per trace in time order; trailing remainder retained.",
+            dataset_idx=dataset_idx,
+        )
 
     def _ask_aggregation_threshold(self, ds, pit, n_channels: int = 1) -> "int | None":
         """Modal photon-threshold picker for aggregation (default 3000)."""
         from PyQt6.QtWidgets import (
             QDialog, QDialogButtonBox, QLabel, QSpinBox, QVBoxLayout)
+        from ..analysis.aggregation import aggregation_time_mode
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Aggregate Localizations")
+        dlg.setMinimumWidth(620)
         lay = QVBoxLayout(dlg)
         ax = "" if pit.axial_iter is None else f", axial itr {pit.axial_iter}"
+        time_mode = aggregation_time_mode(ds)
+        if time_mode == "first":
+            time_text = (
+                "The aggregate timestamp is taken from the first contributing "
+                "localization (legacy nested-record convention)."
+            )
+        else:
+            time_text = (
+                "The aggregate timestamp is the photon-weighted mean of the "
+                "contributing localization timestamps (modern flat-record convention)."
+            )
         overlay_note = (f"<i>Overlay: all {n_channels} channels will be aggregated "
                         f"and kept as an overlay.</i><br>" if n_channels > 1 else "")
         info = QLabel(
             f"<b>{ds.name}</b><br>{overlay_note}{ds.prop.num_loc:,} localizations · "
             f"{ds.prop.num_traces:,} traces · {ds.prop.num_dim}-D<br>"
-            f"Photon count = eco over iterations {pit.photon_iters} "
-            f"(lateral itr {pit.lateral_iter}{ax}; {pit.source}).<br><br>"
-            "Within each trace, localizations are binned in time order until "
-            "their combined photon count reaches the threshold below.")
+            f"Per-localization photon count <i>P</i> is the sum of background-corrected "
+            f"effective counts (<code>eco</code>) over final-scale iterations "
+            f"{pit.photon_iters} (lateral itr {pit.lateral_iter}{ax}; "
+            f"{pit.source}; 0-based raw iteration indices).<br><br>"
+            "Valid final localizations are processed separately for each trace and "
+            "ordered by time. Consecutive localizations are accumulated until their "
+            "combined photon count reaches or exceeds the threshold below. Complete "
+            "localizations are not split, so a bin can exceed the threshold; the final "
+            "sub-threshold remainder of each trace is retained.<br><br>"
+            "The resulting coordinate is the photon-weighted centroid "
+            "Σ(<i>P</i><sub>i</sub> · <i>r</i><sub>i</sub>) / "
+            "Σ<i>P</i><sub>i</sub>, and its photon count is Σ<i>P</i><sub>i</sub>. "
+            f"{time_text} The source dataset remains unchanged.")
         info.setWordWrap(True)
         lay.addWidget(info)
         row = QLabel("Photon threshold per aggregated localization:")
@@ -3345,6 +3724,7 @@ class MainWindow(QMainWindow):
         spin = QSpinBox()
         spin.setRange(1, 10_000_000)
         spin.setSingleStep(500)
+        spin.setSuffix(" photons")
         # Remember the last-used threshold across sessions (default 3000).
         try:
             last = int(self._state.prefs.get("aggregation", {}).get(
@@ -3549,7 +3929,12 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         # 2) a freshly drawn draft on this dataset's render/scatter overlay
-        for win in (self._render_windows.get(ds_idx), self._scatter_windows.get(ds_idx)):
+        #    (basic render, advanced render, or scatter).
+        for win in (
+            self._render_windows.get(ds_idx),
+            self._advanced_render_windows.get(ds_idx),
+            self._scatter_windows.get(ds_idx),
+        ):
             ctrl = getattr(win, "_roi_overlay", None)
             if ctrl is None:
                 continue
@@ -3868,6 +4253,198 @@ class MainWindow(QMainWindow):
         win = ChannelSeparationWindow(self._state, idx, owner=self)
         show_modeless(win, self)
 
+    def _show_time_channel_separation(self) -> None:
+        """Open the time-window editor for the active dataset."""
+        import numpy as np
+
+        from ..core.loader import attr_values_1d
+        from ..core.overlay import overlay_color_cycle
+        from .time_channel_dialog import TimeChannelDialog
+
+        idx = self._state.active_idx
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        source = self._state.datasets[idx]
+        tim = attr_values_1d(source, "tim")
+        if tim is None:
+            QMessageBox.information(
+                self,
+                "Separate Channels from Time Windows",
+                "The active dataset has no tim attribute.",
+            )
+            return
+        tim = np.asarray(tim, dtype=float).ravel()
+        base_mask = np.asarray(source.filter_mask, dtype=bool).ravel()
+        if tim.size != int(source.prop.num_loc) or base_mask.size != tim.size:
+            QMessageBox.warning(
+                self,
+                "Separate Channels from Time Windows",
+                "The tim attribute does not align with the active localization table.",
+            )
+            return
+        active_tim = tim[base_mask & np.isfinite(tim)]
+        if active_tim.size < 2 or float(np.max(active_tim)) <= float(np.min(active_tim)):
+            QMessageBox.information(
+                self,
+                "Separate Channels from Time Windows",
+                "The active localizations do not span a usable acquisition-time range.",
+            )
+            return
+
+        try:
+            dialog = TimeChannelDialog(
+                tim,
+                source_name=source.name,
+                base_mask=base_mask,
+                color_cycle=overlay_color_cycle(self._state.prefs),
+                parent=self,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Separate Channels from Time Windows", str(exc))
+            return
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.apply_time_channel_separation(idx, dialog.windows())
+
+    def apply_time_channel_separation(self, source_idx: int, windows) -> bool:
+        """Create filtered full-data clones and group them as a channel overlay."""
+        import uuid
+
+        import numpy as np
+
+        from ..core.loader import attr_values_1d
+        from ..core.overlay import display_transform_record, identity_matrix4
+        from ..core.time_channels import (
+            clone_time_channel_dataset,
+            time_channel_selections,
+        )
+
+        if not (0 <= source_idx < len(self._state.datasets)):
+            return False
+        source = self._state.datasets[source_idx]
+        tim = attr_values_1d(source, "tim")
+        if tim is None:
+            return False
+        try:
+            selections = time_channel_selections(
+                tim,
+                windows,
+                base_mask=source.filter_mask,
+            )
+        except ValueError as exc:
+            self._state.log(f"Time-window channel separation failed: {exc}", "ERROR")
+            return False
+        if any(not np.any(selection.mask) for selection in selections):
+            self._state.log(
+                "Time-window channel separation failed: at least one channel is empty.",
+                "ERROR",
+            )
+            return False
+
+        reserved = {dataset.name.casefold() for dataset in self._state.datasets}
+
+        def unique_name(requested: str) -> str:
+            base = requested.strip()
+            candidate = base
+            number = 2
+            while candidate.casefold() in reserved:
+                candidate = f"{base} ({number})"
+                number += 1
+            reserved.add(candidate.casefold())
+            return candidate
+
+        timestamp = datetime.now().strftime("%Y-%b-%d, %H:%M:%S")
+        try:
+            new_datasets = [
+                clone_time_channel_dataset(
+                    source,
+                    selection,
+                    name=unique_name(selection.window.name),
+                    timestamp=timestamp,
+                )
+                for selection in selections
+            ]
+        except Exception as exc:
+            self._state.log(f"Time-window channel separation failed: {exc}", "ERROR")
+            QMessageBox.critical(
+                self, "Separate Channels from Time Windows", str(exc)
+            )
+            return False
+
+        overlay_index = self._next_overlay_index
+        self._next_overlay_index += 1
+        overlay_id = f"overlay:{overlay_index}:{uuid.uuid4().hex}"
+        new_indices: list[int] = []
+        previous = getattr(self._state, "suspend_auto_render", False)
+        self._state.suspend_auto_render = True
+        try:
+            for order, (selection, dataset) in enumerate(
+                zip(selections, new_datasets), start=1
+            ):
+                idx = self._state.add_dataset(dataset)
+                channel = self._state.datasets[idx]
+                lut = selection.window.lut
+                transform = display_transform_record(
+                    overlay_id=overlay_id,
+                    overlay_index=overlay_index,
+                    order=order,
+                    lut=lut,
+                    source_dataset_idx=idx,
+                    alignment_mode="stage origin",
+                    matrix_4x4=identity_matrix4(),
+                    provenance={
+                        "method": "time-window channel separation",
+                        "source_dataset": source.name,
+                    },
+                )
+                channel.state["overlay_id"] = overlay_id
+                channel.state["render_group_id"] = overlay_id
+                channel.state["overlay_index"] = overlay_index
+                channel.state["overlay_order"] = order
+                channel.state["overlay_lut"] = lut
+                channel.state["render_channel_lut"] = lut
+                channel.state["overlay_transform"] = transform
+                channel.state["render_transform_2d"] = transform
+                channel.metadata["overlay_id"] = overlay_id
+                channel.metadata["overlay_index"] = overlay_index
+                channel.metadata["overlay_alignment_mode"] = "stage origin"
+                new_indices.append(idx)
+        finally:
+            self._state.suspend_auto_render = previous
+
+        if not new_indices:
+            return False
+        anchor = new_indices[0]
+        self._state.set_active(anchor)
+        self._show_render(anchor)
+        self._notify_view_state_changed()
+        summary = ", ".join(
+            f"{selection.window.name}: {int(selection.mask.sum()):,}"
+            for selection in selections
+        )
+        self._state.log(
+            f"Separated '{source.name}' into {len(new_indices)} time-window "
+            f"channels (overlay {overlay_index}): {summary}."
+        )
+        try:
+            self._state.journal.add(
+                "transform",
+                f"Separated dataset '{source.name}' into {len(new_indices)} "
+                "channels using acquisition-time windows.",
+                windows=[
+                    {
+                        "name": selection.window.name,
+                        "start_s": float(selection.window.start_s),
+                        "end_s": float(selection.window.end_s),
+                    }
+                    for selection in selections
+                ],
+            )
+        except Exception:
+            pass
+        return True
+
     def apply_dcr_channel_separation(self, src_idx: int, labels) -> bool:
         """Build red / green / (unassigned) truncated copies from per-localization
         channel *labels* (0/1/-1) and combine them as a render overlay. Returns
@@ -3984,19 +4561,599 @@ class MainWindow(QMainWindow):
         self._notify_view_state_changed()
         return win
 
+    def _show_advanced_render(self, dataset_idx: int | None = None):
+        """Open the isolated advanced render view."""
+        if self._state.active_dataset is None:
+            self._no_data_warning()
+            return
+        idx = dataset_idx if type(dataset_idx) is int else self._state.active_idx
+        if idx is None:
+            return
+
+        win = self._advanced_render_windows.get(idx)
+        if win is None:
+            for candidate in self._advanced_render_windows.values():
+                try:
+                    if any(
+                        ch.get("dataset_idx") == idx
+                        for ch in getattr(candidate, "_channels", [])
+                    ):
+                        win = candidate
+                        break
+                except RuntimeError:
+                    continue
+        if win is not None:
+            self._install_window_shortcuts(win)
+            try:
+                win._refresh_from_dataset()
+            except Exception:
+                pass
+            win.show()
+            win.raise_()
+            win.activateWindow()
+            self._notify_view_state_changed()
+            return win
+
+        from .precision_render_window import PrecisionRenderWindow
+        win = PrecisionRenderWindow(self._state, dataset_idx=idx)
+        self._install_window_shortcuts(win)
+        win.destroyed.connect(
+            lambda _=None, i=idx: self._advanced_render_windows.pop(i, None)
+        )
+        self._advanced_render_windows[idx] = win
+        win.show()
+        self._notify_view_state_changed()
+        return win
+
+    def _swap_render_mode(self, win, mode: str):
+        """Swap a render window for the other engine (basic ↔ advanced) on the
+        same dataset, preserving geometry, orientation and zoom. Triggered by the
+        render window's right-click Render Mode ▸ Basic/Advanced submenu."""
+        idx = getattr(win, "_idx", None)
+        if idx is None:
+            channels = getattr(win, "_channels", [])
+            idx = channels[0].get("dataset_idx") if channels else self._state.active_idx
+        if idx is None:
+            return None
+
+        # Capture the current view so the swap feels in-place.
+        orientation = getattr(win, "_orientation", "XY")
+        view_range = None
+        try:
+            xr, yr = win._view_box.viewRange()
+            view_range = (tuple(xr), tuple(yr))
+        except Exception:
+            view_range = None
+        try:
+            geom = win.geometry()
+        except Exception:
+            geom = None
+        # Capture the active ROI draft so a drawn-but-unsaved ROI survives the
+        # swap (a stored/selected ROI persists on its own via state.rois).
+        roi_draft = None
+        try:
+            ctrl = getattr(win, "_roi_overlay", None)
+            if ctrl is not None and ctrl.current_record() is not None:
+                import copy as _copy
+                roi_draft = _copy.deepcopy(ctrl.current_record())
+        except Exception:
+            roi_draft = None
+
+        # Drop the old window from whichever registry holds it, then close it.
+        for registry in (self._render_windows, self._advanced_render_windows):
+            for key in [k for k, value in registry.items() if value is win]:
+                registry.pop(key, None)
+        try:
+            win.close()
+            win.deleteLater()
+        except Exception:
+            pass
+
+        opener = self._show_advanced_render if mode == "advanced" else self._show_render
+        new_win = opener(idx)
+        if new_win is None:
+            return None
+
+        if geom is not None:
+            try:
+                new_win.setGeometry(geom)
+            except Exception:
+                pass
+        try:
+            if orientation and orientation != getattr(new_win, "_orientation", "XY"):
+                new_win._set_orientation(orientation)
+        except Exception:
+            pass
+        if view_range is not None:
+            try:
+                new_win._view_box.setRange(
+                    xRange=view_range[0], yRange=view_range[1], padding=0
+                )
+            except Exception:
+                pass
+        # Re-apply the captured ROI draft on the new engine (deferred so the new
+        # window has built its channels / rendered first).
+        if roi_draft is not None:
+            def _restore(rec=roi_draft, w=new_win):
+                ctrl = getattr(w, "_roi_overlay", None)
+                if ctrl is not None:
+                    try:
+                        ctrl.replace_draft(rec)
+                    except Exception:
+                        pass
+            QTimer.singleShot(0, _restore)
+        return new_win
+
     # ------------------------------------------------------------------
     # ParaView
     # ------------------------------------------------------------------
 
     def _save_data(self, *args) -> None:
-        """File › Save Processed Data — save the **active** dataset."""
+        """File › Save — save/export the **active** dataset."""
         ds = self._state.active_dataset
         if ds is None:
             QMessageBox.information(
-                self, "Save processed data", "No active dataset to save."
+                self, "Save", "No active dataset to save."
             )
             return
         self.save_dataset(ds)
+
+    def _active_dataset_for_save(self):
+        ds = self._state.active_dataset
+        if ds is None:
+            QMessageBox.information(self, "Save", "No active dataset to save.")
+            return None
+        return ds
+
+    def _default_save_path(self, ds, suffix: str) -> Path:
+        default_dir = Path(self._state.prefs["file"].get("default_folder", str(Path.home())))
+        folder = Path(str(getattr(getattr(ds, "file", None), "folder", "") or default_dir))
+        if not folder.exists():
+            folder = default_dir
+        stem = Path(str(getattr(ds, "name", "") or "dataset")).stem or "dataset"
+        return folder / f"{stem}{suffix}"
+
+    def _save_as_minflux_formats(self) -> None:
+        ds = self._active_dataset_for_save()
+        if ds is None:
+            return
+        suggested = str(self._default_save_path(ds, ".mat"))
+        filters = (
+            "MATLAB (*.mat);;NumPy (*.npy);;JSON (*.json);;"
+            "MINFLUX data formats (*.mat *.npy *.json)"
+        )
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Save MINFLUX data", suggested, filters
+        )
+        if not path:
+            return
+        suffix = Path(path).suffix.lower()
+        fmt = {".mat": "mat", ".npy": "npy", ".json": "json"}.get(suffix)
+        if fmt is None:
+            if "NumPy" in selected:
+                fmt = "npy"
+            elif "JSON" in selected:
+                fmt = "json"
+            else:
+                fmt = "mat"
+        self._save_as_format(fmt, "MINFLUX data", path=path)
+
+    def _save_as_format(self, fmt: str, title: str, *, path: str | None = None) -> None:
+        ds = self._active_dataset_for_save()
+        if ds is None:
+            return
+        ext = {"mat": ".mat", "npy": ".npy", "json": ".json", "zarr": ".zarr", "msr": ".msr"}[fmt]
+        if path is None:
+            filters = {
+                "mat": "MATLAB (*.mat)",
+                "npy": "NumPy (*.npy)",
+                "json": "JSON (*.json)",
+                "zarr": "Zarr v2 (*.zarr)",
+                "msr": "MINFLUX (*.msr)",
+            }
+            path, _ = QFileDialog.getSaveFileName(
+                self, f"Save {title}", str(self._default_save_path(ds, ext)), filters[fmt]
+            )
+            if not path:
+                return
+        from ..core.save import save_processed
+
+        try:
+            written = save_processed(
+                ds,
+                data_path=path,
+                fmt=fmt,
+                content="raw",
+                include={"attrs": True, "derived": False, "recipe": True},
+                filter_mode="flag",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Save failed", f"Could not save {title}:\n{exc}")
+            return
+        self._state.log(
+            "Saved "
+            + ", ".join(str(p) for p in written),
+            dataset_idx=self._state.active_idx,
+        )
+
+    def _save_as_spreadsheet(self) -> None:
+        ds = self._active_dataset_for_save()
+        if ds is None:
+            return
+        from ..core.save import spreadsheet_export_columns, write_spreadsheet_csv
+        from .export_dialogs import CsvExportDialog
+
+        try:
+            columns = spreadsheet_export_columns(ds)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Spreadsheet export failed", f"Could not prepare spreadsheet:\n{exc}"
+            )
+            return
+        dialog = CsvExportDialog(
+            list(columns),
+            self._default_save_path(ds, ".csv"),
+            self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            path = write_spreadsheet_csv(
+                ds,
+                dialog.path_edit.text().strip(),
+                column_headers=dialog.selected_columns(),
+                separator=dialog.separator_edit.text(),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Spreadsheet export failed", f"Could not save spreadsheet:\n{exc}"
+            )
+            return
+        self._state.log(
+            f"Saved spreadsheet: {path}",
+            dataset_idx=self._state.active_idx,
+        )
+
+    def _save_as_picasso_hdf5(self) -> None:
+        ds = self._active_dataset_for_save()
+        if ds is None:
+            return
+        from PyQt6.QtWidgets import QDialogButtonBox, QFormLayout
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Save Picasso HDF5")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        path_edit = QLineEdit(str(self._default_save_path(ds, ".hdf5")))
+        browse = QPushButton("Browse...")
+        row = QWidget()
+        from PyQt6.QtWidgets import QHBoxLayout
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(path_edit, 1)
+        row_layout.addWidget(browse)
+        form.addRow("File:", row)
+        pixel_spin = QDoubleSpinBox()
+        pixel_spin.setDecimals(3)
+        pixel_spin.setRange(0.001, 1_000_000.0)
+        pixel_spin.setValue(1.0)
+        pixel_spin.setSuffix(" nm")
+        pixel_spin.setToolTip(
+            "Virtual Picasso camera pixel size. With 1 nm, x/y camera-pixel "
+            "coordinates numerically match MINFLUX nanometres after origin shift."
+        )
+        form.addRow("Picasso pixel size:", pixel_spin)
+        layout.addLayout(form)
+        note = QLabel(
+            "Writes a Picasso-compatible localization HDF5 at /locs plus a "
+            "same-name .yaml metadata file. x/y are exported in camera pixels; "
+            "z remains in nm."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def choose_path() -> None:
+            path, _ = QFileDialog.getSaveFileName(
+                dialog, "Save Picasso HDF5", path_edit.text(), "Picasso HDF5 (*.hdf5)"
+            )
+            if path:
+                path_edit.setText(path)
+
+        browse.clicked.connect(choose_path)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        path = path_edit.text().strip()
+        if not path:
+            QMessageBox.warning(self, "Save Picasso HDF5", "Choose an output file path.")
+            return
+        from ..core.save import write_picasso_hdf5
+
+        try:
+            written = write_picasso_hdf5(ds, path, pixel_size_nm=pixel_spin.value())
+        except Exception as exc:
+            QMessageBox.critical(self, "Save failed", f"Could not save Picasso HDF5:\n{exc}")
+            return
+        self._state.log(
+            "Saved Picasso HDF5: " + ", ".join(str(p) for p in written),
+            dataset_idx=self._state.active_idx,
+        )
+
+    def _save_as_ome_tiff(self) -> None:
+        ds = self._active_dataset_for_save()
+        if ds is None:
+            return
+        idx = self._state.active_idx
+        if idx is None:
+            return
+        win = self._render_window_for_dataset(idx)
+        if win is None:
+            win = self._show_render(idx)
+        if win is None:
+            return
+        try:
+            win.show()
+            win.raise_()
+            win.activateWindow()
+            win._export_to_tiff()
+        except Exception as exc:
+            QMessageBox.critical(self, "OME-TIFF export failed", str(exc))
+
+    def _save_as_ome_zarr(self) -> None:
+        ds = self._active_dataset_for_save()
+        if ds is None:
+            return
+        idx = self._state.active_idx
+        from ..core.ome_zarr import (
+            estimate_ome_zarr_export,
+            normalize_ome_zarr_path,
+            write_ome_zarr,
+        )
+        from .export_dialogs import OmeZarrExportDialog
+
+        pixel_size_nm = float(getattr(ds.cali, "pixel_size", 4.0) or 4.0)
+        is_3d = int(getattr(ds.prop, "num_dim", 2)) >= 3
+        loc_precision = getattr(ds.cali, "loc_precision", None)
+        try:
+            z_default = float(loc_precision[2])
+        except (TypeError, IndexError, ValueError):
+            z_default = 0.0
+        if not z_default > 0.0:
+            z_default = max(10.0, pixel_size_nm * 2.0)
+        dialog = OmeZarrExportDialog(
+            self._default_save_path(ds, ".ome.zarr"),
+            pixel_size_nm=pixel_size_nm,
+            z_voxel_nm=z_default,
+            is_3d=is_3d,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        output = normalize_ome_zarr_path(dialog.path_edit.text().strip())
+        pixel_size_nm = dialog.pixel_size_spin.value()
+        z_voxel_nm = dialog.z_voxel_spin.value() if is_3d else None
+        max_levels = dialog.levels_spin.value()
+        overwrite = False
+        if output.exists():
+            answer = QMessageBox.question(
+                self,
+                "Replace OME-Zarr package?",
+                f"{output}\nalready exists. Replace the complete package?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            overwrite = True
+
+        self._state.status_progress(
+            f"Estimating OME-Zarr export of '{ds.name}'", 0.0
+        )
+        QApplication.processEvents()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        preflight_error = None
+        try:
+            estimate = estimate_ome_zarr_export(
+                ds,
+                output,
+                pixel_size_nm=pixel_size_nm,
+                z_voxel_nm=z_voxel_nm,
+                max_levels=max_levels,
+            )
+        except Exception as exc:
+            preflight_error = exc
+        finally:
+            QApplication.restoreOverrideCursor()
+        if preflight_error is not None:
+            self._state.status_message.emit("OME-Zarr preflight: failed.")
+            QMessageBox.critical(
+                self,
+                "OME-Zarr preflight failed",
+                f"Could not estimate OME-Zarr resources:\n{preflight_error}",
+            )
+            return
+
+        estimate_text = self._ome_zarr_estimate_text(estimate)
+        self._state.log(
+            f"OME-Zarr preflight for '{ds.name}': "
+            f"shape {' x '.join(str(value) for value in estimate.image_shape)}, "
+            f"estimated {_human_bytes(estimate.estimated_output_bytes)}, "
+            f"working RAM {_human_bytes(estimate.peak_working_ram_bytes)}, "
+            f"time {_human_duration(estimate.estimated_seconds)}.",
+            dataset_idx=idx,
+        )
+        if estimate.blockers:
+            QMessageBox.critical(
+                self,
+                "OME-Zarr export exceeds system capacity",
+                estimate_text
+                + "\n\nExport cannot start:\n"
+                + "\n".join(f"- {reason}" for reason in estimate.blockers),
+            )
+            return
+        if estimate.warnings:
+            answer = QMessageBox.warning(
+                self,
+                "Large OME-Zarr export",
+                estimate_text
+                + "\n\n"
+                + "\n".join(f"- {warning}" for warning in estimate.warnings)
+                + "\n\nContinue with the export?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        roi_records = []
+        for record in self._state.rois.records:
+            context = getattr(record, "context", {}) or {}
+            record_idx = context.get("dataset_idx")
+            if record_idx is not None:
+                if idx is not None and int(record_idx) == int(idx):
+                    roi_records.append(record)
+                continue
+            target = str(getattr(record, "target_hint", "") or "")
+            if len(self._state.datasets) == 1 or (target and ds.name in target):
+                roi_records.append(record)
+
+        journal_entries = []
+        source_path = str(getattr(getattr(ds, "file", None), "path", "") or "")
+        for entry in self._state.journal.entries:
+            if len(self._state.datasets) == 1:
+                journal_entries.append(entry)
+                continue
+            details = getattr(entry, "details", {}) or {}
+            haystack = f"{getattr(entry, 'summary', '')} {details}"
+            if ds.name in haystack or (source_path and source_path in haystack):
+                journal_entries.append(entry)
+
+        def export(progress):
+            return write_ome_zarr(
+                ds,
+                output,
+                pixel_size_nm=pixel_size_nm,
+                z_voxel_nm=z_voxel_nm,
+                max_levels=max_levels,
+                dataset_idx=idx,
+                roi_records=roi_records,
+                journal_entries=journal_entries,
+                overwrite=overwrite,
+                progress=progress,
+            )
+
+        from ..core.app_state import format_progress_bar
+
+        task = _OmeZarrTask(export)
+        task.signals.progress.connect(
+            lambda fraction, stage, t=task: self._on_ome_zarr_progress(
+                fraction, stage, t
+            )
+        )
+        task.signals.done.connect(
+            lambda result, t=task, dataset=ds: self._on_ome_zarr_done(
+                result, t, dataset
+            )
+        )
+        task.signals.failed.connect(
+            lambda message, t=task, dataset=ds: self._on_ome_zarr_failed(
+                message, t, dataset
+            )
+        )
+        task.signals.cancelled.connect(
+            lambda t=task: self._on_ome_zarr_cancelled(t)
+        )
+        self._ome_zarr_tasks.add(task)
+        self._state.log(
+            f"OME-Zarr export started for '{ds.name}' -> {output}",
+            dataset_idx=idx,
+        )
+        self._state.log_progress(format_progress_bar(0.0))
+        self._state.status_progress(f"OME-Zarr export of '{ds.name}'", 0.0)
+        QThreadPool.globalInstance().start(task)
+
+    @staticmethod
+    def _ome_zarr_estimate_text(estimate) -> str:
+        axes = "Z x Y x X" if estimate.is_3d else "Y x X"
+        voxel = " x ".join(f"{value:g}" for value in estimate.voxel_size_nm)
+        return (
+            f"Level-0 shape ({axes}): "
+            f"{' x '.join(str(value) for value in estimate.image_shape)}\n"
+            f"Voxel/pixel size: {voxel} nm\n"
+            f"Pyramid levels: {len(estimate.level_shapes)}\n"
+            f"Filtered localizations: {estimate.filtered_localizations:,}\n"
+            f"Estimated compressed package: "
+            f"{_human_bytes(estimate.estimated_output_bytes)}\n"
+            f"Conservative upper bound: {_human_bytes(estimate.upper_output_bytes)}\n"
+            f"Exporter working RAM: {_human_bytes(estimate.peak_working_ram_bytes)} "
+            f"of {_human_bytes(estimate.available_ram_bytes)} available\n"
+            f"Dense level-0 stack in a reader: "
+            f"{_human_bytes(estimate.dense_level_zero_bytes)}\n"
+            f"Free target-disk space: {_human_bytes(estimate.free_disk_bytes)}\n"
+            f"Estimated conversion time: {_human_duration(estimate.estimated_seconds)}"
+        )
+
+    def _on_ome_zarr_progress(self, fraction: float, stage: str, task) -> None:
+        if task not in self._ome_zarr_tasks or self._is_shutting_down:
+            return
+        from ..core.app_state import format_progress_bar
+
+        fraction = max(0.0, min(1.0, float(fraction)))
+        percent = int(round(fraction * 100.0))
+        if percent != task.last_percent:
+            task.last_percent = percent
+            self._state.log_progress(format_progress_bar(fraction))
+        task.last_stage = str(stage)
+        self._state.status_progress(f"OME-Zarr: {stage}", fraction)
+
+    def _on_ome_zarr_done(self, result, task, ds) -> None:
+        self._ome_zarr_tasks.discard(task)
+        if self._is_shutting_down:
+            return
+        from ..core.app_state import format_progress_bar
+
+        self._state.log_progress(format_progress_bar(1.0, done=True), final=True)
+        self._state.status_message.emit("OME-Zarr export: done.")
+        idx = self._post_load_index(ds)
+        details = (
+            f"Saved OME-NGFF 0.5 / Zarr v3: {result.path} "
+            f"({result.levels} pyramid level(s), "
+            f"shape {' x '.join(str(value) for value in result.image_shape)}, "
+            f"voxel/pixel size "
+            f"{' x '.join(f'{value:g}' for value in result.voxel_size_nm)} nm)"
+        )
+        self._state.log(details, dataset_idx=idx)
+        for warning in result.warnings:
+            self._state.log(f"OME-Zarr export warning: {warning}", dataset_idx=idx)
+
+    def _on_ome_zarr_failed(self, message: str, task, ds) -> None:
+        self._ome_zarr_tasks.discard(task)
+        if self._is_shutting_down:
+            return
+        self._state.log_progress("=" * 10 + "  FAILED  " + "=" * 10, final=True)
+        self._state.status_message.emit("OME-Zarr export: failed.")
+        self._state.log(
+            f"OME-Zarr export failed: {message}",
+            level="ERROR",
+            dataset_idx=self._post_load_index(ds),
+        )
+        QMessageBox.critical(
+            self,
+            "OME-Zarr export failed",
+            f"Could not save OME-NGFF 0.5 / Zarr v3:\n{message}",
+        )
+
+    def _on_ome_zarr_cancelled(self, task) -> None:
+        self._ome_zarr_tasks.discard(task)
+        if self._is_shutting_down:
+            return
+        self._state.log_progress("=" * 10 + "  CANCELLED  " + "=" * 10, final=True)
+        self._state.status_message.emit("OME-Zarr export: cancelled.")
 
     def save_dataset(self, ds) -> None:
         """Open the Save / Export dialog for *ds* (the active dataset from File ›
@@ -4339,6 +5496,7 @@ class MainWindow(QMainWindow):
         for mapping in (
             self._data_windows,
             self._render_windows,
+            self._advanced_render_windows,
             self._scatter_windows,
             self._histogram_windows,
             self._attr_windows,
@@ -4746,14 +5904,17 @@ class MainWindow(QMainWindow):
                 act.setProperty("command_keywords", " ".join(meta.keywords))
         # ROI Convert sub-actions are created in a loop (no per-action attribute),
         # so tag the whole submenu's leaves as one group.
-        conv = COMMAND_META.get("_roi_convert")
-        menu = getattr(self, "menuRoiConvert", None)
-        if conv is not None and menu is not None:
+        for group_key, menu_attr in (("_roi_convert", "menuRoiConvert"),
+                                     ("_roi_fit", "menuRoiFit")):
+            grp = COMMAND_META.get(group_key)
+            menu = getattr(self, menu_attr, None)
+            if grp is None or menu is None:
+                continue
             for act in menu.actions():
                 if act.isSeparator() or act.menu() is not None:
                     continue
-                act.setProperty("command_source", conv.source)
-                act.setProperty("command_keywords", " ".join(conv.keywords))
+                act.setProperty("command_source", grp.source)
+                act.setProperty("command_keywords", " ".join(grp.keywords))
 
     def _refresh_command_index(self) -> None:
         from PyQt6.QtCore import QStringListModel
@@ -4860,8 +6021,36 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _apply_menu_separator_style(self) -> None:
+        """Make menu **section separators** clearly visible. The native 1-px etch
+        is almost invisible on some themes / RDP sessions; this draws a solid line
+        with an inset margin (Fiji-style), theme-adaptive (darker on a light theme,
+        lighter on a dark one). App-wide so menu-bar and right-click menus match.
+        Styling only `QMenu::separator` leaves the items' native rendering intact."""
+        from PyQt6.QtGui import QPalette
+        app = QApplication.instance()
+        if not isinstance(app, QApplication):
+            return
+        try:
+            dark = app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+        except Exception:
+            dark = False
+        color = "#9a9a9a" if dark else "#6f6f6f"
+        rule = (f"QMenu::separator {{ height: 1px; background: {color}; "
+                f"margin: 4px 8px; }}")
+        existing = app.styleSheet() or ""
+        if "QMenu::separator" not in existing:
+            app.setStyleSheet((existing + "\n" + rule).strip())
+
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        if not getattr(self, "_positioned", False):
+            self._positioned = True
+            # Open on the active monitor (the screen under the cursor) toward the
+            # upper-right, so child windows (render, Log, MSR reader) have room to
+            # the left and below instead of piling on top of the main window.
+            from .modeless import ensure_on_screen
+            ensure_on_screen(self, align="top_right")
         if not getattr(self, "_toolbar_aligned", True):
             self._toolbar_aligned = True
             QTimer.singleShot(0, self._align_toolbar_to_menu)
@@ -4912,6 +6101,17 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._update_tasks.clear()
+        for task in list(getattr(self, "_ome_zarr_tasks", set())):
+            try:
+                task.cancel()
+            except Exception:
+                pass
+            for signal_name in ("progress", "done", "failed", "cancelled"):
+                try:
+                    getattr(task.signals, signal_name).disconnect()
+                except Exception:
+                    pass
+        self._ome_zarr_tasks.clear()
 
         try:
             pool = QThreadPool.globalInstance()
@@ -4936,6 +6136,9 @@ class MainWindow(QMainWindow):
             try: win.close()
             except Exception: pass
         for win in list(self._render_windows.values()):
+            try: win.close()
+            except Exception: pass
+        for win in list(self._advanced_render_windows.values()):
             try: win.close()
             except Exception: pass
         for win in list(self._tiff_windows.values()):

@@ -35,6 +35,13 @@ CRLB_2D_MSG = ("Localization precision (CRLB, Marin-Ries): median σ_xy = 5.20 n
                "median N = 200 photons.")
 FRC_MSG = ("Localization precision (FRC): resolution = 25.30 nm "
            "(1/7 threshold, per-localization, 50,000 points, pixel 2.00 nm).")
+AGGREGATION_MSG = (
+    "Aggregated 'raw' into 'raw (aggregated 500)': 1,340,965 -> 487,008 "
+    "localizations; photon threshold = 500 photons per aggregated localization; "
+    "photon iterations = [4] (fallback); position = photon-weighted centroid; "
+    "timestamp mode = first; valid final localizations grouped per trace in time "
+    "order; trailing remainder retained."
+)
 
 
 def test_stddev_text_and_citation():
@@ -90,6 +97,34 @@ def test_frc_two_citations():
     assert mt.CITE_FRC_NIEUWENHUIZEN[0] in txt
     assert mt.CITE_FRC_BANTERLE[1] in txt
     assert mt.CITE_FRC_NIEUWENHUIZEN[1] in txt
+
+
+def test_aggregation_method_text_is_scientific_and_parameterized():
+    txt = mt.generate_method_text(
+        _state(),
+        [_ev(AGGREGATION_MSG, name="raw (aggregated 500)")],
+    )
+    assert "valid final localizations" in txt
+    assert "separately within each trace and in timestamp order" in txt
+    assert "background-corrected effective counts (eco)" in txt
+    assert "final-scale iteration(s) [4]" in txt
+    assert "0-based raw iteration indices" in txt
+    assert "reached or exceeded 500 photons per aggregated localization" in txt
+    assert "completed groups could exceed the threshold" in txt
+    assert "photon-weighted centroid Σ(P_i r_i)/ΣP_i" in txt
+    assert "first contributing localization" in txt
+    assert "final sub-threshold remainder of each trace was retained" in txt
+    assert "1,340,965 contributing localizations to 487,008" in txt
+
+
+def test_aggregation_method_text_describes_modern_weighted_time():
+    msg = AGGREGATION_MSG.replace(
+        "timestamp mode = first",
+        "timestamp mode = photon_weighted",
+    )
+    txt = mt.generate_method_text(_state(), [_ev(msg)])
+    assert "photon-count-weighted mean" in txt
+    assert "modern flat-record convention" in txt
 
 
 def test_citations_deduped():

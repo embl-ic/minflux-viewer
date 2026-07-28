@@ -35,9 +35,10 @@ def _name_to_gri(points_by_gri: dict) -> dict[str, int]:
 
 
 def extract_bead_drift(points, points_by_gri, used_rids, *, min_points: int = 1) -> list[dict]:
-    """Per used bead, return ``{gri, rid, xyz_nm, tim_s, n}``.
+    """Per used bead, return ``{gri, rid, xyz_nm, pos_nm, tim_s, n}``.
 
-    ``xyz_nm`` is (n×3) in nm, re-zeroed to the bead's per-axis **median**;
+    ``xyz_nm`` is (n×3) in nm, re-zeroed to the bead's per-axis **median**
+    (``pos_nm`` = that median, the bead's absolute position for a scatter);
     ``tim_s`` is sorted ascending and zeroed to its start. When ``used_rids`` is
     empty, all beads in ``points_by_gri`` are used as a fallback.
     """
@@ -66,14 +67,15 @@ def extract_bead_drift(points, points_by_gri, used_rids, *, min_points: int = 1)
         if n < min_points:
             continue
         xyz_nm = xyz[mask] * 1.0e9
-        xyz_nm = xyz_nm - np.median(xyz_nm, axis=0)         # re-zero to median
+        pos_nm = np.median(xyz_nm, axis=0)                   # absolute bead position
+        xyz_nm = xyz_nm - pos_nm                             # re-zero to median
         tim_s = tim[mask]
         order = np.argsort(tim_s)                            # chronological
         tim_s = tim_s[order]
         tim_s = tim_s - tim_s[0]                             # zero to start
         xyz_nm = xyz_nm[order]
         beads.append({"gri": int(gri), "rid": str(rid),
-                      "xyz_nm": xyz_nm, "tim_s": tim_s, "n": n})
+                      "xyz_nm": xyz_nm, "pos_nm": pos_nm, "tim_s": tim_s, "n": n})
     beads.sort(key=lambda b: b["gri"])
     return beads
 

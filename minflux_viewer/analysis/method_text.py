@@ -280,6 +280,39 @@ def _render_dcr(m, ev, state):
     ), []
 
 
+def _render_aggregation(m, ev, state):
+    time_mode = m.group("time_mode")
+    if time_mode == "first":
+        time_sentence = (
+            "The aggregate timestamp was assigned from the first contributing "
+            "localization, following the legacy nested-record convention."
+        )
+    elif time_mode == "photon_weighted":
+        time_sentence = (
+            "The aggregate timestamp was the photon-count-weighted mean of the "
+            "contributing localization timestamps, following the modern flat-record "
+            "convention."
+        )
+    else:
+        time_sentence = f"The recorded aggregate timestamp mode was '{time_mode}'."
+    return (
+        f"Photon-threshold aggregation was applied to valid final localizations from "
+        f"'{m.group('source')}', separately within each trace and in timestamp order. "
+        f"For each localization i, the photon count P_i was calculated by summing the "
+        f"background-corrected effective counts (eco) over final-scale iteration(s) "
+        f"{m.group('iters')} (0-based raw iteration indices; iteration selection: "
+        f"{m.group('iter_source')}). Consecutive localizations were accumulated until "
+        f"ΣP_i reached or exceeded "
+        f"{m.group('thr')} photons per aggregated localization. Complete localizations "
+        f"were not split, so completed groups could exceed the threshold; the final "
+        f"sub-threshold remainder of each trace was retained. The aggregated coordinate "
+        f"was the photon-weighted centroid Σ(P_i r_i)/ΣP_i, and the reported photon "
+        f"count was ΣP_i. {time_sentence} This reduced {m.group('nin')} contributing "
+        f"localizations to {m.group('nout')} aggregated localizations in "
+        f"'{m.group('result')}'."
+    ), []
+
+
 def _render_stddev(m, ev, state):
     name = _ds_name(state, ev)
     return (
@@ -349,6 +382,15 @@ RULES = [
                 r"pixel (?P<px>[\d.]+) nm\)"), "analysis", _render_frc),
     (re.compile(r"RIMF for '(?P<name>.+?)': (?P<value>[\d.]+)\s*(?:\((?P<note>[^)]*)\))?"),
      "analysis", _render_rimf),
+    (re.compile(
+        r"^Aggregated '(?P<source>.+?)' into '(?P<result>.+?)': "
+        r"(?P<nin>[\d,]+) -> (?P<nout>[\d,]+) localizations; "
+        r"photon threshold = (?P<thr>[\d.eE+-]+) photons per aggregated localization; "
+        r"photon iterations = (?P<iters>\[[^\]]*\]) "
+        r"\((?P<iter_source>[^)]*)\); position = photon-weighted centroid; "
+        r"timestamp mode = (?P<time_mode>[a-z_]+); valid final localizations grouped "
+        r"per trace in time order; trailing remainder retained\."),
+     "transform", _render_aggregation),
     (re.compile(r"NPC segmentation \(2D\): detected (?P<n>\d+) NPC\(s\) on '(?P<name>.+?)'.*?"
                 r"diameter=(?P<diam>[\d.]+) nm, rim=(?P<rim>[\d.]+) nm, pixel=(?P<pixel>[\d.]+) nm, "
                 r"min support=(?P<support>[\d.]+)"), "segmentation", _render_npc),

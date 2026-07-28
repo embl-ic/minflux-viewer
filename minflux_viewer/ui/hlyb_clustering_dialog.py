@@ -12,13 +12,16 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -77,6 +80,10 @@ class HlyBClusteringDialog(QDialog):
         self._mask_px = None
         if self._mode in {"3D", "TEMPLATE3D"}:
             self._zscale = self._dspin(0.1, 2.0, d.z_scaling_factor, 4, 0.01, "")
+            self._zscale.setToolTip(
+                "Factor applied to the raw z coordinate before analysis "
+                "(z_nm = raw_z × this). Defaults to the dataset's current RIMF; "
+                "edit it here to override for this run.")
             form.addRow("Z scaling (RIMF):", self._zscale)
         else:
             self._border = self._dspin(0.0, 2000.0, d.border_size_nm, 1, 10.0, " nm")
@@ -271,13 +278,48 @@ class HlyBResultWindow(QDialog):
 
     # -- scatter --------------------------------------------------------
 
+    _AXIS_NAMES = {0: "x", 1: "y", 2: "z"}
+    _VIEW_AXES = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
+
     def _build_scatter(self) -> QWidget:
-        if self._prefer_2d:
-            return self._build_2d_scatter()
-        try:
-            return self._build_gl_scatter()
-        except Exception as exc:  # noqa: BLE001 - fall back to a flat 2-D scatter
-            return self._build_2d_scatter(str(exc))
+        """Scatter area with a View selector (3D / XY / XZ / YZ).
+
+        Views are built lazily and cached in a ``QStackedWidget`` so switching is
+        instant and the 3-D camera survives a round-trip. All 2-D views project
+        the z-scaled points/centres, so XZ / YZ reflect the current z-scaling.
+        """
+        container = QWidget()
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("View:"))
+        self._view_combo = QComboBox()
+        self._view_combo.addItems(["3D", "XY", "XZ", "YZ"])
+        self._view_combo.setCurrentText("XY" if self._prefer_2d else "3D")
+        row.addWidget(self._view_combo)
+        row.addStretch(1)
+        outer.addLayout(row)
+
+        self._view_stack = QStackedWidget()
+        self._view_pages: dict[str, int] = {}
+        outer.addWidget(self._view_stack, 1)
+
+        self._view_combo.currentTextChanged.connect(self._show_view)
+        self._show_view(self._view_combo.currentText())
+        return container
+
+    def _show_view(self, view: str) -> None:
+        if view not in self._view_pages:
+            if view == "3D":
+                try:
+                    widget = self._build_gl_scatter()
+                except Exception as exc:  # noqa: BLE001 - fall back to a flat XY scatter
+                    widget = self._build_2d_scatter(axes=(0, 1), reason=str(exc))
+            else:
+                widget = self._build_2d_scatter(axes=self._VIEW_AXES[view])
+            self._view_pages[view] = self._view_stack.addWidget(widget)
+        self._view_stack.setCurrentIndex(self._view_pages[view])
 
     def _structure_colors(self) -> np.ndarray:
         """RGBA per sub-unit: structure colour, or gray for unclustered."""
@@ -367,14 +409,16 @@ class HlyBResultWindow(QDialog):
         except Exception:
             pass
 
-    def _build_2d_scatter(self, reason: str = "") -> QWidget:
+    def _build_2d_scatter(self, *, axes: tuple[int, int] = (0, 1), reason: str = "") -> QWidget:
+        ax0, ax1 = axes
+        name0, name1 = self._AXIS_NAMES[ax0], self._AXIS_NAMES[ax1]
         plot = pg.PlotWidget(background="w")
         plot.setAspectLocked(True)
         plot.showGrid(x=True, y=True, alpha=0.2)
-        plot.setLabel("bottom", "x", units="nm")
-        plot.setLabel("left", "y", units="nm")
+        plot.setLabel("bottom", name0, units="nm")
+        plot.setLabel("left", name1, units="nm")
         if reason:
-            plot.setTitle(f"3-D view unavailable ({reason}); showing XY")
+            plot.setTitle(f"3-D view unavailable ({reason}); showing {name0.upper()}{name1.upper()}")
         elif self._result.get("is_2d"):
             plot.setTitle("Interior (gray) vs border-excluded (orange) localizations; "
                           "sub-unit centres and measured pairs")
@@ -384,27 +428,27 @@ class HlyBResultWindow(QDialog):
             border = np.asarray(border, dtype=np.float64)
             if border.shape[0]:
                 plot.addItem(pg.ScatterPlotItem(
-                    border[:, 0], border[:, 1], size=2, pen=None,
+                    border[:, ax0], border[:, ax1], size=2, pen=None,
                     brush=pg.mkBrush(230, 160, 40, 90)))
         points = np.asarray(self._result["points_nm"], dtype=np.float64)
         centers = np.asarray(self._result["subunit_centers"], dtype=np.float64)
         if points.shape[0]:
             plot.addItem(pg.ScatterPlotItem(
-                points[:, 0], points[:, 1], size=2, pen=None,
+                points[:, ax0], points[:, ax1], size=2, pen=None,
                 brush=pg.mkBrush(150, 150, 150, 120)))
         seg, labels = self._pair_segments()
         for a in range(0, seg.shape[0], 2):
-            plot.plot(seg[a:a + 2, 0], seg[a:a + 2, 1], pen=pg.mkPen((40, 110, 230), width=1.2))
+            plot.plot(seg[a:a + 2, ax0], seg[a:a + 2, ax1], pen=pg.mkPen((40, 110, 230), width=1.2))
         if len(labels) <= _MAX_DISTANCE_LABELS:
             for mid, dist in labels:
                 t = pg.TextItem(f"{dist:.1f}", color=(40, 40, 40), anchor=(0.5, 0.5))
-                t.setPos(float(mid[0]), float(mid[1]))
+                t.setPos(float(mid[ax0]), float(mid[ax1]))
                 plot.addItem(t)
         if centers.shape[0]:
             colors = self._structure_colors()
             brushes = [pg.mkBrush(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255), 255) for c in colors]
             plot.addItem(pg.ScatterPlotItem(
-                centers[:, 0], centers[:, 1], size=10, brush=brushes, pen=pg.mkPen("k", width=0.5)))
+                centers[:, ax0], centers[:, ax1], size=10, brush=brushes, pen=pg.mkPen("k", width=0.5)))
         return plot
 
     # -- histogram ------------------------------------------------------

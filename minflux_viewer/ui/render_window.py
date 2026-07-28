@@ -92,6 +92,38 @@ _DEBOUNCE_MS   = 25      # delay between view change and re-render
 _COLORMAPS     = ["hot", "inferno", "viridis", "magma", "plasma", "cividis", "gray"]
 _ORIENTATIONS  = ["XY", "XZ", "YZ", "3D"]
 _RENDER_ORIENTATIONS = {"XY", "XZ", "YZ"}
+# Right-click "Render Mode" submenu: (mode id, label, hover-help). The help
+# explains both the mode and how it reconstructs pixels.
+_RENDER_MODE_INFO = (
+    (
+        "basic",
+        "Basic",
+        "Basic render — the fast production pipeline.\n"
+        "\n"
+        "Tiled LOD cache when zoomed out, direct\n"
+        "per-viewport render when zoomed in. Each\n"
+        "region is drawn as a 2-D histogram (dense)\n"
+        "or a per-localization isotropic Gaussian\n"
+        "(sparse), optionally blurred by one sigma.\n"
+        "Fast and responsive for everyday viewing.",
+    ),
+    (
+        "advanced",
+        "Advanced",
+        "Advanced render — precision reconstruction\n"
+        "(SMAP-inspired).\n"
+        "\n"
+        "Every localization is a unit-mass,\n"
+        "pixel-integrated anisotropic Gaussian sized\n"
+        "by its own precision (per-loc → per-trace\n"
+        "StdDev → calibration → 5 nm fallback). Adds\n"
+        "a Renderer selector (Histogram, Bilinear,\n"
+        "Basic, Fixed Gaussian, Loc-precision\n"
+        "Gaussian). Sharper, precision-weighted;\n"
+        "heavier, but cached + progressive so\n"
+        "interaction stays responsive.",
+    ),
+)
 _PURE_COLOR_LUTS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"]
 _CHANNEL_LUTS  = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray", *_COLORMAPS]
 _IMAGEJ_AUTO_THRESHOLD = 5000
@@ -669,6 +701,11 @@ class RenderWindow(QWidget):
     """
 
     TAG = "render_window"
+    SUPPORTS_VOLUME_3D = True
+    SIGMA_MENU_TEXT = "Sigma"
+    # Which render engine this window is. The right-click "Render Mode" submenu
+    # swaps between them (PrecisionRenderWindow sets this to "advanced").
+    RENDER_MODE = "basic"
 
     def __init__(
         self,
@@ -689,6 +726,10 @@ class RenderWindow(QWidget):
         self._bounds_xy: tuple[float, float, float, float] = (0, 1, 0, 1)
         self._fit_view_size: tuple[float, float] = (1.0, 1.0)
         self._suppress_zoom_limit: bool = False
+        # The fit done during construction uses a placeholder ViewBox pixel size;
+        # re-fit once on first real show (see showEvent) so a wide dataset's full
+        # X extent is not clipped by PyQtGraph's aspect-lock enforcement.
+        self._did_initial_fit: bool = False
         self._bounds_depth: tuple[float, float] = (0, 0)
         self._depth_range: tuple[float, float] = (0, 0)
         self._depth_inclusive: tuple[bool, bool] = (True, True)
@@ -2523,8 +2564,15 @@ class RenderWindow(QWidget):
             action.setCheckable(True)
             if orientation == "3D":
                 action.setChecked(self._volume_window is not None and self._volume_window.isVisible())
-                action.setEnabled(self._render_mode == "localizations" and self._has_depth)
-                action.triggered.connect(self._show_3d_volume_window)
+                action.setEnabled(
+                    self.SUPPORTS_VOLUME_3D
+                    and self._render_mode == "localizations"
+                    and self._has_depth
+                )
+                if self.SUPPORTS_VOLUME_3D:
+                    action.triggered.connect(self._show_3d_volume_window)
+                else:
+                    action.setToolTip("3D volume rendering is not part of this test view")
             else:
                 action.setChecked(self._orientation == orientation)
                 action.setEnabled(orientation in _RENDER_ORIENTATIONS)
@@ -2536,6 +2584,24 @@ class RenderWindow(QWidget):
         wb_action.setCheckable(True)
         wb_action.setChecked(self._white_bg)
         wb_action.triggered.connect(self._set_white_background)
+
+        # Render Mode (Basic / Advanced) lives inside View, below White background.
+        mode_menu = view_menu.addMenu("Render Mode")
+        mode_menu.setToolTipsVisible(True)  # show the per-item hover help
+        for mode_id, label, tip in _RENDER_MODE_INFO:
+            action = mode_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self.RENDER_MODE == mode_id)
+            action.setToolTip(tip)
+            # Advanced render is localization-only; grey it out in image mode.
+            if mode_id == "advanced" and self._render_mode != "localizations":
+                action.setEnabled(False)
+                action.setToolTip(
+                    "Advanced render applies to localization data, not images."
+                )
+            action.triggered.connect(
+                lambda _checked=False, value=mode_id: self._switch_render_mode(value)
+            )
 
         cmap_menu = menu.addMenu("Colormap")
         for name in _COLORMAPS:
@@ -2558,7 +2624,7 @@ class RenderWindow(QWidget):
                 bc_action.setShortcutVisibleInContextMenu(False)
             except Exception:
                 pass
-        menu.addAction("Sigma", self._show_sigma_dialog)
+        menu.addAction(self.SIGMA_MENU_TEXT, self._show_sigma_dialog)
 
         axis_action = menu.addAction("Axis")
         axis_action.setCheckable(True)
@@ -2570,6 +2636,16 @@ class RenderWindow(QWidget):
 
         menu.addAction("Reset View", self._reset_view)
         menu.exec(self._image_view.ui.graphicsView.mapToGlobal(pos))
+
+    def _switch_render_mode(self, mode: str) -> None:
+        """Right-click Render Mode ▸ Basic/Advanced: swap this window for the
+        other render engine on the same dataset, preserving the current view."""
+        if mode == self.RENDER_MODE:
+            return
+        main_window = getattr(getattr(self._state, "mfv", None), "_main_window", None)
+        if main_window is None or not hasattr(main_window, "_swap_render_mode"):
+            return
+        main_window._swap_render_mode(self, mode)
 
     def _set_orientation(self, text: str) -> None:
         if text not in _RENDER_ORIENTATIONS:
@@ -3274,6 +3350,26 @@ class RenderWindow(QWidget):
         if locs.shape[1] == 2:
             locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=np.float64)])
         return self._apply_dataset_render_transform(ds, locs[:, :3])
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # The initial fit happens during construction, before the window is on
+        # screen, so the ViewBox reports a placeholder pixel size. PyQtGraph's
+        # aspect-lock re-enforcement on the first real resize can then clip the
+        # X extent of a wide dataset (full height shown, left/right cut off).
+        # Re-fit once, deferred to the next event-loop tick so the ViewBox has
+        # its real on-screen size — but only if the user hasn't interacted yet.
+        if not self._did_initial_fit:
+            self._did_initial_fit = True
+            QTimer.singleShot(0, self._fit_view_on_first_show)
+
+    def _fit_view_on_first_show(self) -> None:
+        try:
+            if self._locs_nm is None and self._image_data is None:
+                return
+            self._fit_view()
+        except Exception:
+            pass
 
     def closeEvent(self, event) -> None:
         if self._volume_window is not None:

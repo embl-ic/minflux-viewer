@@ -68,6 +68,18 @@ def _finite_filtered_locs(dataset) -> np.ndarray:
     return np.ascontiguousarray(locs[finite, :3], dtype=np.float64)
 
 
+def _clip_region(locs, sigma, region):
+    """Keep only localizations inside the 3-D box (xlo,xhi,ylo,yhi,zlo,zhi nm),
+    carrying an aligned per-loc ``sigma`` (or None) along with them."""
+    xlo, xhi, ylo, yhi, zlo, zhi = region
+    keep = (
+        (locs[:, 0] >= xlo) & (locs[:, 0] <= xhi)
+        & (locs[:, 1] >= ylo) & (locs[:, 1] <= yhi)
+        & (locs[:, 2] >= zlo) & (locs[:, 2] <= zhi)
+    )
+    return locs[keep], (None if sigma is None else sigma[keep])
+
+
 def _matplotlib_rgba(name: str, values: np.ndarray) -> np.ndarray:
     """Map normalised values to uint8 RGBA through matplotlib."""
     import matplotlib as mpl
@@ -86,6 +98,115 @@ def _surface_color(cmap_name: str, value: float, opacity: float) -> tuple[float,
     )
 
 
+# Per-method 3-D blur, expressed as a fraction of the voxel size. Crisp for
+# histogram; a light sub-voxel smoothing for the interpolating/smoothed methods
+# (a voxel volume can't show a splat kernel's sub-voxel shape, so a small blur
+# captures each method's "smoother than histogram" character). Fixed/precision
+# use real nm sigmas instead (see _voxelize_volume).
+_METHOD_VOXEL_BLUR = {
+    "histogram": 0.0,
+    "bilinear": 0.6,
+    "bicubic": 0.9,
+    "basic": 0.5,
+}
+# Anti-alias floor (voxels) for the precision volume: when the total-voxel cap
+# forces a coarse voxel, the per-loc precision blur becomes sub-voxel and leaves
+# a blocky histogram; this floor keeps it smooth (≈ the base render's default).
+_MIN_VOXEL_BLUR = 0.75
+
+
+def _precision_volume_3d(
+    locs: np.ndarray,
+    sigma_nm: np.ndarray,
+    edges: list[np.ndarray],
+    voxel_xyz: tuple[float, float, float],
+    *,
+    n_bins: int = 6,
+) -> np.ndarray:
+    """True per-localization precision 3-D volume.
+
+    Each localization is an anisotropic 3-D Gaussian sized by its own
+    ``sigma_nm`` (X/Y/Z). For speed this is done by **sigma binning**: group
+    localizations into ``n_bins`` by their mean precision, histogram each group,
+    blur it by that group's median sigma (in voxels), and sum — O(bins·voxels)
+    instead of a per-localization stamp, visually indistinguishable from it.
+
+    The per-bin blur is combined in quadrature with a **minimum anti-alias floor**
+    (``_MIN_VOXEL_BLUR`` voxels): when the total-voxel cap forces a coarse voxel,
+    the precision (nm) becomes sub-voxel and would leave a raw blocky histogram —
+    the floor keeps the volume smooth (matching the base render), so it never
+    looks pixelated even though it can't resolve below the voxel.
+    """
+    counts = tuple(len(e) - 1 for e in edges)
+    total = int(np.prod(counts))
+    flat = np.zeros(total, dtype=np.float64)
+    if locs.shape[0] == 0:
+        return flat.reshape(counts).astype(np.float32)
+
+    sig = np.maximum(np.asarray(sigma_nm, dtype=np.float64), 1e-3)
+    smean = np.cbrt(np.prod(sig, axis=1))
+    lo, hi = np.percentile(smean, [1.0, 99.0])
+    if hi <= lo:
+        group = np.zeros(smean.shape[0], dtype=np.int64)
+        bin_edges = np.array([lo, hi + 1e-6])
+    else:
+        bin_edges = np.linspace(lo, hi, n_bins + 1)
+        group = np.clip(np.digitize(smean, bin_edges) - 1, 0, n_bins - 1)
+
+    for g in range(len(bin_edges) - 1):
+        sel = group == g
+        if not np.any(sel):
+            continue
+        hist, _ = np.histogramdd(locs[sel], bins=edges)
+        vol = hist.astype(np.float64)
+        med = np.median(sig[sel], axis=0)
+        sigma_px = tuple(
+            float(np.hypot(med[i] / max(voxel_xyz[i], 1e-12), _MIN_VOXEL_BLUR))
+            for i in range(3)
+        )
+        vol = gaussian_filter(vol, sigma=sigma_px, mode="constant")
+        flat += vol.reshape(-1)
+    return flat.reshape(counts).astype(np.float32)
+
+
+def _voxelize_volume(
+    locs: np.ndarray,
+    edges: list[np.ndarray],
+    voxel_xyz: tuple[float, float, float],
+    *,
+    render_method: str | None,
+    sigma_nm_xyz: tuple[float, float, float],
+    precision_sigma_nm: np.ndarray | None,
+) -> np.ndarray:
+    """Voxelise localizations into a scalar volume, reflecting *render_method*.
+
+    ``render_method=None`` reproduces the original behavior (histogram + the
+    ``sigma_nm_xyz``-with-0.75-voxel-fallback blur).
+    """
+    method = (render_method or "").lower()
+    if method == "precision_gaussian" and precision_sigma_nm is not None:
+        return _precision_volume_3d(locs, precision_sigma_nm, edges, voxel_xyz)
+
+    hist, _ = np.histogramdd(locs, bins=edges)
+    volume = hist.astype(np.float32, copy=False)
+    if method == "fixed_gaussian":
+        sigma_px = tuple(
+            max(float(s) / max(v, 1e-12), 0.0) for s, v in zip(sigma_nm_xyz, voxel_xyz)
+        )
+    elif method in _METHOD_VOXEL_BLUR:
+        frac = _METHOD_VOXEL_BLUR[method]
+        sigma_px = (frac, frac, frac)
+    else:
+        # None / precision-without-sigma / unknown → original fallback behavior.
+        sigma_px = tuple(
+            max(float(s) / max(v, 1e-12), 0.0) if s > 0.0 else 0.75
+            for s, v in zip(sigma_nm_xyz, voxel_xyz)
+        )
+    if max(sigma_px) >= 0.1:
+        volume = gaussian_filter(volume, sigma=tuple(sigma_px), mode="constant")
+    return volume
+
+
 def make_volume_payload(
     locs_nm: np.ndarray,
     *,
@@ -97,8 +218,19 @@ def make_volume_payload(
     cmap_name: str = "hot",
     opacity: float = 0.45,
     sigma_nm_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    render_method: str | None = None,
+    precision_sigma_nm: np.ndarray | None = None,
+    black_pct: float = 0.0,
+    white_pct: float = 99.7,
 ) -> VolumePayload:
-    """Voxelise localisation coordinates into a bounded RGBA volume."""
+    """Voxelise localisation coordinates into a bounded RGBA volume.
+
+    ``black_pct``/``white_pct`` are the percentiles of the non-zero voxel counts
+    mapped to fully transparent / fully opaque — the volume's brightness/contrast.
+    The default ``(0, 99.7)`` reproduces the historical auto-normalisation; the
+    advanced view passes the 2-D view's contrast expressed as percentiles so the
+    3-D visibility matches what's on screen.
+    """
     locs = np.asarray(locs_nm, dtype=np.float64)
     if locs.ndim != 2 or locs.shape[1] != 3:
         raise ValueError("locs_nm must have shape (N, 3)")
@@ -138,28 +270,27 @@ def make_volume_payload(
         np.linspace(float(lo[i]), float(hi[i]), int(counts[i]) + 1, dtype=np.float64)
         for i in range(3)
     ]
-    hist, _ = np.histogramdd(locs, bins=edges)
-    volume = hist.astype(np.float32, copy=False)
-
     voxel_xyz = tuple(float(edges[i][1] - edges[i][0]) for i in range(3))
-    sigma_px = []
-    for sigma_nm, step_nm in zip(sigma_nm_xyz, voxel_xyz):
-        if sigma_nm > 0.0:
-            sigma_px.append(max(float(sigma_nm) / max(step_nm, 1e-12), 0.0))
-        else:
-            sigma_px.append(0.75)
-    if max(sigma_px) >= 0.1:
-        volume = gaussian_filter(volume, sigma=tuple(sigma_px), mode="constant")
+    volume = _voxelize_volume(
+        locs, edges, voxel_xyz,
+        render_method=render_method,
+        sigma_nm_xyz=sigma_nm_xyz,
+        precision_sigma_nm=precision_sigma_nm,
+    )
 
     nonzero = volume[volume > 0.0]
+    wp = float(np.clip(white_pct, 0.0, 100.0))
+    bp = float(np.clip(black_pct, 0.0, max(wp - 1e-3, 0.0)))
     if nonzero.size:
-        vmax = float(np.percentile(nonzero, 99.7))
-        if vmax <= 0.0:
-            vmax = float(nonzero.max())
+        vhi = float(np.percentile(nonzero, wp))
+        if vhi <= 0.0:
+            vhi = float(nonzero.max())
+        vlo = 0.0 if bp <= 0.0 else float(np.percentile(nonzero, bp))
     else:
-        vmax = 1.0
-    vmax = max(vmax, 1e-12)
-    norm = np.clip(volume / vmax, 0.0, 1.0)
+        vhi, vlo = 1.0, 0.0
+    vhi = max(vhi, vlo + 1e-12)
+    norm = np.clip((volume - vlo) / (vhi - vlo), 0.0, 1.0)
+    vmax = vhi
 
     rgba = _matplotlib_rgba(cmap_name, norm.ravel()).reshape((*volume.shape, 4))
     alpha = (np.power(norm, 0.75) * np.clip(float(opacity), 0.0, 1.0) * 255.0).astype(np.uint8)
@@ -238,6 +369,8 @@ def make_multichannel_volume_payload(
     max_voxels: int = _DEFAULT_MAX_VOXELS,
     opacity: float = 0.45,
     sigma_nm_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    black_pct: float = 0.0,
+    white_pct: float = 99.7,
 ) -> VolumePayload:
     """Composite several overlay channels into one RGBA volume.
 
@@ -275,9 +408,12 @@ def make_multichannel_volume_payload(
         if max(sigma_px) >= 0.1:
             vol = gaussian_filter(vol, sigma=tuple(sigma_px), mode="constant")
         nz = vol[vol > 0.0]
-        vmax = float(np.percentile(nz, 99.7)) if nz.size else 1.0
-        vmax = max(vmax, 1e-12)
-        norm = np.clip(vol / vmax, 0.0, 1.0)
+        wp = float(np.clip(white_pct, 0.0, 100.0))
+        bp = float(np.clip(black_pct, 0.0, max(wp - 1e-3, 0.0)))
+        vhi = float(np.percentile(nz, wp)) if nz.size else 1.0
+        vlo = float(np.percentile(nz, bp)) if (nz.size and bp > 0.0) else 0.0
+        vhi = max(vhi, vlo + 1e-12)
+        norm = np.clip((vol - vlo) / (vhi - vlo), 0.0, 1.0)
         for k in range(3):
             rgb_accum[..., k] += float(rgb[k]) * norm
         alpha_accum = np.maximum(alpha_accum, np.power(norm, 0.75))
@@ -316,12 +452,28 @@ class VolumeRenderWindow(QWidget):
         dataset_idx: int,
         *,
         sigma_nm_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        render_method: str | None = None,
+        region_bounds: tuple[float, float, float, float, float, float] | None = None,
+        contrast_pct: tuple[float, float] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._state = state
         self._idx = int(dataset_idx)
         self._sigma_nm_xyz = sigma_nm_xyz
+        # Volume brightness/contrast as (black, white) percentiles of the nonzero
+        # voxels. Default (0, 99.7) = the historical auto-normalisation; the
+        # advanced view passes its 2-D contrast so the 3-D visibility matches.
+        self._black_pct, self._white_pct = contrast_pct or (0.0, 99.7)
+        # Advanced view passes these: which 2-D method to reflect in 3-D, and a
+        # 3-D box (xlo,xhi,ylo,yhi,zlo,zhi nm) to restrict the volume to the
+        # currently focused region. Both None → the standard whole-data volume.
+        self._render_method = render_method
+        self._region_bounds = region_bounds
+        # Cached GPU 3-D texture limit (see _gl_max_3d_texture); the Max dim
+        # spinbox is auto-populated from it on first refresh, then user-adjustable.
+        self._max_dim: int | None = None
+        self._max_dim_initialised = False
         self._view = None
         self._volume_item = None
         self._mip_items: list = []
@@ -358,7 +510,7 @@ class VolumeRenderWindow(QWidget):
         self._xy_voxel_spin.setRange(0.1, 10_000.0)
         self._xy_voxel_spin.setDecimals(1)
         self._xy_voxel_spin.setSuffix(" nm")
-        self._xy_voxel_spin.setValue(5.0)
+        self._xy_voxel_spin.setValue(2.5)
         self._xy_voxel_spin.valueChanged.connect(self._schedule_rebuild)
         bar.addWidget(self._xy_voxel_spin)
 
@@ -367,16 +519,21 @@ class VolumeRenderWindow(QWidget):
         self._z_voxel_spin.setRange(0.1, 10_000.0)
         self._z_voxel_spin.setDecimals(1)
         self._z_voxel_spin.setSuffix(" nm")
-        self._z_voxel_spin.setValue(10.0)
+        self._z_voxel_spin.setValue(2.5)
         self._z_voxel_spin.valueChanged.connect(self._schedule_rebuild)
         bar.addWidget(self._z_voxel_spin)
 
         bar.addWidget(QLabel("Max dim"))
         self._max_dim_spin = QSpinBox()
-        self._max_dim_spin.setRange(32, 1024)
-        self._max_dim_spin.setValue(160)
+        self._max_dim_spin.setRange(32, 2048)      # widened to the GPU limit on first refresh
+        self._max_dim_spin.setValue(2048)
         self._max_dim_spin.setToolTip(
-            f"Maximum voxels along the longest axis. Total voxels are still capped at {_DEFAULT_MAX_VOXELS:,}."
+            "Cap on the number of voxels along the LONGEST axis. Auto-populated\n"
+            "from the GPU's max 3-D texture size; raise for finer detail on an\n"
+            "elongated or focused region, lower to save memory.\n"
+            f"The TOTAL voxel count is also capped at {_DEFAULT_MAX_VOXELS:,} — for a\n"
+            "big whole-field volume that usually binds first, so raising this may\n"
+            "not change resolution (zoom into a region instead)."
         )
         self._max_dim_spin.valueChanged.connect(self._schedule_rebuild)
         bar.addWidget(self._max_dim_spin)
@@ -395,6 +552,33 @@ class VolumeRenderWindow(QWidget):
         self._opacity_spin.setValue(0.45)
         self._opacity_spin.valueChanged.connect(self._schedule_rebuild)
         bar.addWidget(self._opacity_spin)
+
+        # Brightness/contrast: black/white as percentiles of the nonzero voxels.
+        bar.addWidget(QLabel("Black %"))
+        self._black_spin = QDoubleSpinBox()
+        self._black_spin.setRange(0.0, 99.0)
+        self._black_spin.setDecimals(1)
+        self._black_spin.setSingleStep(1.0)
+        self._black_spin.setValue(float(self._black_pct))
+        self._black_spin.setToolTip(
+            "Contrast black point: voxel-count percentile mapped to transparent."
+        )
+        self._black_spin.valueChanged.connect(self._on_contrast_changed)
+        bar.addWidget(self._black_spin)
+
+        bar.addWidget(QLabel("White %"))
+        self._white_spin = QDoubleSpinBox()
+        self._white_spin.setRange(1.0, 100.0)
+        self._white_spin.setDecimals(1)
+        self._white_spin.setSingleStep(0.5)
+        self._white_spin.setValue(float(self._white_pct))
+        self._white_spin.setToolTip(
+            "Contrast white point: voxel-count percentile mapped to fully opaque.\n"
+            "Opened from the advanced 2-D view, both are seeded from that view's\n"
+            "brightness/contrast so 3-D visibility matches the 2-D image."
+        )
+        self._white_spin.valueChanged.connect(self._on_contrast_changed)
+        bar.addWidget(self._white_spin)
 
         bar.addWidget(QLabel("ISO"))
         self._iso_spin = QDoubleSpinBox()
@@ -468,27 +652,96 @@ class VolumeRenderWindow(QWidget):
             out.append((np.ascontiguousarray(locs[:, :3], dtype=np.float64), rgb))
         return out or None
 
+    def _gl_max_3d_texture(self) -> int:
+        """The GPU's `GL_MAX_3D_TEXTURE_SIZE` — the hard per-axis voxel limit
+        (a longer axis fails to upload → black window). Queried once from the
+        live GL context; 2048 fallback (the OpenGL 4.3 guaranteed minimum, and
+        the value on essentially every desktop GPU that runs this app)."""
+        if self._max_dim is not None:
+            return self._max_dim
+        limit = 2048
+        try:
+            if self._view is not None:
+                from OpenGL.GL import GL_MAX_3D_TEXTURE_SIZE, glGetIntegerv
+                self._view.makeCurrent()
+                try:
+                    value = glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE)
+                finally:
+                    self._view.doneCurrent()
+                gl_max = int(np.asarray(value).ravel()[0])
+                if gl_max >= 256:
+                    limit = gl_max
+        except Exception:
+            limit = 2048
+        self._max_dim = int(limit)
+        return self._max_dim
+
+    def _recommended_max_dim(self) -> int:
+        """Auto-populated default for the Max dim control: the GPU limit, but not
+        more than 2048 (an axis that long is already extreme for a localization
+        volume; the 8M total-voxel cap usually binds first anyway)."""
+        return int(min(self._gl_max_3d_texture(), 2048))
+
+    def _single_channel_locs(self, ds):
+        """Filtered finite native-XYZ locs, plus aligned per-loc precision sigma
+        (N,3 nm) when the reflected method is the precision Gaussian, else None."""
+        try:
+            full = np.asarray(ds.loc_nm, dtype=np.float64)
+        except Exception:
+            return np.empty((0, 3), dtype=np.float64), None
+        if full.ndim != 2 or full.shape[1] < 2:
+            return np.empty((0, 3), dtype=np.float64), None
+        if full.shape[1] == 2:
+            full = np.column_stack([full, np.zeros(full.shape[0], dtype=np.float64)])
+        n = full.shape[0]
+        mask = np.asarray(ds.filter_mask, dtype=bool)
+        if mask.shape[0] != n:
+            mask = np.ones(n, dtype=bool)
+        mask = mask & np.all(np.isfinite(full[:, :3]), axis=1)
+        locs = np.ascontiguousarray(full[mask, :3], dtype=np.float64)
+        if (self._render_method or "").lower() != "precision_gaussian":
+            return locs, None
+        try:
+            from .precision_render import resolve_precision_xyz_nm
+            sigma, _src = resolve_precision_xyz_nm(ds, n)   # (n,3) native nm, RIMF on z
+            return locs, np.ascontiguousarray(sigma[mask], dtype=np.float64)
+        except Exception:
+            return locs, None
+
     def refresh_from_dataset(self) -> None:
         if self._idx < 0 or self._idx >= len(self._state.datasets):
             self._info_label.setText("No active dataset.")
             return
         ds = self._state.datasets[self._idx]
         channels = self._overlay_channels()
+        precision_sigma = None
         if channels:
             self.setWindowTitle(
                 f"3D Volume Preview - {ds.name} (+{len(channels) - 1} channel(s))")
             all_locs = np.vstack([c[0] for c in channels])
         else:
             self.setWindowTitle(f"3D Volume Preview - {ds.name}")
-            all_locs = _finite_filtered_locs(ds)
-        if all_locs.shape[0] > 0:
-            span = np.ptp(all_locs, axis=0)
-            suggested_xy = max(float(ds.cali.pixel_size), float(max(span[0], span[1])) / 160.0, 0.5)
-            suggested_z = max(float(ds.cali.pixel_size), float(span[2]) / 96.0, 0.5)
-            if not getattr(self, "_voxel_initialised", False):
-                self._xy_voxel_spin.setValue(float(suggested_xy))
-                self._z_voxel_spin.setValue(float(suggested_z))
-                self._voxel_initialised = True
+            all_locs, precision_sigma = self._single_channel_locs(ds)
+        # Restrict to the focused 3-D region (from the advanced 2-D view) if set.
+        if self._region_bounds is not None and all_locs.shape[0] > 0:
+            all_locs, precision_sigma = _clip_region(
+                all_locs, precision_sigma, self._region_bounds
+            )
+        # Default to an isotropic 2.5 nm voxel (the total-voxel cap enlarges it
+        # if the region is too big); only seed the spinboxes once.
+        if not getattr(self, "_voxel_initialised", False):
+            self._xy_voxel_spin.setValue(2.5)
+            self._z_voxel_spin.setValue(2.5)
+            self._voxel_initialised = True
+        # Populate Max dim from the GPU limit once the GL context exists (widen
+        # the range to the hard limit, default to the recommended value).
+        if not getattr(self, "_max_dim_initialised", False) and self._view is not None:
+            self._max_dim_initialised = True
+            hard = self._gl_max_3d_texture()
+            self._max_dim_spin.blockSignals(True)
+            self._max_dim_spin.setRange(32, max(hard, 64))
+            self._max_dim_spin.setValue(self._recommended_max_dim())
+            self._max_dim_spin.blockSignals(False)
 
         if self._view is None:
             self._info_label.setText("3D OpenGL preview unavailable.")
@@ -505,6 +758,8 @@ class VolumeRenderWindow(QWidget):
                     max_voxels=_DEFAULT_MAX_VOXELS,
                     opacity=float(self._opacity_spin.value()),
                     sigma_nm_xyz=self._sigma_nm_xyz,
+                    black_pct=self._black_pct,
+                    white_pct=self._white_pct,
                 )
             else:
                 payload = make_volume_payload(
@@ -516,6 +771,10 @@ class VolumeRenderWindow(QWidget):
                     cmap_name=self._cmap_combo.currentText(),
                     opacity=float(self._opacity_spin.value()),
                     sigma_nm_xyz=self._sigma_nm_xyz,
+                    render_method=self._render_method,
+                    precision_sigma_nm=precision_sigma,
+                    black_pct=self._black_pct,
+                    white_pct=self._white_pct,
                 )
         except Exception as exc:
             QApplication.restoreOverrideCursor()
@@ -543,6 +802,22 @@ class VolumeRenderWindow(QWidget):
         if not getattr(self, "_voxel_initialised", False):
             return
         self._rebuild_timer.start()
+
+    def _on_contrast_changed(self, *_args) -> None:
+        self._black_pct = float(self._black_spin.value())
+        self._white_pct = float(self._white_spin.value())
+        self._schedule_rebuild()
+
+    def set_contrast_pct(self, black: float, white: float) -> None:
+        """Seed the volume brightness/contrast (black/white percentiles) — used
+        by the advanced view to match the 2-D contrast. Updates the spinboxes
+        without triggering a redundant rebuild (the caller refreshes)."""
+        self._black_pct = float(black)
+        self._white_pct = float(white)
+        for spin, value in ((self._black_spin, black), (self._white_spin, white)):
+            spin.blockSignals(True)
+            spin.setValue(float(value))
+            spin.blockSignals(False)
 
     def _on_mode_changed(self, mode: str) -> None:
         self._iso_spin.setEnabled(mode in {"Surface", "ISO surface"})

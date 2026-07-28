@@ -17,10 +17,28 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QSizePolicy,
     QVBoxLayout,
 )
 
 from ..core.roi_crop import CropOptions, parse_channel_spec
+
+
+def auto_z_bounds(counts: np.ndarray, edges: np.ndarray) -> tuple[float, float]:
+    """Data-driven Z bounds: the outermost histogram bins whose count stays at
+    or above a threshold, trimming the sparse outlier tails. The threshold is
+    ``max(1, ~5% of the peak)`` — i.e. the two ends are where the distribution
+    has clearly fallen off. Falls back to the full extent when nothing (or
+    everything) qualifies."""
+    counts = np.asarray(counts, dtype=float)
+    edges = np.asarray(edges, dtype=float)
+    if counts.size == 0 or edges.size < 2 or counts.max() <= 0:
+        return float(edges[0]), float(edges[-1])
+    threshold = max(1.0, 0.05 * float(counts.max()))
+    keep = np.flatnonzero(counts >= threshold)
+    if keep.size == 0:
+        return float(edges[0]), float(edges[-1])
+    return float(edges[keep[0]]), float(edges[keep[-1] + 1])
 
 
 class CropDialog(QDialog):
@@ -41,13 +59,19 @@ class CropDialog(QDialog):
         self.setMinimumWidth(460)
         self._channels = list(channels or [])
         init = initial or CropOptions()
+        # Z-histogram hover read-out state (set in _build_z_section).
+        self._z_plot = None
+        self._z_counts = None
+        self._z_edges = None
+        self._z_cursor = None
+        self._z_hover_label = QLabel(" ")
 
         root = QVBoxLayout(self)
         root.addWidget(QLabel(f"Dataset: <b>{dataset_name}</b>"))
 
         # With an active region ROI the duplicate always crops; this chooses the
         # ROI's exact outline vs its (axis-aligned) bounding box.
-        self._exact_shape = QCheckBox("duplicate only the ROI region (exact shape; else bounding box)")
+        self._exact_shape = QCheckBox("duplicate only the ROI region")
         self._exact_shape.setChecked(bool(init.exact_shape))
         self._exact_shape.setEnabled(has_roi)
         self._exact_shape.setToolTip(
@@ -110,6 +134,9 @@ class CropDialog(QDialog):
 
         self._all_z.toggled.connect(self._sync_enabled)
         self._sync_enabled()
+        # Open tall enough to see the Z histogram; the plot then grows on resize.
+        if self._has_z:
+            self.resize(520, 620)
 
     # ------------------------------------------------------------------
     def _build_z_section(self, root, z: np.ndarray, init: CropOptions) -> None:
@@ -120,17 +147,25 @@ class CropDialog(QDialog):
         zmin, zmax = float(z.min()), float(z.max())
         if zmax <= zmin:
             zmax = zmin + 1.0
-        lo, hi = (init.z_range or (zmin, zmax))
+        counts, edges = np.histogram(z, bins=min(64, max(8, z.size // 20)))
+        self._z_counts = np.asarray(counts, dtype=float)
+        self._z_edges = np.asarray(edges, dtype=float)
+        # Default the two Z bounds to the data-driven edges (sparse tails
+        # trimmed) so they're ready when the user unchecks "All Z".
+        lo, hi = init.z_range if init.z_range is not None else auto_z_bounds(counts, edges)
 
-        root.addWidget(QLabel("Z distribution (drag the shaded range, or the slider):"))
+        root.addWidget(QLabel(
+            "Z distribution — drag the shaded range or the slider; drag the dialog "
+            "taller to expand the count axis, hover a bar to read its count:"))
         try:
             import pyqtgraph as pg
             plot = pg.PlotWidget()
-            plot.setMaximumHeight(110)
+            plot.setMinimumHeight(120)
+            # Grow vertically with the dialog so the count axis expands on drag.
+            plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             plot.setMouseEnabled(x=False, y=False)
-            plot.hideAxis("left")
+            plot.setLabel("left", "count")
             plot.setLabel("bottom", "Z (nm)")
-            counts, edges = np.histogram(z, bins=min(64, max(8, z.size // 20)))
             centers = 0.5 * (edges[:-1] + edges[1:])
             width = (edges[1] - edges[0]) if edges.size > 1 else 1.0
             plot.addItem(pg.BarGraphItem(x=centers, height=counts, width=width, brush="#5a9bd4"))
@@ -142,7 +177,20 @@ class CropDialog(QDialog):
             self._region.setZValue(10)
             plot.addItem(self._region)
             self._region.sigRegionChanged.connect(self._on_region_changed)
-            root.addWidget(plot)
+            # Hover read-out: a dashed vertical marker + a label with the count
+            # of the bar under the cursor, so the user can read exact counts and
+            # decide the Z bounds.
+            self._z_plot = plot
+            self._z_cursor = pg.InfiniteLine(
+                angle=90, movable=False,
+                pen=pg.mkPen("#666", width=1, style=Qt.PenStyle.DashLine))
+            self._z_cursor.setZValue(5)
+            self._z_cursor.hide()
+            plot.addItem(self._z_cursor, ignoreBounds=True)
+            plot.scene().sigMouseMoved.connect(self._on_z_hover)
+            root.addWidget(plot, 1)   # stretch → takes the dialog's extra height
+            self._z_hover_label.setStyleSheet("color: #555; font-size: 11px;")
+            root.addWidget(self._z_hover_label)
         except Exception:
             self._region = None
 
@@ -159,6 +207,30 @@ class CropDialog(QDialog):
         z_row.addWidget(self._z_label)
         root.addLayout(z_row)
         self._update_z_label()
+
+    def _on_z_hover(self, pos) -> None:
+        """Show the count of the histogram bar under the mouse (with a marker)."""
+        plot = self._z_plot
+        if plot is None or self._z_counts is None or self._z_edges is None:
+            return
+        vb = plot.getPlotItem().vb
+        if not vb.sceneBoundingRect().contains(pos):
+            self._z_cursor.hide()
+            self._z_hover_label.setText(" ")
+            return
+        x = float(vb.mapSceneToView(pos).x())
+        idx = int(np.searchsorted(self._z_edges, x) - 1)
+        if idx < 0 or idx >= self._z_counts.size:
+            self._z_cursor.hide()
+            self._z_hover_label.setText(" ")
+            return
+        self._z_cursor.setPos(x)
+        self._z_cursor.show()
+        e0, e1 = float(self._z_edges[idx]), float(self._z_edges[idx + 1])
+        self._z_hover_label.setText(
+            f"Z ≈ {x:.1f} nm   ·   bin [{e0:.1f}, {e1:.1f}] nm   ·   "
+            f"count = {int(self._z_counts[idx])}"
+        )
 
     def _on_region_changed(self, *_args) -> None:
         if self._syncing or self._region is None or self._slider is None:
