@@ -84,5 +84,6 @@ def ensure_loaded() -> None:
     from . import data_simulator  # noqa: F401  (immediately under ParaView)
     from . import drift_correction  # noqa: F401
     from . import trace_viewer    # noqa: F401
+    from . import spatial_line_pattern  # noqa: F401
     from . import generate_method_text  # noqa: F401
     from . import script_editor   # noqa: F401  (moved to the bottom of the list)

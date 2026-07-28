@@ -174,3 +174,56 @@ def axis_aligned_enclosing_ellipse(points):
     q = ((P[:, 0] - cx) / sx) ** 2 + ((P[:, 1] - cy) / sy) ** 2
     scale = max(float(np.sqrt(q.max())), 1e-9)
     return float(cx), float(cy), 2.0 * sx * scale, 2.0 * sy * scale
+
+
+def _circle_from_2(a, b):
+    cx, cy = (a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0
+    r = 0.5 * float(np.hypot(a[0] - b[0], a[1] - b[1]))
+    return (cx, cy, r)
+
+
+def _circle_from_3(a, b, c):
+    ax, ay = a; bx, by = b; cx_, cy_ = c
+    d = 2.0 * (ax * (by - cy_) + bx * (cy_ - ay) + cx_ * (ay - by))
+    if abs(d) < 1e-12:
+        return None
+    a2 = ax * ax + ay * ay
+    b2 = bx * bx + by * by
+    c2 = cx_ * cx_ + cy_ * cy_
+    ux = (a2 * (by - cy_) + b2 * (cy_ - ay) + c2 * (ay - by)) / d
+    uy = (a2 * (cx_ - bx) + b2 * (ax - cx_) + c2 * (bx - ax)) / d
+    return (ux, uy, float(np.hypot(ax - ux, ay - uy)))
+
+
+def _in_circle(circ, p, eps: float = 1e-9) -> bool:
+    return np.hypot(p[0] - circ[0], p[1] - circ[1]) <= circ[2] + eps
+
+
+def min_enclosing_circle(points):
+    """Minimum-enclosing circle of 2-D *points* → ``(cx, cy, radius)`` via Welzl's
+    algorithm (expected O(n)). Deterministic (fixed shuffle seed)."""
+    import random
+
+    P = np.asarray(points, dtype=float)
+    if P.ndim != 2 or P.shape[0] == 0:
+        return 0.0, 0.0, 0.0
+    pts = [(float(x), float(y)) for x, y in P[:, :2]]
+    random.Random(0x5EED).shuffle(pts)
+    circ = (pts[0][0], pts[0][1], 0.0)
+    for i, p in enumerate(pts):
+        if _in_circle(circ, p):
+            continue
+        circ = (p[0], p[1], 0.0)                      # p on boundary
+        for j in range(i):
+            q = pts[j]
+            if _in_circle(circ, q):
+                continue
+            circ = _circle_from_2(p, q)               # p, q on boundary
+            for k in range(j):
+                s = pts[k]
+                if _in_circle(circ, s):
+                    continue
+                three = _circle_from_3(p, q, s)        # p, q, s on boundary
+                if three is not None:
+                    circ = three
+    return float(circ[0]), float(circ[1]), float(circ[2])
