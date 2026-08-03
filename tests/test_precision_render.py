@@ -500,3 +500,36 @@ def test_precision_render_window_voronoi_supports_xy_xz_yz(qtbot):
         timeout=5_000,
     )
     assert window._voronoi_scheduler.generation == generation
+
+
+def test_voronoi_3d_action_opens_volume_with_true_3d_method(qtbot, monkeypatch):
+    from PyQt6.QtWidgets import QWidget
+
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui import volume_window as volume_module
+    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+
+    rng = np.random.default_rng(19)
+    state = AppState()
+    state.add_dataset(
+        build_localization_dataset(
+            name="3d-voronoi-volume-link-test",
+            x_nm=rng.normal(0.0, 40.0, 80),
+            y_nm=rng.normal(0.0, 35.0, 80),
+            z_nm=rng.normal(0.0, 25.0, 80),
+            tid=np.arange(80),
+        )
+    )
+
+    class FakeVolumeWindow(QWidget):
+        def __init__(self, _state, _dataset_idx, *, render_method=None, parent=None, **_kwargs):
+            super().__init__(parent)
+            self.render_method = render_method
+
+    monkeypatch.setattr(volume_module, "VolumeRenderWindow", FakeVolumeWindow)
+    window = PrecisionRenderWindow(state, dataset_idx=0)
+    qtbot.addWidget(window)
+    window._advanced_render_method = RENDER_METHOD_VORONOI
+    window._show_3d_volume_window()
+    qtbot.addWidget(window._volume_window)
+    assert window._volume_window.render_method == RENDER_METHOD_VORONOI

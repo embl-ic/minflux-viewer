@@ -11,10 +11,7 @@ from collections import OrderedDict
 
 import numpy as np
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import (
-    QDialog,
-    QMessageBox,
-)
+from PyQt6.QtWidgets import QDialog
 
 from .precision_render import (
     RENDER_METHOD_DEFAULT,
@@ -794,15 +791,6 @@ class PrecisionRenderWindow(RenderWindow):
 
     def _show_3d_volume_window(self, _checked: bool = False) -> None:
         if self._idx is None or not (0 <= self._idx < len(self._state.datasets)):
-            return
-        if self._advanced_render_method == RENDER_METHOD_VORONOI:
-            QMessageBox.information(
-                self,
-                "Projected Voronoi Density",
-                "Voronoi density is currently implemented only for the projected "
-                "XY, XZ, and YZ views. True 3-D Voronoi volume rendering is not "
-                "available.",
-            )
             return
         self._state.set_active(self._idx)
         region = self._current_3d_region()
