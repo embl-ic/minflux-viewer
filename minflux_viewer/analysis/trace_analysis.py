@@ -413,6 +413,10 @@ def estimate_anisotropy_for_dataset(ds, *, mode: int = 3) -> dict | None:
     twice gives the same value. Returns the detailed result dict, or ``None``
     when 3-D coordinates / traces are unavailable.
     """
+    from ..core.dataset_kind import is_3d
+
+    if not is_3d(ds):
+        return None
     data = raw_last_valid_loc_nm(ds)
     if data is None:
         return None
@@ -431,6 +435,14 @@ def show_anisotropy_dialog(parent: QWidget, ds, state=None) -> None:
     z-scaling. ``state`` (AppState) enables the dialog's "Apply to data"
     button to set the dataset's RIMF and refresh open views.
     """
+    from ..core.dataset_kind import is_3d
+
+    if not is_3d(ds):
+        QMessageBox.warning(
+            parent, "Anisotropy",
+            "Anisotropy estimation requires a 3-D dataset (non-degenerate Z).",
+        )
+        return
     if ds.attr.get("tid") is None and ds.mfx_raw.get("tid") is None:
         QMessageBox.warning(parent, "Anisotropy",
                             "Dataset has no trace ID (tid) attribute.")
@@ -452,9 +464,10 @@ def show_anisotropy_dialog(parent: QWidget, ds, state=None) -> None:
         QMessageBox.warning(parent, "Anisotropy", "No valid traces found.")
         return
 
-    # Check for actual z variation
-    z_range = float(loc[:, 2].max() - loc[:, 2].min())
-    if z_range < 1.0:
+    # Check for actual finite Z variation as a defensive guard for raw data
+    # containing missing Z measurements.
+    finite_z = loc[:, 2][np.isfinite(loc[:, 2])]
+    if finite_z.size == 0 or float(np.ptp(finite_z)) < 1.0:
         QMessageBox.warning(parent, "Anisotropy",
                             "Z range is < 1 nm — this appears to be 2-D data.\n"
                             "Anisotropy estimation requires 3-D acquisitions.")

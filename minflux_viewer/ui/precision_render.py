@@ -16,6 +16,12 @@ import numpy as np
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal, pyqtSlot
 from scipy.special import ndtr
 
+from ..analysis.voronoi_density import (
+    ProjectedVoronoiError,
+    ProjectedVoronoiField,
+    build_projected_voronoi_field,
+)
+
 _DEFAULT_SIGMA_NM = 5.0
 _MIN_SIGMA_NM = 1.0e-3
 
@@ -25,6 +31,7 @@ RENDER_METHOD_BICUBIC = "bicubic"
 RENDER_METHOD_BASIC = "basic"
 RENDER_METHOD_FIXED_GAUSSIAN = "fixed_gaussian"
 RENDER_METHOD_PRECISION_GAUSSIAN = "precision_gaussian"
+RENDER_METHOD_VORONOI = "voronoi_density"
 RENDER_METHODS = {
     RENDER_METHOD_HISTOGRAM,
     RENDER_METHOD_BILINEAR,
@@ -32,6 +39,68 @@ RENDER_METHODS = {
     RENDER_METHOD_BASIC,
     RENDER_METHOD_FIXED_GAUSSIAN,
     RENDER_METHOD_PRECISION_GAUSSIAN,
+    RENDER_METHOD_VORONOI,
+}
+
+# Public UI order is intentionally separate from the implementation set.  The
+# old bicubic kernel remains available to callers that use the low-level API,
+# but it is not a distinct viewer method: its visual result overlaps the other
+# pixel-interpolation choices too closely for the additional control to help.
+RENDER_METHOD_DEFAULT = RENDER_METHOD_BASIC
+RENDER_METHOD_PREFERENCE_ORDER = (
+    RENDER_METHOD_HISTOGRAM,
+    RENDER_METHOD_BILINEAR,
+    RENDER_METHOD_BASIC,
+    RENDER_METHOD_FIXED_GAUSSIAN,
+    RENDER_METHOD_PRECISION_GAUSSIAN,
+    RENDER_METHOD_VORONOI,
+)
+RENDER_METHOD_MENU_ORDER = RENDER_METHOD_PREFERENCE_ORDER
+RENDER_METHOD_LABELS = {
+    RENDER_METHOD_HISTOGRAM: "Histogram",
+    RENDER_METHOD_BILINEAR: "Bilinear Histogram",
+    RENDER_METHOD_BASIC: "Smoothed histogram",
+    RENDER_METHOD_FIXED_GAUSSIAN: "Fixed Gaussian",
+    RENDER_METHOD_PRECISION_GAUSSIAN: "Localization-precision Gaussian",
+    RENDER_METHOD_VORONOI: "Voronoi density",
+}
+RENDER_METHOD_TIPS = {
+    RENDER_METHOD_HISTOGRAM: (
+        "Assigns one count to the pixel containing each localization. "
+        "This is the fastest and most direct occupancy view, but it is "
+        "pixel-grid dependent and contains no sub-pixel or PSF information."
+    ),
+    RENDER_METHOD_BILINEAR: (
+        "Distributes each count among the four neighbouring pixel centres "
+        "using bilinear weights. This preserves sub-pixel position without "
+        "assuming a localization precision or optical PSF."
+    ),
+    RENDER_METHOD_BASIC: (
+        "The production smoothed-histogram view: counts are rasterized and "
+        "given a small half-pixel anti-aliasing blur that follows zoom. It "
+        "is smooth and fast, but is a display reconstruction rather than a "
+        "precision-weighted localization model."
+    ),
+    RENDER_METHOD_FIXED_GAUSSIAN: (
+        "Convolves every localization with the same Gaussian. The context "
+        "menu sigma controls the lateral XY width and the axial Z width for "
+        "3-D views; this is useful for a controlled, comparable blur but does "
+        "not use per-localization uncertainty."
+    ),
+    RENDER_METHOD_PRECISION_GAUSSIAN: (
+        "Renders each localization as a unit-mass, pixel-integrated Gaussian "
+        "with anisotropic widths from localization precision, falling back to "
+        "trace precision, calibration, and finally 5 nm. It is the most "
+        "measurement-aware method and is correspondingly more computationally "
+        "expensive."
+    ),
+    RENDER_METHOD_VORONOI: (
+        "Projects localizations onto the selected plane and assigns each point "
+        "a density from its projected Voronoi cell: multiplicity divided by "
+        "finite cell area. The result is piecewise constant, adapts to local "
+        "sampling density, and is recomputed for the current filters and depth "
+        "selection."
+    ),
 }
 
 
@@ -60,7 +129,8 @@ class PrecisionTileRequest:
     shape: tuple[int, int]
     depth_range: tuple[float, float] | None
     render_method: str = RENDER_METHOD_PRECISION_GAUSSIAN
-    fixed_sigma_nm: float = _DEFAULT_SIGMA_NM
+    fixed_sigma_nm: float | tuple[float, float] = _DEFAULT_SIGMA_NM
+    voronoi_field: ProjectedVoronoiField | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +141,25 @@ class PrecisionTileResult:
     key: Hashable
     array: np.ndarray
     count: int
+
+
+@dataclass(frozen=True)
+class VoronoiFieldRequest:
+    """One projection-wide Voronoi field requested from a background worker."""
+
+    key: Hashable
+    x_nm: np.ndarray
+    y_nm: np.ndarray
+
+
+@dataclass(frozen=True)
+class VoronoiFieldResult:
+    """Completed field, or a user-facing construction error."""
+
+    generation: int
+    key: Hashable
+    field: ProjectedVoronoiField | None
+    error: str | None = None
 
 
 class ViewportScalarCache:
@@ -118,6 +207,43 @@ class ViewportScalarCache:
     @property
     def nbytes(self) -> int:
         return self._bytes
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+class VoronoiFieldCache:
+    """Small LRU of selection-wide projected density fields."""
+
+    def __init__(self, max_items: int = 4) -> None:
+        self.max_items = max(int(max_items), 1)
+        self._items: OrderedDict[Hashable, ProjectedVoronoiField] = OrderedDict()
+
+    def get(self, key: Hashable | None) -> ProjectedVoronoiField | None:
+        if key is None:
+            return None
+        value = self._items.get(key)
+        if value is not None:
+            self._items.move_to_end(key)
+        return value
+
+    def put(self, key: Hashable, value: ProjectedVoronoiField) -> None:
+        self._items.pop(key, None)
+        self._items[key] = value
+        while len(self._items) > self.max_items:
+            self._items.popitem(last=False)
+
+    def remove_dataset(self, dataset_idx: int) -> None:
+        for key in list(self._items):
+            if isinstance(key, tuple) and len(key) > 1 and key[1] == dataset_idx:
+                self._items.pop(key)
+
+    def clear(self) -> None:
+        self._items.clear()
+
+    @property
+    def nbytes(self) -> int:
+        return sum(field.nbytes for field in self._items.values())
 
     def __len__(self) -> int:
         return len(self._items)
@@ -603,20 +729,34 @@ def render_advanced_tile(
     depth_range: tuple[float, float] | None = None,
     *,
     render_method: str = RENDER_METHOD_PRECISION_GAUSSIAN,
-    fixed_sigma_nm: float = _DEFAULT_SIGMA_NM,
+    fixed_sigma_nm: float | tuple[float, float] = _DEFAULT_SIGMA_NM,
+    voronoi_field: ProjectedVoronoiField | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple[np.ndarray, int]:
     """Render one advanced-view tile using the selected scientific method."""
-    if channel.grid is None or channel.x_nm.size == 0:
-        return np.zeros(shape, dtype=np.float32), 0
     if render_method not in RENDER_METHODS:
         raise ValueError(f"Unknown render method: {render_method}")
 
     x0, x1, y0, y1 = bounds
     height, width = max(int(shape[0]), 1), max(int(shape[1]), 1)
+    if render_method == RENDER_METHOD_VORONOI:
+        if voronoi_field is None:
+            raise ValueError("Voronoi density rendering requires a precomputed field.")
+        if cancelled is not None and cancelled():
+            return np.zeros((height, width), dtype=np.float32), 0
+        return voronoi_field.sample(bounds, (height, width)), voronoi_field.source_count
+
+    if channel.grid is None or channel.x_nm.size == 0:
+        return np.zeros((height, width), dtype=np.float32), 0
     dx = (x1 - x0) / width
     dy = (y1 - y0) / height
-    fixed_sigma = max(float(fixed_sigma_nm), _MIN_SIGMA_NM)
+    if isinstance(fixed_sigma_nm, tuple):
+        fixed_sigma_x = max(float(fixed_sigma_nm[0]), _MIN_SIGMA_NM)
+        fixed_sigma_y = max(float(fixed_sigma_nm[1]), _MIN_SIGMA_NM)
+    else:
+        fixed_sigma_x = fixed_sigma_y = max(
+            float(fixed_sigma_nm), _MIN_SIGMA_NM
+        )
     # Basic = production "smoothed histogram": a half-pixel anti-alias blur that
     # scales with zoom (constant in pixels), so its footprint stays ~1 px.
     basic_sigma_x = 0.5 * dx
@@ -625,7 +765,8 @@ def render_advanced_tile(
         halo_x = 4.0 * float(np.max(channel.sigma_x_nm))
         halo_y = 4.0 * float(np.max(channel.sigma_y_nm))
     elif render_method == RENDER_METHOD_FIXED_GAUSSIAN:
-        halo_x = halo_y = 4.0 * fixed_sigma
+        halo_x = 4.0 * fixed_sigma_x
+        halo_y = 4.0 * fixed_sigma_y
     elif render_method == RENDER_METHOD_BASIC:
         halo_x = 4.0 * basic_sigma_x
         halo_y = 4.0 * basic_sigma_y
@@ -675,7 +816,7 @@ def render_advanced_tile(
         # Constant sigma → the fast histogram+filter path (100–1600× faster than
         # per-localization stamping, especially when zoomed in / large sigma).
         image = render_gaussian_filtered(
-            x, y, bounds, shape, fixed_sigma, fixed_sigma
+            x, y, bounds, shape, fixed_sigma_x, fixed_sigma_y
         )
     else:
         image = render_precision_gaussians(
@@ -740,6 +881,7 @@ class _PrecisionTileTask(QRunnable):
             self.request.depth_range,
             render_method=self.request.render_method,
             fixed_sigma_nm=self.request.fixed_sigma_nm,
+            voronoi_field=self.request.voronoi_field,
             cancelled=self._cancelled,
         )
         if not self._cancelled():
@@ -783,5 +925,91 @@ class PrecisionRenderScheduler(QObject):
 
     @pyqtSlot(object)
     def _forward_result(self, result: PrecisionTileResult) -> None:
+        if result.generation == self._generation:
+            self.result_ready.emit(result)
+
+
+class _VoronoiFieldSignals(QObject):
+    result_ready = pyqtSignal(object)
+
+
+class _VoronoiFieldTask(QRunnable):
+    def __init__(
+        self,
+        scheduler: VoronoiFieldScheduler,
+        generation: int,
+        request: VoronoiFieldRequest,
+    ) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self.scheduler = scheduler
+        self.generation = generation
+        self.request = request
+        self.signals = _VoronoiFieldSignals()
+
+    def _cancelled(self) -> bool:
+        return self.scheduler.generation != self.generation
+
+    def run(self) -> None:
+        if self._cancelled():
+            return
+        field = None
+        error = None
+        try:
+            field = build_projected_voronoi_field(
+                self.request.x_nm,
+                self.request.y_nm,
+            )
+        except ProjectedVoronoiError as exc:
+            error = str(exc)
+        except Exception as exc:
+            error = f"Unexpected Voronoi density error ({type(exc).__name__}): {exc}"
+        if not self._cancelled():
+            self.signals.result_ready.emit(
+                VoronoiFieldResult(
+                    generation=self.generation,
+                    key=self.request.key,
+                    field=field,
+                    error=error,
+                )
+            )
+
+
+class VoronoiFieldScheduler(QObject):
+    """Build projection-wide Voronoi fields away from the Qt main thread."""
+
+    result_ready = pyqtSignal(object)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._generation = 0
+        self._pool = QThreadPool(self)
+        # Overlay channels run serially to avoid simultaneous Qhull memory peaks.
+        self._pool.setMaxThreadCount(1)
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    def cancel(self) -> None:
+        self._generation += 1
+        self._pool.clear()
+
+    def shutdown(self, timeout_ms: int = 5_000) -> bool:
+        """Cancel queued work and briefly drain the non-interruptible Qhull task."""
+        self.cancel()
+        return bool(self._pool.waitForDone(max(int(timeout_ms), 0)))
+
+    def request(self, requests: list[VoronoiFieldRequest]) -> int:
+        self.cancel()
+        generation = self._generation
+        for request in requests:
+            task = _VoronoiFieldTask(self, generation, request)
+            task.signals.result_ready.connect(self._forward_result)
+            self._pool.start(task)
+        return generation
+
+    @pyqtSlot(object)
+    def _forward_result(self, result: VoronoiFieldResult) -> None:
         if result.generation == self._generation:
             self.result_ready.emit(result)

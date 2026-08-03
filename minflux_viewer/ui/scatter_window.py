@@ -62,6 +62,13 @@ def _load_cmap(name: str) -> pg.ColorMap:
             r, g, b = _SOLID_COLOR_RGB.get(color_part, (128, 128, 128))
         rgba = np.array([[r, g, b, 255], [r, g, b, 255]], dtype=np.ubyte)
         return pg.ColorMap(np.array([0.0, 1.0]), rgba)
+    # Single-colour ramp names offered by the LUT dialog (black → colour), e.g.
+    # picking "Red" in the LUT editor. Delegate to the shared builder so the
+    # scatter renders them identically to the render's channel LUTs (without this
+    # they fell through to the CET-L3 fallback).
+    if name in _LUT_SINGLE_COLOURS:
+        from .lut_dialog import make_colormap
+        return make_colormap(name)
     key = name.lower().replace(" ", "_")
     if key == "glasbey":
         try:
@@ -139,6 +146,9 @@ _SOLID_COLOR_RGB: dict[str, tuple[int, int, int]] = {
     "Gray":    (120, 120, 120),
 }
 _NAMED_CMAPS = ["glasbey", "jet", "HiLo", "parula", "turbo", "hot"]
+# Single-colour ramp names the LUT dialog offers (black → colour), matching the
+# render's channel LUTs. Distinct from the flat "solid:<Name>" scatter colours.
+_LUT_SINGLE_COLOURS = {"Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray"}
 
 
 class ScatterWindow(QWidget):
@@ -162,6 +172,7 @@ class ScatterWindow(QWidget):
         self._last_color_values: np.ndarray = np.empty(0)
         self._lut_dialog = None
         self._lut_invert = False
+        self._lut_gamma = 1.0
         self._roi_overlay = None
         self._view_state_key = "scatter_plot_state"
         self._cached_dataset_idx: int | None = None
@@ -220,7 +231,7 @@ class ScatterWindow(QWidget):
         # menu, but QComboBox keeps the existing state/update code compact.
         self._cbar_combo = QComboBox(self)
         self._cbar_combo.setMinimumWidth(120)
-        self._cbar_combo.currentTextChanged.connect(self._update_color)
+        self._cbar_combo.currentTextChanged.connect(self._on_color_by_changed)
         self._cbar_combo.hide()
 
         self._cmap_combo = QComboBox(self)
@@ -540,6 +551,16 @@ class ScatterWindow(QWidget):
         self._update_colorbar_visibility()
         self._invalidate_color_cache()
         self._update_color()
+        self.sync_lut_dialog()
+
+    def _on_color_by_changed(self, _name: str) -> None:
+        """The colour-by attribute changed → its value range is different, so drop
+        any manual levels and auto-scale to the new attribute (this re-tunes both
+        the plot colours and the LUT dialog to the new range)."""
+        self._manual_color_levels = None
+        self._invalidate_color_cache()
+        self._update_color()
+        self.sync_lut_dialog()
 
     def _update_colorbar_visibility(self) -> None:
         is_3d = self._axis_combo.currentText() == "3D"
@@ -922,7 +943,10 @@ class ScatterWindow(QWidget):
         revert it to its solid channel colour."""
         if 0 <= ch_idx < len(self._channels):
             self._channels[ch_idx]["color_by"] = attr
+            self._manual_color_levels = None          # auto-scale to the new attribute
+            self._invalidate_color_cache()
             self._redraw_current(save_state=False)
+            self.sync_lut_dialog()
 
     def _update_overlay_title(self) -> None:
         ds = self._dataset()
@@ -1557,16 +1581,6 @@ class ScatterWindow(QWidget):
         self._color_cache = None
 
     def open_lut_dialog(self) -> None:
-        vals = np.asarray(self._last_color_values, dtype=float)
-        vals = vals[np.isfinite(vals)]
-        if vals.size == 0:
-            self._refresh()
-            vals = np.asarray(self._last_color_values, dtype=float)
-            vals = vals[np.isfinite(vals)]
-        if vals.size == 0:
-            self._info_label.setText("LUT unavailable: no colour values to display.")
-            return
-
         from .lut_dialog import LutDialog
 
         if self._lut_dialog is None:
@@ -1574,26 +1588,56 @@ class ScatterWindow(QWidget):
                 on_levels_changed=self._on_lut_levels_changed,
                 on_cmap_changed=self._on_lut_cmap_changed,
                 on_invert_changed=self._on_lut_invert_changed,
+                on_gamma_changed=self._on_lut_gamma_changed,
                 parent=self,
             )
+        if not self._refresh_lut_dialog(capture_baseline=True):
+            self._info_label.setText("LUT unavailable: no colour values to display.")
+            return
+        self._lut_dialog.show()
+        self._lut_dialog.raise_()
+        self._lut_dialog.activateWindow()
 
+    def _refresh_lut_dialog(self, *, capture_baseline: bool) -> bool:
+        """(Re)load the LUT dialog from the current colour values / colormap.
+        Returns False when there is nothing to colour."""
+        dlg = self._lut_dialog
+        if dlg is None:
+            return False
+        vals = np.asarray(self._last_color_values, dtype=float)
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            self._refresh()
+            vals = np.asarray(self._last_color_values, dtype=float)
+            vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            return False
         data_lo = float(np.nanmin(vals))
         data_hi = float(np.nanmax(vals))
         if data_hi <= data_lo:
             data_hi = data_lo + 1.0
         lo, hi = self._manual_color_levels or tuple(np.nanpercentile(vals, [1, 99]))
-        self._lut_dialog.load_image(
-            pixels=vals,
-            data_lo=data_lo,
-            data_hi=data_hi,
-            lo=float(lo),
-            hi=float(hi),
+        dlg.load_image(
+            pixels=vals, data_lo=data_lo, data_hi=data_hi,
+            lo=float(lo), hi=float(hi),
             cmap_name=self._cmap_combo.currentText(),
             invert=self._lut_invert,
+            gamma=self._lut_gamma,
+            capture_baseline=capture_baseline,
         )
-        self._lut_dialog.show()
-        self._lut_dialog.raise_()
-        self._lut_dialog.activateWindow()
+        return True
+
+    def sync_lut_dialog(self) -> None:
+        """Push the current colormap / colour-by / levels into an open LUT dialog,
+        so external changes reflect in realtime. Skipped while the user is editing
+        the dialog itself (it is the active window then)."""
+        dlg = self._lut_dialog
+        try:
+            if dlg is None or not dlg.isVisible() or dlg.isActiveWindow():
+                return
+        except RuntimeError:
+            return
+        self._refresh_lut_dialog(capture_baseline=False)
 
     def roi_view_plane(self) -> str | None:
         """Current scatter projection for ROI 3-D placement (XY/XZ/YZ); ``None``
@@ -1727,7 +1771,7 @@ class ScatterWindow(QWidget):
         self._cmap_combo.blockSignals(True)
         self._cmap_combo.setCurrentText(name)
         self._cmap_combo.blockSignals(False)
-        self._cmap = make_colormap(name, invert=self._lut_invert)
+        self._cmap = make_colormap(name, invert=self._lut_invert, gamma=self._lut_gamma)
         self._colorbar.setColorMap(self._cmap)
         self._update_colorbar_visibility()
         self._invalidate_color_cache()
@@ -1735,6 +1779,10 @@ class ScatterWindow(QWidget):
 
     def _on_lut_invert_changed(self, invert: bool) -> None:
         self._on_lut_cmap_changed(self._cmap_combo.currentText(), invert)
+
+    def _on_lut_gamma_changed(self, gamma: float) -> None:
+        self._lut_gamma = float(gamma)
+        self._on_lut_cmap_changed(self._cmap_combo.currentText(), self._lut_invert)
 
     def focusInEvent(self, event) -> None:
         if self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets):

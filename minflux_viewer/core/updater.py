@@ -18,7 +18,7 @@ import urllib.request
 from dataclasses import dataclass
 
 #: GitHub repository hosting the releases.
-GITHUB_REPO = "EMBL-ICLM/minflux-viewer"
+GITHUB_REPO = "embl-ic/minflux-viewer"
 RELEASES_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 

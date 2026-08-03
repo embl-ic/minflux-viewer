@@ -66,3 +66,21 @@ def test_make_volume_payload_allows_high_max_dim_but_caps_total_voxels() -> None
 
     assert max(payload.counts) <= 1024
     assert np.prod(payload.counts) <= 8_000_000
+
+
+def test_make_volume_payload_supports_inverted_lut() -> None:
+    rng = np.random.default_rng(7)
+    locs = np.column_stack([
+        rng.normal(0.0, 20.0, 250),
+        rng.normal(0.0, 20.0, 250),
+        rng.normal(0.0, 12.0, 250),
+    ])
+    common = dict(
+        xy_voxel_nm=4.0, z_voxel_nm=4.0, max_dim=48,
+        max_voxels=48 * 48 * 48, cmap_name="hot",
+    )
+    normal = make_volume_payload(locs, **common)
+    inverted = make_volume_payload(locs, invert=True, **common)
+
+    assert np.array_equal(normal.rgba[..., 3], inverted.rgba[..., 3])
+    assert not np.array_equal(normal.rgba[..., :3], inverted.rgba[..., :3])

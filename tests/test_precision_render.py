@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from minflux_viewer.analysis.voronoi_density import build_projected_voronoi_field
 from minflux_viewer.core.dataset import build_localization_dataset
 from minflux_viewer.core.simulate import simulate_localizations
 from minflux_viewer.core.spatial_grid import SpatialGrid
@@ -11,9 +12,13 @@ from minflux_viewer.ui.precision_render import (
     RENDER_METHOD_BILINEAR,
     RENDER_METHOD_FIXED_GAUSSIAN,
     RENDER_METHOD_HISTOGRAM,
+    RENDER_METHOD_LABELS,
+    RENDER_METHOD_PREFERENCE_ORDER,
     RENDER_METHOD_PRECISION_GAUSSIAN,
+    RENDER_METHOD_VORONOI,
     PrecisionChannelData,
     ViewportScalarCache,
+    VoronoiFieldCache,
     render_advanced_tile,
     render_bicubic_histogram,
     render_bilinear_histogram,
@@ -49,6 +54,17 @@ def test_bilinear_histogram_preserves_mass_for_interior_points():
 
     assert np.isclose(image.sum(), 2.0)
     assert np.count_nonzero(image) > 2
+
+
+def test_render_method_catalog_matches_preference_order():
+    assert [RENDER_METHOD_LABELS[method] for method in RENDER_METHOD_PREFERENCE_ORDER] == [
+        "Histogram",
+        "Bilinear Histogram",
+        "Smoothed histogram",
+        "Fixed Gaussian",
+        "Localization-precision Gaussian",
+        "Voronoi density",
+    ]
 
 
 def _image_moments(image: np.ndarray, bounds):
@@ -168,6 +184,38 @@ def test_advanced_tile_supports_each_explicit_method():
         assert image.max() > 0.0
 
 
+def test_advanced_tile_samples_precomputed_voronoi_field():
+    axis = np.arange(5, dtype=np.float64) * 10.0
+    x, y = np.meshgrid(axis, axis)
+    x, y = x.ravel(), y.ravel()
+    sigma = np.ones_like(x)
+    channel = PrecisionChannelData(
+        dataset_idx=0,
+        x_nm=x,
+        y_nm=y,
+        depth_nm=np.zeros_like(x),
+        sigma_x_nm=sigma,
+        sigma_y_nm=sigma,
+        sigma_depth_nm=sigma,
+        grid=SpatialGrid(x, y),
+        source="test",
+    )
+    field = build_projected_voronoi_field(x, y)
+
+    image, count = render_advanced_tile(
+        channel,
+        (0.0, 40.0, 0.0, 40.0),
+        (64, 64),
+        render_method=RENDER_METHOD_VORONOI,
+        voronoi_field=field,
+    )
+
+    assert count == 25
+    assert image.shape == (64, 64)
+    assert np.all(np.isfinite(image))
+    assert image.max() > 0.0
+
+
 def test_bicubic_histogram_is_nonnegative_and_smoother_than_bilinear():
     # A single interior localization: bicubic must stay non-negative (its kernel
     # has negative lobes that are clamped) and spread over more pixels than the
@@ -213,6 +261,24 @@ def test_scalar_lru_enforces_byte_limit_and_dataset_invalidation():
     cache.remove_dataset(4)
     assert len(cache) == 0
     assert cache.nbytes == 0
+
+
+def test_voronoi_field_lru_enforces_item_limit_and_dataset_invalidation():
+    x, y = np.meshgrid(np.arange(5, dtype=float), np.arange(5, dtype=float))
+    field = build_projected_voronoi_field(x.ravel(), y.ravel())
+    cache = VoronoiFieldCache(max_items=1)
+    first_key = ("voronoi-field", 4, "first")
+    second_key = ("voronoi-field", 4, "second")
+    cache.put(first_key, field)
+    cache.put(second_key, field)
+
+    assert len(cache) == 1
+    assert cache.get(first_key) is None
+    assert cache.get(second_key) is field
+    assert cache.nbytes > 0
+
+    cache.remove_dataset(4)
+    assert len(cache) == 0
 
 
 def test_precision_resolution_prefers_per_loc_then_per_trace():
@@ -325,21 +391,20 @@ def test_precision_render_window_smoke(qtbot):
     window.resize(500, 500)
     window.show()
 
-    # Localization-precision Gaussian is the default and renders precision tiles
-    # at every zoom level — no production-style overview, so the composite always
-    # comes from the tile path (marked by _last_lod == -3).
+    # The unified render window defaults to the production smoothed histogram,
+    # while every method still uses the responsive precision tile path.
     qtbot.waitUntil(
         lambda: window._last_scalar_tile is not None,
         timeout=5000,
     )
-    assert window.windowTitle().endswith("[advanced]")
-    assert window._render_method_combo.count() == 6   # loc-prec, hist, bilinear, bicubic, basic, fixed
-    assert window._render_method_combo.currentText() == "Localization-precision Gaussian"
+    assert not window.windowTitle().endswith("[advanced]")
+    assert not hasattr(window, "_render_method_combo")
+    assert window._advanced_render_method == RENDER_METHOD_BASIC
     assert window._last_scalar_tile.shape[0] == 1
     assert np.all(np.isfinite(window._last_scalar_tile))
     assert not hasattr(window, "_overview_scalar")
     qtbot.waitUntil(
-        lambda: "Localization-precision Gaussian (" in window._info_label.text(),
+        lambda: "Smoothed histogram (" in window._info_label.text(),
         timeout=5000,
     )
     assert window._last_lod == -3
@@ -353,20 +418,19 @@ def test_precision_render_window_smoke(qtbot):
         padding=0,
     )
     qtbot.waitUntil(
-        lambda: "Localization-precision Gaussian (" in window._info_label.text(),
+        lambda: "Smoothed histogram (" in window._info_label.text(),
         timeout=5000,
     )
     assert window._active_tile_keys
     assert window._precision_cache.nbytes <= window._CACHE_BYTES
 
-    window._render_method_combo.setCurrentText("Histogram")
+    window._set_render_method(RENDER_METHOD_HISTOGRAM)
     qtbot.waitUntil(
         lambda: "Histogram (" in window._info_label.text(),
         timeout=5000,
     )
-    assert not window._fixed_sigma_spin.isEnabled()
-    window._render_method_combo.setCurrentText("Fixed Gaussian")
-    assert window._fixed_sigma_spin.isEnabled()
+    window._set_render_method(RENDER_METHOD_FIXED_GAUSSIAN)
+    assert window._fixed_sigma_for_orientation() == (5.0, 5.0)
 
     old_generation = window._precision_scheduler.generation
     window._set_orientation("XZ")
@@ -388,3 +452,51 @@ def test_precision_render_window_smoke(qtbot):
     channel = window._precision_channels[0]
     assert np.allclose(channel.sigma_x_nm, sx)
     assert np.allclose(channel.sigma_y_nm, sz * 0.7)
+
+
+def test_precision_render_window_voronoi_supports_xy_xz_yz(qtbot):
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+
+    rng = np.random.default_rng(18)
+    n = 300
+    state = AppState()
+    dataset = build_localization_dataset(
+        name="projected-voronoi-window-test",
+        x_nm=rng.normal(0.0, 80.0, n),
+        y_nm=rng.normal(0.0, 60.0, n),
+        z_nm=rng.normal(0.0, 110.0, n),
+        tid=np.arange(n),
+    )
+    state.add_dataset(dataset)
+    window = PrecisionRenderWindow(state, dataset_idx=0)
+    qtbot.addWidget(window)
+    window.resize(480, 480)
+    window.show()
+    window._set_render_method(RENDER_METHOD_VORONOI)
+
+    for orientation in ("XY", "XZ", "YZ"):
+        window._set_orientation(orientation)
+        qtbot.waitUntil(
+            lambda orientation=orientation: (
+                window._last_frame_orientation == orientation
+                and "Voronoi density (" in window._info_label.text()
+                and window._last_scalar_tile is not None
+                and bool(np.any(window._last_scalar_tile > 0.0))
+            ),
+            timeout=10_000,
+        )
+        assert window._last_scalar_tile.shape[0] == 1
+        assert np.all(np.isfinite(window._last_scalar_tile))
+
+    assert len(window._voronoi_cache) == 3
+    generation = window._voronoi_scheduler.generation
+    window._set_orientation("XY")
+    qtbot.waitUntil(
+        lambda: (
+            window._last_frame_orientation == "XY"
+            and "Voronoi density (" in window._info_label.text()
+        ),
+        timeout=5_000,
+    )
+    assert window._voronoi_scheduler.generation == generation

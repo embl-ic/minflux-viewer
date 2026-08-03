@@ -999,6 +999,31 @@ class TestMinZRangeThreshold:
         # Non-zero Z (even if tiny) → num_dim == 3
         assert ds.prop.num_dim == 3
 
+    def test_nan_z_values_do_not_mark_a_planar_dataset_as_3d(self, tmp_path):
+        from scipy.io import savemat
+        from minflux_viewer.core.loader import load_dataset
+
+        n = 12
+        path = tmp_path / "nan_planar.mat"
+        savemat(str(path), {
+            "itr": np.zeros(n, dtype=np.int32),
+            "vld": np.ones(n, dtype=np.uint8),
+            "loc": np.column_stack([
+                np.linspace(0.0, 1e-6, n),
+                np.linspace(0.0, 1e-6, n),
+                np.where(np.arange(n) % 2, np.nan, 0.0),
+            ]),
+            "tid": np.arange(n, dtype=np.int32),
+            "tim": np.arange(n, dtype=float),
+        })
+
+        ds = load_dataset(path, prefs={
+            "data": {"enforce_min_z_range": True, "min_z_range_nm": 5.0}
+        })
+
+        assert ds.prop.num_dim == 2
+        assert np.all(ds.attr["loc_z"] == 0.0)
+
 
 # ---------------------------------------------------------------------------
 # Preferences dialog round-trip

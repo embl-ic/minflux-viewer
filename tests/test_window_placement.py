@@ -73,6 +73,24 @@ def test_corner_never_goes_offscreen_when_window_too_wide():
     assert x == 0 and y == 24
 
 
+def test_corner_fraction_places_window_toward_center():
+    # (fx, fy) = fraction of the free space (CSS background-position semantics).
+    # The main window uses (0.75, 0.25): 75 % toward the right, 25 % down.
+    w, h = 1000, 700
+    x, y = corner_position(AVAIL, (w, h), align=(0.75, 0.25))
+    assert x == round(0.75 * (1920 - w))            # 690
+    assert y == round(0.25 * (1080 - h))            # 95
+    # strictly inside the top-right corner (moved left + down toward centre)
+    tr_x, tr_y = corner_position(AVAIL, (w, h), align="top_right", margin=24)
+    assert x < tr_x and y > tr_y
+    assert 0 <= x and x + w <= 1920 and 0 <= y and y + h <= 1080
+
+
+def test_corner_fraction_extremes_flush_and_onscreen():
+    assert corner_position(AVAIL, (400, 300), align=(1.0, 1.0)) == (1520, 780)   # flush BR
+    assert corner_position(AVAIL, (400, 300), align=(0.0, 0.0)) == (0, 0)         # flush TL
+
+
 def test_corner_bottom_left():
     x, y = corner_position(AVAIL, (500, 300), align="bottom_left", margin=24)
     assert x == 24 and y == 1080 - 24 - 300

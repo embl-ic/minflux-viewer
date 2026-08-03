@@ -53,7 +53,7 @@ _RELEASE = {
     "tag_name": "v0.3.1",
     "name": "v0.3.1",
     "body": "## What's new\n- thing",
-    "html_url": "https://github.com/EMBL-ICLM/minflux-viewer/releases/tag/v0.3.1",
+    "html_url": "https://github.com/embl-ic/minflux-viewer/releases/tag/v0.3.1",
     "published_at": "2026-06-16T00:00:00Z",
     "assets": [
         {"name": "minflux_viewer-0.3.1-windows.zip",

@@ -266,6 +266,28 @@ def align_to_canonical(points, fit: dict, symmetry: int = DEFAULT_SYMMETRY) -> n
     return (Rz @ p0.T).T
 
 
+def canonical_transform_matrix(fit: dict) -> np.ndarray:
+    """The 4×4 rigid transform that :func:`align_to_canonical` applies, as a
+    matrix: ``x_canonical = M @ [x, y, z, 1]``.
+
+    Exposed so multi-channel particle averaging can **replay a particle's fitted
+    alignment onto the other overlay channels** — the reference (active) channel
+    is what the NPC two-ring model is fit to, and the same rigid motion (un-tilt
+    normal→+Z about the centre, then rotate −phase about Z) is propagated to the
+    co-located points of the other channels. Rigid, so it composes cleanly.
+    """
+    R_tilt = np.asarray(rotation_a_to_b(fit["normal"], [0.0, 0.0, 1.0]), float)
+    ph = -float(fit["phase"])
+    c, s = np.cos(ph), np.sin(ph)
+    Rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    A = Rz @ R_tilt
+    center = np.asarray(fit["center"], float).ravel()[:3]
+    M = np.eye(4)
+    M[:3, :3] = A
+    M[:3, 3] = -A @ center
+    return M
+
+
 def _row(i, n, fit) -> dict:
     if not fit.get("ok"):
         nan = float("nan")
@@ -294,9 +316,10 @@ def average_npc_geomfit(particles, *, init_particles=None, init_tids=None,
     already trace-collapsed)."""
     parts = [np.asarray(p, float) for p in particles]
     out = {"points": np.empty((0, 3)), "average_loc": np.empty((0, 3)), "table": [],
-           "fits": [], "aligned": [], "n_particles": len(parts), "n_accepted": 0,
+           "fits": [], "aligned": [], "particle_transforms": [],
+           "n_particles": len(parts), "n_accepted": 0,
            "min_gof": float(min_gof), "mode": "geomfit", "symmetry": int(symmetry)}
-    pooled, table, fits, aligned = [], [], [], []
+    pooled, table, fits, aligned, ptransforms = [], [], [], [], []
     total = len(parts)
     for i, P in enumerate(parts, start=1):
         if progress is not None:
@@ -309,6 +332,7 @@ def average_npc_geomfit(particles, *, init_particles=None, init_tids=None,
                             symmetry=symmetry, **fit_kw)
         fits.append(fit)
         row = _row(i, int(np.asarray(P).shape[0]), fit)
+        mat = None
         if fit.get("ok"):
             a = align_to_canonical(P, fit, symmetry)
             aligned.append(a)
@@ -316,10 +340,15 @@ def average_npc_geomfit(particles, *, init_particles=None, init_tids=None,
             row["accepted"] = accepted
             if accepted:
                 pooled.append(a[:, :3])
+                mat = canonical_transform_matrix(fit)     # replayable onto other channels
         else:
             aligned.append(None)
+        # Parallel to *particles*: the accepted particle's alignment matrix, else
+        # None — so the other channels pool exactly the accepted particles.
+        ptransforms.append(mat)
         table.append(row)
     out["table"], out["fits"], out["aligned"] = table, fits, aligned
+    out["particle_transforms"] = ptransforms
     out["n_accepted"] = len(pooled)
     if pooled:
         out["average_loc"] = np.vstack(pooled)

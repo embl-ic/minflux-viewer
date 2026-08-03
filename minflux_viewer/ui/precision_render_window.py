@@ -1,4 +1,4 @@
-"""Experimental precision-aware 2-D render view.
+"""Unified precision-aware 2-D render view.
 
 The window inherits the established render UI and interactions. Only the
 localization-to-scalar-image stage is replaced.
@@ -7,97 +7,77 @@ localization-to-scalar-image stage is replaced.
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
-    QComboBox,
-    QDoubleSpinBox,
-    QHBoxLayout,
-    QLabel,
+    QDialog,
     QMessageBox,
-    QWidget,
 )
 
 from .precision_render import (
-    RENDER_METHOD_BASIC,
-    RENDER_METHOD_BICUBIC,
-    RENDER_METHOD_BILINEAR,
-    RENDER_METHOD_FIXED_GAUSSIAN,
-    RENDER_METHOD_HISTOGRAM,
-    RENDER_METHOD_PRECISION_GAUSSIAN,
+    RENDER_METHOD_DEFAULT,
+    RENDER_METHOD_LABELS,
+    RENDER_METHOD_VORONOI,
     PrecisionChannelData,
     PrecisionRenderScheduler,
     PrecisionTileRequest,
     PrecisionTileResult,
     ViewportScalarCache,
+    VoronoiFieldCache,
+    VoronoiFieldRequest,
+    VoronoiFieldResult,
+    VoronoiFieldScheduler,
     resolve_precision_xyz_nm,
     transform_precision_marginals,
 )
-from .render_window import RenderWindow
-
-# Localization-precision Gaussian is the default (top); the rest follow
-# rough → smooth. (The old redundant "Automatic" alias was removed.)
-_RENDER_METHOD_OPTIONS = (
-    ("Localization-precision Gaussian", RENDER_METHOD_PRECISION_GAUSSIAN),
-    ("Histogram", RENDER_METHOD_HISTOGRAM),
-    ("Bilinear histogram", RENDER_METHOD_BILINEAR),
-    ("Bicubic histogram", RENDER_METHOD_BICUBIC),
-    ("Basic (smoothed histogram)", RENDER_METHOD_BASIC),
-    ("Fixed Gaussian", RENDER_METHOD_FIXED_GAUSSIAN),
-)
-_RENDER_METHOD_LABELS = dict(
-    (method, label) for label, method in _RENDER_METHOD_OPTIONS
-)
-# Per-item hover help shown in the dropdown as you scroll through the methods.
-_RENDER_METHOD_TIPS = {
-    RENDER_METHOD_PRECISION_GAUSSIAN:
-        "Default. Each localization is a unit-mass, pixel-integrated\n"
-        "ANISOTROPIC Gaussian sized by its OWN precision (per-loc →\n"
-        "per-trace StdDev → calibration → 5 nm). Most faithful; slowest.",
-    RENDER_METHOD_HISTOGRAM:
-        "One count per pixel (the pixel each localization falls in).\n"
-        "Fastest and rawest; grainy, no sub-pixel information.",
-    RENDER_METHOD_BILINEAR:
-        "Each count is split over the 4 nearest pixel centres by\n"
-        "bilinear weights — keeps sub-pixel position, no blur (PSF-free).",
-    RENDER_METHOD_BICUBIC:
-        "Each count is split over a 4×4 neighbourhood with a Catmull-Rom\n"
-        "cubic kernel — smoother sub-pixel than bilinear (~2× the cost;\n"
-        "negative lobes clamped to zero).",
-    RENDER_METHOD_BASIC:
-        "The previous production look: histogram + a ½-pixel anti-alias\n"
-        "blur that scales with zoom. Fast, smooth.",
-    RENDER_METHOD_FIXED_GAUSSIAN:
-        "One isotropic Gaussian of a FIXED sigma (the Sigma box) for\n"
-        "every localization, via a fast histogram+blur (stays quick at\n"
-        "any zoom / sigma).",
-}
+from .render_window import RenderWindow, SigmaDialog
 
 
 class PrecisionRenderWindow(RenderWindow):
-    """SMAP-inspired advanced 2-D renderer with selectable reconstruction."""
+    """Unified render window with selectable scientific reconstruction."""
 
     SUPPORTS_VOLUME_3D = True
-    SIGMA_MENU_TEXT = "Render Methods…"
-    RENDER_MODE = "advanced"
     _TILE_PX = 256
     _MIN_TILE_PIXEL_NM = 0.125
     _MAX_TILE_PIXEL_NM = 1024.0
     _CACHE_BYTES = 192 * 1024 * 1024
+    _VORONOI_FIELD_CACHE_ITEMS = 4
+    _VORONOI_FAILURE_CACHE_ITEMS = 8
     _INTERACTION_DEBOUNCE_MS = 45
     _PROGRESSIVE_COALESCE_MS = 20
 
     def __init__(self, *args, **kwargs) -> None:
         # _build_channel_grid is dynamically dispatched during RenderWindow init.
-        self._advanced_render_method = RENDER_METHOD_PRECISION_GAUSSIAN
+        state = args[0] if args else kwargs.get("state")
+        preferred = RENDER_METHOD_DEFAULT
+        if state is not None:
+            preferred = str(
+                state.prefs.get("plot", {}).get(
+                    "render_method", RENDER_METHOD_DEFAULT
+                )
+            )
+        if preferred not in RENDER_METHOD_LABELS:
+            preferred = RENDER_METHOD_DEFAULT
+        self._advanced_render_method = preferred
+        self._fixed_sigma_xy_nm = 5.0
+        self._fixed_sigma_z_nm = 5.0
         self._fixed_sigma_nm = 5.0
+        self._sigma_nm_xyz = (5.0, 5.0, 5.0)
         self._precision_channels: dict[int, PrecisionChannelData] = {}
         self._precision_cache = ViewportScalarCache(
             max_bytes=self._CACHE_BYTES, max_items=2048
         )
+        self._voronoi_cache = VoronoiFieldCache(
+            max_items=self._VORONOI_FIELD_CACHE_ITEMS
+        )
+        self._voronoi_failures: OrderedDict[tuple, str] = OrderedDict()
         self._precision_scheduler: PrecisionRenderScheduler | None = None
+        self._voronoi_scheduler: VoronoiFieldScheduler | None = None
         self._active_tile_generation = -1
+        self._active_voronoi_generation = -1
+        self._pending_voronoi_keys: set[tuple] = set()
         self._active_tile_keys: dict[int, list[tuple[int, int, tuple]]] = {}
         self._active_tile_geometry: tuple[float, float, float, float] | None = None
         self._active_tile_pixel_nm = 1.0
@@ -109,10 +89,11 @@ class PrecisionRenderWindow(RenderWindow):
         self._preview_geometry: tuple[float, float, float, float] | None = None
         self._last_frame_orientation: str | None = None
         super().__init__(*args, **kwargs)
-        self._build_advanced_controls()
         self._redraw_timer.setInterval(self._INTERACTION_DEBOUNCE_MS)
         self._precision_scheduler = PrecisionRenderScheduler(parent=self)
         self._precision_scheduler.result_ready.connect(self._on_precision_tile_result)
+        self._voronoi_scheduler = VoronoiFieldScheduler(parent=self)
+        self._voronoi_scheduler.result_ready.connect(self._on_voronoi_field_result)
         # Coalesce progressive re-composites so a burst of finished tiles paints
         # at most once per interval instead of once per tile.
         self._progressive_timer = QTimer(self)
@@ -124,58 +105,6 @@ class PrecisionRenderWindow(RenderWindow):
         self._update_overlay_title()
         self._schedule_render()
 
-    def _update_overlay_title(self) -> None:
-        super()._update_overlay_title()
-        title = self.windowTitle()
-        if not title.endswith(" [advanced]"):
-            self.setWindowTitle(f"{title} [advanced]")
-
-    def _build_advanced_controls(self) -> None:
-        row = QWidget(self)
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-
-        layout.addWidget(QLabel("Renderer:"))
-        self._render_method_combo = QComboBox()
-        for index, (label, method) in enumerate(_RENDER_METHOD_OPTIONS):
-            self._render_method_combo.addItem(label, method)
-            tip = _RENDER_METHOD_TIPS.get(method)
-            if tip:  # per-item hover help in the open dropdown
-                self._render_method_combo.setItemData(
-                    index, tip, Qt.ItemDataRole.ToolTipRole
-                )
-        self._render_method_combo.setToolTip(
-            "Choose how localizations are reconstructed into scalar pixels.\n"
-            "Hover an item in the list for what it does."
-        )
-        self._render_method_combo.currentIndexChanged.connect(
-            self._on_render_method_changed
-        )
-        layout.addWidget(self._render_method_combo)
-
-        self._fixed_sigma_label = QLabel("Sigma:")
-        layout.addWidget(self._fixed_sigma_label)
-        self._fixed_sigma_spin = QDoubleSpinBox()
-        self._fixed_sigma_spin.setDecimals(2)
-        self._fixed_sigma_spin.setRange(0.01, 10000.0)
-        self._fixed_sigma_spin.setSingleStep(0.5)
-        self._fixed_sigma_spin.setValue(self._fixed_sigma_nm)
-        self._fixed_sigma_spin.setSuffix(" nm")
-        self._fixed_sigma_spin.setToolTip(
-            "Standard deviation of the isotropic Gaussian assigned to every localization."
-        )
-        self._fixed_sigma_spin.valueChanged.connect(self._on_fixed_sigma_changed)
-        layout.addWidget(self._fixed_sigma_spin)
-        layout.addStretch(1)
-        self.layout().insertWidget(1, row)
-        self._update_advanced_controls()
-
-    def _update_advanced_controls(self) -> None:
-        enabled = self._advanced_render_method == RENDER_METHOD_FIXED_GAUSSIAN
-        self._fixed_sigma_label.setEnabled(enabled)
-        self._fixed_sigma_spin.setEnabled(enabled)
-
     def _invalidate_advanced_render(self) -> None:
         self._precision_cache.clear()
         self._active_tile_keys = {}
@@ -186,28 +115,68 @@ class PrecisionRenderWindow(RenderWindow):
         self._scheduler.cancel()
         if self._precision_scheduler is not None:
             self._precision_scheduler.cancel()
+        if self._voronoi_scheduler is not None:
+            self._voronoi_scheduler.cancel()
+        self._pending_voronoi_keys.clear()
         self._schedule_render()
 
-    def _on_render_method_changed(self, index: int) -> None:
-        method = self._render_method_combo.itemData(index)
-        if not method or method == self._advanced_render_method:
+    def _set_render_method(self, method: str) -> None:
+        method = str(method)
+        if method not in RENDER_METHOD_LABELS:
             return
-        self._advanced_render_method = str(method)
-        self._update_advanced_controls()
+        if method == self._advanced_render_method:
+            return
+        self._advanced_render_method = method
         self._invalidate_advanced_render()
+        if self._volume_window is not None and self._volume_window.isVisible():
+            self._volume_window.sync_from_2d(
+                self._volume_display_state(), render_method=method
+            )
 
-    def _on_fixed_sigma_changed(self, value: float) -> None:
-        value = max(float(value), 0.01)
-        if np.isclose(value, self._fixed_sigma_nm):
+    def _fixed_sigma_for_orientation(self) -> tuple[float, float]:
+        if self._orientation == "XY":
+            return self._fixed_sigma_xy_nm, self._fixed_sigma_xy_nm
+        return self._fixed_sigma_xy_nm, self._fixed_sigma_z_nm
+
+    def _show_sigma_dialog(self) -> None:
+        dialog = SigmaDialog(
+            (self._fixed_sigma_xy_nm, self._fixed_sigma_z_nm), parent=self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self._fixed_sigma_nm = value
-        if self._advanced_render_method == RENDER_METHOD_FIXED_GAUSSIAN:
-            self._invalidate_advanced_render()
+        xy, z = dialog.values_xy_z()
+        if np.isclose(xy, self._fixed_sigma_xy_nm) and np.isclose(
+            z, self._fixed_sigma_z_nm
+        ):
+            return
+        self._fixed_sigma_xy_nm = max(float(xy), 0.01)
+        self._fixed_sigma_z_nm = max(float(z), 0.01)
+        self._fixed_sigma_nm = self._fixed_sigma_xy_nm
+        self._sigma_nm_xyz = (
+            self._fixed_sigma_xy_nm,
+            self._fixed_sigma_xy_nm,
+            self._fixed_sigma_z_nm,
+        )
+        self._invalidate_advanced_render()
+        if self._volume_window is not None and self._volume_window.isVisible():
+            self._volume_window._sigma_nm_xyz = self._sigma_nm_xyz
+            self._volume_window.refresh_from_dataset()
 
     def _render_method_label(self) -> str:
-        return _RENDER_METHOD_LABELS.get(
+        return RENDER_METHOD_LABELS.get(
             self._advanced_render_method, self._advanced_render_method
         )
+
+    def refresh_preferences(self) -> None:
+        super().refresh_preferences()
+        preferred = str(
+            self._state.prefs.get("plot", {}).get(
+                "render_method", RENDER_METHOD_DEFAULT
+            )
+        )
+        if preferred not in RENDER_METHOD_LABELS:
+            preferred = RENDER_METHOD_DEFAULT
+        self._set_render_method(preferred)
 
     def _build_channel_grid(self, ch: dict) -> None:
         super()._build_channel_grid(ch)
@@ -278,6 +247,125 @@ class PrecisionRenderWindow(RenderWindow):
             return None
         return tuple(round(float(value), 4) for value in self._depth_range)
 
+    def _voronoi_field_key(self, channel: PrecisionChannelData) -> tuple:
+        ch = next(
+            (item for item in self._channels if item["dataset_idx"] == channel.dataset_idx),
+            {},
+        )
+        transform_key = self._channel_loc_transform_key(ch) if ch else None
+        return (
+            "voronoi-field",
+            channel.dataset_idx,
+            self._mask_versions.get(channel.dataset_idx, 0),
+            self._orientation,
+            transform_key,
+            self._depth_key(),
+        )
+
+    def _voronoi_request(
+        self, channel: PrecisionChannelData, key: tuple
+    ) -> VoronoiFieldRequest:
+        x = np.asarray(channel.x_nm, dtype=np.float64)
+        y = np.asarray(channel.y_nm, dtype=np.float64)
+        keep = np.isfinite(x) & np.isfinite(y)
+        depth_key = self._depth_key()
+        if depth_key is not None:
+            lo, hi = sorted(float(value) for value in self._depth_range)
+            depth = np.asarray(channel.depth_nm, dtype=np.float64)
+            keep &= np.isfinite(depth) & (depth >= lo) & (depth <= hi)
+        return VoronoiFieldRequest(
+            key=key,
+            x_nm=np.ascontiguousarray(x[keep], dtype=np.float64),
+            y_nm=np.ascontiguousarray(y[keep], dtype=np.float64),
+        )
+
+    def _remember_voronoi_failure(self, key: tuple, error: str) -> None:
+        self._voronoi_failures.pop(key, None)
+        self._voronoi_failures[key] = error
+        while len(self._voronoi_failures) > self._VORONOI_FAILURE_CACHE_ITEMS:
+            self._voronoi_failures.popitem(last=False)
+
+    def _ensure_voronoi_fields(self) -> bool:
+        if self._advanced_render_method != RENDER_METHOD_VORONOI:
+            return True
+        if self._voronoi_scheduler is None:
+            return False
+
+        requests: list[VoronoiFieldRequest] = []
+        failures: list[str] = []
+        localization_channel_count = sum(
+            ch["kind"] == "localizations" for ch in self._channels
+        )
+        self._voronoi_cache.max_items = max(
+            self._VORONOI_FIELD_CACHE_ITEMS,
+            localization_channel_count,
+        )
+        for ch in self._channels:
+            if ch["kind"] != "localizations":
+                continue
+            channel = self._precision_channels.get(ch["dataset_idx"])
+            if channel is None or channel.grid is None or channel.x_nm.size == 0:
+                continue
+            key = self._voronoi_field_key(channel)
+            if self._voronoi_cache.get(key) is not None:
+                continue
+            failure = self._voronoi_failures.get(key)
+            if failure is not None:
+                failures.append(failure)
+                continue
+            requests.append(self._voronoi_request(channel, key))
+
+        if failures:
+            if self._precision_scheduler is not None:
+                self._precision_scheduler.cancel()
+            suffix = f" (+{len(failures) - 1} channel(s))" if len(failures) > 1 else ""
+            self._info_label.setText(
+                f"{self._dataset_dim_label}  |  Voronoi density unavailable: "
+                f"{failures[0]}{suffix}"
+            )
+            return False
+        if not requests:
+            self._pending_voronoi_keys.clear()
+            return True
+
+        request_keys = {request.key for request in requests}
+        if (
+            request_keys != self._pending_voronoi_keys
+            or self._active_voronoi_generation != self._voronoi_scheduler.generation
+        ):
+            if self._precision_scheduler is not None:
+                self._precision_scheduler.cancel()
+            self._pending_voronoi_keys = set(request_keys)
+            self._active_voronoi_generation = self._voronoi_scheduler.request(requests)
+
+        count = sum(int(request.x_nm.size) for request in requests)
+        self._info_label.setText(
+            f"{self._dataset_dim_label}  |  Voronoi density  |  "
+            f"building {len(requests)} projected field(s), {count:,} localization(s)..."
+        )
+        return False
+
+    def _on_voronoi_field_result(self, result: VoronoiFieldResult) -> None:
+        if self._voronoi_scheduler is None:
+            return
+        if (
+            result.generation != self._voronoi_scheduler.generation
+            or result.generation != self._active_voronoi_generation
+        ):
+            return
+        key = result.key
+        if result.field is not None:
+            self._voronoi_cache.put(key, result.field)
+            self._voronoi_failures.pop(key, None)
+        else:
+            self._remember_voronoi_failure(
+                key,
+                result.error or "The projected field could not be constructed.",
+            )
+        self._pending_voronoi_keys.discard(key)
+        if not self._pending_voronoi_keys:
+            QTimer.singleShot(0, self._render)
+
     def _tile_pixel_size_nm(
         self, bounds: tuple[float, float, float, float]
     ) -> float:
@@ -315,7 +403,7 @@ class PrecisionRenderWindow(RenderWindow):
             transform_key,
             self._depth_key(),
             self._advanced_render_method,
-            round(self._fixed_sigma_nm, 6),
+            tuple(round(value, 6) for value in self._fixed_sigma_for_orientation()),
             round(float(pixel_nm), 9),
             int(tile_row),
             int(tile_col),
@@ -354,6 +442,11 @@ class PrecisionRenderWindow(RenderWindow):
             channel = self._precision_channels.get(ch["dataset_idx"])
             if channel is None or channel.grid is None:
                 continue
+            voronoi_field = (
+                self._voronoi_cache.get(self._voronoi_field_key(channel))
+                if self._advanced_render_method == RENDER_METHOD_VORONOI
+                else None
+            )
             entries: list[tuple[int, int, tuple]] = []
             for tile_row in range(row0, row1 + 1):
                 for tile_col in range(col0, col1 + 1):
@@ -374,7 +467,8 @@ class PrecisionRenderWindow(RenderWindow):
                                 shape=(self._TILE_PX, self._TILE_PX),
                                 depth_range=depth_range,
                                 render_method=self._advanced_render_method,
-                                fixed_sigma_nm=self._fixed_sigma_nm,
+                                fixed_sigma_nm=self._fixed_sigma_for_orientation(),
+                                voronoi_field=voronoi_field,
                             )
                         )
             keys_by_dataset[channel.dataset_idx] = entries
@@ -397,6 +491,8 @@ class PrecisionRenderWindow(RenderWindow):
         (x0, x1), (y0, y1) = self._view_box.viewRange()
         bounds = (float(x0), float(x1), float(y0), float(y1))
         if x1 <= x0 or y1 <= y0:
+            return
+        if not self._ensure_voronoi_fields():
             return
 
         # One consistent precision-tile path at every zoom level — the tile
@@ -545,6 +641,7 @@ class PrecisionRenderWindow(RenderWindow):
             if levels is not None:
                 self._manual_levels = levels
                 self._channels[0]["levels"] = None
+                self._sync_volume_display_state()
                 if self._bc_dialog is not None and self._bc_dialog.isVisible():
                     self._bc_dialog.set_levels(*levels)
 
@@ -552,16 +649,22 @@ class PrecisionRenderWindow(RenderWindow):
         self._redraw_roi_highlight()
 
         cache_mb = self._precision_cache.nbytes / (1024.0 * 1024.0)
+        visible_channels = sum(
+            1 for channel in self._channels if channel.get("visible", True)
+        )
         if final:
             self._info_label.setText(
-                f"{self._dataset_dim_label}  |  {self._render_method_label()} "
-                f"({stage})  |  px={self._active_tile_pixel_nm:.3g} nm  |  "
+                f"{self._dataset_dim_label}  |  {visible_channels} ch  |  "
+                f"{self._render_method_label()} ({stage})  |  "
+                f"LOD {self._last_lod}  |  px={self._active_tile_pixel_nm:.3g} nm  |  "
                 f"{total} tile(s)  |  cache {cache_mb:.1f} MB"
             )
         else:
             self._info_label.setText(
-                f"{self._dataset_dim_label}  |  {self._render_method_label()}  |  "
-                f"px={self._active_tile_pixel_nm:.3g} nm  |  {ready}/{total} tile(s)…"
+                f"{self._dataset_dim_label}  |  {visible_channels} ch  |  "
+                f"{self._render_method_label()}  |  LOD {self._last_lod}  |  "
+                f"px={self._active_tile_pixel_nm:.3g} nm  |  "
+                f"{ready}/{total} tile(s)…"
             )
         if final and self._bc_dialog is not None and self._bc_dialog.isVisible():
             self._bc_dialog.set_data(scalar[self._active_channel_index()])
@@ -604,48 +707,32 @@ class PrecisionRenderWindow(RenderWindow):
         if not self._progressive_timer.isActive():
             self._progressive_timer.start()
 
-    def _show_sigma_dialog(self) -> None:
-        sources = sorted({channel.source for channel in self._precision_channels.values()})
-        source_text = "\n".join(f"- {source}" for source in sources) or "- no localization channel"
-        QMessageBox.information(
-            self,
-            "Advanced Rendering Methods",
-            "• Localization-precision Gaussian (default) — a unit-mass,\n"
-            "  pixel-integrated ANISOTROPIC Gaussian per localization,\n"
-            "  sized by its own precision. The most faithful, and slowest.\n"
-            "• Histogram — one count per pixel (raw, grainy).\n"
-            "• Bilinear histogram — one count split over the 4 nearest\n"
-            "  pixel centres (keeps sub-pixel position).\n"
-            "• Bicubic histogram — one count split over a 4×4 neighbourhood\n"
-            "  with a Catmull-Rom cubic kernel (smoother sub-pixel).\n"
-            "• Basic (smoothed histogram) — histogram + a ½-pixel blur;\n"
-            "  the previous production look, fast.\n"
-            "• Fixed Gaussian — one isotropic sigma for every localization\n"
-            "  (rendered via a fast histogram+blur, so it stays quick).\n\n"
-            "Precision source(s):\n"
-            f"{source_text}\n\n"
-            "Source priority: per-localization precision, per-trace StdDev,\n"
-            "dataset calibration, then the reported 5 nm fallback.",
-        )
-
     def _current_3d_region(self):
         """The current 2-D view mapped to a native 3-D box (xlo,xhi,ylo,yhi,
         zlo,zhi nm) so the volume focuses on what's on screen. The off-plane axis
-        uses the depth slider when active, else the full data extent. Returns
-        None (→ whole-data volume) for an overlay-transformed dataset (its
-        display coords aren't native)."""
+        uses the depth slider when active, else the full data extent. Coordinates
+        are taken in the same display space used by the 3-D volume, including
+        overlay transforms."""
         if self._idx is None or not (0 <= self._idx < len(self._state.datasets)):
-            return None
-        ds = self._state.datasets[self._idx]
-        if ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"):
             return None
         try:
             (vx0, vx1), (vy0, vy1) = self._view_box.viewRange()
-            loc = np.asarray(ds.loc_nm, dtype=np.float64)
         except Exception:
             return None
-        if loc.ndim != 2 or loc.shape[1] < 3:
+
+        loc_chunks = []
+        for channel in self._channels:
+            if not channel.get("visible") or channel.get("kind") != "localizations":
+                continue
+            try:
+                locs = self._channel_locs(channel)
+            except Exception:
+                continue
+            if locs.ndim == 2 and locs.shape[1] >= 3 and locs.shape[0]:
+                loc_chunks.append(locs[:, :3])
+        if not loc_chunks:
             return None
+        loc = np.vstack(loc_chunks)
         finite = np.all(np.isfinite(loc[:, :3]), axis=1)
         if not np.any(finite):
             return None
@@ -705,12 +792,22 @@ class PrecisionRenderWindow(RenderWindow):
         except Exception:
             return default
 
-    def _show_3d_volume_window(self) -> None:
+    def _show_3d_volume_window(self, _checked: bool = False) -> None:
         if self._idx is None or not (0 <= self._idx < len(self._state.datasets)):
+            return
+        if self._advanced_render_method == RENDER_METHOD_VORONOI:
+            QMessageBox.information(
+                self,
+                "Projected Voronoi Density",
+                "Voronoi density is currently implemented only for the projected "
+                "XY, XZ, and YZ views. True 3-D Voronoi volume rendering is not "
+                "available.",
+            )
             return
         self._state.set_active(self._idx)
         region = self._current_3d_region()
         contrast = self._current_2d_contrast_pct()
+        display_state = self._volume_display_state()
         if self._volume_window is None:
             from .volume_window import VolumeRenderWindow
             self._volume_window = VolumeRenderWindow(
@@ -719,6 +816,7 @@ class PrecisionRenderWindow(RenderWindow):
                 render_method=self._advanced_render_method,
                 region_bounds=region,
                 contrast_pct=contrast,
+                display_state=display_state,
                 parent=self,
             )
             self._volume_window.destroyed.connect(
@@ -727,7 +825,17 @@ class PrecisionRenderWindow(RenderWindow):
         else:
             self._volume_window._sigma_nm_xyz = self._sigma_nm_xyz
             self._volume_window._render_method = self._advanced_render_method
+            region_changed = self._volume_window._region_bounds != region
             self._volume_window._region_bounds = region
+            self._volume_window._rebuild_timer.stop()
+            if region_changed:
+                # The volume grid is rebuilt from the new 2-D crop. Reframe the
+                # existing 3-D camera as well, otherwise the new crop can be
+                # present but remain outside the old camera view.
+                self._volume_window._camera_initialized = False
+            self._volume_window.capture_spatial_state()
+            self._volume_window._display_state = display_state
+            self._volume_window._apply_display_state_to_controls(display_state)
             self._volume_window.set_contrast_pct(*contrast)
             self._volume_window.refresh_from_dataset()
         self._volume_window.show()
@@ -740,4 +848,6 @@ class PrecisionRenderWindow(RenderWindow):
         self._scheduler.cancel()
         if self._precision_scheduler is not None:
             self._precision_scheduler.cancel()
+        if self._voronoi_scheduler is not None:
+            self._voronoi_scheduler.shutdown()
         super().closeEvent(event)

@@ -27,8 +27,19 @@ from PyQt6.QtWidgets import (
 
 from ..core.app_state import AppState
 from ..core.attributes import attribute_description, plot_attribute_names
-from ..core.iteration import iteration_labels, ordinal, parse_iteration_label
-from ..core.loader import attr_matches_selection, attr_values_1d, mfx_filter_mask, mfx_get
+from ..core.iteration import (
+    iteration_bold_flags,
+    iteration_labels,
+    ordinal,
+    parse_iteration_label,
+)
+from ..core.loader import (
+    attr_matches_selection,
+    attr_values_1d,
+    effective_iterations_for_attr,
+    mfx_filter_mask,
+    mfx_get,
+)
 from ..core.roi_selection import rectangle_mask
 from .plot_format import plot_widget
 
@@ -100,6 +111,7 @@ class AttributeWindow(QWidget):
         self._x_combo = QComboBox()
         self._x_combo.setMinimumWidth(100)
         self._x_combo.currentTextChanged.connect(self._draw)
+        self._x_combo.currentTextChanged.connect(lambda *_: self._style_iteration_boldness())
         self._x_combo.currentTextChanged.connect(
             lambda text: self._x_combo.setToolTip(attribute_description(text))
         )
@@ -109,6 +121,7 @@ class AttributeWindow(QWidget):
         self._y_combo = QComboBox()
         self._y_combo.setMinimumWidth(100)
         self._y_combo.currentTextChanged.connect(self._draw)
+        self._y_combo.currentTextChanged.connect(lambda *_: self._style_iteration_boldness())
         self._y_combo.currentTextChanged.connect(
             lambda text: self._y_combo.setToolTip(attribute_description(text))
         )
@@ -213,6 +226,7 @@ class AttributeWindow(QWidget):
 
         # Iteration dropdown: last (Nth) · all [flatten] · all [stacked] · (N-1)th … 1st
         iter_opts = self._iter_labels(ds)
+        self._eff_iter_cache = {}                    # dataset (re)loaded → drop cache
         self._iter_combo.blockSignals(True)
         self._iter_combo.clear()
         self._iter_combo.addItems(iter_opts)
@@ -223,6 +237,7 @@ class AttributeWindow(QWidget):
         has_iters = bool(iter_opts)
         self._iter_combo.setVisible(has_iters)
         self._iter_label.setVisible(has_iters)
+        self._style_iteration_boldness()             # bold the useful iterations
 
         x_default = saved.get("x", "idx")
         y_default = saved.get("y", "efo")
@@ -269,6 +284,38 @@ class AttributeWindow(QWidget):
     def _default_iter_label(self, ds) -> str:
         labels = self._iter_labels(ds)
         return f"last ({ordinal(self._num_itr(ds))})" if labels else ""
+
+    def _style_iteration_boldness(self) -> None:
+        """Bold the iteration-dropdown entries where **both** plotted attributes
+        hold real values (intersection), so the useful iterations stand out."""
+        from PyQt6.QtGui import QFont
+
+        ds = self._dataset()
+        if ds is None or self._iter_combo.count() == 0:
+            return
+        cache = getattr(self, "_eff_iter_cache", None)
+        if cache is None:
+            cache = self._eff_iter_cache = {}
+        eff = None
+        for attr in (self._x_combo.currentText(), self._y_combo.currentText()):
+            if not attr:
+                continue
+            if attr not in cache:
+                try:
+                    cache[attr] = effective_iterations_for_attr(ds, attr)
+                except Exception:
+                    cache[attr] = None
+            e = cache[attr]
+            if e is None:                            # undetermined → no constraint
+                continue
+            eff = e.copy() if eff is None else (eff & e)
+        labels = [self._iter_combo.itemText(i) for i in range(self._iter_combo.count())]
+        flags = (iteration_bold_flags(labels, eff, self._num_itr(ds))
+                 if eff is not None else [False] * len(labels))
+        for i, bold in enumerate(flags):
+            font = QFont(self._iter_combo.font())
+            font.setBold(bool(bold))
+            self._iter_combo.setItemData(i, font, Qt.ItemDataRole.FontRole)
 
     def _selection(self) -> tuple:
         """Return (itr_selector, render_mode) for the current label."""

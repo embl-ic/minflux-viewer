@@ -72,6 +72,19 @@ def test_2d_recovers_known_drift_sign_and_shape():
     assert cy > 0.9, f"y drift not recovered (corr={cy:.3f})"
 
 
+def test_nan_z_values_are_ignored_when_inferring_2d_drift():
+    x, y, t, tid, _, _ = _synthetic_drifted_2d(n_struct=40)
+    z = np.zeros_like(x)
+    z[::3] = np.nan
+
+    res = dc.estimate_drift(
+        x, y, z, t, tid, resolution_nm=4.0, time_window_s=400.0
+    )
+
+    assert res.dims == 2
+    assert res.dz is None
+
+
 def test_2d_correction_reduces_spread():
     """Subtracting the estimated drift must tighten the localization cloud."""
     x, y, t, tid, dxt, dyt = _synthetic_drifted_2d()

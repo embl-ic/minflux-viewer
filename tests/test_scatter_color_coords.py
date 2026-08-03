@@ -78,3 +78,87 @@ def test_scatter_color_by_coordinate_varies(_qt_app, coord):
         assert vmax > vmin
     finally:
         win.close()
+
+
+def test_opening_lut_dialog_preserves_color_mapping(_qt_app):
+    """Opening the LUT dialog must REFLECT the current colour mapping, not change
+    it. Bug: setBounds() on the dialog's level lines re-clamped a line sitting
+    outside the new range and emitted a stale level callback, which the scatter
+    recorded as manual levels and recoloured with (the plot 'turned one colour')."""
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.scatter_window import ScatterWindow
+
+    state = AppState()
+    state.add_dataset(_make_ds())
+    ds = state.datasets[0]
+    win = ScatterWindow(state, dataset_idx=0)
+    try:
+        win._cbar_combo.setCurrentText("efo")             # data range 10..100 (min > 0)
+        win._cmap_combo.setCurrentText("glasbey")
+        win._invalidate_color_cache()
+        idx = np.arange(ds.prop.num_loc)
+        _, bins0, _, vmin0, vmax0 = win._color_bins_for_points(None, None, None, ds, idx)
+        assert win._manual_color_levels is None
+        assert np.unique(bins0).size > 1                  # real spread of colours
+
+        win.open_lut_dialog()                             # must not alter the mapping
+
+        assert win._manual_color_levels is None           # not corrupted on open
+        win._invalidate_color_cache()
+        _, bins1, _, vmin1, vmax1 = win._color_bins_for_points(None, None, None, ds, idx)
+        assert (vmin1, vmax1) == (vmin0, vmax0)
+        assert np.array_equal(bins1, bins0)               # identical colours after open
+    finally:
+        win.close()
+
+
+def test_color_by_change_drops_manual_levels_and_autoscales(_qt_app):
+    """Changing the colour-by attribute must auto-scale to the NEW attribute's
+    range — a manual level range set for the old attribute must not linger."""
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.scatter_window import ScatterWindow
+
+    state = AppState()
+    state.add_dataset(_make_ds())
+    ds = state.datasets[0]
+    win = ScatterWindow(state, dataset_idx=0)
+    try:
+        idx = np.arange(ds.prop.num_loc)
+        win._cbar_combo.setCurrentText("efo")             # range ~10..100
+        win._on_lut_levels_changed(20.0, 30.0)            # user sets manual levels
+        *_, vmin, vmax = win._color_bins_for_points(None, None, None, ds, idx)
+        assert (vmin, vmax) == (20.0, 30.0)               # manual levels honoured
+
+        win._cbar_combo.setCurrentText("cfr")             # range ~0.3..0.9
+        assert win._manual_color_levels is None           # dropped on attribute change
+        _, _, label, vmin2, vmax2 = win._color_bins_for_points(None, None, None, ds, idx)
+        assert label == "cfr"
+        assert (vmin2, vmax2) != (20.0, 30.0)
+        assert vmax2 < 2.0                                # auto-scaled to cfr's own range
+    finally:
+        win.close()
+
+
+def test_lut_dialog_follows_color_by_range(_qt_app):
+    """With the LUT dialog open, switching colour-by refreshes the dialog's data
+    range (and UI) to the new attribute."""
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.scatter_window import ScatterWindow
+
+    state = AppState()
+    state.add_dataset(_make_ds())
+    win = ScatterWindow(state, dataset_idx=0)
+    try:
+        win._cbar_combo.setCurrentText("efo")
+        win.open_lut_dialog()
+        dlg = win._lut_dialog
+        assert dlg is not None
+        efo_hi = dlg._data_hi
+        assert efo_hi > 5.0                               # efo ~10..100
+
+        win._cbar_combo.setCurrentText("cfr")
+        win._refresh_lut_dialog(capture_baseline=False)   # (also fired via sync)
+        assert dlg._data_hi < 2.0                         # now cfr ~0.3..0.9
+        assert dlg._data_hi < efo_hi
+    finally:
+        win.close()
