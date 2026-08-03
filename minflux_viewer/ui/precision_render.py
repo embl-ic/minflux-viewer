@@ -99,7 +99,8 @@ RENDER_METHOD_TIPS = {
         "a density from its projected Voronoi cell: multiplicity divided by "
         "finite cell area. The result is piecewise constant, adapts to local "
         "sampling density, and is recomputed for the current filters and depth "
-        "selection."
+        "selection. The 3-D action builds a true XYZ Voronoi volume with "
+        "multiplicity divided by finite cell volume."
     ),
 }
 

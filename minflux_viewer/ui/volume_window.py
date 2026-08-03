@@ -10,8 +10,8 @@ that volume with pyqtgraph's GLVolumeItem.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from copy import deepcopy
+from dataclasses import dataclass
 
 import numpy as np
 import pyqtgraph as pg
@@ -33,6 +33,10 @@ from PyQt6.QtWidgets import (
 from scipy.ndimage import gaussian_filter
 
 from .. import resource_path
+from ..analysis.voronoi_density import (
+    Voronoi3DField,
+    build_voronoi_3d_field,
+)
 from ..core.app_state import AppState
 
 _DEFAULT_MAX_VOXELS = 8_000_000
@@ -292,6 +296,7 @@ def make_volume_payload(
     sigma_nm_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
     render_method: str | None = None,
     precision_sigma_nm: np.ndarray | None = None,
+    voronoi_field: Voronoi3DField | None = None,
     black_pct: float = 0.0,
     white_pct: float = 99.7,
     invert: bool = False,
@@ -344,12 +349,21 @@ def make_volume_payload(
         for i in range(3)
     ]
     voxel_xyz = tuple(float(edges[i][1] - edges[i][0]) for i in range(3))
-    volume = _voxelize_volume(
-        locs, edges, voxel_xyz,
-        render_method=render_method,
-        sigma_nm_xyz=sigma_nm_xyz,
-        precision_sigma_nm=precision_sigma_nm,
-    )
+    if (render_method or "").lower() == "voronoi_density":
+        if voronoi_field is None:
+            raise ValueError("3-D Voronoi rendering requires a precomputed field.")
+        volume = voronoi_field.sample(
+            (float(lo[0]), float(hi[0]), float(lo[1]), float(hi[1]),
+             float(lo[2]), float(hi[2])),
+            tuple(int(value) for value in counts),
+        )
+    else:
+        volume = _voxelize_volume(
+            locs, edges, voxel_xyz,
+            render_method=render_method,
+            sigma_nm_xyz=sigma_nm_xyz,
+            precision_sigma_nm=precision_sigma_nm,
+        )
 
     norm, vmax = _normalize_volume(volume, black_pct, white_pct)
 
@@ -435,6 +449,8 @@ def make_multichannel_volume_payload(
     black_pct: float = 0.0,
     white_pct: float = 99.7,
     channel_contrast_pct: list[tuple[float, float]] | None = None,
+    render_method: str | None = None,
+    voronoi_fields: list[Voronoi3DField] | None = None,
 ) -> VolumePayload:
     """Composite several overlay channels into one RGBA volume.
 
@@ -465,11 +481,22 @@ def make_multichannel_volume_payload(
     scalar_sum = np.zeros(shape, dtype=np.float32)
     n_total = 0
     op = float(np.clip(opacity, 0.0, 1.0))
+    method = (render_method or "").lower()
     for channel_index, (locs, _rgb) in enumerate(valid):
-        hist, _ = np.histogramdd(locs, bins=edges)
-        vol = hist.astype(np.float32, copy=False)
-        if max(sigma_px) >= 0.1:
-            vol = gaussian_filter(vol, sigma=tuple(sigma_px), mode="constant")
+        if method == "voronoi_density":
+            if voronoi_fields is None or channel_index >= len(voronoi_fields):
+                raise ValueError("3-D Voronoi rendering requires one field per channel.")
+            vol = voronoi_fields[channel_index].sample(
+                (float(edges[0][0]), float(edges[0][-1]),
+                 float(edges[1][0]), float(edges[1][-1]),
+                 float(edges[2][0]), float(edges[2][-1])),
+                shape,
+            )
+        else:
+            hist, _ = np.histogramdd(locs, bins=edges)
+            vol = hist.astype(np.float32, copy=False)
+            if max(sigma_px) >= 0.1:
+                vol = gaussian_filter(vol, sigma=tuple(sigma_px), mode="constant")
         if channel_contrast_pct is not None and channel_index < len(channel_contrast_pct):
             channel_black, channel_white = channel_contrast_pct[channel_index]
         else:
@@ -745,7 +772,10 @@ class VolumeRenderWindow(QWidget):
         each channel's transform applied), or ``None`` when the dataset is not a
         multi-channel overlay."""
         from ..core.overlay import (
-            apply_display_transform_nm, dataset_group_id, overlay_members)
+            apply_display_transform_nm,
+            dataset_group_id,
+            overlay_members,
+        )
 
         if not (0 <= self._idx < len(self._state.datasets)):
             return None
@@ -851,14 +881,22 @@ class VolumeRenderWindow(QWidget):
         ds = self._state.datasets[self._idx]
         channels = self._overlay_channels()
         precision_sigma = None
+        voronoi_source_channels = channels
         if channels:
             self.setWindowTitle(
                 f"3D Volume Preview - {ds.name} (+{len(channels) - 1} channel(s))")
+            voronoi_source_channels = list(channels)
+            if self._region_bounds is not None:
+                channels = [
+                    (_clip_region(locs, None, self._region_bounds)[0], rgb)
+                    for locs, rgb in channels
+                ]
             all_locs = np.vstack([c[0] for c in channels])
         else:
             self._volume_channel_ids = ()
             self.setWindowTitle(f"3D Volume Preview - {ds.name}")
             all_locs, precision_sigma = self._single_channel_locs(ds)
+        voronoi_source_locs = all_locs
         # Restrict to the focused 3-D region (from the advanced 2-D view) if set.
         if self._region_bounds is not None and all_locs.shape[0] > 0:
             all_locs, precision_sigma = _clip_region(
@@ -886,12 +924,19 @@ class VolumeRenderWindow(QWidget):
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
+            render_method = (self._render_method or "").lower()
             if channels:
                 channel_contrast_pct = [
                     self._display_contrast(dataset_idx)
                     or (self._black_pct, self._white_pct)
                     for dataset_idx in self._volume_channel_ids
                 ]
+                voronoi_fields = None
+                if render_method == "voronoi_density":
+                    voronoi_fields = [
+                        build_voronoi_3d_field(locs)
+                        for locs, _rgb in voronoi_source_channels
+                    ]
                 payload = make_multichannel_volume_payload(
                     [c[0] for c in channels], [c[1] for c in channels],
                     xy_voxel_nm=float(self._xy_voxel_spin.value()),
@@ -903,11 +948,16 @@ class VolumeRenderWindow(QWidget):
                     black_pct=self._black_pct,
                     white_pct=self._white_pct,
                     channel_contrast_pct=channel_contrast_pct,
+                    render_method=self._render_method,
+                    voronoi_fields=voronoi_fields,
                 )
             else:
                 contrast = self._display_contrast(self._idx)
                 if contrast is not None:
                     self._black_pct, self._white_pct = contrast
+                voronoi_field = None
+                if render_method == "voronoi_density":
+                    voronoi_field = build_voronoi_3d_field(voronoi_source_locs)
                 payload = make_volume_payload(
                     all_locs,
                     xy_voxel_nm=float(self._xy_voxel_spin.value()),
@@ -922,6 +972,7 @@ class VolumeRenderWindow(QWidget):
                     black_pct=self._black_pct,
                     white_pct=self._white_pct,
                     invert=self._lut_invert,
+                    voronoi_field=voronoi_field,
                 )
         except Exception as exc:
             QApplication.restoreOverrideCursor()
@@ -939,10 +990,16 @@ class VolumeRenderWindow(QWidget):
         nx, ny, nz = payload.counts
         vx, vy, vz = payload.voxel_nm
         ch_txt = f"  |  {len(channels)} channels" if channels else ""
+        method_txt = (
+            "  |  3-D Voronoi density (nm^-3)"
+            if (self._render_method or "").lower() == "voronoi_density"
+            else ""
+        )
         self._info_label.setText(
             f"{payload.n_locs:,} filtered locs{ch_txt}  |  volume {nx} x {ny} x {nz}  |  "
             f"voxel=({vx:.1f}, {vy:.1f}, {vz:.1f}) nm  |  "
-            f"mode={self._mode_combo.currentText()}  |  intensity max~{payload.intensity_max:.3g}"
+            f"mode={self._mode_combo.currentText()}{method_txt}  |  "
+            f"intensity max~{payload.intensity_max:.3g}"
         )
 
     def _recompose_single_payload(self) -> bool:

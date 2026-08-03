@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from minflux_viewer.analysis.voronoi_density import build_voronoi_3d_field
 from minflux_viewer.ui.volume_window import (
     _clip_region,
     _compose_multichannel_rgba,
@@ -163,3 +164,24 @@ def test_multichannel_empty_raises():
         make_multichannel_volume_payload(
             [np.empty((0, 3))], [(1.0, 0.0, 0.0)],
             xy_voxel_nm=5.0, z_voxel_nm=5.0, max_dim=64)
+
+
+def test_multichannel_voronoi_density_uses_one_field_per_channel():
+    rng = np.random.default_rng(76)
+    red = rng.normal([0.0, 0.0, 0.0], [5.0, 5.0, 15.0], size=(40, 3))
+    green = rng.normal([80.0, 0.0, 0.0], [5.0, 5.0, 15.0], size=(40, 3))
+    fields = [build_voronoi_3d_field(red), build_voronoi_3d_field(green)]
+    payload = make_multichannel_volume_payload(
+        [red, green], [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+        xy_voxel_nm=8.0,
+        z_voxel_nm=8.0,
+        max_dim=32,
+        max_voxels=32 ** 3,
+        render_method="voronoi_density",
+        voronoi_fields=fields,
+        opacity=1.0,
+    )
+    assert payload.channel_norms is not None
+    assert len(payload.channel_norms) == 2
+    assert np.any(payload.rgba[..., 0] > payload.rgba[..., 1])
+    assert np.any(payload.rgba[..., 1] > payload.rgba[..., 0])

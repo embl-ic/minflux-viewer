@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from minflux_viewer.analysis.voronoi_density import build_voronoi_3d_field
 from minflux_viewer.ui.volume_window import make_volume_payload
 
 
@@ -84,3 +85,24 @@ def test_make_volume_payload_supports_inverted_lut() -> None:
 
     assert np.array_equal(normal.rgba[..., 3], inverted.rgba[..., 3])
     assert not np.array_equal(normal.rgba[..., :3], inverted.rgba[..., :3])
+
+
+def test_make_volume_payload_supports_3d_voronoi_density() -> None:
+    rng = np.random.default_rng(75)
+    locs = rng.normal(0.0, (35.0, 28.0, 18.0), size=(80, 3))
+    field = build_voronoi_3d_field(locs)
+    payload = make_volume_payload(
+        locs,
+        xy_voxel_nm=5.0,
+        z_voxel_nm=5.0,
+        max_dim=32,
+        max_voxels=32 ** 3,
+        render_method="voronoi_density",
+        voronoi_field=field,
+    )
+
+    assert payload.scalar.shape == payload.counts
+    assert payload.rgba.shape == (*payload.counts, 4)
+    assert np.all(np.isfinite(payload.scalar))
+    assert np.all(payload.scalar >= 0.0)
+    assert np.any(payload.scalar > 0.0)

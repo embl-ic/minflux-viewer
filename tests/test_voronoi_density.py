@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from scipy.spatial import Voronoi
+from scipy.spatial import ConvexHull, Voronoi
 
 from minflux_viewer.analysis.voronoi_density import (
     ProjectedVoronoiError,
+    Voronoi3DError,
     build_projected_voronoi_field,
+    build_voronoi_3d_field,
 )
 
 
@@ -108,3 +110,71 @@ def test_unique_point_limit_fails_explicitly() -> None:
 
     with pytest.raises(ProjectedVoronoiError, match="at most 8"):
         build_projected_voronoi_field(x, y, max_unique_points=8)
+
+
+def test_3d_cell_volumes_match_explicit_voronoi_regions() -> None:
+    rng = np.random.default_rng(72)
+    points = rng.uniform(-100.0, 100.0, size=(36, 3))
+    field = build_voronoi_3d_field(points)
+
+    reference = Voronoi(points)
+    expected = np.full(points.shape[0], np.nan, dtype=np.float64)
+    for point_index, region_index in enumerate(reference.point_region):
+        region = reference.regions[region_index]
+        if len(region) > 3 and -1 not in region:
+            expected[point_index] = 1.0 / ConvexHull(
+                reference.vertices[region]
+            ).volume
+
+    # np.unique(..., axis=0) uses lexicographic order, which is also the order
+    # produced by this explicit coordinate sort.
+    order = np.lexsort((points[:, 2], points[:, 1], points[:, 0]))
+    finite = np.isfinite(expected[order])
+    assert np.count_nonzero(finite) == field.finite_cell_count
+    np.testing.assert_allclose(
+        field.density_per_nm3[finite], expected[order][finite], rtol=1e-9, atol=1e-12
+    )
+
+
+def test_3d_duplicate_multiplicity_scales_density() -> None:
+    rng = np.random.default_rng(73)
+    points = rng.uniform(-100.0, 100.0, size=(30, 3))
+    base = build_voronoi_3d_field(points)
+    sorted_order = np.lexsort((points[:, 2], points[:, 1], points[:, 0]))
+    duplicate_index = int(sorted_order[np.flatnonzero(base.density_per_nm3 > 0.0)[0]])
+    with_duplicate = build_voronoi_3d_field(
+        np.concatenate((points, points[[duplicate_index]]), axis=0)
+    )
+    matches = np.all(np.isclose(base.points_nm, points[duplicate_index]), axis=1)
+    duplicate_matches = np.all(
+        np.isclose(with_duplicate.points_nm, points[duplicate_index]), axis=1
+    )
+    assert np.count_nonzero(matches) == 1
+    assert np.count_nonzero(duplicate_matches) == 1
+    base_value = base.density_per_nm3[matches][0]
+    duplicate_value = with_duplicate.density_per_nm3[duplicate_matches][0]
+    assert base_value > 0.0
+    assert np.isclose(duplicate_value, 2.0 * base_value)
+
+
+def test_3d_field_samples_bounded_volume() -> None:
+    rng = np.random.default_rng(74)
+    points = rng.uniform(-10.0, 10.0, size=(40, 3))
+    field = build_voronoi_3d_field(points)
+    volume = field.sample((-12.0, 12.0, -12.0, 12.0, -12.0, 12.0), (9, 8, 7))
+    assert volume.shape == (9, 8, 7)
+    assert volume.dtype == np.float32
+    assert np.all(np.isfinite(volume))
+    assert np.all(volume >= 0.0)
+
+
+def test_3d_degenerate_selection_fails_explicitly() -> None:
+    points = np.column_stack(
+        (
+            np.linspace(0.0, 10.0, 8),
+            np.linspace(0.0, 20.0, 8),
+            np.linspace(0.0, 30.0, 8),
+        )
+    )
+    with pytest.raises(Voronoi3DError, match="span all three dimensions"):
+        build_voronoi_3d_field(points)
