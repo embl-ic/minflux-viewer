@@ -167,9 +167,10 @@ class TiffViewerWindow(QWidget):
         info.setContext(Qt.ShortcutContext.WindowShortcut)
         info.activated.connect(self._show_info_window)
 
-        bc = QShortcut(QKeySequence("Shift+C"), self)
-        bc.setContext(Qt.ShortcutContext.WindowShortcut)
-        bc.activated.connect(self._show_brightness_contrast)
+        # Brightness/Contrast (Shift+C) is an application-wide shortcut handled by
+        # the main window, which delegates to this window's own _show_brightness_contrast
+        # when it is focused. A local Shift+C QShortcut here would be an ambiguous
+        # overload with the global one, so it is intentionally not installed.
 
     def _refresh_controls(self) -> None:
         axes = self._source.metadata.axes

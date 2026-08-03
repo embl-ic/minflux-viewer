@@ -588,7 +588,8 @@ def write_picasso_hdf5(
     height = int(np.ceil(float(np.max(y_px))) + 1)
     width = max(width, 1)
     height = max(height, 1)
-    is_3d = float(np.max(znm) - np.min(znm)) > 1.0
+    from .dataset_kind import is_3d as dataset_is_3d
+    is_3d = bool(dataset_is_3d(ds))
 
     lpx = _picasso_precision_nm(columns, "x", len(finite))[finite] / pixel_size_nm
     lpy = _picasso_precision_nm(columns, "y", len(finite))[finite] / pixel_size_nm

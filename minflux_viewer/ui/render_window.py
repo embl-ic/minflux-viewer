@@ -27,14 +27,14 @@ Interactions (unchanged from pre-pyramid version)
 * **Scroll** on the image to zoom in/out around the cursor.
 * **Orientation dropdown** — switch between XY (default), XZ, YZ.
 * **Z slider** (3-D data) — step through Z slabs.
-* **Sigma** spin box to override the automatic blur.
+* **Fixed Gaussian sigma** is edited from the right-click context menu when
+  that method is selected.
 * **Reset view** resets orientation (XY), zoom, B&C, and Z to centre.
 * Focus on the window to make its dataset the active one (Fiji-style).
 """
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -59,7 +59,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from scipy.ndimage import affine_transform, gaussian_filter, zoom
+from scipy.ndimage import affine_transform, zoom
 
 from .. import resource_path
 from ..core.app_state import AppState
@@ -70,7 +70,7 @@ from ..core.overlay import (
     matrix4_to_xy3,
     transform_key,
 )
-from ..core.roi_selection import active_roi_mask, rectangle_mask, roi_region_mask
+from ..core.roi_selection import active_roi_mask, roi_region_mask
 from ..core.spatial_grid import SpatialGrid
 from .render_config import (
     DIRECT_RENDER_THRESHOLD_NM,
@@ -82,6 +82,13 @@ from .render_config import (
 )
 from .render_scheduler import RenderScheduler
 from .tile_cache import PhysicalTileCache, TileKey
+from .precision_render import (
+    RENDER_METHOD_BASIC,
+    RENDER_METHOD_FIXED_GAUSSIAN,
+    RENDER_METHOD_LABELS,
+    RENDER_METHOD_MENU_ORDER,
+    RENDER_METHOD_TIPS,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -92,38 +99,6 @@ _DEBOUNCE_MS   = 25      # delay between view change and re-render
 _COLORMAPS     = ["hot", "inferno", "viridis", "magma", "plasma", "cividis", "gray"]
 _ORIENTATIONS  = ["XY", "XZ", "YZ", "3D"]
 _RENDER_ORIENTATIONS = {"XY", "XZ", "YZ"}
-# Right-click "Render Mode" submenu: (mode id, label, hover-help). The help
-# explains both the mode and how it reconstructs pixels.
-_RENDER_MODE_INFO = (
-    (
-        "basic",
-        "Basic",
-        "Basic render — the fast production pipeline.\n"
-        "\n"
-        "Tiled LOD cache when zoomed out, direct\n"
-        "per-viewport render when zoomed in. Each\n"
-        "region is drawn as a 2-D histogram (dense)\n"
-        "or a per-localization isotropic Gaussian\n"
-        "(sparse), optionally blurred by one sigma.\n"
-        "Fast and responsive for everyday viewing.",
-    ),
-    (
-        "advanced",
-        "Advanced",
-        "Advanced render — precision reconstruction\n"
-        "(SMAP-inspired).\n"
-        "\n"
-        "Every localization is a unit-mass,\n"
-        "pixel-integrated anisotropic Gaussian sized\n"
-        "by its own precision (per-loc → per-trace\n"
-        "StdDev → calibration → 5 nm fallback). Adds\n"
-        "a Renderer selector (Histogram, Bilinear,\n"
-        "Basic, Fixed Gaussian, Loc-precision\n"
-        "Gaussian). Sharper, precision-weighted;\n"
-        "heavier, but cached + progressive so\n"
-        "interaction stays responsive.",
-    ),
-)
 _PURE_COLOR_LUTS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"]
 _CHANNEL_LUTS  = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray", *_COLORMAPS]
 _IMAGEJ_AUTO_THRESHOLD = 5000
@@ -513,26 +488,32 @@ class DepthRangeDialog(QDialog):
 
 
 class SigmaDialog(QDialog):
-    """Small modal dialog for render-convolution sigma in physical units."""
+    """Modal editor for fixed-Gaussian lateral and axial widths."""
 
-    def __init__(self, values_xyz: tuple[float, float, float], parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        values_xyz: tuple[float, float, float] | tuple[float, float],
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Render Sigma")
+        self.setWindowTitle("Fixed Gaussian Sigma")
         self.setModal(True)
-        self.resize(260, 120)
+        self.resize(280, 120)
 
         root = QVBoxLayout(self)
         form = QFormLayout()
         root.addLayout(form)
 
         self._spins: list[QDoubleSpinBox] = []
-        for label, value in zip(("X sigma", "Y sigma", "Z sigma"), values_xyz):
+        values = tuple(float(value) for value in values_xyz)
+        if len(values) == 3:
+            values = (values[0], values[2])
+        for label, value in zip(("XY sigma", "Z sigma"), values):
             spin = QDoubleSpinBox()
             spin.setDecimals(2)
-            spin.setRange(0.0, 10000.0)
+            spin.setRange(0.01, 10000.0)
             spin.setSingleStep(1.0)
-            spin.setValue(float(value))
-            spin.setSpecialValueText("auto")
+            spin.setValue(max(float(value), 0.01))
             spin.setSuffix(" nm")
             form.addRow(label, spin)
             self._spins.append(spin)
@@ -545,7 +526,11 @@ class SigmaDialog(QDialog):
         root.addWidget(buttons)
 
     def values_xyz(self) -> tuple[float, float, float]:
-        return tuple(float(spin.value()) for spin in self._spins)
+        xy, z = self.values_xy_z()
+        return xy, xy, z
+
+    def values_xy_z(self) -> tuple[float, float]:
+        return float(self._spins[0].value()), float(self._spins[1].value())
 
 
 class ManualAlignDialog(QDialog):
@@ -702,10 +687,7 @@ class RenderWindow(QWidget):
 
     TAG = "render_window"
     SUPPORTS_VOLUME_3D = True
-    SIGMA_MENU_TEXT = "Sigma"
-    # Which render engine this window is. The right-click "Render Mode" submenu
-    # swaps between them (PrecisionRenderWindow sets this to "advanced").
-    RENDER_MODE = "basic"
+    SIGMA_MENU_TEXT = "Fixed Gaussian sigma…"
 
     def __init__(
         self,
@@ -744,7 +726,9 @@ class RenderWindow(QWidget):
         pref_cmap = str(state.prefs.get("plot", {}).get("render_cmap", "hot")).lower()
         self._active_cmap: str = pref_cmap if pref_cmap in _COLORMAPS else "hot"
         self._axis_visible: bool = False
-        self._sigma_nm_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._sigma_nm_xyz: tuple[float, float, float] = tuple(
+            getattr(self, "_sigma_nm_xyz", (5.0, 5.0, 5.0))
+        )
         self._channels: list[dict] = []
         self._channel_rows: list[tuple[QLabel, QComboBox]] = []
         self._export_workers: list = []  # live TIFF-export QThreads (kept from GC)
@@ -1157,6 +1141,7 @@ class RenderWindow(QWidget):
         if 0 <= ch_idx < len(self._channels):
             self._channels[ch_idx]["visible"] = bool(visible)
             self._compose_from_cache()
+            self._sync_volume_display_state()
 
     def _on_channel_lut(self, ch_idx: int, lut: str) -> None:
         if 0 <= ch_idx < len(self._channels):
@@ -1167,9 +1152,11 @@ class RenderWindow(QWidget):
             except Exception:
                 pass
             self._compose_from_cache()
+            self._sync_volume_display_state()
             # Recolour the B/C histogram if this is the active channel.
             if ch_idx == self._active_channel_index():
                 self._sync_bc_dialog()
+                self.sync_lut_dialog()
 
     def _channel_locs(self, ch: dict) -> np.ndarray:
         ds = self._state.datasets[ch["dataset_idx"]]
@@ -1477,7 +1464,8 @@ class RenderWindow(QWidget):
                 self._fit_view()
                 self._schedule_render()
             return
-        self._sigma_nm_xyz = (0.0, 0.0, 0.0)
+        if not hasattr(self, "_advanced_render_method"):
+            self._sigma_nm_xyz = (0.0, 0.0, 0.0)
         self._all_depth_check.setChecked(True)
         self._depth_range = self._bounds_depth
         self._depth_range_initialized = False
@@ -2066,6 +2054,68 @@ class RenderWindow(QWidget):
         img = self._image_view.imageItem.image
         return None if img is None else np.asarray(img)
 
+    def _volume_contrast_pct_for_channel(self, ch_idx: int) -> tuple[float, float]:
+        """Return this channel's 2-D B/C as nonzero-pixel percentiles."""
+        default = (0.0, 99.7)
+        try:
+            if self._last_scalar_tile is None or not (0 <= ch_idx < len(self._channels)):
+                return default
+            pixels = np.asarray(self._last_scalar_tile[ch_idx], dtype=np.float64)
+            values = pixels[np.isfinite(pixels)]
+            if values.size == 0:
+                return default
+            levels = self._channels[ch_idx].get("levels")
+            if levels is None:
+                levels = (
+                    self._manual_levels
+                    if len(self._channels) == 1 and self._manual_levels
+                    else self._compute_auto_levels(pixels)
+                )
+            if not levels:
+                return default
+            lo, hi = float(levels[0]), float(levels[1])
+            nonzero = values[values > 0.0]
+            if nonzero.size == 0:
+                return default
+            black = float(np.mean(nonzero < lo) * 100.0)
+            white = float(np.mean(nonzero < hi) * 100.0)
+            if white <= black:
+                white = min(black + 1.0, 100.0)
+            return black, white
+        except Exception:
+            return default
+
+    def _volume_display_state(self) -> dict | None:
+        """Snapshot cheap 2-D display state for an open 3-D volume.
+
+        This deliberately excludes camera/FOV and channel transforms. Those are
+        spatial state and remain explicit refresh actions from the 3-D menu.
+        """
+        if self._render_mode != "localizations" or not self._channels:
+            return None
+        channels = []
+        for i, channel in enumerate(self._channels):
+            channels.append(
+                {
+                    "dataset_idx": int(channel.get("dataset_idx", -1)),
+                    "kind": str(channel.get("kind", "localizations")),
+                    "visible": bool(channel.get("visible", True)),
+                    "lut": str(channel.get("lut") or self._active_cmap),
+                    "contrast_pct": self._volume_contrast_pct_for_channel(i),
+                }
+            )
+        return {"channels": channels, "invert": bool(getattr(self, "_lut_invert", False))}
+
+    def _sync_volume_display_state(self) -> None:
+        volume = getattr(self, "_volume_window", None)
+        if volume is None:
+            return
+        try:
+            if volume.isVisible() and hasattr(volume, "sync_from_2d"):
+                volume.sync_from_2d(self._volume_display_state())
+        except RuntimeError:
+            self._volume_window = None
+
     def _sync_bc_dialog(self) -> None:
         """Point the open B/C dialog at the active channel: its pixel histogram
         (coloured with that channel's LUT) and its own contrast levels."""
@@ -2228,8 +2278,13 @@ class RenderWindow(QWidget):
         else:
             lo, hi = levels
         safe = np.nan_to_num(tile.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
-        norm = (safe - float(lo)) / max(float(hi) - float(lo), 1e-12)
-        return np.clip(norm, 0.0, 1.0)
+        norm = np.clip((safe - float(lo)) / max(float(hi) - float(lo), 1e-12), 0.0, 1.0)
+        # Per-channel gamma (LUT dialog): warp the normalised value before the
+        # colour ramp. <1 brightens mid-tones, >1 darkens them.
+        gamma = float(ch.get("gamma", 1.0) or 1.0)
+        if gamma > 0.0 and abs(gamma - 1.0) > 1e-6:
+            norm = np.power(norm, gamma, dtype=np.float32)
+        return norm
 
     def _map_norm_to_rgb(self, norm: np.ndarray, lut: str) -> np.ndarray:
         if lut in _CHANNEL_COLORS:
@@ -2301,6 +2356,7 @@ class RenderWindow(QWidget):
                     combo.setCurrentText(name)
                     combo.blockSignals(False)
             self._compose_from_cache()
+            self._sync_volume_display_state()
             return
 
         try:
@@ -2429,6 +2485,8 @@ class RenderWindow(QWidget):
         if 0 <= target < len(self._channels):
             self._channels[target]["levels"] = (lo, hi)
             self._compose_from_cache()
+            self._sync_volume_display_state()
+        self.sync_lut_dialog()
 
     def _on_bc_auto(self) -> None:
         img = self._bc_pixels()
@@ -2443,11 +2501,13 @@ class RenderWindow(QWidget):
         if 0 <= target < len(self._channels):
             self._channels[target]["levels"] = None
         self._compose_from_cache()
+        self._sync_volume_display_state()
         if self._bc_dialog is not None:
             self._bc_dialog.set_bar_color(self._histogram_bar_color())
             self._bc_dialog.set_data(img)
             self._bc_dialog.set_levels(*levels)
             self._bc_dialog.set_auto_state(True)
+        self.sync_lut_dialog()
 
     def _on_bc_reset(self) -> None:
         img = self._bc_pixels()
@@ -2469,6 +2529,8 @@ class RenderWindow(QWidget):
             self._bc_dialog.set_data(img)
             self._bc_dialog.set_levels(*levels)
         self._compose_from_cache()
+        self._sync_volume_display_state()
+        self.sync_lut_dialog()
 
     # ------------------------------------------------------------------
     # LUT dialog (Fiji-style B&C + colormap)
@@ -2476,7 +2538,7 @@ class RenderWindow(QWidget):
 
     def open_lut_dialog(self) -> None:
         """Open the rich LUT editor for this render window."""
-        from .lut_dialog import LutDialog, make_colormap
+        from .lut_dialog import LutDialog
 
         if getattr(self, "_lut_dialog", None) is None:
             self._lut_dialog = LutDialog(
@@ -2484,31 +2546,53 @@ class RenderWindow(QWidget):
                 on_cmap_changed=self._on_lut_cmap_changed,
                 on_invert_changed=self._on_lut_invert_changed,
                 on_reset=self._on_bc_reset,
+                on_gamma_changed=self._on_lut_gamma_changed,
                 parent=self,
             )
-
-        img = self._bc_pixels()
-        if img is None:
+        if not self._refresh_lut_dialog(capture_baseline=True):
             self._lut_dialog.show(); self._lut_dialog.raise_()
             return
+        self._lut_dialog.show()
+        self._lut_dialog.raise_()
+        self._lut_dialog.activateWindow()
 
+    def _refresh_lut_dialog(self, *, capture_baseline: bool) -> bool:
+        """(Re)load the LUT dialog from this window's current state. Returns False
+        when there is nothing to show (image mode / no pixels)."""
+        dlg = getattr(self, "_lut_dialog", None)
+        if dlg is None:
+            return False
+        img = self._bc_pixels()
+        if img is None:
+            return False
         data_lo = float(img.min())
         data_hi = float(img.max() if img.max() > img.min() else img.min() + 1.0)
         if self._manual_levels is not None:
             lo, hi = self._manual_levels
         else:
             lo, hi = data_lo, data_hi
-
         self._lut_invert = bool(getattr(self, "_lut_invert", False))
-        self._lut_dialog.load_image(
+        dlg.load_image(
             pixels=img, data_lo=data_lo, data_hi=data_hi,
             lo=float(lo), hi=float(hi),
             cmap_name=self._active_channel_lut(),
             invert=self._lut_invert,
+            gamma=self._active_channel_gamma(),
+            capture_baseline=capture_baseline,
         )
-        self._lut_dialog.show()
-        self._lut_dialog.raise_()
-        self._lut_dialog.activateWindow()
+        return True
+
+    def sync_lut_dialog(self) -> None:
+        """Push this window's current LUT/brightness/colormap into an already-open
+        LUT dialog, so external changes reflect in realtime. Skipped while the user
+        is editing the dialog itself (it is the active window then)."""
+        dlg = getattr(self, "_lut_dialog", None)
+        try:
+            if dlg is None or not dlg.isVisible() or dlg.isActiveWindow():
+                return
+        except RuntimeError:
+            return
+        self._refresh_lut_dialog(capture_baseline=False)
 
     def _on_lut_cmap_changed(self, name: str, invert: bool) -> None:
         from .lut_dialog import make_colormap
@@ -2523,9 +2607,11 @@ class RenderWindow(QWidget):
                 combo.setCurrentText(name)
                 combo.blockSignals(False)
             self._compose_from_cache()
+            self._sync_volume_display_state()
             return
         try:
-            self._image_view.setColorMap(make_colormap(name, invert=invert))
+            self._image_view.setColorMap(
+                make_colormap(name, invert=invert, gamma=getattr(self, "_lut_gamma", 1.0)))
         except Exception as exc:
             print(f"LUT cmap change failed: {exc}")
 
@@ -2533,11 +2619,36 @@ class RenderWindow(QWidget):
         self._lut_invert = invert
         self._on_lut_cmap_changed(self._active_channel_lut(), invert)
 
+    def _on_lut_gamma_changed(self, gamma: float) -> None:
+        """LUT dialog gamma → the active channel (localization compositing) or the
+        image LUT (TIFF path)."""
+        from .lut_dialog import make_colormap
+        g = float(gamma)
+        self._lut_gamma = g
+        if self._channels:
+            i = self._active_channel_index()
+            if 0 <= i < len(self._channels):
+                self._channels[i]["gamma"] = g
+            self._compose_from_cache()
+        else:
+            try:
+                self._image_view.setColorMap(
+                    make_colormap(self._active_cmap, invert=getattr(self, "_lut_invert", False), gamma=g))
+            except Exception as exc:
+                print(f"LUT gamma change failed: {exc}")
+
     def _active_channel_lut(self) -> str:
         for ch in self._channels:
             if ch["visible"]:
                 return str(ch["lut"])
         return self._active_cmap
+
+    def _active_channel_gamma(self) -> float:
+        if self._channels:
+            i = self._active_channel_index()
+            if 0 <= i < len(self._channels):
+                return float(self._channels[i].get("gamma", 1.0) or 1.0)
+        return float(getattr(self, "_lut_gamma", 1.0) or 1.0)
 
     # ------------------------------------------------------------------
     # View interaction
@@ -2585,22 +2696,38 @@ class RenderWindow(QWidget):
         wb_action.setChecked(self._white_bg)
         wb_action.triggered.connect(self._set_white_background)
 
-        # Render Mode (Basic / Advanced) lives inside View, below White background.
-        mode_menu = view_menu.addMenu("Render Mode")
-        mode_menu.setToolTipsVisible(True)  # show the per-item hover help
-        for mode_id, label, tip in _RENDER_MODE_INFO:
-            action = mode_menu.addAction(label)
+        # Reconstruction methods are actions on the unified renderer. Put the
+        # preferred method first so the menu communicates the active default.
+        method_menu = view_menu.addMenu("Render Method")
+        method_menu.setToolTipsVisible(True)
+        preferred = str(
+            self._state.prefs.get("plot", {}).get(
+                "render_method", RENDER_METHOD_BASIC
+            )
+        )
+        if preferred not in RENDER_METHOD_LABELS:
+            preferred = RENDER_METHOD_BASIC
+        method_order = (preferred,) + tuple(
+            method
+            for method in RENDER_METHOD_MENU_ORDER
+            if method != preferred
+        )
+        current_method = getattr(self, "_advanced_render_method", None)
+        for method in method_order:
+            label = RENDER_METHOD_LABELS[method]
+            if method == preferred:
+                label += " (default)"
+            action = method_menu.addAction(label)
             action.setCheckable(True)
-            action.setChecked(self.RENDER_MODE == mode_id)
-            action.setToolTip(tip)
-            # Advanced render is localization-only; grey it out in image mode.
-            if mode_id == "advanced" and self._render_mode != "localizations":
+            action.setChecked(current_method == method)
+            action.setToolTip(RENDER_METHOD_TIPS[method])
+            if self._render_mode != "localizations":
                 action.setEnabled(False)
                 action.setToolTip(
-                    "Advanced render applies to localization data, not images."
+                    "Render methods apply to localization data, not image files."
                 )
             action.triggered.connect(
-                lambda _checked=False, value=mode_id: self._switch_render_mode(value)
+                lambda _checked=False, value=method: self._set_render_method(value)
             )
 
         cmap_menu = menu.addMenu("Colormap")
@@ -2616,20 +2743,18 @@ class RenderWindow(QWidget):
             action.setChecked(self._active_channel_lut() == name)
             action.triggered.connect(lambda _checked=False, value=name: self._on_cmap_changed(value))
 
-        bc_action = menu.addAction("Brightness/Contrast", self._show_brightness_contrast)
-        bc_shortcut = str(self._state.prefs.get("shortcuts", {}).get("brightness_contrast", "") or "")
-        if bc_shortcut:
-            bc_action.setShortcut(QKeySequence(bc_shortcut))
-            try:
-                bc_action.setShortcutVisibleInContextMenu(False)
-            except Exception:
-                pass
-        menu.addAction(self.SIGMA_MENU_TEXT, self._show_sigma_dialog)
+        # No setShortcut here: brightness_contrast is an application-wide shortcut
+        # (main window) that already fires from this render window. A shortcut on
+        # this context-menu action too would be an ambiguous overload.
+        menu.addAction("Brightness/Contrast", self._show_brightness_contrast)
 
         axis_action = menu.addAction("Axis")
         axis_action.setCheckable(True)
         axis_action.setChecked(self._axis_visible)
         axis_action.triggered.connect(self._set_axis_visible_from_menu)
+
+        if getattr(self, "_advanced_render_method", None) == RENDER_METHOD_FIXED_GAUSSIAN:
+            menu.addAction(self.SIGMA_MENU_TEXT, self._show_sigma_dialog)
 
         export_action = menu.addAction("Export to TIFF…", self._export_to_tiff)
         export_action.setEnabled(self._render_mode == "localizations")
@@ -2637,15 +2762,10 @@ class RenderWindow(QWidget):
         menu.addAction("Reset View", self._reset_view)
         menu.exec(self._image_view.ui.graphicsView.mapToGlobal(pos))
 
-    def _switch_render_mode(self, mode: str) -> None:
-        """Right-click Render Mode ▸ Basic/Advanced: swap this window for the
-        other render engine on the same dataset, preserving the current view."""
-        if mode == self.RENDER_MODE:
-            return
-        main_window = getattr(getattr(self._state, "mfv", None), "_main_window", None)
-        if main_window is None or not hasattr(main_window, "_swap_render_mode"):
-            return
-        main_window._swap_render_mode(self, mode)
+    def _set_render_method(self, method: str) -> None:
+        """Set a reconstruction method on the unified renderer subclass."""
+        del method
+
 
     def _set_orientation(self, text: str) -> None:
         if text not in _RENDER_ORIENTATIONS:
@@ -2665,7 +2785,7 @@ class RenderWindow(QWidget):
     def _set_axis_visible_from_menu(self, checked: bool) -> None:
         self._set_axes_visible(bool(checked))
 
-    def _show_3d_volume_window(self) -> None:
+    def _show_3d_volume_window(self, _checked: bool = False) -> None:
         if self._idx is None or not (0 <= self._idx < len(self._state.datasets)):
             return
         self._state.set_active(self._idx)
@@ -2675,11 +2795,17 @@ class RenderWindow(QWidget):
                 self._state,
                 self._idx,
                 sigma_nm_xyz=self._sigma_nm_xyz,
+                display_state=self._volume_display_state(),
                 parent=self,
             )
             self._volume_window.destroyed.connect(lambda *_: setattr(self, "_volume_window", None))
         else:
             self._volume_window._sigma_nm_xyz = self._sigma_nm_xyz
+            self._volume_window.capture_spatial_state()
+            self._volume_window._display_state = self._volume_display_state()
+            self._volume_window._apply_display_state_to_controls(
+                self._volume_window._display_state
+            )
             self._volume_window.refresh_from_dataset()
         self._volume_window.show()
         self._volume_window.raise_()
@@ -2768,7 +2894,11 @@ class RenderWindow(QWidget):
             return
 
         all_xyz = np.vstack([c.xyz for c in channels])
-        is_3d = float(all_xyz[:, 2].max() - all_xyz[:, 2].min()) > 1.0
+        is_3d = any(
+            int(getattr(self._state.datasets[ch["dataset_idx"]].prop, "num_dim", 2)) >= 3
+            for ch in self._channels
+            if ch.get("visible") and ch.get("kind") == "localizations"
+        )
 
         roi_bounds = self._active_rectangle_xy_bounds()
         if roi_bounds is not None:
@@ -2777,7 +2907,10 @@ class RenderWindow(QWidget):
         else:
             x_span = (float(all_xyz[:, 0].min()), float(all_xyz[:, 0].max()))
             y_span = (float(all_xyz[:, 1].min()), float(all_xyz[:, 1].max()))
-        z_span = (float(all_xyz[:, 2].min()), float(all_xyz[:, 2].max()))
+        finite_z = all_xyz[:, 2][np.isfinite(all_xyz[:, 2])]
+        if finite_z.size == 0:
+            finite_z = np.zeros(1, dtype=float)
+        z_span = (float(finite_z.min()), float(finite_z.max()))
 
         ds0 = self._state.datasets[self._idx] if self._idx is not None else None
         rimf = None
@@ -3444,6 +3577,7 @@ class RenderWindow(QWidget):
         if any(ch.get("dataset_idx") == idx for ch in self._channels):
             self._idx = idx
             self._sync_bc_dialog()
+            self.sync_lut_dialog()
 
     def _on_filter_changed(self, idx: int) -> None:
         if any(ch["dataset_idx"] == idx for ch in self._channels):

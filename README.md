@@ -19,7 +19,7 @@ as a Python/Qt reimplementation of a previous in-house built MATLAB toolset.
 - Files are opened from the menu or by drag-and-drop. Multiple datasets as multi-channel data are supported as overlay, but need to be imported as the original .msr raw data.
 
 MINFLUX data exists in several structural versions (`m2410`, `m2205`, and older
-*legacy* layouts) and container formats that have changed across Imspector/MINFLUX releases. The common ones are supported. A file that does not open correctly can be reported on the [issue tracker](https://github.com/EMBL-ICLM/minflux-viewer/issues) with a minimum sample, so the parser can be extended to cover it.
+*legacy* layouts) and container formats that have changed across Imspector/MINFLUX releases. The common ones are supported. A file that does not open correctly can be reported on the [issue tracker](https://github.com/embl-ic/minflux-viewer/issues) with a minimum sample, so the parser can be extended to cover it.
 
 ## Visualization
 
@@ -66,7 +66,7 @@ MINFLUX data exists in several structural versions (`m2410`, `m2205`, and older
 ## Installation and running
 
 Prebuilt applications for each operating system are provided on the
-[Releases](https://github.com/EMBL-ICLM/minflux-viewer/releases) page.
+[Releases](https://github.com/embl-ic/minflux-viewer/releases) page.
 
 | OS | File | Run |
 |----|------|-----|
@@ -86,7 +86,7 @@ Python 3.10, 3.11, or 3.12 is required.
 
 ```bash
 # Clone
-git clone https://github.com/EMBL-ICLM/minflux-viewer.git
+git clone https://github.com/embl-ic/minflux-viewer.git
 cd minflux-viewer
 
 # Create and activate a virtual environment

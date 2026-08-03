@@ -7,6 +7,7 @@ import pytest
 
 from minflux_viewer.ui.volume_window import (
     _clip_region,
+    _compose_multichannel_rgba,
     _precision_volume_3d,
     lut_rgb,
     make_multichannel_volume_payload,
@@ -124,6 +125,29 @@ def test_multichannel_overlap_is_yellow():
     R, G, B = rgba[..., 0], rgba[..., 1], rgba[..., 2]
     # Where both channels overlap, red + green add to yellow (R & G high, B low).
     assert np.any((R > 100) & (G > 100) & (B < 80) & vis), "no yellow overlap voxels"
+
+
+def test_multichannel_caches_compact_norms_for_display_sync():
+    rng = np.random.default_rng(11)
+    red = rng.normal([0.0, 0.0, 0.0], [5.0, 5.0, 25.0], size=(1500, 3))
+    green = rng.normal([160.0, 0.0, 0.0], [5.0, 5.0, 25.0], size=(1500, 3))
+    payload = make_multichannel_volume_payload(
+        [red, green], [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+        xy_voxel_nm=5.0, z_voxel_nm=5.0, max_dim=96, opacity=1.0,
+        channel_contrast_pct=[(0.0, 10.0), (0.0, 99.7)],
+    )
+
+    assert payload.channel_norms is not None
+    assert len(payload.channel_norms) == 2
+    assert all(norm.dtype == np.uint8 for norm in payload.channel_norms)
+    assert all(norm.shape == payload.counts for norm in payload.channel_norms)
+    # Recomposition from the cached responses changes channel contribution
+    # without rebuilding the voxel grid.
+    red_only = _compose_multichannel_rgba(
+        [payload.channel_norms[0]], [(1.0, 0.0, 0.0)], 1.0
+    )
+    assert np.any(red_only[..., 0] > 0)
+    assert np.all(red_only[..., 1] == 0)
 
 
 def test_multichannel_requires_z_range():

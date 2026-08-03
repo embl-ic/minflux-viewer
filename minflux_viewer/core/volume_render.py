@@ -59,10 +59,14 @@ class HistogramVolume:
     """Cached voxelised representation of a MINFLUX localisation cloud."""
 
     def __init__(self, loc_nm: np.ndarray) -> None:
-        if loc_nm.ndim != 2 or loc_nm.shape[1] != 3:
+        coords = np.asarray(loc_nm, dtype=np.float64)
+        if coords.ndim != 2 or coords.shape[1] != 3:
             raise ValueError("loc_nm must have shape (N, 3)")
 
-        self._loc_nm = np.asarray(loc_nm, dtype=np.float64)
+        # Missing coordinates must not poison min/max/extent calculations or
+        # make a planar cloud look volumetric.  The canonical loader normally
+        # zero-fills 2-D Z, but this class is also used with direct arrays.
+        self._loc_nm = coords[np.all(np.isfinite(coords), axis=1)]
         self._config: VolumeRenderConfig | None = None
         self._raw_volume: np.ndarray | None = None
         self._smoothed_volume: np.ndarray | None = None
@@ -79,7 +83,8 @@ class HistogramVolume:
         if not self.has_data:
             return False
         z = self._loc_nm[:, 2]
-        return bool(np.ptp(z) > 1.0)
+        finite_z = z[np.isfinite(z)]
+        return bool(finite_z.size and np.ptp(finite_z) > 1.0)
 
     def configure(self, config: VolumeRenderConfig) -> None:
         """Rebuild caches only when the physical render settings change."""

@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Any
 
 
-FILTER_KEYS = {"apply", "attribute", "value_as", "min", "max"}
+# Note: the iteration selector is stored under "iteration", NOT "itr" — "itr"
+# is a raw MINFLUX data-column name (see MINFLUX_DATA_KEYS below), so a filter
+# row keyed "itr" would be misclassified as a data row and rejected.
+FILTER_KEYS = {"apply", "attribute", "value_as", "min", "max", "iteration"}
 MINFLUX_DATA_KEYS = {"loc", "lnc", "ext", "tid", "tim", "itr", "vld", "efo", "cfr", "dcr"}
 
 

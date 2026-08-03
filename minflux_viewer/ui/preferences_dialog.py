@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QMessageBox,
     QKeySequenceEdit,
     QScrollArea,
     QSpinBox,
@@ -56,6 +57,12 @@ from PyQt6.QtWidgets import (
 
 from ..core.app_state import AppState, DEFAULT_PREFS
 from ..msr.descriptions import describe_path
+from .precision_render import (
+    RENDER_METHOD_DEFAULT,
+    RENDER_METHOD_LABELS,
+    RENDER_METHOD_PREFERENCE_ORDER,
+    RENDER_METHOD_TIPS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +663,19 @@ class PreferencesDialog(QDialog):
             self._render_xy_origin_combo.addItem(label, value)
         form_render.addRow("Display XY coordinates as", self._render_xy_origin_combo)
 
+        render_method_row = QHBoxLayout()
+        self._render_method_combo = QComboBox()
+        for method in RENDER_METHOD_PREFERENCE_ORDER:
+            self._render_method_combo.addItem(RENDER_METHOD_LABELS[method], method)
+        self._render_method_help = QPushButton("Help")
+        self._render_method_help.setToolTip(
+            "Explain the scientific assumptions and visual effect of each render method."
+        )
+        self._render_method_help.clicked.connect(self._show_render_method_help)
+        render_method_row.addWidget(self._render_method_combo, 1)
+        render_method_row.addWidget(self._render_method_help)
+        form_render.addRow("Default render method", render_method_row)
+
         root.addWidget(grp_render)
 
         # ── Scatter Plot ─────────────────────────────────────────────
@@ -826,6 +846,20 @@ class PreferencesDialog(QDialog):
 
         root.addStretch()
         return w
+
+    def _show_render_method_help(self) -> None:
+        sections = [
+            f"{RENDER_METHOD_LABELS[method]}\n{RENDER_METHOD_TIPS[method]}"
+            for method in RENDER_METHOD_PREFERENCE_ORDER
+        ]
+        QMessageBox.information(
+            self,
+            "Render Methods",
+            "The render method reconstructs the localization point cloud "
+            "as a scalar image. The methods make different assumptions about "
+            "pixel occupancy, localization uncertainty, and sampling density.\n\n"
+            + "\n\n".join(sections),
+        )
 
     # -- Plugin tab --------------------------------------------------
 
@@ -1136,6 +1170,10 @@ class PreferencesDialog(QDialog):
         self._px_spin.setValue(float(p.get("render_pixel_size", 2)))
         self._set_combo(self._render_cmap_combo, p.get("render_cmap", "Hot"), _RENDER_CMAPS)
         self._set_combo_data(self._render_xy_origin_combo, p.get("render_xy_origin", "top_left"))
+        self._set_combo_data(
+            self._render_method_combo,
+            p.get("render_method", RENDER_METHOD_DEFAULT),
+        )
         self._set_combo(self._scatter_color_by_combo, p.get("scatter_color_by", "tid"),
                         _SCATTER_COLOR_BY_OPTIONS)
         self._set_combo(self._scatter_cmap_combo, p.get("scatter_cmap", "jet"), _SCATTER_CMAPS)
@@ -1243,6 +1281,9 @@ class PreferencesDialog(QDialog):
         p["render_pixel_size"] = float(self._px_spin.value())
         p["render_cmap"] = self._render_cmap_combo.currentText()
         p["render_xy_origin"] = str(self._render_xy_origin_combo.currentData() or "top_left")
+        p["render_method"] = str(
+            self._render_method_combo.currentData() or RENDER_METHOD_DEFAULT
+        )
         p["scatter_color_by"] = self._scatter_color_by_combo.currentText()
         p["scatter_cmap"] = self._scatter_cmap_combo.currentText()
         p["scatter_xy_origin"] = str(self._scatter_xy_origin_combo.currentData() or "top_left")

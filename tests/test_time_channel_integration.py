@@ -87,10 +87,16 @@ def test_main_window_creates_filtered_time_channel_overlay(_app, tmp_path):
         assert state.active_idx == 1
         assert shown == [1]
 
+        # Time-window separation now lives under the "Convert Dataset to
+        # Multi-Channel Overlay" submenu (relabelled "by Time Window").
         menu_labels = [
             action.text() for action in window.menuProcessChannel.actions()
         ]
-        assert "Separate Channels from Time Windows" in menu_labels
+        assert "Convert Dataset to Multi-Channel Overlay" in menu_labels
+        convert_labels = [
+            action.text() for action in window.menuConvertOverlay.actions()
+        ]
+        assert "by Time Window" in convert_labels
     finally:
         window.close()
         _app.processEvents()

@@ -34,11 +34,17 @@ from ..core.attributes import (
     is_trace_wise_attribute,
     plot_attribute_names,
 )
-from ..core.iteration import iteration_labels, ordinal, parse_iteration_label
+from ..core.iteration import (
+    iteration_bold_flags,
+    iteration_labels,
+    ordinal,
+    parse_iteration_label,
+)
 from ..core.loader import (
     attr_matches_selection,
     attr_values_1d,
     effective_iteration_for_attr,
+    effective_iterations_for_attr,
     mfx_filter_mask,
     mfx_get,
 )
@@ -294,6 +300,7 @@ class HistogramWindow(QWidget):
         self._enforce_trace_aggregation()
 
         iter_opts = self._iter_labels(ds)
+        self._eff_iter_cache = {}                    # dataset (re)loaded → drop cache
         self._iter_combo.blockSignals(True)
         self._iter_combo.clear()
         self._iter_combo.addItems(iter_opts)
@@ -305,6 +312,7 @@ class HistogramWindow(QWidget):
         has_iters = bool(iter_opts)
         self._iter_combo.setVisible(has_iters)
         self._iter_label.setVisible(has_iters)
+        self._style_iteration_boldness()             # bold the useful iterations
 
         self._zero_chk.blockSignals(True)
         self._log_chk.blockSignals(True)
@@ -365,6 +373,33 @@ class HistogramWindow(QWidget):
         """Preferred default label for *attr*: its effective iteration (cfr/efc)
         when defined, otherwise the last-iteration default."""
         return self._effective_iter_label(ds, attr) or self._default_iter_label(ds)
+
+    def _style_iteration_boldness(self) -> None:
+        """Bold the iteration-dropdown entries that hold real values for the
+        current attribute, so the useful iterations stand out while browsing
+        (e.g. cfr → only its measured iteration(s); dcr → every iteration)."""
+        from PyQt6.QtGui import QFont
+
+        ds = self._dataset()
+        if ds is None or self._iter_combo.count() == 0:
+            return
+        attr = self._attr_combo.currentText()
+        cache = getattr(self, "_eff_iter_cache", None)
+        if cache is None:
+            cache = self._eff_iter_cache = {}
+        if attr not in cache:
+            try:
+                cache[attr] = effective_iterations_for_attr(ds, attr)
+            except Exception:
+                cache[attr] = None
+        eff = cache[attr]
+        labels = [self._iter_combo.itemText(i) for i in range(self._iter_combo.count())]
+        flags = (iteration_bold_flags(labels, eff, self._num_itr(ds))
+                 if eff is not None else [False] * len(labels))
+        for i, bold in enumerate(flags):
+            font = QFont(self._iter_combo.font())
+            font.setBold(bool(bold))
+            self._iter_combo.setItemData(i, font, Qt.ItemDataRole.FontRole)
 
     def _enforce_effective_iteration(self) -> None:
         """Auto-select the effective iteration when the attribute is cfr/efc.
@@ -1287,6 +1322,7 @@ class HistogramWindow(QWidget):
     def _on_histogram_attribute_changed(self, *_args) -> None:
         self._enforce_trace_aggregation()
         self._enforce_effective_iteration()
+        self._style_iteration_boldness()             # re-bold for the new attribute
         self._reset_for_new_data()
         if self._filter_edit:
             self._reset_filter_region_to_current_data()

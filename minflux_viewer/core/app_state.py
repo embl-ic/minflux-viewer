@@ -108,6 +108,7 @@ DEFAULT_PREFS: dict = {
         "render_pixel_size": 2,
         "render_cmap": "hot",
         "render_xy_origin": "top_left",     # "top_left" | "bottom_left"
+        "render_method": "basic",            # smoothed histogram
         "scatter_color_by": "tid",
         "scatter_cmap": "jet",
         "scatter_xy_origin": "top_left",    # "top_left" | "bottom_left"

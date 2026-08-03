@@ -43,7 +43,7 @@ from PyQt6.QtWidgets import (
 
 from ..core.app_state import AppState
 from ..core.attributes import is_trace_wise_attribute, plot_attribute_names
-from ..core.loader import attr_values_1d
+from ..core.loader import attr_values_1d, effective_iteration_for_attr
 from ..core.filter_io import (
     is_filter_json_file,
     is_filter_json_payload,
@@ -206,7 +206,10 @@ class FilterDialog(QDialog):
 
         self._build_ui()
         self._populate_attr_lists()
-        self._install_view_shortcuts()
+        # View-opening shortcuts (Ctrl+1/2/3, Ctrl+R, Ctrl+D) are now handled
+        # application-wide by the main window (ApplicationShortcut) and fire from
+        # this dialog too. A per-dialog QShortcut for the same keys would be an
+        # *ambiguous* overload (Qt then fires neither), so it is not installed.
 
         # Accept JSON filter files dropped anywhere on the dialog.
         # The table widget must not intercept drops, or they won't reach here.
@@ -452,7 +455,7 @@ class FilterDialog(QDialog):
     def _add_row(self, attr: str = "efo", mode: str = "per loc",
                  lo: float = 0.0, hi: float = 1.0, enabled: bool = False,
                  min_inclusive: bool = True, max_inclusive: bool = True,
-                 auto_range: bool = True) -> None:
+                 auto_range: bool = True, itr: "str | int | None" = None) -> None:
         row = self._table.rowCount()
         self._table.insertRow(row)
 
@@ -474,6 +477,11 @@ class FilterDialog(QDialog):
         elif self._numeric_attrs:
             attr_combo.setCurrentIndex(0)
         attr_combo.blockSignals(False)
+        # Stash the authored iteration selector (from a loaded JSON preset) so it
+        # round-trips through _apply_all / _save_json even without a UI column.
+        # Cleared when the user changes the attribute (then re-derived).
+        if itr is not None and str(itr) != "":
+            attr_combo.setProperty("filter_itr", itr)
         attr_combo.currentTextChanged.connect(lambda text, r=row: self._on_row_attr_changed(text, r))
         self._table.setCellWidget(row, _COL_ATTR, attr_combo)
 
@@ -521,9 +529,54 @@ class FilterDialog(QDialog):
         self._table.resizeColumnsToContents()
 
     def _on_row_attr_changed(self, attr: str, row: int) -> None:
+        # A loaded iteration selector no longer applies once the attribute
+        # changes; drop it so _row_iteration re-derives the default.
+        attr_combo = self._table.cellWidget(row, _COL_ATTR)
+        if isinstance(attr_combo, QComboBox):
+            attr_combo.setProperty("filter_itr", None)
         self._enforce_trace_mode(row)
         self._auto_fill_range(attr, row)
         self._table.resizeColumnsToContents()
+
+    def _row_iteration(self, attr_combo, attr: str) -> "str | int":
+        """Iteration selector to persist for a filter row.
+
+        Uses a stashed selector from a loaded JSON preset when present,
+        otherwise derives the current authoring semantics: ``"effective"`` for
+        cfr/efc (their measured iteration), else ``"last"``. This is behaviour-
+        preserving — the FilterDialog always authors against the materialized
+        last-valid (effective-for-cfr/efc) view — while making the stored filter
+        self-describing and reproducible across iteration browsing / round-trips.
+        """
+        if isinstance(attr_combo, QComboBox):
+            stored = attr_combo.property("filter_itr")
+            if stored is not None and str(stored) != "":
+                return stored
+        ds = self._dataset()
+        eff = effective_iteration_for_attr(ds, attr) if ds is not None else None
+        return "effective" if eff is not None else "last"
+
+    def _row_mask_values(self, ds, attr: str, itr_sel: "str | int"):
+        """Per-loc values (aligned to ``ds.attr`` rows) for the live filter mask,
+        honouring the row's iteration selector.
+
+        ``last``/``effective``/``browse`` use the materialized value
+        (:func:`attr_values_1d`, unchanged). A concrete int iteration gathers
+        that iteration's value onto the materialized rows so the live mask
+        matches the persisted spec's semantics.
+        """
+        if isinstance(itr_sel, (int, np.integer)) and not isinstance(itr_sel, bool):
+            from ..core.loader import iteration_attr_values_1d, _attr_row_selection
+            rows = _attr_row_selection(ds)
+            if rows is not None:
+                vals = iteration_attr_values_1d(
+                    ds, attr, int(itr_sel), itr=rows[0], vld_only=rows[1],
+                )
+                if vals is not None:
+                    vals = np.asarray(vals).ravel()
+                    if vals.shape[0] == int(getattr(ds.prop, "num_loc", 0)):
+                        return vals
+        return attr_values_1d(ds, attr)
 
     def _on_row_mode_changed(self, row: int) -> None:
         self._enforce_trace_mode(row)
@@ -647,15 +700,20 @@ class FilterDialog(QDialog):
             if attr not in ds.attr:
                 continue
 
+            itr_sel = self._row_iteration(attr_combo, attr)
+
             # Persist the spec so it can be re-evaluated against the raw
-            # all-iteration store (Stage B iteration/validity browsing).
+            # all-iteration store (Stage B iteration/validity browsing). "itr"
+            # records the iteration the bound was authored against so the filter
+            # is reproducible across iteration browsing and JSON round-trips.
             specs.append({
                 "attribute": attr, "mode": mode,
                 "lo": float(lo), "hi": float(hi),
                 "lo_inc": lo_inc, "hi_inc": hi_inc,
+                "itr": itr_sel,
             })
 
-            raw = attr_values_1d(ds, attr)
+            raw = self._row_mask_values(ds, attr, itr_sel)
             if raw is None:
                 # No per-loc 1-D representation; the persisted spec still
                 # applies on the raw store in the plot windows.
@@ -786,14 +844,19 @@ class FilterDialog(QDialog):
             mode = self._table.cellWidget(row, _COL_MODE)
             lo   = self._table.cellWidget(row, _COL_MIN)
             hi   = self._table.cellWidget(row, _COL_MAX)
+            attr_name = attr.currentText() if isinstance(attr, QComboBox) else ""
             rows.append({
                 "apply":     isinstance(chk, QCheckBox) and chk.isChecked(),
-                "attribute": attr.currentText() if isinstance(attr, QComboBox) else "",
+                "attribute": attr_name,
                 "value_as":  mode.currentText() if isinstance(mode, QComboBox) else "per loc",
                 "min":       lo.value() if isinstance(lo, QDoubleSpinBox) else 0.0,
                 "max":       hi.value() if isinstance(hi, QDoubleSpinBox) else 1.0,
                 "min_inclusive": bool(lo.property("inclusive") if isinstance(lo, QDoubleSpinBox) and lo.property("inclusive") is not None else True),
                 "max_inclusive": bool(hi.property("inclusive") if isinstance(hi, QDoubleSpinBox) and hi.property("inclusive") is not None else True),
+                # Iteration the bound is authored against. NB: NOT "itr" — that
+                # key collides with the raw MINFLUX data-column name and would
+                # make filter_io misclassify the file as data (see filter_io.py).
+                "iteration": self._row_iteration(attr, attr_name),
             })
         try:
             save_filter_json_file(path, rows)
@@ -832,6 +895,7 @@ class FilterDialog(QDialog):
                 min_inclusive = bool(r.get("min_inclusive", True)),
                 max_inclusive = bool(r.get("max_inclusive", True)),
                 auto_range = False,
+                itr     = r.get("iteration", None),
             )
             added += 1
         self._info.setText(f"Appended {added} row(s) from {Path(path).name}")

@@ -410,6 +410,41 @@ def effective_iteration_for_attr(ds: "MinfluxDataset", attr: str) -> "int | None
     return idx0
 
 
+def effective_iterations_for_attr(ds: "MinfluxDataset", attr: str) -> np.ndarray:
+    """Boolean array (length ``n_itr``, 0-based) marking iterations that hold
+    **real** (finite, non-zero) values for *attr*.
+
+    Attributes recorded at every loop iteration (``dcr``, ``efo``, coordinates …)
+    are effective everywhere → all ``True``; single-iteration measurements
+    (``cfr``/``efc``) are effective only at the iteration they are measured at.
+    Used to **bold the useful iterations** in the iteration selectors so the user
+    can browse straight to them. Returns all-``True`` when it cannot be
+    determined (no raw store, or a 2-D/misaligned column).
+    """
+    n_itr = max(1, int(ds.metadata.get("raw_num_itr", getattr(ds.prop, "num_itr", 1) or 1)))
+    out = np.zeros(n_itr, dtype=bool)
+    raw = getattr(ds, "mfx_raw", None)
+    if raw is None or _mfx_raw_len(raw) == 0:
+        out[:] = True
+        return out
+    itr_all = np.asarray(raw.get("itr", np.zeros(_mfx_raw_len(raw), int))).ravel()
+    vals = mfx_get(ds, attr, itr="all", vld_only=False)
+    if vals is None:
+        out[:] = True
+        return out
+    vals = np.asarray(vals).ravel()
+    if vals.shape[0] != itr_all.shape[0]:
+        out[:] = True                             # per-iteration 2-D / can't align
+        return out
+    with np.errstate(invalid="ignore"):
+        good = np.isfinite(vals) & (vals != 0.0)
+    idx = itr_all[good]
+    idx = idx[(idx >= 0) & (idx < n_itr)]
+    if idx.size:
+        out[np.unique(idx.astype(int))] = True
+    return out
+
+
 def _detect_raw_version(raw: dict) -> str:
     itr_val = raw.get("itr")
     if itr_val is None:
@@ -563,22 +598,30 @@ def _effective_iteration_flat(itr_arr, field_arr, vld_val) -> int | None:
     return int(np.argmax(sums)) + 1
 
 
-def _dcr_is_two_channel(arr: np.ndarray, sample: int = 500) -> bool:
+def _dcr_is_two_channel(arr: np.ndarray, sample: int = 500, tol: float = 1e-3) -> bool:
     """
     Heuristic: return True when a (N, 2) dcr array holds m2410-style
     two-channel ratios ch1/(ch1+ch2) and ch2/(ch1+ch2).
 
-    In that format each row sums to 1.0 (within floating-point tolerance).
-    In legacy m2205 format with exactly 2 iterations the same (N, 2) shape
-    arises, but the two columns are independent per-iteration ratios that
-    generally do NOT sum to 1.
+    In that format the two columns are **complementary** and sum to 1.0 —
+    but only *approximately*: the instrument quantises each channel ratio
+    independently (≈12-bit, step ≈ 1/4096 ≈ 2.4e-4), so a genuine two-channel
+    sum lands on ``(4096 ± 1)/4096`` — i.e. within ~2.5e-4 of 1.0, not exactly 1.
+    Hence the tolerance is ``1e-3`` (not float-epsilon): tight enough to reject
+    legacy m2205 2-iteration data, whose two columns are *independent*
+    per-iteration ratios that do not sum to 1.
+
+    All-zero (invalid-localization) placeholder rows are skipped so they don't
+    fail the test.
     """
-    n = min(sample, arr.shape[0])
-    row_sums = arr[:n, 0] + arr[:n, 1]
-    finite = np.isfinite(row_sums)
-    if not finite.any():
+    col0 = np.asarray(arr[:, 0], dtype=float)
+    col1 = np.asarray(arr[:, 1], dtype=float)
+    s = col0 + col1
+    good = np.isfinite(s) & ((col0 != 0.0) | (col1 != 0.0))
+    idx = np.flatnonzero(good)[:sample]
+    if idx.size == 0:
         return False
-    return bool(np.all(np.abs(row_sums[finite] - 1.0) < 1e-6))
+    return bool(np.all(np.abs(s[idx] - 1.0) < tol))
 
 
 # ---------------------------------------------------------------------------
@@ -1436,6 +1479,110 @@ def mfx_get(
     return arr[mask] if arr.ndim == 1 else arr[mask, :]
 
 
+def resolve_spec_iteration(ds: "MinfluxDataset", spec: dict) -> "str | int":
+    """Resolve a filter spec's iteration selector to a concrete evaluation token.
+
+    A filter spec may carry an optional ``"itr"`` key recording *which*
+    iteration its bound was authored against (so the same logical filter is
+    reproducible across iteration browsing and file round-trips):
+
+    ``"last"``       — the localization's final valid iteration (broadcast).
+    ``"effective"``  — the attribute's measured iteration (cfr/efc); falls back
+                       to ``"last"`` when the attribute has none.
+    ``"all"``        — evaluate the bound at each browse row's own value
+                       (per-iteration; a localization's rows may split).
+    ``int``          — a specific 0-based iteration index (broadcast).
+
+    A missing/``None`` ``"itr"`` is the **legacy auto default**, reproducing the
+    pre-iteration-aware behaviour exactly: ``"effective"`` for cfr/efc (their
+    measured value), otherwise ``"browse"`` (test the bound at whatever
+    iteration is being viewed — the previous per-browse-row semantics).
+    Returns ``"browse"``, ``"last"``, ``"all"``, ``"effective"`` or an ``int``.
+    """
+    attr = spec.get("attribute", "")
+    raw_sel = spec.get("itr", None)
+    if raw_sel is None:
+        return "effective" if effective_iteration_for_attr(ds, attr) is not None else "browse"
+    if isinstance(raw_sel, (int, np.integer)) and not isinstance(raw_sel, bool):
+        return int(raw_sel)
+    text = str(raw_sel).strip().lower()
+    if text in ("browse", "last", "all", "effective"):
+        return text
+    if text.isdigit():
+        return int(text)
+    return "last"
+
+
+def _broadcast_iteration_to_rows(
+    ds: "MinfluxDataset",
+    attr: str,
+    *,
+    src_itr: "str | int",
+    src_vld: bool,
+    browse_mask: np.ndarray,
+    raw: "AttrStore",
+) -> "np.ndarray | None":
+    """Per-localization value of *attr* at ``(src_itr, src_vld)`` duplicated onto
+    the ``browse_mask`` rows by localization id.
+
+    Sourcing the per-localization values through :func:`mfx_get` makes this work
+    uniformly for raw, coordinate (``xnm``…), derived (``den``…) and ``idx``
+    attributes. NaN for localizations absent from the source selection. Returns
+    ``None`` when the value cannot be aligned (so the caller marks the spec
+    unevaluable rather than mis-filtering).
+    """
+    src_mask = mfx_row_mask(raw, itr=src_itr, vld_only=src_vld)
+    if src_mask is None:
+        return None
+    src_vals = mfx_get(ds, attr, itr=src_itr, vld_only=src_vld)
+    if src_vals is None:
+        return None
+    src_vals = np.asarray(src_vals).ravel()
+    if src_vals.shape[0] != int(src_mask.sum()):
+        return None
+    loc_id = _raw_loc_id(raw)
+    if loc_id is None:
+        return None
+    per_loc = np.full(int(loc_id.max()) + 1, np.nan)
+    per_loc[loc_id[src_mask]] = src_vals.astype(float, copy=False)
+    return per_loc[loc_id[browse_mask]]
+
+
+def _spec_filter_values(
+    ds: "MinfluxDataset",
+    spec: dict,
+    *,
+    itr: "str | int",
+    vld_only: bool,
+    raw: "AttrStore | None",
+    browse_mask: "np.ndarray | None",
+) -> "np.ndarray | None":
+    """Values to test a single filter spec's bound against, aligned to the
+    ``(itr, vld_only)`` browse selection and honouring the spec's own ``"itr"``.
+
+    See :func:`resolve_spec_iteration` for the iteration semantics.
+    """
+    attr = spec.get("attribute", "")
+    sel = resolve_spec_iteration(ds, spec)
+
+    # Per-row: evaluate at each browse row's own value (localization rows may
+    # individually pass/fail). "browse" is the legacy default for normal attrs.
+    if sel in ("browse", "all") or browse_mask is None or raw is None or len(raw) == 0:
+        return mfx_get(ds, attr, itr=itr, vld_only=vld_only)
+
+    # Per-localization broadcast at the spec's own iteration.
+    if sel == "effective":
+        eff = effective_iteration_for_attr(ds, attr)
+        src_itr, src_vld = (eff, True) if eff is not None else ("last", True)
+    elif sel == "last":
+        src_itr, src_vld = "last", True
+    else:  # concrete 0-based int iteration
+        src_itr, src_vld = int(sel), False
+    return _broadcast_iteration_to_rows(
+        ds, attr, src_itr=src_itr, src_vld=src_vld, browse_mask=browse_mask, raw=raw,
+    )
+
+
 def mfx_filter_mask(
     ds: "MinfluxDataset",
     *,
@@ -1445,10 +1592,14 @@ def mfx_filter_mask(
     """Re-evaluate the dataset's persisted filter specs over a raw-store selection.
 
     The dataset's active filters are stored as re-evaluable specs in
-    ``ds.state["filter_specs"]`` (attribute, mode, bounds). This re-applies
-    them against :func:`mfx_get` rows for the given ``itr``/``vld_only``
-    selection, so the same logical filter extends to any iteration and to
-    invalid localizations.
+    ``ds.state["filter_specs"]`` (attribute, mode, bounds, and an optional
+    per-spec ``"itr"`` iteration selector). This re-applies them against
+    :func:`mfx_get` rows for the given ``itr``/``vld_only`` browse selection, so
+    the same logical filter extends to any iteration and to invalid
+    localizations. Each spec is evaluated at **its own** iteration
+    (:func:`resolve_spec_iteration`), independent of the browse selection —
+    e.g. an ``itr="last"`` spec keeps/drops a localization's iteration rows
+    together by its last-valid value, matching what render/scatter show.
 
     Returns
     -------
@@ -1478,15 +1629,9 @@ def mfx_filter_mask(
     unevaluable: list[str] = []
     for spec in specs:
         attr = spec.get("attribute", "")
-        # cfr/efc are per-localization properties measured at one iteration; the
-        # filter must use that effective value broadcast onto the browse rows,
-        # not the (zero/NaN) value at whatever iteration is being viewed.
-        eff = effective_iteration_for_attr(ds, attr)
-        if eff is not None and browse_mask is not None:
-            src_mask = mfx_row_mask(raw, itr=eff, vld_only=True)
-            vals = _gather_iteration_values(raw, attr, src_mask, browse_mask)
-        else:
-            vals = mfx_get(ds, attr, itr=itr, vld_only=vld_only)
+        vals = _spec_filter_values(
+            ds, spec, itr=itr, vld_only=vld_only, raw=raw, browse_mask=browse_mask,
+        )
         if vals is None or np.asarray(vals).ravel().shape[0] != n:
             if attr and attr not in unevaluable:
                 unevaluable.append(attr)
@@ -1507,11 +1652,16 @@ def apply_saved_filters(ds: "MinfluxDataset") -> bool:
     """Apply ``ds.state['filter_specs']`` over the materialized attributes and
     set ``ds.filter_mask``; returns True if at least one spec was applied.
 
-    Resolves each attribute through :func:`attr_values_1d`, so coordinate
-    (``xnm``/``ynm``/``znm``) and derived (``den`` …) filters map to per-loc
-    values — mirroring the live FilterDialog. A spec whose attribute is not yet
-    materialized (e.g. ``den`` before post-load density) is skipped; callers
-    re-run this once those attributes exist.
+    When a raw store aligned with ``ds.attr`` is available, this delegates to
+    :func:`mfx_filter_mask` over the materialized selection so each spec is
+    evaluated at **its own** iteration (:func:`resolve_spec_iteration`) — the
+    same result the plot windows show for the materialized view. Otherwise
+    (no raw store, e.g. a re-imported flat table) it resolves each attribute
+    through :func:`attr_values_1d`, so coordinate (``xnm``/``ynm``/``znm``) and
+    derived (``den`` …) filters map to per-loc values — mirroring the live
+    FilterDialog. A spec whose attribute is not yet materialized (e.g. ``den``
+    before post-load density) is skipped; callers re-run this once those
+    attributes exist.
     """
     from ..utils.filters import raw_spec_mask
 
@@ -1519,6 +1669,21 @@ def apply_saved_filters(ds: "MinfluxDataset") -> bool:
     if not specs:
         return False
     n = int(ds.prop.num_loc)
+
+    # Preferred path: re-evaluate over the raw store's materialized selection so
+    # per-spec iteration selectors are honoured. Fall through to the materialized
+    # attr_values_1d path when no aligned raw view exists or nothing was
+    # evaluable (so a deferred den filter re-runs once density is computed).
+    raw = getattr(ds, "mfx_raw", None)
+    rows = _attr_row_selection(ds) if raw is not None and len(raw) else None
+    if rows is not None:
+        res = mfx_filter_mask(ds, itr=rows[0], vld_only=rows[1])
+        if res is not None:
+            rmask, uneval = res
+            if rmask.shape[0] == n and len(uneval) < len(specs):
+                ds.filter_mask = rmask
+                return True
+
     tid_v = attr_values_1d(ds, "tid")
     tid = np.arange(n) if tid_v is None else np.asarray(tid_v).ravel()
     mask = np.ones(n, dtype=bool)
@@ -1749,30 +1914,40 @@ def _compute_properties(
     """
     Compute trace structure, dimensionality, etc.
 
-    If ``prefs["data"]["enforce_min_z_range"]`` is True and the Z range of
-    ``attrs["loc_z"]`` is smaller than ``prefs["data"]["min_z_range_nm"]``
+    If ``prefs["data"]["enforce_min_z_range"]`` is True and the finite Z range
+    of ``attrs["loc_z"]`` is smaller than ``prefs["data"]["min_z_range_nm"]``
     (value in nm — raw data is stored in metres), the Z axis is forced to
-    zero and the dataset is marked as 2-D. This filters out tiny residual
-    Z variations caused by drift correction in genuinely 2-D acquisitions.
+    zero and the dataset is marked as 2-D. Non-finite Z values are ignored for
+    dimensionality and a dataset with no finite non-zero Z is normalized to a
+    zero-filled 2-D axis. This filters out tiny residual Z variations caused by
+    drift correction in genuinely 2-D acquisitions.
     """
     prop = DataProp(num_loc=num_loc, num_itr=num_itr)
 
     # Dimensionality
-    z = np.asarray(attrs.get("loc_z", np.zeros(num_loc)))
+    z = np.asarray(attrs.get("loc_z", np.zeros(num_loc)), dtype=float).ravel()
+    finite_z = z[np.isfinite(z)]
 
     # Optional 2D/3D threshold (user preference)
-    if prefs is not None and z.size > 0:
+    if prefs is not None and finite_z.size > 0:
         data_prefs = prefs.get("data", {}) or {}
         if data_prefs.get("enforce_min_z_range", False):
             min_z_nm   = float(data_prefs.get("min_z_range_nm", 5.0))
             # Raw z values are in metres; convert the threshold from nm.
-            z_range_m  = float(z.max() - z.min())
+            z_range_m  = float(np.ptp(finite_z))
             z_range_nm = z_range_m * 1e9
             if z_range_nm < min_z_nm:
                 z = np.zeros_like(z)
-                attrs["loc_z"] = z
 
-    prop.num_dim = 3 if np.any(z != 0) else 2
+    # NaNs/Infs are missing Z measurements, not evidence of a third axis.  If
+    # no finite non-zero value remains, keep the canonical 2-D contract that
+    # loc_z is present and zero-filled so renderers and analyses agree.
+    has_nonzero_z = bool(np.any(np.isfinite(z) & (z != 0.0)))
+    if not has_nonzero_z:
+        z = np.zeros_like(z)
+    attrs["loc_z"] = z
+
+    prop.num_dim = 3 if has_nonzero_z else 2
 
     # Trace structure
     tid     = np.asarray(attrs.get("tid", np.arange(num_loc))).ravel()

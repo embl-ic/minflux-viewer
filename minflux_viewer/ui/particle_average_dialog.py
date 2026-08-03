@@ -257,7 +257,6 @@ class ParticleAverageWindow(QDialog):
         ib.addRow("Max iterations:", self._iters)
         ib.addRow("Convergence tol:", self._conv_tol)
         ib.addRow("", self._tilt_correct)
-        ib.addRow("", self._multichannel)
         ib.addRow("", self._image_group)
         mv.addWidget(self._image_box)
 
@@ -300,6 +299,9 @@ class ParticleAverageWindow(QDialog):
         info.setStyleSheet("color:#888;"); info.setWordWrap(True)
         gb.addRow(info)
         mv.addWidget(self._geomfit_box)
+        # Shared across methods (template-free / template-provided / NPC two-ring):
+        # combine the overlay's other channels by replaying each particle's transform.
+        mv.addWidget(self._multichannel)
         root.addWidget(method_group)
 
         self._status = QLabel("")
@@ -402,7 +404,7 @@ class ParticleAverageWindow(QDialog):
 
     def _multichannel_active(self) -> bool:
         """At run time: do we have collected channel data + a compatible method?"""
-        return (self._method.currentData() in ("free", "template")
+        return (self._method.currentData() in ("free", "template", "geomfit")
                 and self._multichannel.isChecked() and len(self._channel_luts) >= 2)
 
     def _multichannel_data(self) -> dict:
@@ -421,16 +423,20 @@ class ParticleAverageWindow(QDialog):
                 "ref_lut": self._channel_luts.get(self._ref_channel_name, "")}
 
     def _box_records(self) -> list:
-        """Rectangle ROIs belonging to the active dataset (or untagged ones)."""
-        idx = self._active_idx()
-        recs = []
-        for r in self._state.rois.records:
-            if r.type != "rectangle":
-                continue
-            ctx = (r.context or {}).get("dataset_idx")
-            if ctx is None or ctx == idx:
-                recs.append(r)
-        return recs
+        """Rectangle ROIs available for particle extraction.
+
+        The ROI store is global, and detection boxes are commonly generated on a
+        **processed copy** of the data — e.g. an aggregated + ring-convolved copy
+        used only to find particles — and then applied to the source dataset (or,
+        as is typical, to a DCR-separated channel of it), which has a *different*
+        ``dataset_idx``. So we do NOT scope to the active dataset's index: every
+        rectangle ROI is offered, and extraction is coordinate-based against
+        whatever the active dataset is (a box that doesn't overlap it simply
+        yields no particle). Previously the ``dataset_idx == active`` filter here
+        silently hid detection boxes made on a processed copy, so the particle
+        list came up empty.
+        """
+        return [r for r in self._state.rois.records if r.type == "rectangle"]
 
     def _refresh_rois(self) -> None:
         ds = self._active_dataset()
@@ -659,6 +665,10 @@ class ParticleAverageWindow(QDialog):
             g_subinit = bool(self._geom_subunit_init.isChecked())
             g_init_pts = [np.asarray(p.points, float) for p in self._particles]
             g_init_tids = [(None if p.tid is None else np.asarray(p.tid)) for p in self._particles]
+            # Multi-channel: capture the other channels' per-particle points (UI
+            # thread) so the worker can replay the reference particle's fitted
+            # transform onto them (same as template-free / template-provided).
+            mc = self._multichannel_data()
 
             def compute(progress):
                 from ..analysis import npc_geomfit as gfit
@@ -671,10 +681,17 @@ class ParticleAverageWindow(QDialog):
                 med = float(np.median(diams)) if diams else float("nan")
                 desc = (f"NPC model fit: {res['n_accepted']}/{res['n_particles']} accepted "
                         f"(GoF≥{gmingof:g}), median diameter {med:.1f} nm")
-                return res["average_loc"][:, :3], desc, {
+                mats = res.get("particle_transforms", [])
+                extra = {
                     "table": res.get("table", []), "min_gof": gmingof, "mode": "geomfit",
                     "fits": res.get("fits", []), "aligned": res.get("aligned", []),
-                    "symmetry": gsym}
+                    "symmetry": gsym, "particle_transforms": mats}
+                if mc["channels"]:
+                    extra["channels"] = {name: pa.pool_transformed(pl, mats)
+                                         for name, pl in mc["channels"].items()}
+                    extra.update({"ref_name": mc["ref_name"], "luts": mc["luts"],
+                                  "ref_lut": mc["ref_lut"]})
+                return res["average_loc"][:, :3], desc, extra
         else:
             particles = grouped
             box, px = float(self._box_size.value()), float(self._pixel.value())

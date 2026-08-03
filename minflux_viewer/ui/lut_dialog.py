@@ -90,12 +90,38 @@ _CHANNEL_RGB = {
 }
 
 
-def make_colormap(name: str, *, invert: bool = False) -> pg.ColorMap:
+def apply_gamma(cmap: pg.ColorMap, gamma: float) -> pg.ColorMap:
+    """Gamma-warp a colormap: the displayed colour at normalised value ``t`` is
+    the original colormap sampled at ``t**gamma``.
+
+    ``gamma < 1`` brightens the mid-tones (bows the transfer curve up),
+    ``gamma > 1`` darkens them. A no-op at ``gamma == 1``.
+    """
+    try:
+        g = float(gamma)
+    except (TypeError, ValueError):
+        return cmap
+    if not np.isfinite(g) or g <= 0.0 or abs(g - 1.0) < 1e-6:
+        return cmap
+    try:
+        lut = cmap.getLookupTable(0.0, 1.0, 256).astype(np.float64)
+        pts = np.linspace(0.0, 1.0, 256)
+        warped = pts ** g
+        out = np.empty_like(lut)
+        for c in range(lut.shape[1]):
+            out[:, c] = np.interp(warped, pts, lut[:, c])
+        return pg.ColorMap(pts.astype(np.float32), out.astype(np.uint8))
+    except Exception:
+        return cmap
+
+
+def make_colormap(name: str, *, invert: bool = False, gamma: float = 1.0) -> pg.ColorMap:
     """
     Build a ``pg.ColorMap`` by name.
 
     Tries pyqtgraph built-ins first, falls back to matplotlib, then to
-    single-colour channel ramps, then to CET-L3 as a last resort.
+    single-colour channel ramps, then to CET-L3 as a last resort. ``gamma``
+    gamma-warps the resulting LUT (see :func:`apply_gamma`).
     """
     pts = np.linspace(0.0, 1.0, 256, dtype=np.float32)
     key = name.lower().replace(" ", "_")
@@ -158,6 +184,7 @@ def make_colormap(name: str, *, invert: bool = False) -> pg.ColorMap:
 
     if invert:
         cmap = _invert_cmap(cmap)
+    cmap = apply_gamma(cmap, gamma)
     return cmap
 
 
@@ -170,6 +197,33 @@ def _invert_cmap(cmap: pg.ColorMap) -> pg.ColorMap:
         return pg.ColorMap(pts, lut)
     except Exception:
         return cmap
+
+
+# ---------------------------------------------------------------------------
+# Gamma-draggable histogram viewbox
+# ---------------------------------------------------------------------------
+
+class _GammaViewBox(pg.ViewBox):
+    """Histogram ViewBox where a left-drag **anywhere** re-fits gamma.
+
+    Child items (the min/max level lines, the mid-value dot) get first crack at
+    the drag — pyqtgraph offers a drag to the topmost item under the cursor and
+    only falls back to the ViewBox when none claims it — so those keep working;
+    a drag on empty plot area lands here and tilts the gamma transfer curve.
+    """
+
+    def __init__(self, on_drag: Callable[[float, float], None], **kwargs) -> None:
+        super().__init__(enableMouse=False, **kwargs)
+        self._on_drag = on_drag
+        self.setMouseEnabled(x=False, y=False)
+
+    def mouseDragEvent(self, ev, axis=None) -> None:
+        if ev.button() == Qt.MouseButton.LeftButton:
+            ev.accept()
+            p = self.mapSceneToView(ev.scenePos())
+            self._on_drag(float(p.x()), float(p.y()))
+        else:
+            super().mouseDragEvent(ev, axis=axis)
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +248,7 @@ class LutDialog(QDialog):
         on_cmap_changed:   Callable[[str, bool], None],
         on_invert_changed: Callable[[bool], None] | None = None,
         on_reset:          Callable[[], None] | None = None,
+        on_gamma_changed:  Callable[[float], None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -201,6 +256,8 @@ class LutDialog(QDialog):
         self._cb_cmap    = on_cmap_changed
         self._cb_invert  = on_invert_changed
         self._cb_reset   = on_reset
+        self._cb_gamma   = on_gamma_changed
+        self._gamma: float = 1.0
 
         self.setWindowTitle("LUT")
         # Non-modal so the user can adjust levels while watching the image
@@ -219,6 +276,8 @@ class LutDialog(QDialog):
         self._pixel_values: np.ndarray | None = None
         # Invert flag
         self._invert: bool = False
+        # Histogram Y extent (for the gamma tilt line / control-dot placement)
+        self._hist_ymax: float = 1.0
 
         self._build_ui()
 
@@ -232,7 +291,10 @@ class LutDialog(QDialog):
         root.setSpacing(6)
 
         # ── Histogram preview ────────────────────────────────────
-        self._hist_plot = pg.PlotWidget(background="#222")
+        # Custom viewbox so a drag on empty plot area re-fits gamma (the level
+        # lines / mid dot still claim their own drags first).
+        self._gamma_vb = _GammaViewBox(self._on_curve_dragged)
+        self._hist_plot = pg.PlotWidget(background="#222", viewBox=self._gamma_vb)
         self._hist_plot.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -248,9 +310,24 @@ class LutDialog(QDialog):
         )
         self._hist_plot.addItem(self._hist_curve)
 
-        # Vertical markers for current min/max
-        self._lo_line = pg.InfiniteLine(angle=90, pen=pg.mkPen("#3af", width=2))
-        self._hi_line = pg.InfiniteLine(angle=90, pen=pg.mkPen("#f83", width=2))
+        # Draggable vertical markers for the current min/max levels (like the
+        # histogram filter bounds): drag them on the histogram to set the levels.
+        self._lo_line = pg.InfiniteLine(
+            angle=90, movable=True, pen=pg.mkPen("#3af", width=2),
+            hoverPen=pg.mkPen("#8cf", width=3))
+        self._hi_line = pg.InfiniteLine(
+            angle=90, movable=True, pen=pg.mkPen("#f83", width=2),
+            hoverPen=pg.mkPen("#fb7", width=3))
+        self._lo_line.sigPositionChanged.connect(self._on_lo_line_moved)
+        self._hi_line.sigPositionChanged.connect(self._on_hi_line_moved)
+        # Gamma "tilt line": the transfer curve from (lo, 0) to (hi, top). Drag
+        # anywhere on the plot to re-fit gamma (handled by _GammaViewBox).
+        self._tf_curve = pg.PlotCurveItem(
+            pen=pg.mkPen("#6c6", width=2, style=Qt.PenStyle.DashLine))
+        self._tf_curve.setZValue(5)
+        self._hist_plot.addItem(self._tf_curve)
+        self._lo_line.setZValue(10)
+        self._hi_line.setZValue(10)
         self._hist_plot.addItem(self._lo_line)
         self._hist_plot.addItem(self._hi_line)
 
@@ -310,6 +387,28 @@ class LutDialog(QDialog):
 
         root.addLayout(grid)
 
+        # ── Gamma ────────────────────────────────────────────────
+        # Non-linear intensity mapping: drag the green dot on the histogram to
+        # tilt the transfer curve, or set it precisely here.
+        gamma_row = QHBoxLayout()
+        gamma_row.addWidget(QLabel("Gamma"))
+        self._gamma_spin = QDoubleSpinBox()
+        self._gamma_spin.setDecimals(2)
+        self._gamma_spin.setRange(0.10, 10.0)
+        self._gamma_spin.setSingleStep(0.05)
+        self._gamma_spin.setValue(1.0)
+        self._gamma_spin.setToolTip(
+            "Gamma correction. <1 brightens mid-tones, >1 darkens them. "
+            "Drag the green dot on the histogram to tilt the transfer curve.")
+        self._gamma_spin.valueChanged.connect(self._on_gamma_spin)
+        gamma_row.addWidget(self._gamma_spin)
+        gamma_reset = QPushButton("γ=1")
+        gamma_reset.setToolTip("Reset gamma to 1 (linear).")
+        gamma_reset.clicked.connect(lambda: self._set_gamma(1.0))
+        gamma_row.addWidget(gamma_reset)
+        gamma_row.addStretch()
+        root.addLayout(gamma_row)
+
         # ── Action buttons ────────────────────────────────────────
         btn_row = QHBoxLayout()
         for label, cb in [
@@ -339,11 +438,16 @@ class LutDialog(QDialog):
         hi: float,
         cmap_name: str,
         invert: bool,
+        gamma: float = 1.0,
+        capture_baseline: bool = True,
     ) -> None:
         """
         Populate the dialog with the current render image state.
 
-        This also captures the state as the "reset baseline".
+        When *capture_baseline* is True (opening the dialog) this also captures
+        the state as the "reset baseline". Live syncs from the owning window
+        (colormap / brightness / color-by changed outside the dialog) pass
+        ``capture_baseline=False`` so the Reset target isn't overwritten.
         """
         self._pixel_values = np.asarray(pixels).ravel()
         self._data_lo = float(data_lo)
@@ -355,14 +459,29 @@ class LutDialog(QDialog):
             spin.setRange(self._data_lo - abs(self._data_lo),
                           self._data_hi + abs(self._data_hi) + 1.0)
             spin.blockSignals(False)
+        # The draggable level lines are confined to the histogram's data range.
+        # Block their signals: setBounds() re-clamps a line sitting outside the new
+        # range and would emit sigPositionChanged with a STALE level, firing the
+        # owner's level callback and corrupting its manual levels (opening the LUT
+        # dialog then visibly re-scaled the plot — the "everything turns one colour"
+        # bug). Levels are applied silently just below via _set_levels_silent.
+        for _line in (self._lo_line, self._hi_line):
+            _line.blockSignals(True)
+            _line.setBounds((self._data_lo, self._data_hi))
+            _line.blockSignals(False)
 
-        # Record baseline for Reset
-        self._initial_state = dict(
-            lo=float(lo), hi=float(hi),
-            cmap=str(cmap_name), invert=bool(invert),
-        )
+        # Record baseline for Reset (only when the dialog is (re)opened).
+        if capture_baseline or self._initial_state is None:
+            self._initial_state = dict(
+                lo=float(lo), hi=float(hi),
+                cmap=str(cmap_name), invert=bool(invert), gamma=float(gamma),
+            )
 
         # Apply to widgets
+        self._gamma = float(max(0.1, min(10.0, gamma)))
+        self._gamma_spin.blockSignals(True)
+        self._gamma_spin.setValue(self._gamma)
+        self._gamma_spin.blockSignals(False)
         self._set_levels_silent(lo, hi)
         self._set_combo_silent(cmap_name)
         self._invert = bool(invert)
@@ -379,8 +498,9 @@ class LutDialog(QDialog):
         self._sync_widgets_from_levels()
 
     def _sync_widgets_from_levels(self) -> None:
-        for w in (self._min_slider, self._max_slider, self._min_spin, self._max_spin,
-                  self._br_slider, self._co_slider):
+        blocked = (self._min_slider, self._max_slider, self._min_spin, self._max_spin,
+                   self._br_slider, self._co_slider, self._lo_line, self._hi_line)
+        for w in blocked:
             w.blockSignals(True)
         try:
             self._min_slider.setValue(self._level_to_slider(self._lo))
@@ -406,9 +526,9 @@ class LutDialog(QDialog):
             self._lo_line.setPos(self._lo)
             self._hi_line.setPos(self._hi)
         finally:
-            for w in (self._min_slider, self._max_slider, self._min_spin, self._max_spin,
-                      self._br_slider, self._co_slider):
+            for w in blocked:
                 w.blockSignals(False)
+        self._redraw_transfer_curve()                 # curve endpoints follow lo/hi
 
     def _level_to_slider(self, v: float) -> int:
         span = max(1e-12, self._data_hi - self._data_lo)
@@ -420,9 +540,71 @@ class LutDialog(QDialog):
         return self._data_lo + frac * (self._data_hi - self._data_lo)
 
     def _emit_levels(self) -> None:
+        self._lo_line.blockSignals(True)
+        self._hi_line.blockSignals(True)
         self._lo_line.setPos(self._lo)
         self._hi_line.setPos(self._hi)
+        self._lo_line.blockSignals(False)
+        self._hi_line.blockSignals(False)
+        self._redraw_transfer_curve()
         self._cb_levels(self._lo, self._hi)
+
+    # -- Draggable min/max lines (like the histogram filter bounds) --
+
+    def _on_lo_line_moved(self) -> None:
+        lo = float(self._lo_line.value())
+        if lo > self._hi:
+            lo = self._hi
+        self._lo = max(self._data_lo, lo)
+        self._sync_widgets_from_levels()              # re-clamps line, updates sliders/spins
+        self._cb_levels(self._lo, self._hi)
+
+    def _on_hi_line_moved(self) -> None:
+        hi = float(self._hi_line.value())
+        if hi < self._lo:
+            hi = self._lo
+        self._hi = min(self._data_hi, hi)
+        self._sync_widgets_from_levels()
+        self._cb_levels(self._lo, self._hi)
+
+    # -- Gamma tilt line -------------------------------------------
+
+    def _redraw_transfer_curve(self) -> None:
+        """Draw the (lo,0)→(hi,top) transfer curve for the current gamma and put
+        the draggable control dot at its mid-value."""
+        ymax = max(1e-9, float(self._hist_ymax))
+        lo, hi = float(self._lo), float(self._hi)
+        if hi <= lo:
+            self._tf_curve.setData([], [])
+            return
+        xs = np.linspace(lo, hi, 64)
+        t = np.clip((xs - lo) / (hi - lo), 0.0, 1.0)
+        self._tf_curve.setData(xs, ymax * np.power(t, self._gamma))
+
+    def _on_curve_dragged(self, x: float, y: float) -> None:
+        """Whole-line drag: re-fit gamma so the curve passes through (x, y)."""
+        ymax = max(1e-9, float(self._hist_ymax))
+        lo, hi = float(self._lo), float(self._hi)
+        if hi <= lo:
+            return
+        t = (x - lo) / (hi - lo)
+        t = min(max(t, 0.02), 0.98)                       # ignore the pinned ends
+        frac = min(max(y / ymax, 0.02), 0.98)
+        gamma = float(np.log(frac) / np.log(t))           # frac = t**gamma
+        self._set_gamma(gamma)
+
+    def _on_gamma_spin(self, value: float) -> None:
+        self._set_gamma(float(value))
+
+    def _set_gamma(self, gamma: float) -> None:
+        gamma = float(max(0.1, min(10.0, gamma)))
+        self._gamma = gamma
+        self._gamma_spin.blockSignals(True)
+        self._gamma_spin.setValue(gamma)
+        self._gamma_spin.blockSignals(False)
+        self._redraw_transfer_curve()                  # snaps the dot's x back to mid
+        if self._cb_gamma is not None:
+            self._cb_gamma(self._gamma)
 
     # -- Slider/spin handlers ---------------------------------------
 
@@ -506,8 +688,9 @@ class LutDialog(QDialog):
     def _on_reset_clicked(self) -> None:
         if self._initial_state is None:
             return
-        # Reset display range to the current image's full data range.
+        # Reset display range to the current image's full data range + linear gamma.
         self._set_levels_silent(self._data_lo, self._data_hi)
+        self._set_gamma(1.0)
         self._emit_levels()
 
     # ------------------------------------------------------------------
@@ -528,6 +711,8 @@ class LutDialog(QDialog):
         """Draw a simplified histogram on the preview plot."""
         if self._pixel_values is None or self._pixel_values.size == 0:
             self._hist_curve.setData([], [])
+            self._hist_ymax = 1.0
+            self._redraw_transfer_curve()
             return
         vals = self._pixel_values
         nz = vals[vals > 0] if np.any(vals > 0) else vals
@@ -540,4 +725,6 @@ class LutDialog(QDialog):
         ys = np.log1p(h)
         self._hist_curve.setData(xs, ys)
         self._hist_plot.setXRange(self._data_lo, self._data_hi, padding=0.02)
-        self._hist_plot.setYRange(0, max(1.0, float(ys.max()) * 1.05))
+        self._hist_ymax = max(1.0, float(ys.max()) * 1.05)
+        self._hist_plot.setYRange(0, self._hist_ymax)
+        self._redraw_transfer_curve()                 # gamma tilt line follows the histogram

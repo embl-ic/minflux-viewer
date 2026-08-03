@@ -115,3 +115,49 @@ def test_too_few_values_raises():
     import pytest
     with pytest.raises(ValueError):
         fit_two_component_gaussian([1.0])
+
+
+def test_binned_fit_matches_full_fit_on_large_input():
+    """The weighted-histogram path (N > max_points) recovers the same parameters
+    as the exact per-value fit — this is the responsiveness fix for millions of
+    flattened-iteration DCRs."""
+    x = _two_peaks(n1=400_000, n2=300_000)        # > default max_points (200k)
+    g = fit_two_component_gaussian(x)             # takes the binned path
+    assert g.n == x.size                          # reports the full count
+    assert g.mu1 < g.mu2
+    assert abs(g.mu1 - 0.30) < 0.01
+    assert abs(g.mu2 - 0.70) < 0.01
+    assert abs(g.sigma1 - 0.05) < 0.01
+    assert abs(g.sigma2 - 0.06) < 0.01
+    assert abs(g.weight1 - 4 / 7) < 0.03
+
+    # Explicitly forcing the binned path on a small set ≈ the exact fit.
+    small = _two_peaks()
+    g_full = fit_two_component_gaussian(small)
+    g_bin = fit_two_component_gaussian(small, max_points=1)
+    assert abs(g_full.mu1 - g_bin.mu1) < 0.01
+    assert abs(g_full.mu2 - g_bin.mu2) < 0.01
+
+
+def test_assign_per_trace_majority_vote():
+    g = fit_two_component_gaussian(_two_peaks())  # means ~0.30 (red) / ~0.70 (green)
+    # trace 10: 3 red locs + 1 green → majority red; trace 20: all green.
+    vals = np.array([0.30, 0.30, 0.30, 0.70,   0.70, 0.70, 0.68])
+    tid = np.array([10, 10, 10, 10,            20, 20, 20])
+    lab = assign_per_trace(vals, tid, g, mode="trace majority vote", min_confidence=0.5)
+    assert set(lab[:4]) == {0}                    # whole trace 10 → red by vote
+    assert set(lab[4:]) == {1}                    # whole trace 20 → green
+    assert lab[3] == 0                            # the lone green loc follows its trace
+
+
+def test_assign_per_trace_majority_vote_confidence_and_ties():
+    g = fit_two_component_gaussian(_two_peaks())
+    # trace 10: 3 red / 1 green (frac 0.75); trace 20: 2 red / 2 green (tie).
+    vals = np.array([0.30, 0.30, 0.30, 0.70,   0.30, 0.30, 0.70, 0.70])
+    tid = np.array([10, 10, 10, 10,            20, 20, 20, 20])
+    # A tie is always unassigned; 0.75 passes at 50% but not at 80%.
+    lab_lo = assign_per_trace(vals, tid, g, mode="trace majority vote", min_confidence=0.5)
+    assert set(lab_lo[:4]) == {0}
+    assert set(lab_lo[4:]) == {-1}                # tie → unassigned
+    lab_hi = assign_per_trace(vals, tid, g, mode="trace majority vote", min_confidence=0.8)
+    assert set(lab_hi[:4]) == {-1}                # 0.75 < 0.80 → unassigned

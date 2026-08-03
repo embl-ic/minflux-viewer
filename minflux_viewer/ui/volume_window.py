@@ -11,6 +11,7 @@ that volume with pyqtgraph's GLVolumeItem.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 
 import numpy as np
 import pyqtgraph as pg
@@ -49,6 +50,9 @@ class VolumePayload:
     counts: tuple[int, int, int]
     n_locs: int
     intensity_max: float
+    # Compact per-channel normalized volumes let overlay LUT/visibility changes
+    # recompose without repeating the expensive histogram/blur pass.
+    channel_norms: tuple[np.ndarray, ...] | None = None
 
 
 def _finite_filtered_locs(dataset) -> np.ndarray:
@@ -80,16 +84,84 @@ def _clip_region(locs, sigma, region):
     return locs[keep], (None if sigma is None else sigma[keep])
 
 
-def _matplotlib_rgba(name: str, values: np.ndarray) -> np.ndarray:
+def _matplotlib_rgba(
+    name: str, values: np.ndarray, *, invert: bool = False
+) -> np.ndarray:
     """Map normalised values to uint8 RGBA through matplotlib."""
-    import matplotlib as mpl
+    try:
+        import matplotlib as mpl
+        cmap = mpl.colormaps.get_cmap(name)
+        mapper = lambda v: np.asarray(cmap(v, bytes=True), dtype=np.uint8)
+    except Exception:
+        # The LUT dialog also exposes pyqtgraph/colorcet and pure-colour ramps
+        # that are not necessarily registered in matplotlib.
+        from .lut_dialog import make_colormap
+        cmap = make_colormap(name)
+        table = np.asarray(cmap.getLookupTable(0.0, 1.0, 256), dtype=np.uint8)
+        if table.ndim != 2 or table.shape[1] not in (3, 4):
+            table = np.tile(np.array([[255, 255, 255, 255]], dtype=np.uint8), (256, 1))
+        elif table.shape[1] == 3:
+            table = np.column_stack([table, np.full(256, 255, dtype=np.uint8)])
+        mapper = lambda v: table[np.clip(np.rint(v * 255.0), 0, 255).astype(np.int64)]
+    if invert:
+        values = 1.0 - np.asarray(values, dtype=float)
+    return mapper(np.asarray(values, dtype=float))
 
-    cmap = mpl.colormaps.get_cmap(name)
-    return np.asarray(cmap(values, bytes=True), dtype=np.uint8)
+
+def _normalize_volume(
+    volume: np.ndarray, black_pct: float, white_pct: float
+) -> tuple[np.ndarray, float]:
+    """Normalize a voxel scalar using nonzero-voxel percentile B/C."""
+    nonzero = np.asarray(volume)[np.asarray(volume) > 0.0]
+    wp = float(np.clip(white_pct, 0.0, 100.0))
+    bp = float(np.clip(black_pct, 0.0, max(wp - 1e-3, 0.0)))
+    if nonzero.size:
+        vhi = float(np.percentile(nonzero, wp))
+        if vhi <= 0.0:
+            vhi = float(nonzero.max())
+        vlo = 0.0 if bp <= 0.0 else float(np.percentile(nonzero, bp))
+    else:
+        vhi, vlo = 1.0, 0.0
+    vhi = max(vhi, vlo + 1e-12)
+    norm = np.clip((np.asarray(volume, dtype=np.float32) - vlo) / (vhi - vlo), 0.0, 1.0)
+    return np.ascontiguousarray(norm, dtype=np.float32), vhi
 
 
-def _surface_color(cmap_name: str, value: float, opacity: float) -> tuple[float, float, float, float]:
-    rgba = _matplotlib_rgba(cmap_name, np.array([np.clip(value, 0.0, 1.0)], dtype=float))[0]
+def _compose_multichannel_rgba(
+    channel_norms: list[np.ndarray] | tuple[np.ndarray, ...],
+    channel_rgb: list | tuple,
+    opacity: float,
+) -> np.ndarray:
+    """Compose normalized overlay channels into one additive RGBA volume."""
+    if not channel_norms:
+        return np.empty((0, 0, 0, 4), dtype=np.uint8)
+    shape = np.asarray(channel_norms[0]).shape
+    rgb_accum = np.zeros((*shape, 3), dtype=np.float32)
+    alpha_accum = np.zeros(shape, dtype=np.float32)
+    for norm_uint8, rgb in zip(channel_norms, channel_rgb):
+        norm = np.asarray(norm_uint8, dtype=np.float32) / 255.0
+        colour = np.asarray(rgb, dtype=np.float32).ravel()[:3]
+        for k in range(3):
+            rgb_accum[..., k] += float(colour[k]) * norm
+        alpha_accum = np.maximum(alpha_accum, np.power(norm, 0.75))
+    rgba = np.zeros((*shape, 4), dtype=np.uint8)
+    rgba[..., :3] = (np.clip(rgb_accum, 0.0, 1.0) * 255.0).astype(np.uint8)
+    alpha = (
+        alpha_accum * np.clip(float(opacity), 0.0, 1.0) * 255.0
+    ).astype(np.uint8)
+    alpha[alpha_accum <= 0.0] = 0
+    rgba[..., 3] = alpha
+    return np.ascontiguousarray(rgba, dtype=np.uint8)
+
+
+def _surface_color(
+    cmap_name: str, value: float, opacity: float, *, invert: bool = False
+) -> tuple[float, float, float, float]:
+    rgba = _matplotlib_rgba(
+        cmap_name,
+        np.array([np.clip(value, 0.0, 1.0)], dtype=float),
+        invert=invert,
+    )[0]
     return (
         float(rgba[0]) / 255.0,
         float(rgba[1]) / 255.0,
@@ -222,6 +294,7 @@ def make_volume_payload(
     precision_sigma_nm: np.ndarray | None = None,
     black_pct: float = 0.0,
     white_pct: float = 99.7,
+    invert: bool = False,
 ) -> VolumePayload:
     """Voxelise localisation coordinates into a bounded RGBA volume.
 
@@ -278,21 +351,11 @@ def make_volume_payload(
         precision_sigma_nm=precision_sigma_nm,
     )
 
-    nonzero = volume[volume > 0.0]
-    wp = float(np.clip(white_pct, 0.0, 100.0))
-    bp = float(np.clip(black_pct, 0.0, max(wp - 1e-3, 0.0)))
-    if nonzero.size:
-        vhi = float(np.percentile(nonzero, wp))
-        if vhi <= 0.0:
-            vhi = float(nonzero.max())
-        vlo = 0.0 if bp <= 0.0 else float(np.percentile(nonzero, bp))
-    else:
-        vhi, vlo = 1.0, 0.0
-    vhi = max(vhi, vlo + 1e-12)
-    norm = np.clip((volume - vlo) / (vhi - vlo), 0.0, 1.0)
-    vmax = vhi
+    norm, vmax = _normalize_volume(volume, black_pct, white_pct)
 
-    rgba = _matplotlib_rgba(cmap_name, norm.ravel()).reshape((*volume.shape, 4))
+    rgba = _matplotlib_rgba(
+        cmap_name, norm.ravel(), invert=invert
+    ).reshape((*volume.shape, 4))
     alpha = (np.power(norm, 0.75) * np.clip(float(opacity), 0.0, 1.0) * 255.0).astype(np.uint8)
     rgba[..., 3] = alpha
     rgba[norm <= 0.0, 3] = 0
@@ -371,11 +434,12 @@ def make_multichannel_volume_payload(
     sigma_nm_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
     black_pct: float = 0.0,
     white_pct: float = 99.7,
+    channel_contrast_pct: list[tuple[float, float]] | None = None,
 ) -> VolumePayload:
     """Composite several overlay channels into one RGBA volume.
 
     Each channel's ``(N, 3)`` nm localisations are voxelised on a **shared** grid,
-    normalised to its own 99.7-percentile, and **additively coloured** by its LUT
+    normalised to its own percentile, and **additively coloured** by its LUT
     colour (so e.g. red + green overlap → yellow). Per-voxel alpha is the maximum
     channel response, so a voxel visible in any channel shows.
     """
@@ -397,35 +461,27 @@ def make_multichannel_volume_payload(
         sigma_px.append(max(float(sigma_nm) / max(step_nm, 1e-12), 0.0)
                         if sigma_nm > 0.0 else 0.75)
 
-    rgb_accum = np.zeros((*shape, 3), dtype=np.float32)
-    alpha_accum = np.zeros(shape, dtype=np.float32)
+    channel_norms: list[np.ndarray] = []
     scalar_sum = np.zeros(shape, dtype=np.float32)
     n_total = 0
     op = float(np.clip(opacity, 0.0, 1.0))
-    for locs, rgb in valid:
+    for channel_index, (locs, _rgb) in enumerate(valid):
         hist, _ = np.histogramdd(locs, bins=edges)
         vol = hist.astype(np.float32, copy=False)
         if max(sigma_px) >= 0.1:
             vol = gaussian_filter(vol, sigma=tuple(sigma_px), mode="constant")
-        nz = vol[vol > 0.0]
-        wp = float(np.clip(white_pct, 0.0, 100.0))
-        bp = float(np.clip(black_pct, 0.0, max(wp - 1e-3, 0.0)))
-        vhi = float(np.percentile(nz, wp)) if nz.size else 1.0
-        vlo = float(np.percentile(nz, bp)) if (nz.size and bp > 0.0) else 0.0
-        vhi = max(vhi, vlo + 1e-12)
-        norm = np.clip((vol - vlo) / (vhi - vlo), 0.0, 1.0)
-        for k in range(3):
-            rgb_accum[..., k] += float(rgb[k]) * norm
-        alpha_accum = np.maximum(alpha_accum, np.power(norm, 0.75))
+        if channel_contrast_pct is not None and channel_index < len(channel_contrast_pct):
+            channel_black, channel_white = channel_contrast_pct[channel_index]
+        else:
+            channel_black, channel_white = black_pct, white_pct
+        norm, _vhi = _normalize_volume(vol, channel_black, channel_white)
+        channel_norms.append(np.rint(norm * 255.0).astype(np.uint8, copy=False))
         scalar_sum += vol
         n_total += int(locs.shape[0])
 
-    rgb_accum = np.clip(rgb_accum, 0.0, 1.0)
-    rgba = np.zeros((*shape, 4), dtype=np.uint8)
-    rgba[..., :3] = (rgb_accum * 255.0).astype(np.uint8)
-    alpha = (alpha_accum * op * 255.0).astype(np.uint8)
-    alpha[alpha_accum <= 0.0] = 0
-    rgba[..., 3] = alpha
+    rgba = _compose_multichannel_rgba(
+        channel_norms, [rgb for _, rgb in valid], op
+    )
 
     smax = float(scalar_sum.max()) if scalar_sum.size else 1.0
     norm_out = np.clip(scalar_sum / max(smax, 1e-12), 0.0, 1.0)
@@ -438,6 +494,7 @@ def make_multichannel_volume_payload(
         counts=shape,
         n_locs=n_total,
         intensity_max=max(smax, 1e-12),
+        channel_norms=tuple(np.ascontiguousarray(norm) for norm in channel_norms),
     )
 
 
@@ -455,6 +512,7 @@ class VolumeRenderWindow(QWidget):
         render_method: str | None = None,
         region_bounds: tuple[float, float, float, float, float, float] | None = None,
         contrast_pct: tuple[float, float] | None = None,
+        display_state: dict | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -470,8 +528,11 @@ class VolumeRenderWindow(QWidget):
         # currently focused region. Both None → the standard whole-data volume.
         self._render_method = render_method
         self._region_bounds = region_bounds
+        self._display_state = display_state
+        self._volume_channel_ids: tuple[int, ...] = ()
+        self._overlay_transforms: dict[int, object] = {}
         # Cached GPU 3-D texture limit (see _gl_max_3d_texture); the Max dim
-        # spinbox is auto-populated from it on first refresh, then user-adjustable.
+        # spinbox is constrained by it on first refresh, then user-adjustable.
         self._max_dim: int | None = None
         self._max_dim_initialised = False
         self._view = None
@@ -480,6 +541,8 @@ class VolumeRenderWindow(QWidget):
         self._surface_item = None
         self._overlay_items: list = []
         self._payload: VolumePayload | None = None
+        self._lut_dialog = None
+        self._lut_invert = False
         self._show_axis_system = True
         self._show_bounding_box = True
         self._camera_initialized = False
@@ -494,7 +557,9 @@ class VolumeRenderWindow(QWidget):
         self.resize(980, 780)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
+        self.capture_spatial_state()
         self._build_ui()
+        self._apply_display_state_to_controls(display_state)
         self.refresh_from_dataset()
 
     def _build_ui(self) -> None:
@@ -510,7 +575,7 @@ class VolumeRenderWindow(QWidget):
         self._xy_voxel_spin.setRange(0.1, 10_000.0)
         self._xy_voxel_spin.setDecimals(1)
         self._xy_voxel_spin.setSuffix(" nm")
-        self._xy_voxel_spin.setValue(2.5)
+        self._xy_voxel_spin.setValue(1.0)
         self._xy_voxel_spin.valueChanged.connect(self._schedule_rebuild)
         bar.addWidget(self._xy_voxel_spin)
 
@@ -519,17 +584,18 @@ class VolumeRenderWindow(QWidget):
         self._z_voxel_spin.setRange(0.1, 10_000.0)
         self._z_voxel_spin.setDecimals(1)
         self._z_voxel_spin.setSuffix(" nm")
-        self._z_voxel_spin.setValue(2.5)
+        self._z_voxel_spin.setValue(1.0)
         self._z_voxel_spin.valueChanged.connect(self._schedule_rebuild)
         bar.addWidget(self._z_voxel_spin)
 
         bar.addWidget(QLabel("Max dim"))
         self._max_dim_spin = QSpinBox()
-        self._max_dim_spin.setRange(32, 2048)      # widened to the GPU limit on first refresh
-        self._max_dim_spin.setValue(2048)
+        self._max_dim_spin.setRange(32, 4096)      # narrowed to the GPU limit on first refresh
+        self._max_dim_spin.setValue(1024)
         self._max_dim_spin.setToolTip(
-            "Cap on the number of voxels along the LONGEST axis. Auto-populated\n"
-            "from the GPU's max 3-D texture size; raise for finer detail on an\n"
+            "Cap on the number of voxels along the LONGEST axis. Starts at 1024\n"
+            "and is limited by the GPU's max 3-D texture size (up to 4096); raise\n"
+            "for finer detail on an\n"
             "elongated or focused region, lower to save memory.\n"
             f"The TOTAL voxel count is also capped at {_DEFAULT_MAX_VOXELS:,} — for a\n"
             "big whole-field volume that usually binds first, so raising this may\n"
@@ -553,39 +619,17 @@ class VolumeRenderWindow(QWidget):
         self._opacity_spin.valueChanged.connect(self._schedule_rebuild)
         bar.addWidget(self._opacity_spin)
 
-        # Brightness/contrast: black/white as percentiles of the nonzero voxels.
-        bar.addWidget(QLabel("Black %"))
-        self._black_spin = QDoubleSpinBox()
-        self._black_spin.setRange(0.0, 99.0)
-        self._black_spin.setDecimals(1)
-        self._black_spin.setSingleStep(1.0)
-        self._black_spin.setValue(float(self._black_pct))
-        self._black_spin.setToolTip(
-            "Contrast black point: voxel-count percentile mapped to transparent."
-        )
-        self._black_spin.valueChanged.connect(self._on_contrast_changed)
-        bar.addWidget(self._black_spin)
-
-        bar.addWidget(QLabel("White %"))
-        self._white_spin = QDoubleSpinBox()
-        self._white_spin.setRange(1.0, 100.0)
-        self._white_spin.setDecimals(1)
-        self._white_spin.setSingleStep(0.5)
-        self._white_spin.setValue(float(self._white_pct))
-        self._white_spin.setToolTip(
-            "Contrast white point: voxel-count percentile mapped to fully opaque.\n"
-            "Opened from the advanced 2-D view, both are seeded from that view's\n"
-            "brightness/contrast so 3-D visibility matches the 2-D image."
-        )
-        self._white_spin.valueChanged.connect(self._on_contrast_changed)
-        bar.addWidget(self._white_spin)
-
         bar.addWidget(QLabel("ISO"))
         self._iso_spin = QDoubleSpinBox()
         self._iso_spin.setRange(0.01, 0.99)
         self._iso_spin.setDecimals(2)
         self._iso_spin.setSingleStep(0.05)
         self._iso_spin.setValue(0.25)
+        self._iso_spin.setToolTip(
+            "Isosurface threshold on normalized voxel density (0.01-0.99).\n"
+            "Enabled in Surface and ISO surface modes. Lower values include\n"
+            "more low-density structure; higher values keep only dense cores."
+        )
         self._iso_spin.valueChanged.connect(self._schedule_rebuild)
         bar.addWidget(self._iso_spin)
 
@@ -625,6 +669,77 @@ class VolumeRenderWindow(QWidget):
         root.addWidget(self._info_label)
         self._on_mode_changed(self._mode_combo.currentText())
 
+    def _display_channel_specs(self) -> list[dict]:
+        if not self._display_state:
+            return []
+        return [
+            spec for spec in self._display_state.get("channels", [])
+            if isinstance(spec, dict)
+        ]
+
+    def _display_channel_map(self) -> dict[int, dict]:
+        out = {}
+        for spec in self._display_channel_specs():
+            try:
+                out[int(spec["dataset_idx"])] = spec
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+
+    def _display_visible_ids(self) -> tuple[int, ...]:
+        return tuple(
+            dataset_idx
+            for dataset_idx, spec in self._display_channel_map().items()
+            if spec.get("kind", "localizations") == "localizations"
+            and bool(spec.get("visible", True))
+        )
+
+    def _display_contrast(self, dataset_idx: int) -> tuple[float, float] | None:
+        spec = self._display_channel_map().get(int(dataset_idx))
+        value = spec.get("contrast_pct") if spec else None
+        if value is None:
+            return None
+        try:
+            return float(value[0]), float(value[1])
+        except (IndexError, TypeError, ValueError):
+            return None
+
+    def _apply_display_state_to_controls(self, display_state: dict | None) -> None:
+        """Apply a 2-D snapshot to controls without starting a rebuild."""
+        if display_state is None:
+            return
+        self._lut_invert = bool(display_state.get("invert", False))
+        spec = self._display_channel_map().get(self._idx)
+        if spec is None:
+            return
+        lut = str(spec.get("lut") or self._cmap_combo.currentText())
+        if self._cmap_combo.findText(lut) < 0:
+            self._cmap_combo.addItem(lut)
+        self._cmap_combo.blockSignals(True)
+        self._cmap_combo.setCurrentText(lut)
+        self._cmap_combo.blockSignals(False)
+        contrast = self._display_contrast(self._idx)
+        if contrast is not None:
+            self._black_pct, self._white_pct = contrast
+
+    def capture_spatial_state(self) -> None:
+        """Capture overlay transforms for an explicit 3-D refresh.
+
+        Automatic display synchronization must not turn a later 2-D alignment
+        edit into an implicit 3-D spatial refresh.
+        """
+        from ..core.overlay import overlay_members
+
+        self._overlay_transforms = {}
+        if not (0 <= self._idx < len(self._state.datasets)):
+            return
+        for dataset_idx, ds in overlay_members(self._state, self._idx):
+            transform = ds.state.get("overlay_transform") or ds.state.get(
+                "render_transform_2d"
+            )
+            if transform is not None:
+                self._overlay_transforms[int(dataset_idx)] = deepcopy(transform)
+
     def _overlay_channels(self):
         """Visible overlay channels as ``[(locs_nm, rgb01), …]`` (display-space,
         each channel's transform applied), or ``None`` when the dataset is not a
@@ -640,16 +755,36 @@ class VolumeRenderWindow(QWidget):
         if len(members) < 2:
             return None
         out = []
-        for _, ds in members:
+        display_map = self._display_channel_map()
+        self._volume_channel_ids = ()
+        channel_ids = []
+        for dataset_idx, ds in members:
+            spec = display_map.get(int(dataset_idx))
+            if spec is not None:
+                if spec.get("kind", "localizations") != "localizations":
+                    continue
+                if not bool(spec.get("visible", True)):
+                    continue
             locs = _finite_filtered_locs(ds)
             if locs.shape[0] == 0:
                 continue
+            transform = self._overlay_transforms.get(int(dataset_idx))
+            if transform is None:
+                transform = ds.state.get("overlay_transform") or ds.state.get(
+                    "render_transform_2d"
+                )
             locs = apply_display_transform_nm(
-                locs, ds.state.get("overlay_transform")
-                or ds.state.get("render_transform_2d"))
-            rgb = lut_rgb(str(ds.state.get("overlay_lut")
-                             or ds.state.get("render_channel_lut") or "Gray"))
+                locs, transform
+            )
+            lut = (
+                str(spec.get("lut")) if spec is not None and spec.get("lut")
+                else str(ds.state.get("overlay_lut")
+                         or ds.state.get("render_channel_lut") or "Gray")
+            )
+            rgb = lut_rgb(lut)
             out.append((np.ascontiguousarray(locs[:, :3], dtype=np.float64), rgb))
+            channel_ids.append(int(dataset_idx))
+        self._volume_channel_ids = tuple(channel_ids)
         return out or None
 
     def _gl_max_3d_texture(self) -> int:
@@ -677,14 +812,15 @@ class VolumeRenderWindow(QWidget):
         return self._max_dim
 
     def _recommended_max_dim(self) -> int:
-        """Auto-populated default for the Max dim control: the GPU limit, but not
-        more than 2048 (an axis that long is already extreme for a localization
-        volume; the 8M total-voxel cap usually binds first anyway)."""
-        return int(min(self._gl_max_3d_texture(), 2048))
+        """Default Max dim: 1024 unless the GPU requires a lower value."""
+        return int(min(self._gl_max_3d_texture(), 1024))
 
     def _single_channel_locs(self, ds):
         """Filtered finite native-XYZ locs, plus aligned per-loc precision sigma
         (N,3 nm) when the reflected method is the precision Gaussian, else None."""
+        spec = self._display_channel_map().get(self._idx)
+        if spec is not None and not bool(spec.get("visible", True)):
+            return np.empty((0, 3), dtype=np.float64), None
         try:
             full = np.asarray(ds.loc_nm, dtype=np.float64)
         except Exception:
@@ -720,6 +856,7 @@ class VolumeRenderWindow(QWidget):
                 f"3D Volume Preview - {ds.name} (+{len(channels) - 1} channel(s))")
             all_locs = np.vstack([c[0] for c in channels])
         else:
+            self._volume_channel_ids = ()
             self.setWindowTitle(f"3D Volume Preview - {ds.name}")
             all_locs, precision_sigma = self._single_channel_locs(ds)
         # Restrict to the focused 3-D region (from the advanced 2-D view) if set.
@@ -727,11 +864,11 @@ class VolumeRenderWindow(QWidget):
             all_locs, precision_sigma = _clip_region(
                 all_locs, precision_sigma, self._region_bounds
             )
-        # Default to an isotropic 2.5 nm voxel (the total-voxel cap enlarges it
+        # Default to an isotropic 1 nm voxel (the total-voxel cap enlarges it
         # if the region is too big); only seed the spinboxes once.
         if not getattr(self, "_voxel_initialised", False):
-            self._xy_voxel_spin.setValue(2.5)
-            self._z_voxel_spin.setValue(2.5)
+            self._xy_voxel_spin.setValue(1.0)
+            self._z_voxel_spin.setValue(1.0)
             self._voxel_initialised = True
         # Populate Max dim from the GPU limit once the GL context exists (widen
         # the range to the hard limit, default to the recommended value).
@@ -739,7 +876,7 @@ class VolumeRenderWindow(QWidget):
             self._max_dim_initialised = True
             hard = self._gl_max_3d_texture()
             self._max_dim_spin.blockSignals(True)
-            self._max_dim_spin.setRange(32, max(hard, 64))
+            self._max_dim_spin.setRange(32, min(max(hard, 64), 4096))
             self._max_dim_spin.setValue(self._recommended_max_dim())
             self._max_dim_spin.blockSignals(False)
 
@@ -750,6 +887,11 @@ class VolumeRenderWindow(QWidget):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             if channels:
+                channel_contrast_pct = [
+                    self._display_contrast(dataset_idx)
+                    or (self._black_pct, self._white_pct)
+                    for dataset_idx in self._volume_channel_ids
+                ]
                 payload = make_multichannel_volume_payload(
                     [c[0] for c in channels], [c[1] for c in channels],
                     xy_voxel_nm=float(self._xy_voxel_spin.value()),
@@ -760,8 +902,12 @@ class VolumeRenderWindow(QWidget):
                     sigma_nm_xyz=self._sigma_nm_xyz,
                     black_pct=self._black_pct,
                     white_pct=self._white_pct,
+                    channel_contrast_pct=channel_contrast_pct,
                 )
             else:
+                contrast = self._display_contrast(self._idx)
+                if contrast is not None:
+                    self._black_pct, self._white_pct = contrast
                 payload = make_volume_payload(
                     all_locs,
                     xy_voxel_nm=float(self._xy_voxel_spin.value()),
@@ -775,6 +921,7 @@ class VolumeRenderWindow(QWidget):
                     precision_sigma_nm=precision_sigma,
                     black_pct=self._black_pct,
                     white_pct=self._white_pct,
+                    invert=self._lut_invert,
                 )
         except Exception as exc:
             QApplication.restoreOverrideCursor()
@@ -798,30 +945,221 @@ class VolumeRenderWindow(QWidget):
             f"mode={self._mode_combo.currentText()}  |  intensity max~{payload.intensity_max:.3g}"
         )
 
+    def _recompose_single_payload(self) -> bool:
+        payload = self._payload
+        if payload is None or self._volume_channel_ids:
+            return False
+        contrast = self._display_contrast(self._idx)
+        black, white = contrast or (self._black_pct, self._white_pct)
+        norm, vmax = _normalize_volume(payload.scalar, black, white)
+        rgba = _matplotlib_rgba(
+            self._cmap_combo.currentText(), norm.ravel(), invert=self._lut_invert
+        ).reshape((*norm.shape, 4))
+        alpha = (
+            np.power(norm, 0.75)
+            * np.clip(float(self._opacity_spin.value()), 0.0, 1.0)
+            * 255.0
+        ).astype(np.uint8)
+        rgba[..., 3] = alpha
+        rgba[norm <= 0.0, 3] = 0
+        self._black_pct, self._white_pct = float(black), float(white)
+        self._payload = VolumePayload(
+            scalar=payload.scalar,
+            norm=norm,
+            rgba=np.ascontiguousarray(rgba, dtype=np.uint8),
+            origin_nm=payload.origin_nm,
+            voxel_nm=payload.voxel_nm,
+            counts=payload.counts,
+            n_locs=payload.n_locs,
+            intensity_max=vmax,
+        )
+        self._set_render_item(self._payload)
+        return True
+
+    def _recompose_overlay_payload(self) -> bool:
+        payload = self._payload
+        if payload is None or not payload.channel_norms:
+            return False
+        norm_by_id = {
+            dataset_idx: norm
+            for dataset_idx, norm in zip(
+                self._volume_channel_ids, payload.channel_norms
+            )
+        }
+        visible_ids = self._display_visible_ids()
+        if not visible_ids or any(dataset_idx not in norm_by_id for dataset_idx in visible_ids):
+            return False
+        specs = self._display_channel_map()
+        norms = [norm_by_id[dataset_idx] for dataset_idx in visible_ids]
+        rgbs = [lut_rgb(str(specs[dataset_idx].get("lut") or "Gray"))
+                for dataset_idx in visible_ids]
+        rgba = _compose_multichannel_rgba(
+            norms, rgbs, float(self._opacity_spin.value())
+        )
+        self._payload = VolumePayload(
+            scalar=payload.scalar,
+            norm=payload.norm,
+            rgba=rgba,
+            origin_nm=payload.origin_nm,
+            voxel_nm=payload.voxel_nm,
+            counts=payload.counts,
+            n_locs=payload.n_locs,
+            intensity_max=payload.intensity_max,
+            channel_norms=payload.channel_norms,
+        )
+        self._set_render_item(self._payload)
+        return True
+
+    def sync_from_2d(
+        self, display_state: dict | None, *, render_method: str | None = None
+    ) -> None:
+        """Synchronize display state from the linked 2-D render.
+
+        LUT and visibility changes use cached channel responses. B/C changes in
+        an overlay, and any render-method change, are coalesced into one volume
+        rebuild because they change the voxel scalar field. Camera/FOV and
+        alignment are intentionally absent from this interface.
+        """
+        old_state = self._display_state
+        old_visible_ids = (
+            self._volume_channel_ids
+            if self._volume_channel_ids
+            else self._display_visible_ids()
+        )
+        old_map = self._display_channel_map()
+        old_method = self._render_method
+        self._display_state = display_state
+        self._apply_display_state_to_controls(display_state)
+        new_map = self._display_channel_map()
+        new_visible_ids = self._display_visible_ids()
+        if render_method is not None:
+            self._render_method = render_method
+        method_changed = render_method is not None and render_method != old_method
+        if method_changed:
+            self._schedule_rebuild()
+            return
+        if self._payload is None:
+            return
+
+        ids_changed = tuple(old_visible_ids) != tuple(new_visible_ids)
+        ids_to_compare = set(old_map) | set(new_map)
+        contrast_changed = any(
+            old_map.get(dataset_idx, {}).get("contrast_pct")
+            != new_map.get(dataset_idx, {}).get("contrast_pct")
+            for dataset_idx in ids_to_compare
+        )
+        lut_changed = any(
+            old_map.get(dataset_idx, {}).get("lut")
+            != new_map.get(dataset_idx, {}).get("lut")
+            for dataset_idx in ids_to_compare
+        )
+        if old_state is None:
+            ids_changed = True
+
+        if self._volume_channel_ids:
+            if contrast_changed:
+                self._schedule_rebuild()
+            elif ids_changed or lut_changed:
+                if not self._recompose_overlay_payload():
+                    self._schedule_rebuild()
+        elif contrast_changed or lut_changed:
+            self._recompose_single_payload()
+
     def _schedule_rebuild(self, *_args) -> None:
         if not getattr(self, "_voxel_initialised", False):
             return
         self._rebuild_timer.start()
 
-    def _on_contrast_changed(self, *_args) -> None:
-        self._black_pct = float(self._black_spin.value())
-        self._white_pct = float(self._white_spin.value())
-        self._schedule_rebuild()
-
     def set_contrast_pct(self, black: float, white: float) -> None:
         """Seed the volume brightness/contrast (black/white percentiles) — used
-        by the advanced view to match the 2-D contrast. Updates the spinboxes
-        without triggering a redundant rebuild (the caller refreshes)."""
+        by the advanced view to match the 2-D contrast. The values are retained
+        for LUT/Brightness-Contrast dialogs, not exposed as duplicate inline
+        controls."""
         self._black_pct = float(black)
         self._white_pct = float(white)
-        for spin, value in ((self._black_spin, black), (self._white_spin, white)):
-            spin.blockSignals(True)
-            spin.setValue(float(value))
-            spin.blockSignals(False)
 
     def _on_mode_changed(self, mode: str) -> None:
         self._iso_spin.setEnabled(mode in {"Surface", "ISO surface"})
         self._schedule_rebuild()
+
+    def _lut_values(self) -> np.ndarray:
+        payload = self._payload
+        if payload is None:
+            return np.empty(0, dtype=float)
+        values = np.asarray(payload.scalar, dtype=float).ravel()
+        return values[np.isfinite(values)]
+
+    def open_lut_dialog(self) -> None:
+        """Open the shared LUT editor for the 3-D volume view."""
+        values = self._lut_values()
+        if values.size == 0:
+            self.refresh_from_dataset()
+            values = self._lut_values()
+        if values.size == 0:
+            self._info_label.setText("LUT unavailable: no volume values to display.")
+            return
+
+        from .lut_dialog import LutDialog
+
+        if self._lut_dialog is None:
+            self._lut_dialog = LutDialog(
+                on_levels_changed=self._on_lut_levels_changed,
+                on_cmap_changed=self._on_lut_cmap_changed,
+                on_invert_changed=self._on_lut_invert_changed,
+                parent=self,
+            )
+
+        data_lo = float(values.min())
+        data_hi = float(values.max())
+        if data_hi <= data_lo:
+            data_hi = data_lo + 1.0
+        nonzero = values[values > 0.0]
+        sample = nonzero if nonzero.size else values
+        lo = float(np.percentile(sample, np.clip(self._black_pct, 0.0, 100.0)))
+        hi = float(np.percentile(sample, np.clip(self._white_pct, 0.0, 100.0)))
+        if hi <= lo:
+            hi = lo + 1.0
+        self._lut_dialog.load_image(
+            pixels=values,
+            data_lo=data_lo,
+            data_hi=data_hi,
+            lo=lo,
+            hi=hi,
+            cmap_name=self._cmap_combo.currentText(),
+            invert=self._lut_invert,
+        )
+        self._lut_dialog.show()
+        self._lut_dialog.raise_()
+        self._lut_dialog.activateWindow()
+
+    def _on_lut_levels_changed(self, lo: float, hi: float) -> None:
+        values = self._lut_values()
+        if values.size == 0:
+            return
+        sample = values[values > 0.0]
+        if sample.size == 0:
+            sample = values
+        self._black_pct = float(np.mean(sample <= float(lo)) * 100.0)
+        self._white_pct = float(np.mean(sample <= float(hi)) * 100.0)
+        self._white_pct = max(self._white_pct, self._black_pct + 0.1)
+        self._white_pct = min(self._white_pct, 100.0)
+        self.refresh_from_dataset()
+
+    def _on_lut_cmap_changed(self, name: str, invert: bool) -> None:
+        self._lut_invert = bool(invert)
+        if 0 <= self._idx < len(self._state.datasets):
+            ds = self._state.datasets[self._idx]
+            ds.state["render_channel_lut"] = name
+            ds.state["overlay_lut"] = name
+        if self._cmap_combo.findText(name) < 0:
+            self._cmap_combo.addItem(name)
+        self._cmap_combo.blockSignals(True)
+        self._cmap_combo.setCurrentText(name)
+        self._cmap_combo.blockSignals(False)
+        self.refresh_from_dataset()
+
+    def _on_lut_invert_changed(self, invert: bool) -> None:
+        self._on_lut_cmap_changed(self._cmap_combo.currentText(), invert)
 
     def _clear_render_items(self) -> None:
         if self._view is None:
@@ -906,7 +1244,10 @@ class VolumeRenderWindow(QWidget):
         verts[:, 0] = ox + verts[:, 0] * payload.voxel_nm[0]
         verts[:, 1] = oy + verts[:, 1] * payload.voxel_nm[1]
         verts[:, 2] = oz + verts[:, 2] * payload.voxel_nm[2]
-        color = _surface_color(self._cmap_combo.currentText(), level, float(self._opacity_spin.value()))
+        color = _surface_color(
+            self._cmap_combo.currentText(), level,
+            float(self._opacity_spin.value()), invert=self._lut_invert,
+        )
         mesh = gl.MeshData(vertexes=verts, faces=np.asarray(faces, dtype=np.uint32))
         self._surface_item = gl.GLMeshItem(
             meshdata=mesh,

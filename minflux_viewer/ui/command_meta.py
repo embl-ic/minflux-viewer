@@ -23,7 +23,7 @@ on each QAction from this registry; `command_finder` reads those back.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -112,8 +112,8 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "Localization scatter plot.", "view"),
     "actionRender": CommandMeta(U + "render_window.py",
                               ("image", "reconstruction", "histogram", "gaussian", "advanced", "precision", "bilinear"),
-                              "Rendered localization image (right-click › View › Render Mode "
-                              "switches Basic ↔ Advanced precision reconstruction).", "view"),
+                              "Rendered localization image (right-click › View › Render Method "
+                              "selects the reconstruction method).", "view"),
     "actionLog": CommandMeta(U + "log_window.py", ("events", "messages"), "Event log window.", "view"),
 
     # ---- Process › Channel ----------------------------------------------------
@@ -129,19 +129,39 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "(transforms baked, trace ids remapped) for combined analysis.", "process",
                               inputs=("active multi-channel overlay",),
                               outputs=("single flattened dataset (hot LUT)",)),
-    "actionChannelSeparateDcr": CommandMeta(A + "dcr_em.py",
-                              ("dcr", "two color", "2 color", "spectral", "em", "gaussian mixture", "unmix"),
-                              "Separate two colours by a Gaussian-mixture (EM) fit of the DCR distribution; "
-                              "each trace is assigned by its mean DCR.", "process",
+    "actionChannelSeparateDcr": CommandMeta(U + "attribute_separation_dialog.py",
+                              ("dcr", "two color", "2 color", "spectral", "em", "gaussian mixture", "unmix",
+                               "photon weighted", "majority vote", "channel"),
+                              "Separate colours by a mixture fit of the DCR distribution into "
+                              "value-window channels; each trace is assigned by mean/median/majority vote "
+                              "(optionally photon-weighted DCR).", "process",
                               params=(ParamMeta("n_components", "int", 2, "", "mixture components"),),
                               inputs=("active dataset with dcr",),
-                              outputs=("red/green/(unassigned) overlay datasets",)),
+                              outputs=("per-channel (+unassigned) overlay datasets",)),
     "actionChannelSeparateTime": CommandMeta(U + "time_channel_dialog.py",
-                              ("time", "window", "split", "exchange paint", "multiplex", "channel"),
+                              ("time", "window", "split", "exchange paint", "multiplex", "channel",
+                               "convert overlay"),
                               "Separate the active dataset into an overlay of "
                               "filtered acquisition-time channels.", "process",
                               inputs=("active dataset with tim",),
                               outputs=("time-window overlay datasets",)),
+    "actionChannelSeparateAttribute": CommandMeta(U + "attribute_separation_dialog.py",
+                              ("attribute", "distribution", "mixture", "gaussian", "log-normal",
+                               "gamma", "poisson", "convert overlay", "channel", "unmix", "efo", "cfr"),
+                              "Convert a dataset to a multi-channel overlay by any MINFLUX "
+                              "attribute's distribution (mixture fit → value-window channels).",
+                              "process",
+                              params=(ParamMeta("n_components", "int", 2, "", "mixture components"),),
+                              inputs=("active MINFLUX dataset",),
+                              outputs=("per-channel (+unassigned) overlay datasets",)),
+    "actionRevertOverlay": CommandMeta(U + "main_window.py",
+                              ("revert", "undo", "overlay", "original", "recombine", "unsplit",
+                               "convert overlay", "channel"),
+                              "Revert a separation overlay back to its single original dataset "
+                              "(removes the channels; reconstructs if the source was closed).",
+                              "process",
+                              inputs=("active separation overlay",),
+                              outputs=("original single dataset",)),
 
     # ---- Process › ROI --------------------------------------------------------
     "actionRoiManager": CommandMeta(U + "roi_manager.py", ("roi", "regions", "manager"),

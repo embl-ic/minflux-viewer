@@ -68,3 +68,26 @@ def parse_iteration_label(label: str) -> tuple["str | int", str]:
     if digits:
         return int(digits) - 1, "single"   # 1-based label -> 0-based index
     return "last", "single"
+
+
+def iteration_bold_flags(labels, effective, n_itr: int) -> list[bool]:
+    """Which iteration-selector *labels* to render **bold**.
+
+    ``effective`` is a boolean sequence (length ``n_itr``, 0-based) marking the
+    iterations that hold real values for the current attribute (see
+    ``loader.effective_iterations_for_attr``). An individual ``kth`` label is
+    bold when iteration ``k-1`` is effective; ``last (Nth)`` is bold when the
+    global-max iteration (``n_itr-1``) is effective. The pooled modes
+    (``all [flatten]`` / ``all [stacked]``) are never bold.
+    """
+    eff = list(effective)
+    out: list[bool] = []
+    for label in labels:
+        sel, _render = parse_iteration_label(label)
+        bold = False
+        if isinstance(sel, int):
+            bold = 0 <= sel < n_itr and sel < len(eff) and bool(eff[sel])
+        elif sel == "last":
+            bold = n_itr > 0 and (n_itr - 1) < len(eff) and bool(eff[n_itr - 1])
+        out.append(bold)
+    return out

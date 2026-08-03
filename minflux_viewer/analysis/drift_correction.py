@@ -483,7 +483,9 @@ def estimate_drift(
     tid = np.asarray(tid).ravel()
 
     if dims is None:
-        z_ok = z is not None and np.ptp(np.asarray(z, dtype=float)) > 0
+        z_arr = None if z is None else np.asarray(z, dtype=float).ravel()
+        finite_z = z_arr[np.isfinite(z_arr)] if z_arr is not None else np.empty(0)
+        z_ok = bool(finite_z.size and np.ptp(finite_z) > 0)
         dims = 3 if z_ok else 2
 
     if dims == 3:

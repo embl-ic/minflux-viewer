@@ -43,4 +43,4 @@ The **"Beads and alignment result"** window (from *Align channel* / *Show beads 
 
 ---
 
-Earlier releases: see the [Releases page](https://github.com/EMBL-ICLM/minflux-viewer/releases).
+Earlier releases: see the [Releases page](https://github.com/embl-ic/minflux-viewer/releases).

@@ -35,22 +35,30 @@ def _alive(window: QWidget) -> bool:
         return False
 
 
-def corner_position(avail, size, *, align: str = "center", margin: int = 24):
+def corner_position(avail, size, *, align="center", margin: int = 24):
     """Pure geometry: top-left ``(x, y)`` to place a ``size=(w, h)`` window at an
     anchor of the exclusive ``(left, top, right, bottom)`` rect *avail*.
 
     ``align`` is ``"center"`` (default), ``"top_right"``, ``"top_left"``,
-    ``"bottom_right"`` or ``"bottom_left"``. The result is always clamped so the
-    window sits fully inside *avail* (assuming it is not larger than *avail*).
+    ``"bottom_right"`` or ``"bottom_left"`` — **or** a ``(fx, fy)`` fraction pair
+    (CSS ``background-position`` semantics): ``fx=0`` flush-left … ``fx=1``
+    flush-right, ``fy=0`` flush-top … ``fy=1`` flush-bottom. So ``(0.75, 0.25)``
+    sits the window 75 % of the way toward the right and 25 % down (= 75 % up
+    from the bottom). The result is always clamped so the window sits fully
+    inside *avail* (assuming it is not larger than *avail*).
     """
     vl, vt, vr, vb = avail
     w, h = size
-    right = "right" in align
-    bottom = "bottom" in align
-    if align == "center":
+    if isinstance(align, (tuple, list)):
+        fx, fy = float(align[0]), float(align[1])
+        x = vl + int(round(fx * max(0, (vr - vl - w))))
+        y = vt + int(round(fy * max(0, (vb - vt - h))))
+    elif align == "center":
         x = vl + (vr - vl - w) // 2
         y = vt + (vb - vt - h) // 2
     else:
+        right = "right" in align
+        bottom = "bottom" in align
         x = (vr - margin - w) if right else (vl + margin)
         y = (vb - margin - h) if bottom else (vt + margin)
     x = min(max(x, vl), max(vl, vr - w))
@@ -59,7 +67,8 @@ def corner_position(avail, size, *, align: str = "center", margin: int = 24):
 
 
 def ensure_on_screen(window: QWidget, owner: QWidget | None = None, *,
-                     margin: int = 24, align: str = "center") -> None:
+                     margin: int = 24,
+                     align: "str | tuple[float, float]" = "center") -> None:
     """Cap *window* to the available screen area and place it fully on-screen.
 
     Unparented top-level windows (the MSR reader, Dataset Manager, modeless

@@ -3660,7 +3660,7 @@ class MsrReaderDialog(QWidget):
             )
             loc_z = np.asarray(attrs.get("loc_z", np.zeros(num_raw)), dtype=np.float64)
             finite = np.isfinite(loc_z)
-            if np.any(finite) and np.nanmax(np.abs(loc_z[finite])) > 1e-12:
+            if np.count_nonzero(finite) and np.ptp(loc_z[finite]) > 1e-12:
                 return True
         except Exception:
             pass
@@ -3672,7 +3672,7 @@ class MsrReaderDialog(QWidget):
                 if xyz.ndim >= 2 and xyz.shape[-1] >= 3:
                     z = xyz[..., 2]
                     finite = np.isfinite(z)
-                    return bool(np.any(finite) and np.nanmax(np.abs(z[finite])) > 1e-12)
+                    return bool(np.count_nonzero(finite) and np.ptp(z[finite]) > 1e-12)
         except Exception:
             pass
         return False

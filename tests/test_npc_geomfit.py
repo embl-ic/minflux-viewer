@@ -64,6 +64,42 @@ def test_align_to_canonical_flattens_and_scales():
     assert abs(np.median(np.hypot(A[:, 0], A[:, 1])) - 50) < 8  # radius ~50
 
 
+def test_canonical_transform_matrix_matches_align_to_canonical():
+    from minflux_viewer.analysis.particle_average import apply_particle_transform
+
+    P = _make_npc(diameter=100, inter=40, rim=4, tilt_deg=22, az=1.0, phase=0.3, seed=7)
+    fit = gf.fit_npc_model(P)
+    M = gf.canonical_transform_matrix(fit)
+    assert M.shape == (4, 4)
+    # applying the 4×4 == the align_to_canonical operation (so it can be replayed
+    # onto other overlay channels)
+    got = apply_particle_transform(P, M)
+    want = gf.align_to_canonical(P, fit)
+    assert np.allclose(got, want, atol=1e-6)
+
+
+def test_average_geomfit_particle_transforms_parallel_and_replayable():
+    from minflux_viewer.analysis.particle_average import pool_transformed
+
+    good = [_make_npc(diameter=100, inter=40, rim=5, tilt_deg=t, az=a, phase=p, seed=i)
+            for i, (t, a, p) in enumerate([(0, 0.0, 0.1), (15, 0.7, 0.2), (25, 1.5, 0.05)])]
+    tiny = np.zeros((3, 3))                                    # too few points → fit fails
+    parts = good + [tiny]
+    res = gf.average_npc_geomfit(parts, min_gof=-10.0)
+
+    mats = res["particle_transforms"]
+    assert len(mats) == len(parts)                            # parallel to particles
+    for r, m in zip(res["table"], mats):
+        assert (m is not None) == bool(r["accepted"])         # matrix iff accepted
+        if m is not None:
+            assert np.asarray(m).shape == (4, 4)
+    assert mats[-1] is None                                    # the failed particle
+    # replaying each accepted particle's matrix onto its own points reproduces the
+    # reference pooled average — the basis for multi-channel replay
+    ref_pool = pool_transformed(parts, mats)
+    assert np.allclose(ref_pool, res["average_loc"], atol=1e-6)
+
+
 def test_average_geomfit_table_and_aligned_parallel():
     rng = np.random.default_rng(5)
     parts = [_make_npc(diameter=100 + rng.normal(0, 3), inter=40, rim=5,

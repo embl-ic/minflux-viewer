@@ -22,11 +22,17 @@ from PyQt6.QtCore import QEvent, QObject, QPoint, QRunnable, QThreadPool, QTimer
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
+    QColor,
     QDragEnterEvent,
     QDropEvent,
     QIcon,
+    QImage,
     QKeySequence,
+    QPainter,
+    QPalette,
+    QPixmap,
     QShortcut,
+    QTransform,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -212,6 +218,71 @@ def _human_duration(seconds: float) -> str:
     return f"{minutes / 60.0:.1f} h"
 
 
+def _adaptive_toolbar_pixmap(path: str) -> "QPixmap | None":
+    """Load a toolbar icon without its baked-in white matte.
+
+    The small ROI/LUT PNGs are opaque black-on-white images. Treating the white
+    pixels as an alpha mask removes the visible white square on dark palettes.
+    Monochrome artwork is recoloured with the current button-text colour so the
+    same source remains legible in both light and dark modes; the coloured
+    LUT-picker icon keeps its original colours.
+    """
+    image = QImage(path)
+    if image.isNull():
+        return None
+    image = image.convertToFormat(QImage.Format.Format_ARGB32)
+
+    monochrome = True
+    for y in range(image.height()):
+        for x in range(image.width()):
+            color = image.pixelColor(x, y)
+            if max(color.red(), color.green(), color.blue()) - min(
+                color.red(), color.green(), color.blue()
+            ) > 3:
+                monochrome = False
+                break
+        if not monochrome:
+            break
+
+    palette = QApplication.palette()
+    foreground = palette.color(
+        QPalette.ColorGroup.Active, QPalette.ColorRole.ButtonText
+    )
+    if not foreground.isValid():
+        foreground = palette.color(
+            QPalette.ColorGroup.Active, QPalette.ColorRole.WindowText
+        )
+    # Keep dark-mode strokes slightly softer than a fully opaque pure white.
+    foreground_alpha = 230
+
+    for y in range(image.height()):
+        for x in range(image.width()):
+            color = image.pixelColor(x, y)
+            red, green, blue = color.red(), color.green(), color.blue()
+            if monochrome:
+                luminance = round(0.2126 * red + 0.7152 * green + 0.0722 * blue)
+                coverage = max(0, min(255, 255 - luminance))
+                alpha = round(color.alpha() * coverage * foreground_alpha / (255 * 255))
+                image.setPixelColor(
+                    x,
+                    y,
+                    QColor(foreground.red(), foreground.green(), foreground.blue(), alpha),
+                )
+            else:
+                # For coloured artwork, only remove the white matte while
+                # preserving the original wheel colours and antialiasing.
+                coverage = max(0, min(255, 255 - min(red, green, blue)))
+                alpha = round(color.alpha() * coverage / 255)
+                image.setPixelColor(x, y, QColor(red, green, blue, alpha))
+
+    return QPixmap.fromImage(image)
+
+
+def _adaptive_toolbar_icon(path: str) -> QIcon:
+    pixmap = _adaptive_toolbar_pixmap(path)
+    return QIcon(pixmap) if pixmap is not None else QIcon(path)
+
+
 class MainWindow(QMainWindow):
     """Top-level application window."""
 
@@ -243,10 +314,7 @@ class MainWindow(QMainWindow):
         self._roi_tool_actions: dict[str, QAction] = {}
         self._window_cycle_index = -1
         # One render window per dataset: {dataset_idx: RenderWindow}
-        self._render_windows: dict[int, "RenderWindow"] = {}
-        # Advanced render windows are deliberately kept separate so alternate
-        # reconstruction methods cannot replace or mutate the production renderer.
-        self._advanced_render_windows: dict[int, QWidget] = {}
+        self._render_windows: dict[int, QWidget] = {}
         # Standalone TIFF viewers are not MINFLUX datasets and never appear in
         # the dataset manager.
         self._tiff_windows: dict[str, QWidget] = {}
@@ -300,6 +368,29 @@ class MainWindow(QMainWindow):
         self._recent_menu_style = _ScrollableMenuStyle()
         self._recent_menu_style.setParent(self._recent_menu)
         self._recent_menu.setStyle(self._recent_menu_style)
+        # Right-click a recent file → "Open file location" (a QMenu doesn't emit
+        # customContextMenuRequested for its items, so use an event filter).
+        self._recent_menu.installEventFilter(self)
+
+        # Remember the last plot window (render/scatter) the user focused, so the
+        # LUT toolbar button targets it — clicking the toolbar activates the MAIN
+        # window, so QApplication.activeWindow() no longer identifies it. Using the
+        # global focusChanged signal (not an event filter installed on the plot
+        # windows, which perturbs pyqtgraph's window teardown).
+        self._last_active_plot_window = None
+        app = QApplication.instance()
+        if app is not None and hasattr(app, "focusChanged"):
+            app.focusChanged.connect(self._on_focus_changed)
+
+        # Keyboard commands from Preferences are application-wide. Installing the
+        # existing shortcut event filter on QApplication is what lets it see key
+        # events delivered to modeless windows and dialogs (the previous
+        # installation only covered the recent-menu / ROI toolbar buttons). The
+        # filter still lets ordinary text-entry keys pass through when a command
+        # is not allowed in an editor, and never fires while a QKeySequenceEdit
+        # (the Preferences shortcut recorder) has focus.
+        if app is not None:
+            app.installEventFilter(self)
 
         # Wire actions to handlers (previously spread across _build_menu/_toolbar)
         self._connect_actions()
@@ -401,8 +492,8 @@ class MainWindow(QMainWindow):
         self.actionAttributePlot3DMatplotlib = QAction("Attribute Plot 3D (Matplotlib)", self)
         self.actionAttributePlot3DMatplotlib.triggered.connect(self._show_attr_plot_3d_matplotlib)
         u.actionRender.triggered.connect(self._show_render)        # was Process > Render image
-        # The advanced render view is reached via the render window's right-click
-        # View › Render Mode › Advanced switch, not a standalone menu entry.
+        # The unified render view exposes methods from its right-click
+        # View › Render Method menu.
         u.actionShowInfo.triggered.connect(self._show_info_for_active)
         u.actionLog.triggered.connect(self._show_log)
         u.actionConsole.triggered.connect(self._show_console)
@@ -517,20 +608,33 @@ class MainWindow(QMainWindow):
         self.actionChannelSplit.triggered.connect(self._split_active_channel_group)
         self.actionChannelFlatten = QAction("Flatten", self)
         self.actionChannelFlatten.triggered.connect(self._flatten_active_channel_group)
-        self.actionChannelSeparateDcr = QAction("Separate Channel by DCR", self)
+        # Convert Dataset to Multi-Channel Overlay — the unified home for the
+        # separation tools (by DCR / by Time Window / by any attribute) plus the
+        # inverse (Revert). DCR / Time keep their existing behaviour; only their
+        # menu home + labels moved here.
+        self.menuConvertOverlay = QMenu("Convert Dataset to Multi-Channel Overlay", self)
+        self.actionChannelSeparateDcr = QAction("by DCR: detection channel ratio", self)
         self.actionChannelSeparateDcr.triggered.connect(self._show_channel_separation)
-        self.actionChannelSeparateTime = QAction(
-            "Separate Channels from Time Windows", self
-        )
+        self.actionChannelSeparateTime = QAction("by Time Window", self)
         self.actionChannelSeparateTime.triggered.connect(
             self._show_time_channel_separation
         )
+        self.actionChannelSeparateAttribute = QAction("by MINFLUX data attribute...", self)
+        self.actionChannelSeparateAttribute.triggered.connect(self._show_attribute_separation)
+        self.actionRevertOverlay = QAction("Revert Overlay to Original Dataset", self)
+        self.actionRevertOverlay.triggered.connect(self._revert_overlay_to_original)
+        self.menuConvertOverlay.addAction(self.actionChannelSeparateDcr)
+        self.menuConvertOverlay.addAction(self.actionChannelSeparateTime)
+        self.menuConvertOverlay.addAction(self.actionChannelSeparateAttribute)
+        self.menuConvertOverlay.addSeparator()
+        self.menuConvertOverlay.addAction(self.actionRevertOverlay)
+
         self.menuProcessChannel.addAction(self.actionChannelTool)
         self.menuProcessChannel.addAction(self.actionChannelCombine)
         self.menuProcessChannel.addAction(self.actionChannelSplit)
         self.menuProcessChannel.addAction(self.actionChannelFlatten)
-        self.menuProcessChannel.addAction(self.actionChannelSeparateDcr)
-        self.menuProcessChannel.addAction(self.actionChannelSeparateTime)
+        self.menuProcessChannel.addSeparator()
+        self.menuProcessChannel.addMenu(self.menuConvertOverlay)
 
         self.menuProcessRoi = QMenu("ROI", self)
         self.actionRoiManager = QAction("ROI Manager", self)
@@ -728,8 +832,11 @@ class MainWindow(QMainWindow):
         self.actionChannelTool.setText("Channel Tool")
         self.actionChannelCombine.setText("Combine...")
         self.actionChannelSplit.setText("Split...")
-        self.actionChannelSeparateDcr.setText("Separate Channel by DCR")
-        self.actionChannelSeparateTime.setText("Separate Channels from Time Windows")
+        self.menuConvertOverlay.setTitle("Convert Dataset to Multi-Channel Overlay")
+        self.actionChannelSeparateDcr.setText("by DCR: detection channel ratio")
+        self.actionChannelSeparateTime.setText("by Time Window")
+        self.actionChannelSeparateAttribute.setText("by MINFLUX data attribute...")
+        self.actionRevertOverlay.setText("Revert Overlay to Original Dataset")
         self.menuProcessRoi.setTitle("ROI")
         self.actionRoiManager.setText("ROI Manager")
         u.menuOpenRecent.setTitle("Open Recent")
@@ -928,9 +1035,10 @@ class MainWindow(QMainWindow):
         for key, action in self._shortcut_actions.items():
             seq = str(shortcuts.get(key, "") or "")
             action.setShortcut(QKeySequence(seq) if seq else QKeySequence())
-            # WindowShortcut: fires when the main window is the active window
-            # (WidgetShortcut required the widget itself to hold focus, which
-            # menu actions almost never do — so the shortcuts never triggered).
+            # Keep the shortcut visible in menus and available through the
+            # normal main-window action path. The QApplication event filter
+            # dispatches the same command when another window or dialog owns
+            # focus.
             action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         self._ui.actionQuit.setShortcut(QKeySequence("Ctrl+Q"))
         self._ui.actionQuit.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
@@ -998,6 +1106,11 @@ class MainWindow(QMainWindow):
                 self._install_window_shortcuts(widget)
 
     def _trigger_shortcut_command(self, command: str) -> None:
+        # QKeySequenceEdit must receive the key sequence it is recording; it is
+        # the one editor in which a preference shortcut is intentionally being
+        # entered rather than invoked.
+        if self._focus_is_shortcut_editor():
+            return
         focus = QApplication.focusWidget()
         editing_text = isinstance(
             focus,
@@ -1056,6 +1169,17 @@ class MainWindow(QMainWindow):
         return QKeySequence(mods | key).toString(QKeySequence.SequenceFormat.PortableText)
 
     def eventFilter(self, obj, event) -> bool:
+        # Right-click on a recent-file entry → "Open file location".
+        if (event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.RightButton
+                and obj is getattr(self, "_recent_menu", None)):
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            act = self._recent_menu.actionAt(pos)
+            if act is not None and act.isEnabled() and act.data():
+                gpos = (event.globalPosition().toPoint()
+                        if hasattr(event, "globalPosition") else event.globalPos())
+                self._show_recent_file_menu(str(act.data()), gpos)
+                return True
         # Right-click on a ROI toolbar button → tool/variant switch menu.
         if (event.type() == QEvent.Type.MouseButtonPress
                 and event.button() == Qt.MouseButton.RightButton
@@ -1077,6 +1201,8 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.Type.ShortcutOverride:
             command = self._shortcut_command_for_sequence(seq)
             if command is not None:
+                if self._focus_is_shortcut_editor():
+                    return super().eventFilter(obj, event)
                 focus = QApplication.focusWidget()
                 editing_text = isinstance(
                     focus,
@@ -1095,6 +1221,8 @@ class MainWindow(QMainWindow):
         return self._handle_shortcut_keypress(seq, event)
 
     def _handle_shortcut_keypress(self, seq: str, event) -> bool:
+        if self._focus_is_shortcut_editor():
+            return False
         shortcuts = self._state.prefs.get("shortcuts", {})
         focus = QApplication.focusWidget()
         editing_text = isinstance(
@@ -1168,6 +1296,15 @@ class MainWindow(QMainWindow):
                 continue
             by_seq.setdefault(seq, []).append(label)
         return {seq: commands for seq, commands in by_seq.items() if len(commands) > 1}
+
+    @staticmethod
+    def _focus_is_shortcut_editor() -> bool:
+        focus = QApplication.focusWidget()
+        while focus is not None:
+            if isinstance(focus, QKeySequenceEdit):
+                return True
+            focus = focus.parentWidget()
+        return False
 
     def _shortcut_allowed_in_editing(self, command: str) -> bool:
         active = QApplication.activeWindow()
@@ -1693,8 +1830,42 @@ class MainWindow(QMainWindow):
             return
         for path in shown:
             act = QAction(path, self)
+            act.setData(path)                        # for the right-click location menu
             act.triggered.connect(lambda checked, p=path: self._route_file(p))
             self._recent_menu.addAction(act)
+
+    def _show_recent_file_menu(self, path: str, global_pos) -> None:
+        """Right-click context menu for a File › Open Recent entry."""
+        menu = QMenu(self)
+        act_open = menu.addAction("Open")
+        act_loc = menu.addAction("Open file location")
+        chosen = menu.exec(global_pos)
+        if chosen is act_open:
+            self._route_file(path)
+        elif chosen is act_loc:
+            self._open_file_location(path)
+
+    def _open_file_location(self, path: str) -> None:
+        """Reveal a file in the OS file manager (falls back to opening its
+        containing folder). Cross-platform."""
+        import subprocess
+        import sys
+
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+
+        p = Path(path)
+        folder = p.parent
+        try:
+            if sys.platform.startswith("win"):
+                subprocess.Popen(["explorer", f"/select,{p}"])   # str(Path) is native
+                return
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(p)])
+                return
+        except Exception:
+            pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def _populate_plugins_menu(self) -> None:
         """
@@ -2121,10 +2292,9 @@ class MainWindow(QMainWindow):
     # Process › ROI › Restore ROI
     # ------------------------------------------------------------------
     def _coordinate_views_for_dataset(self, idx):
-        """Open render / advanced-render / scatter windows for dataset *idx*."""
+        """Open render / scatter windows for dataset *idx*."""
         wins = []
-        for reg in (self._render_windows, self._advanced_render_windows,
-                    self._scatter_windows):
+        for reg in (self._render_windows, self._scatter_windows):
             w = reg.get(idx)
             if w is not None:
                 wins.append(w)
@@ -2404,6 +2574,14 @@ class MainWindow(QMainWindow):
         idx = self._state.active_idx
         if idx is None or not (0 <= idx < len(self._state.datasets)):
             self._no_data_warning()
+            return
+        ds = self._state.datasets[idx]
+        from ..core.dataset_kind import is_3d
+        if not is_3d(ds):
+            QMessageBox.information(
+                self, "3-D ROI",
+                "The active dataset is 2-D and has no non-degenerate Z coordinate.",
+            )
             return
         from .modeless import show_modeless
         from .roi_3d_dialog import Roi3DWindow
@@ -2712,7 +2890,6 @@ class MainWindow(QMainWindow):
             visible_overlay = False
             for win in (
                 list(self._render_windows.values())
-                + list(self._advanced_render_windows.values())
                 + list(self._scatter_windows.values())
             ):
                 try:
@@ -2729,7 +2906,6 @@ class MainWindow(QMainWindow):
                 return f"Overlay {overlay_idx}" if overlay_idx else "Overlay"
         own_maps = (
             self._render_windows,
-            self._advanced_render_windows,
             self._scatter_windows,
             self._histogram_windows,
             self._attr_windows,
@@ -2797,7 +2973,7 @@ class MainWindow(QMainWindow):
         icon_file = {t: ic for _l, t, ic in _LINE_FAMILY}.get(self._line_variant, "line.png")
         path = resource_path("icons", icon_file)
         if path.exists():
-            self._ui.toolLine.setIcon(QIcon(str(path)))
+            self._ui.toolLine.setIcon(_adaptive_toolbar_icon(str(path)))
             self._ui.toolLine.setToolTip(
                 {t: lbl for lbl, t, _ic in _LINE_FAMILY}.get(self._line_variant, "Line")
                 + " — right-click to switch (straight / poly / freehand line)")
@@ -2882,20 +3058,18 @@ class MainWindow(QMainWindow):
         """A QIcon from *path*, optionally turned *rotate_deg*° (the rotated rectangle
         / ellipse variants reuse the base icon at 45°, no separate asset).
 
-        The base toolbar icons are opaque black-on-white with **no alpha**, so
-        rotating them leaves the new corner triangles transparent — which shows the
-        toolbar background as visible notches. Composite the rotated icon onto a
-        white canvas so it keeps the same white background as every other icon."""
+        The source artwork has a baked-in white matte. Normalize it (matte →
+        transparent, monochrome linework tinted for the palette) before rotating
+        so the toolbar background remains visible, including on dark palettes."""
         if abs(rotate_deg) < 1e-6:
-            return QIcon(path)
-        from PyQt6.QtGui import QColor, QPainter, QPixmap, QTransform
-        pix = QPixmap(path)
-        if pix.isNull():
+            return _adaptive_toolbar_icon(path)
+        pix = _adaptive_toolbar_pixmap(path)
+        if pix is None:
             return QIcon(path)
         rotated = pix.transformed(
             QTransform().rotate(rotate_deg), Qt.TransformationMode.SmoothTransformation)
         canvas = QPixmap(rotated.size())
-        canvas.fill(QColor("white"))
+        canvas.fill(Qt.GlobalColor.transparent)
         painter = QPainter(canvas)
         painter.drawPixmap(0, 0, rotated)
         painter.end()
@@ -3017,6 +3191,21 @@ class MainWindow(QMainWindow):
         Forward to the render window of the currently active dataset.
         The active dataset follows whichever render window is focused (#2).
         """
+        # The Shift+C shortcut is application-wide. When a window that owns its own
+        # brightness/contrast is focused (a render view, the standalone TIFF/image
+        # viewer), route to it rather than the active dataset's render — so the key
+        # means "adjust what I'm looking at". This is why those windows no longer
+        # need their own Shift+C QShortcut (which would be an ambiguous overload).
+        active = QApplication.activeWindow()
+        own_bc = getattr(active, "_show_brightness_contrast", None) if (
+            active is not None and active is not self) else None
+        if active is not None and callable(own_bc):
+            try:
+                own_bc()
+                active.raise_()
+                return
+            except Exception as exc:
+                self._state.log(f"Brightness/Contrast failed for focused window: {exc}", "ERROR")
         if self._state.active_dataset is None:
             self._no_data_warning()
             return
@@ -3479,6 +3668,116 @@ class MainWindow(QMainWindow):
         idx = self._state.add_dataset(ds)
         self._show_render(idx)
 
+    def _revert_overlay_to_original(self) -> None:
+        """Process › Channel › Convert Dataset to Multi-Channel Overlay › Revert
+        Overlay to Original Dataset — the inverse of a channel separation.
+
+        Removes the active overlay's channel datasets and restores the single
+        source dataset. When the source is still open (separation keeps it) it is
+        re-activated exactly; otherwise it is reconstructed by concatenating the
+        channels (:func:`analysis.attribute_channels.reconstruct_from_channels`).
+        Only offered for separation overlays (DCR / time / by-attribute); an MSR
+        multi-channel overlay has no single original — use Flatten instead."""
+        from ..core.overlay import dataset_group_id, overlay_members
+
+        idx = self._state.active_idx
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        active = self._state.datasets[idx]
+        group_id = dataset_group_id(active)
+        if not group_id:
+            QMessageBox.information(
+                self, "Revert Overlay",
+                "The active dataset is not part of a multi-channel overlay.")
+            return
+        members = overlay_members(self._state, idx)
+        member_objs = [ds for _, ds in members]
+        if len(member_objs) < 2:
+            QMessageBox.information(
+                self, "Revert Overlay", "The active overlay contains only one dataset.")
+            return
+        if not all(m.metadata.get("separated_from") for m in member_objs):
+            QMessageBox.information(
+                self, "Revert Overlay",
+                "This overlay was not created by a channel separation, so it has no "
+                "single original dataset to revert to. Use Flatten to combine it.")
+            return
+
+        base_name = member_objs[0].metadata.get("separated_from") or "dataset"
+
+        def index_of(obj):
+            return next((i for i, d in enumerate(self._state.datasets) if d is obj), None)
+
+        # Prefer the still-present source (exact restore); else reconstruct.
+        source = None
+        for d in self._state.datasets:
+            if d in member_objs:
+                continue
+            if group_id in (d.metadata.get("produced_overlays") or []):
+                source = d
+                break
+        if source is None:                          # name-match fallback
+            for d in self._state.datasets:
+                if d in member_objs or dataset_group_id(d):
+                    continue
+                if getattr(d, "name", None) == base_name:
+                    source = d
+                    break
+
+        reconstructed = None
+        if source is None:
+            from ..analysis.attribute_channels import reconstruct_from_channels
+            from ..core.dataset import build_localization_dataset
+            rec = reconstruct_from_channels(member_objs)
+            if not rec or rec.get("x_nm") is None or rec["x_nm"].size == 0:
+                QMessageBox.warning(
+                    self, "Revert Overlay",
+                    "Could not reconstruct the original dataset from the channels.")
+                return
+            reconstructed = build_localization_dataset(
+                name=base_name, x_nm=rec["x_nm"], y_nm=rec["y_nm"], z_nm=rec["z_nm"],
+                tid=rec["tid"], attrs=rec["attrs"], source_version="reverted",
+                prefs=self._state.prefs)
+            try:
+                reconstructed.set_rimf(1.0, source="reverted (z baked)")
+                reconstructed.derived["rimf"] = 1.0
+            except Exception:
+                pass
+            reconstructed.metadata["reverted_from_overlay"] = group_id
+
+        # Remove the channel datasets (descending index so lower ones stay valid).
+        member_idxs = sorted(
+            (i for i in (index_of(m) for m in member_objs) if i is not None), reverse=True)
+        previous = getattr(self._state, "suspend_auto_render", False)
+        self._state.suspend_auto_render = True
+        try:
+            for i in member_idxs:
+                self._state.remove_dataset(i)
+        finally:
+            self._state.suspend_auto_render = previous
+
+        if source is not None and source in self._state.datasets:
+            try:
+                (source.metadata.get("produced_overlays") or []).remove(group_id)
+            except ValueError:
+                pass
+            si = index_of(source)
+            if si is not None:
+                self._state.set_active(si)
+                self._show_render(si)
+            self._state.log(
+                f"Reverted overlay to original dataset '{source.name}' "
+                f"({len(member_objs)} channel(s) removed).")
+        else:
+            new_idx = self._state.add_dataset(reconstructed)
+            self._state.set_active(new_idx)
+            self._show_render(new_idx)
+            self._state.log(
+                f"Reverted overlay by reconstructing '{base_name}' from "
+                f"{len(member_objs)} channel(s).")
+        self._notify_view_state_changed()
+
     def _aggregate_active_dataset(self) -> None:
         """Process › Aggregate Localizations — Imspector-style per-trace photon
         binning of the active dataset into a new aggregated dataset.
@@ -3928,11 +4227,9 @@ class MainWindow(QMainWindow):
                     return record
         except Exception:
             pass
-        # 2) a freshly drawn draft on this dataset's render/scatter overlay
-        #    (basic render, advanced render, or scatter).
+        # 2) a freshly drawn draft on this dataset's render/scatter overlay.
         for win in (
             self._render_windows.get(ds_idx),
-            self._advanced_render_windows.get(ds_idx),
             self._scatter_windows.get(ds_idx),
         ):
             ctrl = getattr(win, "_roi_overlay", None)
@@ -4248,9 +4545,30 @@ class MainWindow(QMainWindow):
                 self, "Separate Channel by DCR",
                 "The active dataset has no DCR attribute, so it cannot be separated by DCR.")
             return
-        from .channel_separation_window import ChannelSeparationWindow
+        from .attribute_separation_dialog import AttributeSeparationDialog
         from .modeless import show_modeless
-        win = ChannelSeparationWindow(self._state, idx, owner=self)
+        win = AttributeSeparationDialog(
+            self._state, idx, attribute="dcr",
+            title="Separate Channel by DCR", allow_photon_weight=True, owner=self)
+        show_modeless(win, self)
+
+    def _show_attribute_separation(self) -> None:
+        """Process › Channel › Convert Dataset to Multi-Channel Overlay › by MINFLUX
+        data attribute — the generic attribute-based channel separation. Same
+        dialog as by-DCR, but with an attribute picker (DCR is one instance)."""
+        idx = self._state.active_idx
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        ds = self._state.datasets[idx]
+        from ..core.loader import attr_values_1d
+        default = "dcr" if attr_values_1d(ds, "dcr") is not None else "efo"
+        from .attribute_separation_dialog import AttributeSeparationDialog
+        from .modeless import show_modeless
+        win = AttributeSeparationDialog(
+            self._state, idx, attribute=default,
+            title="Convert to Multi-Channel Overlay (by attribute)",
+            allow_photon_weight=True, pick_attribute=True, owner=self)
         show_modeless(win, self)
 
     def _show_time_channel_separation(self) -> None:
@@ -4409,12 +4727,16 @@ class MainWindow(QMainWindow):
                 channel.metadata["overlay_id"] = overlay_id
                 channel.metadata["overlay_index"] = overlay_index
                 channel.metadata["overlay_alignment_mode"] = "stage origin"
+                channel.metadata["separated_from"] = source.name
+                channel.metadata["separated_by"] = "tim"
                 new_indices.append(idx)
         finally:
             self._state.suspend_auto_render = previous
 
         if not new_indices:
             return False
+        # Breadcrumb so "Revert Overlay to Original Dataset" can find this source.
+        source.metadata.setdefault("produced_overlays", []).append(overlay_id)
         anchor = new_indices[0]
         self._state.set_active(anchor)
         self._show_render(anchor)
@@ -4445,10 +4767,13 @@ class MainWindow(QMainWindow):
             pass
         return True
 
-    def apply_dcr_channel_separation(self, src_idx: int, labels) -> bool:
-        """Build red / green / (unassigned) truncated copies from per-localization
-        channel *labels* (0/1/-1) and combine them as a render overlay. Returns
-        True on success. Called by ``ChannelSeparationWindow`` on Apply."""
+    def apply_channel_separation(self, src_idx: int, labels, channels, *,
+                                 attribute: str = "", method_label: str = "channel separation") -> bool:
+        """Build one truncated dataset per channel (+ a hidden *unassigned*) from
+        per-localization channel *labels* (0..N-1, or -1 = unassigned) and combine
+        them as a render overlay. *channels* is a list of carriers exposing
+        ``.name`` and ``.lut`` (see :class:`analysis.attribute_channels.Channel`).
+        Attribute-agnostic — DCR is one instance. Returns True on success."""
         import uuid
 
         import numpy as np
@@ -4464,12 +4789,14 @@ class MainWindow(QMainWindow):
         if labels.size != n:
             return False
         base_name = src.name
-        # (mask, LUT, name suffix, hidden-by-default)
+        # (mask, LUT, dataset name, hidden-by-default), one per channel + unassigned.
         plan = [
-            (labels == 0, "Red", "ch1 red", False),
-            (labels == 1, "Green", "ch2 green", False),
-            (labels == -1, "Gray", "unassigned", True),
+            (labels == k, getattr(ch, "lut", "Gray") or "Gray",
+             getattr(ch, "name", None) or f"{base_name} [ch {k + 1}]", False)
+            for k, ch in enumerate(channels)
         ]
+        plan.append((labels == -1, "Gray", f"{base_name} [unassigned]", True))
+
         overlay_index = self._next_overlay_index
         self._next_overlay_index += 1
         overlay_id = f"overlay:{overlay_index}:{uuid.uuid4().hex}"
@@ -4480,19 +4807,20 @@ class MainWindow(QMainWindow):
         previous = getattr(self._state, "suspend_auto_render", False)
         self._state.suspend_auto_render = True
         try:
-            for mask, lut, suffix, hidden in plan:
+            for mask, lut, name, hidden in plan:
                 keep = np.asarray(mask, dtype=bool)
                 if not keep.any():
                     continue
                 order += 1
-                new_ds = subset_dataset(src, keep, name=f"{base_name} [{suffix}]", prefs=prefs)
+                new_ds = subset_dataset(src, keep, name=name, prefs=prefs)
                 idx = self._state.add_dataset(new_ds)
                 ds = self._state.datasets[idx]
                 transform = display_transform_record(
                     overlay_id=overlay_id, overlay_index=overlay_index, order=order,
                     lut=lut, source_dataset_idx=idx, alignment_mode="stage origin",
                     matrix_4x4=identity_matrix4(),
-                    provenance={"method": "dcr channel separation", "source_dataset": base_name})
+                    provenance={"method": method_label, "source_dataset": base_name,
+                                "attribute": attribute})
                 ds.state["overlay_id"] = overlay_id
                 ds.state["render_group_id"] = overlay_id
                 ds.state["overlay_index"] = overlay_index
@@ -4505,21 +4833,25 @@ class MainWindow(QMainWindow):
                     ds.state["overlay_default_hidden"] = True
                 ds.metadata["overlay_id"] = overlay_id
                 ds.metadata["overlay_index"] = overlay_index
-                ds.metadata["dcr_separated_from"] = base_name
+                ds.metadata["separated_from"] = base_name
+                ds.metadata["separated_by"] = attribute
                 new_indices.append(idx)
         finally:
             self._state.suspend_auto_render = previous
 
         if not new_indices:
-            QMessageBox.warning(self, "Separate Channel by DCR",
+            QMessageBox.warning(self, "Separate Channels",
                                 "No localizations were assigned to a channel.")
             return False
+        # Breadcrumb so "Revert Overlay to Original Dataset" can find this source.
+        src.metadata.setdefault("produced_overlays", []).append(overlay_id)
         anchor = new_indices[0]
         self._state.set_active(anchor)
         self._show_render(anchor)
         self._notify_view_state_changed()
+        by = attribute or method_label
         self._state.log(
-            f"Separated '{base_name}' into {len(new_indices)} DCR channel(s) (overlay {overlay_index}).")
+            f"Separated '{base_name}' into {len(new_indices)} channel(s) by {by} (overlay {overlay_index}).")
         return True
 
     def _show_render(self, dataset_idx: int | None = None):
@@ -4550,8 +4882,8 @@ class MainWindow(QMainWindow):
             self._notify_view_state_changed()
             return win
 
-        from .render_window import RenderWindow
-        win = RenderWindow(self._state, dataset_idx=idx)
+        from .precision_render_window import PrecisionRenderWindow
+        win = PrecisionRenderWindow(self._state, dataset_idx=idx)
         self._install_window_shortcuts(win)
         win.destroyed.connect(
             lambda _=None, i=idx: self._render_windows.pop(i, None)
@@ -4560,129 +4892,6 @@ class MainWindow(QMainWindow):
         win.show()
         self._notify_view_state_changed()
         return win
-
-    def _show_advanced_render(self, dataset_idx: int | None = None):
-        """Open the isolated advanced render view."""
-        if self._state.active_dataset is None:
-            self._no_data_warning()
-            return
-        idx = dataset_idx if type(dataset_idx) is int else self._state.active_idx
-        if idx is None:
-            return
-
-        win = self._advanced_render_windows.get(idx)
-        if win is None:
-            for candidate in self._advanced_render_windows.values():
-                try:
-                    if any(
-                        ch.get("dataset_idx") == idx
-                        for ch in getattr(candidate, "_channels", [])
-                    ):
-                        win = candidate
-                        break
-                except RuntimeError:
-                    continue
-        if win is not None:
-            self._install_window_shortcuts(win)
-            try:
-                win._refresh_from_dataset()
-            except Exception:
-                pass
-            win.show()
-            win.raise_()
-            win.activateWindow()
-            self._notify_view_state_changed()
-            return win
-
-        from .precision_render_window import PrecisionRenderWindow
-        win = PrecisionRenderWindow(self._state, dataset_idx=idx)
-        self._install_window_shortcuts(win)
-        win.destroyed.connect(
-            lambda _=None, i=idx: self._advanced_render_windows.pop(i, None)
-        )
-        self._advanced_render_windows[idx] = win
-        win.show()
-        self._notify_view_state_changed()
-        return win
-
-    def _swap_render_mode(self, win, mode: str):
-        """Swap a render window for the other engine (basic ↔ advanced) on the
-        same dataset, preserving geometry, orientation and zoom. Triggered by the
-        render window's right-click Render Mode ▸ Basic/Advanced submenu."""
-        idx = getattr(win, "_idx", None)
-        if idx is None:
-            channels = getattr(win, "_channels", [])
-            idx = channels[0].get("dataset_idx") if channels else self._state.active_idx
-        if idx is None:
-            return None
-
-        # Capture the current view so the swap feels in-place.
-        orientation = getattr(win, "_orientation", "XY")
-        view_range = None
-        try:
-            xr, yr = win._view_box.viewRange()
-            view_range = (tuple(xr), tuple(yr))
-        except Exception:
-            view_range = None
-        try:
-            geom = win.geometry()
-        except Exception:
-            geom = None
-        # Capture the active ROI draft so a drawn-but-unsaved ROI survives the
-        # swap (a stored/selected ROI persists on its own via state.rois).
-        roi_draft = None
-        try:
-            ctrl = getattr(win, "_roi_overlay", None)
-            if ctrl is not None and ctrl.current_record() is not None:
-                import copy as _copy
-                roi_draft = _copy.deepcopy(ctrl.current_record())
-        except Exception:
-            roi_draft = None
-
-        # Drop the old window from whichever registry holds it, then close it.
-        for registry in (self._render_windows, self._advanced_render_windows):
-            for key in [k for k, value in registry.items() if value is win]:
-                registry.pop(key, None)
-        try:
-            win.close()
-            win.deleteLater()
-        except Exception:
-            pass
-
-        opener = self._show_advanced_render if mode == "advanced" else self._show_render
-        new_win = opener(idx)
-        if new_win is None:
-            return None
-
-        if geom is not None:
-            try:
-                new_win.setGeometry(geom)
-            except Exception:
-                pass
-        try:
-            if orientation and orientation != getattr(new_win, "_orientation", "XY"):
-                new_win._set_orientation(orientation)
-        except Exception:
-            pass
-        if view_range is not None:
-            try:
-                new_win._view_box.setRange(
-                    xRange=view_range[0], yRange=view_range[1], padding=0
-                )
-            except Exception:
-                pass
-        # Re-apply the captured ROI draft on the new engine (deferred so the new
-        # window has built its channels / rendered first).
-        if roi_draft is not None:
-            def _restore(rec=roi_draft, w=new_win):
-                ctrl = getattr(w, "_roi_overlay", None)
-                if ctrl is not None:
-                    try:
-                        ctrl.replace_draft(rec)
-                    except Exception:
-                        pass
-            QTimer.singleShot(0, _restore)
-        return new_win
 
     # ------------------------------------------------------------------
     # ParaView
@@ -5496,7 +5705,6 @@ class MainWindow(QMainWindow):
         for mapping in (
             self._data_windows,
             self._render_windows,
-            self._advanced_render_windows,
             self._scatter_windows,
             self._histogram_windows,
             self._attr_windows,
@@ -5587,31 +5795,109 @@ class MainWindow(QMainWindow):
     # LUT / Color / Show Info / Localization Precision / Toolbar icons
     # ------------------------------------------------------------------
 
+    def _on_focus_changed(self, _old, new) -> None:
+        """Record the last render/scatter window the user focused (for the LUT
+        button). Guarded — focus can shift to a window being torn down."""
+        if new is None:
+            return
+        try:
+            win = new.window()
+            if win is not None and win is not self and hasattr(win, "open_lut_dialog"):
+                self._last_active_plot_window = win
+                # Focusing a plot window refreshes its (already-open) LUT dialog,
+                # so the dialog reflects whichever view the user is working in.
+                sync = getattr(win, "sync_lut_dialog", None)
+                if callable(sync):
+                    sync()
+        except (RuntimeError, AttributeError):
+            pass
+
+    @staticmethod
+    def _lut_view_shows_dataset(view, idx: "int | None") -> bool:
+        """True when *view* displays dataset *idx* (directly or as an overlay
+        channel), so the LUT button targets the view of the active dataset."""
+        if view is None or idx is None:
+            return view is not None
+        try:
+            for attr in ("_idx", "_dataset_idx", "dataset_idx"):
+                value = getattr(view, attr, None)
+                if callable(value):
+                    value = value()
+                if value == idx:
+                    return True
+            return any(
+                ch.get("dataset_idx") == idx
+                for ch in getattr(view, "_channels", [])
+            )
+        except (RuntimeError, TypeError, AttributeError):
+            return False
+
+    def _open_lut_on_view(self, view, idx: "int | None") -> bool:
+        """Open *view*'s LUT dialog if it is a live, visible LUT-capable view of
+        dataset *idx*. Returns True once handled (or on failure, to stop trying)."""
+        if view is None:
+            return False
+        try:
+            opener = getattr(view, "open_lut_dialog", None)
+        except RuntimeError:
+            return False
+        if not callable(opener):
+            return False
+        try:
+            if not view.isVisible():
+                return False
+        except (RuntimeError, AttributeError):
+            return False
+        if not self._lut_view_shows_dataset(view, idx):
+            return False
+        try:
+            opener()
+            self._last_active_plot_window = view
+            return True
+        except Exception as exc:
+            self._state.log(f"LUT failed for active view: {exc}", "ERROR")
+            return True
+
     def _show_lut(self) -> None:
-        """Toolbar LUT button — open the Fiji-style LUT editor (#1 fix)."""
+        """Toolbar LUT button — open the LUT / colormap editor for the active
+        view: render, scatter, or the 3-D volume (the 3-D
+        scatter uses the scatter window's own LUT).
+
+        Clicking the toolbar activates the main window, so ``activeWindow()`` no
+        longer identifies the plot window; try the focused view and the last-used
+        view, then scan the render/scatter registries (and each render's
+        3-D volume window) for one showing the active dataset.
+        """
         active = QApplication.activeWindow()
-        if active is not None and hasattr(active, "open_lut_dialog"):
-            try:
-                active.open_lut_dialog()
-                return
-            except Exception as exc:
-                self._state.log(f"LUT failed for active window: {exc}", "ERROR")
         if self._state.active_dataset is None:
             self._no_data_warning(); return
         idx = self._state.active_idx
-        # Reuse the window already displaying this dataset (incl. as an overlay
-        # channel) so a non-primary channel doesn't spawn a duplicate overlay view.
+        candidates = [active, getattr(self, "_last_active_plot_window", None)]
+        for registry in (self._render_windows, self._scatter_windows):
+            candidates.extend(registry.values())
+            for view in registry.values():
+                volume = getattr(view, "_volume_window", None)
+                if volume is not None:
+                    candidates.append(volume)
+        seen: set[int] = set()
+        for view in candidates:
+            if id(view) in seen:
+                continue
+            seen.add(id(view))
+            if self._open_lut_on_view(view, idx):
+                return
+
+        # No suitable view yet — open the active dataset's render and target it.
         rwin = self._render_window_for_dataset(idx)
         if rwin is None:
             self._show_render(idx)
             rwin = self._render_window_for_dataset(idx)
-        if rwin is None or not hasattr(rwin, "open_lut_dialog"):
-            QMessageBox.information(
-                self, "LUT",
-                "Open the render view first, then use the LUT button.",
-            )
+        if rwin is not None and self._open_lut_on_view(rwin, idx):
             return
-        rwin.open_lut_dialog()
+        QMessageBox.information(
+            self, "LUT",
+            "Open a render or scatter view first, then use the LUT button.",
+        )
 
     def _show_color_picker(self) -> None:
         """Toolbar Color button — pick a single colour for ROIs/render."""
@@ -5711,9 +5997,11 @@ class MainWindow(QMainWindow):
         show_anisotropy_dialog(self, self._state.active_dataset, self._state)
 
     def _install_toolbar_icons(self) -> None:
-        """Attach PNG icons to the toolbar QActions (item #5)."""
-        from PyQt6.QtGui import QIcon
+        """Attach PNG icons to the toolbar QActions (item #5).
 
+        Icons are normalized (white matte stripped, monochrome linework tinted to
+        the button-text colour) so the same source PNGs read correctly on both
+        light and dark palettes."""
         from .. import resource_path
         icon_dir = resource_path("icons")
         mapping = {
@@ -5732,14 +6020,14 @@ class MainWindow(QMainWindow):
                 continue
             ipath = icon_dir / fname
             if ipath.exists():
-                action.setIcon(QIcon(str(ipath)))
+                action.setIcon(_adaptive_toolbar_icon(str(ipath)))
         # Angle tool lives on self (not the generated UI).
         angle_icon = icon_dir / "angle.png"
         if hasattr(self, "toolAngle") and angle_icon.exists():
-            self.toolAngle.setIcon(QIcon(str(angle_icon)))
+            self.toolAngle.setIcon(_adaptive_toolbar_icon(str(angle_icon)))
         lasso_icon = icon_dir / "lasso.png"
         if hasattr(self, "toolMagneticLasso") and lasso_icon.exists():
-            self.toolMagneticLasso.setIcon(QIcon(str(lasso_icon)))
+            self.toolMagneticLasso.setIcon(_adaptive_toolbar_icon(str(lasso_icon)))
 
     def _no_data_warning(self) -> None:        QMessageBox.information(self, "No data", "Please load a dataset first.")
 
@@ -6046,11 +6334,13 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         if not getattr(self, "_positioned", False):
             self._positioned = True
-            # Open on the active monitor (the screen under the cursor) toward the
-            # upper-right, so child windows (render, Log, MSR reader) have room to
-            # the left and below instead of piling on top of the main window.
+            # Open on the active monitor (the screen under the cursor) in the
+            # upper-right region but nudged toward centre — 75 % toward the right
+            # edge and 25 % down (75 % up from the bottom) — so child windows
+            # (render, Log, MSR reader) still have room to the left and below
+            # without the main window hugging the extreme corner.
             from .modeless import ensure_on_screen
-            ensure_on_screen(self, align="top_right")
+            ensure_on_screen(self, align=(0.75, 0.25))
         if not getattr(self, "_toolbar_aligned", True):
             self._toolbar_aligned = True
             QTimer.singleShot(0, self._align_toolbar_to_menu)
@@ -6136,9 +6426,6 @@ class MainWindow(QMainWindow):
             try: win.close()
             except Exception: pass
         for win in list(self._render_windows.values()):
-            try: win.close()
-            except Exception: pass
-        for win in list(self._advanced_render_windows.values()):
             try: win.close()
             except Exception: pass
         for win in list(self._tiff_windows.values()):
