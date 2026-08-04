@@ -59,7 +59,7 @@ from ..analysis.distribution_fit import (
     fit_mixture,
 )
 from ..core.iteration import FLATTEN_LABEL, iteration_labels, ordinal, parse_iteration_label
-from ..core.loader import attr_values_1d, mfx_get
+from ..core.loader import attr_values_1d, is_value_pool_selector, mfx_get
 from ..core.overlay import CHANNEL_LUTS, PURE_COLOR_RGB
 from ..utils.filters import raw_trace_aggregate
 
@@ -381,7 +381,10 @@ class AttributeSeparationDialog(QDialog):
         vals = np.asarray(vals).ravel().astype(float)
         agg = self._agg_combo.currentText()
         if agg != "per loc":
-            tid = mfx_get(ds, "tid", itr=itr_sel, vld_only=True)
+            # tid identifies a ROW, so a value-pooling selector uses the `last`
+            # rows its pooled values are laid on (a summed tid is meaningless).
+            row_sel = "last" if is_value_pool_selector(itr_sel) else itr_sel
+            tid = mfx_get(ds, "tid", itr=row_sel, vld_only=True)
             if tid is not None:
                 vals = raw_trace_aggregate(vals, np.asarray(tid).ravel(), agg)
         return self._transform_drop(vals)

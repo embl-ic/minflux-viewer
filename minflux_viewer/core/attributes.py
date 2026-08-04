@@ -65,6 +65,8 @@ AGGREGATION_DESCRIPTIONS = {
     "trace median": "Median value of all localizations in a trace.",
     "trace min": "Minimum value of all localizations in a trace.",
     "trace max": "Maximum value of all localizations in a trace.",
+    "trace 1st": "Value of the first localization in a trace, in time order.",
+    "trace last": "Value of the last localization in a trace, in time order.",
     "trace stdev": "Standard deviation of all localizations in a trace.",
     "trace range": "Range of all localizations in a trace.",
 }

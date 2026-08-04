@@ -18,6 +18,7 @@ temp file for the whole test session.
 
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -40,7 +41,10 @@ def _isolate_preferences(tmp_path_factory):
                     _mod._merge(json.loads(prefs_file.read_text()), _mod.DEFAULT_PREFS))
             except Exception:
                 pass
-        return _mod._migrate_prefs(dict(_mod.DEFAULT_PREFS))
+        # deepcopy, like the real AppState._load_prefs: a shallow dict() hands
+        # back the live DEFAULT_PREFS sub-dicts, so one test editing
+        # prefs["plot"][...] would rewrite the defaults for every later test.
+        return _mod._migrate_prefs(copy.deepcopy(_mod.DEFAULT_PREFS))
 
     def _save(self):
         try:

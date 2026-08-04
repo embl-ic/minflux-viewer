@@ -1403,6 +1403,64 @@ def iteration_attr_values_1d(
     return _gather_iteration_values(raw, attr, source_mask, target_mask)
 
 
+#: Iteration selectors that collapse a localization's iterations to ONE value.
+VALUE_POOL_SELECTORS = ("sum", "average")
+
+
+def is_value_pool_selector(itr: "str | int | None") -> bool:
+    """True for the ``"sum"`` / ``"average"`` per-localization pooling selectors."""
+    return isinstance(itr, str) and itr.strip().lower() in VALUE_POOL_SELECTORS
+
+
+def _pooled_loc_values(
+    ds: "MinfluxDataset",
+    attr: str,
+    *,
+    how: str,
+    vld_only: bool,
+) -> "np.ndarray | None":
+    """Per-localization pooling of *attr* over **all** of its iterations::
+
+        sum      ->  Σ a_i
+        average  ->  mean(a_i)
+
+    The result is aligned to the ``last`` selection rows — one entry per
+    localization — so it drops into any per-localization consumer unchanged.
+    Non-finite values are skipped; a localization with no usable iteration gets
+    ``NaN`` rather than a misleading ``0``.
+    """
+    raw = getattr(ds, "mfx_raw", None)
+    if raw is None or _mfx_raw_len(raw) == 0:
+        return None
+    all_mask = mfx_row_mask(raw, itr="all", vld_only=vld_only)
+    target_mask = mfx_row_mask(raw, itr="last", vld_only=vld_only)
+    loc_id = _raw_loc_id(raw)
+    if all_mask is None or target_mask is None or loc_id is None:
+        return None
+
+    vals = _mfx_get_rows(ds, attr, itr="all", vld_only=vld_only)
+    if vals is None:
+        return None
+    vals = np.asarray(vals, dtype=float).ravel()
+    if vals.shape[0] != int(all_mask.sum()):
+        return None
+
+    ids = loc_id[all_mask]
+    good = np.isfinite(vals)
+    n_groups = int(loc_id.max()) + 1
+    num = np.bincount(ids[good], weights=vals[good], minlength=n_groups)
+    cnt = np.bincount(ids[good], minlength=n_groups)
+
+    per_loc = np.full(n_groups, np.nan)
+    if str(how).strip().lower() == "sum":
+        np.copyto(per_loc, num, where=cnt > 0)
+    else:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            avg = num / cnt
+        np.copyto(per_loc, avg, where=cnt > 0)
+    return per_loc[loc_id[target_mask]]
+
+
 def mfx_get(
     ds: "MinfluxDataset",
     attr: str,
@@ -1420,9 +1478,12 @@ def mfx_get(
     attr :
         Attribute name, e.g. ``"efo"``, ``"cfr"``, ``"loc_x"``, ``"idx"``.
     itr :
-        ``"last"`` — final iteration only (default).
-        ``"all"``  — all iterations pooled.
-        ``int``    — specific 0-based iteration index.
+        ``"last"``    — final iteration only (default).
+        ``"all"``     — all iterations pooled, one row each.
+        ``int``       — specific 0-based iteration index.
+        ``"sum"`` / ``"average"`` — collapse each localization's iterations to
+        one value (see :func:`_pooled_loc_values`); the result is aligned to the
+        ``last`` selection rows, i.e. one value per localization.
     vld_only :
         When True, return only rows where ``vld`` is True.
 
@@ -1437,10 +1498,29 @@ def mfx_get(
     last-valid loads, else ``ds.components.derived_last``; ``None`` is returned
     when neither holds the attribute.
     """
+    if is_value_pool_selector(itr):
+        return _pooled_loc_values(
+            ds, attr, how=str(itr).strip().lower(), vld_only=vld_only,
+        )
+    return _mfx_get_rows(ds, attr, itr=itr, vld_only=vld_only)
+
+
+def _mfx_get_rows(
+    ds: "MinfluxDataset",
+    attr: str,
+    *,
+    itr: "str | int" = "last",
+    vld_only: bool = True,
+) -> "np.ndarray | None":
+    """Row-wise retrieval for a non-pooled selection.
+
+    The body of :func:`mfx_get`; kept separate so the pooling layer can reuse it
+    without recursing through its own dispatch.
+    """
     # xnm/ynm/znm are the canonical nm coordinate views of the metres store.
     if attr in _COORD_NM_BASE:
         base = _COORD_NM_BASE[attr]
-        v = mfx_get(ds, base, itr=itr, vld_only=vld_only)
+        v = _mfx_get_rows(ds, base, itr=itr, vld_only=vld_only)
         if v is None:
             return None
         v = np.asarray(v, dtype=float) * 1.0e9
@@ -1489,24 +1569,27 @@ def resolve_spec_iteration(ds: "MinfluxDataset", spec: dict) -> "str | int":
     ``"last"``       — the localization's final valid iteration (broadcast).
     ``"effective"``  — the attribute's measured iteration (cfr/efc); falls back
                        to ``"last"`` when the attribute has none.
+    ``"sum"`` /
+    ``"average"``    — the localization's value pooled over all iterations
+                       (broadcast); see :func:`_pooled_loc_values`.
     ``"all"``        — evaluate the bound at each browse row's own value
                        (per-iteration; a localization's rows may split).
     ``int``          — a specific 0-based iteration index (broadcast).
 
-    A missing/``None`` ``"itr"`` is the **legacy auto default**, reproducing the
-    pre-iteration-aware behaviour exactly: ``"effective"`` for cfr/efc (their
-    measured value), otherwise ``"browse"`` (test the bound at whatever
-    iteration is being viewed — the previous per-browse-row semantics).
-    Returns ``"browse"``, ``"last"``, ``"all"``, ``"effective"`` or an ``int``.
+    A missing/``None`` ``"itr"`` is the **legacy default for filter files saved
+    before the selector existed**: ``"effective"`` for cfr/efc (their measured
+    iteration), otherwise ``"last"``. Both read the attribute's raw value at that
+    iteration. Returns ``"browse"``, ``"last"``, ``"all"``, ``"effective"``,
+    ``"sum"``, ``"average"`` or an ``int``.
     """
     attr = spec.get("attribute", "")
     raw_sel = spec.get("itr", None)
     if raw_sel is None:
-        return "effective" if effective_iteration_for_attr(ds, attr) is not None else "browse"
+        return "effective" if effective_iteration_for_attr(ds, attr) is not None else "last"
     if isinstance(raw_sel, (int, np.integer)) and not isinstance(raw_sel, bool):
         return int(raw_sel)
     text = str(raw_sel).strip().lower()
-    if text in ("browse", "last", "all", "effective"):
+    if text in ("browse", "last", "all", "effective") or text in VALUE_POOL_SELECTORS:
         return text
     if text.isdigit():
         return int(text)
@@ -1526,12 +1609,16 @@ def _broadcast_iteration_to_rows(
     the ``browse_mask`` rows by localization id.
 
     Sourcing the per-localization values through :func:`mfx_get` makes this work
-    uniformly for raw, coordinate (``xnm``…), derived (``den``…) and ``idx``
-    attributes. NaN for localizations absent from the source selection. Returns
-    ``None`` when the value cannot be aligned (so the caller marks the spec
-    unevaluable rather than mis-filtering).
+    uniformly for raw, coordinate (``xnm``…), derived (``den``…), ``idx`` and
+    value-pooled (``"sum"``/``"average"``) attributes — the pooled selectors
+    already return one value per localization, aligned to the ``last`` rows,
+    which is why the source *mask* uses ``"last"`` for them. NaN for
+    localizations absent from the source selection. Returns ``None`` when the
+    value cannot be aligned (so the caller marks the spec unevaluable rather
+    than mis-filtering).
     """
-    src_mask = mfx_row_mask(raw, itr=src_itr, vld_only=src_vld)
+    mask_itr = "last" if is_value_pool_selector(src_itr) else src_itr
+    src_mask = mfx_row_mask(raw, itr=mask_itr, vld_only=src_vld)
     if src_mask is None:
         return None
     src_vals = mfx_get(ds, attr, itr=src_itr, vld_only=src_vld)
@@ -1566,20 +1653,21 @@ def _spec_filter_values(
     sel = resolve_spec_iteration(ds, spec)
 
     # Per-row: evaluate at each browse row's own value (localization rows may
-    # individually pass/fail). "browse" is the legacy default for normal attrs.
+    # individually pass/fail).
     if sel in ("browse", "all") or browse_mask is None or raw is None or len(raw) == 0:
         return mfx_get(ds, attr, itr=itr, vld_only=vld_only)
 
-    # Per-localization broadcast at the spec's own iteration.
+    # Per-localization broadcast at the spec's own iteration / pooling.
     if sel == "effective":
         eff = effective_iteration_for_attr(ds, attr)
         src_itr, src_vld = (eff, True) if eff is not None else ("last", True)
-    elif sel == "last":
-        src_itr, src_vld = "last", True
+    elif sel == "last" or is_value_pool_selector(sel):
+        src_itr, src_vld = sel, True
     else:  # concrete 0-based int iteration
         src_itr, src_vld = int(sel), False
     return _broadcast_iteration_to_rows(
-        ds, attr, src_itr=src_itr, src_vld=src_vld, browse_mask=browse_mask, raw=raw,
+        ds, attr, src_itr=src_itr, src_vld=src_vld, browse_mask=browse_mask,
+        raw=raw,
     )
 
 
@@ -1657,9 +1745,9 @@ def apply_saved_filters(ds: "MinfluxDataset") -> bool:
     evaluated at **its own** iteration (:func:`resolve_spec_iteration`) — the
     same result the plot windows show for the materialized view. Otherwise
     (no raw store, e.g. a re-imported flat table) it resolves each attribute
-    through :func:`attr_values_1d`, so coordinate (``xnm``/``ynm``/``znm``) and
-    derived (``den`` …) filters map to per-loc values — mirroring the live
-    FilterDialog. A spec whose attribute is not yet materialized (e.g. ``den``
+    through :func:`attr_values_for_selection`, so coordinate
+    (``xnm``/``ynm``/``znm``) and derived (``den`` …) filters map to per-loc
+    values — mirroring the live FilterDialog. A spec whose attribute is not yet materialized (e.g. ``den``
     before post-load density) is skipped; callers re-run this once those
     attributes exist.
     """
@@ -1689,7 +1777,11 @@ def apply_saved_filters(ds: "MinfluxDataset") -> bool:
     mask = np.ones(n, dtype=bool)
     applied = False
     for spec in specs:
-        vals = attr_values_1d(ds, str(spec.get("attribute", "")))
+        vals = attr_values_for_selection(
+            ds,
+            str(spec.get("attribute", "")),
+            itr=resolve_spec_iteration(ds, spec),
+        )
         if vals is None:
             continue
         vals = np.asarray(vals).ravel()
@@ -1883,6 +1975,103 @@ def attr_values_1d(ds: "MinfluxDataset", attr: str) -> "np.ndarray | None":
         if vals is not None and np.asarray(vals).ndim == 1:
             return np.asarray(vals)
     return None
+
+
+def _values_on_attr_rows(
+    ds: "MinfluxDataset",
+    attr: str,
+    *,
+    src_itr: "str | int",
+    src_vld: bool,
+) -> "np.ndarray | None":
+    """*attr* at ``(src_itr, src_vld)`` gathered onto ``ds.attr`` rows.
+
+    The materialized-view counterpart of :func:`_broadcast_iteration_to_rows`:
+    the target rows are whatever raw selection ``ds.attr`` materializes
+    (:func:`_attr_row_selection`) instead of an arbitrary browse selection.
+    ``None`` when there is no aligned raw view, so the caller can fall back to
+    the plain materialized values.
+    """
+    raw = getattr(ds, "mfx_raw", None)
+    if raw is None or _mfx_raw_len(raw) == 0:
+        return None
+    rows = _attr_row_selection(ds)
+    if rows is None:
+        return None
+    target_mask = mfx_row_mask(raw, itr=rows[0], vld_only=rows[1])
+    mask_itr = "last" if is_value_pool_selector(src_itr) else src_itr
+    src_mask = mfx_row_mask(raw, itr=mask_itr, vld_only=src_vld)
+    loc_id = _raw_loc_id(raw)
+    if target_mask is None or src_mask is None or loc_id is None:
+        return None
+    src_vals = mfx_get(ds, attr, itr=src_itr, vld_only=src_vld)
+    if src_vals is None:
+        return None
+    src_vals = np.asarray(src_vals, dtype=float).ravel()
+    if src_vals.shape[0] != int(src_mask.sum()):
+        return None
+    per_loc = np.full(int(loc_id.max()) + 1, np.nan)
+    per_loc[loc_id[src_mask]] = src_vals
+    out = per_loc[loc_id[target_mask]]
+    return out if out.shape[0] == int(getattr(ds.prop, "num_loc", 0)) else None
+
+
+def attr_values_for_selection(
+    ds: "MinfluxDataset",
+    attr: str,
+    *,
+    itr: "str | int | None" = "auto",
+) -> "np.ndarray | None":
+    """1-D values of *attr* aligned to ``ds.attr`` rows for one iteration selection.
+
+    This is the per-localization accessor the Filter dialog and the Histogram's
+    materialized path share, so a filter row's ``Iter`` setting and the histogram
+    it is authored on always show the same numbers.
+
+    ``itr`` accepts:
+
+    ``"auto"`` / ``None``   the materialized default — cfr/efc at their effective
+                            iteration, everything else the last-valid value
+                            (i.e. exactly :func:`attr_values_1d`).
+    ``"last"``              the value at the global-max iteration. For cfr/efc
+                            this is deliberately the raw (≈0) last value, not the
+                            effective one — pick ``"effective"`` for that.
+    ``"effective"``         cfr/efc's measured iteration; ``"last"`` otherwise.
+    ``int``                 a specific 0-based iteration (NaN where a
+                            localization has no such iteration).
+    ``"sum"`` / ``"average"``  pooled over all of the localization's iterations.
+
+    Returns ``None`` when no aligned 1-D representation exists.
+    """
+    if ds is None:
+        return None
+    sel: "str | int" = itr if itr is not None else "auto"
+    if isinstance(sel, str):
+        sel = sel.strip().lower() or "auto"
+    if sel in ("auto", "browse"):
+        sel = "effective" if effective_iteration_for_attr(ds, attr) is not None else "last"
+    if sel == "effective":
+        eff = effective_iteration_for_attr(ds, attr)
+        sel = "last" if eff is None else int(eff)
+
+    # Fast path: the plain last-valid materialization already holds the value.
+    if sel == "last" and attr not in _EFFECTIVE_ITER_META and attr_matches_last_valid(ds):
+        base = attr_values_1d(ds, attr)
+        if base is not None:
+            return np.asarray(base)
+
+    if isinstance(sel, (int, np.integer)) and not isinstance(sel, bool):
+        src_itr, src_vld = int(sel), False
+    else:                                    # "last" / "sum" / "average" / "all"
+        src_itr, src_vld = ("all" if sel == "all" else sel), True
+    vals = _values_on_attr_rows(ds, attr, src_itr=src_itr, src_vld=src_vld)
+    if vals is not None:
+        return vals
+
+    # No aligned raw view (e.g. a re-imported flat table): the materialized
+    # values are all there is.
+    base = attr_values_1d(ds, attr)
+    return None if base is None else np.asarray(base)
 
 
 def attr_matches_last_valid(ds: "MinfluxDataset") -> bool:

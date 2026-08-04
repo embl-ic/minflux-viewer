@@ -43,7 +43,17 @@ from PyQt6.QtWidgets import (
 
 from ..core.app_state import AppState
 from ..core.attributes import is_trace_wise_attribute, plot_attribute_names
-from ..core.loader import attr_values_1d, effective_iteration_for_attr
+from ..core.iteration import (
+    filter_iteration_labels,
+    iteration_selector_label,
+    last_label,
+    parse_iteration_label,
+)
+from ..core.loader import (
+    attr_values_for_selection,
+    effective_iteration_for_attr,
+)
+from ..utils.filters import AGG_MODES, FLOAT_RESULT_MODES, trace_agg_func
 from ..core.filter_io import (
     is_filter_json_file,
     is_filter_json_payload,
@@ -51,18 +61,33 @@ from ..core.filter_io import (
     save_filter_json as save_filter_json_file,
 )
 
-_AGG_MODES = ["per loc", "trace mean", "trace stdev", "trace max", "trace min", "trace range"]
+#: Same set, same order as the histogram's "As" dropdown — a view the user can
+#: author in the histogram must be expressible as a filter.
+_AGG_MODES = list(AGG_MODES)
+#: Read-outs that return an actual data value (not a derived statistic), so an
+#: integral source attribute keeps integral bounds.
+_VALUE_PRESERVING_MODES = frozenset(
+    {"per loc"} | (set(AGG_MODES) - set(FLOAT_RESULT_MODES) - {"per loc"})
+)
 _FILTER_ATTR_PRIORITY = ("efo", "cfr", "siz", "tim", "tid", "sta", "itr")
 
+_ITER_TOOLTIP = (
+    "Which loop iteration the bound applies to.\n"
+    "last (Nth) — the localization's final valid iteration.\n"
+    "kth — that single iteration's raw value.\n"
+    "all [sum] / all [average] — pooled over every iteration of the localization.\n"
+    "cfr / efc default to the iteration they are actually measured at."
+)
 # Column indices
 _COL_ENABLED = 0
 _COL_ATTR    = 1
 _COL_MODE    = 2
-_COL_MIN     = 3
-_COL_MAX     = 4
-_COL_DISPLAY = 5
-_COL_DELETE  = 6
-_NCOLS       = 7
+_COL_ITER    = 3
+_COL_MIN     = 4
+_COL_MAX     = 5
+_COL_DISPLAY = 6
+_COL_DELETE  = 7
+_NCOLS       = 8
 
 
 class SmartBoundsSpinBox(QDoubleSpinBox):
@@ -96,7 +121,7 @@ class SmartBoundsSpinBox(QDoubleSpinBox):
                 data_max = float(np.nanmax(finite.astype(float, copy=False)))
             self._kind = self._infer_kind(arr, mode)
         else:
-            self._kind = "float" if mode in {"trace mean", "trace stdev", "trace range"} else self._kind
+            self._kind = "float" if mode in FLOAT_RESULT_MODES else self._kind
 
         if data_min is not None:
             self._data_min = float(data_min)
@@ -160,11 +185,13 @@ class SmartBoundsSpinBox(QDoubleSpinBox):
 
     @classmethod
     def _infer_kind(cls, values: np.ndarray, mode: str) -> str:
-        if mode in {"trace mean", "trace median", "trace stdev", "trace range"}:
+        if mode in FLOAT_RESULT_MODES:
             return "float"
         if values.dtype.kind == "b":
             return "bool"
-        if values.dtype.kind in {"i", "u"} and mode in {"per loc", "trace min", "trace max"}:
+        # min/max/1st/last return an actual data value, so they keep the source
+        # attribute's integer-ness.
+        if values.dtype.kind in {"i", "u"} and mode in _VALUE_PRESERVING_MODES:
             return "int"
         return "float"
 
@@ -195,7 +222,7 @@ class FilterDialog(QDialog):
 
         self.setWindowTitle("Filter")
         self.setWindowFlags(Qt.WindowType.Window)
-        self.resize(720, 360)
+        self.resize(940, 360)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
         # Single-shot timer — debounces rapid edits (spinners) before applying.
@@ -356,7 +383,7 @@ class FilterDialog(QDialog):
         # ── Filter table ──────────────────────────────────────────
         self._table = QTableWidget(0, _NCOLS)
         self._table.setHorizontalHeaderLabels(
-            ["On", "Attribute", "Mode", "Min", "Max", "", ""]
+            ["On", "Attribute", "Mode", "Iter", "Min", "Max", "", ""]
         )
         hh = self._table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -367,6 +394,7 @@ class FilterDialog(QDialog):
         self._table.setColumnWidth(_COL_ENABLED, 36)
         self._table.setColumnWidth(_COL_ATTR,   170)
         self._table.setColumnWidth(_COL_MODE,   130)
+        self._table.setColumnWidth(_COL_ITER,   120)
         self._table.setColumnWidth(_COL_MIN,    130)
         self._table.setColumnWidth(_COL_MAX,    130)
         self._table.setColumnWidth(_COL_DISPLAY, 36)
@@ -451,6 +479,98 @@ class FilterDialog(QDialog):
                     combo.setCurrentText(old)
                 combo.blockSignals(False)
                 self._enforce_trace_mode(row)
+            self._repopulate_iter_combo(row)
+
+    # ------------------------------------------------------------------
+    # Iteration column helpers
+    # ------------------------------------------------------------------
+
+    def _num_itr(self) -> int:
+        ds = self._dataset()
+        if ds is None:
+            return 1
+        return max(1, int(ds.metadata.get("raw_num_itr", ds.prop.num_itr or 1)))
+
+    def _default_iter_label(self, attr: str) -> str:
+        """Default ``Iter`` label for *attr*: its effective iteration for cfr/efc
+        (where the value is actually measured), otherwise ``last (Nth)``.
+
+        This is also the semantics a legacy filter file — one saved before the
+        column existed — is loaded with.
+        """
+        ds = self._dataset()
+        n_itr = self._num_itr()
+        eff = effective_iteration_for_attr(ds, attr) if ds is not None else None
+        if eff is not None:
+            label = iteration_selector_label(int(eff), n_itr)
+            if label in filter_iteration_labels(n_itr):
+                return label
+        return last_label(n_itr)
+
+    def _repopulate_iter_combo(self, row: int) -> None:
+        """Rebuild a row's ``Iter`` choices for the current dataset, keeping the
+        selection when it still exists."""
+        combo = self._table.cellWidget(row, _COL_ITER)
+        attr_combo = self._table.cellWidget(row, _COL_ATTR)
+        if not isinstance(combo, QComboBox):
+            return
+        labels = filter_iteration_labels(self._num_itr())
+        old = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(labels)
+        if old in labels:
+            combo.setCurrentText(old)
+        else:
+            attr = attr_combo.currentText() if isinstance(attr_combo, QComboBox) else ""
+            combo.setCurrentText(self._default_iter_label(attr))
+        combo.blockSignals(False)
+
+    def _row_iteration(self, row: int) -> "str | int":
+        """The iteration selector to persist for *row*.
+
+        The dropdown shows concrete iterations, but a cfr/efc row sitting on its
+        *measured* iteration is stored as the semantic ``"effective"`` so the
+        filter stays reproducible on a dataset with a different sequence — the
+        same token a legacy (column-less) filter file resolves to.
+        """
+        combo = self._table.cellWidget(row, _COL_ITER)
+        attr_combo = self._table.cellWidget(row, _COL_ATTR)
+        if not isinstance(combo, QComboBox):
+            return "last"
+        sel, _render = parse_iteration_label(combo.currentText())
+        attr = attr_combo.currentText() if isinstance(attr_combo, QComboBox) else ""
+        ds = self._dataset()
+        eff = effective_iteration_for_attr(ds, attr) if ds is not None else None
+        if eff is not None and isinstance(sel, int) and int(sel) == int(eff):
+            return "effective"
+        return sel
+
+    def _set_row_iteration(self, row: int, itr: "str | int | None", attr: str) -> None:
+        """Select the label matching a stored/loaded selector; fall back to the
+        attribute's default when it is absent or does not apply here."""
+        combo = self._table.cellWidget(row, _COL_ITER)
+        if not isinstance(combo, QComboBox):
+            return
+        sel = itr
+        if isinstance(sel, str) and sel.strip().lower() == "effective":
+            eff = effective_iteration_for_attr(self._dataset(), attr)
+            sel = int(eff) if eff is not None else "last"
+        label = iteration_selector_label(sel, self._num_itr()) if sel is not None else ""
+        if not label or combo.findText(label) < 0:
+            label = self._default_iter_label(attr)
+        combo.blockSignals(True)
+        combo.setCurrentText(label)
+        combo.blockSignals(False)
+
+    def _on_row_selection_changed(self, row: int) -> None:
+        """Iter changed: the value space changed, so re-derive the bounds from
+        the new data range (as an attribute change does) and apply."""
+        attr_combo = self._table.cellWidget(row, _COL_ATTR)
+        attr = attr_combo.currentText() if isinstance(attr_combo, QComboBox) else ""
+        self._auto_fill_range(attr, row)
+        self._table.resizeColumnsToContents()
+        self._apply_all()
 
     def _add_row(self, attr: str = "efo", mode: str = "per loc",
                  lo: float = 0.0, hi: float = 1.0, enabled: bool = False,
@@ -477,11 +597,6 @@ class FilterDialog(QDialog):
         elif self._numeric_attrs:
             attr_combo.setCurrentIndex(0)
         attr_combo.blockSignals(False)
-        # Stash the authored iteration selector (from a loaded JSON preset) so it
-        # round-trips through _apply_all / _save_json even without a UI column.
-        # Cleared when the user changes the attribute (then re-derived).
-        if itr is not None and str(itr) != "":
-            attr_combo.setProperty("filter_itr", itr)
         attr_combo.currentTextChanged.connect(lambda text, r=row: self._on_row_attr_changed(text, r))
         self._table.setCellWidget(row, _COL_ATTR, attr_combo)
 
@@ -493,6 +608,18 @@ class FilterDialog(QDialog):
         mode_combo.blockSignals(False)
         mode_combo.currentTextChanged.connect(lambda _text, r=row: self._on_row_mode_changed(r))
         self._table.setCellWidget(row, _COL_MODE, mode_combo)
+
+        # Iteration combo — which loop iteration the bound applies to.
+        iter_combo = QComboBox()
+        iter_combo.setToolTip(_ITER_TOOLTIP)
+        iter_combo.blockSignals(True)
+        iter_combo.addItems(filter_iteration_labels(self._num_itr()))
+        iter_combo.blockSignals(False)
+        self._table.setCellWidget(row, _COL_ITER, iter_combo)
+        self._set_row_iteration(row, itr, attr_combo.currentText())
+        iter_combo.currentTextChanged.connect(
+            lambda _text, r=row: self._on_row_selection_changed(r)
+        )
 
         # Min / Max spinners — use debounce timer so dragging doesn't hammer the renderer
         min_spin = _make_spin(lo)
@@ -529,54 +656,12 @@ class FilterDialog(QDialog):
         self._table.resizeColumnsToContents()
 
     def _on_row_attr_changed(self, attr: str, row: int) -> None:
-        # A loaded iteration selector no longer applies once the attribute
-        # changes; drop it so _row_iteration re-derives the default.
-        attr_combo = self._table.cellWidget(row, _COL_ATTR)
-        if isinstance(attr_combo, QComboBox):
-            attr_combo.setProperty("filter_itr", None)
+        # The iteration selector is attribute-specific (cfr/efc default to their
+        # measured iteration), so re-derive it for the new attribute.
+        self._set_row_iteration(row, None, attr)
         self._enforce_trace_mode(row)
         self._auto_fill_range(attr, row)
         self._table.resizeColumnsToContents()
-
-    def _row_iteration(self, attr_combo, attr: str) -> "str | int":
-        """Iteration selector to persist for a filter row.
-
-        Uses a stashed selector from a loaded JSON preset when present,
-        otherwise derives the current authoring semantics: ``"effective"`` for
-        cfr/efc (their measured iteration), else ``"last"``. This is behaviour-
-        preserving — the FilterDialog always authors against the materialized
-        last-valid (effective-for-cfr/efc) view — while making the stored filter
-        self-describing and reproducible across iteration browsing / round-trips.
-        """
-        if isinstance(attr_combo, QComboBox):
-            stored = attr_combo.property("filter_itr")
-            if stored is not None and str(stored) != "":
-                return stored
-        ds = self._dataset()
-        eff = effective_iteration_for_attr(ds, attr) if ds is not None else None
-        return "effective" if eff is not None else "last"
-
-    def _row_mask_values(self, ds, attr: str, itr_sel: "str | int"):
-        """Per-loc values (aligned to ``ds.attr`` rows) for the live filter mask,
-        honouring the row's iteration selector.
-
-        ``last``/``effective``/``browse`` use the materialized value
-        (:func:`attr_values_1d`, unchanged). A concrete int iteration gathers
-        that iteration's value onto the materialized rows so the live mask
-        matches the persisted spec's semantics.
-        """
-        if isinstance(itr_sel, (int, np.integer)) and not isinstance(itr_sel, bool):
-            from ..core.loader import iteration_attr_values_1d, _attr_row_selection
-            rows = _attr_row_selection(ds)
-            if rows is not None:
-                vals = iteration_attr_values_1d(
-                    ds, attr, int(itr_sel), itr=rows[0], vld_only=rows[1],
-                )
-                if vals is not None:
-                    vals = np.asarray(vals).ravel()
-                    if vals.shape[0] == int(getattr(ds.prop, "num_loc", 0)):
-                        return vals
-        return attr_values_1d(ds, attr)
 
     def _on_row_mode_changed(self, row: int) -> None:
         self._enforce_trace_mode(row)
@@ -611,7 +696,9 @@ class FilterDialog(QDialog):
         attr = attr_combo.currentText()
         if attr not in ds.attr:
             return
-        raw_values, range_values = _filter_spinner_values(ds, attr, mode_combo.currentText())
+        raw_values, range_values = _filter_spinner_values(
+            ds, attr, mode_combo.currentText(), itr=self._row_iteration(row),
+        )
         if raw_values.size == 0 or range_values.size == 0:
             return
         vals_float = range_values.astype(float, copy=False)
@@ -641,15 +728,6 @@ class FilterDialog(QDialog):
         ds = self._dataset()
         if ds is None or attr not in ds.attr:
             return
-        mode_combo = self._table.cellWidget(row, _COL_MODE)
-        mode = mode_combo.currentText() if isinstance(mode_combo, QComboBox) else "per loc"
-        raw_vals, range_vals = _filter_spinner_values(ds, attr, mode)
-        finite = range_vals.astype(float, copy=False)
-        finite = finite[np.isfinite(finite)]
-        if finite.size == 0:
-            return
-        lo, hi = float(np.nanmin(finite)), float(np.nanmax(finite))
-
         if row is None:
             # Find the row that triggered this (by sender)
             for r in range(self._table.rowCount()):
@@ -658,6 +736,16 @@ class FilterDialog(QDialog):
                     break
         if row is None:
             return
+        mode_combo = self._table.cellWidget(row, _COL_MODE)
+        mode = mode_combo.currentText() if isinstance(mode_combo, QComboBox) else "per loc"
+        raw_vals, range_vals = _filter_spinner_values(
+            ds, attr, mode, itr=self._row_iteration(row),
+        )
+        finite = range_vals.astype(float, copy=False)
+        finite = finite[np.isfinite(finite)]
+        if finite.size == 0:
+            return
+        lo, hi = float(np.nanmin(finite)), float(np.nanmax(finite))
 
         for col, val in ((_COL_MIN, lo), (_COL_MAX, hi)):
             spin = self._table.cellWidget(row, col)
@@ -700,12 +788,13 @@ class FilterDialog(QDialog):
             if attr not in ds.attr:
                 continue
 
-            itr_sel = self._row_iteration(attr_combo, attr)
+            itr_sel = self._row_iteration(row)
 
             # Persist the spec so it can be re-evaluated against the raw
             # all-iteration store (Stage B iteration/validity browsing). "itr"
-            # records the iteration the bound was authored against so the filter
-            # is reproducible across iteration browsing and JSON round-trips.
+            # records the iteration the bound was authored against, so the
+            # filter is reproducible across iteration browsing and JSON
+            # round-trips.
             specs.append({
                 "attribute": attr, "mode": mode,
                 "lo": float(lo), "hi": float(hi),
@@ -713,7 +802,7 @@ class FilterDialog(QDialog):
                 "itr": itr_sel,
             })
 
-            raw = self._row_mask_values(ds, attr, itr_sel)
+            raw = attr_values_for_selection(ds, attr, itr=itr_sel)
             if raw is None:
                 # No per-loc 1-D representation; the persisted spec still
                 # applies on the raw store in the plot windows.
@@ -730,6 +819,17 @@ class FilterDialog(QDialog):
         self._applying = False
 
         n_pass = int(mask.sum())
+        self._info.setText(
+            f"{n_pass:,} / {ds.prop.num_loc:,} localisations pass all enabled filters."
+        )
+
+    def _update_info(self) -> None:
+        """Refresh the pass-count line without re-applying the filters."""
+        ds = self._dataset()
+        if ds is None:
+            self._info.setText("")
+            return
+        n_pass = int(np.asarray(ds.filter_mask, dtype=bool).sum())
         self._info.setText(
             f"{n_pass:,} / {ds.prop.num_loc:,} localisations pass all enabled filters."
         )
@@ -806,11 +906,14 @@ class FilterDialog(QDialog):
             self._state.notify_filter_changed(self._dataset_idx)
             self._update_info()
 
+        # The histogram must plot exactly the values this row filters on, so the
+        # row's Iter setting travels with the edit request.
         hist.start_filter_edit(
             attr=attr_combo.currentText(),
             mode=mode_combo.currentText(),
             lo=min_spin.value(),
             hi=max_spin.value(),
+            itr=self._row_iteration(row),
             on_update=write_values,
             on_finish=write_values,
             on_cancel=cancel,
@@ -856,7 +959,7 @@ class FilterDialog(QDialog):
                 # Iteration the bound is authored against. NB: NOT "itr" — that
                 # key collides with the raw MINFLUX data-column name and would
                 # make filter_io misclassify the file as data (see filter_io.py).
-                "iteration": self._row_iteration(attr, attr_name),
+                "iteration": self._row_iteration(row),
             })
         try:
             save_filter_json_file(path, rows)
@@ -895,7 +998,10 @@ class FilterDialog(QDialog):
                 min_inclusive = bool(r.get("min_inclusive", True)),
                 max_inclusive = bool(r.get("max_inclusive", True)),
                 auto_range = False,
-                itr     = r.get("iteration", None),
+                # Absent in a filter file saved before the column existed:
+                # iteration -> the attribute's default (effective for cfr/efc,
+                # else last).
+                itr      = r.get("iteration", None),
             )
             added += 1
         self._info.setText(f"Appended {added} row(s) from {Path(path).name}")
@@ -963,8 +1069,19 @@ def _prioritize_filter_attrs(attrs: list[str]) -> list[str]:
     return ordered
 
 
-def _filter_spinner_values(ds, attr: str, mode: str) -> tuple[np.ndarray, np.ndarray]:
-    raw = attr_values_1d(ds, attr)
+def _filter_spinner_values(
+    ds,
+    attr: str,
+    mode: str,
+    *,
+    itr: "str | int | None" = "auto",
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(per-loc values, values the Min/Max range is derived from)``.
+
+    ``itr`` selects which value space the bounds live in, so the spinners
+    auto-range over the same numbers the filter actually tests.
+    """
+    raw = attr_values_for_selection(ds, attr, itr=itr)
     raw = np.empty(0) if raw is None else np.asarray(raw).ravel()
     if raw.size == 0 or mode == "per loc":
         return raw, raw
@@ -973,16 +1090,7 @@ def _filter_spinner_values(ds, attr: str, mode: str) -> tuple[np.ndarray, np.nda
     num_traces = int(getattr(ds.prop, "num_traces", 0) or trace_idx.shape[0])
     if trace_idx.ndim != 2 or trace_idx.shape[1] < 2 or num_traces <= 0:
         return raw, raw
-    fn = {
-        "trace mean": np.nanmean,
-        "trace median": np.nanmedian,
-        "trace min": np.nanmin,
-        "trace max": np.nanmax,
-        "trace stdev": np.nanstd,
-        "trace range": lambda a: float(np.nanmax(a)) - float(np.nanmin(a)),
-    }.get(mode)
-    if fn is None:
-        return raw, raw
+    fn = trace_agg_func(mode)
     values: list[float] = []
     with np.errstate(all="ignore"):
         for start, stop in trace_idx[:num_traces]:

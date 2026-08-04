@@ -37,6 +37,7 @@ from ..core.loader import (
     attr_matches_selection,
     attr_values_1d,
     effective_iterations_for_attr,
+    is_value_pool_selector,
     mfx_filter_mask,
     mfx_get,
 )
@@ -49,6 +50,17 @@ _ITER_COLORS = [
     (148, 103, 189), (140, 86, 75), (227, 119, 194), (127, 127, 127),
     (188, 189, 34), (23, 190, 207),
 ]
+
+
+def _row_selector(sel):
+    """The row-identity selector for *sel*.
+
+    ``all [sum]`` / ``all [average]`` produce one value per localization laid on
+    the ``last`` rows, so anything that identifies a *row* (the synthetic ``idx``,
+    ``tid``, a filter mask) must be fetched at ``last`` — pooling those would be
+    meaningless. Every other selector is its own row selector.
+    """
+    return "last" if is_value_pool_selector(sel) else sel
 
 
 def _iter_color(k: int) -> tuple[int, int, int]:
@@ -460,8 +472,10 @@ class AttributeWindow(QWidget):
         other attributes use ds.attr in the default view, raw store otherwise."""
         if name == "idx":
             # In the default view (sel == "last", vld_only == the loaded
-            # validity) this is exactly the materialized rows' index.
-            v = mfx_get(ds, "idx", itr=sel, vld_only=vld_only)
+            # validity) this is exactly the materialized rows' index. A pooled
+            # selection sits on the `last` rows, so it takes their index —
+            # summing/averaging row positions would be meaningless.
+            v = mfx_get(ds, "idx", itr=_row_selector(sel), vld_only=vld_only)
         elif default:
             # attr_values_1d falls back to the raw store for per-iteration
             # columns kept 2-D in ds.attr (m2205 iter_load="all").
@@ -504,7 +518,9 @@ class AttributeWindow(QWidget):
                     x, y = x[fmask], y[fmask]
                     n = x.size
             else:
-                res = mfx_filter_mask(ds, itr=sel, vld_only=vld_only)
+                # The filter mask indexes rows, so a pooled selection uses the
+                # `last` rows its values are laid on.
+                res = mfx_filter_mask(ds, itr=_row_selector(sel), vld_only=vld_only)
                 if res is not None:
                     fmask, missing = res
                     if fmask.shape[0] == n:

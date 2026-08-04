@@ -13,15 +13,65 @@ from __future__ import annotations
 import numpy as np
 
 
+def _trace_first(a: np.ndarray) -> float:
+    """First value of a trace, positionally (rows are in store/time order)."""
+    return float(a[0]) if a.size else float("nan")
+
+
+def _trace_last(a: np.ndarray) -> float:
+    return float(a[-1]) if a.size else float("nan")
+
+
+def _trace_range(a: np.ndarray) -> float:
+    return float(np.nanmax(a)) - float(np.nanmin(a))
+
+
+#: The one registry of trace read-outs: label -> function over a trace's values.
+#:
+#: Every trace aggregation in the app dispatches through this — the histogram's
+#: materialized and raw paths, the filter's bounds/spinners/mask. Adding a
+#: read-out here makes it available everywhere at once; the previous
+#: table-per-call-site arrangement silently degraded to per-localization values
+#: wherever a table was missed.
+#:
+#: ``mean``/``median``/``stdev``/``range`` are NaN-skipping summaries;
+#: ``min``/``max`` are NaN-skipping order statistics; ``1st``/``last`` are
+#: **positional** — the trace's first and last row in store (time) order, taken
+#: literally rather than skipping NaN.
+TRACE_AGG_FUNCS = {
+    "trace mean":   np.nanmean,
+    "trace median": np.nanmedian,
+    "trace min":    np.nanmin,
+    "trace max":    np.nanmax,
+    "trace 1st":    _trace_first,
+    "trace last":   _trace_last,
+    "trace stdev":  np.nanstd,
+    "trace range":  _trace_range,
+}
+
+#: Trace read-outs whose result is a derived statistic rather than a data value,
+#: so a bound on them is float even when the source attribute is integral.
+FLOAT_RESULT_MODES = frozenset({
+    "trace mean", "trace median", "trace stdev", "trace range",
+})
+
 # Aggregation mode labels — shared by histogram and filter dialog
-AGG_MODES: list[str] = [
-    "per loc",
-    "trace mean",
-    "trace stdev",
-    "trace max",
-    "trace min",
-    "trace range",
-]
+AGG_MODES: list[str] = ["per loc"] + list(TRACE_AGG_FUNCS)
+
+
+def trace_agg_func(mode: str):
+    """Function for a trace read-out, or ``None`` for ``"per loc"``.
+
+    Raises ``ValueError`` for an unknown mode: returning the input unchanged
+    would silently produce one value per row where the caller promised one per
+    trace.
+    """
+    if mode == "per loc":
+        return None
+    try:
+        return TRACE_AGG_FUNCS[mode]
+    except KeyError:
+        raise ValueError(f"unsupported aggregation mode {mode!r}") from None
 
 
 def aggregate(
@@ -58,26 +108,12 @@ def aggregate(
     if mode == "per loc":
         return raw[ftr]
 
-    def _trace_agg(fn) -> np.ndarray:
+    fn = trace_agg_func(mode)
+    with np.errstate(all="ignore"):
         return np.array([
             fn(raw[trace_idx[i, 0] : trace_idx[i, 1] + 1])
             for i in range(num_traces)
         ])
-
-    dispatch = {
-        "trace mean":  lambda: _trace_agg(np.nanmean),
-        "trace stdev": lambda: _trace_agg(np.nanstd),
-        "trace max":   lambda: _trace_agg(np.nanmax),
-        "trace min":   lambda: _trace_agg(np.nanmin),
-        "trace range": lambda: _trace_agg(
-            lambda a: float(np.nanmax(a)) - float(np.nanmin(a))
-        ),
-    }
-    if mode in dispatch:
-        return dispatch[mode]()
-
-    # fallback
-    return raw[ftr]
 
 
 def compute_filter_mask(
@@ -124,25 +160,12 @@ def compute_filter_mask(
     if mode == "per loc":
         return _in_bounds(raw)
 
-    def _agg(fn) -> np.ndarray:
-        return np.array([
+    fn = trace_agg_func(mode)
+    with np.errstate(all="ignore"):
+        agg = np.array([
             fn(raw[trace_idx[i, 0] : trace_idx[i, 1] + 1])
             for i in range(num_traces)
         ])
-
-    if mode == "trace mean":
-        agg = _agg(np.nanmean)
-    elif mode == "trace stdev":
-        agg = _agg(np.nanstd)
-    elif mode == "trace max":
-        agg = _agg(np.nanmax)
-    elif mode == "trace min":
-        agg = _agg(np.nanmin)
-    elif mode == "trace range":
-        agg = _agg(lambda a: float(np.nanmax(a)) - float(np.nanmin(a)))
-    else:
-        return _in_bounds(raw)
-
     trace_pass = _in_bounds(agg)
     return np.repeat(trace_pass, num_loc_per_trace)
 
@@ -204,16 +227,7 @@ def raw_spec_mask(
     ends = np.concatenate([boundaries, [sorted_tid.size]])
     counts = ends - starts
 
-    fn = {
-        "trace mean":  np.nanmean,
-        "trace stdev": np.nanstd,
-        "trace max":   np.nanmax,
-        "trace min":   np.nanmin,
-        "trace range": lambda a: float(np.nanmax(a)) - float(np.nanmin(a)),
-    }.get(mode)
-    if fn is None:
-        return _in_bounds(vals)
-
+    fn = trace_agg_func(mode)
     with np.errstate(all="ignore"):
         agg = np.array([fn(sorted_vals[s:e]) for s, e in zip(starts, ends)])
     trace_pass = _in_bounds(agg)
@@ -244,16 +258,11 @@ def raw_trace_aggregate(vals: np.ndarray, tid: np.ndarray, mode: str) -> np.ndar
     starts = np.concatenate([[0], boundaries])
     ends = np.concatenate([boundaries, [sorted_tid.size]])
 
-    fn = {
-        "trace mean":   np.nanmean,
-        "trace median": np.nanmedian,
-        "trace min":    np.nanmin,
-        "trace max":    np.nanmax,
-        "trace stdev":  np.nanstd,
-        "trace range":  lambda a: float(np.nanmax(a)) - float(np.nanmin(a)),
-    }.get(mode)
-    if fn is None:
-        return vals
+    # The stable sort above keeps each trace's rows in store order, which is
+    # localization-major / iteration-minor — so the positional read-outs are the
+    # trace's first and last localization under a single-iteration selection,
+    # and its first and last raw row under `all [flatten]`.
+    fn = trace_agg_func(mode)
     with np.errstate(all="ignore"):
         return np.array([fn(sorted_vals[s:e]) for s, e in zip(starts, ends)])
 

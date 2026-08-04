@@ -74,9 +74,10 @@ def test_resolve_spec_iteration_tokens():
     mfx, eff = _make_m2410_per_iter_efo()
     ds = loader.load_from_mfx_array(mfx, "iter")
 
-    # Absent itr: cfr/efc -> "effective"; other attrs -> "browse".
+    # Absent itr (a filter file saved before the column existed): cfr/efc ->
+    # "effective" (their measured iteration), every other attribute -> "last".
     assert loader.resolve_spec_iteration(ds, _spec("cfr", 0, 1)) == "effective"
-    assert loader.resolve_spec_iteration(ds, _spec("efo", 0, 1)) == "browse"
+    assert loader.resolve_spec_iteration(ds, _spec("efo", 0, 1)) == "last"
 
     # Explicit tokens pass through (case/whitespace-insensitive).
     assert loader.resolve_spec_iteration(ds, _spec("efo", 0, 1, itr="last")) == "last"
@@ -84,6 +85,8 @@ def test_resolve_spec_iteration_tokens():
     assert loader.resolve_spec_iteration(ds, _spec("cfr", 0, 1, itr="effective")) == "effective"
     assert loader.resolve_spec_iteration(ds, _spec("efo", 0, 1, itr=2)) == 2
     assert loader.resolve_spec_iteration(ds, _spec("efo", 0, 1, itr="2")) == 2
+    assert loader.resolve_spec_iteration(ds, _spec("efo", 0, 1, itr="sum")) == "sum"
+    assert loader.resolve_spec_iteration(ds, _spec("efo", 0, 1, itr="Average")) == "average"
 
     # A stray bool is not an int iteration; unknown text falls back to "last".
     assert loader.resolve_spec_iteration(ds, _spec("efo", 0, 1, itr="weird")) == "last"
@@ -114,9 +117,9 @@ def test_itr_last_broadcasts_across_browse_iterations():
     assert int(mask_last.sum()) == 5
 
 
-def test_absent_itr_is_legacy_per_browse_row():
-    """No itr -> legacy behaviour: the bound is tested at each browse row's own
-    value, so only the matching iteration's rows pass (rows split)."""
+def test_absent_itr_filters_on_last():
+    """A filter file with no iteration info is read as a filter on `last`, so a
+    localization's whole iteration stack is kept/dropped by its last value."""
     mfx, _ = _make_m2410_per_iter_efo()
     ds = loader.load_from_mfx_array(mfx, "iter")
     ds.state["filter_specs"] = [_spec("efo", 3000, 3004)]  # no itr
@@ -124,8 +127,12 @@ def test_absent_itr_is_legacy_per_browse_row():
     res = loader.mfx_filter_mask(ds, itr="all", vld_only=True)
     mask, uneval = res
     assert uneval == []
-    # Only the last-iteration rows of locs 0..4 fall in [3000, 3004] -> 5 rows.
-    assert int(mask.sum()) == 5
+    # Last-iteration efo of locs 0..4 falls in [3000, 3004]; all their rows pass.
+    assert int(mask.sum()) == 5 * N_ITR
+    # Identical to spelling the selector out explicitly.
+    ds.state["filter_specs"] = [_spec("efo", 3000, 3004, itr="last")]
+    explicit, _ = loader.mfx_filter_mask(ds, itr="all", vld_only=True)
+    assert np.array_equal(mask, explicit)
 
 
 def test_itr_specific_iteration_broadcasts_that_iterations_value():

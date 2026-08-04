@@ -29,7 +29,8 @@ DERIVED = ["dt", "dst", "spd", "siz", "dur", "len", "tim_trace"]
 def test_iteration_labels_fixed_order():
     # last on top, pooled modes next, then individual iterations counting down.
     assert iteration_labels(4) == [
-        "last (4th)", "all [flatten]", "all [stacked]", "3rd", "2nd", "1st",
+        "last (4th)", "all [flatten]", "all [stacked]", "all [sum]", "all [average]",
+        "3rd", "2nd", "1st",
     ]
 
 
