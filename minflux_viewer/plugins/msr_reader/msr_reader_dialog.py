@@ -4477,12 +4477,13 @@ class MsrReaderDialog(QWidget):
             self._state.suspend_auto_render = previous_suspend_auto_render
 
         # A single imported dataset is standalone, not an overlay channel — drop
-        # the assigned channel colour so it renders with the default LUT (hot).
-        # The Red/Green/Blue cycle is only meaningful for a multi-channel overlay.
+        # the provisional overlay assignment as well as the channel colour. The
+        # grouped path assigns these fields before all imports have succeeded;
+        # a one-channel result must remain a standalone dataset.
         if len(imported_indices) == 1:
             sole = self._state.datasets[imported_indices[0]]
-            sole.state.pop("overlay_lut", None)
-            sole.state.pop("render_channel_lut", None)
+            from ...core.overlay import clear_overlay_assignment
+            clear_overlay_assignment(sole)
 
         # Record an overlay-level summary so the Method-text generator can
         # describe the whole multi-channel acquisition (source .msr, channels and

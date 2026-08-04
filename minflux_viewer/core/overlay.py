@@ -59,6 +59,43 @@ def dataset_overlay_index(ds) -> int | None:
         return None
 
 
+def is_multichannel_overlay(state, anchor_idx: int) -> bool:
+    """Return whether *anchor_idx* belongs to a real multi-dataset overlay.
+
+    An ``overlay_id`` is only a grouping hint; a stale or partially imported
+    dataset can carry one without having another channel beside it.  Such a
+    singleton must behave as a standalone dataset in viewer/UI code.
+    """
+    if not (0 <= anchor_idx < len(state.datasets)):
+        return False
+    if not dataset_group_id(state.datasets[anchor_idx]):
+        return False
+    return len(overlay_members(state, anchor_idx)) > 1
+
+
+def clear_overlay_assignment(ds) -> None:
+    """Remove overlay identity and per-channel display metadata from *ds*.
+
+    This is used when an import that started in grouped mode ends up with only
+    one successfully imported dataset.  The dataset remains linked to its MSR
+    source, but it is not a channel overlay.
+    """
+    state = getattr(ds, "state", {})
+    metadata = getattr(ds, "metadata", {})
+    for key in (
+        "overlay_id", "render_group_id", "overlay_index", "overlay_order",
+        "overlay_lut", "render_channel_lut", "overlay_transform",
+        "render_transform_2d",
+    ):
+        state.pop(key, None)
+    for key in (
+        "overlay_id", "overlay_index", "overlay_channels", "overlay_reference",
+        "overlay_alignment_mode", "overlay_bead_excluded", "overlay_transform",
+        "render_transform_2d", "transformed",
+    ):
+        metadata.pop(key, None)
+
+
 def overlay_members(state, anchor_idx: int) -> list[tuple[int, object]]:
     if not (0 <= anchor_idx < len(state.datasets)):
         return []

@@ -56,6 +56,8 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.app_state import AppState, DEFAULT_PREFS
+from ..core.attributes import aggregation_description
+from ..core.iteration import POOL_KEYS
 from ..msr.descriptions import describe_path
 from .precision_render import (
     RENDER_METHOD_DEFAULT,
@@ -95,6 +97,30 @@ _OVERLAY_COLORS = [
 ]
 _OVERLAY_DEFAULTS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"]
 _OVERLAY_ORDINALS = ["1st", "2nd", "3rd", "4th", "5th", "6th"]
+
+# Histogram Plot > "show trace value(s)": (stored aggregation mode, checkbox
+# label). The stored mode keeps its "trace " prefix — that is what the
+# histogram's "As" dropdown and the saved per-dataset view state use — while the
+# checkbox drops it, since the row label already says "trace".
+_HIST_TRACE_VALUES = [
+    ("trace mean", "mean"),
+    ("trace median", "median"),
+    ("trace min", "min"),
+    ("trace max", "max"),
+    ("trace 1st", "1st"),
+    ("trace last", "last"),
+    ("trace stdev", "stdev"),
+    ("trace range", "range"),
+]
+
+# Histogram Plot > "show all iteration value(s)": pooled modes offered in the
+# histogram's "Iter" dropdown (keys from core.iteration.POOL_KEYS).
+_HIST_ITER_TOOLTIPS = {
+    "flatten": "all [flatten] — every iteration's rows pooled into one series.",
+    "stacked": "all [stacked] — one coloured series per iteration, with a legend.",
+    "sum": "all [sum] — each localization's iterations summed to one value.",
+    "average": "all [average] — each localization's iterations averaged to one value.",
+}
 
 _XY_ORIGIN_OPTIONS = [
     ("origin at top left (Y increase downward)", "top_left"),
@@ -716,20 +742,29 @@ class PreferencesDialog(QDialog):
         hist_layout = QVBoxLayout(grp_hist)
         hist_layout.setSpacing(4)
 
+        # Row 1 — trace read-outs offered in the histogram's "As" dropdown.
         hist_values = QHBoxLayout()
-        self._hist_trace_mean = QCheckBox("trace mean")
-        self._hist_trace_median = QCheckBox("trace median")
-        self._hist_trace_min = QCheckBox("trace min")
-        self._hist_trace_max = QCheckBox("trace max")
-        self._hist_trace_stdev = QCheckBox("trace stdev")
-        self._hist_trace_range = QCheckBox("trace range")
-        for cb in (
-            self._hist_trace_mean, self._hist_trace_median, self._hist_trace_min,
-            self._hist_trace_max, self._hist_trace_stdev, self._hist_trace_range,
-        ):
+        hist_values.addWidget(QLabel("show trace value(s):"))
+        self._hist_trace_checks: dict[str, QCheckBox] = {}
+        for mode, label in _HIST_TRACE_VALUES:
+            cb = QCheckBox(label)
+            cb.setToolTip(aggregation_description(mode) or "")
+            self._hist_trace_checks[mode] = cb
             hist_values.addWidget(cb)
         hist_values.addStretch()
         hist_layout.addLayout(hist_values)
+
+        # Row 2 — pooled modes offered in the histogram's "Iter" dropdown.
+        hist_iters = QHBoxLayout()
+        hist_iters.addWidget(QLabel("show all iteration value(s):"))
+        self._hist_iter_checks: dict[str, QCheckBox] = {}
+        for key in POOL_KEYS:
+            cb = QCheckBox(key)
+            cb.setToolTip(_HIST_ITER_TOOLTIPS[key])
+            self._hist_iter_checks[key] = cb
+            hist_iters.addWidget(cb)
+        hist_iters.addStretch()
+        hist_layout.addLayout(hist_iters)
 
         root.addWidget(grp_hist)
 
@@ -1195,13 +1230,15 @@ class PreferencesDialog(QDialog):
         for i, combo in enumerate(self._overlay_color_combos):
             default = overlay_colors[i] if i < len(overlay_colors) else _OVERLAY_DEFAULTS[i]
             self._set_combo(combo, default, _OVERLAY_COLORS)
-        hist_values = set(p.get("histogram_values", ["trace mean"]))
-        self._hist_trace_mean.setChecked("trace mean" in hist_values)
-        self._hist_trace_median.setChecked("trace median" in hist_values)
-        self._hist_trace_min.setChecked("trace min" in hist_values)
-        self._hist_trace_max.setChecked("trace max" in hist_values)
-        self._hist_trace_stdev.setChecked("trace stdev" in hist_values)
-        self._hist_trace_range.setChecked("trace range" in hist_values)
+        hist_values = set(p.get("histogram_values", DEFAULT_PREFS["plot"]["histogram_values"]))
+        for mode, cb in self._hist_trace_checks.items():
+            cb.setChecked(mode in hist_values)
+        # A missing key means "all pooled modes" (the pre-preference behaviour);
+        # an empty list is a real choice to show none.
+        stored_iters = p.get("histogram_iterations", None)
+        hist_iters = set(POOL_KEYS) if stored_iters is None else set(stored_iters)
+        for key, cb in self._hist_iter_checks.items():
+            cb.setChecked(key in hist_iters)
 
         self._temp_folder_edit.setText(f.get("temp_folder", ""))
 
@@ -1299,18 +1336,20 @@ class PreferencesDialog(QDialog):
         p["filter_bounds_color"] = self._filter_bounds_color_combo.currentText()
         p["filter_bounds_size"] = int(self._filter_bounds_size.value())
         p["overlay_colors"] = [c.currentText() for c in self._overlay_color_combos]
-        hist_values = []
-        for name, cb in (
-            ("trace mean", self._hist_trace_mean),
-            ("trace median", self._hist_trace_median),
-            ("trace min", self._hist_trace_min),
-            ("trace max", self._hist_trace_max),
-            ("trace stdev", self._hist_trace_stdev),
-            ("trace range", self._hist_trace_range),
-        ):
-            if cb.isChecked():
-                hist_values.append(name)
+        # Order follows _HIST_TRACE_VALUES / POOL_KEYS, which is the order the
+        # histogram dropdowns use.
+        hist_values = [
+            mode for mode, _label in _HIST_TRACE_VALUES
+            if self._hist_trace_checks[mode].isChecked()
+        ]
+        # Unchecking every trace read-out would leave the "As" dropdown with only
+        # "per loc"; keep the mean so a trace-wise attribute still has a read-out.
         p["histogram_values"] = hist_values or ["trace mean"]
+        # An empty pooled list is allowed: "Iter" then offers only `last` and the
+        # individual iterations.
+        p["histogram_iterations"] = [
+            key for key in POOL_KEYS if self._hist_iter_checks[key].isChecked()
+        ]
 
         f["temp_folder"] = self._temp_folder_edit.text().strip()
 

@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -37,18 +38,21 @@ from ..core.attributes import (
 from ..core.iteration import (
     iteration_bold_flags,
     iteration_labels,
+    iteration_selector_label,
     ordinal,
     parse_iteration_label,
 )
 from ..core.loader import (
     attr_matches_selection,
-    attr_values_1d,
+    attr_values_for_selection,
     effective_iteration_for_attr,
     effective_iterations_for_attr,
+    is_value_pool_selector,
     mfx_filter_mask,
     mfx_get,
 )
 from ..core.roi_selection import rectangle_bounds, value_range_mask
+from ..utils.filters import TRACE_AGG_FUNCS, trace_agg_func
 from .filter_dialog import SmartBoundsSpinBox, _filter_spinner_values
 from .plot_format import plot_widget
 
@@ -63,14 +67,37 @@ _ITER_COLORS = [
 def _iter_color(k: int) -> tuple[int, int, int]:
     return _ITER_COLORS[k % len(_ITER_COLORS)]
 
-_TRACE_AGG_MODES = [
-    "trace mean",
-    "trace median",
-    "trace min",
-    "trace max",
-    "trace stdev",
-    "trace range",
-]
+#: Trace read-outs offered in the "As" dropdown. Order and membership come from
+#: the shared registry so the histogram, the filter and the raw path can never
+#: disagree; which of them actually appear is gated by
+#: ``prefs["plot"]["histogram_values"]``.
+_TRACE_AGG_MODES = list(TRACE_AGG_FUNCS)
+
+#: Upper bound on bins across the full data range (mirrors ``_bin_edges_for``).
+_MAX_HISTOGRAM_BINS = 4096
+#: Bin-count targeting for a zoomed x span: roughly this many values per bin,
+#: clamped to a readable number of bars across the window.
+_ZOOM_VALUES_PER_BIN = 4
+_ZOOM_MIN_BINS = 10
+_ZOOM_MAX_BINS = 60
+#: Headroom above the tallest visible bar when a zoom re-fits the height.
+_ZOOM_Y_HEADROOM = 0.05
+
+_ZOOM_TOOLTIPS = {
+    "horizontal": (
+        "Drag a horizontal guide at the mouse; X remaps to the drawn span.\n"
+        "The bin size is refined for the new span and the height is\n"
+        "re-fitted to the re-binned bars."
+    ),
+    "vertical": (
+        "Drag a vertical guide at the mouse; Y (count) remaps to the drawn\n"
+        "span, clamped at zero. X and the bin size are unchanged."
+    ),
+    "unconstrained": (
+        "Drag a rectangle; X remaps to it and the bin size is refined.\n"
+        "The height is re-fitted to the re-binned bars."
+    ),
+}
 
 _COLOR_NAMES = {
     "yellow": QColor(255, 221, 0),
@@ -117,10 +144,19 @@ class HistogramWindow(QWidget):
         self._view_state_key = "histogram_plot_state"
         self._filter_edit: dict | None = None
         self._last_histogram_bounds: tuple[float, float, float, float] | None = None
+        # Right-click Zoom tool: None = off, else the armed drag mode.
+        self._zoom_mode: str | None = None
+        self._zoom_drag_start = None
+        self._zoom_preview = None
         self._original_auto_range = None
         self._last_attr_name = ""
         self._last_agg_mode = ""
         self._last_log_data = False
+        # Set while a filter row that targets one specific iteration is being
+        # edited: that iteration's values are then gathered onto the
+        # materialized rows so the region drag stays available (see
+        # _current_value_itr / _is_raw_mode).
+        self._edit_itr: int | None = None
 
         self.setWindowTitle("Histogram")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -210,16 +246,29 @@ class HistogramWindow(QWidget):
         self._plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._plot.setLabel("left", "count")
         self._plot.showGrid(x=False, y=True, alpha=0.2)
-        self._plot.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self._plot.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._plot.customContextMenuRequested.connect(self._show_plot_context_menu)
         self._plot.getPlotItem().setMenuEnabled(False)
-        view_box = self._plot.getPlotItem().vb
+        plot_item = self._plot.getPlotItem()
+        view_box = plot_item.vb
+        self._view_box = view_box
         try:
             view_box.setMenuEnabled(False)
         except Exception:
             pass
         self._original_auto_range = view_box.autoRange
         view_box.autoRange = lambda *args, **kwargs: self._fit_histogram_view()
+        # The floating "A" button calls PlotItem.autoBtnClicked(), which turns on
+        # pyqtgraph's *continuous* auto-range (enableAutoRange) rather than going
+        # through vb.autoRange — so the patch above never saw it. Continuous
+        # auto-range fits every item including the view-anchored filter report
+        # label, and repositioning that label on sigRangeChanged grew the bounds
+        # again, so each click zoomed further out. Route "A" to the same
+        # deterministic fit the Reset button uses.
+        plot_item.autoBtnClicked = lambda *args, **kwargs: self._fit_histogram_view()
         view_box.sigRangeChanged.connect(lambda *_args: self._update_filter_edit_labels())
+        self._original_mouse_drag_event = view_box.mouseDragEvent
+        view_box.mouseDragEvent = self._zoom_mouse_drag_event
 
         self._hist_item = pg.BarGraphItem(x=[], height=[], width=1, brush="steelblue")
         self._plot.addItem(self._hist_item)
@@ -299,20 +348,8 @@ class HistogramWindow(QWidget):
         self._agg_combo.setToolTip(aggregation_description(self._agg_combo.currentText()))
         self._enforce_trace_aggregation()
 
-        iter_opts = self._iter_labels(ds)
         self._eff_iter_cache = {}                    # dataset (re)loaded → drop cache
-        self._iter_combo.blockSignals(True)
-        self._iter_combo.clear()
-        self._iter_combo.addItems(iter_opts)
-        default_label = self._default_iter_label_for(ds, self._attr_combo.currentText())
-        saved_label = str(saved.get("iter", "") or "")
-        self._iter_combo.setCurrentText(saved_label if saved_label in iter_opts else default_label)
-        self._iter_combo.blockSignals(False)
-        # Nothing to browse for single-iteration data.
-        has_iters = bool(iter_opts)
-        self._iter_combo.setVisible(has_iters)
-        self._iter_label.setVisible(has_iters)
-        self._style_iteration_boldness()             # bold the useful iterations
+        self._populate_iteration_modes(ds, str(saved.get("iter", "") or ""))
 
         self._zero_chk.blockSignals(True)
         self._log_chk.blockSignals(True)
@@ -326,6 +363,49 @@ class HistogramWindow(QWidget):
 
         self._auto_bin_width = None
         self._draw()
+
+    def _populate_iteration_modes(self, ds, preferred: str = "") -> None:
+        """Fill the ``Iter`` dropdown, honouring the Preferences pooled-mode set.
+
+        *preferred* is the label to re-select when it is still on offer (the
+        saved view state on a refresh, the live selection on a preference
+        change); otherwise the attribute's default label is used.
+        """
+        iter_opts = self._iter_labels(ds)
+        self._iter_combo.blockSignals(True)
+        self._iter_combo.clear()
+        self._iter_combo.addItems(iter_opts)
+        default_label = self._default_iter_label_for(ds, self._attr_combo.currentText())
+        self._iter_combo.setCurrentText(
+            preferred if preferred in iter_opts else default_label
+        )
+        self._iter_combo.blockSignals(False)
+        # Nothing to browse for single-iteration data.
+        has_iters = bool(iter_opts)
+        self._iter_combo.setVisible(has_iters)
+        self._iter_label.setVisible(has_iters)
+        self._style_iteration_boldness()             # bold the useful iterations
+
+    def refresh_preferences(self) -> None:
+        """Re-read Preferences > Appearance > Histogram Plot.
+
+        Broadcast by ``main_window._refresh_plot_preferences`` after Preferences
+        is accepted, so the "As" / "Iter" dropdowns pick up the enabled trace
+        read-outs and pooled modes without reopening the window.
+        """
+        ds = self._dataset()
+        if ds is None:
+            return
+        agg_before = self._agg_combo.currentText()
+        iter_before = self._iter_combo.currentText()
+        self._populate_agg_modes()
+        self._populate_iteration_modes(ds, iter_before)
+        self._enforce_trace_aggregation()
+        if (self._agg_combo.currentText() != agg_before
+                or self._iter_combo.currentText() != iter_before):
+            # The plotted quantity changed because the old choice is gone.
+            self._reset_for_new_data()
+        self._remember_histogram_controls()
 
     def _populate_agg_modes(self) -> None:
         old = self._agg_combo.currentText()
@@ -355,7 +435,10 @@ class HistogramWindow(QWidget):
         return max(1, int(ds.metadata.get("raw_num_itr", ds.prop.num_itr or 1)))
 
     def _iter_labels(self, ds) -> list[str]:
-        return iteration_labels(self._num_itr(ds))
+        # Which pooled modes are offered is a preference; a missing key means
+        # "all of them", an empty list means the user turned them all off.
+        allowed = self._state.prefs.get("plot", {}).get("histogram_iterations", None)
+        return iteration_labels(self._num_itr(ds), allowed=allowed)
 
     def _default_iter_label(self, ds) -> str:
         labels = self._iter_labels(ds)
@@ -429,36 +512,86 @@ class HistogramWindow(QWidget):
         """Return (itr_selector, render_mode) for the current label."""
         return parse_iteration_label(self._iter_combo.currentText())
 
+    def _value_label(self, attr_name: str) -> str:
+        """Axis/report name for the plotted quantity (log made explicit)."""
+        return f"log({attr_name})" if self._log_chk.isChecked() else attr_name
+
+    def _current_value_itr(self) -> "str | int":
+        """Iteration selector the materialized path reads values at.
+
+        ``"auto"`` is the historical materialized value (cfr/efc at their
+        effective iteration, everything else last-valid). The value-pooling
+        modes pass straight through, and while a filter row targeting one
+        specific iteration is being edited that iteration is used, so the plot
+        shows the values the filter actually tests.
+        """
+        itr_sel, render = self._selection()
+        if is_value_pool_selector(itr_sel):
+            return itr_sel
+        if (
+            self._edit_itr is not None
+            and render == "single"
+            and isinstance(itr_sel, (int, np.integer))
+            and int(itr_sel) == self._edit_itr
+        ):
+            return int(itr_sel)
+        return "auto"
+
+    def _materialized_values(self, ds, attr_name: str) -> "np.ndarray | None":
+        """Per-loc values on the default (``ds.attr``-aligned) path.
+
+        Honours the Iter dropdown's value-pooling modes (``all [sum]`` /
+        ``all [average]``, which yield one value per localization just like the
+        default view). Everything else keeps the materialized value, so this is
+        a drop-in for the previous ``attr_values_1d`` call.
+        """
+        if ds is None:
+            return None
+        return attr_values_for_selection(ds, attr_name, itr=self._current_value_itr())
+
     def _is_raw_mode(self) -> bool:
-        """True unless the view is the ``last`` single series whose rows ARE
-        the materialized store.
+        """True unless the current selection yields one value per localization
+        on rows that ARE the materialized store.
 
         The default (ds.attr) path requires ds.attr row alignment with the
         current selection: last+valid for normal loads, last+all-validity for
         ``only_valid_locs=False`` loads (so filter-edit/ROI work there too).
         For all-iteration loads even a ``last`` selection must come from the
         raw store.
+
+        Selections that stay on the materialized path — all one value per
+        localization, which is what keeps filter editing and ROI bands alive:
+
+        * plain ``last``;
+        * cfr/efc at their **effective** iteration — the canonical per-loc value
+          ``attr_values_for_selection`` returns, so the Iter label matches the
+          displayed values (any other iteration browses the genuine raw values);
+        * the value-pooling modes ``all [sum]`` / ``all [average]``, which pool
+          onto the same rows as ``last``;
+        * while a filter row is being edited, the single iteration that row
+          filters on (gathered onto the materialized rows).
         """
         itr_sel, render = self._selection()
         ds = self._dataset()
-        # cfr/efc: their effective iteration carries the canonical per-loc value
-        # (attr_values_1d returns it), so that single-iteration selection routes
-        # through the materialized path — keeping filter-edit/ROI working and the
-        # Iter label matching the displayed values. Any other iteration browses
-        # the genuine raw values.
-        eff = effective_iteration_for_attr(ds, self._attr_combo.currentText()) if ds is not None else None
-        if eff is not None and render == "single":
-            is_eff = isinstance(itr_sel, (int, np.integer)) and int(itr_sel) == eff
-            if not is_eff:
-                return True
-            return not attr_matches_selection(
-                ds, itr="last", vld_only=self._valid_chk.isChecked(),
-            )
-        if not (itr_sel == "last" and render == "single"):
-            return True
-        return ds is not None and not attr_matches_selection(
+        if ds is None:
+            return not (itr_sel == "last" and render == "single")
+        aligned = attr_matches_selection(
             ds, itr="last", vld_only=self._valid_chk.isChecked(),
         )
+        if is_value_pool_selector(itr_sel):
+            return not aligned
+        if render == "single" and isinstance(itr_sel, (int, np.integer)):
+            eff = effective_iteration_for_attr(ds, self._attr_combo.currentText())
+            on_effective = eff is not None and int(itr_sel) == int(eff)
+            on_edit_iter = self._edit_itr is not None and int(itr_sel) == self._edit_itr
+            return not aligned if (on_effective or on_edit_iter) else True
+        if not (itr_sel == "last" and render == "single"):
+            return True
+        # cfr/efc on `last`: the materialized value is their effective one, so
+        # the plotted numbers would not match the label -> browse raw instead.
+        if effective_iteration_for_attr(ds, self._attr_combo.currentText()) is not None:
+            return True
+        return not aligned
 
     def _clear_raw_items(self) -> None:
         for item in self._raw_items:
@@ -481,21 +614,27 @@ class HistogramWindow(QWidget):
             pass
 
     def _raw_values(self, ds, attr_name: str, sel, vld_only: bool, agg_mode: str):
-        """Return histogram values + unevaluable filter attrs for one iteration."""
+        """Return histogram values + unevaluable filter attrs for one iteration.
+
+        A value-pooling selector yields one value per localization laid on the
+        ``last`` rows, so the companion tid / filter mask must be taken at
+        ``last`` — pooling those would be meaningless (a summed ``tid``).
+        """
         from ..utils.filters import raw_trace_aggregate
         vals = mfx_get(ds, attr_name, itr=sel, vld_only=vld_only)
         if vals is None:
             return np.empty(0), []
         vals = np.asarray(vals).ravel().astype(float)
+        row_sel = "last" if is_value_pool_selector(sel) else sel
         unevaluable: list[str] = []
         if agg_mode == "per loc":
-            res = mfx_filter_mask(ds, itr=sel, vld_only=vld_only)
+            res = mfx_filter_mask(ds, itr=row_sel, vld_only=vld_only)
             if res is not None:
                 fmask, unevaluable = res
                 if fmask.shape[0] == vals.shape[0]:
                     vals = vals[fmask]
         else:
-            tid = mfx_get(ds, "tid", itr=sel, vld_only=vld_only)
+            tid = mfx_get(ds, "tid", itr=row_sel, vld_only=vld_only)
             vals = raw_trace_aggregate(vals, tid, agg_mode)
         return vals, unevaluable
 
@@ -584,7 +723,7 @@ class HistogramWindow(QWidget):
         max_count = float(counts.max()) if counts.size else 1.0
         self._last_histogram_bounds = (float(edges[0]), float(edges[-1]), 0.0, max(max_count, 1.0))
 
-        x_label = f"log({attr_name})" if self._log_chk.isChecked() else attr_name
+        x_label = self._value_label(attr_name)
         self._plot.setLabel("bottom", f"{x_label}  [{agg_mode}]")
         sel_label = self._iter_combo.currentText()
         note = f"{vals.size:,} values  |  {sel_label}  |  {attr_name} [{agg_mode}]  |  bin {bin_width:.6g}"
@@ -636,7 +775,7 @@ class HistogramWindow(QWidget):
             self._raw_items.append(item)
 
         self._last_histogram_bounds = (float(edges[0]), float(edges[-1]), 0.0, max(max_count, 1.0))
-        x_label = f"log({attr_name})" if self._log_chk.isChecked() else attr_name
+        x_label = self._value_label(attr_name)
         self._plot.setLabel("bottom", f"{x_label}  [{agg_mode}]")
         total = int(sum(v.size for _k, v in series))
         note = (
@@ -682,7 +821,7 @@ class HistogramWindow(QWidget):
             "iter": self._iter_combo.currentText() or "",
             "valid_only": True,
         }
-        raw = attr_values_1d(ds, attr_name)
+        raw = self._materialized_values(ds, attr_name)
         raw = np.empty(0) if raw is None else np.asarray(raw).ravel().astype(float)
         if raw.size == 0:
             return
@@ -755,11 +894,16 @@ class HistogramWindow(QWidget):
                 0.0,
                 max(max_count, 1.0),
             )
-        x_label = f"log({attr_name})" if self._log_chk.isChecked() else attr_name
+        x_label = self._value_label(attr_name)
         self._plot.setLabel("bottom", f"{x_label}  [{agg_mode}]")
+        iter_note = (
+            f"  |  {self._iter_combo.currentText()}"
+            if is_value_pool_selector(self._selection()[0]) else ""
+        )
         self._info_label.setText(
             f"{int(ds.filter_mask.sum()):,} / {ds.prop.num_loc:,} localisations  |  "
-            f"{vals.size:,} histogram values  |  {attr_name} [{agg_mode}]  |  "
+            f"{vals.size:,} histogram values  |  {attr_name} [{agg_mode}]"
+            f"{iter_note}  |  "
             f"bin size {bin_width:.6g}  |  min {data_vmin:.6g}  |  max {data_vmax:.6g}"
         )
         self._remember_histogram_controls()
@@ -798,6 +942,282 @@ class HistogramWindow(QWidget):
         )
         self._update_filter_edit_labels()
 
+    # ------------------------------------------------------------------
+    # Right-click menu: Zoom + Reset View
+    # ------------------------------------------------------------------
+
+    #: Zoom drag modes, in the order they appear in the context menu.
+    ZOOM_MODES = ("horizontal", "vertical", "unconstrained")
+
+    def _show_plot_context_menu(self, pos) -> None:
+        """Plot right-click menu; defers to a ROI right-click like the render view."""
+        overlay = self._roi_overlay
+        if overlay is not None:
+            try:
+                view_pos = self._view_box.mapSceneToView(
+                    self._plot.mapToScene(pos)
+                )
+                if overlay._record_at(view_pos) is not None:
+                    return
+            except Exception:
+                pass
+
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        zoom_menu = menu.addMenu("Zoom")
+        zoom_menu.setToolTipsVisible(True)
+        zoom_menu.menuAction().setToolTip(
+            "Arm a zoom drag. The tool releases itself after one drag,\n"
+            "so the next left-drag pans as usual. Esc cancels."
+        )
+        for mode in self.ZOOM_MODES:
+            action = zoom_menu.addAction(mode)
+            action.setCheckable(True)
+            action.setChecked(self._zoom_mode == mode)
+            action.setToolTip(_ZOOM_TOOLTIPS[mode])
+            action.triggered.connect(
+                lambda _checked=False, value=mode: self._toggle_zoom_mode(value)
+            )
+        menu.addSeparator()
+        reset_action = menu.addAction("Reset View")
+        reset_action.setToolTip(
+            "Re-bin over the full data range and fit the plot to it\n"
+            "(the same as the Reset button)."
+        )
+        reset_action.triggered.connect(self._reset_view)
+        menu.exec(self._plot.mapToGlobal(pos))
+
+    def _toggle_zoom_mode(self, mode: str) -> None:
+        """Arm a zoom drag mode; selecting the armed mode again disarms it.
+
+        The armed mode is one-shot — ``_zoom_mouse_drag_event`` releases it once
+        the drag finishes.
+        """
+        if mode not in self.ZOOM_MODES:
+            return
+        self._set_zoom_mode(None if self._zoom_mode == mode else mode)
+
+    def _set_zoom_mode(self, mode: "str | None") -> None:
+        self._zoom_mode = mode
+        self._clear_zoom_preview()
+        # Left-drag normally pans, so an armed zoom needs a visible affordance;
+        # the menu check-mark alone is not on screen while dragging.
+        try:
+            viewport = self._plot.viewport()
+            if mode:
+                viewport.setCursor(Qt.CursorShape.CrossCursor)
+            else:
+                viewport.unsetCursor()
+        except Exception:
+            pass
+
+    def _reset_view(self) -> None:
+        """Context-menu Reset View — identical to the Reset button."""
+        self._set_zoom_mode(None)
+        self._reset_histogram()
+
+    def keyPressEvent(self, event):                      # noqa: D102 - Qt override
+        if event.key() == Qt.Key.Key_Escape and self._zoom_mode:
+            self._set_zoom_mode(None)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _zoom_mouse_drag_event(self, event, axis=None) -> None:
+        if not self._zoom_mode or event.button() != Qt.MouseButton.LeftButton:
+            self._original_mouse_drag_event(event, axis=axis)
+            return
+        event.accept()
+        if event.isStart():
+            self._zoom_drag_start = self._view_box.mapSceneToView(
+                event.buttonDownScenePos(Qt.MouseButton.LeftButton)
+            )
+            self._clear_zoom_preview()
+            self._zoom_preview = pg.PlotDataItem(
+                pen=pg.mkPen((30, 120, 220), width=1.5, style=Qt.PenStyle.DashLine)
+            )
+            self._zoom_preview.setZValue(30)
+            self._plot.addItem(self._zoom_preview, ignoreBounds=True)
+        if self._zoom_drag_start is None:
+            return
+        current = self._view_box.mapSceneToView(event.scenePos())
+        self._update_zoom_preview(self._zoom_drag_start, current)
+        if event.isFinish():
+            self._apply_zoom_drag(self._zoom_drag_start, current)
+            self._zoom_drag_start = None
+            # One-shot: finishing the gesture releases the tool, so the next
+            # left-drag pans as usual instead of starting another zoom. Pick the
+            # mode again from the right-click menu to zoom once more.
+            self._set_zoom_mode(None)
+
+    def _update_zoom_preview(self, start, current) -> None:
+        """Draw the rubber band: an 'H' for horizontal, an 'I' for vertical,
+        a rectangle for unconstrained.
+
+        The guide tracks the **cursor** on its free axis (the horizontal guide
+        rides at the mouse's y, the vertical one at the mouse's x) rather than
+        sitting at the middle of the view, so it can be lined up against the
+        bars it is about to zoom into.
+        """
+        if self._zoom_preview is None:
+            return
+        x0, x1 = float(start.x()), float(current.x())
+        y0, y1 = float(start.y()), float(current.y())
+        (vx0, vx1), (vy0, vy1) = self._view_box.viewRange()
+        if self._zoom_mode == "horizontal":
+            cap = (vy1 - vy0) * 0.08
+            self._zoom_preview.setData(
+                [x0, x1, np.nan, x0, x0, np.nan, x1, x1],
+                [y1, y1, np.nan, y1 - cap, y1 + cap, np.nan, y1 - cap, y1 + cap],
+            )
+        elif self._zoom_mode == "vertical":
+            cap = (vx1 - vx0) * 0.08
+            self._zoom_preview.setData(
+                [x1, x1, np.nan, x1 - cap, x1 + cap, np.nan, x1 - cap, x1 + cap],
+                [y0, y1, np.nan, y0, y0, np.nan, y1, y1],
+            )
+        else:
+            self._zoom_preview.setData([x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0])
+
+    def _apply_zoom_drag(self, start, current) -> None:
+        x0, x1 = sorted((float(start.x()), float(current.x())))
+        y0, y1 = sorted((float(start.y()), float(current.y())))
+        (vx0, vx1), (vy0, vy1) = self._view_box.viewRange()
+        min_dx = abs(vx1 - vx0) * 1e-6
+        min_dy = abs(vy1 - vy0) * 1e-6
+        if self._zoom_mode == "horizontal":
+            if (x1 - x0) > min_dx:
+                # X remaps to the drawn span; Y is re-fitted because re-binning
+                # changed the counts (see _zoom_to).
+                self._zoom_to(x0, x1, None, None, rebin=True)
+        elif self._zoom_mode == "vertical":
+            # Counts are never negative, so a guide dragged below the axis only
+            # buys empty space — clamp it away.
+            y0 = max(y0, 0.0)
+            if (y1 - y0) > min_dy:
+                # Y only — the bin size (and so the counts) stay put.
+                self._zoom_to(vx0, vx1, y0, y1, rebin=False)
+        elif (x1 - x0) > min_dx and (y1 - y0) > min_dy:
+            # The drawn box sets X; Y is re-fitted for the same reason as above,
+            # falling back to the drawn height if the fit has nothing to go on.
+            self._zoom_to(x0, x1, max(y0, 0.0), y1, rebin=True, auto_y=True)
+
+    def _zoom_to(
+        self,
+        x0: float,
+        x1: float,
+        y0: "float | None",
+        y1: "float | None",
+        *,
+        rebin: bool,
+        auto_y: bool = False,
+    ) -> None:
+        """Apply a zoom rectangle, optionally re-binning for the new x span.
+
+        Re-binning goes through ``_draw()``, which re-bins over the **full** data
+        range and then re-fits the view, so the requested range is re-applied
+        afterwards.
+
+        A ``None`` y bound (or ``auto_y``) means "fit the height to the re-binned
+        bars now visible": a finer bin width splits each bar's counts, so the
+        peak the user zoomed into lands at a different height and the pre-zoom
+        (or drawn) y range would leave it squashed or off-screen.
+        """
+        if rebin:
+            width = self._zoom_bin_width(x0, x1)
+            if width is not None:
+                self._auto_bin_width = width
+                self._set_bin_spin(width)
+                self._draw()
+        if y0 is None or y1 is None or auto_y:
+            fitted = self._auto_y_for_x_range(x0, x1)
+            if fitted is not None:
+                y0, y1 = fitted
+        if y0 is None or y1 is None:
+            _vx, (y0, y1) = self._view_box.viewRange()
+        # Never zoom into the empty band below zero.
+        y0 = max(float(y0), 0.0)
+        y1 = float(y1)
+        if y1 <= y0:
+            y1 = y0 + max(abs(y0) * 0.01, 1.0)
+        self._view_box.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0.0)
+        self._update_filter_edit_labels()
+
+    def _auto_y_for_x_range(self, x0: float, x1: float) -> "tuple[float, float] | None":
+        """``(0, peak)`` over the bars currently visible in ``[x0, x1]``.
+
+        Read off the drawn bars rather than the source values so it reflects the
+        bin width actually in use. ``None`` when there is nothing to measure
+        (empty plot, or a multi-series ``all [stacked]`` view that does not use
+        the bar item) — the caller then leaves the height alone.
+        """
+        opts = getattr(self._hist_item, "opts", {}) or {}
+        x = np.asarray(opts.get("x", []), dtype=float).ravel()
+        heights = np.asarray(opts.get("height", []), dtype=float).ravel()
+        if x.size == 0 or heights.size != x.size:
+            return None
+        # A bar counts as visible when any part of it overlaps the span.
+        try:
+            half = abs(float(opts.get("width", 0.0) or 0.0)) / 2.0
+        except (TypeError, ValueError):
+            half = 0.0
+        inside = (x + half >= x0) & (x - half <= x1)
+        if not inside.any():
+            return None
+        visible = heights[inside]
+        visible = visible[np.isfinite(visible)]
+        if visible.size == 0:
+            return None
+        top = float(np.max(visible))
+        if not np.isfinite(top) or top <= 0.0:
+            return None
+        return 0.0, top * (1.0 + _ZOOM_Y_HEADROOM)
+
+    def _zoom_bin_width(self, x0: float, x1: float) -> "float | None":
+        """A bin width that resolves detail inside the zoomed x span.
+
+        Aims for a bin *count* across the zoomed span, scaled by how many values
+        actually land there (``_ZOOM_VALUES_PER_BIN`` each, clamped to
+        ``_ZOOM_MIN_BINS``…``_ZOOM_MAX_BINS``), so the window always shows a
+        readable number of bars.
+
+        Freedman-Diaconis is deliberately **not** consulted. It is the right rule
+        for a whole distribution but the wrong one for a zoom window: it trades
+        span for sample size (a 10x zoom refines only ~4.6x, leaving the window
+        emptier than before), and on a window holding a sharp concentration its
+        IQR collapses and it asks for thousands of sub-pixel bars, nearly all of
+        count 0 or 1 — which renders as one solid block of equal-height bars.
+
+        ``None`` when there is nothing to re-bin from.
+        """
+        span = float(x1) - float(x0)
+        if not np.isfinite([x0, x1]).all() or span <= 0:
+            return None
+        vals = np.asarray(self._vals, dtype=float).ravel()
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            return None
+        inside = vals[(vals >= x0) & (vals <= x1)]
+        target = int(np.clip(
+            inside.size // _ZOOM_VALUES_PER_BIN, _ZOOM_MIN_BINS, _ZOOM_MAX_BINS,
+        ))
+        width = span / target
+        # _bin_edges_for caps the full-range bin count, so a finer width than
+        # that would be silently clamped and the spin box would lie. This is what
+        # limits how far a zoom can keep refining (see _MAX_HISTOGRAM_BINS).
+        full_span = float(np.max(vals)) - float(np.min(vals))
+        if full_span > 0:
+            width = max(width, full_span / _MAX_HISTOGRAM_BINS)
+        return width if np.isfinite(width) and width > 0 else None
+
+    def _clear_zoom_preview(self) -> None:
+        if self._zoom_preview is not None:
+            try:
+                self._plot.removeItem(self._zoom_preview)
+            except Exception:
+                pass
+            self._zoom_preview = None
+
     def normalize_roi_record(self, record):
         """Histograms treat rectangle ROIs as x-range bands."""
         if record.type != "rectangle":
@@ -828,7 +1248,7 @@ class HistogramWindow(QWidget):
             return None
         attr_name = self._attr_combo.currentText()
         agg_mode = self._agg_combo.currentText()
-        raw = attr_values_1d(ds, attr_name)
+        raw = self._materialized_values(ds, attr_name)
         raw = np.empty(0) if raw is None else np.asarray(raw).ravel().astype(float)
         if raw.size == 0:
             return None
@@ -916,28 +1336,21 @@ class HistogramWindow(QWidget):
         self._state.log(msg, "WARN")
 
     def _aggregate(self, raw: np.ndarray, ftr: np.ndarray, mode: str, ds) -> np.ndarray:
+        """One value per trace (or the filtered per-loc values for ``per loc``).
+
+        NB: a trace read-out is computed from **every** localization in the
+        trace — *ftr* is deliberately not applied. A trace's mean/median/... is a
+        property of the trace itself, so it does not shift as the user tunes an
+        unrelated filter. (``per loc`` does honour *ftr*.)
+        """
         if mode == "per loc":
             return raw[ftr]
 
         ti = ds.prop.trace_idx
         n_tr = ds.prop.num_traces
-
-        def trace_agg(fn) -> np.ndarray:
+        fn = trace_agg_func(mode)
+        with np.errstate(all="ignore"):
             return np.array([fn(raw[ti[i, 0] : ti[i, 1] + 1]) for i in range(n_tr)])
-
-        if mode == "trace mean":
-            return trace_agg(np.nanmean)
-        if mode == "trace median":
-            return trace_agg(np.nanmedian)
-        if mode == "trace min":
-            return trace_agg(np.nanmin)
-        if mode == "trace max":
-            return trace_agg(np.nanmax)
-        if mode == "trace stdev":
-            return trace_agg(np.nanstd)
-        if mode == "trace range":
-            return trace_agg(lambda a: float(np.nanmax(a)) - float(np.nanmin(a)))
-        return raw[ftr]
 
     def _default_bin_width(self, vals: np.ndarray) -> float:
         vals = vals[np.isfinite(vals)]
@@ -991,13 +1404,19 @@ class HistogramWindow(QWidget):
         mode: str,
         lo: float,
         hi: float,
+        itr: "str | int | None" = None,
         on_update=None,
         on_finish=None,
         on_cancel=None,
         restore_view_on_finish: bool = True,
         restore_view_on_cancel: bool = True,
     ) -> None:
-        """Display and edit a filter range on top of this histogram."""
+        """Display and edit a filter range on top of this histogram.
+
+        ``itr`` mirrors the filter row's own value space onto the plot, so the
+        region the user drags is over exactly the numbers the filter tests.
+        ``None`` keeps the histogram's current setting.
+        """
         self._clear_filter_edit(restore=False)
         # Set the attribute first so cfr/efc can pick their effective iteration.
         if self._attr_combo.findText(attr) >= 0:
@@ -1008,9 +1427,12 @@ class HistogramWindow(QWidget):
             self._agg_combo.blockSignals(True)
             self._agg_combo.setCurrentText(mode)
             self._agg_combo.blockSignals(False)
-        # cfr/efc: edit on their effective-iteration view (its canonical per-loc
-        # value); this stays a materialized selection so filter-edit works.
-        self._enforce_effective_iteration()
+        applied_itr = self._apply_filter_iteration(itr, attr)
+        if not applied_itr:
+            self._edit_itr = None
+            # cfr/efc: edit on their effective-iteration view (its canonical
+            # per-loc value); a materialized selection, so filter-edit works.
+            self._enforce_effective_iteration()
         # Filter editing needs the materialized store. If still in raw mode (a
         # normal attribute on a non-last / all-iteration selection), fall back
         # to the default last-iteration view.
@@ -1075,7 +1497,10 @@ class HistogramWindow(QWidget):
         report_font.setPointSizeF(base_size * 1.1)
         report_label.textItem.setFont(report_font)
         report_label.setZValue(21)
-        self._plot.addItem(report_label)
+        # The label is anchored to the current view corner and re-positioned on
+        # every range change, so letting it contribute to auto-range bounds
+        # creates a feedback loop that grows the view without bound.
+        self._plot.addItem(report_label, ignoreBounds=True)
         region.sigRegionChanged.connect(self._update_filter_edit_labels)
         region.sigRegionChangeFinished.connect(self._on_filter_region_changed)
         region.scene().sigMouseClicked.connect(self._on_filter_scene_clicked)
@@ -1088,6 +1513,32 @@ class HistogramWindow(QWidget):
         self._set_filter_edit_buttons_visible(True)
         self._fit_histogram_view()
         self._update_filter_edit_labels()
+
+    def _apply_filter_iteration(self, itr: "str | int | None", attr: str) -> bool:
+        """Point the Iter dropdown at a filter row's selector; True when applied.
+
+        Accepts the persisted spec tokens (``"last"``, ``"effective"``, an int,
+        ``"sum"``/``"average"``). ``"effective"`` resolves against *attr*.
+        Returns False when there is nothing to apply, so the caller falls back
+        to its own default.
+        """
+        if itr is None or self._iter_combo.count() == 0:
+            return False
+        ds = self._dataset()
+        sel = itr
+        if isinstance(sel, str) and sel.strip().lower() in ("effective", "auto", "browse"):
+            eff = effective_iteration_for_attr(ds, attr) if ds is not None else None
+            sel = int(eff) if eff is not None else "last"
+        label = iteration_selector_label(sel, self._num_itr(ds) if ds is not None else 1)
+        if not label or self._iter_combo.findText(label) < 0:
+            return False
+        self._iter_combo.blockSignals(True)
+        self._iter_combo.setCurrentText(label)
+        self._iter_combo.blockSignals(False)
+        # Remember a concrete iteration so it keeps the materialized path (and
+        # therefore the draggable region) while this edit is open.
+        self._edit_itr = int(sel) if isinstance(sel, (int, np.integer)) else None
+        return True
 
     def _on_filter_region_changed(self) -> None:
         edit = self._filter_edit or {}
@@ -1118,7 +1569,7 @@ class HistogramWindow(QWidget):
         x_span = max(abs(x1 - x0), 1e-12)
         y_span = max(abs(y1 - y0), 1e-12)
         attr_name = self._attr_combo.currentText()
-        x_label = f"log({attr_name})" if self._log_chk.isChecked() else attr_name
+        x_label = self._value_label(attr_name)
         report_label.setText(
             f"filtering {x_label} as {self._agg_combo.currentText()}\n"
             f"loc in filter {self._filter_count_text(lo, hi)}\n"
@@ -1133,7 +1584,7 @@ class HistogramWindow(QWidget):
             return ""
         attr_name = self._attr_combo.currentText()
         agg_mode = self._agg_combo.currentText()
-        raw = attr_values_1d(ds, attr_name)
+        raw = self._materialized_values(ds, attr_name)
         raw = np.empty(0) if raw is None else np.asarray(raw).ravel().astype(float)
         if raw.size == 0:
             return f"0 / {ds.prop.num_loc:,}"
@@ -1197,7 +1648,9 @@ class HistogramWindow(QWidget):
         data_min = None
         data_max = None
         if ds is not None and attr in ds.attr:
-            values, range_values = _filter_spinner_values(ds, attr, mode)
+            values, range_values = _filter_spinner_values(
+                ds, attr, mode, itr=self._current_value_itr(),
+            )
             finite = range_values.astype(float, copy=False)
             finite = finite[np.isfinite(finite)]
             if finite.size:
@@ -1239,7 +1692,7 @@ class HistogramWindow(QWidget):
         ds = self._dataset()
         if ds is None:
             return None
-        raw = attr_values_1d(ds, self._attr_combo.currentText())
+        raw = self._materialized_values(ds, self._attr_combo.currentText())
         if raw is None:
             return None
         vals = np.asarray(raw).ravel().astype(float)
@@ -1307,6 +1760,7 @@ class HistogramWindow(QWidget):
                     pass
         saved = edit.get("saved_state")
         self._filter_edit = None
+        self._edit_itr = None
         self._set_filter_edit_buttons_visible(False)
         ds = self._dataset()
         if restore and saved and ds is not None:
@@ -1408,7 +1862,16 @@ class HistogramWindow(QWidget):
         trace_wise = is_trace_wise_attribute(self._attr_combo.currentText())
         self._agg_combo.blockSignals(True)
         if trace_wise:
-            self._agg_combo.setCurrentText("trace mean")
+            # "trace mean" can be switched off in Preferences, and setCurrentText
+            # is a no-op for a missing entry — which would leave a track-level
+            # attribute on a per-loc read-out while the combo says otherwise.
+            forced = "trace mean"
+            if self._agg_combo.findText(forced) < 0:
+                forced = next(
+                    (m for m in _TRACE_AGG_MODES if self._agg_combo.findText(m) >= 0),
+                    "per loc",
+                )
+            self._agg_combo.setCurrentText(forced)
             self._agg_combo.setEnabled(False)
             self._agg_combo.setToolTip("This is a track-level attribute expanded per localization; histogram uses trace mean.")
         else:

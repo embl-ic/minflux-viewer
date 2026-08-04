@@ -2885,7 +2885,9 @@ class MainWindow(QMainWindow):
             return "None"
         ds = self._state.datasets[idx]
         group_id = ds.state.get("overlay_id") or ds.state.get("render_group_id")
-        if group_id:
+        from ..core.overlay import is_multichannel_overlay
+        is_overlay = bool(group_id and is_multichannel_overlay(self._state, idx))
+        if is_overlay:
             overlay_idx = ds.state.get("overlay_index")
             visible_overlay = False
             for win in (
@@ -2899,10 +2901,7 @@ class MainWindow(QMainWindow):
                         break
                 except RuntimeError:
                     continue
-            if visible_overlay or any(
-                getattr(other, "state", {}).get("overlay_id") == group_id
-                for other in self._state.datasets
-            ):
+            if visible_overlay or is_overlay:
                 return f"Overlay {overlay_idx}" if overlay_idx else "Overlay"
         own_maps = (
             self._render_windows,
@@ -3314,7 +3313,12 @@ class MainWindow(QMainWindow):
             self._refresh_plot_preferences()
 
     def _refresh_plot_preferences(self) -> None:
-        for win in list(self._render_windows.values()) + list(self._scatter_windows.values()):
+        windows = (
+            list(self._render_windows.values())
+            + list(self._scatter_windows.values())
+            + list(self._histogram_windows.values())
+        )
+        for win in windows:
             refresh = getattr(win, "refresh_preferences", None)
             if callable(refresh):
                 refresh()

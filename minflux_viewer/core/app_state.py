@@ -16,6 +16,7 @@ being directly coupled to any other component.
 
 from __future__ import annotations
 
+import copy
 import json
 from contextlib import contextmanager
 from pathlib import Path
@@ -122,7 +123,11 @@ DEFAULT_PREFS: dict = {
         "filter_range_alpha": 45,
         "filter_bounds_color": "Green",
         "filter_bounds_size": 1,
-        "histogram_values": ["trace mean"],
+        # Histogram Plot: which trace read-outs appear in the "As" dropdown...
+        "histogram_values": ["trace mean", "trace median"],
+        # ...and which pooled modes appear in its "Iter" dropdown (see
+        # core.iteration.POOL_KEYS). All four by default.
+        "histogram_iterations": ["flatten", "stacked", "sum", "average"],
         # Per-dataset overlay channel colours (1st..6th), cycled for overlays.
         "overlay_colors": ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"],
     },
@@ -202,8 +207,14 @@ DEFAULT_PREFS: dict = {
 
 
 def _merge(saved: dict, defaults: dict) -> dict:
-    """Recursively fill missing keys from *defaults* into *saved*."""
-    result = dict(defaults)
+    """Recursively fill missing keys from *defaults* into *saved*.
+
+    *defaults* is deep-copied: a plain ``dict()`` is shallow, so every key the
+    user has not saved would hand back the **live** ``DEFAULT_PREFS`` sub-dict /
+    list, and editing preferences would then mutate the module-level defaults
+    for the rest of the process.
+    """
+    result = copy.deepcopy(defaults)
     for k, v in saved.items():
         if k in result and isinstance(result[k], dict) and isinstance(v, dict):
             result[k] = _merge(v, result[k])
@@ -567,7 +578,7 @@ class AppState(QObject):
                 return _migrate_prefs(_merge(json.loads(raw), DEFAULT_PREFS))
             except Exception:
                 pass
-        return _migrate_prefs(dict(DEFAULT_PREFS))
+        return _migrate_prefs(copy.deepcopy(DEFAULT_PREFS))
 
     def save_prefs(self) -> None:
         qs = QSettings("EMBL-IC", "MinfluxViewer")
