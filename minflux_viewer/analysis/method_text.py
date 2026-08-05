@@ -375,7 +375,11 @@ def _method_number(value, digits: int = 3, *, strip: bool = True) -> str:
     if not math.isfinite(number):
         return "not available"
     text = f"{number:.{digits}f}"
-    return text.rstrip("0").rstrip(".") if strip else text
+    # Only trailing zeros AFTER a decimal point are redundant.  Stripping
+    # unconditionally turned 60 into 6 and 50 into 5 whenever digits=0.
+    if strip and "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
 
 
 def _method_count(value) -> str:
@@ -681,6 +685,198 @@ def _render_hlyb_template3d(m, ev, state):
     return text, []
 
 
+_PAIR_FIT_HYPOTHESIS = {
+    "six_site": "the six-site HlyB complex",
+    "dimer_only": "a single dimer distance",
+    "no_structure": "no structure beyond the same-site population",
+}
+
+
+def _pair_fit_ranking(fits: dict, best: str) -> str:
+    """Rank competing hypotheses by AIC difference, worst evidence first."""
+    if not isinstance(fits, dict) or not fits:
+        return "not recorded"
+    parts = []
+    for name, fit in sorted(fits.items(), key=lambda kv: kv[1].get("delta_aic", 0.0)):
+        label = _PAIR_FIT_HYPOTHESIS.get(name, name)
+        gap = fit.get("delta_aic", 0.0)
+        if name == best:
+            parts.append(f"{label} (preferred)")
+        else:
+            parts.append(f"{label} worse by {_method_number(gap, 1)} AIC units")
+    return "; ".join(parts)
+
+
+def _render_hlyb_pair_fit(m, ev, state):
+    """Account of one ensemble pair-distance model fit.
+
+    The structural claim this method supports is deliberately narrower than a
+    per-complex detection, and the text is written so that it cannot be read as
+    one.
+    """
+    method = ev.get("method_data")
+    name = m.group("name")
+    if not isinstance(method, dict) or method.get("schema") != "hlyb_pair_distance_fit_3d/v1":
+        return (
+            f"Analysis. An ensemble pair-distance model fit was applied to dataset "
+            f"'{name}'. The method measures the distribution of distances between "
+            f"trace centroids without merging them, compares it with an "
+            f"envelope-preserving randomized reference, and fits a model comprising a "
+            f"same-site short-range population, the six-site HlyB geometry and "
+            f"unrelated pairs. The settings and fitted values of this run were not "
+            f"serialized in the Log event and are therefore not reproduced here."
+        ), []
+
+    inp = method.get("input", {})
+    params = method.get("parameters", {})
+    obs = method.get("observable", {})
+    kernel = method.get("repeat_kernel", {})
+    model = method.get("model", {})
+    fits = method.get("fits", {})
+    relaxed = method.get("fits_relaxed_kernel", {})
+    best = str(method.get("best_hypothesis", ""))
+    best_fit = fits.get(best, {})
+
+    dataset = inp.get("dataset_name") or name
+    source_path = str(inp.get("source_path") or "").strip()
+    source = f" (source file '{source_path}')" if source_path else ""
+    bits = []
+    if inp.get("source_version"):
+        bits.append(f"source version {inp['source_version']}")
+    if inp.get("source_format"):
+        bits.append(f"container {inp['source_format']}")
+    format_text = f"; {', '.join(bits)}" if bits else ""
+
+    sem = obs.get("centroid_sem_nm") or []
+    sem_text = (" / ".join(_method_number(v, 2) for v in sem) + " nm in x / y / z"
+                if len(sem) == 3 else "not recorded")
+
+    classes = model.get("class_distances_nm") or []
+    class_text = (", ".join(_method_number(v, 2) for v in classes) + " nm"
+                  if classes else "not recorded")
+
+    if inp.get("time_column_available") and kernel.get("n_pairs"):
+        kernel_text = (
+            f"calibrated empirically from {_method_count(kernel.get('n_pairs'))} "
+            f"consecutive trace pairs separated by less than "
+            f"{_method_number(params.get('repeat_gap_s'), 2)} s, with a median "
+            f"separation of {_method_number(kernel.get('median_nm'), 2)} nm. "
+            f"Those pairs were selected on the acquisition time alone and never on "
+            f"distance, so their distance distribution is an unbiased sample of "
+            f"same-site separations rather than a restatement of a distance "
+            f"threshold"
+        )
+    else:
+        kernel_text = (
+            f"not calibrated from the data — no usable acquisition-time column was "
+            f"available — and an assumed width of "
+            f"{_method_number(kernel.get('sigma_nm'), 2)} nm was used instead"
+        )
+
+    bounds = best_fit.get("parameters_at_bounds") or []
+    delta = best_fit.get("label_offset_nm")
+    lo_bound, hi_bound = (params.get("label_offset_bounds_nm") or [0.0, 6.0])[:2]
+    if delta is None:
+        offset_text = "The antibody displacement was not recorded."
+    elif "label_offset_nm" in bounds:
+        offset_text = (
+            f"The fitted antibody displacement reached the edge of its permitted "
+            f"range at {_method_number(delta, 2)} nm and is therefore a limit rather "
+            f"than an estimate: the data prefer observed distances at or below the "
+            f"protein-domain values and give no support for a radially outward label, "
+            f"which would lengthen every class by 3-4 nm."
+        )
+    else:
+        style = ("an isotropically oriented label" if float(delta) < 1.8
+                 else "a radially outward label, matching the tabulated distances "
+                      "that include 2 nm per antibody at each endpoint")
+        offset_text = (
+            f"The fitted antibody displacement was {_method_number(delta, 2)} nm "
+            f"(permitted range {_method_number(lo_bound, 1)} to "
+            f"{_method_number(hi_bound, 1)} nm), consistent with {style}."
+        )
+
+    relaxed_gap = min((f.get("delta_aic", 0.0) for key, f in relaxed.items()
+                       if key != method.get("best_hypothesis_relaxed", "")),
+                      default=float("nan"))
+    pinned_gap = min((f.get("delta_aic", 0.0) for key, f in fits.items()
+                      if key != best), default=float("nan"))
+
+    text = (
+        f"Input data. An ensemble pair-distance model fit was performed on dataset "
+        f"'{dataset}'{source}. {_method_count(inp.get('n_localizations'))} valid "
+        f"localization record(s) at the final iteration were grouped into "
+        f"{_method_count(inp.get('n_traces_total'))} trace(s), of which "
+        f"{_method_count(inp.get('n_traces_used'))} carried at least "
+        f"{_method_count(params.get('min_loc_per_trace'))} localizations and entered the "
+        f"analysis{format_text}. Coordinates were converted to nanometres and the axial "
+        f"coordinate multiplied by "
+        f"{_method_number(params.get('z_scaling_factor'), 4)} (RIMF, the "
+        f"refractive-index mismatch factor), taken from "
+        f"{inp.get('z_scaling_source') or 'the dataset'}. Viewer filter masks and ROI "
+        f"selections were not applied.\n\n"
+        f"Observable. Each trace was reduced to the mean of its localizations, whose "
+        f"standard error was {sem_text}. Unlike a detection-based analysis, trace "
+        f"centres were **not** merged into sub-unit centres: a merge threshold "
+        f"comparable to the distances being measured removes them from the result and "
+        f"creates a maximum immediately above itself, so the short-range population is "
+        f"modelled here rather than deleted. All pair distances up to "
+        f"{_method_number(params.get('r_max_nm'), 0)} nm were histogrammed in "
+        f"{_method_number(params.get('bin_nm'), 2)} nm bins. A reference distribution "
+        f"was obtained by redrawing the same number of centres from their own "
+        f"{_method_number(params.get('null_cell_nm'), 0)} nm occupancy histogram "
+        f"({_method_count(obs.get('null_replicates'))} replicates), which preserves the "
+        f"cell-scale density while destroying all finer structure. The measured "
+        f"distribution exceeded that reference by more than three standard deviations "
+        f"out to {_method_number(obs.get('excess_outer_nm'), 1)} nm, and was "
+        f"indistinguishable from it beyond.\n\n"
+        f"Model. The distribution was described as the sum of three terms. The first is "
+        f"a same-site short-range population — one molecule re-acquired as several "
+        f"traces, the two fluorophores carried by one divalent antibody, and drift "
+        f"between re-acquisitions — whose shape was {kernel_text}. The second is the "
+        f"intra-complex term of the six-site HlyB model, using the inter-domain "
+        f"distances {class_text}, each convolved with the positional blur of a pair of "
+        f"centres. The five distance classes were held at equal weight "
+        f"({_method_number(model.get('class_weight'), 3)} each): every class comprises "
+        f"three of the fifteen site pairs, and every pair requires two labels, so all "
+        f"classes scale with the square of the labelling efficiency and their ratio "
+        f"does not depend on it. Those weights are therefore a constraint imposed by "
+        f"the structure rather than free parameters, which is what makes the fit a test "
+        f"of the model. The third term is the randomized reference, scaled by one free "
+        f"amplitude, representing pairs from different complexes. Amplitudes were "
+        f"estimated by Poisson maximum likelihood over "
+        f"{_method_number(params.get('fit_r_min_nm'), 1)} to "
+        f"{_method_number(params.get('fit_r_max_nm'), 1)} nm. The positional blur was "
+        f"bounded below by the measured centroid precision "
+        f"({_method_number(obs.get('sigma_floor_nm'), 2)} nm for a pair) and shared "
+        f"across competing hypotheses, since it describes the measurement and not the "
+        f"structure; the antibody displacement was restricted to non-negative values, "
+        f"because two displacements can only lengthen an expected distance.\n\n"
+        f"Results. The preferred description was {_PAIR_FIT_HYPOTHESIS.get(best, best)}. "
+        f"Ranked by Akaike information criterion: {_pair_fit_ranking(fits, best)}. The "
+        f"fit assigned {_method_number(best_fit.get('n_complex_pairs'), 0)} pair(s) to "
+        f"the complex term and {_method_number(best_fit.get('n_repeat_pairs'), 0)} to "
+        f"the same-site term, with the randomized reference scaled by "
+        f"{_method_number(best_fit.get('background_scale'), 3)} and a fitted pair blur "
+        f"of {_method_number(best_fit.get('sigma_nm'), 2)} nm. {offset_text}\n\n"
+        f"Sensitivity and limits. The comparison above holds the same-site kernel at "
+        f"its measured width. Repeating it with that width free to increase — which is "
+        f"physically plausible, since drift and a divalent label both broaden the "
+        f"population — the preferred model was unchanged but its margin over the next "
+        f"hypothesis fell from {_method_number(pinned_gap, 1)} to "
+        f"{_method_number(relaxed_gap, 1)} AIC units. Both figures are reported because "
+        f"the strength of the structural evidence depends on that choice. The "
+        f"individual distance classes are not resolved and no attempt was made to "
+        f"resolve them: the three short classes span about 2 nm against a pair blur of "
+        f"several nanometres. What this analysis measures is the ensemble envelope, its "
+        f"outer extent, and which of the competing geometries reproduces them; it does "
+        f"not assign any observed pair to a distance class, nor identify individual "
+        f"complexes, and the reported numbers should not be read as a count of detected "
+        f"complexes."
+    )
+    return text, []
+
+
 #: (compiled pattern, stage, render(match, event, state) -> (sentence, [citations]))
 RULES = [
     (re.compile(r"^Loaded dataset '(?P<name>.+?)':"), "load", _render_load),
@@ -700,6 +896,8 @@ RULES = [
     (re.compile(r"Localization precision \(FRC\): resolution = (?P<res>[\d.]+) nm "
                 r"\(1/7 threshold, (?P<mode>[^,]+), (?P<n>[\d,]+) points, "
                 r"pixel (?P<px>[\d.]+) nm\)"), "analysis", _render_frc),
+    (re.compile(r"^HlyB pair-distance model fit on '(?P<name>.+?)':"),
+     "analysis", _render_hlyb_pair_fit),
     (re.compile(
         r"^HlyB subunit pair analysis \(template matching 3D\) on '(?P<name>.+?)': "
         r"(?P<traces>[\d,]+) trace\(s\) → (?P<subunits>[\d,]+) subunit\(s\) → "
