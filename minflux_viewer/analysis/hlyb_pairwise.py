@@ -195,7 +195,64 @@ def trace_centroids(
         "t_end": None if t_end is None else t_end[keep],
         "trace_ids": uid[keep],
         "n_traces_total": int(uid.size),
+        "points_nm": points,
     }
+
+
+def repeat_pair_index(
+    centroids_nm: np.ndarray,
+    t_start: np.ndarray | None,
+    t_end: np.ndarray | None,
+    *,
+    gap_s: float = 0.2,
+    max_nm: float = 40.0,
+) -> np.ndarray:
+    """Index pairs of the consecutive-in-time traces used to calibrate the kernel.
+
+    Returned as an ``(M, 2)`` array of indices into ``centroids_nm`` so the
+    calibration set can be drawn, and therefore judged, rather than taken on
+    trust.
+    """
+    pts = np.asarray(centroids_nm, dtype=np.float64)
+    if t_start is None or t_end is None or pts.shape[0] < 2:
+        return np.empty((0, 2), dtype=np.int64)
+    t0 = np.asarray(t_start, dtype=float).ravel()
+    t1 = np.asarray(t_end, dtype=float).ravel()
+    if t0.size != pts.shape[0]:
+        return np.empty((0, 2), dtype=np.int64)
+    order = np.argsort(t0)
+    gaps = t0[order][1:] - t1[order][:-1]
+    dist = np.linalg.norm(pts[order][1:] - pts[order][:-1], axis=1)
+    sel = (gaps < float(gap_s)) & (dist <= float(max_nm))
+    if not sel.any():
+        return np.empty((0, 2), dtype=np.int64)
+    idx = np.flatnonzero(sel)
+    return np.column_stack([order[idx], order[idx + 1]]).astype(np.int64)
+
+
+def pairs_in_band(
+    centroids_nm: np.ndarray,
+    lo_nm: float,
+    hi_nm: float,
+) -> np.ndarray:
+    """Index pairs of centroids whose separation lies in ``[lo_nm, hi_nm]``.
+
+    This is the spatial counterpart of selecting a range on the pair-distance
+    profile.  It asserts **no** assignment of a pair to a complex or to a
+    distance class — the measurement does not make one, and at this precision
+    it could not.
+    """
+    from scipy.spatial import cKDTree
+
+    pts = np.asarray(centroids_nm, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[0] < 2 or hi_nm <= 0:
+        return np.empty((0, 2), dtype=np.int64)
+    tree = cKDTree(pts)
+    pairs = tree.query_pairs(r=float(hi_nm), output_type="ndarray")
+    if pairs.shape[0] == 0:
+        return pairs.astype(np.int64)
+    dist = np.linalg.norm(pts[pairs[:, 1]] - pts[pairs[:, 0]], axis=1)
+    return pairs[dist >= float(lo_nm)].astype(np.int64)
 
 
 # --------------------------------------------------------------------------
@@ -702,6 +759,16 @@ def analyze_hlyb_pairwise(
         "n_traces_used": int(pts.shape[0]),
         "centroid_sem_nm": median_sem,
         "sigma_floor_nm": sigma_floor,
+        # Kept so the spatial view can show the actual observable.  These are
+        # TRACE centroids, not sub-unit centres: several of them may belong to
+        # one labelled site, which is exactly the population the repeat kernel
+        # describes and which this method never merges away.
+        "centroids_nm": pts,
+        "centroid_n_locs": traces["n_locs"],
+        "points_nm": traces["points_nm"],
+        "repeat_pairs": repeat_pair_index(pts, traces["t_start"], traces["t_end"],
+                                          gap_s=cfg.repeat_gap_s,
+                                          max_nm=cfg.repeat_max_nm),
         "class_names": list(HLYB_CLASS_NAMES),
         "class_distances_nm": list(HLYB_CLASS_DISTANCES_NM),
         "config": cfg,
