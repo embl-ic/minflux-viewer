@@ -525,17 +525,25 @@ class MainWindow(QMainWindow):
             lambda: self._placeholder("K nearest neighbour", "a later implementation")
         )
         self.menuHlyBPair = QMenu("HlyB subunit pair analysis", self)
-        self.actionHlyB2D = QAction("2D", self)
-        self.actionHlyB2D.triggered.connect(lambda: self._run_hlyb_pair_analysis(mode="2D"))
-        self.actionHlyB3D = QAction("3D", self)
-        self.actionHlyB3D.triggered.connect(lambda: self._run_hlyb_pair_analysis(mode="3D"))
+        self.actionHlyBPairFit = QAction("Pair-distance model fit (3D)", self)
+        self.actionHlyBPairFit.setToolTip(
+            "Measure the pair-distance distribution of trace centroids without "
+            "merging them, against an envelope-preserving null, and fit the "
+            "six-site HlyB model to it.")
+        self.actionHlyBPairFit.triggered.connect(self._run_hlyb_pairwise_analysis)
         self.actionHlyBTemplate3D = QAction("Template matching (3D)", self)
         self.actionHlyBTemplate3D.triggered.connect(
             lambda: self._run_hlyb_pair_analysis(mode="TEMPLATE3D")
         )
-        self.menuHlyBPair.addAction(self.actionHlyB2D)
-        self.menuHlyBPair.addAction(self.actionHlyB3D)
+        self.menuHlyBPair.addAction(self.actionHlyBPairFit)
         self.menuHlyBPair.addAction(self.actionHlyBTemplate3D)
+        # The plain "2D" and "3D" entries are retired: the 3-D one reported
+        # generic DBSCAN proximity groups (including groups larger than a
+        # six-site complex, and distances beyond the model's own maximum) as
+        # "HlyB structures", and the 2-D one inherited that plus the projection
+        # foreshortening.  analyze_hlyb / analyze_hlyb_2d and the cell
+        # delineation are deliberately KEPT in analysis/hlyb_clustering.py, so
+        # a proper 2-D workflow can be built on them once the 3-D one settles.
         self.menuAnalyzeClustering.addAction(self.actionDbscan)
         self.menuAnalyzeClustering.addAction(self.actionKNearestNeighbour)
         self.menuAnalyzeClustering.addSeparator()
@@ -1001,8 +1009,7 @@ class MainWindow(QMainWindow):
             self.actionDbscan,
             self.actionKNearestNeighbour,
             #self.menuHlyBPair.menuAction(),
-            #self.actionHlyB2D,
-            #self.actionHlyB3D,
+            #self.actionHlyBPairFit,
             #self.actionHlyBTemplate3D,
             #self.menuAnalyzeSegmentation.menuAction(),
             #self.actionSegNpc2D,
@@ -2378,6 +2385,94 @@ class MainWindow(QMainWindow):
         else:
             self._state.log(
                 "Restore ROI: no other coordinate view open to restore onto.", "WARN")
+
+    def _run_hlyb_pairwise_analysis(self) -> None:
+        """Analyze › Clustering › HlyB subunit pair analysis › Pair-distance model
+        fit (3D) — measure the trace-centroid pair-distance distribution against
+        an envelope-preserving null and fit the six-site HlyB model to it.
+
+        No merge radius is applied anywhere, so no distance range is removed and
+        the short-range same-site population is modelled rather than deleted.
+        """
+        import numpy as np
+        from ..core.loader import mfx_get
+
+        idx = self._state.active_idx
+        if idx is None or self._state.active_dataset is None:
+            self._no_data_warning()
+            return
+        ds = self._state.datasets[idx]
+
+        def _col(attr):
+            v = mfx_get(ds, attr, itr="last", vld_only=True)
+            return None if v is None else np.asarray(v, dtype=float).ravel()
+
+        lx, ly, lz, tid = _col("loc_x"), _col("loc_y"), _col("loc_z"), _col("tid")
+        if lx is None or ly is None or tid is None or lx.size < 3:
+            QMessageBox.information(
+                self, "HlyB Pair-Distance Model Fit",
+                "The active dataset has no localizations with trace IDs to analyze.")
+            return
+        if lz is None or lz.size != lx.size:
+            lz = np.zeros_like(lx)
+        loc_m = np.column_stack([lx, ly, lz])
+        # The time column calibrates the same-site short-range kernel; without
+        # it the kernel falls back to an assumed width, which is reported.
+        tim = _col("tim")
+        if tim is not None and tim.size != lx.size:
+            tim = None
+
+        from ..analysis.hlyb_pairwise import PairFitConfig, analyze_hlyb_pairwise
+        from .hlyb_pairwise_dialog import HlyBPairwiseDialog, HlyBPairwiseWindow
+
+        current_rimf = float(getattr(ds.cali, "RIMF", 0.67) or 0.67)
+        defaults = getattr(self, "_hlyb_pair_cfg", None)
+        if defaults is None:
+            defaults = PairFitConfig(z_scaling_factor=current_rimf)
+        else:
+            defaults = PairFitConfig(**{**vars(defaults), "z_scaling_factor": current_rimf})
+        dlg = HlyBPairwiseDialog(self, defaults=defaults)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        cfg = dlg.config()
+        self._hlyb_pair_cfg = cfg
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = analyze_hlyb_pairwise(loc_m, tid, tim, cfg)
+        except Exception as exc:
+            QMessageBox.warning(self, "HlyB Pair-Distance Model Fit",
+                                f"Analysis failed: {exc}")
+            return
+        finally:
+            if QApplication.overrideCursor() is not None:
+                QApplication.restoreOverrideCursor()
+
+        from .modeless import show_modeless
+        win = HlyBPairwiseWindow(result, title=ds.name, owner=self)
+        show_modeless(win, self)
+
+        best = result.get("best_hypothesis", "")
+        fits = result.get("fits", {})
+        relaxed = result.get("fits_relaxed_kernel", {})
+        margin = min((f.get("delta_aic", 0.0) for name, f in fits.items()
+                      if name != best), default=float("nan"))
+        margin_relaxed = min((f.get("delta_aic", 0.0) for name, f in relaxed.items()
+                              if name != result.get("best_hypothesis_relaxed", "")),
+                             default=float("nan"))
+        kernel = result.get("repeat_kernel", {})
+        best_fit = result.get("best_fit", {})
+        self._state.log(
+            f"HlyB pair-distance model fit on '{ds.name}': "
+            f"{result['n_traces_used']:,} of {result['n_traces_total']:,} trace(s); "
+            f"excess above null out to {result['excess_outer_nm']:.1f} nm; "
+            f"best model '{best}' (next by dAIC {margin:.1f}, "
+            f"{margin_relaxed:.1f} with the short-range kernel released); "
+            f"delta {best_fit.get('label_offset_nm', float('nan')):.2f} nm, "
+            f"sigma {best_fit.get('sigma_nm', float('nan')):.2f} nm "
+            f"(min loc/trace {cfg.min_loc_per_trace}, z-scale {cfg.z_scaling_factor}, "
+            f"kernel {kernel.get('source', 'n/a')} from {kernel.get('n_pairs', 0)} pair(s)).",
+            dataset_idx=idx)
 
     def _run_hlyb_pair_analysis(self, mode: str = "3D") -> None:
         """Analyze › Clustering › HlyB subunit pair analysis › 2D/3D/template — detect

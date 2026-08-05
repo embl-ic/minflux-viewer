@@ -250,18 +250,23 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "DBSCAN clustering (placeholder).", "analysis"),
     "actionKNearestNeighbour": CommandMeta(U + "main_window.py", ("cluster", "knn", "nearest neighbour"),
                               "K-nearest-neighbour analysis (placeholder).", "analysis"),
-    "actionHlyB2D": CommandMeta(A + "hlyb_clustering.py",
-                              ("hlyb", "subunit", "dimer", "pair", "cluster", "ecoli", "2d"),
-                              "HlyB sub-unit pair analysis in 2-D (E. coli border removal + pair distances).",
-                              "analysis", inputs=("active dataset (loc, tid)",),
-                              outputs=("sub-unit centres", "pair-distance histogram")),
-    "actionHlyB3D": CommandMeta(A + "hlyb_clustering.py",
-                              ("hlyb", "subunit", "dimer", "pair", "cluster", "3d"),
-                              "HlyB sub-unit pair analysis in 3-D.", "analysis",
+    "actionHlyBPairFit": CommandMeta(A + "hlyb_pairwise.py",
+                              ("hlyb", "subunit", "dimer", "pair", "distance", "cluster",
+                               "correlation", "model fit", "null", "3d"),
+                              "HlyB sub-unit pair distances: trace-centroid pair-distance "
+                              "distribution against an envelope-preserving null, fitted with "
+                              "the six-site HlyB model. No merge radius, so no distance range "
+                              "is removed.", "analysis",
+                              inputs=("active dataset (loc, tid, tim)",),
+                              outputs=("pair-distance profile", "null band",
+                                       "fitted components", "model comparison")),
+    "actionHlyBTemplate3D": CommandMeta(A + "hlyb_clustering.py",
+                              ("hlyb", "template", "subunit", "dimer", "pair", "3d"),
+                              "HlyB template matching (3-D): per-complex assignment of "
+                              "detected sub-unit centres to the six-site model.", "analysis",
                               inputs=("active dataset (loc, tid)",),
-                              outputs=("sub-unit centres", "pair-distance histogram")),
-    "actionHlyBTemplate3D": CommandMeta(A + "hlyb_clustering.py", ("hlyb", "template", "3d"),
-                              "HlyB template matching (3-D).", "analysis"),
+                              outputs=("sub-unit centres", "matched structures",
+                                       "pair-distance histogram")),
 
     # ---- Analyze › Trace ------------------------------------------------------
     "actionTraceSize": CommandMeta(A + "trace_analysis.py",
