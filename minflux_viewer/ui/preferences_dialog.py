@@ -503,10 +503,10 @@ class PreferencesDialog(QDialog):
 
         rimf_row = QHBoxLayout()
         rimf_row.addSpacing(18)
-        self._compute_rimf = QCheckBox("RIMF (refractive index mismatch factor)")
+        self._compute_rimf = QCheckBox("estimate RIMF from anisotropy")
         self._compute_rimf.setToolTip(
-            "Estimate the RIMF z-scaling factor on load (from the raw last-valid z "
-            "via anisotropy estimation), or tick 'use fixed value' to apply a set value."
+            "Explicitly estimate the RIMF z-scaling factor on load from raw last-valid z. "
+            "Normal MINFLUX loads use the fixed 0.67 value instead."
         )
         rimf_row.addWidget(self._compute_rimf)
         self._use_fixed_rimf = QCheckBox("use fixed value")
@@ -552,12 +552,16 @@ class PreferencesDialog(QDialog):
 
         root.addSpacing(6)
 
-        # Show section (2×2 grid)
+        # Show section
         root.addWidget(self._section_label("Show:"))
         show_row1 = QHBoxLayout()
         show_row1.addSpacing(18)
-        self._show_data_info = QCheckBox("data info... (by Data Selector)")
-        show_row1.addWidget(self._show_data_info); show_row1.addStretch()
+        self._show_data_info = QCheckBox("data info...")
+        self._show_dataset_manager = QCheckBox("Dataset Manager")
+        show_row1.addWidget(self._show_data_info)
+        show_row1.addSpacing(40)
+        show_row1.addWidget(self._show_dataset_manager)
+        show_row1.addStretch()
         root.addLayout(show_row1)
 
         show_row2 = QHBoxLayout()
@@ -1173,7 +1177,7 @@ class PreferencesDialog(QDialog):
         self._min_z_spin.setValue(float(d.get("min_z_range_nm", 5.0)))
         self._min_z_spin.setEnabled(self._enforce_z.isChecked())
         compute_rimf = bool(d.get("compute_rimf", False))
-        use_fixed = bool(p.get("use_fixed_rimf", False))
+        use_fixed = bool(p.get("use_fixed_rimf", True))
         self._compute_rimf.setChecked(compute_rimf)
         self._use_fixed_rimf.setChecked(use_fixed)
         self._rimf_spin.setValue(float(p.get("rimf_value", 0.67)))
@@ -1184,6 +1188,7 @@ class PreferencesDialog(QDialog):
         self._compute_density.setChecked(bool(d.get("compute_local_density", False)))
         self._density_radius.setValue(float(d.get("local_density_radius", 100)))
         self._show_data_info.setChecked(bool(d.get("show_data_info", True)))
+        self._show_dataset_manager.setChecked(bool(d.get("show_dataset_manager", False)))
         self._show_attr.setChecked(bool(d.get("show_attr_plot", True)))
         self._show_scatter.setChecked(bool(d.get("show_scatter", False)))
         self._show_hist.setChecked(bool(d.get("show_histogram", False)))
@@ -1295,6 +1300,7 @@ class PreferencesDialog(QDialog):
         d["compute_local_density"] = bool(self._compute_density.isChecked())
         d["local_density_radius"] = float(self._density_radius.value())
         d["show_data_info"] = bool(self._show_data_info.isChecked())
+        d["show_dataset_manager"] = bool(self._show_dataset_manager.isChecked())
         d["show_attr_plot"] = bool(self._show_attr.isChecked())
         d["show_scatter"] = bool(self._show_scatter.isChecked())
         d["show_histogram"] = bool(self._show_hist.isChecked())

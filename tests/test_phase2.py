@@ -497,6 +497,14 @@ class TestAppStateLog:
         state.log("unsupported file", "WARN")
         assert received[0] == "WARN"
 
+    def test_log_retains_independent_method_provenance(self):
+        from minflux_viewer.core.app_state import AppState
+        state = AppState()
+        provenance = {"schema": "example/v1", "parameters": {"value": 1}}
+        state.log("parameterized operation", method_data=provenance)
+        provenance["parameters"]["value"] = 2
+        assert state.log_history[-1]["method_data"]["parameters"]["value"] == 1
+
 
 # ---------------------------------------------------------------------------
 # Regression tests for loader robustness
@@ -931,6 +939,13 @@ class TestMainWindowCleanup:
         w._show_dataset_manager()
         w._show_log()
         w._show_console()
+
+        # A top-level filter dialog must not be Qt-owned by MainWindow: owned
+        # Windows top-levels are kept above their owner and obscure it when
+        # the two overlap.
+        assert w._filter_dlg.parent() is None
+        assert w._filter_dlg.isModal() is False
+        assert w._filter_dlg in w._modeless_windows
 
         wins = [
             w._scatter_win, w._histogram_win, w._attr_win,
