@@ -306,6 +306,126 @@ def test_merge_radius_conflict_with_the_shortest_model_distance_is_disclosed():
     assert "property of the detection step" in clean
 
 
+PAIR_FIT_MSG = (
+    "HlyB pair-distance model fit on '260626-155951_minflux_mfx.mat': "
+    "3,923 of 6,882 trace(s); excess above null out to 19.2 nm; best model "
+    "'six_site' (next by dAIC 609.5, 10.4 with the short-range kernel released); "
+    "delta 0.00 nm, sigma 3.23 nm (min loc/trace 10, z-scale 0.67, kernel "
+    "empirical (consecutive traces, time-gap selected) from 224 pair(s))."
+)
+
+
+def _pair_fit_method_data(**overrides):
+    data = {
+        "schema": "hlyb_pair_distance_fit_3d/v1",
+        "input": {
+            "dataset_name": "ds", "source_path": "", "source_format": "",
+            "source_version": "m2410", "n_localizations": 192_334,
+            "n_traces_total": 6882, "n_traces_used": 3923,
+            "time_column_available": True,
+            "z_scaling_source": "the dataset's recorded RIMF",
+        },
+        "parameters": {
+            "min_loc_per_trace": 10, "z_scaling_factor": 0.67, "r_max_nm": 60.0,
+            "bin_nm": 0.5, "fit_r_min_nm": 1.0, "fit_r_max_nm": 45.0,
+            "null_cell_nm": 50.0, "null_replicates": 8, "repeat_gap_s": 0.2,
+            "repeat_max_nm": 40.0, "label_offset_bounds_nm": [0.0, 6.0],
+            "fit_label_offset": True,
+        },
+        "observable": {
+            "centroid_sem_nm": [1.02, 1.05, 0.61], "sigma_floor_nm": 1.29,
+            "excess_outer_nm": 19.25, "null_replicates": 8,
+        },
+        "repeat_kernel": {
+            "source": "empirical (consecutive traces, time-gap selected)",
+            "n_pairs": 224, "median_nm": 3.15, "sigma_nm": 2.05,
+            "rejected_far_fraction": 0.233,
+        },
+        "model": {
+            "class_names": ["neighboring domains", "dimer", "every second A-domain",
+                            "cross-domain", "every second B-domain"],
+            "class_distances_nm": [8.936, 10.138, 11.0, 17.302, 19.0],
+            "class_weight": 0.2,
+        },
+        "fits": {
+            "six_site": {"delta_aic": 0.0, "n_repeat_pairs": 2495.0,
+                         "n_complex_pairs": 4933.0, "background_scale": 0.484,
+                         "label_offset_nm": 0.0, "sigma_nm": 3.23,
+                         "parameters_at_bounds": ["label_offset_nm"]},
+            "dimer_only": {"delta_aic": 609.5, "parameters_at_bounds": []},
+            "no_structure": {"delta_aic": 5569.0, "parameters_at_bounds": []},
+        },
+        "fits_relaxed_kernel": {
+            "six_site": {"delta_aic": 0.0}, "dimer_only": {"delta_aic": 10.4},
+            "no_structure": {"delta_aic": 250.4},
+        },
+        "best_hypothesis": "six_site",
+        "best_hypothesis_relaxed": "six_site",
+    }
+    data.update(overrides)
+    return data
+
+
+def test_pair_fit_text_documents_the_measurement_and_its_limits():
+    ev = _ev(PAIR_FIT_MSG, name="ds")
+    ev["method_data"] = _pair_fit_method_data()
+    txt = mt.generate_method_text(_state(), [ev])
+
+    # the observable, and why nothing is merged
+    assert "3,923" in txt and "6,882" in txt
+    assert "not** merged into sub-unit centres" in txt
+    assert "up to 60 nm" in txt          # regression: 60 was printed as "6"
+    assert "50 nm occupancy histogram" in txt
+    assert "out to 19.2 nm" in txt
+    # the kernel calibration must be described as time-selected, not distance-selected
+    assert "selected on the acquisition time alone and never on distance" in txt
+    assert "224 consecutive trace pairs" in txt
+    # the fixed class weights are what make the fit a test
+    assert "constraint imposed by the structure rather than free parameters" in txt
+    # ranking and sensitivity
+    assert "a single dimer distance worse by 609.5 AIC units" in txt
+    assert "fell from 609.5 to 10.4 AIC units" in txt
+    # and the claim must be bounded
+    assert "individual distance classes are not resolved" in txt
+    assert "should not be read as a count of detected complexes" in txt
+
+
+def test_pair_fit_reports_a_bound_offset_as_a_limit():
+    ev = _ev(PAIR_FIT_MSG, name="ds")
+    ev["method_data"] = _pair_fit_method_data()
+    txt = mt.generate_method_text(_state(), [ev])
+    assert "reached the edge of its permitted range" in txt
+    assert "no support for a radially outward label" in txt
+
+
+def test_pair_fit_reports_a_free_offset_as_an_estimate():
+    data = _pair_fit_method_data()
+    data["fits"]["six_site"] = dict(data["fits"]["six_site"],
+                                    label_offset_nm=3.6, parameters_at_bounds=[])
+    ev = _ev(PAIR_FIT_MSG, name="ds")
+    ev["method_data"] = data
+    txt = mt.generate_method_text(_state(), [ev])
+    assert "radially outward label" in txt
+    assert "reached the edge" not in txt
+
+
+def test_pair_fit_says_so_when_the_kernel_could_not_be_calibrated():
+    data = _pair_fit_method_data()
+    data["input"] = dict(data["input"], time_column_available=False)
+    data["repeat_kernel"] = dict(data["repeat_kernel"], source="assumed", n_pairs=0)
+    ev = _ev(PAIR_FIT_MSG, name="ds")
+    ev["method_data"] = data
+    txt = mt.generate_method_text(_state(), [ev])
+    assert "no usable acquisition-time column was available" in txt
+    assert "an assumed width" in txt
+
+
+def test_pair_fit_falls_back_without_provenance():
+    txt = mt.generate_method_text(_state(), [_ev(PAIR_FIT_MSG, name="ds")])
+    assert "ensemble pair-distance model fit" in txt
+    assert "not serialized in the Log event" in txt
+
+
 def test_method_count_tolerates_grouped_numbers():
     assert mt._method_count("6,882") == "6,882"
     assert mt._method_count(6882) == "6,882"

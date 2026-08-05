@@ -2462,6 +2462,90 @@ class MainWindow(QMainWindow):
                              default=float("nan"))
         kernel = result.get("repeat_kernel", {})
         best_fit = result.get("best_fit", {})
+
+        provenance = ds.rimf_provenance or {}
+        z_source = str(provenance.get("source") or "").strip()
+        if abs(float(cfg.z_scaling_factor) - float(getattr(ds.cali, "RIMF", 0) or 0)) > 1e-9:
+            z_source = "a value entered in the analysis dialog"
+        elif not z_source:
+            z_source = "the dataset's recorded RIMF"
+        else:
+            z_source = f"the dataset's recorded RIMF, provenance '{z_source}'"
+
+        def _fit_summary(store):
+            return {
+                name: {
+                    "delta_aic": float(f.get("delta_aic", float("nan"))),
+                    "n_repeat_pairs": float(f.get("n_repeat_pairs", float("nan"))),
+                    "n_complex_pairs": float(f.get("n_complex_pairs", float("nan"))),
+                    "background_scale": float(f.get("background_scale", float("nan"))),
+                    "label_offset_nm": float(f.get("label_offset_nm", float("nan"))),
+                    "sigma_nm": float(f.get("sigma_nm", float("nan"))),
+                    "repeat_scale": float(f.get("repeat_scale", float("nan"))),
+                    "parameters_at_bounds": list(f.get("parameters_at_bounds", [])),
+                }
+                for name, f in (store or {}).items()
+            }
+
+        sem = np.asarray(result.get("centroid_sem_nm", []), dtype=float).ravel()
+        method_data = {
+            "schema": "hlyb_pair_distance_fit_3d/v1",
+            "input": {
+                "dataset_name": ds.name,
+                "source_path": str(
+                    ds.metadata.get("msr_source_path")
+                    or getattr(ds.file, "recent_path", None)
+                    or getattr(ds.file, "path", "") or ""),
+                "source_format": str(ds.metadata.get("source_format", "") or ""),
+                "source_version": str(ds.metadata.get("source_version", "") or ""),
+                "n_localizations": int(lx.size),
+                "n_traces_total": int(result["n_traces_total"]),
+                "n_traces_used": int(result["n_traces_used"]),
+                "iteration_selector": "last",
+                "valid_only": True,
+                "filter_mask_applied": False,
+                "time_column_available": bool(tim is not None),
+                "z_scaling_source": z_source,
+            },
+            "parameters": {
+                "min_loc_per_trace": int(cfg.min_loc_per_trace),
+                "z_scaling_factor": float(cfg.z_scaling_factor),
+                "r_max_nm": float(cfg.r_max_nm),
+                "bin_nm": float(cfg.bin_nm),
+                "fit_r_min_nm": float(cfg.fit_r_min_nm),
+                "fit_r_max_nm": float(cfg.fit_r_max_nm),
+                "null_cell_nm": float(cfg.null_cell_nm),
+                "null_replicates": int(cfg.null_replicates),
+                "repeat_gap_s": float(cfg.repeat_gap_s),
+                "repeat_max_nm": float(cfg.repeat_max_nm),
+                "label_offset_bounds_nm": [float(v) for v in cfg.label_offset_bounds_nm],
+                "fit_label_offset": bool(cfg.fit_label_offset),
+            },
+            "observable": {
+                "centroid_sem_nm": [float(v) for v in sem] if sem.size == 3 else [],
+                "sigma_floor_nm": float(result.get("sigma_floor_nm", float("nan"))),
+                "excess_outer_nm": float(result.get("excess_outer_nm", float("nan"))),
+                "null_replicates": int(result.get("null_replicates", 0)),
+            },
+            "repeat_kernel": {
+                "source": str(kernel.get("source", "")),
+                "n_pairs": int(kernel.get("n_pairs", 0)),
+                "median_nm": float(kernel.get("median_nm", float("nan"))),
+                "sigma_nm": float(kernel.get("sigma_nm", float("nan"))),
+                "rejected_far_fraction": float(
+                    kernel.get("rejected_far_fraction", float("nan"))),
+            },
+            "model": {
+                "class_names": [str(x) for x in result.get("class_names", [])],
+                "class_distances_nm": [float(x) for x in result.get("class_distances_nm", [])],
+                "class_weight": 1.0 / max(len(result.get("class_distances_nm", [])) or 1, 1),
+            },
+            "fits": _fit_summary(fits),
+            "fits_relaxed_kernel": _fit_summary(relaxed),
+            "best_hypothesis": str(best),
+            "best_hypothesis_relaxed": str(result.get("best_hypothesis_relaxed", "")),
+        }
+
         self._state.log(
             f"HlyB pair-distance model fit on '{ds.name}': "
             f"{result['n_traces_used']:,} of {result['n_traces_total']:,} trace(s); "
@@ -2472,7 +2556,7 @@ class MainWindow(QMainWindow):
             f"sigma {best_fit.get('sigma_nm', float('nan')):.2f} nm "
             f"(min loc/trace {cfg.min_loc_per_trace}, z-scale {cfg.z_scaling_factor}, "
             f"kernel {kernel.get('source', 'n/a')} from {kernel.get('n_pairs', 0)} pair(s)).",
-            dataset_idx=idx)
+            dataset_idx=idx, method_data=method_data)
 
     def _run_hlyb_pair_analysis(self, mode: str = "3D") -> None:
         """Analyze › Clustering › HlyB subunit pair analysis › 2D/3D/template — detect
