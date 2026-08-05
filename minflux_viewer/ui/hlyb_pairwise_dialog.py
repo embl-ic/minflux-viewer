@@ -17,6 +17,7 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -26,12 +27,13 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from ..analysis.hlyb_pairwise import PairFitConfig
+from ..analysis.hlyb_pairwise import PairFitConfig, pairs_in_band
 from .text_select import make_labels_selectable
 
 _HYPOTHESIS_LABELS = {
@@ -39,6 +41,13 @@ _HYPOTHESIS_LABELS = {
     "dimer_only": "dimer distance only",
     "no_structure": "no structure",
 }
+
+#: Display cap for raw localizations; deterministic thinning, display only.
+_MAX_RAW_POINTS = 100_000
+#: Display cap for drawn pair links, so a wide band cannot freeze the view.
+_MAX_LINKS = 20_000
+_VIEW_AXES = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
+_AXIS_LABELS = {"XY": ("X", "Y"), "XZ": ("X", "Z"), "YZ": ("Y", "Z")}
 
 
 class HlyBPairwiseDialog(QDialog):
@@ -154,18 +163,29 @@ class HlyBPairwiseWindow(QDialog):
                             else "HlyB Pair-Distance Model Fit")
         self.resize(1040, 780)
 
+        self.resize(1180, 900)
+        self._band_lo = 8.0
+        self._band_hi = 14.0
+        self._scatter_pages: dict[str, dict] = {}
+        self._current_view: str | None = None
+        self._black_background = True
+        self._band_region = None
+
         root = QVBoxLayout(self)
         root.addWidget(self._summary_label())
 
         splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(self._build_scatter())
         splitter.addWidget(self._build_plot())
         splitter.addWidget(self._build_report())
-        splitter.setCollapsible(0, False)
-        splitter.setCollapsible(1, False)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        for i in range(3):
+            splitter.setCollapsible(i, False)
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(2, 2)
         root.addWidget(splitter, 1)
-        QTimer.singleShot(0, lambda: splitter.setSizes([460, 300]))
+        self._splitter = splitter
+        QTimer.singleShot(0, lambda: splitter.setSizes([400, 290, 210]))
         make_labels_selectable(self)
 
     # -- summary ------------------------------------------------------
@@ -183,6 +203,285 @@ class HlyBPairwiseWindow(QDialog):
         )
         label.setWordWrap(True)
         return label
+
+    # -- spatial view -------------------------------------------------
+
+    def _build_scatter(self) -> QWidget:
+        """Spatial view of the measurement.
+
+        Deliberately NOT a port of the template-matching scatter.  That view
+        draws a fitted template and the pair links of an accepted complex; this
+        method never fits a template to an individual complex and never assigns
+        a pair to a distance class, so drawing either would display a result
+        that was not computed.  What is shown instead is exactly what the
+        measurement contains: the raw localizations, the trace centroids it
+        operates on, and every centroid pair whose separation falls in a chosen
+        band of the profile below.
+        """
+        container = QWidget()
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("View:"))
+        self._view_combo = QComboBox()
+        self._view_combo.addItems(["XY", "XZ", "YZ", "3D"])
+        self._view_combo.setCurrentText("XY")
+        self._view_combo.currentTextChanged.connect(self._show_view)
+        row.addWidget(self._view_combo)
+
+        self._raw_check = QCheckBox("raw loc")
+        self._raw_check.setChecked(True)
+        self._raw_check.setToolTip("Show the raw localizations.")
+        self._centroid_check = QCheckBox("trace centroid")
+        self._centroid_check.setChecked(True)
+        self._centroid_check.setToolTip(
+            "Show the trace centroids the analysis operates on.\n"
+            "These are NOT sub-unit centres: several centroids may belong to\n"
+            "one labelled site, which is the population the short-range kernel\n"
+            "describes. Nothing is merged.")
+        self._band_check = QCheckBox("pair link")
+        self._band_check.setChecked(True)
+        self._band_check.setToolTip(
+            "Draw every centroid pair whose separation falls in the selected\n"
+            "band. This asserts no assignment of a pair to a complex or to a\n"
+            "distance class — the measurement makes none.")
+        self._repeat_check = QCheckBox("repeat link")
+        self._repeat_check.setChecked(False)
+        self._repeat_check.setToolTip(
+            "Draw the consecutive-in-time trace pairs that calibrate the\n"
+            "short-range kernel, so the calibration set can be judged rather\n"
+            "than taken on trust.")
+        for box in (self._raw_check, self._centroid_check,
+                    self._band_check, self._repeat_check):
+            box.toggled.connect(lambda _v: self._refresh_scatter())
+            row.addWidget(box)
+        row.addStretch(1)
+        outer.addLayout(row)
+
+        band_row = QHBoxLayout()
+        band_row.addWidget(QLabel("Link band:"))
+        self._band_lo_spin = HlyBPairwiseDialog._dspin(0.0, 200.0, self._band_lo, 1, 0.5, " nm")
+        self._band_hi_spin = HlyBPairwiseDialog._dspin(0.0, 200.0, self._band_hi, 1, 0.5, " nm")
+        for spin in (self._band_lo_spin, self._band_hi_spin):
+            spin.setToolTip(
+                "Distance window whose pairs are drawn. Drag the shaded region "
+                "on the profile below to change it.")
+            spin.valueChanged.connect(self._on_band_spin_changed)
+            band_row.addWidget(spin)
+        self._band_count = QLabel("")
+        band_row.addWidget(self._band_count)
+        band_row.addStretch(1)
+        self._bg_button = QPushButton("White background")
+        self._bg_button.clicked.connect(self._toggle_background)
+        band_row.addWidget(self._bg_button)
+        reset = QPushButton("Reset view")
+        reset.clicked.connect(self._reset_scatter_view)
+        band_row.addWidget(reset)
+        outer.addLayout(band_row)
+
+        self._view_stack = QStackedWidget()
+        self._view_pages: dict[str, int] = {}
+        outer.addWidget(self._view_stack, 1)
+        self._show_view(self._view_combo.currentText())
+        return container
+
+    # -- scatter plumbing ---------------------------------------------
+
+    def _display_points(self) -> np.ndarray:
+        pts = np.asarray(self._result.get("points_nm", np.empty((0, 3))), dtype=float)
+        if pts.shape[0] > _MAX_RAW_POINTS:
+            step = int(np.ceil(pts.shape[0] / _MAX_RAW_POINTS))
+            pts = pts[::step]
+        return pts
+
+    def _centroids(self) -> np.ndarray:
+        return np.asarray(self._result.get("centroids_nm", np.empty((0, 3))), dtype=float)
+
+    def _band_pairs(self) -> np.ndarray:
+        cent = self._centroids()
+        if cent.shape[0] < 2:
+            return np.empty((0, 2), dtype=np.int64)
+        pairs = pairs_in_band(cent, self._band_lo, self._band_hi)
+        if pairs.shape[0] > _MAX_LINKS:
+            step = int(np.ceil(pairs.shape[0] / _MAX_LINKS))
+            pairs = pairs[::step]
+        return pairs
+
+    def _on_band_spin_changed(self, *_args) -> None:
+        lo = float(self._band_lo_spin.value())
+        hi = float(self._band_hi_spin.value())
+        if hi < lo:
+            lo, hi = hi, lo
+        self._band_lo, self._band_hi = lo, hi
+        if getattr(self, "_band_region", None) is not None:
+            self._band_region.blockSignals(True)
+            self._band_region.setRegion((lo, hi))
+            self._band_region.blockSignals(False)
+        self._refresh_scatter()
+
+    def _on_band_region_changed(self) -> None:
+        lo, hi = self._band_region.getRegion()
+        for spin, value in ((self._band_lo_spin, lo), (self._band_hi_spin, hi)):
+            spin.blockSignals(True)
+            spin.setValue(float(value))
+            spin.blockSignals(False)
+        self._band_lo, self._band_hi = float(lo), float(hi)
+        self._refresh_scatter()
+
+    def _toggle_background(self) -> None:
+        self._black_background = not self._black_background
+        self._bg_button.setText("White background" if self._black_background
+                                else "Black background")
+        for page in self._scatter_pages.values():
+            if page["kind"] == "2d":
+                page["widget"].setBackground("k" if self._black_background else "w")
+            else:
+                page["widget"].setBackgroundColor(
+                    "k" if self._black_background else "w")
+        self._refresh_scatter()
+
+    def _reset_scatter_view(self) -> None:
+        page = self._scatter_pages.get(self._current_view or "")
+        if not page:
+            return
+        if page["kind"] == "2d":
+            page["widget"].getPlotItem().enableAutoRange()
+        else:
+            page["widget"].setCameraPosition(distance=page.get("span", 1000.0))
+
+    def _show_view(self, view: str) -> None:
+        if view not in self._view_pages:
+            if view == "3D":
+                try:
+                    widget = self._build_gl_view()
+                except Exception:
+                    # OpenGL unavailable: fall back to the flat XY projection
+                    self._view_combo.blockSignals(True)
+                    self._view_combo.setCurrentText("XY")
+                    self._view_combo.blockSignals(False)
+                    return self._show_view("XY")
+            else:
+                widget = self._build_2d_view(view)
+            self._view_pages[view] = self._view_stack.addWidget(widget)
+        self._view_stack.setCurrentIndex(self._view_pages[view])
+        self._current_view = view
+        self._refresh_scatter()
+
+    def _build_2d_view(self, view: str) -> QWidget:
+        widget = pg.PlotWidget()
+        widget.setBackground("k" if self._black_background else "w")
+        item = widget.getPlotItem()
+        xl, yl = _AXIS_LABELS[view]
+        item.setLabel("bottom", f"{xl} (nm)")
+        item.setLabel("left", f"{yl} (nm)")
+        item.setAspectLocked(True)
+        raw = pg.ScatterPlotItem(pxMode=True, size=2.0, pen=None)
+        # PlotCurveItem, not PlotDataItem: only the curve honours an explicit
+        # per-segment `connect` array, which is what draws thousands of
+        # DISJOINT links in one item instead of one long polyline.
+        links = pg.PlotCurveItem(pen=pg.mkPen(70, 170, 255, 190, width=1))
+        repeats = pg.PlotCurveItem(pen=pg.mkPen(60, 220, 120, 190, width=1))
+        cent = pg.ScatterPlotItem(pxMode=True, size=5.0, pen=None)
+        for entry in (raw, links, repeats, cent):
+            item.addItem(entry)
+        self._scatter_pages[view] = {
+            "kind": "2d", "widget": widget, "axes": _VIEW_AXES[view],
+            "raw": raw, "links": links, "repeats": repeats, "cent": cent,
+        }
+        return widget
+
+    def _build_gl_view(self) -> QWidget:
+        import pyqtgraph.opengl as gl
+
+        view = gl.GLViewWidget()
+        view.setBackgroundColor("k" if self._black_background else "w")
+        anchor = self._centroids()
+        anchor = anchor.mean(axis=0) if anchor.shape[0] else np.zeros(3)
+        raw = gl.GLScatterPlotItem(pxMode=True, size=2.0)
+        links = gl.GLLinePlotItem(mode="lines", width=1.0, antialias=False)
+        repeats = gl.GLLinePlotItem(mode="lines", width=1.0, antialias=False)
+        cent = gl.GLScatterPlotItem(pxMode=True, size=6.0)
+        for entry in (raw, links, repeats, cent):
+            view.addItem(entry)
+        ref = self._centroids()
+        span = float(np.linalg.norm(np.ptp(ref, axis=0))) if ref.shape[0] else 1000.0
+        view.setCameraPosition(distance=max(span * 0.6, 100.0))
+        self._scatter_pages["3D"] = {
+            "kind": "3d", "widget": view, "gl": gl, "anchor": anchor,
+            "raw": raw, "links": links, "repeats": repeats, "cent": cent,
+            "span": max(span * 0.6, 100.0),
+        }
+        return view
+
+    @staticmethod
+    def _segments(points: np.ndarray, pairs: np.ndarray) -> np.ndarray:
+        """Interleave pair endpoints into a flat 'lines' vertex array."""
+        if pairs.shape[0] == 0:
+            return np.empty((0, points.shape[1]))
+        out = np.empty((pairs.shape[0] * 2, points.shape[1]), dtype=float)
+        out[0::2] = points[pairs[:, 0]]
+        out[1::2] = points[pairs[:, 1]]
+        return out
+
+    def _refresh_scatter(self) -> None:
+        view = self._current_view
+        page = self._scatter_pages.get(view or "")
+        if not page:
+            return
+        cent = self._centroids()
+        pairs = self._band_pairs() if self._band_check.isChecked() else \
+            np.empty((0, 2), dtype=np.int64)
+        repeats = np.asarray(self._result.get("repeat_pairs", np.empty((0, 2))),
+                             dtype=np.int64) if self._repeat_check.isChecked() else \
+            np.empty((0, 2), dtype=np.int64)
+        total_band = pairs_in_band(cent, self._band_lo, self._band_hi).shape[0] \
+            if cent.shape[0] > 1 else 0
+        shown = pairs.shape[0]
+        note = "" if shown == total_band else f" (showing {shown:,})"
+        self._band_count.setText(
+            f"{total_band:,} pair(s) in {self._band_lo:.1f}–{self._band_hi:.1f} nm{note}")
+
+        raw_col = (200, 200, 200, 90) if self._black_background else (60, 60, 60, 70)
+        cent_col = (255, 205, 60, 220) if self._black_background else (190, 120, 0, 230)
+        link_col = (70, 170, 255, 190)
+        rep_col = (60, 220, 120, 190)
+
+        if page["kind"] == "2d":
+            ax, ay = page["axes"]
+            pts = self._display_points() if self._raw_check.isChecked() else np.empty((0, 3))
+            page["raw"].setData(
+                x=pts[:, ax] if pts.shape[0] else [],
+                y=pts[:, ay] if pts.shape[0] else [],
+                brush=pg.mkBrush(*raw_col), pen=None, size=2.0)
+            page["cent"].setData(
+                x=cent[:, ax] if (cent.shape[0] and self._centroid_check.isChecked()) else [],
+                y=cent[:, ay] if (cent.shape[0] and self._centroid_check.isChecked()) else [],
+                brush=pg.mkBrush(*cent_col), pen=None, size=5.0)
+            for key, idx, colour in (("links", pairs, link_col),
+                                     ("repeats", repeats, rep_col)):
+                if idx.shape[0]:
+                    seg = self._segments(cent[:, [ax, ay]], idx)
+                    # connect[i] == 1 joins vertex i to i+1, so alternating 1/0
+                    # draws each pair as its own segment
+                    connect = np.tile(np.array([1, 0], dtype=np.uint8), idx.shape[0])
+                    page[key].setData(x=seg[:, 0], y=seg[:, 1], connect=connect,
+                                      pen=pg.mkPen(*colour, width=1))
+                else:
+                    page[key].setData(x=np.empty(0), y=np.empty(0))
+        else:
+            anchor = page["anchor"]
+            pts = self._display_points() if self._raw_check.isChecked() else np.empty((0, 3))
+            page["raw"].setData(pos=pts - anchor if pts.shape[0] else np.empty((0, 3)),
+                                color=tuple(c / 255 for c in raw_col), size=2.0)
+            show_cent = cent.shape[0] and self._centroid_check.isChecked()
+            page["cent"].setData(
+                pos=(cent - anchor) if show_cent else np.empty((0, 3)),
+                color=tuple(c / 255 for c in cent_col), size=6.0)
+            for key, idx, colour in (("links", pairs, link_col),
+                                     ("repeats", repeats, rep_col)):
+                seg = self._segments(cent - anchor, idx) if idx.shape[0] else np.empty((0, 3))
+                page[key].setData(pos=seg, color=tuple(c / 255 for c in colour))
 
     # -- plot ---------------------------------------------------------
 
@@ -220,6 +519,16 @@ class HlyBPairwiseWindow(QDialog):
         self._plot.setLabel("left", f"pairs per {float(np.diff(r['edges_nm']).mean()):.2g} nm bin")
         self._plot.addLegend(offset=(-10, 10))
         layout.addWidget(widget, 1)
+
+        # Dragging this region selects which pairs the spatial view draws, so
+        # a feature of the distribution can be located in the cell directly.
+        self._band_region = pg.LinearRegionItem(
+            values=(self._band_lo, self._band_hi),
+            brush=pg.mkBrush(70, 170, 255, 45),
+            pen=pg.mkPen(70, 170, 255, 160))
+        self._band_region.setZValue(-10)
+        self._band_region.sigRegionChanged.connect(self._on_band_region_changed)
+        self._plot.addItem(self._band_region, ignoreBounds=True)
         self._redraw()
         return panel
 
@@ -276,6 +585,9 @@ class HlyBPairwiseWindow(QDialog):
                     line = pg.InfiniteLine(pos=float(d_nm) + delta, angle=90,
                                            pen=pg.mkPen(50, 90, 220, 90, width=1))
                     plot.addItem(line, ignoreBounds=True)
+        # clear() drops every item, so the band selector has to be put back
+        if self._band_region is not None:
+            plot.addItem(self._band_region, ignoreBounds=True)
         plot.enableAutoRange()
 
     # -- report -------------------------------------------------------
@@ -370,4 +682,8 @@ def pairwise_report(result: dict) -> str:
     add("  Individual distance classes are NOT resolved: the three short classes")
     add("  span 2.1 nm against a pair blur of several nm. What is measured is the")
     add("  ensemble envelope and its outer cutoff, not a single distance.")
+    add("  The spatial view therefore shows no fitted template and no per-complex")
+    add("  assignment: this method fits the ensemble, not individual complexes,")
+    add("  so drawing either would display a result that was not computed. Its")
+    add("  links are simply the centroid pairs falling in the selected band.")
     return "\n".join(lines)

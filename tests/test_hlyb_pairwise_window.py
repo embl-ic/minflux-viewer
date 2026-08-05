@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 
 import numpy as np
+import pyqtgraph as pg
 import pytest
 
 
@@ -18,15 +19,34 @@ def _app():
 
 @pytest.fixture(scope="module")
 def result():
+    """Simulated HlyB complexes, so the spatial view has real pairs to draw.
+
+    A structureless cloud would leave the 8-14 nm band empty and the link tests
+    would pass vacuously.
+    """
+    from minflux_viewer.analysis.hlyb_clustering import HlyBConfig, hlyb_template_model
     from minflux_viewer.analysis.hlyb_pairwise import PairFitConfig, analyze_hlyb_pairwise
 
+    template = hlyb_template_model(HlyBConfig())["template_coords_nm"]
     rng = np.random.default_rng(3)
-    n_tr, per = 500, 20
-    tid = np.repeat(np.arange(n_tr), per)
-    centres = rng.uniform(0, 2000, size=(n_tr, 3))
-    pts = np.repeat(centres, per, axis=0) + rng.normal(scale=2.0, size=(n_tr * per, 3))
-    tim = np.repeat(np.arange(n_tr) * 2.0, per)
-    return analyze_hlyb_pairwise(pts * 1e-9, tid, tim,
+    pts, tids, tim, trace, clock = [], [], [], 0, 0.0
+    for _ in range(150):
+        q = rng.normal(size=4); q /= np.linalg.norm(q)
+        w, x, y, z = q
+        rot = np.array([[1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
+                        [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)],
+                        [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]])
+        sites = (template @ rot.T) + rng.uniform(0, 2000, size=3)
+        for site in sites:
+            if rng.random() > 0.7:
+                continue
+            for _ in range(2):
+                pts.append(site + rng.normal(scale=2.0, size=(20, 3)))
+                tids.append(np.full(20, trace)); trace += 1
+                tim.append(clock + np.arange(20) * 1e-3)
+                clock += 0.05
+    return analyze_hlyb_pairwise(np.concatenate(pts) * 1e-9,
+                                 np.concatenate(tids), np.concatenate(tim),
                                  PairFitConfig(min_loc_per_trace=5,
                                                z_scaling_factor=1.0,
                                                null_replicates=2))
@@ -79,6 +99,97 @@ def test_window_view_toggles_do_not_raise(result, _app):
             widget.setChecked(not widget.isChecked())
             widget.setChecked(not widget.isChecked())
         assert win._plot is not None
+    finally:
+        win.close()
+        win.deleteLater()
+
+
+def test_scatter_offers_the_projections_and_draws_the_band_links(result, _app):
+    from minflux_viewer.ui.hlyb_pairwise_dialog import HlyBPairwiseWindow
+
+    win = HlyBPairwiseWindow(result, title="scatter")
+    try:
+        assert [win._view_combo.itemText(i) for i in range(win._view_combo.count())] \
+            == ["XY", "XZ", "YZ", "3D"]
+        for view in ("XZ", "YZ", "XY"):
+            win._view_combo.setCurrentText(view)
+            assert win._current_view == view
+            page = win._scatter_pages[view]
+            xs, _ = page["links"].getData()
+            assert xs is not None and len(xs) > 0, f"no links drawn in {view}"
+    finally:
+        win.close()
+        win.deleteLater()
+
+
+def test_links_are_drawn_as_disjoint_segments(result, _app):
+    """Regression: the links were invisible when built on a PlotDataItem. Only
+    PlotCurveItem honours a per-segment `connect` array, which is what keeps
+    thousands of separate pair links from being joined into one polyline."""
+    from minflux_viewer.ui.hlyb_pairwise_dialog import HlyBPairwiseWindow
+
+    win = HlyBPairwiseWindow(result, title="segments")
+    try:
+        page = win._scatter_pages["XY"]
+        assert isinstance(page["links"], pg.PlotCurveItem)
+        xs, ys = page["links"].getData()
+        # two vertices per pair, and every vertex is finite (no NaN separators)
+        assert len(xs) % 2 == 0
+        assert np.isfinite(xs).all() and np.isfinite(ys).all()
+        connect = page["links"].opts.get("connect")
+        assert isinstance(connect, np.ndarray)
+        assert connect[0::2].max() == 1 and connect[1::2].max() == 0
+        assert page["links"].opts.get("pen") is not None
+    finally:
+        win.close()
+        win.deleteLater()
+
+
+def test_band_region_and_spinboxes_stay_in_sync(result, _app):
+    from minflux_viewer.analysis.hlyb_pairwise import pairs_in_band
+    from minflux_viewer.ui.hlyb_pairwise_dialog import HlyBPairwiseWindow
+
+    win = HlyBPairwiseWindow(result, title="band")
+    try:
+        win._band_region.setRegion((16.0, 20.0))
+        assert win._band_lo_spin.value() == pytest.approx(16.0)
+        assert win._band_hi_spin.value() == pytest.approx(20.0)
+        expected = pairs_in_band(result["centroids_nm"], 16.0, 20.0).shape[0]
+        assert f"{expected:,}" in win._band_count.text()
+
+        win._band_lo_spin.setValue(5.0)
+        lo, hi = win._band_region.getRegion()
+        assert lo == pytest.approx(5.0)
+    finally:
+        win.close()
+        win.deleteLater()
+
+
+def test_band_region_survives_a_profile_redraw(result, _app):
+    """The profile redraw calls clear(), which drops every item; the band
+    selector has to be put back or it silently disappears on the first toggle."""
+    from minflux_viewer.ui.hlyb_pairwise_dialog import HlyBPairwiseWindow
+
+    win = HlyBPairwiseWindow(result, title="redraw")
+    try:
+        win._show_components.setChecked(False)
+        win._show_excess.setChecked(True)
+        assert win._band_region in win._plot.items
+    finally:
+        win.close()
+        win.deleteLater()
+
+
+def test_toggling_layers_off_clears_them(result, _app):
+    from minflux_viewer.ui.hlyb_pairwise_dialog import HlyBPairwiseWindow
+
+    win = HlyBPairwiseWindow(result, title="layers")
+    try:
+        win._band_check.setChecked(False)
+        xs, _ = win._scatter_pages["XY"]["links"].getData()
+        assert xs is None or len(xs) == 0
+        win._raw_check.setChecked(False)
+        assert len(win._scatter_pages["XY"]["raw"].getData()[0]) == 0
     finally:
         win.close()
         win.deleteLater()
