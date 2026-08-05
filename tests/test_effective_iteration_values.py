@@ -165,3 +165,97 @@ def test_filter_edit_on_cfr_displays_effective_iteration():
         assert win._filter_edit.get("region") is not None
     finally:
         win.close()
+
+
+def test_filter_edit_survives_manual_iteration_browse_and_reports_state():
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except Exception:
+        pytest.skip("PyQt6 not available")
+    app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
+
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.histogram_window import HistogramWindow
+
+    mfx, _eff = _make_m2410_with_effective_cfr()
+    ds = loader.load_from_mfx_array(mfx, "eff")
+    state = AppState()
+    state.add_dataset(ds)
+    callbacks = []
+
+    win = HistogramWindow(state, dataset_idx=0)
+    try:
+        win.start_filter_edit(
+            attr="cfr",
+            mode="per loc",
+            lo=0.4,
+            hi=0.6,
+            on_update=lambda *args: callbacks.append(args[-1]),
+            on_finish=lambda *args: callbacks.append(args[-1]),
+        )
+        region = win._filter_edit["region"]
+        assert win._iter_combo.currentText() == "3rd"
+
+        # Browsing to a non-effective iteration changes the plotted value
+        # source but does not end the edit session or remove its region.
+        win._iter_combo.setCurrentText("2nd")
+        assert win._filter_edit is not None
+        assert win._filter_edit.get("region") is region
+        assert win._is_raw_mode() is False
+
+        win._update_filter_edit()
+        assert callbacks[-1]["attribute"] == "cfr"
+        assert callbacks[-1]["aggregation"] == "per loc"
+        assert callbacks[-1]["itr"] == 1
+
+        win._finish_filter_edit()
+        assert win._filter_edit is None
+        assert callbacks[-1]["iteration_label"] == "2nd"
+    finally:
+        win.close()
+
+
+def test_filter_dialog_update_and_finish_copy_histogram_controls():
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except Exception:
+        pytest.skip("PyQt6 not available")
+    app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
+
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.filter_dialog import FilterDialog, _COL_ATTR, _COL_ITER, _COL_MODE
+    from minflux_viewer.ui.histogram_window import HistogramWindow
+
+    mfx, _eff = _make_m2410_with_effective_cfr()
+    ds = loader.load_from_mfx_array(mfx, "eff")
+    state = AppState()
+    state.add_dataset(ds)
+    hist = HistogramWindow(state, dataset_idx=0)
+
+    class _MainWindow:
+        _histogram_windows = {}
+
+        def _show_histogram(self, _idx):
+            return hist
+
+    dialog = FilterDialog(state, dataset_idx=0)
+    dialog._main_window = lambda: _MainWindow()
+    try:
+        dialog._add_row(
+            attr="cfr", mode="per loc", lo=0.4, hi=0.6,
+            enabled=True, auto_range=False, itr="effective",
+        )
+        dialog._display_filter(0)
+        hist._iter_combo.setCurrentText("2nd")
+        hist._update_filter_edit()
+
+        assert dialog._table.cellWidget(0, _COL_ATTR).currentText() == "cfr"
+        assert dialog._table.cellWidget(0, _COL_MODE).currentText() == "per loc"
+        assert dialog._table.cellWidget(0, _COL_ITER).currentText() == "2nd"
+
+        hist._finish_filter_edit()
+        assert dialog._table.cellWidget(0, _COL_ITER).currentText() == "2nd"
+        assert ds.state["filter_specs"][0]["itr"] == 1
+    finally:
+        dialog.close()
+        hist.close()

@@ -3,15 +3,37 @@ import pytest
 
 from minflux_viewer.analysis.hlyb_clustering import (
     HlyBConfig,
+    all_pair_distance_histogram,
     analyze_hlyb,
     analyze_hlyb_2d,
     analyze_hlyb_template3d,
     compute_border_mask,
+    compute_cell_mask,
     dbscan,
     estimate_trace_size,
     hlyb_template_model,
     locate_subunit_centers,
 )
+
+
+def test_all_pair_distance_histogram_is_exact_in_bounded_blocks():
+    from scipy.spatial.distance import pdist
+
+    points = np.array([
+        [0.0, 0.0, 0.0],
+        [3.0, 4.0, 0.0],
+        [0.0, 10.0, 0.0],
+        [12.0, 0.0, 0.0],
+    ])
+    out = all_pair_distance_histogram(points, 2.0, max_block_pairs=2)
+    reference = pdist(points)
+    expected, _ = np.histogram(reference, bins=out["edges_nm"])
+
+    assert out["n_points"] == 4
+    assert out["n_pairs"] == 6
+    assert out["counts"].sum() == 6
+    np.testing.assert_array_equal(out["counts"], expected)
+    assert out["max_distance_nm"] == pytest.approx(reference.max())
 
 
 def test_dbscan_two_clusters_and_noise():
@@ -67,6 +89,8 @@ def test_locate_subunit_centers_finds_six():
         loc_m, tid, z_scale=1.0, pixel_size=2.5, min_loc_per_trace=1, basic_unit_size_nm=8.0)
     assert out["unit_centers"].shape[0] == 6
     assert out["n_traces"] == 6
+    np.testing.assert_array_equal(
+        out["point_source_indices"], np.arange(loc_m.shape[0]))
 
 
 def test_analyze_hlyb_two_structures_pairs():
@@ -92,9 +116,7 @@ def test_analyze_hlyb_empty_input():
 
 def _partial_template_centers():
     """Two observed 1a/1b/2a partial HlyB complexes."""
-    x = (15.0**2 + 14.0**2 - 12.8**2) / (2 * 14.0)
-    y = np.sqrt(15.0**2 - x**2)
-    tri = np.array([[0.0, 0.0, 0.0], [14.0, 0.0, 0.0], [x, y, 0.0]])
+    tri = hlyb_template_model(HlyBConfig())["template_coords_nm"][:3]
     return [tri, tri + np.array([300.0, 0.0, 0.0])]
 
 
@@ -110,10 +132,25 @@ def _template_partial_locs():
     return loc_nm / 1e9, np.concatenate(tids)
 
 
-def test_hlyb_template_model_contains_all_priors():
+def test_hlyb_template_model_is_one_consistent_3d_geometry():
+    from scipy.spatial.distance import pdist, squareform
+
     model = hlyb_template_model(HlyBConfig())
     assert list(model["labels"]) == ["1a", "1b", "2a", "2b", "3a", "3b"]
-    assert set(np.round(model["prior_distances_nm"], 1)) == {12.8, 14.0, 15.0, 21.3, 23.0}
+    np.testing.assert_allclose(
+        model["distance_matrix_nm"],
+        squareform(pdist(model["template_coords_nm"])),
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        model["prior_distances_nm"],
+        [8.9358, 10.1381, 11.0, 17.3023, 19.0],
+        atol=1e-3,
+    )
+    assert model["label_offset_nm"] == pytest.approx(2.0)
+    assert set(model["source_estimated_labeled_distances_nm"].values()) == {
+        12.8, 14.0, 15.0, 21.3, 23.0,
+    }
 
 
 def test_analyze_hlyb_template3d_finds_partial_matches():
@@ -130,7 +167,8 @@ def test_analyze_hlyb_template3d_finds_partial_matches():
     assert res["n_structures"] == 2
     assert res["all_pair_distances"].size == 6
     assert all(st["unit_centers"].shape[0] == 3 for st in res["structures"])
-    assert np.all(np.abs(np.sort(res["all_pair_distances"]) - np.array([12.8, 12.8, 14, 14, 15, 15])) < 3)
+    expected = np.tile(np.sort(hlyb_template_model(cfg)["distance_matrix_nm"][np.triu_indices(3, 1)]), 2)
+    assert np.all(np.abs(np.sort(res["all_pair_distances"]) - np.sort(expected)) < 3)
 
 
 def test_analyze_hlyb_template3d_rejects_single_overlarge_structure():
@@ -170,6 +208,70 @@ def test_compute_border_mask_empty():
     assert compute_border_mask(np.empty((0, 2))).shape == (0,)
 
 
+def _punctate_rod(rng, x0, y0, length=2000.0, width=700.0, n_puncta=260, per=40):
+    """A rod whose signal is punctate, like a labelled membrane protein: the
+    density has large gaps between clusters, which is what broke the original
+    mask (Otsu + median filter fragmented the cell and then deleted it)."""
+    cx = rng.uniform(x0, x0 + length, n_puncta)
+    cy = rng.uniform(y0, y0 + width, n_puncta)
+    pts = np.repeat(np.column_stack([cx, cy]), per, axis=0)
+    return pts + rng.normal(0, 4.0, size=pts.shape)
+
+
+def test_cell_mask_delineates_punctate_cells_that_the_median_filter_destroyed():
+    rng = np.random.default_rng(7)
+    xy = np.vstack([_punctate_rod(rng, 0, 0), _punctate_rod(rng, 0, 1600)])
+    res = compute_cell_mask(xy, border_size_nm=150.0)
+    # two separate rods, and the mask must cover the great majority of the data
+    assert res.stats["n_cells"] == 2
+    assert res.stats["in_mask_fraction"] > 0.9
+    # a rod 700 nm wide has a ~350 nm half-width
+    assert 250.0 < res.stats["max_half_width_nm"] < 450.0
+    # shrinking by 150 nm must leave a usable core, not annihilate the cell
+    assert 0.2 < res.stats["retained_fraction"] < 0.9
+    assert res.cell_id[~res.border_loc].min() >= 1
+
+
+def test_relative_border_mode_adapts_to_cell_width():
+    rng = np.random.default_rng(8)
+
+    def rod(x0, y0, length, width, density=0.012):
+        n = int(density * length * width)
+        return np.column_stack([rng.uniform(x0, x0 + length, n),
+                                rng.uniform(y0, y0 + width, n)])
+
+    # a wide cell and a narrow one at the same surface density: a fixed nm
+    # shrink treats them very differently, a relative shrink does not
+    xy = np.vstack([rod(0, 0, 2600, 1400), rod(0, 2600, 2600, 500)])
+    absolute = compute_cell_mask(xy, border_size_nm=200.0)
+    relative = compute_cell_mask(xy, border_mode="relative", border_fraction=0.4)
+
+    def kept_per_cell(res):
+        return [float((~res.border_loc[res.cell_id == cid]).mean()) for cid in (1, 2)]
+
+    assert sorted(np.round(absolute.cell_half_width_nm)) == [260.0, 700.0]
+    abs_kept = kept_per_cell(absolute)
+    rel_kept = kept_per_cell(relative)
+    assert abs(abs_kept[0] - abs_kept[1]) > 0.3          # absolute is width-dependent
+    assert abs(rel_kept[0] - rel_kept[1]) < 0.1          # relative is not
+    assert relative.stats["implied_max_tilt_deg"] == pytest.approx(36.87, abs=0.1)
+
+
+def test_cell_mask_reports_stats_and_2d_result_carries_them():
+    rng = np.random.default_rng(9)
+    xy = _punctate_rod(rng, 0, 0)
+    loc_m = np.column_stack([xy / 1e9, np.zeros(xy.shape[0])])
+    tid = np.repeat(np.arange(xy.shape[0] // 40), 40)
+    res = analyze_hlyb_2d(loc_m, tid,
+                          HlyBConfig(min_loc_per_trace=3, basic_unit_size_nm=8.0,
+                                     border_size_nm=100.0))
+    assert res["n_cells"] == 1
+    stats = res["cell_mask_stats"]
+    assert stats["in_mask_fraction"] > 0.9
+    assert stats["border_mode"] == "absolute"
+    assert res["cell_mask"].edge_distance_nm.shape[0] == xy.shape[0]
+
+
 def test_analyze_hlyb_2d_removes_border_and_finds_interior():
     rng = np.random.default_rng(1)
     locs, tids, tid = [], [], 1
@@ -198,6 +300,10 @@ def test_analyze_hlyb_2d_removes_border_and_finds_interior():
     assert res["n_total_traces"] == 6009
     assert res["n_border_traces"] >= 3
     assert res["border_points_nm"].shape[0] > 0
+    assert res["point_source_indices"].size == res["points_nm"].shape[0]
+    assert res["border_source_indices"].size == res["border_points_nm"].shape[0]
+    assert np.intersect1d(
+        res["point_source_indices"], res["border_source_indices"]).size == 0
     assert res["n_structures"] == 2
     # both structures are interior; none near the removed x≈100 border triangle
     xs = sorted(round(float(st["centroid"][0])) for st in res["structures"])

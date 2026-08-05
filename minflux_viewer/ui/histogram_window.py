@@ -652,9 +652,12 @@ class HistogramWindow(QWidget):
         ds = self._dataset()
         if ds is None:
             return
-        # Filter editing / ROI bands require the materialized store; not valid here.
-        if self._filter_edit:
-            self._clear_filter_edit(restore=False)
+        # Keep an active filter edit alive while browsing raw iterations.  A
+        # region is a user-owned edit session; changing the histogram view is
+        # not an implicit Finish/Cancel action.  Concrete iterations selected
+        # during an edit are normally routed through the materialized path by
+        # ``_on_histogram_selection_changed``.  This guard also preserves the
+        # region for selections that genuinely need the raw renderer.
 
         attr_name = self._attr_combo.currentText()
         self._enforce_trace_aggregation()
@@ -682,12 +685,14 @@ class HistogramWindow(QWidget):
                 f"{attr_name} has no per-iteration values (computed from the last valid iteration)."
             )
             self._fit_histogram_view()
+            self._update_filter_edit_labels()
             return
 
         if render == "stacked":
             self._draw_stacked_histogram(ds, attr_name, agg_mode, vld_only)
         else:
             self._draw_single_raw_histogram(ds, attr_name, agg_mode, itr_sel, vld_only, render)
+        self._update_filter_edit_labels()
 
     def _bin_edges_for(self, vals: np.ndarray) -> tuple[np.ndarray, float]:
         bin_width = (
@@ -792,6 +797,17 @@ class HistogramWindow(QWidget):
 
     def _on_histogram_selection_changed(self, *_args) -> None:
         self._auto_bin_width = None
+        if self._filter_edit:
+            itr_sel, render = self._selection()
+            # A concrete iteration can be gathered onto the materialized
+            # rows, which keeps the editable region usable while the user
+            # browses away from an attribute's default/effective iteration.
+            # The value is deliberately updated only for a single iteration;
+            # pooled/stacked selections retain their own raw rendering rules.
+            if render == "single" and isinstance(itr_sel, (int, np.integer)):
+                self._edit_itr = int(itr_sel)
+            else:
+                self._edit_itr = None
         self._reset_for_new_data()
         self._remember_histogram_controls()
 
@@ -1715,13 +1731,34 @@ class HistogramWindow(QWidget):
             lo, hi = float(np.exp(lo)), float(np.exp(hi))
         return lo, hi, bool(edit.get("inclusive_min", True)), bool(edit.get("inclusive_max", True))
 
+    def current_filter_edit_state(self) -> dict:
+        """Return the histogram controls currently associated with an edit.
+
+        The Filter Dialog uses this snapshot when Update/Finish is pressed so
+        the row records the state the user actually edited, including a manual
+        iteration browse away from cfr/efc's effective iteration.
+        """
+        itr_sel, render = self._selection()
+        state = {
+            "attribute": self._attr_combo.currentText(),
+            "aggregation": self._agg_combo.currentText(),
+            "itr": itr_sel,
+            "iteration_label": self._iter_combo.currentText(),
+            "render_mode": render,
+        }
+        if self._filter_edit is not None:
+            self._filter_edit["attr"] = state["attribute"]
+            self._filter_edit["mode"] = state["aggregation"]
+            self._filter_edit["itr"] = state["itr"]
+        return state
+
     def _update_filter_edit(self) -> None:
         edit = self._filter_edit
         if not edit:
             return
         callback = edit.get("on_update")
         if callable(callback):
-            callback(*self._current_filter_edit_values())
+            callback(*self._current_filter_edit_values(), self.current_filter_edit_state())
 
     def _finish_filter_edit(self) -> None:
         edit = self._filter_edit
@@ -1729,9 +1766,10 @@ class HistogramWindow(QWidget):
             return
         callback = edit.get("on_finish")
         values = self._current_filter_edit_values()
+        state = self.current_filter_edit_state()
         self._clear_filter_edit(restore=bool(edit.get("restore_view_on_finish", True)))
         if callable(callback):
-            callback(*values)
+            callback(*values, state)
 
     def _cancel_filter_edit(self) -> None:
         edit = self._filter_edit

@@ -80,7 +80,9 @@ DEFAULT_PREFS: dict = {
         "iter_load": "last",            # "last" | "all"
         "load_efc_cfr": True,
         "load_all_dcr": False,
-        "compute_rimf": True,
+        # Fixed 0.67 is the normal MINFLUX z correction.  Anisotropy-based
+        # estimation is an explicit opt-in in Preferences.
+        "compute_rimf": False,
         "compute_loc_prec": True,
         "loc_precision_method": "stddev",  # "stddev" | "crlb" | "frc"
         "compute_local_density": True,
@@ -91,6 +93,7 @@ DEFAULT_PREFS: dict = {
         "min_z_range_nm": 5.0,
         # auto-open windows on load:
         "show_data_info": True,
+        "show_dataset_manager": False,
         "show_attr_plot": False,
         "show_scatter": False,
         "show_histogram": False,
@@ -105,7 +108,7 @@ DEFAULT_PREFS: dict = {
     },
     "plot": {
         "rimf_value": 0.67,
-        "use_fixed_rimf": False,
+        "use_fixed_rimf": True,
         "render_pixel_size": 2,
         "render_cmap": "hot",
         "render_xy_origin": "top_left",     # "top_left" | "bottom_left"
@@ -266,6 +269,14 @@ def _migrate_prefs(prefs: dict) -> dict:
     if not migrations.get("v035_update_check_optin"):
         prefs.setdefault("file", {})["check_updates_on_startup"] = False
         migrations["v035_update_check_optin"] = True
+    # Project-wide RIMF policy: ordinary real MINFLUX loads use the established
+    # 0.67 z factor.  Estimation remains available as an explicit opt-in.
+    if not migrations.get("v036_fixed_rimf_default"):
+        prefs.setdefault("data", {})["compute_rimf"] = False
+        plot = prefs.setdefault("plot", {})
+        plot["use_fixed_rimf"] = True
+        plot["rimf_value"] = 0.67
+        migrations["v036_fixed_rimf_default"] = True
     return prefs
 
 
@@ -483,7 +494,14 @@ class AppState(QObject):
         if idx is not None:
             self.calibration_changed.emit(idx)
 
-    def log(self, message: str, level: str = "INFO", *, dataset_idx: int | None = None) -> None:
+    def log(
+        self,
+        message: str,
+        level: str = "INFO",
+        *,
+        dataset_idx: int | None = None,
+        method_data: dict | None = None,
+    ) -> None:
         """
         Post a message to the log window.
 
@@ -497,17 +515,23 @@ class AppState(QObject):
             Human-readable description of the event.
         level:
             One of "INFO", "WARN", "ERROR", "DEBUG".
+        method_data:
+            Optional structured, run-specific provenance retained with the log
+            event for Generate Method Text. It is not shown in the Log window.
         """
         from datetime import datetime
         idx = self._active_idx if dataset_idx is None else dataset_idx
         ds = self._datasets[idx] if (idx is not None and 0 <= idx < len(self._datasets)) else None
-        self._log_history.append({
+        event = {
             "time": datetime.now(),
             "level": str(level),
             "message": str(message),
             "dataset_idx": idx,
             "dataset_name": ds.name if ds is not None else None,
-        })
+        }
+        if method_data is not None:
+            event["method_data"] = copy.deepcopy(method_data)
+        self._log_history.append(event)
         if len(self._log_history) > self._log_history_max:
             del self._log_history[: len(self._log_history) - self._log_history_max]
         self.log_message.emit(message, level)

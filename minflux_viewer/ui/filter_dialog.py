@@ -882,7 +882,33 @@ class FilterDialog(QDialog):
             "mask": ds.filter_mask.copy(),
         }
 
-        def write_values(lo: float, hi: float, _lo_inc: bool = True, _hi_inc: bool = True) -> None:
+        def write_values(
+            lo: float,
+            hi: float,
+            _lo_inc: bool = True,
+            _hi_inc: bool = True,
+            histogram_state: dict | None = None,
+        ) -> None:
+            # Update the row from the live histogram controls before applying
+            # the bounds.  The histogram edit session is allowed to change
+            # attribute, aggregation, and iteration while it remains open.
+            if isinstance(histogram_state, dict):
+                hist_attr = str(histogram_state.get("attribute", ""))
+                hist_mode = str(histogram_state.get("aggregation", ""))
+                if hist_attr in self._numeric_attrs:
+                    attr_combo.blockSignals(True)
+                    attr_combo.setCurrentText(hist_attr)
+                    attr_combo.blockSignals(False)
+                if mode_combo.findText(hist_mode) >= 0:
+                    mode_combo.blockSignals(True)
+                    mode_combo.setCurrentText(hist_mode)
+                    mode_combo.blockSignals(False)
+                self._enforce_trace_mode(row)
+                self._set_row_iteration(
+                    row,
+                    histogram_state.get("itr"),
+                    attr_combo.currentText(),
+                )
             min_spin.setValue(min(lo, hi))
             max_spin.setValue(max(lo, hi))
             min_spin.setProperty("inclusive", bool(_lo_inc))

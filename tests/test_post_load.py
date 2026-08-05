@@ -16,6 +16,27 @@ import pytest
 from minflux_viewer.core.dataset import AttrStore, DataProp, FileInfo, MinfluxDataset
 
 
+def test_fixed_rimf_is_default_and_migrates_existing_preferences():
+    from minflux_viewer.core.app_state import DEFAULT_PREFS, _migrate_prefs
+
+    assert DEFAULT_PREFS["data"]["compute_rimf"] is False
+    assert DEFAULT_PREFS["plot"]["use_fixed_rimf"] is True
+    assert DEFAULT_PREFS["plot"]["rimf_value"] == pytest.approx(0.67)
+
+    old = {
+        "data": {"compute_rimf": True},
+        "plot": {"use_fixed_rimf": False, "rimf_value": 1.0},
+        "_migrations": {
+            "v021_compute_show_defaults": True,
+            "v035_update_check_optin": True,
+        },
+    }
+    migrated = _migrate_prefs(old)
+    assert migrated["data"]["compute_rimf"] is False
+    assert migrated["plot"]["use_fixed_rimf"] is True
+    assert migrated["plot"]["rimf_value"] == pytest.approx(0.67)
+
+
 def _make_3d_ds(n_traces: int = 40, per: int = 12) -> MinfluxDataset:
     rng = np.random.default_rng(0)
     n = n_traces * per
@@ -124,6 +145,8 @@ def test_post_load_chain_and_abort(_qt_app):
 
     state = AppState()
     state.prefs.setdefault("data", {}).update({"show_data_info": False, "show_render": False})
+    state.prefs["data"]["compute_rimf"] = False
+    state.prefs.setdefault("plot", {}).update({"use_fixed_rimf": True, "rimf_value": 0.67})
     win = MainWindow(state)
     try:
         # Abort path: a dataset the window doesn't know is index None → no-op.
@@ -139,6 +162,8 @@ def test_post_load_chain_and_abort(_qt_app):
                          and "sigma_per_trace_nm" in ds.derived)
         assert ok, "post-load chain did not finish"
         assert np.isfinite(np.asarray(ds.derived["rimf"])).all()
+        assert float(ds.cali.RIMF) == pytest.approx(0.67)
+        assert ds.rimf_provenance["source"] == "fixed (preference)"
         assert np.asarray(ds.attr["den"]).shape[0] == ds.prop.num_loc
 
         # The Log window auto-opens on the first log message (placed beside the

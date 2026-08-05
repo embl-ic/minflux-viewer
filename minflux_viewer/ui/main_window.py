@@ -1995,6 +1995,7 @@ class MainWindow(QMainWindow):
 
     def _show_filter(self) -> None:
         from .filter_dialog import FilterDialog
+        from .modeless import show_modeless
         idx = self._state.active_idx
         win = self._filter_dlgs.get(idx)
         if win is not None:
@@ -2009,13 +2010,15 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 self._filter_dlgs.pop(idx, None)
                 win = None
-        win = FilterDialog(self._state, parent=self, dataset_idx=idx)
+        # Filter dialogs are top-level modeless windows, like the normal
+        # viewer windows.  Giving a top-level Qt.Window the main window as a
+        # QWidget parent makes Windows keep it above that owner, so it can
+        # obscure the main window whenever the two overlap.
+        win = FilterDialog(self._state, parent=None, dataset_idx=idx)
         win.destroyed.connect(lambda _=None, key=idx: self._filter_dlgs.pop(key, None))
         self._filter_dlgs[idx] = win
         self._filter_dlg = win
-        win.show()
-        win.raise_()
-        win.activateWindow()
+        show_modeless(win, self)
         self._notify_view_state_changed()
         return win
 
@@ -2025,13 +2028,34 @@ class MainWindow(QMainWindow):
         self._filter_dlg.load_filter_json(path)
 
     def _show_dataset_manager(self) -> None:
+        manager = self._get_dataset_manager()
+        manager.show()
+        manager.raise_()
+        manager.activateWindow()
+        self._notify_view_state_changed()
+
+    def _get_dataset_manager(self):
+        """Return the existing Dataset Manager, creating it if necessary."""
         from .dataset_manager import DatasetManager
         if self._ds_manager is None:
             self._ds_manager = DatasetManager(self._state, parent=self)
-            self._ds_manager.destroyed.connect(lambda _=None: setattr(self, "_ds_manager", None))
-        self._ds_manager.show()
-        self._ds_manager.raise_()
-        self._ds_manager.activateWindow()
+            self._ds_manager.destroyed.connect(
+                lambda _=None: setattr(self, "_ds_manager", None)
+            )
+        return self._ds_manager
+
+    def _ensure_dataset_manager_visible(self) -> None:
+        """Create/show the Dataset Manager without changing window focus."""
+        manager = self._get_dataset_manager()
+        try:
+            if not manager.isVisible():
+                manager.show()
+        except RuntimeError:
+            # The QObject may have been deleted but the destroyed signal has
+            # not run yet; retry through the normal creation path.
+            self._ds_manager = None
+            manager = self._get_dataset_manager()
+            manager.show()
         self._notify_view_state_changed()
 
     def _show_roi_manager(self) -> None:
@@ -2386,7 +2410,8 @@ class MainWindow(QMainWindow):
                 self, "HlyB Subunit Pair Analysis",
                 "The active dataset has no localizations with trace IDs to analyze.")
             return
-        if lz is None or lz.size != lx.size:
+        z_was_synthesized = lz is None or lz.size != lx.size
+        if z_was_synthesized:
             lz = np.zeros_like(lx)
         loc_m = np.column_stack([lx, ly, lz])  # metres, raw z (z-scaling applied in analysis)
 
@@ -2432,8 +2457,10 @@ class MainWindow(QMainWindow):
 
         from .modeless import show_modeless
         title_mode = "Template matching (3D)" if mode == "TEMPLATE3D" else mode
-        win = HlyBResultWindow(result, cfg, title=f"{ds.name} ({title_mode})", owner=self,
-                               prefer_2d=(mode == "2D"))
+        win = HlyBResultWindow(
+            result, cfg, title=f"{ds.name} ({title_mode})", owner=self,
+            prefer_2d=(mode == "2D"), source_dataset=ds, prefs=self._state.prefs,
+        )
         show_modeless(win, self)
 
         pd = result["all_pair_distances"]
@@ -2462,13 +2489,140 @@ class MainWindow(QMainWindow):
             f"candidate edge {result['candidate_edge_radius_nm']:.1f} nm"
             if mode == "TEMPLATE3D" else f"HlyB radius {result['hlyb_diameter_nm']:.1f} nm"
         )
+        method_data = None
+        if mode == "TEMPLATE3D":
+            model = result.get("model", {})
+            structures = result.get("structures", [])
+            structure_sizes: dict[str, int] = {}
+            for structure in structures:
+                size = str(int(np.asarray(structure.get("unit_indices", [])).size))
+                structure_sizes[size] = structure_sizes.get(size, 0) + 1
+            residuals = [
+                np.asarray(structure.get("pair_residuals", []), dtype=float).ravel()
+                for structure in structures
+            ]
+            residuals = np.concatenate(residuals) if residuals else np.empty(0)
+            rms_values = np.asarray(
+                [structure.get("rms_residual_nm", np.nan) for structure in structures],
+                dtype=float,
+            )
+            match_fractions = np.asarray(
+                [structure.get("match_fraction", np.nan) for structure in structures],
+                dtype=float,
+            )
+            source_path = (
+                ds.metadata.get("msr_source_path")
+                or getattr(ds.file, "recent_path", None)
+                or getattr(ds.file, "path", "")
+            )
+            qc = result.get("match_qc", {})
+            # Where the z scale came from matters scientifically: a value of 1.0
+            # can mean "2-D data", "user-fixed" or "the anisotropy estimate was
+            # rejected", and those are not the same claim.
+            provenance = ds.rimf_provenance or {}
+            z_source = str(provenance.get("source") or "").strip()
+            if abs(float(cfg.z_scaling_factor) - float(getattr(ds.cali, "RIMF", 0) or 0)) > 1e-9:
+                z_source = "a value entered in the analysis dialog"
+            elif not z_source:
+                z_source = "the dataset's recorded RIMF"
+            else:
+                z_source = f"the dataset's recorded RIMF, provenance '{z_source}'"
+            method_data = {
+                "schema": "hlyb_template_matching_3d/v1",
+                "input": {
+                    "dataset_name": ds.name,
+                    "source_path": str(source_path or ""),
+                    "source_format": str(ds.metadata.get("source_format", "") or ""),
+                    "source_version": str(ds.metadata.get("source_version", "") or ""),
+                    "n_dimensions": int(getattr(ds.prop, "num_dim", 3) or 3),
+                    "n_localizations": int(lx.size),
+                    "n_traces": int(result["n_traces"]),
+                    "iteration_selector": "last",
+                    "valid_only": True,
+                    "filter_mask_applied": False,
+                    "coordinate_unit": "metres",
+                    "coordinate_fields": (
+                        ["loc_x", "loc_y"] if z_was_synthesized
+                        else ["loc_x", "loc_y", "loc_z"]
+                    ),
+                    "trace_id_field": "tid",
+                    "z_was_synthesized": bool(z_was_synthesized),
+                    "z_scaling_source": z_source,
+                },
+                "parameters": {
+                    "min_loc_per_trace": int(cfg.min_loc_per_trace),
+                    "z_scaling_factor": float(cfg.z_scaling_factor),
+                    "unit_render_pixel_size_nm": float(cfg.unit_render_pixel_size),
+                    "basic_unit_size_nm": float(cfg.basic_unit_size_nm),
+                    "min_observed_subunits": int(cfg.min_observed_subunits_per_HlyB),
+                    "core_a_ring_side_nm": float(cfg.template_core_a_ring_side_nm),
+                    "core_b_ring_side_nm": float(cfg.template_core_b_ring_side_nm),
+                    "core_twist_deg": float(cfg.template_core_twist_deg),
+                    "core_axial_offset_nm": float(cfg.template_core_axial_offset_nm),
+                    "label_offset_nm": float(cfg.template_label_offset_nm),
+                    "pair_tolerance_nm": float(cfg.model_pair_tolerance_nm),
+                    "rms_threshold_nm": float(cfg.model_rms_threshold_nm),
+                    "max_pair_residual_nm": float(cfg.model_max_residual_nm),
+                    "min_pair_match_fraction": float(cfg.min_pair_match_fraction),
+                },
+                "effective_parameters": {
+                    "basic_unit_size_nm": float(result["dunit_nm"]),
+                    "pair_tolerance_nm": float(result["model_pair_tolerance_nm"]),
+                    "rms_threshold_nm": float(result["model_rms_threshold_nm"]),
+                    "max_pair_residual_nm": float(result["model_max_residual_nm"]),
+                    "candidate_edge_radius_nm": float(result["candidate_edge_radius_nm"]),
+                    "max_observed_subunits": int(cfg.max_observed_subunits_per_HlyB),
+                    "max_candidate_subsets_per_component": int(
+                        cfg.max_candidate_subsets_per_component),
+                },
+                "template": {
+                    "site_labels": [str(x) for x in model.get("labels", [])],
+                    "class_distances_nm": {
+                        str(key): float(value)
+                        for key, value in model.get("class_distances_nm", {}).items()
+                    },
+                },
+                "screening": {
+                    "n_after_trace_density": int(result.get("n_pass1", 0)),
+                    "n_after_log": int(result.get("n_pass2", 0)),
+                    "n_components": int(qc.get("n_components", 0)),
+                    "n_candidates_tested": int(qc.get("n_candidates_tested", 0)),
+                    "n_candidates_passed_thresholds": int(
+                        qc.get("n_candidates_passed_thresholds", 0)),
+                    "n_overlap_rejected": int(qc.get("n_overlap_rejected", 0)),
+                    "n_skipped_large_subsets": int(qc.get("n_skipped_large_subsets", 0)),
+                },
+                "result": {
+                    "n_subunits": int(result["n_subunits"]),
+                    "n_structures": int(result["n_structures"]),
+                    "structure_size_counts": structure_sizes,
+                    "n_pairs": int(pd.size),
+                    "pair_distance_median_nm": med,
+                    "pair_distance_min_nm": float(np.min(pd)) if pd.size else float("nan"),
+                    "pair_distance_max_nm": float(np.max(pd)) if pd.size else float("nan"),
+                    "residual_median_abs_nm": (
+                        float(np.median(np.abs(residuals))) if residuals.size else float("nan")
+                    ),
+                    "residual_max_abs_nm": (
+                        float(np.max(np.abs(residuals))) if residuals.size else float("nan")
+                    ),
+                    "structure_rms_median_nm": (
+                        float(np.nanmedian(rms_values)) if rms_values.size else float("nan")
+                    ),
+                    "match_fraction_median": (
+                        float(np.nanmedian(match_fractions))
+                        if match_fractions.size else float("nan")
+                    ),
+                },
+            }
         self._state.log(
             prefix
             + f"{result['n_subunits']} subunit(s) → {result['n_structures']} HlyB structure(s); "
             f"{pd.size} pair(s), median distance {med:.2f} nm "
             f"(unit Ø {result['dunit_nm']:.1f} nm, {radius_label}, "
             f"min loc/trace {cfg.min_loc_per_trace}, {extra}).",
-            dataset_idx=idx)
+            dataset_idx=idx,
+            method_data=method_data)
 
     def _segment_npc_2d(self) -> None:
         """Analyze › Segmentation › NPC › 2D — detect NPC centres by ring-kernel
@@ -5429,6 +5583,8 @@ class MainWindow(QMainWindow):
         self._populate_recent_menu()
 
         data_prefs = self._state.prefs.get("data", {})
+        if data_prefs.get("show_dataset_manager", False):
+            self._ensure_dataset_manager_visible()
 
         # Open the render view first (when requested, unless a batch importer will
         # open a grouped render view) so the data-info window can be placed *beside*
@@ -5473,8 +5629,13 @@ class MainWindow(QMainWindow):
             return
         ds = self._state.datasets[idx]
         data_prefs = self._state.prefs.get("data", {})
+        plot_prefs = self._state.prefs.get("plot", {})
+        rimf_requested = (
+            data_prefs.get("compute_rimf", False)
+            or plot_prefs.get("use_fixed_rimf", True)
+        )
         needs = (
-            (data_prefs.get("compute_rimf", True) and "rimf" not in ds.derived)
+            (rimf_requested and "rimf" not in ds.derived)
             or (data_prefs.get("compute_loc_prec", True) and "sigma_per_trace_nm" not in ds.derived)
             or (data_prefs.get("compute_local_density", True) and "den" not in ds.attr)
             or bool(ds.state.get("filter_specs"))
@@ -5501,22 +5662,24 @@ class MainWindow(QMainWindow):
         if idx is None:
             return
         data_prefs = self._state.prefs.get("data", {})
-        if data_prefs.get("compute_rimf", True) and "rimf" not in ds.derived:
+        plot_prefs = self._state.prefs.get("plot", {})
+        estimate_rimf = data_prefs.get("compute_rimf", False)
+        use_fixed_rimf = plot_prefs.get("use_fixed_rimf", True)
+        if (estimate_rimf or use_fixed_rimf) and "rimf" not in ds.derived:
             import numpy as np
-            plot_prefs = self._state.prefs.get("plot", {})
             if ds.prop.num_dim < 3:
                 # 2D data: Z is all zero, so anisotropy estimation is moot.
                 ds.set_rimf(1.0, source="2D (no z correction)")
                 ds.derived["rimf"] = np.asarray([1.0], dtype=float)
                 self._state.log(f"RIMF for '{ds.name}': 1.0 (2D dataset, computation skipped).")
                 self._state.notify_calibration_changed(idx)
-            elif plot_prefs.get("use_fixed_rimf", False):
-                fixed = float(plot_prefs.get("rimf_value", 1.0))
+            elif use_fixed_rimf:
+                fixed = float(plot_prefs.get("rimf_value", 0.67))
                 ds.set_rimf(fixed, source="fixed (preference)")
                 ds.derived["rimf"] = np.asarray([fixed], dtype=float)
                 self._state.log(f"RIMF for '{ds.name}': {fixed:.4g} (fixed preference value).")
                 self._state.notify_calibration_changed(idx)
-            else:
+            elif estimate_rimf:
                 # Heavy estimate: announce now and run it on the next event-loop
                 # turn so this line is painted before the (sub-second) compute.
                 self._state.log(f"Estimating anisotropy / RIMF of '{ds.name}'…")

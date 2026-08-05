@@ -42,6 +42,14 @@ AGGREGATION_MSG = (
     "timestamp mode = first; valid final localizations grouped per trace in time "
     "order; trailing remainder retained."
 )
+HLYB_TEMPLATE_MSG = (
+    "HlyB subunit pair analysis (template matching 3D) on "
+    "'260626-155951_minflux_mfx.mat': 6882 trace(s) → 2312 subunit(s) → "
+    "196 HlyB structure(s); 858 pair(s), median distance 13.30 nm "
+    "(unit Ø 14.8 nm, candidate edge 24.0 nm, min loc/trace 1, z-scale 0.67, "
+    "template tol 5.0 nm, tested 3773 candidate(s), passed 873, "
+    "overlap-rejected 677)."
+)
 
 
 def test_stddev_text_and_citation():
@@ -125,6 +133,183 @@ def test_aggregation_method_text_describes_modern_weighted_time():
     txt = mt.generate_method_text(_state(), [_ev(msg)])
     assert "photon-count-weighted mean" in txt
     assert "modern flat-record convention" in txt
+
+
+def test_hlyb_template_legacy_log_gets_scientific_method_text():
+    txt = mt.generate_method_text(
+        _state(), [_ev(HLYB_TEMPLATE_MSG, name="260626-155951_minflux_mfx.mat")])
+    assert "valid final iteration" in txt
+    assert "loc_x, loc_y and loc_z" in txt
+    assert "Viewer filter masks and ROI selections are not applied" in txt
+    assert "Laplacian-of-Gaussian" in txt
+    assert "six-site, C3-symmetric HlyB model" in txt
+    assert "3,773 template candidate(s) tested" in txt
+    assert "873 passed" in txt
+    assert "677 were subsequently rejected" in txt
+    assert "858 unique within-structure pair distance(s)" in txt
+    assert "median of 13.3 nm" in txt
+    assert "not serialized in this legacy Log event" in txt
+    assert "show all (remove template gating)" in txt
+
+
+def test_hlyb_template_structured_provenance_documents_full_run():
+    method_data = {
+        "schema": "hlyb_template_matching_3d/v1",
+        "input": {
+            "dataset_name": "260626-155951_minflux_mfx.mat",
+            "source_path": r"D:\\Temp\\260626-155951_minflux_mfx.mat",
+            "source_format": "MATLAB",
+            "source_version": "m2410",
+            "n_dimensions": 3,
+            "n_localizations": 50_000,
+            "n_traces": 6882,
+            "iteration_selector": "last",
+            "valid_only": True,
+            "filter_mask_applied": False,
+            "coordinate_unit": "metres",
+            "coordinate_fields": ["loc_x", "loc_y", "loc_z"],
+            "trace_id_field": "tid",
+            "z_was_synthesized": False,
+        },
+        "parameters": {
+            "min_loc_per_trace": 1,
+            "z_scaling_factor": 0.67,
+            "unit_render_pixel_size_nm": 2.5,
+            "basic_unit_size_nm": 0.0,
+            "min_observed_subunits": 3,
+            "core_a_ring_side_nm": 11.0,
+            "core_b_ring_side_nm": 19.0,
+            "core_twist_deg": 65.452835488,
+            "core_axial_offset_nm": 0.0,
+            "label_offset_nm": 2.0,
+            "pair_tolerance_nm": 0.0,
+            "rms_threshold_nm": 0.0,
+            "max_pair_residual_nm": 0.0,
+            "min_pair_match_fraction": 0.7,
+        },
+        "effective_parameters": {
+            "basic_unit_size_nm": 14.8,
+            "pair_tolerance_nm": 5.0,
+            "rms_threshold_nm": 4.0,
+            "max_pair_residual_nm": 8.0,
+            "candidate_edge_radius_nm": 24.0,
+            "max_observed_subunits": 6,
+            "max_candidate_subsets_per_component": 20_000,
+        },
+        "template": {
+            "site_labels": ["1a", "1b", "2a", "2b", "3a", "3b"],
+            "class_distances_nm": {
+                "neighboring domains": 8.936,
+                "dimer": 10.138,
+                "every second A-domain": 11.0,
+                "cross-domain": 17.302,
+                "every second B-domain": 19.0,
+            },
+        },
+        "screening": {
+            "n_after_trace_density": 4000,
+            "n_after_log": 3000,
+            "n_components": 600,
+            "n_candidates_tested": 3773,
+            "n_candidates_passed_thresholds": 873,
+            "n_overlap_rejected": 677,
+            "n_skipped_large_subsets": 12,
+        },
+        "result": {
+            "n_subunits": 2312,
+            "n_structures": 196,
+            "structure_size_counts": {"3": 150, "4": 46},
+            "n_pairs": 858,
+            "pair_distance_median_nm": 13.3,
+            "pair_distance_min_nm": 7.2,
+            "pair_distance_max_nm": 22.8,
+            "residual_median_abs_nm": 1.2,
+            "residual_max_abs_nm": 7.8,
+            "structure_rms_median_nm": 2.1,
+            "match_fraction_median": 0.9,
+        },
+    }
+    ev = _ev(HLYB_TEMPLATE_MSG, name="260626-155951_minflux_mfx.mat")
+    ev["method_data"] = method_data
+    txt = mt.generate_method_text(_state(), [ev])
+
+    assert "50,000 valid localization record(s)" in txt
+    assert "itr='last' (the global final iteration)" in txt
+    assert "raw Z was multiplied by 0.67 (RIMF, the refractive-index mismatch factor)" in txt
+    assert "basic-unit diameter was automatic (effective value 14.8 nm)" in txt
+    assert "A- and B-rings with side lengths 11 and 19 nm" in txt
+    assert "automatic (effective value 5 nm)" in txt
+    # the structural model must state its provenance and the label-offset caveat
+    assert "agree with the values annotated on the source structural diagram" in txt
+    assert "2 nm per single-domain antibody at each endpoint" in txt
+    assert "biased short by that amount" in txt
+    assert "invariant under reflection" in txt
+    # and the specificity limits must be disclosed, not implied
+    assert "selection-biased downward" in txt
+    assert "single contiguous range" in txt
+    assert "No chance-level expectation was computed" in txt
+    assert "σ = Dunit/(2√2·pixel size)" in txt
+    assert "DBSCAN with ε = Dunit/2 and minPts = 1" in txt
+    assert "all ordered assignments to distinct template sites" in txt
+    assert "residual d_observed − d_expected" in txt
+    assert "20,000" in txt
+    assert "196 non-overlapping HlyB structure(s)" in txt
+    assert "150 with 3 observed site(s), 46 with 4 observed site(s)" in txt
+    assert "858 distances from 7.2 to 22.8 nm" in txt
+    assert "show all (remove template gating)" in txt
+
+
+def test_source_version_and_container_are_not_conflated():
+    """source_version is the structural data version, source_format the container."""
+    method_data = {
+        "schema": "hlyb_template_matching_3d/v1",
+        "input": {"dataset_name": "ds", "source_version": "m2410",
+                  "source_format": "obf / mfxdta", "n_localizations": 10,
+                  "n_traces": 5, "coordinate_fields": ["loc_x", "loc_y", "loc_z"]},
+        "parameters": {}, "effective_parameters": {}, "template": {},
+        "screening": {}, "result": {},
+    }
+    ev = _ev(HLYB_TEMPLATE_MSG, name="ds")
+    ev["method_data"] = method_data
+    txt = mt.generate_method_text(_state(), [ev])
+    assert "source version m2410, container obf / mfxdta" in txt
+    assert "source format m2410" not in txt
+
+
+def test_merge_radius_conflict_with_the_shortest_model_distance_is_disclosed():
+    """The detection merge radius can exceed the shortest distance being sought;
+    when it does, the methods text must say the class is unrecoverable."""
+    template = {"site_labels": ["1a", "1b", "2a", "2b", "3a", "3b"],
+                "class_distances_nm": {"neighboring domains": 8.936, "dimer": 10.138,
+                                       "every second A-domain": 11.0,
+                                       "cross-domain": 17.302,
+                                       "every second B-domain": 19.0}}
+    base = {"schema": "hlyb_template_matching_3d/v1",
+            "input": {"dataset_name": "ds", "coordinate_fields": ["loc_x", "loc_y", "loc_z"]},
+            "parameters": {"min_observed_subunits": 3}, "template": template,
+            "screening": {}, "result": {}}
+
+    def render(dunit):
+        data = dict(base)
+        data["effective_parameters"] = {"basic_unit_size_nm": dunit,
+                                        "pair_tolerance_nm": 5.0}
+        ev = _ev(HLYB_TEMPLATE_MSG, name="ds")
+        ev["method_data"] = data
+        return mt.generate_method_text(_state(), [ev])
+
+    conflicted = render(16.058)          # merge radius 8.03 nm >= 8.94 - 5
+    assert "cannot be recovered from this run" in conflicted
+    assert "must not be interpreted as a structural distance" in conflicted
+
+    clean = render(6.0)                  # merge radius 3.0 nm, well below
+    assert "all modelled classes remain resolvable in principle" in clean
+    assert "property of the detection step" in clean
+
+
+def test_method_count_tolerates_grouped_numbers():
+    assert mt._method_count("6,882") == "6,882"
+    assert mt._method_count(6882) == "6,882"
+    assert mt._method_count("nope") == "not recorded"
 
 
 def test_citations_deduped():

@@ -20,6 +20,7 @@ Pure Python (no Qt) → unit-testable.
 from __future__ import annotations
 
 import html as _html
+import math
 import re
 from datetime import datetime
 
@@ -361,6 +362,325 @@ def _render_frc(m, ev, state):
     ), [CITE_FRC_BANTERLE, CITE_FRC_NIEUWENHUIZEN]
 
 
+def _method_number(value, digits: int = 3, *, strip: bool = True) -> str:
+    """Compact, locale-independent number formatting for method provenance.
+
+    ``strip=False`` keeps trailing zeros, so a list of quantities of the same
+    kind stays column-consistent (8.94 / 10.14 / 11.00 rather than 11).
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "not recorded"
+    if not math.isfinite(number):
+        return "not available"
+    text = f"{number:.{digits}f}"
+    return text.rstrip("0").rstrip(".") if strip else text
+
+
+def _method_count(value) -> str:
+    # Group separators appear in the Log line this rule may be parsed from, so
+    # they must be tolerated rather than reported as a missing value.
+    if isinstance(value, str):
+        value = value.replace(",", "").replace(" ", "").replace("\xa0", "").strip()
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return "not recorded"
+
+
+def _hlyb_setting(raw, effective, *, digits: int = 3, unit: str = "") -> str:
+    raw_text = _method_number(raw, digits)
+    effective_text = _method_number(effective, digits)
+    suffix = f" {unit}" if unit else ""
+    try:
+        automatic = float(raw) <= 0
+    except (TypeError, ValueError):
+        automatic = False
+    if automatic:
+        return f"automatic (effective value {effective_text}{suffix})"
+    return f"{raw_text}{suffix}"
+
+
+def _hlyb_structure_size_text(counts) -> str:
+    if not isinstance(counts, dict) or not counts:
+        return "not recorded"
+    try:
+        ordered = sorted(((int(size), int(count)) for size, count in counts.items()))
+    except (TypeError, ValueError):
+        return "not recorded"
+    return ", ".join(f"{count:,} with {size} observed site(s)" for size, count in ordered)
+
+
+def _render_hlyb_template3d(m, ev, state):
+    """Render a complete scientific account from one HlyB analysis event.
+
+    New events carry a structured provenance snapshot. The regex groups retain
+    compatibility with historical log lines, for which unrecorded settings are
+    explicitly identified instead of being reconstructed from mutable defaults.
+    """
+    method = ev.get("method_data")
+    if not isinstance(method, dict) or method.get("schema") != "hlyb_template_matching_3d/v1":
+        name = m.group("name")
+        return (
+            f"Input data. Three-dimensional HlyB template matching was applied to dataset "
+            f"'{name}'. The implementation reads the canonical localization coordinates "
+            f"(loc_x, loc_y and loc_z) and trace identifier (tid) at the valid final "
+            f"iteration; raw coordinates are converted from metres to nanometres and Z is "
+            f"multiplied by the recorded scale factor {_method_number(m.group('zscale'))}. "
+            f"Viewer filter masks and ROI selections are not applied by this operation.\n\n"
+            f"Parameters and computation. The selected historical event records a minimum "
+            f"of {_method_count(m.group('minloc'))} localization(s) per trace, an effective "
+            f"basic-unit diameter of {_method_number(m.group('dunit'))} nm, an effective "
+            f"template pair tolerance of {_method_number(m.group('tolerance'))} nm, and a "
+            f"candidate-graph edge radius of {_method_number(m.group('edge'))} nm. Trace "
+            f"centres are screened by localization support and local density, by a "
+            f"Laplacian-of-Gaussian response in an XY localization histogram, and then merged "
+            f"with DBSCAN to obtain candidate subunit centres. Connected candidate groups are "
+            f"tested against partial assignments of the six-site, C3-symmetric HlyB model by "
+            f"minimizing the root-mean-square residual between all observed and expected "
+            f"within-candidate pair distances. Accepted candidates are ranked by site count, "
+            f"residual and trace support, after which overlapping lower-ranked candidates are "
+            f"discarded. Other user settings and intermediate screening counts were not "
+            f"serialized in this legacy Log event and are therefore not inferred.\n\n"
+            f"Results. {_method_count(m.group('traces'))} input trace(s) yielded "
+            f"{_method_count(m.group('subunits'))} candidate subunit(s) and "
+            f"{_method_count(m.group('structures'))} non-overlapping HlyB structure(s). Of "
+            f"{_method_count(m.group('tested'))} template candidate(s) tested, "
+            f"{_method_count(m.group('passed'))} passed the numerical thresholds and "
+            f"{_method_count(m.group('overlap'))} were subsequently rejected because they "
+            f"overlapped a better-ranked match. The gated result contained "
+            f"{_method_count(m.group('pairs'))} unique within-structure pair distance(s), with "
+            f"a median of {_method_number(m.group('median'))} nm. These distances are not the "
+            f"all-to-all distribution of every detected subunit; the optional 'show all "
+            f"(remove template gating)' overlay computes that ungated distribution separately."
+        ), []
+
+    inp = method.get("input", {})
+    params = method.get("parameters", {})
+    effective = method.get("effective_parameters", {})
+    template = method.get("template", {})
+    screening = method.get("screening", {})
+    result = method.get("result", {})
+
+    name = inp.get("dataset_name") or m.group("name")
+    source_path = str(inp.get("source_path") or "").strip()
+    source = f" (source file '{source_path}')" if source_path else ""
+    # source_version is the structural data version (m2410 / m2205 / legacy);
+    # source_format is the transport container.  They are orthogonal and must
+    # not be merged into one "source format" phrase.
+    source_format = str(inp.get("source_format") or "").strip()
+    source_version = str(inp.get("source_version") or "").strip()
+    format_bits = []
+    if source_version:
+        format_bits.append(f"source version {source_version}")
+    if source_format:
+        format_bits.append(f"container {source_format}")
+    format_text = f"; {', '.join(format_bits)}" if format_bits else ""
+    coordinate_fields = inp.get("coordinate_fields", ["loc_x", "loc_y", "loc_z"])
+    coordinate_text = ", ".join(str(field) for field in coordinate_fields)
+    z_note = (
+        "No axial coordinate was available, so Z was set to zero before scaling."
+        if inp.get("z_was_synthesized")
+        else "The raw axial coordinate was retained until this run-specific scaling step."
+    )
+
+    pair_tolerance = _hlyb_setting(
+        params.get("pair_tolerance_nm"), effective.get("pair_tolerance_nm"), unit="nm")
+    rms_threshold = _hlyb_setting(
+        params.get("rms_threshold_nm"), effective.get("rms_threshold_nm"), unit="nm")
+    max_residual = _hlyb_setting(
+        params.get("max_pair_residual_nm"), effective.get("max_pair_residual_nm"), unit="nm")
+    basic_unit = _hlyb_setting(
+        params.get("basic_unit_size_nm"), effective.get("basic_unit_size_nm"), unit="nm")
+
+    class_distances = template.get("class_distances_nm", {})
+    if isinstance(class_distances, dict) and class_distances:
+        class_text = "; ".join(
+            f"{name} {_method_number(distance, 2, strip=False)} nm"
+            for name, distance in class_distances.items()
+        )
+        model_values = [float(v) for v in class_distances.values()]
+        min_model = min(model_values)
+        max_model = max(model_values)
+    else:
+        class_text = "not recorded"
+        min_model = max_model = float("nan")
+
+    # Quantities the reader needs in order to judge the result, derived from
+    # the recorded settings rather than asserted.
+    tol = effective.get("pair_tolerance_nm")
+    try:
+        tol = float(tol)
+    except (TypeError, ValueError):
+        tol = float("nan")
+    try:
+        merge_radius = float(effective.get("basic_unit_size_nm")) / 2.0
+    except (TypeError, ValueError):
+        merge_radius = float("nan")
+    n_sites = len(template.get("site_labels") or []) or 6
+    min_n = params.get("min_observed_subunits")
+    try:
+        min_n = int(min_n)
+    except (TypeError, ValueError):
+        min_n = 3
+    n_assign = 1
+    for k in range(min_n):
+        n_assign *= max(n_sites - k, 1)
+
+    if math.isfinite(merge_radius) and math.isfinite(min_model):
+        if merge_radius >= min_model - (tol if math.isfinite(tol) else 0.0):
+            merge_note = (
+                f"This merge radius, {_method_number(merge_radius, 2)} nm, is not smaller "
+                f"than the shortest modelled distance ({_method_number(min_model, 2)} nm) "
+                f"less the matching tolerance, so two genuinely distinct sites at that "
+                f"separation are merged into a single centre and the corresponding "
+                f"distance class cannot be recovered from this run. Distances shorter "
+                f"than the merge radius are absent from the output by construction, and "
+                f"the resulting truncation of an otherwise decreasing pair-distance "
+                f"distribution produces a maximum immediately above it that must not be "
+                f"interpreted as a structural distance."
+            )
+        else:
+            merge_note = (
+                f"The merge radius, {_method_number(merge_radius, 2)} nm, is smaller than "
+                f"the shortest modelled distance ({_method_number(min_model, 2)} nm), so "
+                f"all modelled classes remain resolvable in principle. Distances shorter "
+                f"than the merge radius are nonetheless absent by construction, and the "
+                f"truncation produces a maximum immediately above it that is a property "
+                f"of the detection step, not of the sample."
+            )
+    else:
+        merge_note = ""
+
+    z_source = str(inp.get("z_scaling_source") or "").strip()
+    z_source_text = f" The scale factor was taken from {z_source}." if z_source else ""
+
+    text = (
+        f"Input data. Three-dimensional HlyB subunit-pair template matching was performed on "
+        f"dataset '{name}'{source}. The input comprised "
+        f"{_method_count(inp.get('n_localizations'))} valid localization record(s) from "
+        f"{_method_count(inp.get('n_traces'))} trace(s){format_text}. The canonical "
+        f"{coordinate_text} coordinate field(s) and tid were read from rows selected as "
+        f"itr='last' (the global "
+        f"final iteration) with vld_only=True. Viewer filter masks and ROI selections were "
+        f"not applied. Coordinates were converted from metres to nanometres, and raw Z was "
+        f"multiplied by {_method_number(params.get('z_scaling_factor'), 4)} (RIMF, the "
+        f"refractive-index mismatch factor).{z_source_text} {z_note}\n\n"
+        f"User-defined parameters. The minimum localization support was "
+        f"{_method_count(params.get('min_loc_per_trace'))} localization(s) per trace; the XY "
+        f"rendering pixel used for subunit detection was "
+        f"{_method_number(params.get('unit_render_pixel_size_nm'))} nm; and the basic-unit "
+        f"diameter was {basic_unit}. The same minimum-support number is applied twice, as a "
+        f"minimum localization count per trace and as a minimum neighbour count around the "
+        f"trace centre; they are not independently adjustable. A partial structure required at "
+        f"least {_method_count(params.get('min_observed_subunits'))} observed subunit(s). The "
+        f"six-site model used equilateral A- and B-rings with side lengths "
+        f"{_method_number(params.get('core_a_ring_side_nm'))} and "
+        f"{_method_number(params.get('core_b_ring_side_nm'))} nm, respectively; the B-ring "
+        f"was rotated by {_method_number(params.get('core_twist_deg'), 1)}° relative to the "
+        f"A-ring and displaced axially by "
+        f"{_method_number(params.get('core_axial_offset_nm'))} nm. The pair-distance tolerance "
+        f"setting was {pair_tolerance}, the RMS-residual threshold setting was {rms_threshold}, "
+        f"the maximum single-pair residual setting was {max_residual}, and the required fraction "
+        f"of pairs "
+        f"within tolerance was {_method_number(params.get('min_pair_match_fraction'))}.\n\n"
+        f"Subunit detection. A per-axis median centre and localization count were computed "
+        f"for each trace. When the basic-unit diameter was automatic, it was calculated as "
+        f"twice the median of three estimates of the positive within-trace radial offsets: "
+        f"the geometric mean in log space, the centre of the modal log-distance bin, and the "
+        f"centre from a Gaussian fit to the log-distance histogram (with a 10 nm fallback if "
+        f"estimation was degenerate). First, traces were retained when both their localization "
+        f"count and their local-density score—the number of localizations within half the "
+        f"basic-unit diameter of the trace centre, minus one—were at least "
+        f"{_method_count(params.get('min_loc_per_trace'))}; "
+        f"{_method_count(screening.get('n_after_trace_density'))} trace centre(s) passed. "
+        f"Second, all XY localizations were histogrammed at the selected pixel size and filtered "
+        f"with a Laplacian-of-Gaussian kernel of σ = Dunit/(2√2·pixel size); centres whose "
+        f"normalized response exceeded the standard deviation of the response map were retained "
+        f"({_method_count(screening.get('n_after_log'))} centre(s)). Third, surviving trace "
+        f"centres were merged by three-dimensional DBSCAN with ε = Dunit/2 and minPts = 1. "
+        f"Each resulting subunit centre was the per-axis median of all localizations from "
+        f"its member traces. {merge_note}\n\n"
+        f"Structural model. The six N-terminal labelling sites 1a, 1b, 2a, 2b, 3a and 3b of "
+        f"the three HlyB dimers were represented by one Euclidean coordinate model: two "
+        f"coplanar, C3-symmetric equilateral rings, the A-ring carrying 1a/2a/3a and the "
+        f"B-ring 1b/2b/3b. All expected pair distances were derived from those coordinates, so "
+        f"they are mutually consistent by construction: {class_text}. These are the "
+        f"inter-domain distances of the reference structure, and agree with the values "
+        f"annotated on the source structural diagram to better than 0.25 nm in every class. "
+        f"They are approximately 4 nm shorter than the distances tabulated alongside that "
+        f"diagram, which by the source's own statement include an allowance of 2 nm per "
+        f"single-domain antibody at each endpoint. The model is therefore a model of the "
+        f"protein domains, whereas the measurement localizes fluorophores displaced from those "
+        f"domains by the antibody. If that displacement is isotropically oriented it lengthens "
+        f"an observed distance by only about 1 nm, and the domain distances used here are "
+        f"appropriate; if it is directed radially outward from the complex axis it lengthens "
+        f"observed distances by 3-4 nm, reproducing the tabulated values, in which case every "
+        f"match reported here is biased short by that amount. The displacement geometry was not "
+        f"determined independently in this work, and this remains the dominant systematic "
+        f"uncertainty of the measurement. Because both rings are coplanar, the model is "
+        f"invariant under reflection and carries no information about the handedness or the "
+        f"axial order of the complex.\n\n"
+        f"Matching. An undirected "
+        f"candidate graph joined detected subunit centres separated by at most "
+        f"{_method_number(effective.get('candidate_edge_radius_nm'))} nm. Within each connected "
+        f"component, every subset from "
+        f"{_method_count(effective.get('max_observed_subunits'))} down to "
+        f"{_method_count(params.get('min_observed_subunits'))} observed sites was evaluated, "
+        f"unless the number of same-size subsets exceeded "
+        f"{_method_count(effective.get('max_candidate_subsets_per_component'))}. For each subset, "
+        f"all ordered assignments to distinct template sites were scored from all n(n−1)/2 "
+        f"pair distances, using residual d_observed − d_expected; the assignment with the lowest "
+        f"RMS residual was retained. Candidates with at least three sites had to satisfy the RMS, "
+        f"maximum-residual and match-fraction thresholds simultaneously (a two-site candidate, "
+        f"if enabled, was judged only by the pair tolerance). Passing candidates were ordered by "
+        f"decreasing site count, increasing RMS residual and decreasing mean trace support, then "
+        f"greedily accepted subject to non-overlap.\n\n"
+        f"Specificity of the matching criterion. The reported residuals are minima over "
+        f"{_method_count(n_assign)} ordered site assignments for the smallest accepted subset "
+        f"size, so they are selection-biased downward and are not goodness-of-fit statistics in "
+        f"the usual sense. The model contains {_method_count(len(class_distances) if isinstance(class_distances, dict) else 0)} "
+        f"distinct distances spanning "
+        f"{_method_number(min_model, 2)} to {_method_number(max_model, 2)} nm; with a tolerance "
+        f"of {_method_number(tol, 2)} nm the accepted intervals overlap into the single "
+        f"contiguous range {_method_number(min_model - tol, 2)} to "
+        f"{_method_number(max_model + tol, 2)} nm, within which any pair distance satisfies at "
+        f"least one class. The criterion is correspondingly permissive for the smallest subsets, "
+        f"and at three observed sites the match-fraction threshold is degenerate, since the only "
+        f"attainable fractions are 0, 1/3, 2/3 and 1. No chance-level expectation was computed "
+        f"for this run: the number of accepted structures reported below is not accompanied by "
+        f"the number that the same procedure would accept on spatially randomized data, and "
+        f"should not be read as a detection count until that comparison is made.\n\n"
+        f"Results. The screening produced {_method_count(result.get('n_subunits'))} detected "
+        f"subunit centre(s) and {_method_count(screening.get('n_components'))} candidate-graph "
+        f"component(s). {_method_count(screening.get('n_candidates_tested'))} subset candidate(s) "
+        f"were tested; {_method_count(screening.get('n_candidates_passed_thresholds'))} passed "
+        f"the numerical thresholds, {_method_count(screening.get('n_overlap_rejected'))} of those "
+        f"were rejected during overlap resolution, and "
+        f"{_method_count(screening.get('n_skipped_large_subsets'))} subset(s) were skipped by the "
+        f"combinatorial cap. The final set contained "
+        f"{_method_count(result.get('n_structures'))} non-overlapping HlyB structure(s) "
+        f"({_hlyb_structure_size_text(result.get('structure_size_counts'))}). Their accepted "
+        f"within-structure pairs contributed {_method_count(result.get('n_pairs'))} distances "
+        f"from {_method_number(result.get('pair_distance_min_nm'))} to "
+        f"{_method_number(result.get('pair_distance_max_nm'))} nm (median "
+        f"{_method_number(result.get('pair_distance_median_nm'))} nm). The median structure RMS "
+        f"residual was {_method_number(result.get('structure_rms_median_nm'))} nm, the median "
+        f"absolute pair residual was {_method_number(result.get('residual_median_abs_nm'))} nm "
+        f"(maximum {_method_number(result.get('residual_max_abs_nm'))} nm), and the median matched-"
+        f"pair fraction was {_method_number(result.get('match_fraction_median'))}; the last of "
+        f"these is uninformative for three-site structures, as noted above. The reported "
+        f"blue histogram represents template-gated pairs within accepted structures, "
+        f"not all detected-subunit pairs. The optional 'show all (remove template gating)' control "
+        f"computes the all-to-all detected-subunit distance distribution exactly and overlays it "
+        f"in light gray without changing the matching result; that overlay is not an unbiased "
+        f"reference distribution, because it is subject to the same short-distance exclusion "
+        f"imposed by the merge radius."
+    )
+    return text, []
+
+
 #: (compiled pattern, stage, render(match, event, state) -> (sentence, [citations]))
 RULES = [
     (re.compile(r"^Loaded dataset '(?P<name>.+?)':"), "load", _render_load),
@@ -380,6 +700,16 @@ RULES = [
     (re.compile(r"Localization precision \(FRC\): resolution = (?P<res>[\d.]+) nm "
                 r"\(1/7 threshold, (?P<mode>[^,]+), (?P<n>[\d,]+) points, "
                 r"pixel (?P<px>[\d.]+) nm\)"), "analysis", _render_frc),
+    (re.compile(
+        r"^HlyB subunit pair analysis \(template matching 3D\) on '(?P<name>.+?)': "
+        r"(?P<traces>[\d,]+) trace\(s\) → (?P<subunits>[\d,]+) subunit\(s\) → "
+        r"(?P<structures>[\d,]+) HlyB structure\(s\); (?P<pairs>[\d,]+) pair\(s\), "
+        r"median distance (?P<median>[-+\w.]+) nm \(unit Ø (?P<dunit>[-+\d.]+) nm, "
+        r"candidate edge (?P<edge>[-+\d.]+) nm, min loc/trace (?P<minloc>[\d,]+), "
+        r"z-scale (?P<zscale>[-+\d.]+), template tol (?P<tolerance>[-+\d.]+) nm, "
+        r"tested (?P<tested>[\d,]+) candidate\(s\), passed (?P<passed>[\d,]+), "
+        r"overlap-rejected (?P<overlap>[\d,]+)\)"),
+     "analysis", _render_hlyb_template3d),
     (re.compile(r"RIMF for '(?P<name>.+?)': (?P<value>[\d.]+)\s*(?:\((?P<note>[^)]*)\))?"),
      "analysis", _render_rimf),
     (re.compile(
