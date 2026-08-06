@@ -489,6 +489,37 @@ def _render_hlyb_template3d(m, ev, state):
         else "The raw axial coordinate was retained until this run-specific scaling step."
     )
 
+    proj = method.get("projection") or {}
+    if proj.get("is_2d"):
+        cell = proj.get("cell_mask_stats") or {}
+        shrink = (
+            f"{_method_number(cell.get('border_fraction'), 2)} of each cell's half-width"
+            if str(cell.get("border_mode")) == "relative"
+            else f"{_method_number(cell.get('border_size_nm'), 0)} nm")
+        template_projection_text = (
+            "\n\nProjection. Matching was performed in the image plane. Each E.coli was "
+            f"first delineated from the localization density "
+            f"({_method_count(cell.get('n_cells'))} cell(s)) and shrunk inward by "
+            f"{shrink}, which removed "
+            f"{_method_count(proj.get('n_border_traces'))} of "
+            f"{_method_count(proj.get('n_total_traces'))} trace(s) at the rim, where "
+            f"the membrane is seen edge-on and an in-plane distance is most "
+            f"foreshortened. A projected separation is never longer than the true one "
+            f"and can be shorter by up to 1 - cos(tilt) of it, so scoring a projected "
+            f"observation against three-dimensional model distances with a symmetric "
+            f"residual would reject genuinely matching complexes for being tilted, and "
+            f"would do so more the larger the distance. Shortening was therefore "
+            f"forgiven up to the tilt the shrink admits, "
+            f"{_method_number(proj.get('tilt_deg'), 1)}°, i.e. up to "
+            f"{_method_number(100 * float(proj.get('max_shortening', 0.0)), 0)} % of each "
+            f"modelled distance; lengthening was never forgiven, because projection "
+            f"cannot produce it. The reference geometry is itself planar, so a face-on "
+            f"complex projects to the modelled distances exactly. The projection still "
+            f"superimposes the upper and lower membrane, which is not corrected."
+        )
+    else:
+        template_projection_text = ""
+
     pair_tolerance = _hlyb_setting(
         params.get("pair_tolerance_nm"), effective.get("pair_tolerance_nm"), unit="nm")
     rms_threshold = _hlyb_setting(
@@ -570,7 +601,8 @@ def _render_hlyb_template3d(m, ev, state):
         f"final iteration) with vld_only=True. Viewer filter masks and ROI selections were "
         f"not applied. Coordinates were converted from metres to nanometres, and raw Z was "
         f"multiplied by {_method_number(params.get('z_scaling_factor'), 4)} (RIMF, the "
-        f"refractive-index mismatch factor).{z_source_text} {z_note}\n\n"
+        f"refractive-index mismatch factor).{z_source_text} {z_note}"
+        f"{template_projection_text}\n\n"
         f"User-defined parameters. The minimum localization support was "
         f"{_method_count(params.get('min_loc_per_trace'))} localization(s) per trace; the XY "
         f"rendering pixel used for subunit detection was "
@@ -1017,8 +1049,12 @@ RULES = [
                 r"on '(?P<name>.+?)':"),
      "analysis", _render_hlyb_pair_fit),
     (re.compile(
-        r"^HlyB subunit pair analysis \(template matching 3D\) on '(?P<name>.+?)': "
-        r"(?P<traces>[\d,]+) trace\(s\) → (?P<subunits>[\d,]+) subunit\(s\) → "
+        r"^HlyB subunit pair analysis \(template matching (?P<dims>[23])D\) on "
+        r"'(?P<name>.+?)': "
+        # the 2-D entry inserts its border-shrink counts before the arrow
+        r"(?P<traces>[\d,]+) trace\(s\)"
+        r"(?:, (?P<border>[\d,]+) border-excluded, (?P<interior>[\d,]+) interior)?"
+        r" → (?P<subunits>[\d,]+) subunit\(s\) → "
         r"(?P<structures>[\d,]+) HlyB structure\(s\); (?P<pairs>[\d,]+) pair\(s\), "
         r"median distance (?P<median>[-+\w.]+) nm \(unit Ø (?P<dunit>[-+\d.]+) nm, "
         r"candidate edge (?P<edge>[-+\d.]+) nm, min loc/trace (?P<minloc>[\d,]+), "

@@ -535,3 +535,37 @@ def test_each_fit_shape_is_reported_by_name(_app):
             assert shape in win._distance_stats_label.text()
     finally:
         win.close()
+
+
+def test_template_2d_dialog_exposes_both_border_and_template_controls(_app):
+    """The 2-D template mode needs the border shrink AND the template settings;
+    it previously collapsed onto the 3-D mode and showed the wrong pair."""
+    dlg = HlyBClusteringDialog(defaults=HlyBConfig(), mode="TEMPLATE2D")
+    try:
+        assert "Template matching 2D" in dlg.windowTitle()
+        assert dlg._border_mode is not None      # border shrink
+        assert dlg._template_tol is not None     # template thresholds
+        assert dlg._core_a_side is not None      # core geometry
+        assert dlg._zscale is None               # z is discarded in the plane
+        assert dlg._min_units.minimum() == 2
+    finally:
+        dlg.close()
+
+
+def test_hlyb_menu_lists_all_four_methods(_app):
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.main_window import MainWindow
+
+    state = AppState()
+    state.prefs.setdefault("data", {}).update({"show_data_info": False,
+                                              "show_render": False})
+    win = MainWindow(state)
+    try:
+        labels = [a.text() for a in win.menuHlyBPair.actions()]
+        assert labels == ["Pair-distance model fit (3D)",
+                          "Pair-distance model fit (2D)",
+                          "Template matching (3D)",
+                          "Template matching (2D)"]
+    finally:
+        win.close()
+        _app.processEvents()

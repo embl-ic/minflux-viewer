@@ -188,8 +188,8 @@ class HlyBClusteringDialog(QDialog):
         super().__init__(parent)
         mode_text = str(mode).upper()
         if "TEMPLATE" in mode_text:
-            self._mode = "TEMPLATE3D"
-            mode_label = "Template matching (3D)"
+            self._mode = "TEMPLATE2D" if "2D" in mode_text else "TEMPLATE3D"
+            mode_label = f"Template matching {self._mode[-2:]}"
         else:
             self._mode = "2D" if mode_text == "2D" else "3D"
             mode_label = self._mode
@@ -202,7 +202,7 @@ class HlyBClusteringDialog(QDialog):
             "Detect protein sub-units from MINFLUX traces, cluster them into HlyB "
             "structures, and measure the sub-unit pair distances within each structure."
         )
-        if self._mode == "2D":
+        if self._mode in {"2D", "TEMPLATE2D"}:
             intro_text += (
                 " Each E.coli is delineated from the localization density and shrunk "
                 "inward; traces in that border margin are excluded, because there the "
@@ -210,11 +210,18 @@ class HlyBClusteringDialog(QDialog):
                 "foreshortened. Note that the 2-D projection still superimposes the "
                 "upper and lower membrane, which this step does not correct."
             )
-        elif self._mode == "TEMPLATE3D":
+        if self._mode in {"TEMPLATE2D", "TEMPLATE3D"}:
             intro_text += (
                 " Candidate sub-units are assigned to a partial six-site, C3-symmetric "
                 "HlyB core. Pair distances are derived from one consistent geometry; "
                 "the sdAb displacement is treated as matching uncertainty."
+            )
+        if self._mode == "TEMPLATE2D":
+            intro_text += (
+                " Distances are measured in the image plane, where a tilted complex "
+                "appears shorter but never longer. The matcher therefore forgives "
+                "shortening up to the tilt the border shrink admits, so a genuine "
+                "complex is not rejected for being tilted."
             )
         intro = QLabel(intro_text)
         intro.setWordWrap(True)
@@ -302,7 +309,7 @@ class HlyBClusteringDialog(QDialog):
         form.addRow("Basic unit size:", self._unit_size)
 
         self._min_units = QSpinBox()
-        if self._mode == "TEMPLATE3D":
+        if self._mode in {"TEMPLATE2D", "TEMPLATE3D"}:
             self._min_units.setRange(2, 6)
             self._min_units.setValue(int(d.min_observed_subunits_per_HlyB))
             self._min_units.setToolTip(
@@ -320,7 +327,7 @@ class HlyBClusteringDialog(QDialog):
         self._d1a2a = self._dspin(1.0, 200.0, d.diameter_distance_1a2a_nm, 1, 1.0, " nm")
         self._d1b2b = self._dspin(1.0, 200.0, d.diameter_distance_1b2b_nm, 1, 1.0, " nm")
         self._d1b2b.setToolTip("Sets the HlyB clustering radius (2·d/√3).")
-        if self._mode != "TEMPLATE3D":
+        if self._mode not in {"TEMPLATE2D", "TEMPLATE3D"}:
             form.addRow("Distance 1a–1b (prior):", self._d1a1b)
             form.addRow("Distance 1a–2a (prior):", self._d1a2a)
             form.addRow("Distance 1b–2b (prior):", self._d1b2b)
@@ -336,7 +343,7 @@ class HlyBClusteringDialog(QDialog):
         self._template_rms = None
         self._template_max_resid = None
         self._template_match_frac = None
-        if self._mode == "TEMPLATE3D":
+        if self._mode in {"TEMPLATE2D", "TEMPLATE3D"}:
             self._core_a_side = self._dspin(
                 1.0, 200.0, d.template_core_a_ring_side_nm, 1, 0.1, " nm")
             self._core_b_side = self._dspin(
@@ -439,7 +446,8 @@ class HlyBClusteringDialog(QDialog):
                 else defaults.template_label_offset_nm
             ),
             min_observed_subunits_per_HlyB=(
-                int(self._min_units.value()) if self._mode == "TEMPLATE3D"
+                int(self._min_units.value())
+                if self._mode in {"TEMPLATE2D", "TEMPLATE3D"}
                 else defaults.min_observed_subunits_per_HlyB
             ),
             model_pair_tolerance_nm=(

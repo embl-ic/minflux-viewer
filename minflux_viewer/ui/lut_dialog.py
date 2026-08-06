@@ -12,8 +12,8 @@ Shows for the currently active render image:
   Yellow, Gray)
 * four **sliders** — Minimum, Maximum, Brightness, Contrast — matching
   Fiji's B&C behaviour
-* **Auto** — compute min/max that leave 0.35 % of pixels saturated at
-  each end, like Fiji's ``ImagePlus::IJ_Auto`` method
+* **Auto** — ImageJ-style repeated-click cycle that progressively increases
+  contrast and restarts from the full-range automatic threshold when exhausted
 * **Invert LUT** — flip the colormap
 * **Reset** — discard all edits and restore the state that was active
   when the dialog was opened
@@ -73,6 +73,9 @@ ALL_COLORMAPS: list[str] = _MPL_CMAPS + _SINGLE_COLOURS
 
 
 _SLIDER_RES = 1000
+_IMAGEJ_AUTO_THRESHOLD = 5000
+_IMAGEJ_AUTO_RESET_THRESHOLD = 10
+_IMAGEJ_AUTO_HIST_BINS = 256
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +243,7 @@ class LutDialog(QDialog):
     on_cmap_changed   : (name, invert) -> None
     on_invert_changed : (invert) -> None    # optional fast path
     on_reset          : () -> None
+    on_auto           : () -> (lo, hi) | None  # optional owner-managed cycle
     """
 
     def __init__(
@@ -250,6 +254,7 @@ class LutDialog(QDialog):
         on_reset:          Callable[[], None] | None = None,
         on_gamma_changed:  Callable[[float], None] | None = None,
         parent: QWidget | None = None,
+        on_auto: Callable[[], tuple[float, float] | None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._cb_levels  = on_levels_changed
@@ -257,7 +262,9 @@ class LutDialog(QDialog):
         self._cb_invert  = on_invert_changed
         self._cb_reset   = on_reset
         self._cb_gamma   = on_gamma_changed
+        self._cb_auto    = on_auto
         self._gamma: float = 1.0
+        self._auto_threshold: int = 0
 
         self.setWindowTitle("LUT")
         # Non-modal so the user can adjust levels while watching the image
@@ -411,14 +418,21 @@ class LutDialog(QDialog):
 
         # ── Action buttons ────────────────────────────────────────
         btn_row = QHBoxLayout()
-        for label, cb in [
-            ("Auto",   self._on_auto),
-            ("Invert LUT", self._on_invert),
-            ("Reset",  self._on_reset_clicked),
-        ]:
-            b = QPushButton(label)
-            b.clicked.connect(cb)
-            btn_row.addWidget(b)
+        self._auto_btn = QPushButton("Auto")
+        self._auto_btn.setCheckable(True)
+        self._auto_btn.setToolTip(
+            "ImageJ-style automatic display range. Repeated clicks increase "
+            "clipping; when no valid range remains, the sequence resets and "
+            "starts again."
+        )
+        self._auto_btn.clicked.connect(self._on_auto)
+        btn_row.addWidget(self._auto_btn)
+        invert_btn = QPushButton("Invert LUT")
+        invert_btn.clicked.connect(self._on_invert)
+        btn_row.addWidget(invert_btn)
+        reset_btn = QPushButton("Reset")
+        reset_btn.clicked.connect(self._on_reset_clicked)
+        btn_row.addWidget(reset_btn)
         btn_row.addStretch()
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
@@ -486,6 +500,15 @@ class LutDialog(QDialog):
         self._set_combo_silent(cmap_name)
         self._invert = bool(invert)
         self._update_histogram()
+        if capture_baseline and self._cb_auto is None:
+            self._auto_threshold = 0
+            self.set_auto_state(False)
+
+    def set_auto_state(self, checked: bool) -> None:
+        """Reflect whether automatic level selection is currently active."""
+        self._auto_btn.blockSignals(True)
+        self._auto_btn.setChecked(bool(checked))
+        self._auto_btn.blockSignals(False)
 
     # ------------------------------------------------------------------
     # Level / slider logic
@@ -539,7 +562,10 @@ class LutDialog(QDialog):
         frac = s / _SLIDER_RES
         return self._data_lo + frac * (self._data_hi - self._data_lo)
 
-    def _emit_levels(self) -> None:
+    def _emit_levels(self, *, manual: bool = True) -> None:
+        if manual:
+            self._auto_threshold = 0
+            self.set_auto_state(False)
         self._lo_line.blockSignals(True)
         self._hi_line.blockSignals(True)
         self._lo_line.setPos(self._lo)
@@ -557,6 +583,8 @@ class LutDialog(QDialog):
             lo = self._hi
         self._lo = max(self._data_lo, lo)
         self._sync_widgets_from_levels()              # re-clamps line, updates sliders/spins
+        self._auto_threshold = 0
+        self.set_auto_state(False)
         self._cb_levels(self._lo, self._hi)
 
     def _on_hi_line_moved(self) -> None:
@@ -565,6 +593,8 @@ class LutDialog(QDialog):
             hi = self._lo
         self._hi = min(self._data_hi, hi)
         self._sync_widgets_from_levels()
+        self._auto_threshold = 0
+        self.set_auto_state(False)
         self._cb_levels(self._lo, self._hi)
 
     # -- Gamma tilt line -------------------------------------------
@@ -661,21 +691,83 @@ class LutDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _on_auto(self) -> None:
-        """Fiji-style auto: leave 0.35 % of pixels saturated at each end."""
-        if self._pixel_values is None or self._pixel_values.size == 0:
+        """Run the same repeated-click ImageJ Auto cycle as the B/C palette."""
+        if self._cb_auto is not None:
+            levels = self._cb_auto()
+            if levels is None:
+                self.set_auto_state(False)
+                return
+            self._set_levels_silent(*levels)
+            self.set_auto_state(True)
             return
-        # Drop zeros from histogram estimation (typical for empty pixels
-        # in a rendered SMLM image)
-        vals = self._pixel_values
-        vals = vals[vals > 0] if np.any(vals > 0) else vals
-        if vals.size == 0:
+
+        levels = self._compute_imagej_auto_levels()
+        if levels is None:
+            self.set_auto_state(False)
             return
-        lo, hi = np.percentile(vals, [0.35, 99.65])
-        self._lo, self._hi = float(lo), float(hi)
-        if self._hi <= self._lo:
-            self._hi = self._lo + 1.0
+        self._lo, self._hi = levels
         self._sync_widgets_from_levels()
-        self._emit_levels()
+        self.set_auto_state(True)
+        self._emit_levels(manual=False)
+
+    def _compute_imagej_auto_levels(self) -> tuple[float, float] | None:
+        if self._pixel_values is None or self._pixel_values.size == 0:
+            return None
+        values = np.asarray(self._pixel_values, dtype=float).ravel()
+        values = values[np.isfinite(values)]
+        if values.size < 10:
+            return None
+        data_min = float(values.min())
+        data_max = float(values.max())
+        if data_max <= data_min:
+            return data_min, data_min + 1.0
+
+        if self._auto_threshold < _IMAGEJ_AUTO_RESET_THRESHOLD:
+            self._auto_threshold = _IMAGEJ_AUTO_THRESHOLD
+        else:
+            self._auto_threshold //= 2
+
+        histogram, _edges = np.histogram(
+            values,
+            bins=_IMAGEJ_AUTO_HIST_BINS,
+            range=(data_min, data_max),
+        )
+        pixel_count = int(values.size)
+        limit = pixel_count // 10
+        threshold = pixel_count // self._auto_threshold
+
+        found = False
+        i = -1
+        while not found and i < _IMAGEJ_AUTO_HIST_BINS - 1:
+            i += 1
+            count = int(histogram[i])
+            if count > limit:
+                count = 0
+            found = count > threshold
+        hmin = i
+
+        found = False
+        i = _IMAGEJ_AUTO_HIST_BINS
+        while not found and i > 0:
+            i -= 1
+            count = int(histogram[i])
+            if count > limit:
+                count = 0
+            found = count > threshold
+        hmax = i
+
+        if hmax < hmin:
+            self._auto_threshold = 0
+            return data_min, data_max
+
+        bin_size = (data_max - data_min) / float(_IMAGEJ_AUTO_HIST_BINS)
+        lo = data_min + hmin * bin_size
+        hi = data_min + hmax * bin_size
+        if hi <= lo:
+            lo, hi = data_min, data_max
+        if hi <= lo:
+            hi = lo + 1.0
+        return float(lo), float(hi)
 
     def _on_invert(self) -> None:
         self._invert = not self._invert
@@ -688,6 +780,8 @@ class LutDialog(QDialog):
     def _on_reset_clicked(self) -> None:
         if self._initial_state is None:
             return
+        self._auto_threshold = 0
+        self.set_auto_state(False)
         # Reset display range to the current image's full data range + linear gamma.
         self._set_levels_silent(self._data_lo, self._data_hi)
         self._set_gamma(1.0)

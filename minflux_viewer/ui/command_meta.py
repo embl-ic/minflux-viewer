@@ -270,6 +270,16 @@ COMMAND_META: dict[str, CommandMeta] = {
                               inputs=("active dataset (loc, tid, tim)",),
                               outputs=("cell delineation", "pair-distance profile",
                                        "null band", "model comparison")),
+    "actionHlyBTemplate2D": CommandMeta(A + "hlyb_clustering.py",
+                              ("hlyb", "template", "subunit", "dimer", "pair", "2d",
+                               "projection", "ecoli", "border", "membrane", "tilt"),
+                              "HlyB template matching in the image plane: E. coli "
+                              "delineation and border shrink first, then six-site "
+                              "matching that forgives the foreshortening the remaining "
+                              "membrane tilt can cause.", "analysis",
+                              inputs=("active dataset (loc, tid)",),
+                              outputs=("cell delineation", "sub-unit centres",
+                                       "matched structures", "pair-distance histogram")),
     "actionHlyBTemplate3D": CommandMeta(A + "hlyb_clustering.py",
                               ("hlyb", "template", "subunit", "dimer", "pair", "3d"),
                               "HlyB template matching (3-D): per-complex assignment of "

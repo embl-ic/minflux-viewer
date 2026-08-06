@@ -68,6 +68,10 @@ class HlyBConfig:
     min_pair_match_fraction: float = 0.7
     candidate_edge_radius_nm: float = 0.0
     max_candidate_subsets_per_component: int = 20_000
+    #: Largest membrane tilt (degrees from face-on) the 2-D matcher forgives.
+    #: 0 disables the allowance, which is correct in 3-D where a separation is
+    #: orientation-independent.  The 2-D entry derives it from the border shrink.
+    template_projection_tilt_deg: float = 0.0
     # 2-D-only: per-E.coli mask + border shrink (Ecoli_dimer_analysis_2D.m).
     border_size_nm: float = 200.0       # shrink each cell mask in by this much
     border_mode: str = "absolute"       # "absolute" (nm) or "relative" (fraction)
@@ -547,6 +551,29 @@ def _connected_components(adj: np.ndarray) -> list[np.ndarray]:
     return comps
 
 
+def _effective_residual(observed: np.ndarray, expected: np.ndarray,
+                        tilt_deg: float) -> np.ndarray:
+    """Residual after allowing for orthographic foreshortening.
+
+    In three dimensions a separation is orientation-independent and this is the
+    plain difference.  In projection it is not: a pair tilted out of the image
+    plane appears **shorter**, never longer, by up to ``1 - cos(tilt)`` of its
+    true length.  Scoring a projected observation against a three-dimensional
+    model with a symmetric residual would therefore reject genuinely matching
+    complexes purely for being tilted, and would do so more the larger the
+    distance -- biasing whatever survived toward the shortest classes.
+
+    Shortening within the allowance is forgiven; lengthening never is, because
+    projection cannot produce it.
+    """
+    residual = np.asarray(observed, dtype=float) - np.asarray(expected, dtype=float)
+    tilt = float(tilt_deg)
+    if tilt <= 0.0:
+        return residual
+    slack = np.asarray(expected, dtype=float) * (1.0 - np.cos(np.deg2rad(min(tilt, 89.0))))
+    return np.where(residual < 0.0, np.minimum(residual + slack, 0.0), residual)
+
+
 def _score_template_candidate(
     unit_indices: np.ndarray,
     centers: np.ndarray,
@@ -559,12 +586,13 @@ def _score_template_candidate(
     pair_idx = cache["pair_idx"]
     obs = np.array([np.linalg.norm(centers[j] - centers[i]) for i, j in pair_idx], dtype=float)
     expected_all = cache["expected"]
-    residual_all = obs[None, :] - expected_all
+    tilt = float(getattr(cfg, "template_projection_tilt_deg", 0.0) or 0.0)
+    residual_all = _effective_residual(obs[None, :], expected_all, tilt)
     rms_all = np.sqrt(np.mean(residual_all * residual_all, axis=1))
     best = int(np.argmin(rms_all))
     assignment = cache["assignments"][best]
     expected = expected_all[best]
-    residual = obs - expected
+    residual = _effective_residual(obs, expected, tilt)
     max_abs = float(np.max(np.abs(residual))) if residual.size else 0.0
     match_fraction = float(np.mean(np.abs(residual) <= cfg.model_pair_tolerance_nm))
     labels = model["labels"][assignment]
@@ -736,6 +764,99 @@ def analyze_hlyb_template3d(loc_m: np.ndarray, tid: np.ndarray, cfg: HlyBConfig 
         "match_qc": qc,
         "template_matching": True,
     }
+
+
+def analyze_hlyb_template2d(loc_m: np.ndarray, tid: np.ndarray,
+                            cfg: HlyBConfig | None = None) -> dict:
+    """Six-site template matching in the image plane.
+
+    Identical to :func:`analyze_hlyb_template3d` except for what projection
+    forces:
+
+    * the E.coli border-shrink preprocessing of :func:`analyze_hlyb_2d` runs
+      first, dropping the rim where the membrane is edge-on and an in-plane
+      distance is worst foreshortened;
+    * the axial coordinate is then discarded and every distance is measured in
+      the plane;
+    * the matcher forgives foreshortening up to the tilt the shrink admits
+      (see :func:`_effective_residual`).  Without that allowance a projected
+      complex is scored against three-dimensional model distances with a
+      symmetric residual, which rejects genuinely matching complexes for being
+      tilted and does so more the larger the distance.
+
+    The reference geometry is itself planar (the six sites are coplanar), so a
+    face-on complex projects to the modelled distances exactly; the allowance
+    covers the residual tilt that survives the shrink.
+    """
+    cfg = cfg or HlyBConfig()
+    loc_m = np.asarray(loc_m, dtype=np.float64)
+    tid = np.asarray(tid).ravel()
+    loc_nm_xy = loc_m[:, :2] * 1e9
+
+    smooth_nm = (
+        float(cfg.mask_sigma_px) * float(cfg.mask_pixel_size_nm)
+        if float(cfg.mask_sigma_px) > 0 else float(cfg.mask_smooth_nm)
+    )
+    cells = compute_cell_mask(
+        loc_nm_xy,
+        border_size_nm=cfg.border_size_nm,
+        border_mode=cfg.border_mode,
+        border_fraction=cfg.border_fraction,
+        pixel_size_nm=cfg.mask_pixel_size_nm,
+        smooth_nm=smooth_nm,
+        close_nm=cfg.mask_close_nm,
+        open_nm=cfg.mask_open_nm,
+        min_cell_area_nm2=cfg.min_cell_area_nm2,
+    )
+    border_loc = cells.border_loc
+
+    if tid.size:
+        uid, inv = np.unique(tid, return_inverse=True)
+        border_trace = np.zeros(uid.size, dtype=bool)
+        np.logical_or.at(border_trace, inv, border_loc)
+        remove = border_trace[inv]
+        n_total = int(uid.size)
+        n_border = int(border_trace.sum())
+    else:
+        remove = np.zeros(0, dtype=bool)
+        n_total = n_border = 0
+    keep = ~remove
+
+    # The shrink bounds the membrane tilt: keeping a fraction f of a cell's
+    # half-width admits only normals within arcsin(1 - f) of face-on.  That
+    # bound, not a guess, is what the matcher forgives.
+    tilt = float(cells.stats.get("implied_max_tilt_deg", 0.0) or 0.0)
+    if tilt <= 0.0 and str(cells.stats.get("border_mode")) == "absolute":
+        half = float(cells.stats.get("median_half_width_nm", 0.0) or 0.0)
+        if half > 0:
+            ratio = max(0.0, 1.0 - float(cfg.border_size_nm) / half)
+            tilt = float(np.degrees(np.arcsin(min(ratio, 1.0))))
+
+    cfg_2d = HlyBConfig(**{**vars(cfg), "template_projection_tilt_deg": tilt})
+    loc_2d = loc_m.copy()
+    loc_2d[:, 2] = 0.0
+    result = analyze_hlyb_template3d(loc_2d[keep], tid[keep], cfg_2d)
+
+    interior_source_indices = np.flatnonzero(keep)
+    relative = np.asarray(
+        result.get("point_source_indices", np.arange(interior_source_indices.size)),
+        dtype=np.int64)
+    result["point_source_indices"] = interior_source_indices[relative]
+
+    border_xy = loc_nm_xy[border_loc]
+    result["border_points_nm"] = np.column_stack(
+        [border_xy, np.zeros(border_xy.shape[0])])
+    result["border_source_indices"] = np.flatnonzero(border_loc)
+    result["n_border_traces"] = n_border
+    result["n_total_traces"] = n_total
+    result["is_2d"] = True
+    result["cell_mask"] = cells
+    result["cell_mask_stats"] = cells.stats
+    result["n_cells"] = int(cells.stats.get("n_cells", 0))
+    result["projection_tilt_deg"] = tilt
+    result["projection_max_shortening"] = float(
+        1.0 - np.cos(np.deg2rad(min(tilt, 89.0)))) if tilt > 0 else 0.0
+    return result
 
 
 # --------------------------------------------------------------------------

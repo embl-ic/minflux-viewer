@@ -543,9 +543,18 @@ class MainWindow(QMainWindow):
         self.actionHlyBTemplate3D.triggered.connect(
             lambda: self._run_hlyb_pair_analysis(mode="TEMPLATE3D")
         )
+        self.actionHlyBTemplate2D = QAction("Template matching (2D)", self)
+        self.actionHlyBTemplate2D.setToolTip(
+            "As the 3-D template match, but in the image plane: each E. coli is "
+            "delineated and shrunk inward first, and the matcher forgives the "
+            "foreshortening that the remaining membrane tilt can cause.")
+        self.actionHlyBTemplate2D.triggered.connect(
+            lambda: self._run_hlyb_pair_analysis(mode="TEMPLATE2D")
+        )
         self.menuHlyBPair.addAction(self.actionHlyBPairFit)
         self.menuHlyBPair.addAction(self.actionHlyBPairFit2D)
         self.menuHlyBPair.addAction(self.actionHlyBTemplate3D)
+        self.menuHlyBPair.addAction(self.actionHlyBTemplate2D)
         # The plain "2D" and "3D" entries are retired: the 3-D one reported
         # generic DBSCAN proximity groups (including groups larger than a
         # six-site complex, and distances beyond the model's own maximum) as
@@ -1020,6 +1029,7 @@ class MainWindow(QMainWindow):
             #self.menuHlyBPair.menuAction(),
             #self.actionHlyBPairFit,
             #self.actionHlyBTemplate3D,
+            #self.actionHlyBTemplate2D,
             #self.menuAnalyzeSegmentation.menuAction(),
             #self.actionSegNpc2D,
             #self.actionSegNpc3D,
@@ -2620,7 +2630,7 @@ class MainWindow(QMainWindow):
 
         mode_text = str(mode).upper()
         if "TEMPLATE" in mode_text:
-            mode = "TEMPLATE3D"
+            mode = "TEMPLATE2D" if "2D" in mode_text else "TEMPLATE3D"
         else:
             mode = "2D" if mode_text == "2D" else "3D"
         idx = self._state.active_idx
@@ -2649,6 +2659,7 @@ class MainWindow(QMainWindow):
             HlyBConfig,
             analyze_hlyb,
             analyze_hlyb_2d,
+            analyze_hlyb_template2d,
             analyze_hlyb_template3d,
         )
 
@@ -2672,6 +2683,8 @@ class MainWindow(QMainWindow):
         try:
             if mode == "2D":
                 result = analyze_hlyb_2d(loc_m, tid, cfg)
+            elif mode == "TEMPLATE2D":
+                result = analyze_hlyb_template2d(loc_m, tid, cfg)
             elif mode == "TEMPLATE3D":
                 result = analyze_hlyb_template3d(loc_m, tid, cfg)
             else:
@@ -2685,10 +2698,12 @@ class MainWindow(QMainWindow):
                 QApplication.restoreOverrideCursor()
 
         from .modeless import show_modeless
-        title_mode = "Template matching (3D)" if mode == "TEMPLATE3D" else mode
+        title_mode = {"TEMPLATE3D": "Template matching (3D)",
+                      "TEMPLATE2D": "Template matching (2D)"}.get(mode, mode)
         win = HlyBResultWindow(
             result, cfg, title=f"{ds.name} ({title_mode})", owner=self,
-            prefer_2d=(mode == "2D"), source_dataset=ds, prefs=self._state.prefs,
+            prefer_2d=(mode in {"2D", "TEMPLATE2D"}), source_dataset=ds,
+            prefs=self._state.prefs,
         )
         show_modeless(win, self)
 
@@ -2700,11 +2715,15 @@ class MainWindow(QMainWindow):
                 f"{result['n_total_traces']} trace(s), {result['n_border_traces']} border-excluded, "
                 f"{result['n_traces']} interior → ")
             extra = (f"border {cfg.border_size_nm:g} nm, mask px {cfg.mask_pixel_size_nm:g} nm")
-        elif mode == "TEMPLATE3D":
+        elif mode in {"TEMPLATE2D", "TEMPLATE3D"}:
             qc = result.get("match_qc", {})
+            dims = "2D" if mode == "TEMPLATE2D" else "3D"
             prefix = (
-                f"HlyB subunit pair analysis (template matching 3D) on '{ds.name}': "
-                f"{result['n_traces']} trace(s) → ")
+                f"HlyB subunit pair analysis (template matching {dims}) on '{ds.name}': "
+                + (f"{result.get('n_total_traces', result['n_traces'])} trace(s), "
+                   f"{result.get('n_border_traces', 0)} border-excluded, "
+                   f"{result['n_traces']} interior → " if mode == "TEMPLATE2D"
+                   else f"{result['n_traces']} trace(s) → "))
             extra = (
                 f"z-scale {cfg.z_scaling_factor:g}, template tol {result['model_pair_tolerance_nm']:.1f} nm, "
                 f"tested {qc.get('n_candidates_tested', 0)} candidate(s), "
@@ -2716,10 +2735,11 @@ class MainWindow(QMainWindow):
             extra = f"z-scale {cfg.z_scaling_factor:g}"
         radius_label = (
             f"candidate edge {result['candidate_edge_radius_nm']:.1f} nm"
-            if mode == "TEMPLATE3D" else f"HlyB radius {result['hlyb_diameter_nm']:.1f} nm"
+            if mode in {"TEMPLATE2D", "TEMPLATE3D"}
+            else f"HlyB radius {result['hlyb_diameter_nm']:.1f} nm"
         )
         method_data = None
-        if mode == "TEMPLATE3D":
+        if mode in {"TEMPLATE2D", "TEMPLATE3D"}:
             model = result.get("model", {})
             structures = result.get("structures", [])
             structure_sizes: dict[str, int] = {}
@@ -2809,6 +2829,18 @@ class MainWindow(QMainWindow):
                     "class_distances_nm": {
                         str(key): float(value)
                         for key, value in model.get("class_distances_nm", {}).items()
+                    },
+                },
+                "projection": {
+                    "is_2d": bool(result.get("is_2d", False)),
+                    "tilt_deg": float(result.get("projection_tilt_deg", 0.0) or 0.0),
+                    "max_shortening": float(
+                        result.get("projection_max_shortening", 0.0) or 0.0),
+                    "n_border_traces": int(result.get("n_border_traces", 0)),
+                    "n_total_traces": int(result.get("n_total_traces", 0)),
+                    "cell_mask_stats": {
+                        k: (float(v) if isinstance(v, (int, float)) else str(v))
+                        for k, v in (result.get("cell_mask_stats") or {}).items()
                     },
                 },
                 "screening": {
