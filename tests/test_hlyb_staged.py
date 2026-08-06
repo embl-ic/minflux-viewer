@@ -5,6 +5,9 @@ import pytest
 
 from minflux_viewer.analysis.hlyb_staged import (
     Staged3DConfig,
+    _band_descriptors,
+    _excess_summary,
+    _null_ratio_distribution,
     analyze_hlyb_staged_3d,
     infer_label_sites,
     segment_spatial_components,
@@ -129,6 +132,137 @@ def test_staged_analysis_does_not_create_short_range_excess_on_null_rods():
 
     assert 0.75 < summary["band_ratio"] < 1.30
     assert summary["band_p"] > 0.025
+
+
+def test_band_p_reports_the_resolution_that_censors_it():
+    """The rank-based p cannot fall below 1/(replicates + 1).
+
+    It is quoted in the report, so the floor has to travel with it -- otherwise
+    a censored value reads as a measured one.
+    """
+    result = _synthetic_result(with_dimers=True)
+    summary = result["summary"]
+    replicates = result["null_profiles"].shape[0]
+
+    assert summary["band_p_resolution"] == pytest.approx(1.0 / (replicates + 1))
+    assert summary["band_p"] >= summary["band_p_resolution"] - 1e-12
+
+
+def test_null_ratio_distribution_is_centred_on_one():
+    """Leave-one-out ratios of exchangeable replicates must centre on unity."""
+    rng = np.random.default_rng(11)
+    counts = rng.normal(500.0, 25.0, 199)
+    ratios = _null_ratio_distribution(counts)
+
+    assert ratios.size == counts.size
+    assert float(ratios.mean()) == pytest.approx(1.0, abs=0.01)
+    # Too few replicates to estimate a spread -> refuse rather than guess.
+    assert _null_ratio_distribution(counts[:2]).size == 0
+
+
+def test_calibrated_ratio_z_scores_the_ratio_against_its_own_null():
+    result = _synthetic_result(with_dimers=True)
+    summary = result["summary"]
+
+    assert summary["null_band_ratio_mean"] == pytest.approx(1.0, abs=0.02)
+    assert summary["null_band_ratio_sd"] > 0.0
+    # Unbounded, so unlike band_p it still separates strong from overwhelming.
+    assert summary["band_ratio_z"] > 3.0
+
+    null_only = _synthetic_result(with_dimers=False)["summary"]
+    assert null_only["band_ratio_z"] < summary["band_ratio_z"]
+
+
+def test_band_descriptors_match_the_summary_on_a_single_null_profile():
+    """The bootstrap shares this helper instead of duplicating a null stack.
+
+    It used to pass ``np.vstack([m, m])`` -- a fabricated two-replicate stack --
+    whose p/z/sd were meaningless.  The descriptors must agree exactly with the
+    replicate-stack summary for the keys the bootstrap actually consumes.
+    """
+    rng = np.random.default_rng(5)
+    edges = np.arange(0.0, 60.5, 0.5)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    mean = rng.uniform(5.0, 40.0, centers.size)
+    observed = mean + rng.uniform(0.0, 6.0, centers.size)
+    band = (centers >= 8.0) & (centers < 25.0)
+
+    direct = _band_descriptors(observed, mean, centers, band)
+    viaset = _excess_summary(observed, np.vstack([mean, mean]), edges,
+                             lo_nm=8.0, hi_nm=25.0)
+
+    assert direct["band_ratio"] == pytest.approx(viaset["band_ratio"])
+    assert direct["positive_excess_centroid_nm"] == pytest.approx(
+        viaset["positive_excess_centroid_nm"])
+    assert direct["peak_nm"] == pytest.approx(viaset["peak_nm"])
+
+
+def test_stratum_profile_exposes_the_ratio_scale_dependence():
+    """band_ratio is conditional on the randomization scale; the location is not.
+
+    Reporting the ratio without its stratum would present a convention-dependent
+    number as an absolute effect size.
+    """
+    rng = np.random.default_rng(9)
+    all_sites = []
+    for offset in (0.0, 2600.0, 5200.0):
+        sites = _rod_sites(rng, 100, offset_x=offset)
+        anchors = _rod_sites(rng, 24, offset_x=offset)
+        partners = anchors.copy()
+        partners[:, 0] += 14.0
+        all_sites.append(np.vstack([sites, anchors, partners]))
+    loc, tid, tim = _localizations_from_sites(np.vstack(all_sites), rng)
+    cfg = Staged3DConfig(
+        z_scaling_factor=1.0, cell_link_nm=300.0, min_sites_per_component=30,
+        null_stratum_sites=48, null_replicates=39, bootstrap_replicates=79,
+        run_sensitivity=False, run_stratum_profile=True,
+        stratum_profile_sites=(16, 48, 128), sensitivity_replicates=19,
+    )
+    result = analyze_hlyb_staged_3d(loc, tid, tim, cfg)
+    profile = result["stratum_profile"]
+
+    assert [row["null_stratum_sites"] for row in profile["rows"]] == [16, 48, 128]
+    # The ratio grows with the stratum: a wider window absorbs less structure.
+    ratios = [row["band_ratio"] for row in profile["rows"]]
+    assert ratios[0] < ratios[-1]
+    # The excess location is the descriptor that survives the scan.
+    centroids = [row["positive_excess_centroid_nm"] for row in profile["rows"]]
+    assert max(centroids) - min(centroids) < 4.0
+
+
+def test_component_bootstrap_flags_a_narrow_interval_at_few_components():
+    result = _synthetic_result(with_dimers=True)
+    bootstrap = result["bootstrap"]
+
+    assert bootstrap["available"]
+    assert bootstrap["narrow_ci_warning"] is (bootstrap["n_components"] < 5)
+
+
+def test_sensitivity_spread_is_reported_as_the_preferred_uncertainty():
+    rng = np.random.default_rng(4)
+    all_sites = []
+    for offset in (0.0, 2600.0, 5200.0):
+        sites = _rod_sites(rng, 100, offset_x=offset)
+        anchors = _rod_sites(rng, 24, offset_x=offset)
+        partners = anchors.copy()
+        partners[:, 0] += 14.0
+        all_sites.append(np.vstack([sites, anchors, partners]))
+    loc, tid, tim = _localizations_from_sites(np.vstack(all_sites), rng)
+    cfg = Staged3DConfig(
+        z_scaling_factor=1.0, cell_link_nm=300.0, min_sites_per_component=30,
+        null_stratum_sites=48, null_replicates=39, bootstrap_replicates=79,
+        run_sensitivity=True, sensitivity_replicates=19,
+        run_stratum_profile=False,
+    )
+    result = analyze_hlyb_staged_3d(loc, tid, tim, cfg)
+
+    lo, hi = result["centroid_sensitivity_range_nm"]
+    assert np.isfinite(lo) and np.isfinite(hi) and lo <= hi
+    assert lo <= result["summary"]["positive_excess_centroid_nm"] <= hi
+    # The calibrated flag is reported alongside the nominal-p one.
+    assert result["robust_short_range_excess_calibrated"] is not None
+    assert result["sensitivity_calibrated_passes"] <= result[
+        "sensitivity_valid_variants"]
 
 
 def test_staged_dialog_round_trips_scientific_defaults(qtbot):

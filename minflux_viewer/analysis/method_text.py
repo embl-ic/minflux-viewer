@@ -755,18 +755,50 @@ def _render_hlyb_staged_short_range(m, ev, state):
     if bootstrap.get("available"):
         ci = bootstrap.get("centroid_ci95_nm") or [float("nan"), float("nan")]
         ratio_ci = bootstrap.get("band_ratio_ci95") or [float("nan"), float("nan")]
+        narrow = (
+            " Because only a handful of components were available, this interval "
+            "understates the true between-cell variance and the parameter-sensitivity "
+            "spread below is the interval we quote."
+            if bootstrap.get("narrow_ci_warning") else "")
         bootstrap_text = (
             f"Resampling the {_method_count(bootstrap.get('n_components'))} spatial "
             f"components as independent units gave a 95 % interval of "
             f"{_method_number(ci[0], 2)}–{_method_number(ci[1], 2)} nm for the "
             f"positive-excess centroid and {_method_number(ratio_ci[0], 2)}–"
-            f"{_method_number(ratio_ci[1], 2)} for the band ratio."
+            f"{_method_number(ratio_ci[1], 2)} for the band ratio.{narrow}"
         )
     else:
         bootstrap_text = (
             "A component-level interval was not reported because fewer than three "
             "independent retained components were available."
         )
+
+    profile = method.get("stratum_profile") or {}
+    profile_rows = profile.get("rows") or []
+    if profile_rows:
+        p_lo, p_hi = (profile.get("band_ratio_range")
+                      or [float("nan"), float("nan")])
+        c_lo, c_hi = (profile.get("centroid_range_nm")
+                      or [float("nan"), float("nan")])
+        strata = ", ".join(_method_count(row.get("null_stratum_sites"))
+                           for row in profile_rows)
+        conditional = bool(profile.get("band_ratio_is_stratum_conditional"))
+        profile_text = (
+            f"Because the stratum width sets the axial window within which the "
+            f"randomization destroys structure, it also sets how much structure the "
+            f"null absorbs. Holding the inferred sites and components fixed and "
+            f"varying the stratum alone over {strata} sites, the observed/null ratio "
+            f"moved from {_method_number(p_lo, 2)} to {_method_number(p_hi, 2)} while "
+            f"the positive-excess centroid moved only from {_method_number(c_lo, 2)} "
+            f"to {_method_number(c_hi, 2)} nm. "
+            + ("The ratio is therefore conditional on the stratification scale and is "
+               "reported together with it; the location of the excess, not the "
+               "magnitude of the ratio, is the stable descriptor."
+               if conditional else
+               "The ratio was therefore stable across the stratification scale.")
+        )
+    else:
+        profile_text = ""
 
     finite_ratios = [float(row.get("band_ratio")) for row in sensitivity
                      if isinstance(row, dict) and row.get("band_ratio") is not None
@@ -776,12 +808,17 @@ def _render_hlyb_staged_short_range(m, ev, state):
                         and row.get("positive_excess_centroid_nm") is not None
                         and math.isfinite(float(row.get("positive_excess_centroid_nm")))]
     if finite_ratios and finite_centroids:
-        robust = method.get("robust_short_range_excess")
+        robust = method.get("robust_short_range_excess_calibrated")
+        if robust is None:
+            robust = method.get("robust_short_range_excess")
+        criterion = _method_number(method.get("calibrated_ratio_z"), 1)
         robust_text = (
-            "The short-range claim passed every valid sensitivity variant."
+            f"Every valid variant showed a ratio above unity and at least "
+            f"{criterion} standard deviations above its own null, so the "
+            f"short-range claim was classified as robust."
             if robust is True else
-            "The short-range claim did not pass every sensitivity variant and was "
-            "therefore classified as parameter-sensitive."
+            "At least one valid variant failed that criterion, so the short-range "
+            "claim was classified as parameter-sensitive."
             if robust is False else "")
         sensitivity_text = (
             f"The mandatory sensitivity audit varied the same-site diameter over "
@@ -791,7 +828,8 @@ def _render_hlyb_staged_short_range(m, ev, state):
             f"{_method_number(min(finite_ratios), 2)} to "
             f"{_method_number(max(finite_ratios), 2)}, and the positive-excess "
             f"centroid from {_method_number(min(finite_centroids), 2)} to "
-            f"{_method_number(max(finite_centroids), 2)} nm. {robust_text}"
+            f"{_method_number(max(finite_centroids), 2)} nm; the latter span is the "
+            f"uncertainty we quote for the location of the excess. {robust_text}"
         )
     else:
         sensitivity_text = "No parameter-sensitivity audit was requested for this run."
@@ -845,14 +883,26 @@ def _render_hlyb_staged_short_range(m, ev, state):
         f"{_method_count(result.get('band_observed_pairs'))} observed pair(s) were "
         f"compared with {_method_number(result.get('band_null_mean_pairs'), 1)} ± "
         f"{_method_number(result.get('band_null_sd_pairs'), 1)} under the surface null, "
-        f"an observed/null ratio of {_method_number(result.get('band_ratio'), 3)} "
-        f"(one-sided conditional-randomization p = "
-        f"{_method_number(result.get('band_p'), 4)}). The positive portion of the "
+        f"an observed/null ratio of {_method_number(result.get('band_ratio'), 3)}. "
+        f"Evidence is reported as the position of that ratio within the null "
+        f"replicate distribution, which was centred on "
+        f"{_method_number(result.get('null_band_ratio_mean'), 3)} with a standard "
+        f"deviation of {_method_number(result.get('null_band_ratio_sd'), 3)}, placing "
+        f"the observation {_method_number(result.get('band_ratio_z'), 1)} standard "
+        f"deviations above the null. The rank-based one-sided randomization p-value "
+        f"was {_method_number(result.get('band_p'), 4)}, but it is bounded below by "
+        f"{_method_number(result.get('band_p_resolution'), 4)} at this replicate count "
+        f"and was found to be anti-conservative when surrogates drawn from the null "
+        f"itself were re-tested; it is reported for completeness rather than as the "
+        f"evidential statistic. The positive portion of the "
         f"observed-minus-null profile had a peak at "
         f"{_method_number(result.get('peak_nm'), 2)} nm, centroid at "
         f"{_method_number(result.get('positive_excess_centroid_nm'), 2)} nm and median "
         f"at {_method_number(result.get('positive_excess_median_nm'), 2)} nm. "
-        f"{bootstrap_text} {sensitivity_text} The centroid and peak describe an excess "
+        f"{bootstrap_text} {sensitivity_text}"
+        + (f"\n\nDependence on the null stratification. {profile_text}"
+           if profile_text else "")
+        + f"\n\nThe centroid and peak describe an excess "
         f"population only: the analysis neither identifies pair membership nor fits or "
         f"claims a molecular HlyB dimer distance."
     )
