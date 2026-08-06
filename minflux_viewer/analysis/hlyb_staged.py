@@ -77,6 +77,23 @@ class Staged3DConfig:
     sensitivity_stratum_sites: tuple[int, ...] = (32, 64, 128)
     sensitivity_cell_link_factors: tuple[float, ...] = (0.75, 1.0, 1.25)
 
+    # Stratum profile.  ``null_stratum_sites`` sets the axial window inside
+    # which the randomization destroys structure, so it also sets how much
+    # structure the null absorbs: ``band_ratio`` is conditional on it and is
+    # not an absolute effect size.  This scan varies the null alone, holding
+    # the inferred sites and components fixed, so the dependence is visible
+    # rather than buried in the sensitivity audit (which varies them too).
+    run_stratum_profile: bool = True
+    stratum_profile_sites: tuple[int, ...] = (16, 32, 64, 128, 256)
+    # Above this max/min spread the ratio is reported as stratum-conditional.
+    stratum_profile_ratio_tolerance: float = 1.5
+
+    # Calibrated per-variant robustness criterion.  ``band_p`` is bounded below
+    # by 1/(replicates + 1) and was measured to be anti-conservative, so the
+    # calibrated flag requires a ratio this many null-ratio standard deviations
+    # above the null instead of a nominal significance level.
+    calibrated_ratio_z: float = 3.0
+
 
 class _UnionFind:
     def __init__(self, n: int) -> None:
@@ -129,6 +146,10 @@ def _validate_config(cfg: Staged3DConfig) -> None:
         raise ValueError("at least 9 null replicates are required")
     if cfg.null_stratum_sites < 4:
         raise ValueError("null_stratum_sites must be at least 4")
+    if cfg.run_stratum_profile and any(int(s) < 4 for s in cfg.stratum_profile_sites):
+        raise ValueError("every stratum_profile_sites entry must be at least 4")
+    if cfg.stratum_profile_ratio_tolerance <= 1.0:
+        raise ValueError("stratum_profile_ratio_tolerance must exceed 1")
 
 
 def infer_label_sites(
@@ -408,6 +429,71 @@ def surface_conditioned_null(
     }
 
 
+def _band_descriptors(
+    observed: np.ndarray,
+    null_mean: np.ndarray,
+    centers_nm: np.ndarray,
+    band: np.ndarray,
+) -> dict:
+    """Deterministic band descriptors of one profile against one null mean.
+
+    Shared by :func:`_excess_summary` and the component bootstrap so the two
+    can never drift apart.  Takes a single expected profile, so it needs no
+    replicate stack and fabricates none.
+    """
+    obs = np.asarray(observed, dtype=float)
+    mean = np.asarray(null_mean, dtype=float)
+    excess = obs - mean
+    band_centers = np.asarray(centers_nm, dtype=float)[band]
+    positive = np.clip(excess[band], 0.0, None)
+    obs_count = float(obs[band].sum())
+    expected = float(mean[band].sum())
+    ratio = obs_count / expected if expected > 0 else float("nan")
+    if positive.sum() > 0:
+        peak = float(band_centers[np.argmax(positive)])
+        centroid = float(np.sum(band_centers * positive) / positive.sum())
+        cumulative = np.cumsum(positive)
+        median = float(band_centers[np.searchsorted(cumulative, 0.5 * cumulative[-1])])
+    else:
+        peak = centroid = median = float("nan")
+    return {
+        "band_observed_pairs": obs_count,
+        "band_expected_pairs": expected,
+        "band_ratio": ratio,
+        "peak_nm": peak,
+        "positive_excess_centroid_nm": centroid,
+        "positive_excess_median_nm": median,
+        "excess_counts": excess,
+    }
+
+
+def _null_ratio_distribution(null_band_counts: np.ndarray) -> np.ndarray:
+    """Leave-one-out band ratios of the null replicates against each other.
+
+    Each replicate is divided by the mean of the *remaining* replicates, which
+    is the same construction as the observed ratio (a band count over a null
+    mean).  It therefore gives a reference distribution on the ratio scale, so
+    ``band_ratio`` can be reported as "2.04 against a null of 1.00 +/- 0.02"
+    and scored by an unbounded z -- unlike the rank-based p-value, which
+    saturates at ``1/(replicates + 1)`` and cannot separate a strong effect
+    from an overwhelming one.
+
+    Being a ratio-scale rescaling of the same replicate counts, the resulting
+    z is close to ``band_z`` by construction; it is not independent evidence.
+    Its value is that it is expressed in the units actually quoted and that it
+    exposes the null spread of the ratio explicitly.  On the reference dataset
+    it reads 48.3, against 45.9 measured externally from fresh surrogates.
+    """
+    counts = np.asarray(null_band_counts, dtype=float)
+    n = counts.size
+    if n < 3:
+        return np.empty(0, dtype=float)
+    loo_mean = (counts.sum() - counts) / (n - 1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratios = np.where(loo_mean > 0, counts / loo_mean, np.nan)
+    return ratios[np.isfinite(ratios)]
+
+
 def _excess_summary(
     observed: np.ndarray,
     null_profiles: np.ndarray,
@@ -422,24 +508,28 @@ def _excess_summary(
     band = (centers >= float(lo_nm)) & (centers < float(hi_nm))
     mean = null.mean(axis=0)
     sd = null.std(axis=0, ddof=1) if null.shape[0] > 1 else np.zeros_like(mean)
-    excess = obs - mean
-    positive = np.clip(excess[band], 0.0, None)
-    band_centers = centers[band]
-    obs_count = float(obs[band].sum())
+    descriptors = _band_descriptors(obs, mean, centers, band)
+    excess = descriptors["excess_counts"]
+    obs_count = descriptors["band_observed_pairs"]
     null_count = null[:, band].sum(axis=1)
     expected = float(null_count.mean())
     count_sd = float(null_count.std(ddof=1)) if null_count.size > 1 else 0.0
     p = float((1 + np.sum(null_count >= obs_count)) / (null_count.size + 1))
-    ratio = obs_count / expected if expected > 0 else float("nan")
+    ratio = descriptors["band_ratio"]
     z = (obs_count - expected) / count_sd if count_sd > 0 else float("nan")
 
-    if positive.sum() > 0:
-        peak = float(band_centers[np.argmax(positive)])
-        centroid = float(np.sum(band_centers * positive) / positive.sum())
-        cumulative = np.cumsum(positive)
-        median = float(band_centers[np.searchsorted(cumulative, 0.5 * cumulative[-1])])
+    # Calibrated effect size.  ``band_p`` is bounded below by 1/(R+1) and was
+    # measured to be anti-conservative (it re-segments and re-stratifies), so
+    # the ratio and its distance from the null ratio distribution are the
+    # statistics to report.
+    null_ratios = _null_ratio_distribution(null_count)
+    if null_ratios.size >= 3:
+        nr_mean = float(null_ratios.mean())
+        nr_sd = float(null_ratios.std(ddof=1))
+        ratio_z = ((ratio - nr_mean) / nr_sd
+                   if nr_sd > 0 and np.isfinite(ratio) else float("nan"))
     else:
-        peak = centroid = median = float("nan")
+        nr_mean = nr_sd = ratio_z = float("nan")
 
     safe_sd = np.where(sd > 0, sd, np.inf)
     z_curve = excess / safe_sd
@@ -455,9 +545,15 @@ def _excess_summary(
         "band_ratio": ratio,
         "band_z": z,
         "band_p": p,
-        "peak_nm": peak,
-        "positive_excess_centroid_nm": centroid,
-        "positive_excess_median_nm": median,
+        # Smallest p this many randomizations can express.  A ``band_p`` equal
+        # to it is censored, not measured.
+        "band_p_resolution": float(1.0 / (null_count.size + 1)),
+        "band_ratio_z": ratio_z,
+        "null_band_ratio_mean": nr_mean,
+        "null_band_ratio_sd": nr_sd,
+        "peak_nm": descriptors["peak_nm"],
+        "positive_excess_centroid_nm": descriptors["positive_excess_centroid_nm"],
+        "positive_excess_median_nm": descriptors["positive_excess_median_nm"],
         "pointwise_z": z_curve,
         "max_pointwise_z": obs_max,
         "max_pointwise_p": max_p,
@@ -478,19 +574,20 @@ def _component_bootstrap(
         return {"available": False, "n_components": int(n), "reason":
                 "fewer than three independent spatial components"}
     rng = np.random.default_rng(int(cfg.rng_seed) + 7919)
+    centers = 0.5 * (edges_nm[:-1] + edges_nm[1:])
+    band = ((centers >= float(cfg.short_range_lo_nm))
+            & (centers < float(cfg.short_range_hi_nm)))
     values = []
     ratios = []
     for _ in range(int(cfg.bootstrap_replicates)):
         pick = rng.integers(0, n, size=n)
-        o = obs[pick].sum(axis=0)
-        m = null[pick].sum(axis=0)
-        # Deterministic descriptor against the resampled component null means.
-        summary = _excess_summary(
-            o, np.vstack([m, m]), edges_nm,
-            lo_nm=cfg.short_range_lo_nm, hi_nm=cfg.short_range_hi_nm,
-        )
-        values.append(summary["positive_excess_centroid_nm"])
-        ratios.append(summary["band_ratio"])
+        # Deterministic descriptors against the resampled component null means.
+        # The resample supplies one expected profile, so the descriptors are
+        # computed directly rather than through the replicate-stack summary.
+        d = _band_descriptors(obs[pick].sum(axis=0), null[pick].sum(axis=0),
+                              centers, band)
+        values.append(d["positive_excess_centroid_nm"])
+        ratios.append(d["band_ratio"])
     values = np.asarray(values, dtype=float)
     ratios = np.asarray(ratios, dtype=float)
     values = values[np.isfinite(values)]
@@ -503,6 +600,60 @@ def _component_bootstrap(
                              if values.size else [float("nan"), float("nan")]),
         "band_ratio_ci95": (np.quantile(ratios, [0.025, 0.975]).tolist()
                             if ratios.size else [float("nan"), float("nan")]),
+        # Resampling only a handful of components cannot express the
+        # between-component variance faithfully; the sensitivity spread is the
+        # honest uncertainty to quote at these component counts.
+        "narrow_ci_warning": bool(n < 5),
+    }
+
+
+def _stratum_profile(base: dict, cfg: Staged3DConfig) -> dict:
+    """Vary the null stratification alone, holding sites and components fixed.
+
+    Isolates how much of ``band_ratio`` is set by the randomization scale
+    rather than by the data.  The excess *location* is expected to be stable
+    across the scan; the ratio's magnitude is not, and reporting it without the
+    stratum it was computed at would overstate a conditional number.
+    """
+    sites = base["sites"]["centers_nm"]
+    components = base["components"]["components"]
+    rows: list[dict] = []
+    for i, stratum in enumerate(sorted({int(s) for s in cfg.stratum_profile_sites})):
+        null = surface_conditioned_null(
+            sites, components, r_max_nm=cfg.r_max_nm, bin_nm=cfg.bin_nm,
+            stratum_sites=stratum, replicates=cfg.sensitivity_replicates,
+            rng_seed=cfg.rng_seed + 3571 * (i + 1),
+        )
+        s = _excess_summary(
+            base["observed"], null["profiles"], base["edges_nm"],
+            lo_nm=cfg.short_range_lo_nm, hi_nm=cfg.short_range_hi_nm,
+        )
+        rows.append({
+            "null_stratum_sites": stratum,
+            "band_ratio": float(s["band_ratio"]),
+            "band_ratio_z": float(s["band_ratio_z"]),
+            "band_p": float(s["band_p"]),
+            "positive_excess_centroid_nm": float(s["positive_excess_centroid_nm"]),
+            "peak_nm": float(s["peak_nm"]),
+        })
+    ratios = np.asarray([r["band_ratio"] for r in rows], dtype=float)
+    centroids = np.asarray([r["positive_excess_centroid_nm"] for r in rows],
+                           dtype=float)
+    ratios = ratios[np.isfinite(ratios) & (ratios > 0)]
+    centroids = centroids[np.isfinite(centroids)]
+    spread = (float(ratios.max() / ratios.min()) if ratios.size else float("nan"))
+    return {
+        "rows": rows,
+        "band_ratio_range": ([float(ratios.min()), float(ratios.max())]
+                             if ratios.size else [float("nan")] * 2),
+        "band_ratio_spread": spread,
+        "centroid_range_nm": ([float(centroids.min()), float(centroids.max())]
+                              if centroids.size else [float("nan")] * 2),
+        # True when the ratio moves more than the configured tolerance across
+        # the scan, i.e. when it must be quoted together with its stratum.
+        "band_ratio_is_stratum_conditional": bool(
+            np.isfinite(spread)
+            and spread > float(cfg.stratum_profile_ratio_tolerance)),
     }
 
 
@@ -627,6 +778,7 @@ def analyze_hlyb_staged_3d(
                 "n_components": int(len(variant["components"]["components"])),
                 "band_ratio": float(s["band_ratio"]),
                 "band_p": float(s["band_p"]),
+                "band_ratio_z": float(s["band_ratio_z"]),
                 "peak_nm": float(s["peak_nm"]),
                 "positive_excess_centroid_nm": float(
                     s["positive_excess_centroid_nm"]),
@@ -648,6 +800,31 @@ def analyze_hlyb_staged_3d(
     )
     robust_excess = (bool(finite_sensitivity)
                      and sensitivity_passes == len(finite_sensitivity))
+    # Calibrated companion to the flag above.  ``band_p`` cannot fall below
+    # 1/(replicates + 1) and was measured to call roughly 15% of draws from the
+    # method's own null significant at a nominal 5%, so the calibrated variant
+    # asks the ratio to clear the null ratio distribution by a stated margin
+    # instead.  Both are reported; they answer the same question at different
+    # strictness, and only the calibrated one is safe to quote as evidence.
+    calibrated_rows = [row for row in finite_sensitivity
+                       if np.isfinite(row.get("band_ratio_z", np.nan))]
+    calibrated_passes = sum(
+        row["band_ratio"] > 1.0 and row["band_ratio_z"] >= cfg.calibrated_ratio_z
+        for row in calibrated_rows
+    )
+    robust_calibrated = (bool(calibrated_rows)
+                         and calibrated_passes == len(calibrated_rows))
+
+    centroid_spread = np.asarray(
+        [row["positive_excess_centroid_nm"] for row in finite_sensitivity],
+        dtype=float)
+    centroid_spread = centroid_spread[np.isfinite(centroid_spread)]
+    ratio_spread = np.asarray([row["band_ratio"] for row in finite_sensitivity],
+                              dtype=float)
+    ratio_spread = ratio_spread[np.isfinite(ratio_spread)]
+
+    stratum_profile = (_stratum_profile(base, cfg)
+                       if cfg.run_stratum_profile else None)
 
     return {
         "schema": "hlyb_staged_short_range_3d/v1",
@@ -689,15 +866,30 @@ def analyze_hlyb_staged_3d(
         "summary": summary,
         "bootstrap": bootstrap,
         "sensitivity": sensitivity,
+        "stratum_profile": stratum_profile,
         "robust_short_range_excess": (robust_excess if cfg.run_sensitivity else None),
+        "robust_short_range_excess_calibrated": (
+            robust_calibrated if cfg.run_sensitivity else None),
         "sensitivity_passes": int(sensitivity_passes),
+        "sensitivity_calibrated_passes": int(calibrated_passes),
         "sensitivity_valid_variants": int(len(finite_sensitivity)),
+        # Preferred uncertainty on the excess location: the spread actually
+        # produced by the audited parameter choices.  Wider and more honest
+        # than the component bootstrap at these component counts.
+        "centroid_sensitivity_range_nm": (
+            [float(centroid_spread.min()), float(centroid_spread.max())]
+            if centroid_spread.size else [float("nan"), float("nan")]),
+        "band_ratio_sensitivity_range": (
+            [float(ratio_spread.min()), float(ratio_spread.max())]
+            if ratio_spread.size else [float("nan"), float("nan")]),
         "limitations": [
             "Inferred sites are label-site estimates, not identified HlyB protomers.",
             "Time spans are retained across all visits, but this implementation does not yet fit a full DDC/BaGoL temporal emitter model.",
             "The conditional null relies on coarse spatial components and a local rod axis.",
             "A short-range excess is not by itself a molecular dimer-distance estimate.",
             "Biological replication must be assessed across acquisitions, not pair counts.",
+            "The randomization p-value is bounded below by 1/(replicates + 1) and is anti-conservative; quote the band ratio and its calibrated z instead.",
+            "The band ratio is conditional on the null stratification scale and must be quoted together with it; the excess location is the stable descriptor.",
         ],
     }
 

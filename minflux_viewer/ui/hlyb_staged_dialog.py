@@ -105,11 +105,14 @@ class HlyBStagedDialog(QDialog):
         self._null_reps = self._ispin(9, 9999, d.null_replicates)
         self._null_reps.setToolTip(
             "Conditional-randomization replicates. 99 gives a minimum empirical "
-            "one-sided p-value of 0.01.")
+            "one-sided p-value of 0.01 — the p-value is censored there, so the "
+            "reported evidence is the band ratio scored against the spread of "
+            "these replicates, which does not saturate.")
         form.addRow("Null replicates:", self._null_reps)
 
         self._sensitivity = QCheckBox(
-            "run site-radius, surface-null, and ±25% component-link audit")
+            "run site-radius, surface-null, ±25% component-link audit and "
+            "stratification profile")
         self._sensitivity.setChecked(bool(d.run_sensitivity))
         form.addRow("Sensitivity:", self._sensitivity)
         root.addLayout(form)
@@ -168,6 +171,12 @@ class HlyBStagedDialog(QDialog):
             sensitivity_site_merge_nm=base.sensitivity_site_merge_nm,
             sensitivity_stratum_sites=base.sensitivity_stratum_sites,
             sensitivity_cell_link_factors=base.sensitivity_cell_link_factors,
+            # The stratification profile rides on the sensitivity switch: both
+            # are robustness reporting rather than the primary computation.
+            run_stratum_profile=bool(self._sensitivity.isChecked()),
+            stratum_profile_sites=base.stratum_profile_sites,
+            stratum_profile_ratio_tolerance=base.stratum_profile_ratio_tolerance,
+            calibrated_ratio_z=base.calibrated_ratio_z,
         )
 
 
@@ -210,24 +219,37 @@ class HlyBStagedWindow(QDialog):
     def _summary_label(self) -> QLabel:
         r = self._result
         s = r["summary"]
-        reps = int(np.asarray(r.get("null_profiles", [])).shape[0])
-        robust = r.get("robust_short_range_excess")
+        robust = r.get("robust_short_range_excess_calibrated")
         robustness = ("passes all sensitivity variants" if robust is True else
                       "does NOT pass every sensitivity variant" if robust is False else
                       "sensitivity audit not run")
+        # The ratio is quoted against its own null spread rather than the
+        # empirical p, which is censored at 1/(replicates + 1).
+        null_sd = s.get("null_band_ratio_sd", float("nan"))
+        ratio_text = f"excess ratio: {s['band_ratio']:.2f}"
+        if np.isfinite(null_sd) and null_sd > 0:
+            ratio_text += (f" vs null {s.get('null_band_ratio_mean', 1.0):.2f}"
+                           f"±{null_sd:.2f} ({s.get('band_ratio_z', float('nan')):.0f}σ)")
+        span = r.get("centroid_sensitivity_range_nm") or []
+        centroid_text = (f"positive-excess centroid: "
+                         f"{s['positive_excess_centroid_nm']:.2f} nm")
+        if len(span) == 2 and np.isfinite(span[0]) and np.isfinite(span[1]):
+            centroid_text += f" (sensitivity {span[0]:.1f}–{span[1]:.1f})"
         label = QLabel(
             f"Traces: {r['n_traces_used']:,}/{r['n_traces_total']:,} used  |  "
             f"Inferred sites: {r['n_sites']:,} ({r['n_sites_used']:,} in "
             f"{r['n_components']} component(s))  |  "
             f"{r['config'].short_range_lo_nm:g}–{r['config'].short_range_hi_nm:g} nm "
-            f"excess ratio: {s['band_ratio']:.2f}  |  empirical p {self._p_text(s['band_p'], reps)}  |  "
-            f"positive-excess centroid: {s['positive_excess_centroid_nm']:.2f} nm  |  "
-            f"{robustness}"
+            f"{ratio_text}  |  {centroid_text}  |  {robustness}"
         )
         label.setWordWrap(True)
         label.setToolTip(
             "The excess centroid describes the positive observed-minus-null population. "
-            "It is not a fitted or assigned HlyB dimer distance.")
+            "It is not a fitted or assigned HlyB dimer distance.\n\n"
+            "The ratio is quoted against the spread of the null replicates because "
+            "the empirical p-value cannot fall below 1/(replicates + 1). The ratio's "
+            "magnitude is conditional on the null stratification scale; see the "
+            "stratum profile in the report.")
         return label
 
     def _build_spatial_view(self) -> QWidget:
@@ -366,8 +388,14 @@ class HlyBStagedWindow(QDialog):
             f"Observed pairs: {s['band_observed_pairs']:,}",
             f"Null expectation: {s['band_null_mean_pairs']:.1f} ± "
             f"{s['band_null_sd_pairs']:.1f}",
-            f"Observed/null ratio: {s['band_ratio']:.3f}",
-            f"Empirical one-sided p: {self._p_text(s['band_p'], cfg.null_replicates)}",
+            f"Observed/null ratio: {s['band_ratio']:.3f}  "
+            f"(null {s.get('null_band_ratio_mean', float('nan')):.3f} ± "
+            f"{s.get('null_band_ratio_sd', float('nan')):.3f}, "
+            f"{s.get('band_ratio_z', float('nan')):.1f}σ) "
+            f"at stratum {cfg.null_stratum_sites}",
+            f"Empirical one-sided p: {self._p_text(s['band_p'], cfg.null_replicates)}  "
+            "— censored at this resolution and anti-conservative; quote the ratio "
+            "and its σ instead",
             f"Positive-excess peak / centroid / median: {s['peak_nm']:.2f} / "
             f"{s['positive_excess_centroid_nm']:.2f} / "
             f"{s['positive_excess_median_nm']:.2f} nm",
@@ -381,33 +409,72 @@ class HlyBStagedWindow(QDialog):
             f"Rod-like PCA diagnostic: {r['n_rod_like_components']} of "
             f"{r['n_components']} retained component(s)",
         ]
+        span = r.get("centroid_sensitivity_range_nm") or []
+        if len(span) == 2 and np.isfinite(span[0]) and np.isfinite(span[1]):
+            lines += [
+                "",
+                "UNCERTAINTY ON THE EXCESS LOCATION",
+                f"Sensitivity spread (preferred): {span[0]:.2f}–{span[1]:.2f} nm "
+                "across the audited parameter choices",
+            ]
         if b.get("available"):
             ci = b.get("centroid_ci95_nm", [np.nan, np.nan])
             ri = b.get("band_ratio_ci95", [np.nan, np.nan])
+            note = (" — only %d component(s); narrower than the true "
+                    "between-cell variance" % b.get("n_components", 0)
+                    if b.get("narrow_ci_warning") else "")
             lines += [
                 "",
                 "COMPONENT BOOTSTRAP",
-                f"Positive-excess centroid 95% interval: {ci[0]:.2f}–{ci[1]:.2f} nm",
+                f"Positive-excess centroid 95% interval: {ci[0]:.2f}–{ci[1]:.2f} nm{note}",
                 f"Band-ratio 95% interval: {ri[0]:.2f}–{ri[1]:.2f}",
             ]
         else:
             lines += ["", "COMPONENT BOOTSTRAP", f"Unavailable: {b.get('reason', 'n/a')}"]
 
+        profile = r.get("stratum_profile") or {}
+        if profile.get("rows"):
+            lo, hi = profile.get("band_ratio_range", [np.nan, np.nan])
+            clo, chi = profile.get("centroid_range_nm", [np.nan, np.nan])
+            verdict = ("the ratio is conditional on this scale and must be quoted "
+                       "with it; the excess location is the stable descriptor"
+                       if profile.get("band_ratio_is_stratum_conditional")
+                       else "the ratio is stable across this scale")
+            lines += [
+                "", "NULL STRATIFICATION PROFILE",
+                "Varying the randomization scale alone, with the inferred sites and "
+                "components held fixed:",
+                f"ratio {lo:.2f}–{hi:.2f} ({profile.get('band_ratio_spread', float('nan')):.1f}×), "
+                f"excess centroid {clo:.2f}–{chi:.2f} nm — {verdict}.",
+                "stratum sites | ratio | ratio σ | excess centroid nm",
+            ]
+            for row in profile["rows"]:
+                lines.append(
+                    f"{row['null_stratum_sites']:13d} | {row['band_ratio']:5.2f} | "
+                    f"{row['band_ratio_z']:7.1f} | "
+                    f"{row['positive_excess_centroid_nm']:7.2f}")
+
         sensitivity = r.get("sensitivity") or []
         if sensitivity:
             lines += [
                 "", "SENSITIVITY AUDIT",
-                f"Primary claim passes {r.get('sensitivity_passes', 0)} of "
-                f"{r.get('sensitivity_valid_variants', 0)} valid variants; "
+                f"Primary claim passes {r.get('sensitivity_calibrated_passes', 0)} of "
+                f"{r.get('sensitivity_valid_variants', 0)} valid variants on the "
+                f"calibrated criterion (ratio > 1 and ≥ {cfg.calibrated_ratio_z:g}σ); "
+                f"robust = {bool(r.get('robust_short_range_excess_calibrated'))}.",
+                f"On the nominal p ≤ 0.05 criterion: "
+                f"{r.get('sensitivity_passes', 0)} of "
+                f"{r.get('sensitivity_valid_variants', 0)}; "
                 f"robust = {bool(r.get('robust_short_range_excess'))}.",
-                "merge nm | link nm | stratum sites | sites used | components | ratio | p | excess centroid nm",
+                "merge nm | link nm | stratum sites | sites used | components | ratio | ratio σ | p | excess centroid nm",
             ]
             for row in sensitivity:
                 lines.append(
                     f"{row['site_merge_nm']:7.1f} | {row['cell_link_nm']:7.0f} | "
                     f"{row['null_stratum_sites']:14d} | "
                     f"{row['n_sites_used']:10d} | {row['n_components']:10d} | "
-                    f"{row['band_ratio']:5.2f} | {row['band_p']:.3g} | "
+                    f"{row['band_ratio']:5.2f} | {row.get('band_ratio_z', float('nan')):7.1f} | "
+                    f"{row['band_p']:.3g} | "
                     f"{row['positive_excess_centroid_nm']:7.2f}")
         lines += ["", "LIMITATIONS"] + [f"• {item}" for item in r.get("limitations", [])]
         report = QTextEdit()

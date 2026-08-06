@@ -2531,16 +2531,26 @@ class MainWindow(QMainWindow):
                 key: float(summary[key]) for key in (
                     "band_observed_pairs", "band_null_mean_pairs",
                     "band_null_sd_pairs", "band_ratio", "band_z", "band_p",
+                    "band_p_resolution", "band_ratio_z",
+                    "null_band_ratio_mean", "null_band_ratio_sd",
                     "peak_nm", "positive_excess_centroid_nm",
                     "positive_excess_median_nm", "max_pointwise_z",
                     "max_pointwise_p")
             },
             "robust_short_range_excess": result.get("robust_short_range_excess"),
+            "robust_short_range_excess_calibrated": result.get(
+                "robust_short_range_excess_calibrated"),
             "sensitivity_passes": int(result.get("sensitivity_passes", 0)),
+            "sensitivity_calibrated_passes": int(
+                result.get("sensitivity_calibrated_passes", 0)),
             "sensitivity_valid_variants": int(
                 result.get("sensitivity_valid_variants", 0)),
+            "centroid_sensitivity_range_nm": result.get(
+                "centroid_sensitivity_range_nm"),
             "bootstrap": result.get("bootstrap", {}),
             "sensitivity": sensitivity,
+            "stratum_profile": result.get("stratum_profile"),
+            "calibrated_ratio_z": float(cfg.calibrated_ratio_z),
         }
         robust_text = ""
         if robust_ratios and robust_centroids:
