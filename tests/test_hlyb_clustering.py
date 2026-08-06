@@ -326,3 +326,90 @@ def test_analyze_hlyb_2d_ignores_z():
     r2 = analyze_hlyb_2d(tall, np.concatenate(tids), cfg)
     assert r1["n_border_traces"] == r2["n_border_traces"]
     assert r1["n_subunits"] == r2["n_subunits"]
+
+
+# -- 2-D template matching -------------------------------------------------
+
+def test_effective_residual_forgives_shortening_but_never_lengthening():
+    """Projection can only shorten a separation, so the residual band is
+    asymmetric. A symmetric one would reject genuinely matching complexes for
+    being tilted, and would do so more the larger the distance."""
+    from minflux_viewer.analysis.hlyb_clustering import _effective_residual
+
+    expected = np.array([10.0, 10.0, 20.0, 20.0])
+    observed = np.array([8.0, 12.0, 16.0, 24.0])   # -2, +2, -4, +4
+    # in 3-D nothing is forgiven: a separation is orientation-independent
+    assert np.allclose(_effective_residual(observed, expected, 0.0),
+                       [-2.0, 2.0, -4.0, 4.0])
+    # at 30 deg the allowance is 1 - cos(30) = 0.134 of each distance
+    got = _effective_residual(observed, expected, 30.0)
+    assert got[0] == pytest.approx(-0.66, abs=0.02)   # 10*0.134 = 1.34 forgiven
+    assert got[1] == pytest.approx(2.0)               # lengthening untouched
+    assert got[2] == pytest.approx(-1.32, abs=0.02)   # 20*0.134 = 2.68 forgiven
+    assert got[3] == pytest.approx(4.0)
+
+
+def test_effective_residual_never_flips_sign():
+    from minflux_viewer.analysis.hlyb_clustering import _effective_residual
+
+    expected = np.full(5, 15.0)
+    observed = np.linspace(1.0, 15.0, 5)
+    got = _effective_residual(observed, expected, 60.0)
+    assert np.all(got <= 0.0), "forgiving shortening must not turn it positive"
+
+
+def test_template2d_shrinks_the_border_and_reports_the_projection():
+    from minflux_viewer.analysis.hlyb_clustering import analyze_hlyb_template2d
+
+    rng = np.random.default_rng(4)
+    locs, tids, tid = [], [], 1
+    # a filled cell body so the delineation has something to find
+    for p in np.column_stack([rng.uniform(0, 2400, 7000), rng.uniform(0, 900, 7000)]):
+        locs.append(p[None, :]); tids.append([tid]); tid += 1
+    tri = np.array([[0.0, 0.0], [10.1, 0.0], [5.0, 8.8]])
+
+    def add_tri(cx, cy):
+        nonlocal tid
+        for off in tri:
+            locs.append(np.array([cx, cy]) + off + rng.normal(0, 1.0, size=(40, 2)))
+            tids.append(np.full(40, tid)); tid += 1
+
+    add_tri(1200, 450)
+    add_tri(800, 450)
+    loc_nm = np.vstack(locs)
+    loc_m = np.column_stack([loc_nm / 1e9, np.zeros(loc_nm.shape[0])])
+    res = analyze_hlyb_template2d(
+        np.asarray(loc_m), np.concatenate(tids),
+        HlyBConfig(min_loc_per_trace=5, basic_unit_size_nm=6.0,
+                   border_mode="relative", border_fraction=0.3))
+    assert res["is_2d"] is True
+    assert res["template_matching"] is True
+    assert res["n_border_traces"] > 0
+    assert res["n_traces"] < res["n_total_traces"]
+    assert res["cell_mask_stats"]["n_cells"] >= 1
+    # the shrink bounds the tilt, and that bound is what the matcher forgives
+    assert res["projection_tilt_deg"] == pytest.approx(
+        np.degrees(np.arcsin(0.7)), abs=0.5)
+    assert 0.0 < res["projection_max_shortening"] < 0.5
+    # source indices stay addressable against the original rows
+    assert res["point_source_indices"].size == res["points_nm"].shape[0]
+    assert np.intersect1d(res["point_source_indices"],
+                          res["border_source_indices"]).size == 0
+
+
+def test_template3d_is_unchanged_by_the_projection_allowance():
+    """The 3-D path must keep exactly its previous behaviour: a separation is
+    orientation-independent there, so the allowance is zero."""
+    rng = np.random.default_rng(6)
+    locs, tids, tid = [], [], 1
+    tri = np.array([[0.0, 0, 0], [10.1, 0, 0], [5.0, 8.8, 0]])
+    for base in (np.array([0.0, 0, 0]), np.array([400.0, 0, 0])):
+        for off in tri:
+            locs.append(base + off + rng.normal(0, 1.0, size=(40, 3)))
+            tids.append(np.full(40, tid)); tid += 1
+    loc_m = np.vstack(locs) / 1e9
+    cfg = HlyBConfig(min_loc_per_trace=5, basic_unit_size_nm=6.0)
+    assert cfg.template_projection_tilt_deg == 0.0
+    res = analyze_hlyb_template3d(np.asarray(loc_m), np.concatenate(tids), cfg)
+    assert res.get("is_2d") is None
+    assert res["n_structures"] >= 1

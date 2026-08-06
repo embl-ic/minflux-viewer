@@ -2733,13 +2733,13 @@ class RenderWindow(QWidget):
             self._sync_volume_display_state()
         self.sync_lut_dialog()
 
-    def _on_bc_auto(self) -> None:
+    def _on_bc_auto(self) -> tuple[float, float] | None:
         img = self._bc_pixels()
         if img is None:
-            return
+            return None
         levels = self._compute_auto_levels(img, advance_auto_threshold=True)
         if levels is None:
-            return
+            return None
         self._auto_bc = True
         self._manual_levels = levels
         target = self._active_channel_index()
@@ -2753,6 +2753,7 @@ class RenderWindow(QWidget):
             self._bc_dialog.set_levels(*levels)
             self._bc_dialog.set_auto_state(True)
         self.sync_lut_dialog()
+        return levels
 
     def _on_bc_reset(self) -> None:
         img = self._bc_pixels()
@@ -2793,6 +2794,7 @@ class RenderWindow(QWidget):
                 on_reset=self._on_bc_reset,
                 on_gamma_changed=self._on_lut_gamma_changed,
                 parent=self,
+                on_auto=self._on_bc_auto,
             )
         if not self._refresh_lut_dialog(capture_baseline=True):
             self._lut_dialog.show(); self._lut_dialog.raise_()
@@ -2825,6 +2827,7 @@ class RenderWindow(QWidget):
             gamma=self._active_channel_gamma(),
             capture_baseline=capture_baseline,
         )
+        dlg.set_auto_state(self._auto_bc)
         return True
 
     def sync_lut_dialog(self) -> None:
