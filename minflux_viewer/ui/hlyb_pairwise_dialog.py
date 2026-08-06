@@ -58,9 +58,12 @@ _AXIS_LABELS = {"XY": ("X", "Y"), "XZ": ("X", "Z"), "YZ": ("Y", "Z")}
 class HlyBPairwiseDialog(QDialog):
     """Modal parameter picker for the ensemble pair-distance analysis."""
 
-    def __init__(self, parent=None, defaults: PairFitConfig | None = None) -> None:
+    def __init__(self, parent=None, defaults: PairFitConfig | None = None,
+                 dimensions: int = 3) -> None:
         super().__init__(parent)
-        self.setWindowTitle("HlyB Pair-Distance Model Fit (3D)")
+        self._dimensions = 2 if int(dimensions) == 2 else 3
+        self.setWindowTitle(
+            f"HlyB Pair-Distance Model Fit ({self._dimensions}D)")
         d = defaults or PairFitConfig()
 
         root = QVBoxLayout(self)
@@ -76,6 +79,18 @@ class HlyBPairwiseDialog(QDialog):
             "with a Gaussian or log-normal spread and a fully elastic flat band. "
             "The shapes are ranked by AIC, so the data decide."
         )
+        if self._dimensions == 2:
+            intro.setText(
+                intro.text() + "\n\n"
+                "This is the two-dimensional variant. It is not the 3-D analysis "
+                "with z discarded: each E.coli is delineated and shrunk inward to "
+                "drop the rim, where the membrane is edge-on and an in-plane "
+                "distance is systematically too short, and the depth of each "
+                "retained localization within its cell gives the local membrane "
+                "tilt, from which the residual foreshortening is modelled. The "
+                "projection still superimposes the upper and lower membrane, "
+                "which is not corrected."
+            )
         intro.setWordWrap(True)
         root.addWidget(intro)
 
@@ -144,6 +159,41 @@ class HlyBPairwiseDialog(QDialog):
         row.setContentsMargins(0, 0, 0, 0)
         form.addRow("Distance search range:", holder)
 
+        self._border_mode = None
+        self._border_fraction = None
+        self._border_size = None
+        if self._dimensions == 2:
+            self._border_mode = QComboBox()
+            self._border_mode.addItem("relative (fraction of cell half-width)", "relative")
+            self._border_mode.addItem("absolute (nm)", "absolute")
+            self._border_mode.setCurrentIndex(
+                1 if str(d.border_mode).lower() == "absolute" else 0)
+            self._border_mode.setToolTip(
+                "Relative mode is the default here because it bounds the membrane\n"
+                "tilt directly: keeping a fraction f of each cell's half-width\n"
+                "admits only surface normals within arcsin(1 - f) of face-on, and\n"
+                "that bound is what the projection model uses.")
+            form.addRow("Border shrink mode:", self._border_mode)
+
+            self._border_fraction = self._dspin(0.0, 0.95, d.border_fraction, 2, 0.05, "")
+            self._border_fraction.setToolTip(
+                "Fraction of each cell's half-width discarded from the rim. "
+                "0.35 admits\nnormals within about 40 deg of face-on. Larger is "
+                "stricter but keeps less data.")
+            form.addRow("Border shrink (relative):", self._border_fraction)
+
+            self._border_size = self._dspin(0.0, 2000.0, d.border_size_nm, 0, 10.0, " nm")
+            self._border_size.setToolTip("Absolute mode: shrink each cell by this distance.")
+            form.addRow("Border shrink (absolute):", self._border_size)
+
+            def _sync() -> None:
+                relative = self._border_mode.currentData() == "relative"
+                self._border_fraction.setEnabled(relative)
+                self._border_size.setEnabled(not relative)
+
+            self._border_mode.currentIndexChanged.connect(lambda _i: _sync())
+            _sync()
+
         root.addLayout(form)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -165,7 +215,17 @@ class HlyBPairwiseDialog(QDialog):
 
     def config(self) -> PairFitConfig:
         base = PairFitConfig()
+        two_d = self._dimensions == 2
         return PairFitConfig(
+            dimensions=self._dimensions,
+            border_mode=(str(self._border_mode.currentData())
+                         if two_d and self._border_mode is not None else base.border_mode),
+            border_fraction=(float(self._border_fraction.value())
+                             if two_d and self._border_fraction is not None
+                             else base.border_fraction),
+            border_size_nm=(float(self._border_size.value())
+                            if two_d and self._border_size is not None
+                            else base.border_size_nm),
             min_loc_per_trace=int(self._min_loc.value()),
             z_scaling_factor=float(self._zscale.value()),
             r_max_nm=float(self._r_max.value()),
@@ -661,6 +721,33 @@ def pairwise_report(result: dict) -> str:
     add(f"  null replicates                : {r.get('null_replicates', 0)}")
     add(f"  excess above null (z>3) out to : {r['excess_outer_nm']:.1f} nm")
     add("")
+
+    if r.get("is_2d"):
+        stats = r.get("cell_mask_stats") or {}
+        add("PROJECTION  (2-D variant)")
+        add(f"  cells delineated               : {stats.get('n_cells', 0)} "
+            f"({stats.get('in_mask_fraction', 0):.0%} of centroids inside, median "
+            f"half-width {stats.get('median_half_width_nm', 0):.0f} nm)")
+        shrink = (f"{stats.get('border_fraction', 0):.2f} of half-width"
+                  if str(stats.get("border_mode")) == "relative"
+                  else f"{stats.get('border_size_nm', 0):.0f} nm")
+        add(f"  border shrink                  : {shrink}, keeping "
+            f"{stats.get('retained_fraction', 0):.0%}")
+        if "implied_max_tilt_deg" in stats:
+            add(f"  admitted membrane tilt         : up to "
+                f"{stats['implied_max_tilt_deg']:.1f} deg from face-on")
+        add(f"  measured tilt of kept points   : median "
+            f"{r.get('median_tilt_deg', float('nan')):.1f} deg")
+        add(f"  mean projected/true length     : "
+            f"{r.get('median_foreshortening', float('nan')):.3f}")
+        add("  The shrink removes the rim, where the membrane is edge-on and an")
+        add("  in-plane distance is systematically too short. The depth of each")
+        add("  retained point within its cell then gives its local tilt, and the")
+        add("  residual foreshortening is modelled rather than ignored -- so this")
+        add("  is not the 3-D analysis with z discarded.")
+        add("  NOT corrected: the projection superimposes the upper and lower")
+        add("  membrane, so some pairs are far apart along the optical axis.")
+        add("")
 
     k = r.get("repeat_kernel", {})
     add("SAME-SITE SHORT-RANGE KERNEL")

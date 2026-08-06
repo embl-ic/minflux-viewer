@@ -304,6 +304,23 @@ class PairFitConfig:
     # given preparation can differ.
     dimer_start_nm: float = 12.0
     dimer_distance_bounds_nm: tuple = (4.0, 40.0)
+    # ---- 2-D variant -----------------------------------------------------
+    #: 2 projects onto XY and models the foreshortening; 3 uses the full
+    #: three-dimensional separation.
+    dimensions: int = 3
+    #: Per-E.coli delineation and inward shrink, shared with the 2-D clustering
+    #: workflow (analysis/hlyb_clustering.py::compute_cell_mask).  In relative
+    #: mode the retained fraction of each cell bounds the membrane tilt, which
+    #: is what makes the projected distances interpretable.
+    border_mode: str = "relative"
+    border_fraction: float = 0.35
+    border_size_nm: float = 200.0
+    mask_pixel_size_nm: float = 20.0
+    mask_smooth_nm: float = 60.0
+    mask_close_nm: float = 120.0
+    min_cell_area_nm2: float = 50_000.0
+    #: Azimuth samples per retained tilt when building the projection kernel.
+    projection_azimuth_samples: int = 48
     #: Physical floor on a TRUE inter-site distance.  Two labelled N-terminal
     #: domains, each carrying an antibody, cannot occupy the same place, so
     #: p(d) is zero below this.
@@ -648,6 +665,120 @@ def maxwell_pdf(r: np.ndarray, sigma: float) -> np.ndarray:
     return np.sqrt(2.0 / np.pi) * r ** 2 / s ** 3 * np.exp(-r ** 2 / (2.0 * s ** 2))
 
 
+def offset_gaussian_pdf_2d(r: np.ndarray, d: float, sigma: float) -> np.ndarray:
+    """Distance distribution for a true separation ``d`` blurred in the PLANE.
+
+    The two-dimensional counterpart of :func:`offset_gaussian_pdf`: a Rice
+    density, written through the exponentially scaled Bessel function so it
+    stays finite when ``r·d/σ²`` is large.
+    """
+    from scipy.special import i0e
+
+    r = np.asarray(r, dtype=float)
+    s = max(float(sigma), 1e-9)
+    d = float(d)
+    z = r * d / s ** 2
+    return (r / s ** 2) * np.exp(-((r - d) ** 2) / (2 * s ** 2)) * i0e(z)
+
+
+def tilt_projection_factors(tilt_deg, n_azimuth: int = 48,
+                            n_bins: int = 24) -> tuple[np.ndarray, np.ndarray]:
+    """Distribution of the projected/true length ratio, as (values, weights).
+
+    A pair on a membrane whose tangent plane is tilted by ``θ`` from the image
+    plane has, at in-plane azimuth ``φ``, an out-of-plane component
+    ``sin θ · sin φ``, so its projected length is
+    ``d·√(1 − sin²θ·sin²φ)``.  Marginalising over azimuth for each observed tilt
+    gives the ratio distribution.
+
+    This is what turns the border shrink from a filter into a model: the
+    retained localizations' own depth within their cell fixes ``θ``, so the
+    foreshortening is measured from the delineation rather than assumed away.
+
+    Returned **binned**.  One entry per (localization, azimuth) would be tens of
+    thousands of values, and the blurred-distance matrix costs one pass per
+    value; a few dozen weighted bins carry the same distribution and keep the
+    build to well under a second.
+    """
+    tilts = np.atleast_1d(np.asarray(tilt_deg, dtype=float))
+    tilts = tilts[np.isfinite(tilts)]
+    if tilts.size == 0:
+        return np.ones(1), np.ones(1)
+    n_az = int(max(n_azimuth, 1))
+    phi = (np.arange(n_az) + 0.5) * (2.0 * np.pi / n_az)
+    sin_t = np.sin(np.deg2rad(np.clip(tilts, 0.0, 90.0)))[:, None]
+    factors = np.sqrt(np.clip(1.0 - (sin_t * np.sin(phi)[None, :]) ** 2, 0.0, 1.0))
+    factors = factors.ravel()
+    bins = int(max(n_bins, 1))
+    lo = float(min(factors.min(), 1.0))
+    if 1.0 - lo < 1e-6:
+        return np.ones(1), np.ones(1)
+    edges = np.linspace(lo, 1.0, bins + 1)
+    weights, _ = np.histogram(factors, bins=edges)
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    keep = weights > 0
+    w = weights[keep].astype(float)
+    return centres[keep], w / w.sum()
+
+
+def blurred_distance_matrix(
+    centres_nm: np.ndarray,
+    d_grid: np.ndarray,
+    sigma_nm: float,
+    *,
+    dimensions: int = 3,
+    factors: np.ndarray | None = None,
+) -> np.ndarray:
+    """``K[i, j]`` = observed density at ``centres[i]`` for true distance ``d[j]``.
+
+    Precomputing this once is what keeps the fit fast: the blur is derived from
+    the measurement rather than fitted, so ``K`` does not change between
+    likelihood evaluations and each one costs a single matrix-vector product.
+    In two dimensions the columns are additionally averaged over the projection
+    factors, so ``K`` carries the foreshortening.
+    """
+    centres = np.asarray(centres_nm, dtype=float)
+    grid = np.asarray(d_grid, dtype=float)
+    out = np.empty((centres.size, grid.size), dtype=float)
+    if int(dimensions) == 2:
+        if factors is None:
+            f, w = np.ones(1), np.ones(1)
+        else:
+            f, w = factors
+            f = np.asarray(f, dtype=float)
+            w = np.asarray(w, dtype=float)
+        good = (f > 0) & (w > 0)
+        f, w = (f[good], w[good]) if np.any(good) else (np.ones(1), np.ones(1))
+        w = w / w.sum()
+        for j, d in enumerate(grid):
+            acc = np.zeros_like(centres)
+            for factor, weight in zip(f, w):
+                acc += weight * offset_gaussian_pdf_2d(centres, d * factor, sigma_nm)
+            out[:, j] = acc
+    else:
+        for j, d in enumerate(grid):
+            out[:, j] = offset_gaussian_pdf(centres, float(d), sigma_nm)
+    return out
+
+
+def summarise_tilts(edge_distance_nm, half_width_nm) -> np.ndarray:
+    """Local membrane tilt (degrees) implied by each point's depth in its cell.
+
+    For a rod of projected half-width ``R`` viewed end-on, a surface point whose
+    distance to the projected boundary is ``e`` sits at in-plane offset
+    ``ρ = R − e`` from the axis, and its tangent plane is tilted by
+    ``arcsin(ρ/R)``.  Points at the projected centre are face-on; points at the
+    rim are edge-on, which is exactly the population the border shrink removes.
+    """
+    edge = np.asarray(edge_distance_nm, dtype=float)
+    width = np.asarray(half_width_nm, dtype=float)
+    good = np.isfinite(edge) & np.isfinite(width) & (width > 0)
+    if not np.any(good):
+        return np.zeros(0)
+    ratio = np.clip(1.0 - edge[good] / width[good], 0.0, 1.0)
+    return np.degrees(np.arcsin(ratio))
+
+
 def offset_gaussian_pdf(r: np.ndarray, d: float, sigma: float) -> np.ndarray:
     """Distance distribution for a true separation ``d`` blurred in 3-D.
 
@@ -689,13 +820,16 @@ def structure_profile(
     sigma_nm: float,
     bin_nm: float = 0.5,
     d_grid: np.ndarray | None = None,
+    kernel: np.ndarray | None = None,
 ) -> np.ndarray:
     """Observed pair-distance profile for a distribution of true distances.
 
     ``S(r) = ∫ p(d) · P(r | d, σ) dd`` where ``p`` comes from the named
-    structure model and ``P`` is the exact 3-D blurred-distance density.  The
-    result is normalised to unit area, so its amplitude is carried by the fit
-    and the shape alone distinguishes the hypotheses.
+    structure model and ``P`` is the blurred-distance density — three- or
+    two-dimensional, the latter also carrying the projection foreshortening
+    when ``kernel`` was built by :func:`blurred_distance_matrix`.  The result is
+    normalised to unit area, so its amplitude is carried by the fit and the
+    shape alone distinguishes the hypotheses.
     """
     centres = np.asarray(centres_nm, dtype=float)
     model = STRUCTURE_MODELS[model_key]
@@ -708,12 +842,15 @@ def structure_profile(
     if total <= 0:
         return np.zeros_like(centres)
     weights = weights / total
-    keep = weights > 1e-9
-    if not keep.any():
-        return np.zeros_like(centres)
-    out = np.zeros_like(centres)
-    for d, w in zip(grid[keep], weights[keep]):
-        out += w * offset_gaussian_pdf(centres, float(d), sigma_nm)
+    if kernel is not None:
+        out = np.asarray(kernel, dtype=float) @ weights
+    else:
+        keep = weights > 1e-9
+        if not keep.any():
+            return np.zeros_like(centres)
+        out = np.zeros_like(centres)
+        for d, w in zip(grid[keep], weights[keep]):
+            out += w * offset_gaussian_pdf(centres, float(d), sigma_nm)
     area = out.sum() * bin_nm
     return out / area if area > 0 else out
 
@@ -804,6 +941,8 @@ def fit_pair_model(
     structure: str = "dimer_gaussian",
     sigma_floor_nm: float | None = None,
     fixed_sigma_nm: float | None = None,
+    dimensions: int = 3,
+    projection_factors: np.ndarray | None = None,
 ) -> dict:
     """Maximum-likelihood fit of the three-component model to the profile.
 
@@ -865,6 +1004,14 @@ def fit_pair_model(
     shape_bounds = list(model_spec.bounds(cfg, centres)) if has_structure else []
     n_shape = len(shape_x0)
     grid = distance_grid(cfg, float(centres[-1]) if centres.size else cfg.r_max_nm)
+    # The blur does not change between likelihood evaluations, so the whole
+    # true-distance -> observed-distance mapping is built once and each
+    # evaluation is a single matrix-vector product.  In two dimensions this
+    # matrix also carries the projection foreshortening.
+    kernel = (blurred_distance_matrix(centres, grid, max(s_start, 0.2),
+                                      dimensions=dimensions,
+                                      factors=projection_factors)
+              if (has_structure and not fit_sigma) else None)
 
     total = max(obs.sum(), 1.0)
 
@@ -873,9 +1020,14 @@ def fit_pair_model(
         model = (max(n_rep, 0.0) * stretched_repeat(scale) * bin_nm
                  + max(a_bkg, 0.0) * bkg)
         if has_structure:
+            use = kernel
+            if use is None:
+                use = blurred_distance_matrix(centres, grid, max(sig, 0.2),
+                                              dimensions=dimensions,
+                                              factors=projection_factors)
             prof = structure_profile(centres, structure, shape,
                                      sigma_nm=max(sig, 0.2), bin_nm=bin_nm,
-                                     d_grid=grid)
+                                     d_grid=grid, kernel=use)
             model = model + max(n_str, 0.0) * prof * bin_nm
         return model
 
@@ -931,10 +1083,14 @@ def fit_pair_model(
     shape_params = dict(zip(model_spec.param_names, shape)) if has_structure else {}
     summary = (structure_distance_summary(structure, shape, grid) if has_structure
                else {})
+    final_kernel = kernel if kernel is not None else (
+        blurred_distance_matrix(centres, grid, max(sig, 0.2),
+                                dimensions=dimensions, factors=projection_factors)
+        if has_structure else None)
     structure_component = (
         max(p[1], 0.0) * structure_profile(centres, structure, shape,
                                            sigma_nm=max(sig, 0.2), bin_nm=bin_nm,
-                                           d_grid=grid) * bin_nm
+                                           d_grid=grid, kernel=final_kernel) * bin_nm
         if has_structure else np.zeros_like(centres)
     )
     return {
@@ -976,6 +1132,8 @@ def profile_likelihood_distance(
     structure: str = "dimer_gaussian",
     sigma_floor_nm: float | None = None,
     fixed_sigma_nm: float | None = None,
+    dimensions: int = 3,
+    projection_factors: np.ndarray | None = None,
     n_points: int = 41,
 ) -> dict:
     """Scan the dimer distance, refitting everything else at each value.
@@ -1001,7 +1159,8 @@ def profile_likelihood_distance(
                                      dimer_distance_bounds_nm=(float(value), float(value)))
         fit = fit_pair_model(counts, edges, repeat_shape, null_mean, pinned,
                              structure=structure, sigma_floor_nm=sigma_floor_nm,
-                             fixed_sigma_nm=fixed_sigma_nm)
+                             fixed_sigma_nm=fixed_sigma_nm, dimensions=dimensions,
+                             projection_factors=projection_factors)
         nll_values.append(fit["nll"])
     nll_values = np.asarray(nll_values, dtype=float)
     best = int(np.argmin(nll_values))
@@ -1040,6 +1199,8 @@ def compare_hypotheses(
     cfg: PairFitConfig,
     *,
     sigma_floor_nm: float | None = None,
+    dimensions: int = 3,
+    projection_factors: np.ndarray | None = None,
 ) -> dict:
     """Fit the competing structural hypotheses and rank them by AIC.
 
@@ -1062,7 +1223,8 @@ def compare_hypotheses(
     for name in names:
         fit = fit_pair_model(counts, edges, repeat_shape, null_mean, cfg,
                              structure=name, sigma_floor_nm=sigma_floor_nm,
-                             fixed_sigma_nm=shared_sigma)
+                             fixed_sigma_nm=shared_sigma, dimensions=dimensions,
+                             projection_factors=projection_factors)
         if shared_sigma is None:
             shared_sigma = float(fit["sigma_nm"])
         fit["shared_sigma_nm"] = float(shared_sigma)
@@ -1077,6 +1239,46 @@ def compare_hypotheses(
 # Top level
 # --------------------------------------------------------------------------
 
+def analyze_hlyb_pairwise_2d(
+    loc_m: np.ndarray,
+    tid: np.ndarray,
+    tim: np.ndarray | None = None,
+    cfg: PairFitConfig | None = None,
+) -> dict:
+    """Two-dimensional ensemble pair-distance analysis.
+
+    Not simply "the 3-D analysis with z discarded".  Discarding z foreshortens
+    every distance by an amount that depends on the pair's orientation, and for
+    a membrane protein on a rod-shaped cell that orientation is a strong
+    function of *where in the projected cell* the pair sits: face-on at the
+    projected centre, edge-on at the rim.  Two things follow, and this function
+    does both.
+
+    First, each E.coli is delineated from the localization density and shrunk
+    inward (:func:`~minflux_viewer.analysis.hlyb_clustering.compute_cell_mask`),
+    dropping the rim where an in-plane distance is systematically too short.
+
+    Second — and this is what makes the shrink a model rather than a filter —
+    the retained localizations' own depth within their cell gives their local
+    membrane tilt, and the projection kernel is built from that measured tilt
+    distribution.  So the foreshortening that survives the shrink is corrected
+    for rather than ignored.
+
+    The 2-D projection still superimposes the upper and lower membrane; that is
+    not corrected here and is reported as a limitation.
+    """
+    cfg = cfg or PairFitConfig()
+    if int(cfg.dimensions) != 2:
+        cfg = _replace_cfg(cfg, dimensions=2)
+    return analyze_hlyb_pairwise(loc_m, tid, tim, cfg)
+
+
+def _replace_cfg(cfg: PairFitConfig, **changes) -> PairFitConfig:
+    import dataclasses
+
+    return dataclasses.replace(cfg, **changes)
+
+
 def analyze_hlyb_pairwise(
     loc_m: np.ndarray,
     tid: np.ndarray,
@@ -1088,6 +1290,40 @@ def analyze_hlyb_pairwise(
     traces = trace_centroids(loc_m, tid, tim, z_scale=cfg.z_scaling_factor,
                              min_loc_per_trace=cfg.min_loc_per_trace)
     pts = traces["centroids_nm"]
+
+    two_d = int(cfg.dimensions) == 2
+    cells = None
+    tilts = np.zeros(0)
+    projection = None
+    if two_d and pts.shape[0]:
+        from .hlyb_clustering import compute_cell_mask
+
+        cells = compute_cell_mask(
+            pts[:, :2],
+            border_size_nm=cfg.border_size_nm,
+            border_mode=cfg.border_mode,
+            border_fraction=cfg.border_fraction,
+            pixel_size_nm=cfg.mask_pixel_size_nm,
+            smooth_nm=cfg.mask_smooth_nm,
+            close_nm=cfg.mask_close_nm,
+            min_cell_area_nm2=cfg.min_cell_area_nm2,
+        )
+        keep = ~cells.border_loc
+        half = np.where(cells.cell_id > 0,
+                        cells.cell_half_width_nm[np.clip(cells.cell_id - 1, 0, None)],
+                        np.nan)
+        tilts = summarise_tilts(cells.edge_distance_nm[keep], half[keep])
+        projection = tilt_projection_factors(tilts, cfg.projection_azimuth_samples)
+        # keep the interior only, and drop z: the analysis is in the image plane
+        pts = pts[keep]
+        for key in ("sem_nm", "n_locs", "trace_ids"):
+            if traces.get(key) is not None and len(traces[key]) == keep.size:
+                traces[key] = np.asarray(traces[key])[keep]
+        for key in ("t_start", "t_end"):
+            if traces.get(key) is not None:
+                traces[key] = np.asarray(traces[key])[keep]
+        pts = np.column_stack([pts[:, 0], pts[:, 1], np.zeros(pts.shape[0])])
+        traces["centroids_nm"] = pts
 
     counts, edges = pair_distance_profile(pts, cfg.r_max_nm, cfg.bin_nm)
     null = envelope_null(pts, r_max_nm=cfg.r_max_nm, bin_nm=cfg.bin_nm,
@@ -1106,16 +1342,19 @@ def analyze_hlyb_pairwise(
     # ``sigma`` in the kernels is the PER-AXIS spread of the separation vector,
     # so the per-axis centroid error is needed here, not its 3-D magnitude, and
     # two independent centroids contribute in quadrature.
-    if np.isfinite(median_sem).any():
-        per_axis = float(np.sqrt(np.nanmean(median_sem ** 2)))
+    axes = slice(0, 2) if two_d else slice(0, 3)
+    if np.isfinite(median_sem[axes]).any():
+        per_axis = float(np.sqrt(np.nanmean(median_sem[axes] ** 2)))
     else:
         per_axis = 0.0
     sigma_floor = float(max(np.sqrt(2.0) * per_axis, 0.5))
 
     import dataclasses
 
+    dims = 2 if two_d else 3
     fits = compare_hypotheses(counts, edges, repeat["shape"], null["mean"], cfg,
-                              sigma_floor_nm=sigma_floor)
+                              sigma_floor_nm=sigma_floor, dimensions=dims,
+                              projection_factors=projection)
     best_name = min(fits, key=lambda k: fits[k]["aic"]) if fits else ""
     best = fits.get(best_name, {})
 
@@ -1126,7 +1365,8 @@ def analyze_hlyb_pairwise(
     # favourable of the two.
     relaxed_cfg = dataclasses.replace(cfg, fit_repeat_scale=not cfg.fit_repeat_scale)
     relaxed = compare_hypotheses(counts, edges, repeat["shape"], null["mean"],
-                                 relaxed_cfg, sigma_floor_nm=sigma_floor)
+                                 relaxed_cfg, sigma_floor_nm=sigma_floor,
+                                 dimensions=dims, projection_factors=projection)
     relaxed_best = min(relaxed, key=lambda k: relaxed[k]["aic"]) if relaxed else ""
 
     # Confidence interval on the dimer distance, from a likelihood scan.  A
@@ -1136,7 +1376,8 @@ def analyze_hlyb_pairwise(
     scan = profile_likelihood_distance(
         counts, edges, repeat["shape"], null["mean"], cfg,
         structure=scan_structure, sigma_floor_nm=sigma_floor,
-        fixed_sigma_nm=float(best.get("sigma_nm")) if best else None)
+        fixed_sigma_nm=float(best.get("sigma_nm")) if best else None,
+        dimensions=dims, projection_factors=projection)
 
     centres = 0.5 * (edges[:-1] + edges[1:])
     excess = counts.astype(float) - null["mean"]
@@ -1167,6 +1408,15 @@ def analyze_hlyb_pairwise(
         "distance_scan": scan,
         "reference_dimer_nm": float(HLYB_REFERENCE_DIMER_NM),
         "structure_labels": {k: v.label for k, v in STRUCTURE_MODELS.items()},
+        "dimensions": dims,
+        "is_2d": bool(two_d),
+        "cell_mask": cells,
+        "cell_mask_stats": (cells.stats if cells is not None else {}),
+        "membrane_tilt_deg": tilts,
+        "median_tilt_deg": (float(np.median(tilts)) if tilts.size else float("nan")),
+        "median_foreshortening": (
+            float(np.sum(projection[0] * projection[1]))
+            if projection is not None and np.size(projection[0]) else float("nan")),
         "n_traces_total": int(traces["n_traces_total"]),
         "n_traces_used": int(pts.shape[0]),
         "centroid_sem_nm": median_sem,

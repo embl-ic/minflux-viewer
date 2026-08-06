@@ -260,6 +260,16 @@ COMMAND_META: dict[str, CommandMeta] = {
                               inputs=("active dataset (loc, tid, tim)",),
                               outputs=("pair-distance profile", "null band",
                                        "fitted components", "model comparison")),
+    "actionHlyBPairFit2D": CommandMeta(A + "hlyb_pairwise.py",
+                              ("hlyb", "subunit", "dimer", "pair", "distance", "2d",
+                               "projection", "ecoli", "border", "membrane", "tilt"),
+                              "HlyB sub-unit pair distances in the image plane: each "
+                              "E. coli is delineated and shrunk inward to drop the "
+                              "edge-on rim, and the residual foreshortening is modelled "
+                              "from the measured membrane tilt.", "analysis",
+                              inputs=("active dataset (loc, tid, tim)",),
+                              outputs=("cell delineation", "pair-distance profile",
+                                       "null band", "model comparison")),
     "actionHlyBTemplate3D": CommandMeta(A + "hlyb_clustering.py",
                               ("hlyb", "template", "subunit", "dimer", "pair", "3d"),
                               "HlyB template matching (3-D): per-complex assignment of "

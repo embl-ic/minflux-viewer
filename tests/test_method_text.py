@@ -410,6 +410,50 @@ def test_pair_fit_text_documents_the_measurement_and_its_limits():
     assert "not a count of detected complexes" in txt
 
 
+def test_pair_fit_2d_documents_the_projection_model():
+    """The 2-D variant must justify itself: it is not the 3-D analysis with z
+    discarded, and the foreshortening it cannot remove has to be stated."""
+    data = _pair_fit_method_data()
+    data["dimensions"] = 2
+    data["projection"] = {
+        "is_2d": True,
+        "cell_mask_stats": {
+            "n_cells": 4.0, "in_mask_fraction": 0.89, "median_half_width_nm": 342.0,
+            "retained_fraction": 0.30, "border_mode": "relative",
+            "border_fraction": 0.35, "implied_max_tilt_deg": 40.5,
+        },
+        "median_tilt_deg": 28.1, "median_foreshortening": 0.943,
+    }
+    ev = _ev(PAIR_FIT_MSG.replace("model fit on", "model fit (2D) on"), name="ds")
+    ev["method_data"] = data
+    txt = mt.generate_method_text(_state(), [ev])
+    assert "not by discarding the axial coordinate" in txt
+    assert "4 cell(s)" in txt and "shrunk inward by 0.35 of each cell's half-width" in txt
+    assert "within 40.5° of face-on" in txt
+    assert "median 28.1°" in txt
+    assert "mean projected/true ratio of 0.943" in txt
+    assert "two-dimensional (Rice) density" in txt
+    # the residual limitation must be admitted
+    assert "superimposes the upper and lower membrane" in txt
+
+
+def test_pair_fit_3d_has_no_projection_paragraph():
+    ev = _ev(PAIR_FIT_MSG, name="ds")
+    ev["method_data"] = _pair_fit_method_data()
+    txt = mt.generate_method_text(_state(), [ev])
+    assert "Projection." not in txt
+
+
+def test_pair_fit_rule_matches_both_dimension_labels():
+    for msg in (PAIR_FIT_MSG,
+                PAIR_FIT_MSG.replace("model fit on", "model fit (2D) on"),
+                PAIR_FIT_MSG.replace("model fit on", "model fit (3D) on")):
+        ev = _ev(msg, name="ds")
+        ev["method_data"] = _pair_fit_method_data()
+        txt = mt.generate_method_text(_state(), [ev])
+        assert "ensemble pair-distance model fit was performed" in txt
+
+
 def test_pair_fit_states_the_trimer_gap_and_its_biological_reading():
     """The motivating question is whether the trimer survived preparation; the
     text must answer it rather than leaving an AIC table to speak for itself."""

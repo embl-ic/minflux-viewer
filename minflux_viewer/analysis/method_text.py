@@ -756,6 +756,49 @@ def _render_hlyb_pair_fit(m, ev, state):
     sem_text = (" / ".join(_method_number(v, 2) for v in sem) + " nm in x / y / z"
                 if len(sem) == 3 else "not recorded")
 
+    projection = method.get("projection") or {}
+    if projection.get("is_2d"):
+        cell = projection.get("cell_mask_stats") or {}
+        shrink = (
+            f"{_method_number(cell.get('border_fraction'), 2)} of each cell's "
+            f"half-width" if str(cell.get("border_mode")) == "relative"
+            else f"{_method_number(cell.get('border_size_nm'), 0)} nm")
+        projection_text = (
+            f"\n\nProjection. The analysis was performed in the image plane, but not "
+            f"by discarding the axial coordinate: doing so shortens every distance by "
+            f"an amount that depends on the pair's orientation, and for a membrane "
+            f"protein on a rod-shaped cell that orientation varies systematically "
+            f"across the projected cell — face-on at the centre, edge-on at the rim. "
+            f"Each cell was therefore delineated from the localization density "
+            f"({_method_count(cell.get('n_cells'))} cell(s), containing "
+            f"{_method_number(100 * float(cell.get('in_mask_fraction', 0)), 0)} % of the "
+            f"trace centres, median projected half-width "
+            f"{_method_number(cell.get('median_half_width_nm'), 0)} nm) and shrunk "
+            f"inward by {shrink}, retaining "
+            f"{_method_number(100 * float(cell.get('retained_fraction', 0)), 0)} % of "
+            f"the centres. "
+        )
+        if "implied_max_tilt_deg" in cell:
+            projection_text += (
+                f"That shrink admits only membrane normals within "
+                f"{_method_number(cell.get('implied_max_tilt_deg'), 1)}° of face-on. ")
+        projection_text += (
+            f"The depth of each retained localization within its own cell gives its "
+            f"local membrane tilt (median "
+            f"{_method_number(projection.get('median_tilt_deg'), 1)}°), and the "
+            f"foreshortening that survives the shrink was modelled from that measured "
+            f"tilt distribution rather than ignored: a pair in a plane tilted by θ at "
+            f"in-plane azimuth φ projects to √(1 − sin²θ·sin²φ) of its true length, "
+            f"giving a mean projected/true ratio of "
+            f"{_method_number(projection.get('median_foreshortening'), 3)}. Distances "
+            f"were blurred with the two-dimensional (Rice) density accordingly. The "
+            f"projection nonetheless superimposes the upper and lower membrane, so "
+            f"some apparently close pairs are far apart along the optical axis; that "
+            f"is not corrected here."
+        )
+    else:
+        projection_text = ""
+
     classes = model.get("class_distances_nm") or []
     class_text = (", ".join(_method_number(v, 2) for v in classes) + " nm"
                   if classes else "not recorded")
@@ -899,7 +942,7 @@ def _render_hlyb_pair_fit(m, ev, state):
         f"cell-scale density while destroying all finer structure. The measured "
         f"distribution exceeded that reference by more than three standard deviations "
         f"out to {_method_number(obs.get('excess_outer_nm'), 1)} nm, and was "
-        f"indistinguishable from it beyond.\n\n"
+        f"indistinguishable from it beyond.{projection_text}\n\n"
         f"Model. The distribution was described as the sum of three terms. The first is "
         f"a same-site short-range population — one molecule re-acquired as several "
         f"traces, the two fluorophores carried by one divalent antibody, and drift "
@@ -970,7 +1013,8 @@ RULES = [
     (re.compile(r"Localization precision \(FRC\): resolution = (?P<res>[\d.]+) nm "
                 r"\(1/7 threshold, (?P<mode>[^,]+), (?P<n>[\d,]+) points, "
                 r"pixel (?P<px>[\d.]+) nm\)"), "analysis", _render_frc),
-    (re.compile(r"^HlyB pair-distance model fit on '(?P<name>.+?)':"),
+    (re.compile(r"^HlyB pair-distance model fit(?: \((?P<dims>[23])D\))? "
+                r"on '(?P<name>.+?)':"),
      "analysis", _render_hlyb_pair_fit),
     (re.compile(
         r"^HlyB subunit pair analysis \(template matching 3D\) on '(?P<name>.+?)': "

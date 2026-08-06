@@ -275,6 +275,51 @@ def test_report_names_the_trimer_gap_when_a_dimer_shape_wins():
     assert "property of the sample" in text
 
 
+def test_two_d_dialog_exposes_the_border_shrink_and_the_3d_one_does_not(_app):
+    from minflux_viewer.analysis.hlyb_pairwise import PairFitConfig
+    from minflux_viewer.ui.hlyb_pairwise_dialog import HlyBPairwiseDialog
+
+    three = HlyBPairwiseDialog(None, defaults=PairFitConfig(), dimensions=3)
+    two = HlyBPairwiseDialog(None, defaults=PairFitConfig(), dimensions=2)
+    try:
+        assert three.config().dimensions == 3
+        assert three._border_mode is None
+        cfg = two.config()
+        assert cfg.dimensions == 2
+        # relative is the default in 2-D because it bounds the membrane tilt
+        assert cfg.border_mode == "relative"
+        assert two._border_fraction.isEnabled()
+        assert not two._border_size.isEnabled()
+    finally:
+        three.deleteLater()
+        two.deleteLater()
+
+
+def test_two_d_report_documents_the_projection_and_its_limit(_app):
+    from minflux_viewer.analysis.hlyb_pairwise import PairFitConfig, analyze_hlyb_pairwise_2d
+    from minflux_viewer.ui.hlyb_pairwise_dialog import pairwise_report
+
+    rng = np.random.default_rng(17)
+    # a filled patch so the delineation finds one cell
+    n_tr, per = 600, 20
+    tid = np.repeat(np.arange(n_tr), per)
+    centres = np.column_stack([rng.uniform(0, 2400, n_tr), rng.uniform(0, 800, n_tr),
+                               rng.uniform(-300, 300, n_tr)])
+    pts = np.repeat(centres, per, axis=0) + rng.normal(scale=2.0, size=(n_tr * per, 3))
+    tim = np.repeat(np.arange(n_tr) * 5.0, per)
+    res = analyze_hlyb_pairwise_2d(pts * 1e-9, tid, tim,
+                                   PairFitConfig(min_loc_per_trace=5,
+                                                 z_scaling_factor=1.0,
+                                                 null_replicates=2))
+    text = pairwise_report(res)
+    assert "PROJECTION  (2-D variant)" in text
+    assert "cells delineated" in text
+    assert "mean projected/true length" in text
+    assert "not the 3-D analysis with z discarded" in text
+    # the uncorrected limitation must be stated, not omitted
+    assert "superimposes the upper and lower" in text
+
+
 def test_hlyb_menu_offers_the_new_method_and_no_longer_the_plain_2d_3d(_app):
     """The plain 2-D / 3-D entries are retired; their analysis code stays in
     hlyb_clustering.py so a proper 2-D workflow can be rebuilt on it."""
@@ -282,7 +327,9 @@ def test_hlyb_menu_offers_the_new_method_and_no_longer_the_plain_2d_3d(_app):
     try:
         labels = [a.text() for a in win.menuHlyBPair.actions()]
         assert "Pair-distance model fit (3D)" in labels
+        assert "Pair-distance model fit (2D)" in labels
         assert "Template matching (3D)" in labels
+        # the retired bare entries, not the new qualified ones
         assert "2D" not in labels
         assert "3D" not in labels
         assert not hasattr(win, "actionHlyB2D")
