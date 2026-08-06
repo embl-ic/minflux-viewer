@@ -530,12 +530,21 @@ class MainWindow(QMainWindow):
             "Measure the pair-distance distribution of trace centroids without "
             "merging them, against an envelope-preserving null, and fit the "
             "six-site HlyB model to it.")
-        self.actionHlyBPairFit.triggered.connect(self._run_hlyb_pairwise_analysis)
+        self.actionHlyBPairFit.triggered.connect(
+            lambda: self._run_hlyb_pairwise_analysis(dimensions=3))
+        self.actionHlyBPairFit2D = QAction("Pair-distance model fit (2D)", self)
+        self.actionHlyBPairFit2D.setToolTip(
+            "As the 3-D fit, but in the image plane: each E.coli is delineated "
+            "and shrunk inward to drop the edge-on rim, and the residual "
+            "foreshortening is modelled from the measured membrane tilt.")
+        self.actionHlyBPairFit2D.triggered.connect(
+            lambda: self._run_hlyb_pairwise_analysis(dimensions=2))
         self.actionHlyBTemplate3D = QAction("Template matching (3D)", self)
         self.actionHlyBTemplate3D.triggered.connect(
             lambda: self._run_hlyb_pair_analysis(mode="TEMPLATE3D")
         )
         self.menuHlyBPair.addAction(self.actionHlyBPairFit)
+        self.menuHlyBPair.addAction(self.actionHlyBPairFit2D)
         self.menuHlyBPair.addAction(self.actionHlyBTemplate3D)
         # The plain "2D" and "3D" entries are retired: the 3-D one reported
         # generic DBSCAN proximity groups (including groups larger than a
@@ -2386,14 +2395,19 @@ class MainWindow(QMainWindow):
             self._state.log(
                 "Restore ROI: no other coordinate view open to restore onto.", "WARN")
 
-    def _run_hlyb_pairwise_analysis(self) -> None:
+    def _run_hlyb_pairwise_analysis(self, dimensions: int = 3) -> None:
         """Analyze › Clustering › HlyB subunit pair analysis › Pair-distance model
-        fit (3D) — measure the trace-centroid pair-distance distribution against
-        an envelope-preserving null and fit the six-site HlyB model to it.
+        fit — measure the trace-centroid pair-distance distribution against an
+        envelope-preserving null and fit the distribution of inter-subunit
+        distances to it.
 
         No merge radius is applied anywhere, so no distance range is removed and
         the short-range same-site population is modelled rather than deleted.
+        The 2-D variant additionally delineates each E.coli, shrinks it inward to
+        drop the edge-on rim, and models the residual foreshortening from the
+        measured membrane tilt.
         """
+        dimensions = 2 if int(dimensions) == 2 else 3
         import numpy as np
         from ..core.loader import mfx_get
 
@@ -2427,11 +2441,12 @@ class MainWindow(QMainWindow):
 
         current_rimf = float(getattr(ds.cali, "RIMF", 0.67) or 0.67)
         defaults = getattr(self, "_hlyb_pair_cfg", None)
+        overrides = {"z_scaling_factor": current_rimf, "dimensions": dimensions}
         if defaults is None:
-            defaults = PairFitConfig(z_scaling_factor=current_rimf)
+            defaults = PairFitConfig(**overrides)
         else:
-            defaults = PairFitConfig(**{**vars(defaults), "z_scaling_factor": current_rimf})
-        dlg = HlyBPairwiseDialog(self, defaults=defaults)
+            defaults = PairFitConfig(**{**vars(defaults), **overrides})
+        dlg = HlyBPairwiseDialog(self, defaults=defaults, dimensions=dimensions)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         cfg = dlg.config()
@@ -2449,7 +2464,8 @@ class MainWindow(QMainWindow):
                 QApplication.restoreOverrideCursor()
 
         from .modeless import show_modeless
-        win = HlyBPairwiseWindow(result, title=ds.name, owner=self)
+        win = HlyBPairwiseWindow(
+            result, title=f"{ds.name} ({dimensions}D)", owner=self)
         show_modeless(win, self)
 
         best = result.get("best_hypothesis", "")
@@ -2494,6 +2510,17 @@ class MainWindow(QMainWindow):
         sem = np.asarray(result.get("centroid_sem_nm", []), dtype=float).ravel()
         method_data = {
             "schema": "hlyb_pair_distance_fit_3d/v1",
+            "dimensions": dimensions,
+            "projection": {
+                "is_2d": bool(result.get("is_2d")),
+                "cell_mask_stats": {
+                    k: (float(v) if isinstance(v, (int, float)) else str(v))
+                    for k, v in (result.get("cell_mask_stats") or {}).items()
+                },
+                "median_tilt_deg": float(result.get("median_tilt_deg", float("nan"))),
+                "median_foreshortening": float(
+                    result.get("median_foreshortening", float("nan"))),
+            },
             "input": {
                 "dataset_name": ds.name,
                 "source_path": str(
@@ -2565,7 +2592,7 @@ class MainWindow(QMainWindow):
         }
 
         self._state.log(
-            f"HlyB pair-distance model fit on '{ds.name}': "
+            f"HlyB pair-distance model fit ({dimensions}D) on '{ds.name}': "
             f"{result['n_traces_used']:,} of {result['n_traces_total']:,} trace(s); "
             f"excess above null out to {result['excess_outer_nm']:.1f} nm; "
             f"best model '{best}' (next by dAIC {margin:.1f}, "

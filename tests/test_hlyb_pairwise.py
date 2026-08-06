@@ -464,6 +464,124 @@ def test_end_to_end_on_dimers_recovers_the_dimer_distance_not_the_trimer():
     assert summary["median_nm"] == pytest.approx(15.0, abs=2.5)
 
 
+# -- 2-D variant -----------------------------------------------------------
+
+def test_two_d_blur_is_the_rice_density_and_matches_a_simulation():
+    from minflux_viewer.analysis.hlyb_pairwise import offset_gaussian_pdf_2d
+
+    rng = np.random.default_rng(5)
+    d, s = 12.0, 2.0
+    b = np.array([d, 0.0]) + rng.normal(scale=s, size=(200000, 2))
+    sample = np.linalg.norm(b, axis=1)
+    edges = np.arange(0, 40.5, 0.5)
+    emp = np.histogram(sample, bins=edges, density=True)[0]
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    assert np.max(np.abs(emp - offset_gaussian_pdf_2d(centres, d, s))) < 0.01
+
+
+def test_projection_factors_follow_the_measured_tilt():
+    """A face-on membrane loses nothing; a tilted one foreshortens by a known
+    amount, and that amount is what the border shrink bounds."""
+    from minflux_viewer.analysis.hlyb_pairwise import tilt_projection_factors
+
+    flat, w_flat = tilt_projection_factors(np.zeros(50))
+    assert float(np.sum(flat * w_flat)) == pytest.approx(1.0, abs=1e-6)
+    tilted, w_tilt = tilt_projection_factors(np.full(50, 60.0))
+    # mean of sqrt(1 - sin^2(60) sin^2(phi)) over uniform phi
+    phi = np.linspace(0, 2 * np.pi, 20001)
+    expect = np.mean(np.sqrt(1 - (np.sin(np.deg2rad(60)) * np.sin(phi)) ** 2))
+    assert float(np.sum(tilted * w_tilt)) == pytest.approx(expect, abs=0.02)
+    assert float(np.sum(tilted * w_tilt)) < 1.0
+
+
+def test_projection_distribution_is_compact():
+    """One entry per (localization, azimuth) would be tens of thousands of
+    values and the blurred-distance matrix costs a pass per value."""
+    from minflux_viewer.analysis.hlyb_pairwise import tilt_projection_factors
+
+    values, weights = tilt_projection_factors(np.linspace(0, 45, 2000))
+    assert values.size <= 32 and values.size == weights.size
+    assert float(weights.sum()) == pytest.approx(1.0)
+
+
+def test_membrane_tilt_from_depth_in_the_cell():
+    from minflux_viewer.analysis.hlyb_pairwise import summarise_tilts
+
+    half = np.full(4, 400.0)
+    # at the projected centre the point is face-on; at the rim it is edge-on
+    tilts = summarise_tilts(np.array([400.0, 200.0, 58.6, 0.0]), half)
+    assert tilts[0] == pytest.approx(0.0, abs=1e-6)
+    assert tilts[1] == pytest.approx(30.0, abs=0.5)
+    assert tilts[3] == pytest.approx(90.0, abs=1e-6)
+
+
+def _simulate_membrane_dimers(n_dimers, distance_nm, radius_nm=400.0, length_nm=2400.0,
+                              seed=0, locs_per_trace=25, sigma=np.array([2.0, 2.0, 3.0])):
+    """Dimers lying in the membrane of a rod, i.e. in the local tangent plane."""
+    rng = np.random.default_rng(seed)
+    pts, tids, tim, t, clock = [], [], [], 0, 0.0
+    for _ in range(n_dimers):
+        x = rng.uniform(0, length_nm)
+        phi = rng.uniform(0, 2 * np.pi)
+        normal = np.array([0.0, np.cos(phi), np.sin(phi)])
+        centre = np.array([x, radius_nm * np.cos(phi), radius_nm * np.sin(phi)])
+        # an orthonormal basis of the tangent plane
+        t1 = np.array([1.0, 0.0, 0.0])
+        t2 = np.cross(normal, t1)
+        azimuth = rng.uniform(0, 2 * np.pi)
+        direction = np.cos(azimuth) * t1 + np.sin(azimuth) * t2
+        for site in (centre, centre + direction * distance_nm):
+            for _ in range(2):
+                pts.append(site + rng.normal(scale=sigma, size=(locs_per_trace, 3)))
+                tids.append(np.full(locs_per_trace, t)); t += 1
+                tim.append(clock + np.arange(locs_per_trace) * 1e-3)
+                clock += 0.05
+            clock += 30.0
+    return (np.concatenate(pts) * 1e-9, np.concatenate(tids), np.concatenate(tim))
+
+
+def test_two_d_recovers_the_distance_that_projection_would_shorten():
+    """The point of the 2-D variant: a projected distance is systematically too
+    short, so a fit that ignores the foreshortening under-reports it."""
+    from minflux_viewer.analysis.hlyb_pairwise import (
+        analyze_hlyb_pairwise_2d, blurred_distance_matrix, distance_grid,
+        structure_profile, tilt_projection_factors)
+
+    loc, tid, tim = _simulate_membrane_dimers(900, distance_nm=16.0, seed=31)
+    res = analyze_hlyb_pairwise_2d(
+        loc, tid, tim,
+        PairFitConfig(min_loc_per_trace=10, z_scaling_factor=1.0, null_replicates=3,
+                      border_mode="relative", border_fraction=0.3,
+                      label_spread_nm=0.05))
+    assert res["is_2d"] is True and res["dimensions"] == 2
+    assert res["cell_mask_stats"]["n_cells"] >= 1
+    # foreshortening was measured, not assumed away
+    assert 0.5 < res["median_foreshortening"] < 1.0
+    assert res["best_fit"]["distance_summary"]["median_nm"] == pytest.approx(16.0, abs=3.5)
+
+
+def test_ignoring_the_projection_would_bias_the_distance_short():
+    """Direct check on the model itself: the projected profile for a given true
+    distance peaks below it, which is exactly the bias the kernel removes."""
+    from minflux_viewer.analysis.hlyb_pairwise import (
+        blurred_distance_matrix, structure_profile, tilt_projection_factors)
+
+    centres = np.arange(0.25, 60, 0.5)
+    grid = np.arange(1.0, 60, 0.25)
+    factors = tilt_projection_factors(np.full(200, 45.0))
+    flat = tilt_projection_factors(np.zeros(200))
+    k_tilt = blurred_distance_matrix(centres, grid, 1.0, dimensions=2, factors=factors)
+    k_flat = blurred_distance_matrix(centres, grid, 1.0, dimensions=2, factors=flat)
+    tilted = structure_profile(centres, "dimer_gaussian", [20.0, 0.5],
+                               sigma_nm=1.0, bin_nm=0.5, d_grid=grid, kernel=k_tilt)
+    face_on = structure_profile(centres, "dimer_gaussian", [20.0, 0.5],
+                                sigma_nm=1.0, bin_nm=0.5, d_grid=grid, kernel=k_flat)
+    mean_tilted = float((centres * tilted).sum() / tilted.sum())
+    mean_flat = float((centres * face_on).sum() / face_on.sum())
+    assert mean_flat == pytest.approx(20.0, abs=0.5)
+    assert mean_tilted < mean_flat - 1.0
+
+
 def test_end_to_end_on_elastic_dimers_reports_a_broad_population():
     """A dimer with a flexible linkage gives a broad band; the reported spread
     must exceed the measurement blur rather than collapsing to a sharp value."""
