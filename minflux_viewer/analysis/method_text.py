@@ -686,9 +686,14 @@ def _render_hlyb_template3d(m, ev, state):
 
 
 _PAIR_FIT_HYPOTHESIS = {
+    "dimer_gaussian": "a single inter-subunit distance with a Gaussian spread",
+    "dimer_uniform": "a single inter-subunit distance uniform within a band",
+    "dimer_lognormal": "a single inter-subunit distance with a log-normal spread",
+    "trimer_six_site": "the published six-site C3 trimer",
+    "no_structure": "no structure beyond the same-site population",
+    # legacy keys from earlier runs
     "six_site": "the six-site HlyB complex",
     "dimer_only": "a single dimer distance",
-    "no_structure": "no structure beyond the same-site population",
 }
 
 
@@ -774,33 +779,98 @@ def _render_hlyb_pair_fit(m, ev, state):
         )
 
     bounds = best_fit.get("parameters_at_bounds") or []
-    delta = best_fit.get("label_offset_nm")
-    lo_bound, hi_bound = (params.get("label_offset_bounds_nm") or [0.0, 6.0])[:2]
-    if delta is None:
-        offset_text = "The antibody displacement was not recorded."
-    elif "label_offset_nm" in bounds:
-        offset_text = (
-            f"The fitted antibody displacement reached the edge of its permitted "
-            f"range at {_method_number(delta, 2)} nm and is therefore a limit rather "
-            f"than an estimate: the data prefer observed distances at or below the "
-            f"protein-domain values and give no support for a radially outward label, "
-            f"which would lengthen every class by 3-4 nm."
+    summary = best_fit.get("distance_summary") or {}
+    scan = method.get("distance_scan") or {}
+    reference_dimer = model.get("reference_dimer_nm")
+
+    if summary:
+        distance_text = (
+            f"The fitted distribution of true inter-subunit distances has a median of "
+            f"{_method_number(summary.get('median_nm'), 2)} nm, with the central 68 % of "
+            f"the population between {_method_number(summary.get('p16_nm'), 2)} and "
+            f"{_method_number(summary.get('p84_nm'), 2)} nm (mode "
+            f"{_method_number(summary.get('mode_nm'), 2)} nm, mean "
+            f"{_method_number(summary.get('mean_nm'), 2)} nm). Percentiles of the fitted "
+            f"distribution are quoted in preference to the raw shape parameters, because "
+            f"they are comparable between shapes and because a broad population must not "
+            f"be reported as though it were a precise distance."
         )
     else:
-        style = ("an isotropically oriented label" if float(delta) < 1.8
-                 else "a radially outward label, matching the tabulated distances "
-                      "that include 2 nm per antibody at each endpoint")
-        offset_text = (
-            f"The fitted antibody displacement was {_method_number(delta, 2)} nm "
-            f"(permitted range {_method_number(lo_bound, 1)} to "
-            f"{_method_number(hi_bound, 1)} nm), consistent with {style}."
+        distance_text = "No structural distance distribution was fitted."
+
+    if reference_dimer and summary:
+        distance_text += (
+            f" For reference, the corresponding distance tabulated on the published "
+            f"diagram is {_method_number(reference_dimer, 2)} nm; it was used only as a "
+            f"starting value and as a point of comparison, never as a constraint."
         )
+
+    if scan.get("available"):
+        ci68 = scan.get("ci68_nm") or [float("nan"), float("nan")]
+        ci95 = scan.get("ci95_nm") or [float("nan"), float("nan")]
+        scan_text = (
+            f"A profile-likelihood scan of the distribution centre, refitting all other "
+            f"parameters at each step, gave {_method_number(scan.get('best_nm'), 2)} nm "
+            f"with a 68 % interval of {_method_number(ci68[0], 2)} to "
+            f"{_method_number(ci68[1], 2)} nm and a 95 % interval of "
+            f"{_method_number(ci95[0], 2)} to {_method_number(ci95[1], 2)} nm."
+        )
+        if not scan.get("constrained", True):
+            scan_text += (
+                " The scan did not rise by 1.92 log-likelihood units anywhere in the "
+                "permitted range, so the data do not localize the centre and only the "
+                "width of the population is being measured."
+            )
+        elif scan.get("ci68_below_scan_step"):
+            scan_text += (
+                f" The 68 % interval is no wider than the "
+                f"{_method_number(scan.get('step_nm'), 2)} nm scan step and is therefore "
+                f"unresolved rather than tight."
+            )
+    else:
+        scan_text = ""
 
     relaxed_gap = min((f.get("delta_aic", 0.0) for key, f in relaxed.items()
                        if key != method.get("best_hypothesis_relaxed", "")),
                       default=float("nan"))
     pinned_gap = min((f.get("delta_aic", 0.0) for key, f in fits.items()
                       if key != best), default=float("nan"))
+    trimer = fits.get("trimer_six_site")
+    if trimer is not None and str(best).startswith("dimer"):
+        architecture_text = (
+            f" The published six-site trimer geometry was among the candidates and was "
+            f"worse than the preferred single-distance description by "
+            f"{_method_number(trimer.get('delta_aic'), 0)} AIC units. This is consistent "
+            f"with the trimeric assembly not surviving sample preparation, leaving "
+            f"dimers whose separation is neither fixed at the tabulated value nor sharp."
+        )
+    elif str(best) == "trimer_six_site":
+        architecture_text = (
+            " The published six-site trimer geometry described the data better than any "
+            "of the single-distance shapes tested."
+        )
+    else:
+        architecture_text = ""
+
+    if summary and best_fit.get("sigma_nm"):
+        try:
+            broad = float(summary.get("spread_nm", 0.0)) > float(best_fit["sigma_nm"])
+        except (TypeError, ValueError):
+            broad = False
+        width_text = (
+            f" The half-width of the central 68 % interval, "
+            f"{_method_number(summary.get('spread_nm'), 2)} nm, "
+            + ("exceeds" if broad else "does not exceed")
+            + f" the {_method_number(best_fit.get('sigma_nm'), 2)} nm positional blur, so "
+            f"the width of the distribution is "
+            + ("a property of the sample — a flexible linkage or several coexisting "
+               "conformations — rather than of the measurement."
+               if broad else
+               "not resolved above the measurement blur, and the distance is consistent "
+               "with being sharp.")
+        )
+    else:
+        width_text = ""
 
     text = (
         f"Input data. An ensemble pair-distance model fit was performed on dataset "
@@ -833,46 +903,50 @@ def _render_hlyb_pair_fit(m, ev, state):
         f"Model. The distribution was described as the sum of three terms. The first is "
         f"a same-site short-range population — one molecule re-acquired as several "
         f"traces, the two fluorophores carried by one divalent antibody, and drift "
-        f"between re-acquisitions — whose shape was {kernel_text}. The second is the "
-        f"intra-complex term of the six-site HlyB model, using the inter-domain "
-        f"distances {class_text}, each convolved with the positional blur of a pair of "
-        f"centres. The five distance classes were held at equal weight "
-        f"({_method_number(model.get('class_weight'), 3)} each): every class comprises "
-        f"three of the fifteen site pairs, and every pair requires two labels, so all "
-        f"classes scale with the square of the labelling efficiency and their ratio "
-        f"does not depend on it. Those weights are therefore a constraint imposed by "
-        f"the structure rather than free parameters, which is what makes the fit a test "
-        f"of the model. The third term is the randomized reference, scaled by one free "
-        f"amplitude, representing pairs from different complexes. Amplitudes were "
-        f"estimated by Poisson maximum likelihood over "
+        f"between re-acquisitions — whose shape was {kernel_text}. The second is a "
+        f"structural term: a distribution p(d) over true inter-subunit distances, "
+        f"convolved with the exact three-dimensional blurred-distance density for a "
+        f"pair of centres, so that the width of p(d) is separated from the positional "
+        f"error of the measurement. The published trimer geometry (inter-domain "
+        f"distances {class_text}) was **not** imposed. It describes a reference "
+        f"architecture that need not survive sample preparation, and fixing it would "
+        f"assume the result; it was instead entered as one candidate shape among "
+        f"several, alongside a single distance with a Gaussian spread, a single "
+        f"distance uniform within a fitted band — the fully elastic case — and a "
+        f"single distance with a log-normal spread. The third term is the randomized "
+        f"reference, scaled by one free amplitude, representing pairs from different "
+        f"assemblies. Amplitudes were estimated by Poisson maximum likelihood over "
         f"{_method_number(params.get('fit_r_min_nm'), 1)} to "
-        f"{_method_number(params.get('fit_r_max_nm'), 1)} nm. The positional blur was "
-        f"bounded below by the measured centroid precision "
-        f"({_method_number(obs.get('sigma_floor_nm'), 2)} nm for a pair) and shared "
-        f"across competing hypotheses, since it describes the measurement and not the "
-        f"structure; the antibody displacement was restricted to non-negative values, "
-        f"because two displacements can only lengthen an expected distance.\n\n"
+        f"{_method_number(params.get('fit_r_max_nm'), 1)} nm, with the distance itself "
+        f"free over {_method_number((params.get('dimer_distance_bounds_nm') or [0, 0])[0], 1)} "
+        f"to {_method_number((params.get('dimer_distance_bounds_nm') or [0, 0])[1], 1)} nm. "
+        f"The positional blur was **not** fitted. It was computed from the measured "
+        f"centroid precision ({_method_number(obs.get('sigma_floor_nm'), 2)} nm for a "
+        f"pair) combined in quadrature with the labelling allowance, and held common to "
+        f"every candidate shape. A freely fitted blur absorbs the very width the "
+        f"analysis is meant to measure, and because it is shared, the shape that "
+        f"absorbs the most then imposes a blur that handicaps the others — tested on "
+        f"simulated data, that alone cost the true architecture ~2100 AIC units on its "
+        f"own ground truth.\n\n"
         f"Results. The preferred description was {_PAIR_FIT_HYPOTHESIS.get(best, best)}. "
         f"Ranked by Akaike information criterion: {_pair_fit_ranking(fits, best)}. The "
-        f"fit assigned {_method_number(best_fit.get('n_complex_pairs'), 0)} pair(s) to "
-        f"the complex term and {_method_number(best_fit.get('n_repeat_pairs'), 0)} to "
+        f"fit assigned {_method_number(best_fit.get('n_structure_pairs'), 0)} pair(s) to "
+        f"the structural term and {_method_number(best_fit.get('n_repeat_pairs'), 0)} to "
         f"the same-site term, with the randomized reference scaled by "
         f"{_method_number(best_fit.get('background_scale'), 3)} and a fitted pair blur "
-        f"of {_method_number(best_fit.get('sigma_nm'), 2)} nm. {offset_text}\n\n"
+        f"of {_method_number(best_fit.get('sigma_nm'), 2)} nm. {distance_text} "
+        f"{scan_text}{architecture_text}{width_text}\n\n"
         f"Sensitivity and limits. The comparison above holds the same-site kernel at "
         f"its measured width. Repeating it with that width free to increase — which is "
         f"physically plausible, since drift and a divalent label both broaden the "
         f"population — the preferred model was unchanged but its margin over the next "
         f"hypothesis fell from {_method_number(pinned_gap, 1)} to "
         f"{_method_number(relaxed_gap, 1)} AIC units. Both figures are reported because "
-        f"the strength of the structural evidence depends on that choice. The "
-        f"individual distance classes are not resolved and no attempt was made to "
-        f"resolve them: the three short classes span about 2 nm against a pair blur of "
-        f"several nanometres. What this analysis measures is the ensemble envelope, its "
-        f"outer extent, and which of the competing geometries reproduces them; it does "
-        f"not assign any observed pair to a distance class, nor identify individual "
-        f"complexes, and the reported numbers should not be read as a count of detected "
-        f"complexes."
+        f"the strength of the structural evidence depends on that choice. What this "
+        f"analysis measures is the distribution of inter-subunit distances, its width, "
+        f"and which candidate shape reproduces it. It does not assign any observed pair "
+        f"to a particular subunit pairing, does not identify individual assemblies, and "
+        f"the reported numbers are not a count of detected complexes."
     )
     return text, []
 

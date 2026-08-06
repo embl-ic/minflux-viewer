@@ -37,9 +37,14 @@ from ..analysis.hlyb_pairwise import PairFitConfig, pairs_in_band
 from .text_select import make_labels_selectable
 
 _HYPOTHESIS_LABELS = {
+    "dimer_gaussian": "dimer, Gaussian spread",
+    "dimer_uniform": "dimer, flat band (elastic)",
+    "dimer_lognormal": "dimer, log-normal spread",
+    "trimer_six_site": "published six-site trimer",
+    "no_structure": "no structure",
+    # legacy keys, so a result from an earlier run still labels cleanly
     "six_site": "six-site HlyB complex",
     "dimer_only": "dimer distance only",
-    "no_structure": "no structure",
 }
 
 #: Display cap for raw localizations; deterministic thinning, display only.
@@ -62,12 +67,14 @@ class HlyBPairwiseDialog(QDialog):
         intro = QLabel(
             "Measure the pair-distance distribution of trace centroids without "
             "merging them, compare it with an envelope-preserving null, and fit "
-            "a forward model whose components are the same-site short-range "
-            "population, the six HlyB labelling sites, and unrelated pairs.\n\n"
+            "the distribution of inter-subunit distances.\n\n"
             "Unlike template matching this never imposes a merge radius, so no "
             "distance range is removed and no artificial peak is created. The "
-            "HlyB class weights are fixed by the structure, so the fit is a test "
-            "of the model rather than a flexible curve fit."
+            "distance is fitted, not assumed: the published trimer geometry is a "
+            "reference architecture that need not survive sample preparation, so "
+            "it is entered as one candidate shape alongside a single distance "
+            "with a Gaussian or log-normal spread and a fully elastic flat band. "
+            "The shapes are ranked by AIC, so the data decide."
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
@@ -110,13 +117,32 @@ class HlyBPairwiseDialog(QDialog):
             "a smoother reference at proportionally more compute.")
         form.addRow("Null replicates:", self._null_reps)
 
-        self._fit_delta = QCheckBox("fit the antibody displacement (δ)")
-        self._fit_delta.setChecked(bool(d.fit_label_offset))
-        self._fit_delta.setToolTip(
-            "The label displacement lengthens every observed distance. Fitting "
-            "it decides from the data whether the label sits isotropically "
-            "(δ ≈ 1 nm) or radially outward (δ ≈ 4 nm).")
-        form.addRow("", self._fit_delta)
+        self._label_spread = self._dspin(0.0, 10.0, d.label_spread_nm, 2, 0.1, " nm")
+        self._label_spread.setToolTip(
+            "Spread a pair distance acquires from the two antibody displacements.\n"
+            "Combined in quadrature with the measured centroid precision, this "
+            "sets the\npositional blur, which is NOT fitted — a free blur absorbs "
+            "the very width\nthe analysis is meant to measure.\n\n"
+            "It matters: on the reference dataset the fitted median distance moves "
+            "from\n12.0 nm at 0 nm allowance to 8.3 nm at 5 nm. Which shape wins "
+            "does not change.")
+        form.addRow("Labelling allowance:", self._label_spread)
+
+        self._dimer_lo = self._dspin(0.5, 100.0, d.dimer_distance_bounds_nm[0], 1, 0.5, " nm")
+        self._dimer_hi = self._dspin(1.0, 200.0, d.dimer_distance_bounds_nm[1], 1, 0.5, " nm")
+        for spin in (self._dimer_lo, self._dimer_hi):
+            spin.setToolTip(
+                "Range over which the inter-subunit distance is searched. It is "
+                "fitted, not\nassumed: the published geometry is a reference "
+                "architecture that need not\nsurvive sample preparation.")
+        row = QHBoxLayout()
+        row.addWidget(self._dimer_lo)
+        row.addWidget(QLabel("to"))
+        row.addWidget(self._dimer_hi)
+        holder = QWidget()
+        holder.setLayout(row)
+        row.setContentsMargins(0, 0, 0, 0)
+        form.addRow("Distance search range:", holder)
 
         root.addLayout(form)
         buttons = QDialogButtonBox(
@@ -146,7 +172,11 @@ class HlyBPairwiseDialog(QDialog):
             bin_nm=float(self._bin.value()),
             repeat_gap_s=float(self._gap.value()),
             null_replicates=int(self._null_reps.value()),
-            fit_label_offset=bool(self._fit_delta.isChecked()),
+            label_spread_nm=float(self._label_spread.value()),
+            dimer_distance_bounds_nm=(
+                min(float(self._dimer_lo.value()), float(self._dimer_hi.value())),
+                max(float(self._dimer_lo.value()), float(self._dimer_hi.value())),
+            ),
             repeat_max_nm=base.repeat_max_nm,
             fit_r_max_nm=min(base.fit_r_max_nm, float(self._r_max.value())),
         )
@@ -571,20 +601,29 @@ class HlyBPairwiseWindow(QDialog):
                           pen=pg.mkPen(30, 150, 60, 220, width=2,
                                        style=Qt.PenStyle.DashLine),
                           name="same-site short range")
-                plot.plot(c, np.asarray(fit["complex_component"]),
+                plot.plot(c, np.asarray(fit.get("structure_component",
+                                                fit.get("complex_component"))),
                           pen=pg.mkPen(50, 90, 220, 230, width=2,
                                        style=Qt.PenStyle.DashLine),
-                          name="HlyB complex")
+                          name="inter-subunit distances")
                 if not excess_mode:
                     plot.plot(c, np.asarray(fit["background_component"]),
                               pen=pg.mkPen(230, 150, 30, 220, width=2,
                                            style=Qt.PenStyle.DotLine),
                               name="unrelated pairs")
-                delta = float(fit.get("label_offset_nm", 0.0))
-                for d_nm in r.get("class_distances_nm", []):
-                    line = pg.InfiniteLine(pos=float(d_nm) + delta, angle=90,
-                                           pen=pg.mkPen(50, 90, 220, 90, width=1))
-                    plot.addItem(line, ignoreBounds=True)
+                # Mark the FITTED distance distribution, not the tabulated
+                # classes: the geometry is an outcome here, not an input.
+                summary = fit.get("distance_summary") or {}
+                if summary:
+                    plot.addItem(pg.InfiniteLine(
+                        pos=float(summary.get("median_nm", 0.0)), angle=90,
+                        pen=pg.mkPen(50, 90, 220, 200, width=2)), ignoreBounds=True)
+                    band = pg.LinearRegionItem(
+                        values=(float(summary.get("p16_nm", 0.0)),
+                                float(summary.get("p84_nm", 0.0))),
+                        brush=pg.mkBrush(50, 90, 220, 28), movable=False)
+                    band.setZValue(-20)
+                    plot.addItem(band, ignoreBounds=True)
         # clear() drops every item, so the band selector has to be put back
         if self._band_region is not None:
             plot.addItem(self._band_region, ignoreBounds=True)
@@ -637,16 +676,56 @@ def pairwise_report(result: dict) -> str:
     add("  removes the merge-radius artifact of template matching.")
     add("")
 
-    add("MODEL COMPARISON  (short-range kernel pinned at its measured width)")
-    add(f"  {'hypothesis':<26} {'dAIC':>10} {'complex pairs':>15} {'delta nm':>10} {'sigma nm':>10}")
-    for name, fit in r.get("fits", {}).items():
-        add(f"  {_HYPOTHESIS_LABELS.get(name, name):<26} {fit.get('delta_aic', 0.0):10.1f} "
-            f"{fit.get('n_complex_pairs', 0.0):15.0f} {fit.get('label_offset_nm', 0.0):10.2f} "
-            f"{fit.get('sigma_nm', 0.0):10.2f}")
-    add("  Lower dAIC is better; 0 marks the preferred model. The HlyB class")
-    add("  weights are fixed at 1/5 each, because every class holds three of the")
-    add("  fifteen pairs and all scale as p^2 with labelling efficiency, so their")
-    add("  ratio does not depend on it.")
+    add("DIMER DISTANCE  (fitted distribution of true inter-subunit distances)")
+    best_fit = r.get("best_fit") or {}
+    summary = best_fit.get("distance_summary") or {}
+    if summary:
+        add(f"  preferred shape                : "
+            f"{_HYPOTHESIS_LABELS.get(r.get('best_hypothesis', ''), '?')}")
+        add(f"  median true distance           : {summary.get('median_nm', float('nan')):.2f} nm")
+        add(f"  central 68% of the population  : "
+            f"{summary.get('p16_nm', float('nan')):.2f} to "
+            f"{summary.get('p84_nm', float('nan')):.2f} nm "
+            f"(half-width {summary.get('spread_nm', float('nan')):.2f} nm)")
+        add(f"  mode / mean                    : {summary.get('mode_nm', float('nan')):.2f} / "
+            f"{summary.get('mean_nm', float('nan')):.2f} nm")
+        add(f"  fitted shape parameters        : {best_fit.get('structure_description', '')}")
+        ref = r.get("reference_dimer_nm")
+        if ref:
+            add(f"  reference diagram value        : {ref:.2f} nm "
+                f"(a reference architecture, NOT a constraint here)")
+    scan = r.get("distance_scan") or {}
+    if scan.get("available"):
+        lo, hi = scan.get("ci68_nm", (float('nan'),) * 2)
+        lo95, hi95 = scan.get("ci95_nm", (float('nan'),) * 2)
+        add(f"  likelihood scan of the centre  : best {scan.get('best_nm', float('nan')):.2f} nm, "
+            f"68% [{lo:.2f}, {hi:.2f}], 95% [{lo95:.2f}, {hi95:.2f}]")
+        if not scan.get("constrained", True):
+            add("    The scan never rises by 1.92, so the data do NOT localize the")
+            add("    centre: only the width of the population is being measured.")
+        elif scan.get("ci68_below_scan_step"):
+            add(f"    The 68% interval is not wider than the {scan.get('step_nm', 0):.2f} nm scan")
+            add("    step, so it is unresolved rather than tight.")
+    add("  The distribution is summarised by percentiles rather than by raw shape")
+    add("  parameters, so the shapes are comparable and a broad population is not")
+    add("  misread as a precise distance.")
+    add("")
+
+    add("SHAPE COMPARISON  (short-range kernel pinned at its measured width)")
+    add(f"  {'hypothesis':<28} {'dAIC':>9} {'pairs':>9} {'median':>8} {'68% range':>16}")
+    for name, fit in sorted(r.get("fits", {}).items(),
+                            key=lambda kv: kv[1].get("delta_aic", 0.0)):
+        s = fit.get("distance_summary") or {}
+        rng = (f"{s['p16_nm']:.1f}-{s['p84_nm']:.1f} nm" if s else "-")
+        med = f"{s['median_nm']:.2f}" if s else "-"
+        add(f"  {_HYPOTHESIS_LABELS.get(name, name):<28} {fit.get('delta_aic', 0.0):9.1f} "
+            f"{fit.get('n_structure_pairs', fit.get('n_complex_pairs', 0.0)):9.0f} "
+            f"{med:>8} {rng:>16}")
+    add("  Lower dAIC is better; 0 marks the preferred shape. The published trimer")
+    add("  geometry is one candidate here, not the model: it may not survive sample")
+    add("  preparation, and imposing it would assume the answer. The positional")
+    add("  blur is fitted once and shared, so no shape can win by claiming extra")
+    add("  blur that another is denied.")
     add("")
 
     relaxed = r.get("fits_relaxed_kernel", {})
@@ -663,25 +742,33 @@ def pairwise_report(result: dict) -> str:
 
     best = r.get("best_fit") or {}
     bounds = best.get("parameters_at_bounds") or []
+    fits = r.get("fits", {})
     add("INTERPRETATION")
-    delta = best.get("label_offset_nm")
-    if delta is not None:
-        add(f"  Fitted antibody displacement delta = {delta:.2f} nm.")
-        if "label_offset_nm" in bounds:
-            add("    This sits at a bound, so it is a limit rather than an estimate:")
-            add("    the data prefer distances at or below the protein-domain values")
-            add("    and give no support for a radially outward label (which would")
-            add("    lengthen every class by 3-4 nm).")
-        elif delta < 1.8:
-            add("    Consistent with an isotropically oriented label.")
-        else:
-            add("    Consistent with a radially outward label, i.e. the tabulated")
-            add("    distances that include 2 nm per antibody at each endpoint.")
+    trimer = fits.get("trimer_six_site")
+    if trimer is not None and r.get("best_hypothesis", "").startswith("dimer"):
+        add(f"  A single broad inter-subunit distance describes the data better than")
+        add(f"  the published six-site trimer by {trimer.get('delta_aic', 0.0):.0f} AIC units.")
+        add("  That is consistent with the trimer not surviving sample preparation,")
+        add("  leaving dimers whose separation is neither fixed at the tabulated")
+        add("  value nor sharp.")
+    elif r.get("best_hypothesis") == "trimer_six_site":
+        add("  The published six-site trimer geometry describes the data better than")
+        add("  any of the single-distance shapes tested.")
+    if summary:
+        add(f"  The population spans {summary.get('p16_nm', float('nan')):.1f}-"
+            f"{summary.get('p84_nm', float('nan')):.1f} nm at 68%, which is broad "
+            f"relative to the")
+        add(f"  {best.get('sigma_nm', float('nan')):.2f} nm measurement blur, so the width is "
+            f"a property of the sample")
+        add("  rather than of the microscope: the linkage is flexible, or several")
+        add("  conformations are present. A flat band is a legitimate outcome and is")
+        add("  offered as an explicit hypothesis.")
     if bounds:
-        add(f"  Parameters resting on a bound: {', '.join(bounds)}.")
-    add("  Individual distance classes are NOT resolved: the three short classes")
-    add("  span 2.1 nm against a pair blur of several nm. What is measured is the")
-    add("  ensemble envelope and its outer cutoff, not a single distance.")
+        add(f"  Parameters resting on a bound (limits, not estimates): "
+            f"{', '.join(bounds)}.")
+    add("  No individual distance class is resolved and none is claimed. What is")
+    add("  measured is the distribution of inter-subunit distances, its width, and")
+    add("  which shape reproduces it.")
     add("  The spatial view therefore shows no fitted template and no per-complex")
     add("  assignment: this method fits the ensemble, not individual complexes,")
     add("  so drawing either would display a result that was not computed. Its")

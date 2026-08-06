@@ -2477,11 +2477,15 @@ class MainWindow(QMainWindow):
                 name: {
                     "delta_aic": float(f.get("delta_aic", float("nan"))),
                     "n_repeat_pairs": float(f.get("n_repeat_pairs", float("nan"))),
-                    "n_complex_pairs": float(f.get("n_complex_pairs", float("nan"))),
+                    "n_structure_pairs": float(f.get("n_structure_pairs", float("nan"))),
                     "background_scale": float(f.get("background_scale", float("nan"))),
-                    "label_offset_nm": float(f.get("label_offset_nm", float("nan"))),
                     "sigma_nm": float(f.get("sigma_nm", float("nan"))),
                     "repeat_scale": float(f.get("repeat_scale", float("nan"))),
+                    "structure_label": str(f.get("structure_label", "")),
+                    "structure_description": str(f.get("structure_description", "")),
+                    "distance_summary": {
+                        k: float(v) for k, v in (f.get("distance_summary") or {}).items()
+                    },
                     "parameters_at_bounds": list(f.get("parameters_at_bounds", [])),
                 }
                 for name, f in (store or {}).items()
@@ -2520,6 +2524,8 @@ class MainWindow(QMainWindow):
                 "repeat_max_nm": float(cfg.repeat_max_nm),
                 "label_offset_bounds_nm": [float(v) for v in cfg.label_offset_bounds_nm],
                 "fit_label_offset": bool(cfg.fit_label_offset),
+                "dimer_distance_bounds_nm": [float(v) for v in cfg.dimer_distance_bounds_nm],
+                "hypotheses": [str(h) for h in cfg.hypotheses],
             },
             "observable": {
                 "centroid_sem_nm": [float(v) for v in sem] if sem.size == 3 else [],
@@ -2539,6 +2545,18 @@ class MainWindow(QMainWindow):
                 "class_names": [str(x) for x in result.get("class_names", [])],
                 "class_distances_nm": [float(x) for x in result.get("class_distances_nm", [])],
                 "class_weight": 1.0 / max(len(result.get("class_distances_nm", [])) or 1, 1),
+                "reference_dimer_nm": float(result.get("reference_dimer_nm", float("nan"))),
+                "structure_labels": {
+                    str(k): str(v) for k, v in (result.get("structure_labels") or {}).items()
+                },
+            },
+            "distance_scan": {
+                key: (float(scan_value) if isinstance(scan_value, (int, float))
+                      else [float(v) for v in scan_value]
+                      if key in ("ci68_nm", "ci95_nm") else scan_value)
+                for key, scan_value in (result.get("distance_scan") or {}).items()
+                if key in ("available", "best_nm", "ci68_nm", "ci95_nm", "step_nm",
+                           "constrained", "ci68_below_scan_step", "parameter")
             },
             "fits": _fit_summary(fits),
             "fits_relaxed_kernel": _fit_summary(relaxed),
@@ -2552,8 +2570,12 @@ class MainWindow(QMainWindow):
             f"excess above null out to {result['excess_outer_nm']:.1f} nm; "
             f"best model '{best}' (next by dAIC {margin:.1f}, "
             f"{margin_relaxed:.1f} with the short-range kernel released); "
-            f"delta {best_fit.get('label_offset_nm', float('nan')):.2f} nm, "
-            f"sigma {best_fit.get('sigma_nm', float('nan')):.2f} nm "
+            f"median inter-subunit distance "
+            f"{(best_fit.get('distance_summary') or {}).get('median_nm', float('nan')):.2f} nm "
+            f"(68% "
+            f"{(best_fit.get('distance_summary') or {}).get('p16_nm', float('nan')):.2f}"
+            f"-{(best_fit.get('distance_summary') or {}).get('p84_nm', float('nan')):.2f} nm), "
+            f"blur {best_fit.get('sigma_nm', float('nan')):.2f} nm "
             f"(min loc/trace {cfg.min_loc_per_trace}, z-scale {cfg.z_scaling_factor}, "
             f"kernel {kernel.get('source', 'n/a')} from {kernel.get('n_pairs', 0)} pair(s)).",
             dataset_idx=idx, method_data=method_data)

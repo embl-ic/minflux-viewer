@@ -200,12 +200,17 @@ def test_report_states_the_limits_rather_than_implying_a_resolved_distance(resul
 
     text = pairwise_report(result)
     assert "SAME-SITE SHORT-RANGE KERNEL" in text
-    assert "MODEL COMPARISON" in text
+    assert "DIMER DISTANCE" in text
+    assert "SHAPE COMPARISON" in text
     assert "SENSITIVITY" in text
-    # the report must not let a reader think individual classes were resolved
-    assert "NOT resolved" in text
-    # and must disclose the fixed class weights that make the fit a test
-    assert "fixed at 1/5" in text
+    # the distance must be reported as a distribution, not a single number
+    assert "median true distance" in text
+    assert "central 68%" in text
+    # the published geometry must be presented as a candidate, not the model
+    assert "one candidate here, not the model" in text
+    assert "NOT a constraint here" in text
+    # and no individual pairing may be claimed
+    assert "No individual distance class is resolved" in text
 
 
 def test_report_flags_a_parameter_resting_on_a_bound():
@@ -213,23 +218,61 @@ def test_report_flags_a_parameter_resting_on_a_bound():
     is the difference between reporting a measurement and overstating one."""
     from minflux_viewer.ui.hlyb_pairwise_dialog import pairwise_report
 
+    summary = {"median_nm": 10.0, "p16_nm": 6.0, "p84_nm": 15.0,
+               "mode_nm": 9.0, "mean_nm": 10.5, "spread_nm": 4.5}
     fake = {
         "n_traces_total": 10, "n_traces_used": 8, "excess_outer_nm": 12.0,
         "centroid_sem_nm": np.array([1.0, 1.0, 1.0]), "sigma_floor_nm": 1.4,
-        "null_replicates": 4,
+        "null_replicates": 4, "reference_dimer_nm": 10.14,
         "repeat_kernel": {"source": "assumed", "n_pairs": 0, "median_nm": 3.0,
                           "rejected_far_fraction": float("nan")},
-        "fits": {"six_site": {"delta_aic": 0.0, "n_complex_pairs": 100.0,
-                              "label_offset_nm": 0.0, "sigma_nm": 2.0,
-                              "parameters_at_bounds": ["label_offset_nm"]}},
-        "best_fit": {"label_offset_nm": 0.0,
-                     "parameters_at_bounds": ["label_offset_nm"]},
+        "fits": {"dimer_gaussian": {
+            "delta_aic": 0.0, "n_structure_pairs": 100.0, "sigma_nm": 2.0,
+            "distance_summary": summary,
+            "parameters_at_bounds": ["distance_nm"]}},
+        "best_fit": {"sigma_nm": 2.0, "distance_summary": summary,
+                     "structure_description": "distance 10.00 nm, spread 4.50 nm",
+                     "parameters_at_bounds": ["distance_nm"]},
         "fits_relaxed_kernel": {},
-        "class_distances_nm": [], "best_hypothesis": "six_site",
+        "class_distances_nm": [], "best_hypothesis": "dimer_gaussian",
     }
     text = pairwise_report(fake)
-    assert "sits at a bound" in text
-    assert "label_offset_nm" in text
+    assert "resting on a bound (limits, not estimates)" in text
+    assert "distance_nm" in text
+
+
+def test_report_names_the_trimer_gap_when_a_dimer_shape_wins():
+    """The motivating question — did the trimer survive? — must be answered in
+    words, not left for the reader to infer from an AIC table."""
+    from minflux_viewer.ui.hlyb_pairwise_dialog import pairwise_report
+
+    summary = {"median_nm": 10.0, "p16_nm": 4.0, "p84_nm": 17.0,
+               "mode_nm": 8.0, "mean_nm": 10.5, "spread_nm": 6.5}
+    fake = {
+        "n_traces_total": 10, "n_traces_used": 8, "excess_outer_nm": 19.0,
+        "centroid_sem_nm": np.array([1.0, 1.0, 1.0]), "sigma_floor_nm": 1.3,
+        "null_replicates": 4, "reference_dimer_nm": 10.14,
+        "repeat_kernel": {"source": "empirical", "n_pairs": 200, "median_nm": 3.0,
+                          "rejected_far_fraction": 0.2},
+        "fits": {
+            "dimer_gaussian": {"delta_aic": 0.0, "n_structure_pairs": 6000.0,
+                               "sigma_nm": 2.6, "distance_summary": summary,
+                               "parameters_at_bounds": []},
+            "trimer_six_site": {"delta_aic": 1499.0, "n_structure_pairs": 4300.0,
+                                "sigma_nm": 2.6, "distance_summary": summary,
+                                "parameters_at_bounds": []},
+        },
+        "best_fit": {"sigma_nm": 2.6, "distance_summary": summary,
+                     "structure_description": "distance 8.00 nm, spread 8.77 nm",
+                     "parameters_at_bounds": []},
+        "fits_relaxed_kernel": {},
+        "class_distances_nm": [], "best_hypothesis": "dimer_gaussian",
+    }
+    text = pairwise_report(fake)
+    assert "better than" in text and "1499 AIC units" in text
+    assert "not surviving sample preparation" in text
+    # a spread wider than the blur is a sample property, and must be said so
+    assert "property of the sample" in text
 
 
 def test_hlyb_menu_offers_the_new_method_and_no_longer_the_plain_2d_3d(_app):
