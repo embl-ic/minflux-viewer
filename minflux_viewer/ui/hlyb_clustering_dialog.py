@@ -500,6 +500,7 @@ class HlyBResultWindow(QDialog):
         self._owner = owner
         self._result = result
         self._cfg = cfg
+        self._prefs = prefs or {}
         self._distance_hist_plot = None
         self._distance_bin_spin = None
         self._distance_stats_label = None
@@ -937,6 +938,27 @@ class HlyBResultWindow(QDialog):
         QTimer.singleShot(0, lambda: self._refresh_gl_pair_labels(view_name))
         return view
 
+    def _xy_origin_top_left(self) -> bool:
+        """Whether Y increases downward, as in the render and scatter views."""
+        value = str(
+            (self._prefs.get("plot", {}) or {}).get("scatter_xy_origin", "top_left")
+        ).lower()
+        return value != "bottom_left"
+
+    def _apply_y_axis_direction(self, view_name: str, plot) -> None:
+        """Match the Loc Scatter Plot and Render view Y-axis convention.
+
+        Those default to a top-left origin (Y increasing downward, the
+        ImageJ/MATLAB image convention), and only in the XY orientation: XZ and
+        YZ keep a natural Y so the axial coordinate reads upward. Without this
+        the same cell appeared mirrored here relative to every other view of it.
+        """
+        try:
+            invert = view_name == "XY" and self._xy_origin_top_left()
+            plot.getPlotItem().getViewBox().invertY(invert)
+        except Exception:
+            pass
+
     def _build_2d_scatter(
         self,
         *,
@@ -960,6 +982,7 @@ class HlyBResultWindow(QDialog):
         plot.showGrid(x=True, y=True, alpha=0.2)
         plot.setLabel("bottom", name0, units="nm")
         plot.setLabel("left", name1, units="nm")
+        self._apply_y_axis_direction(view_name, plot)
         if reason:
             plot.setTitle(f"3-D view unavailable ({reason}); showing {name0.upper()}{name1.upper()}")
         elif self._result.get("is_2d"):

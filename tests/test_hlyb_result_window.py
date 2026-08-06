@@ -428,3 +428,32 @@ def test_template_dialog_uses_consistent_core_parameters(_app):
     assert cfg.template_label_offset_nm == pytest.approx(2.0)
     assert cfg.model_pair_tolerance_nm == pytest.approx(5.0)
     dlg.close()
+
+
+def test_template_scatter_y_axis_matches_the_render_and_scatter_views(_app):
+    """The XY view must put high Y at the BOTTOM, like the Loc Scatter Plot and
+    the Render view (top-left origin, the ImageJ/MATLAB image convention).
+    Without this the same cell appeared mirrored between views.  XZ and YZ keep
+    a natural Y so the axial coordinate still reads upward."""
+    win = HlyBResultWindow(_synthetic_result(), HlyBConfig(), title="axes",
+                           prefs={"plot": {"scatter_xy_origin": "top_left"}})
+    try:
+        inverted = {}
+        for view in ("XY", "XZ", "YZ"):
+            win._view_combo.setCurrentText(view)
+            vb = win._scatter_pages[view]["plot"].getPlotItem().getViewBox()
+            inverted[view] = bool(vb.yInverted())
+        assert inverted == {"XY": True, "XZ": False, "YZ": False}
+    finally:
+        win.close()
+
+
+def test_template_scatter_y_axis_follows_the_origin_preference(_app):
+    win = HlyBResultWindow(_synthetic_result(), HlyBConfig(), title="axes",
+                           prefs={"plot": {"scatter_xy_origin": "bottom_left"}})
+    try:
+        win._view_combo.setCurrentText("XY")
+        vb = win._scatter_pages["XY"]["plot"].getPlotItem().getViewBox()
+        assert not vb.yInverted()
+    finally:
+        win.close()
