@@ -722,7 +722,16 @@ def pairwise_report(result: dict) -> str:
     add(f"  excess above null (z>3) out to : {r['excess_outer_nm']:.1f} nm")
     add("")
 
-    if r.get("is_2d"):
+    if r.get("is_2d") and r.get("delineation_failed"):
+        add("PROJECTION  (2-D variant)  ***  DELINEATION FAILED  ***")
+        add("  No cell could be delineated from the localization density, so the")
+        add("  membrane tilt is unmeasured and NO foreshortening correction was")
+        add("  applied. Projected distances are therefore biased short, by an")
+        add("  unknown amount. Treat the distance below as a lower bound only.")
+        add("  Usual causes: too few localizations, or a field that is not")
+        add("  cell-shaped (free imager, sparse non-specific binding).")
+        add("")
+    elif r.get("is_2d"):
         stats = r.get("cell_mask_stats") or {}
         add("PROJECTION  (2-D variant)")
         add(f"  cells delineated               : {stats.get('n_cells', 0)} "
@@ -766,6 +775,22 @@ def pairwise_report(result: dict) -> str:
     add("DIMER DISTANCE  (fitted distribution of true inter-subunit distances)")
     best_fit = r.get("best_fit") or {}
     summary = best_fit.get("distance_summary") or {}
+    support = r.get("structure_support_z", float("nan"))
+    lo_s, hi_s = r.get("structure_support_range_nm", (float("nan"),) * 2)
+    if summary and not r.get("structure_detected", True):
+        add("  ***  NO STRUCTURAL DISTANCE DETECTED  ***")
+        add(f"  Across {lo_s:.1f}-{hi_s:.1f} nm, where the fitted distance sits, the")
+        add(f"  data exceed the randomized reference by only {support:.1f} sigma.")
+        add("  The structural term is absorbing a mismatch between the observed")
+        add("  profile and the surrogate, not describing a molecular distance.")
+        add("  The numbers below are reported for completeness and must NOT be")
+        add("  quoted as a measurement. A large AIC gap does not rescue this:")
+        add("  a broad component can earn likelihood by patching a background")
+        add("  misfit while the data sit at or below the reference.")
+        add("")
+    elif summary:
+        add(f"  excess supporting the distance : {support:.1f} sigma over "
+            f"{lo_s:.1f}-{hi_s:.1f} nm")
     if summary:
         add(f"  preferred shape                : "
             f"{_HYPOTHESIS_LABELS.get(r.get('best_hypothesis', ''), '?')}")

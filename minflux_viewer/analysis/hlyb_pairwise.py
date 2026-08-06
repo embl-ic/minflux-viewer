@@ -1309,11 +1309,21 @@ def analyze_hlyb_pairwise(
             min_cell_area_nm2=cfg.min_cell_area_nm2,
         )
         keep = ~cells.border_loc
-        half = np.where(cells.cell_id > 0,
-                        cells.cell_half_width_nm[np.clip(cells.cell_id - 1, 0, None)],
-                        np.nan)
-        tilts = summarise_tilts(cells.edge_distance_nm[keep], half[keep])
-        projection = tilt_projection_factors(tilts, cfg.projection_azimuth_samples)
+        widths = np.asarray(cells.cell_half_width_nm, dtype=float)
+        if widths.size:
+            half = np.where(cells.cell_id > 0,
+                            widths[np.clip(cells.cell_id - 1, 0, widths.size - 1)],
+                            np.nan)
+            tilts = summarise_tilts(cells.edge_distance_nm[keep], half[keep])
+        else:
+            # No cell could be delineated -- too few localizations, or the field
+            # is not cell-shaped at all.  Then the membrane tilt is unmeasured,
+            # so NO foreshortening correction is applied rather than one being
+            # invented; distances are consequently biased short and the result
+            # is flagged so the report can say so.
+            tilts = np.zeros(0)
+        projection = (tilt_projection_factors(tilts, cfg.projection_azimuth_samples)
+                      if tilts.size else None)
         # keep the interior only, and drop z: the analysis is in the image plane
         pts = pts[keep]
         for key in ("sem_nm", "n_locs", "trace_ids"):
@@ -1383,13 +1393,54 @@ def analyze_hlyb_pairwise(
     excess = counts.astype(float) - null["mean"]
     with np.errstate(divide="ignore", invalid="ignore"):
         z = np.where(null["sd"] > 0, excess / null["sd"], np.nan)
+    # Outer extent of the excess, taken as a CONTIGUOUS run outward from the
+    # strongest bin rather than the largest radius at which any bin happens to
+    # clear the threshold.  With a finite number of surrogate replicates the
+    # null's spread is itself noisy, so isolated far bins cross it by chance;
+    # reporting the maximum such radius claimed structure out to 32 nm on data
+    # whose profile sits *below* the null over most of that range.
     finite = np.isfinite(z) & (centres <= cfg.fit_r_max_nm)
     outer = 0.0
-    if finite.any():
-        significant = finite & (z > 3.0)
-        outer = float(centres[significant].max()) if significant.any() else 0.0
+    if finite.any() and np.any(finite & (z > 3.0)):
+        idx = np.flatnonzero(finite)
+        peak = idx[int(np.argmax(np.where(finite, z, -np.inf)[idx]))]
+        misses = 0
+        outer = float(centres[peak])
+        for i in range(peak, int(idx.max()) + 1):
+            if finite[i] and z[i] > 3.0:
+                outer = float(centres[i])
+                misses = 0
+            else:
+                misses += 1
+                if misses >= 3:      # three consecutive bins back inside the null
+                    break
+
+    # Is the structural term supported by a real excess, or is it patching a
+    # mismatch between a flat observation and a rising surrogate?  A large AIC
+    # gap alone does not answer that: a broad component can earn likelihood by
+    # absorbing a background misfit while the observed profile sits AT or BELOW
+    # the null exactly where that component lives.  So the excess is integrated
+    # over the fitted distribution's own central range and expressed in units of
+    # the null's spread there.
+    support_z = float("nan")
+    support_range = (float("nan"), float("nan"))
+    summary = (best or {}).get("distance_summary") or {}
+    if summary and np.isfinite(summary.get("p16_nm", np.nan)):
+        lo_r = float(summary["p16_nm"])
+        hi_r = float(summary["p84_nm"])
+        band = (centres >= lo_r) & (centres <= hi_r)
+        if band.any():
+            var = float(np.sum(np.asarray(null["sd"])[band] ** 2))
+            support_z = (float(np.sum(excess[band]) / np.sqrt(var))
+                         if var > 0 else float("nan"))
+            support_range = (lo_r, hi_r)
 
     return {
+        "structure_support_z": support_z,
+        "structure_support_range_nm": support_range,
+        # A structural distance is only claimed when the data genuinely exceed
+        # the randomized reference across the range that distance occupies.
+        "structure_detected": bool(np.isfinite(support_z) and support_z > 3.0),
         "centres_nm": centres,
         "edges_nm": edges,
         "counts": counts,
@@ -1417,6 +1468,9 @@ def analyze_hlyb_pairwise(
         "median_foreshortening": (
             float(np.sum(projection[0] * projection[1]))
             if projection is not None and np.size(projection[0]) else float("nan")),
+        # True when the 2-D variant could not delineate a cell, so no
+        # foreshortening correction was applied and distances are biased short.
+        "delineation_failed": bool(two_d and projection is None),
         "n_traces_total": int(traces["n_traces_total"]),
         "n_traces_used": int(pts.shape[0]),
         "centroid_sem_nm": median_sem,

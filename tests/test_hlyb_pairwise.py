@@ -582,6 +582,71 @@ def test_ignoring_the_projection_would_bias_the_distance_short():
     assert mean_tilted < mean_flat - 1.0
 
 
+def test_two_d_survives_a_field_with_no_delineable_cell():
+    """Regression: a field too sparse to delineate left the cell half-width
+    array empty and crashed on indexing. It must instead report that no cell was
+    found and apply no foreshortening correction."""
+    from minflux_viewer.analysis.hlyb_pairwise import analyze_hlyb_pairwise_2d
+
+    rng = np.random.default_rng(41)
+    n_tr, per = 10, 20          # too sparse over too wide a field to threshold
+    tid = np.repeat(np.arange(n_tr), per)
+    centres = rng.uniform(0, 12000, size=(n_tr, 3))
+    centres[:, 2] = 0.0
+    pts = np.repeat(centres, per, axis=0) + rng.normal(scale=2.0, size=(n_tr * per, 3))
+    tim = np.repeat(np.arange(n_tr) * 5.0, per)
+    res = analyze_hlyb_pairwise_2d(pts * 1e-9, tid, tim,
+                                   PairFitConfig(min_loc_per_trace=5,
+                                                 z_scaling_factor=1.0,
+                                                 null_replicates=2))
+    assert res["delineation_failed"] is True
+    assert not np.isfinite(res["median_foreshortening"])
+
+
+def test_excess_extent_is_a_contiguous_run_not_the_furthest_lucky_bin():
+    """Regression: taking the largest radius at which any bin cleared 3 sigma
+    claimed structure out to 32 nm on data sitting below the null over most of
+    that range, because a finite surrogate count makes far bins noisy."""
+    rng = np.random.default_rng(43)
+    # clustered pairs at 10 nm, and nothing at all beyond
+    base = rng.uniform(0, 3000, size=(400, 3))
+    base[:, 2] = 0.0
+    pts, tid, t = [], [], 0
+    for b in base:
+        d = rng.normal(size=3); d[2] = 0.0; d /= np.linalg.norm(d)
+        for site in (b, b + d * 10.0):
+            pts.append(site + rng.normal(scale=1.0, size=(20, 3)))
+            tid.append(np.full(20, t)); t += 1
+    pts = np.concatenate(pts); pts[:, 2] = 0.0
+    res = analyze_hlyb_pairwise(pts * 1e-9, np.concatenate(tid), None,
+                                PairFitConfig(min_loc_per_trace=5,
+                                              z_scaling_factor=1.0,
+                                              null_replicates=4))
+    # the planted structure ends at 10 nm; the reported extent must not run away
+    assert 5.0 < res["excess_outer_nm"] < 25.0
+
+
+def test_structure_is_not_claimed_without_an_excess_to_support_it():
+    """A large AIC gap is not a detection: a broad component can earn likelihood
+    by patching a mismatch between a flat observation and a rising surrogate
+    while the data sit at or below the reference where that component lives."""
+    rng = np.random.default_rng(44)
+    # uniform points in a slab: no structure at any distance
+    n_tr, per = 900, 20
+    tid = np.repeat(np.arange(n_tr), per)
+    centres = np.column_stack([rng.uniform(0, 2500, n_tr), rng.uniform(0, 700, n_tr),
+                               np.zeros(n_tr)])
+    pts = np.repeat(centres, per, axis=0) + rng.normal(scale=2.0, size=(n_tr * per, 3))
+    pts[:, 2] = 0.0
+    tim = np.repeat(np.arange(n_tr) * 5.0, per)
+    res = analyze_hlyb_pairwise(pts * 1e-9, tid, tim,
+                                PairFitConfig(min_loc_per_trace=5,
+                                              z_scaling_factor=1.0,
+                                              null_replicates=4))
+    assert "structure_support_z" in res
+    assert res["structure_detected"] is False
+
+
 def test_end_to_end_on_elastic_dimers_reports_a_broad_population():
     """A dimer with a flexible linkage gives a broad band; the reported spread
     must exceed the measurement blur rather than collapsing to a sharp value."""
