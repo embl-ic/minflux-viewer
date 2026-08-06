@@ -124,10 +124,35 @@ class StructureModel:
 
 
 def _delta_pdf(d_grid: np.ndarray, centre: float) -> np.ndarray:
-    """Unit mass at the grid point nearest ``centre`` (a rigid distance)."""
+    """Unit mass at ``centre``, split linearly between its two neighbours.
+
+    Snapping to the nearest grid point quantises a rigid distance by up to half
+    a grid step.  That is harmless when the blur is several times the step, but
+    on sharp data it displaces a modelled peak by a sixth of the blur and costs
+    a fixed-geometry hypothesis a great deal of likelihood against a flexible
+    one — an artificial handicap that has nothing to do with the structure.
+    Linear splitting preserves the exact mean distance for any grid.
+    """
     out = np.zeros_like(d_grid)
-    if d_grid.size:
-        out[int(np.argmin(np.abs(d_grid - float(centre))))] = 1.0
+    n = d_grid.size
+    if n == 0:
+        return out
+    value = float(centre)
+    if n == 1 or value <= d_grid[0]:
+        out[0] = 1.0
+        return out
+    if value >= d_grid[-1]:
+        out[-1] = 1.0
+        return out
+    upper = int(np.searchsorted(d_grid, value))
+    lower = upper - 1
+    span = d_grid[upper] - d_grid[lower]
+    if span <= 0:
+        out[lower] = 1.0
+        return out
+    weight = (value - d_grid[lower]) / span
+    out[lower] = 1.0 - weight
+    out[upper] = weight
     return out
 
 
@@ -279,6 +304,19 @@ class PairFitConfig:
     # given preparation can differ.
     dimer_start_nm: float = 12.0
     dimer_distance_bounds_nm: tuple = (4.0, 40.0)
+    #: Physical floor on a TRUE inter-site distance.  Two labelled N-terminal
+    #: domains, each carrying an antibody, cannot occupy the same place, so
+    #: p(d) is zero below this.
+    #:
+    #: Without the floor a broad shape leaks its tail through zero and takes
+    #: over the sub-5 nm region, which belongs to the same-site population:
+    #: on the reference dataset the structural term claimed 6944 pairs against
+    #: 548 for the same-site term, although 1828 centroid pairs lie below 6 nm
+    #: and the calibrated kernel puts most of its mass there.  The leak drags
+    #: the reported median down and inflates the apparent width.  Bounding the
+    #: distribution *centre* does not help -- the spread leaks regardless — so
+    #: the truncation is applied to p(d) itself.
+    structure_min_nm: float = 5.0
     #: Grid over true inter-site distances used to convolve p(d) with the blur.
     distance_grid_nm: float = 0.25
     # σ is the positional blur of a pair distance.  It is a property of the
@@ -627,11 +665,20 @@ def offset_gaussian_pdf(r: np.ndarray, d: float, sigma: float) -> np.ndarray:
                   - np.exp(-((r + d) ** 2) / (2 * s ** 2)))
 
 
-def distance_grid(cfg_or_step, r_max_nm: float = 60.0) -> np.ndarray:
-    """Grid of candidate TRUE inter-site distances."""
+def distance_grid(cfg_or_step, r_max_nm: float = 60.0,
+                  min_nm: float | None = None) -> np.ndarray:
+    """Grid of candidate TRUE inter-site distances.
+
+    The grid starts at the physical floor (:attr:`PairFitConfig.structure_min_nm`),
+    so every shape is truncated there and none can leak its tail into the
+    sub-floor region that belongs to the same-site population.
+    """
     step = float(getattr(cfg_or_step, "distance_grid_nm", cfg_or_step))
     step = step if step > 0 else 0.25
-    return np.arange(step, float(r_max_nm) + step, step)
+    if min_nm is None:
+        min_nm = float(getattr(cfg_or_step, "structure_min_nm", step))
+    start = max(float(min_nm), step)
+    return np.arange(start, float(r_max_nm) + step, step)
 
 
 def structure_profile(
@@ -652,7 +699,8 @@ def structure_profile(
     """
     centres = np.asarray(centres_nm, dtype=float)
     model = STRUCTURE_MODELS[model_key]
-    grid = distance_grid(0.25, float(centres[-1]) if centres.size else 60.0) \
+    grid = distance_grid(0.25, float(centres[-1]) if centres.size else 60.0,
+                         min_nm=0.25) \
         if d_grid is None else np.asarray(d_grid, dtype=float)
     weights = np.asarray(model.pdf(grid, params), dtype=float)
     weights = np.clip(weights, 0.0, None)
