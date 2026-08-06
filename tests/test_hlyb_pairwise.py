@@ -314,26 +314,35 @@ def test_comparison_recovers_the_planted_distance_whichever_shape_wins(
         expected_median, abs=2.0)
 
 
-def test_a_free_blur_would_swallow_the_structure_it_should_measure():
-    """Why the blur is derived from the measurement instead of fitted: given the
-    freedom, it absorbs the conformational spread, and because it is shared it
-    then handicaps every other shape."""
+def test_a_fixed_geometry_wins_on_its_own_ground_truth():
+    """The sharpest hypothesis is the easiest to handicap accidentally: a
+    slightly misplaced or over-smoothed model peak costs it enormous likelihood
+    against a flexible one. With the blur derived from the measurement and the
+    model distances placed exactly, the trimer must simply win here."""
     from minflux_viewer.analysis.hlyb_pairwise import compare_hypotheses
 
     label = float(np.sqrt(max(2.0 ** 2 - 1.8 ** 2, 1e-3)))
-    fixed = PairFitConfig(r_max_nm=60.0, bin_nm=0.5, label_spread_nm=label)
+    cfg = PairFitConfig(r_max_nm=60.0, bin_nm=0.5, label_spread_nm=label)
     counts, edges, rep, bkg = _synthetic_profile(
-        fixed, 3000.0, 12000.0, "trimer_six_site", [1.0], 2.0, seed=7)
+        cfg, 3000.0, 12000.0, "trimer_six_site", [1.0], 2.0, seed=7)
+    fits = compare_hypotheses(counts, edges, rep, bkg, cfg, sigma_floor_nm=1.8)
+    assert min(fits, key=lambda k: fits[k]["aic"]) == "trimer_six_site"
 
-    held = compare_hypotheses(counts, edges, rep, bkg, fixed, sigma_floor_nm=1.8)
-    import dataclasses
-    freed = compare_hypotheses(
-        counts, edges, rep, bkg,
-        dataclasses.replace(fixed, fit_extra_sigma=True), sigma_floor_nm=1.8)
-    # on its own ground truth the trimer must not be crushed
-    assert held["trimer_six_site"]["delta_aic"] < 100
-    assert (freed["trimer_six_site"]["delta_aic"]
-            > held["trimer_six_site"]["delta_aic"])
+
+def test_rigid_distances_are_not_quantised_by_the_distance_grid():
+    """Regression: snapping a model distance to the nearest grid point moved it
+    by up to half a step. Against a sharp measurement that is a sixth of the
+    blur, and it cost the fixed geometry thousands of AIC units for a reason
+    unrelated to the structure."""
+    from minflux_viewer.analysis.hlyb_pairwise import STRUCTURE_MODELS
+
+    grid = np.arange(5.0, 30.0, 0.25)
+    for target in (8.936, 10.138, 17.302):
+        pdf = STRUCTURE_MODELS["dimer_gaussian"].pdf(grid, [target, 0.0])
+        assert pdf.sum() == pytest.approx(1.0, abs=1e-9)
+        # mass is split between neighbours so the mean is exact, not snapped
+        assert float((pdf * grid).sum()) == pytest.approx(target, abs=1e-9)
+        assert int(np.count_nonzero(pdf)) <= 2
 
 
 def test_hypotheses_share_one_blur():
@@ -384,12 +393,18 @@ def _simulate_complexes(n_complex, seed=0, label_eff=0.7, traces_per_site=2,
         for s in range(6):
             if rng.random() > label_eff:
                 continue
+            # Repeats of ONE site follow each other immediately; moving to a
+            # different site takes much longer.  Emitting every trace 0.05 s
+            # apart would let the time-gap calibration collect inter-site pairs
+            # as though they were re-acquisitions, and the kernel would then
+            # describe the structure it is supposed to be separated from.
             for _ in range(traces_per_site):
                 block = sites[s] + rng.normal(scale=sigma, size=(locs_per_trace, 3))
                 pts.append(block)
                 tids.append(np.full(locs_per_trace, t)); t += 1
                 tim.append(tt + np.arange(locs_per_trace) * 1e-3)
                 tt += 0.05
+            tt += 30.0
     return (np.concatenate(pts) * 1e-9, np.concatenate(tids), np.concatenate(tim))
 
 
