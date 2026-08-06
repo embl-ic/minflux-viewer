@@ -275,6 +275,42 @@ def test_report_names_the_trimer_gap_when_a_dimer_shape_wins():
     assert "property of the sample" in text
 
 
+def test_scatter_y_axis_matches_the_loc_scatter_and_render_convention(result, _app):
+    """The XY view must put high Y at the BOTTOM, like the Loc Scatter Plot and
+    the Render view (top-left origin, the ImageJ/MATLAB image convention).
+    Without this the same cell appeared mirrored between views. XZ and YZ keep a
+    natural Y so the axial coordinate still reads upward, exactly as the scatter
+    window does."""
+    from minflux_viewer.ui.hlyb_pairwise_dialog import HlyBPairwiseWindow
+
+    win = HlyBPairwiseWindow(result, title="axes",
+                             prefs={"plot": {"scatter_xy_origin": "top_left"}})
+    try:
+        inverted = {}
+        for view in ("XY", "XZ", "YZ"):
+            win._view_combo.setCurrentText(view)
+            vb = win._scatter_pages[view]["widget"].getPlotItem().getViewBox()
+            inverted[view] = bool(vb.yInverted())
+        assert inverted == {"XY": True, "XZ": False, "YZ": False}
+    finally:
+        win.close()
+        win.deleteLater()
+
+
+def test_scatter_y_axis_follows_the_origin_preference(result, _app):
+    from minflux_viewer.ui.hlyb_pairwise_dialog import HlyBPairwiseWindow
+
+    win = HlyBPairwiseWindow(result, title="axes",
+                             prefs={"plot": {"scatter_xy_origin": "bottom_left"}})
+    try:
+        win._view_combo.setCurrentText("XY")
+        vb = win._scatter_pages["XY"]["widget"].getPlotItem().getViewBox()
+        assert not vb.yInverted()
+    finally:
+        win.close()
+        win.deleteLater()
+
+
 def test_two_d_dialog_exposes_the_border_shrink_and_the_3d_one_does_not(_app):
     from minflux_viewer.analysis.hlyb_pairwise import PairFitConfig
     from minflux_viewer.ui.hlyb_pairwise_dialog import HlyBPairwiseDialog

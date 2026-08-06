@@ -2465,7 +2465,8 @@ class MainWindow(QMainWindow):
 
         from .modeless import show_modeless
         win = HlyBPairwiseWindow(
-            result, title=f"{ds.name} ({dimensions}D)", owner=self)
+            result, title=f"{ds.name} ({dimensions}D)", owner=self,
+            prefs=self._state.prefs)
         show_modeless(win, self)
 
         best = result.get("best_hypothesis", "")
