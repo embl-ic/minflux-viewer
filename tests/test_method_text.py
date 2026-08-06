@@ -51,6 +51,12 @@ HLYB_TEMPLATE_MSG = (
     "overlap-rejected 677)."
 )
 
+HLYB_STAGED_MSG = (
+    "HlyB staged short-range population (3D) on 'ds1': 900/1,000 trace(s) → "
+    "700 inferred site(s) (680 in 4 component(s)); 8–25 nm observed/null 1.400, "
+    "empirical p=0.0100, positive-excess centroid 13.20 nm."
+)
+
 
 def test_stddev_text_and_citation():
     txt = mt.generate_method_text(_state(), [_ev(STDDEV_MSG)])
@@ -59,6 +65,36 @@ def test_stddev_text_and_citation():
     # Ostersehlt citation + DOI inline (plain text)
     assert mt.CITE_STDDEV[0] in txt
     assert mt.CITE_STDDEV[1] in txt
+
+
+def test_hlyb_staged_method_text_preserves_population_only_claim():
+    method_data = {
+        "schema": "hlyb_staged_short_range_3d/v1",
+        "input": {"dataset_name": "ds1", "n_localizations": 10000,
+                  "n_traces_total": 1000, "n_traces_used": 900},
+        "parameters": {"min_loc_per_trace": 10, "z_scaling_factor": 0.67,
+                       "site_merge_nm": 4.0, "cell_link_nm": 180.0,
+                       "min_sites_per_component": 20, "r_max_nm": 60.0,
+                       "bin_nm": 0.5, "short_range_lo_nm": 8.0,
+                       "short_range_hi_nm": 25.0, "null_stratum_sites": 64,
+                       "null_replicates": 99},
+        "site_inference": {"n_sites": 700, "n_sites_used": 680,
+                           "n_repeated_sites": 100, "n_traces_consolidated": 200},
+        "components": {"n_retained": 4, "n_excluded_sites": 20},
+        "result": {"band_observed_pairs": 1400, "band_null_mean_pairs": 1000,
+                   "band_null_sd_pairs": 50, "band_ratio": 1.4, "band_p": 0.01,
+                   "peak_nm": 12.5, "positive_excess_centroid_nm": 13.2,
+                   "positive_excess_median_nm": 13.0},
+        "bootstrap": {"available": False},
+        "sensitivity": [],
+    }
+    event = _ev(HLYB_STAGED_MSG)
+    event["method_data"] = method_data
+    text = mt.generate_method_text(_state(), [event])
+
+    assert "without LoG image filtering or DBSCAN" in text
+    assert "conditional randomizations" in text
+    assert "neither identifies pair membership nor fits or claims a molecular" in text
 
 
 def test_stddev_auto_message_matches():

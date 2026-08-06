@@ -250,6 +250,17 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "DBSCAN clustering (placeholder).", "analysis"),
     "actionKNearestNeighbour": CommandMeta(U + "main_window.py", ("cluster", "knn", "nearest neighbour"),
                               "K-nearest-neighbour analysis (placeholder).", "analysis"),
+    "actionHlyBStaged3D": CommandMeta(A + "hlyb_staged.py",
+                              ("hlyb", "subunit", "dimer", "pair", "distance", "3d",
+                               "short range", "surface null", "population", "robust"),
+                              "Model-independent staged HlyB short-range analysis: "
+                              "conservative repeated-trace consolidation, within-cell "
+                              "pair distances, a rod-surface conditional null, component "
+                              "bootstrap and parameter-sensitivity audit. It reports a "
+                              "population excess, not a fitted molecular distance.",
+                              "analysis", inputs=("active dataset (loc, tid, tim)",),
+                              outputs=("inferred label sites", "surface-null band",
+                                       "short-range excess", "sensitivity audit")),
     "actionHlyBPairFit": CommandMeta(A + "hlyb_pairwise.py",
                               ("hlyb", "subunit", "dimer", "pair", "distance", "cluster",
                                "correlation", "model fit", "null", "3d"),
