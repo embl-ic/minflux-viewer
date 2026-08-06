@@ -35,6 +35,7 @@ Interactions (unchanged from pre-pyramid version)
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +56,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -104,6 +106,9 @@ _CHANNEL_LUTS  = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray", *
 _IMAGEJ_AUTO_THRESHOLD = 5000
 _IMAGEJ_AUTO_RESET_THRESHOLD = 10
 _IMAGEJ_AUTO_HIST_BINS = 256
+_LOCALIZATION_AUTO_LOW_PERCENTILE = 1.0
+_LOCALIZATION_AUTO_HIGH_PERCENTILE = 95.0
+_SIGMA_SLIDER_STEP_NM = 0.1
 _CHANNEL_COLORS = {
     "Red": (1.0, 0.0, 0.0),
     "Green": (0.0, 1.0, 0.0),
@@ -113,6 +118,87 @@ _CHANNEL_COLORS = {
     "Yellow": (1.0, 1.0, 0.0),
     "Gray": (1.0, 1.0, 1.0),
 }
+
+
+def fixed_gaussian_sigma_limits_nm(
+    locs_nm: np.ndarray,
+) -> tuple[float, float]:
+    """Return dataset-derived ``(XY, Z)`` sigma maxima in nanometres.
+
+    XY follows ``0.25 * min(range(X), range(Y))`` and Z follows half the Z
+    range. Maxima are rounded down to the 0.1 nm control grid so the UI never
+    exceeds the requested geometric bound. Degenerate/2-D axes expose the
+    single valid 0.1 nm setting.
+    """
+    locs = np.asarray(locs_nm, dtype=np.float64)
+    if locs.ndim != 2 or locs.shape[0] == 0 or locs.shape[1] < 2:
+        return _SIGMA_SLIDER_STEP_NM, _SIGMA_SLIDER_STEP_NM
+    if locs.shape[1] == 2:
+        locs = np.column_stack(
+            [locs, np.zeros(locs.shape[0], dtype=np.float64)]
+        )
+    spans = np.zeros(3, dtype=np.float64)
+    for axis in range(3):
+        finite_values = locs[np.isfinite(locs[:, axis]), axis]
+        if finite_values.size:
+            spans[axis] = np.ptp(finite_values)
+
+    def quantized_max(value: float) -> float:
+        ticks = max(
+            1,
+            int(np.floor(float(value) / _SIGMA_SLIDER_STEP_NM + 1.0e-9)),
+        )
+        return ticks * _SIGMA_SLIDER_STEP_NM
+
+    return quantized_max(0.25 * min(spans[0], spans[1])), quantized_max(
+        0.5 * spans[2]
+    )
+
+
+def localization_render_auto_levels(
+    image: np.ndarray,
+) -> tuple[float, float] | None:
+    """Default display levels for non-negative localization reconstructions.
+
+    Localization rasters are unlike conventional camera images: at fine zoom,
+    almost every pixel can be exact background while each localization has one
+    bright centre and several lower-valued anti-aliasing/PSF pixels. ImageJ's
+    histogram-count heuristic then changes discontinuously when the number of
+    peak pixels happens to cross ``pixel_count / 5000``. Use the positive-value
+    95th percentile as the white point so a sparse footprint is visible instead
+    of dark red in ``hot``. Keep exact zero as black; fully occupied fields such
+    as Voronoi density use a small positive low-percentile black point.
+
+    This is the passive, per-viewport renderer default. The B/C dialog's
+    explicit *Auto* action remains the ImageJ algorithm below.
+    """
+    values = np.asarray(image, dtype=float).ravel()
+    values = values[np.isfinite(values)]
+    if values.size < 10:
+        return None
+    positive = values[values > 0.0]
+    if positive.size == 0:
+        return (0.0, 1.0)
+
+    has_background = positive.size < values.size
+    lo = (
+        0.0
+        if has_background
+        else float(np.percentile(positive, _LOCALIZATION_AUTO_LOW_PERCENTILE))
+    )
+    hi = float(np.percentile(positive, _LOCALIZATION_AUTO_HIGH_PERCENTILE))
+    data_max = float(np.max(positive))
+    if not np.isfinite(hi) or hi <= lo:
+        hi = data_max
+    if hi <= lo:
+        if has_background:
+            lo = 0.0
+        else:
+            lo = float(np.min(positive))
+        hi = data_max
+    if hi <= lo:
+        hi = lo + 1.0
+    return float(lo), float(hi)
 
 
 def pure_color_ramp(norm, color, *, white_bg: bool = False) -> np.ndarray:
@@ -487,50 +573,183 @@ class DepthRangeDialog(QDialog):
             self._syncing = False
 
 
+class _SigmaSlider(QSlider):
+    """Sigma slider whose mouse wheel advances by exactly 1 nm per notch."""
+
+    _WHEEL_STEP_TICKS = int(round(1.0 / _SIGMA_SLIDER_STEP_NM))
+
+    def wheelEvent(self, event) -> None:
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta == 0:
+            event.ignore()
+            return
+        notches = int(delta / 120)
+        if notches == 0:
+            notches = 1 if delta > 0 else -1
+        self.setValue(self.value() + notches * self._WHEEL_STEP_TICKS)
+        event.accept()
+
+
 class SigmaDialog(QDialog):
-    """Modal editor for fixed-Gaussian lateral and axial widths."""
+    """Modeless editor for fixed-Gaussian lateral and axial widths."""
 
     def __init__(
         self,
         values_xyz: tuple[float, float, float] | tuple[float, float],
         parent: QWidget | None = None,
+        *,
+        maxima_xy_z: tuple[float, float] = (10000.0, 10000.0),
+        on_apply: Callable[[float, float], None] | None = None,
     ) -> None:
         super().__init__(parent)
+        self._on_apply = on_apply
         self.setWindowTitle("Fixed Gaussian Sigma")
-        self.setModal(True)
-        self.resize(280, 120)
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.resize(650, 170)
 
         root = QVBoxLayout(self)
         form = QFormLayout()
         root.addLayout(form)
 
+        self._sliders: list[QSlider] = []
         self._spins: list[QDoubleSpinBox] = []
         values = tuple(float(value) for value in values_xyz)
         if len(values) == 3:
             values = (values[0], values[2])
-        for label, value in zip(("XY sigma", "Z sigma"), values):
+        maxima = tuple(
+            max(float(value), _SIGMA_SLIDER_STEP_NM)
+            for value in maxima_xy_z
+        )
+        for index, (label, value, maximum) in enumerate(
+            zip(("XY sigma", "Z sigma"), values, maxima)
+        ):
+            allowed_max_tick = max(
+                1,
+                int(np.floor(maximum / _SIGMA_SLIDER_STEP_NM + 1.0e-9)),
+            )
+            allowed_maximum = allowed_max_tick * _SIGMA_SLIDER_STEP_NM
+            slider_max_tick = min(
+                allowed_max_tick,
+                int(round(100.0 / _SIGMA_SLIDER_STEP_NM)),
+            )
+            slider = _SigmaSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, slider_max_tick)
+            slider.setSingleStep(1)
+            slider.setPageStep(max(1, slider_max_tick // 10))
+            slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+            slider.setTickInterval(max(1, slider_max_tick // 10))
+            slider.setValue(
+                int(
+                    np.clip(
+                        round(value / _SIGMA_SLIDER_STEP_NM),
+                        1,
+                        slider_max_tick,
+                    )
+                )
+            )
+            slider.setToolTip(
+                f"Slider range: 0–{slider_max_tick * _SIGMA_SLIDER_STEP_NM:.1f} nm "
+                f"(zero snaps to {_SIGMA_SLIDER_STEP_NM:.1f} nm). "
+                "Mouse wheel: 1 nm; arrow keys: 0.1 nm."
+            )
             spin = QDoubleSpinBox()
-            spin.setDecimals(2)
-            spin.setRange(0.01, 10000.0)
-            spin.setSingleStep(1.0)
-            spin.setValue(max(float(value), 0.01))
+            spin.setDecimals(1)
+            spin.setRange(_SIGMA_SLIDER_STEP_NM, allowed_maximum)
+            spin.setSingleStep(_SIGMA_SLIDER_STEP_NM)
+            spin.setKeyboardTracking(False)
             spin.setSuffix(" nm")
-            form.addRow(label, spin)
+            spin.setMinimumWidth(105)
+            spin.setValue(
+                float(np.clip(value, _SIGMA_SLIDER_STEP_NM, allowed_maximum))
+            )
+            spin.setToolTip(
+                f"Editable range: {_SIGMA_SLIDER_STEP_NM:.1f}–{allowed_maximum:.1f} nm; "
+                f"step {_SIGMA_SLIDER_STEP_NM:.1f} nm. Values above the slider range "
+                "can be typed here."
+            )
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(slider, 1)
+            row_layout.addWidget(spin)
+            form.addRow(
+                f"{label} (allowed 0.1–{allowed_maximum:.1f} nm)",
+                row,
+            )
+            self._sliders.append(slider)
             self._spins.append(spin)
+            slider.valueChanged.connect(
+                lambda tick, i=index: self._sync_spin_from_slider(i, tick)
+            )
+            spin.valueChanged.connect(
+                lambda current, i=index: self._sync_slider_from_spin(i, current)
+            )
+            self._sync_slider_from_spin(index, spin.value())
 
-        buttons = QDialogButtonBox(
+        limits_note = QLabel(
+            "Allowed limits use the active dataset's coordinate span. Sliders cover "
+            "up to 100 nm; type larger allowed values in the numerical fields. "
+            "Sigma is the Gaussian standard deviation (FWHM = 2.355σ)."
+        )
+        limits_note.setWordWrap(True)
+        limits_note.setStyleSheet("color: gray;")
+        root.addWidget(limits_note)
+
+        button_row = QHBoxLayout()
+        self._apply_button = QPushButton("Apply")
+        self._apply_button.setToolTip(
+            "Apply the current sigma values without closing this dialog. "
+            "Cancel later keeps the most recently applied values."
+        )
+        self._apply_button.clicked.connect(self._apply_current)
+        button_row.addWidget(self._apply_button)
+        button_row.addStretch(1)
+        self._button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        self._button_box.accepted.connect(self._accept_current)
+        self._button_box.rejected.connect(self.reject)
+        button_row.addWidget(self._button_box)
+        root.addLayout(button_row)
+
+    def _sync_spin_from_slider(self, index: int, tick: int) -> None:
+        if not (0 <= index < len(self._spins)):
+            return
+        slider = self._sliders[index]
+        if tick <= 0:
+            with QSignalBlocker(slider):
+                slider.setValue(1)
+            tick = 1
+        with QSignalBlocker(self._spins[index]):
+            self._spins[index].setValue(tick * _SIGMA_SLIDER_STEP_NM)
+
+    def _sync_slider_from_spin(self, index: int, value: float) -> None:
+        if not (0 <= index < len(self._sliders)):
+            return
+        slider = self._sliders[index]
+        tick = max(1, int(round(float(value) / _SIGMA_SLIDER_STEP_NM)))
+        with QSignalBlocker(slider):
+            slider.setValue(min(tick, slider.maximum()))
+
+    def _apply_current(self) -> None:
+        if self._on_apply is not None:
+            self._on_apply(*self.values_xy_z())
+
+    def _accept_current(self) -> None:
+        self._apply_current()
+        self.accept()
 
     def values_xyz(self) -> tuple[float, float, float]:
         xy, z = self.values_xy_z()
         return xy, xy, z
 
     def values_xy_z(self) -> tuple[float, float]:
-        return float(self._spins[0].value()), float(self._spins[1].value())
+        return (
+            self._spins[0].value(),
+            self._spins[1].value(),
+        )
 
 
 class ManualAlignDialog(QDialog):
@@ -755,6 +974,7 @@ class RenderWindow(QWidget):
         self._white_bg: bool = False
         self._bc_auto_threshold: int = 0
         self._bc_dialog = None
+        self._sigma_dialog: SigmaDialog | None = None
         self._roi_overlay = None
         self._roi_highlight_item = None
         self._volume_window = None
@@ -1550,7 +1770,7 @@ class RenderWindow(QWidget):
         self._last_tile_geometry = (x0, x1, y0, y1)
 
         if self._auto_bc and scalar.shape[0] == 1:
-            levels = self._compute_auto_levels(scalar[0])
+            levels = self._compute_render_auto_levels(scalar[0])
             if levels is not None:
                 self._manual_levels = levels
                 for ch in self._channels:
@@ -1746,7 +1966,7 @@ class RenderWindow(QWidget):
         self._last_tile_geometry = (x0, x1, y0, y1)
 
         if self._auto_bc and scalar.shape[0] == 1:
-            levels = self._compute_auto_levels(scalar[0])
+            levels = self._compute_render_auto_levels(scalar[0])
             if levels is not None:
                 self._manual_levels = levels
                 for ch in self._channels:
@@ -1905,7 +2125,7 @@ class RenderWindow(QWidget):
         self._last_scalar_tile = scalar
 
         if self._auto_bc and scalar.shape[0] == 1:
-            levels = self._compute_auto_levels(scalar[0])
+            levels = self._compute_render_auto_levels(scalar[0])
             if levels is not None:
                 self._manual_levels = levels
 
@@ -2069,7 +2289,7 @@ class RenderWindow(QWidget):
                 levels = (
                     self._manual_levels
                     if len(self._channels) == 1 and self._manual_levels
-                    else self._compute_auto_levels(pixels)
+                    else self._compute_render_auto_levels(pixels)
                 )
             if not levels:
                 return default
@@ -2133,7 +2353,7 @@ class RenderWindow(QWidget):
         if levels is None:
             levels = (
                 self._manual_levels if len(self._channels) == 1 and self._manual_levels
-                else self._compute_auto_levels(pixels)
+                else self._compute_render_auto_levels(pixels)
             )
         if levels is not None:
             dlg.set_levels(*levels)
@@ -2270,7 +2490,11 @@ class RenderWindow(QWidget):
             return np.zeros(tile.shape, dtype=np.float32)
         levels = ch.get("levels")
         if levels is None:
-            levels = self._manual_levels if len(self._channels) == 1 else self._compute_auto_levels(tile[positive])
+            levels = (
+                self._manual_levels
+                if len(self._channels) == 1
+                else self._compute_render_auto_levels(tile)
+            )
         if levels is None:
             lo, hi = float(np.nanmin(tile[positive])), float(np.nanmax(tile[positive]))
             if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
@@ -2391,6 +2615,23 @@ class RenderWindow(QWidget):
     # Brightness & Contrast
     # ------------------------------------------------------------------
 
+    def _compute_render_auto_levels(
+        self,
+        image: np.ndarray,
+    ) -> tuple[float, float] | None:
+        """Levels used while an automatically tuned viewport is rendered.
+
+        Before the user explicitly presses B/C *Auto*, localization rasters use
+        the sparse-aware display default. An explicit Auto press establishes an
+        ImageJ threshold state (>=10), which remains authoritative across
+        subsequent viewport renders until Reset or a manual level edit.
+        """
+        if self._bc_auto_threshold >= _IMAGEJ_AUTO_RESET_THRESHOLD:
+            return self._compute_auto_levels(image)
+        if self._render_mode == "localizations":
+            return localization_render_auto_levels(image)
+        return self._compute_auto_levels(image)
+
     def _compute_auto_levels(
         self,
         hist: np.ndarray,
@@ -2447,6 +2688,10 @@ class RenderWindow(QWidget):
         hmax = i
 
         if hmax < hmin:
+            # ImageJ calls reset() here, which restores the full data range and
+            # clears autoThreshold. Without this reset, later clicks keep
+            # halving an already-unsatisfiable threshold and appear stuck.
+            self._bc_auto_threshold = 0
             return (data_min, data_max)
 
         bin_size = (data_max - data_min) / float(_IMAGEJ_AUTO_HIST_BINS)
@@ -2812,10 +3057,43 @@ class RenderWindow(QWidget):
         self._volume_window.activateWindow()
 
     def _show_sigma_dialog(self) -> None:
-        dialog = SigmaDialog(self._sigma_nm_xyz, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._idx is None or not (0 <= self._idx < len(self._state.datasets)):
             return
-        self._sigma_nm_xyz = dialog.values_xyz()
+        if self._sigma_dialog is not None:
+            try:
+                if self._sigma_dialog.isVisible():
+                    self._sigma_dialog.raise_()
+                    self._sigma_dialog.activateWindow()
+                    return
+            except RuntimeError:
+                self._sigma_dialog = None
+        ds = self._state.datasets[self._idx]
+        maxima = fixed_gaussian_sigma_limits_nm(self._raw_render_locs(ds))
+        dialog = SigmaDialog(
+            self._sigma_nm_xyz,
+            maxima_xy_z=maxima,
+            on_apply=self._apply_fixed_sigma_values,
+            parent=self,
+        )
+        self._sigma_dialog = dialog
+        dialog.destroyed.connect(
+            lambda *_args, current=dialog: self._forget_sigma_dialog(current)
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _forget_sigma_dialog(self, dialog: SigmaDialog) -> None:
+        if self._sigma_dialog is dialog:
+            self._sigma_dialog = None
+
+    def _apply_fixed_sigma_values(self, xy_nm: float, z_nm: float) -> None:
+        xy = max(float(xy_nm), _SIGMA_SLIDER_STEP_NM)
+        z = max(float(z_nm), _SIGMA_SLIDER_STEP_NM)
+        values = (xy, xy, z)
+        if np.allclose(values, self._sigma_nm_xyz):
+            return
+        self._sigma_nm_xyz = values
         self._phys_tile_cache.clear()
         self._scheduler.cancel()
         self._schedule_render()
@@ -3511,6 +3789,12 @@ class RenderWindow(QWidget):
             except Exception:
                 pass
             self._volume_window = None
+        if self._sigma_dialog is not None:
+            try:
+                self._sigma_dialog.close()
+            except RuntimeError:
+                pass
+            self._sigma_dialog = None
         # The Brightness/Contrast palette is a top-level always-on-top Tool
         # window, so it does not hide with this viewer on its own — close it
         # explicitly or it lingers orphaned over the desktop.

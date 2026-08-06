@@ -11,7 +11,6 @@ from collections import OrderedDict
 
 import numpy as np
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QDialog
 
 from .precision_render import (
     RENDER_METHOD_DEFAULT,
@@ -29,7 +28,7 @@ from .precision_render import (
     resolve_precision_xyz_nm,
     transform_precision_marginals,
 )
-from .render_window import RenderWindow, SigmaDialog
+from .render_window import RenderWindow
 
 
 class PrecisionRenderWindow(RenderWindow):
@@ -135,19 +134,14 @@ class PrecisionRenderWindow(RenderWindow):
             return self._fixed_sigma_xy_nm, self._fixed_sigma_xy_nm
         return self._fixed_sigma_xy_nm, self._fixed_sigma_z_nm
 
-    def _show_sigma_dialog(self) -> None:
-        dialog = SigmaDialog(
-            (self._fixed_sigma_xy_nm, self._fixed_sigma_z_nm), parent=self
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        xy, z = dialog.values_xy_z()
+    def _apply_fixed_sigma_values(self, xy_nm: float, z_nm: float) -> None:
+        xy, z = max(float(xy_nm), 0.1), max(float(z_nm), 0.1)
         if np.isclose(xy, self._fixed_sigma_xy_nm) and np.isclose(
             z, self._fixed_sigma_z_nm
         ):
             return
-        self._fixed_sigma_xy_nm = max(float(xy), 0.01)
-        self._fixed_sigma_z_nm = max(float(z), 0.01)
+        self._fixed_sigma_xy_nm = xy
+        self._fixed_sigma_z_nm = z
         self._fixed_sigma_nm = self._fixed_sigma_xy_nm
         self._sigma_nm_xyz = (
             self._fixed_sigma_xy_nm,
@@ -634,7 +628,7 @@ class PrecisionRenderWindow(RenderWindow):
         # Only settle auto brightness/contrast on the final image so levels do
         # not flicker as tiles fill in over the coarse preview.
         if final and self._auto_bc and scalar.shape[0] == 1:
-            levels = self._compute_auto_levels(scalar[0])
+            levels = self._compute_render_auto_levels(scalar[0])
             if levels is not None:
                 self._manual_levels = levels
                 self._channels[0]["levels"] = None
@@ -772,7 +766,7 @@ class PrecisionRenderWindow(RenderWindow):
                 levels = (
                     self._manual_levels
                     if (len(self._channels) == 1 and self._manual_levels)
-                    else self._compute_auto_levels(pixels)
+                    else self._compute_render_auto_levels(pixels)
                 )
             if not levels:
                 return default
