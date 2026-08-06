@@ -18,8 +18,7 @@ distance — it moves when the merge radius moves.
 
 This module never merges.  It works directly on **trace centroids**, models the
 same-emitter repeat population instead of deleting it, and fits the whole
-observed pair-distance distribution with a forward model whose class weights
-are fixed by the structure.  Three components:
+observed pair-distance distribution.  Three components:
 
 ``N_rep · K_rep(r)``
     Same molecule re-acquired as several traces.  ``K_rep`` is calibrated
@@ -28,20 +27,44 @@ are fixed by the structure.  Three components:
     never on distance, so the resulting distance distribution is an unbiased
     sample of same-emitter separations.
 
-``N_cx · Σ_c (1/5) · P(r; d_c + δ, σ)``
-    Distinct sub-units of one complex.  ``d_c`` are the five HlyB distances,
-    held fixed.  **The class weights are fixed at 1/5 and are not free**: each
-    class has exactly three pairs, and every pair needs two labels, so all
-    classes scale as p² with labelling efficiency and their *ratio* is
-    independent of it.  That is what makes the fit a test of the model rather
-    than a flexible curve fit.  ``δ`` — the fluorophore displacement caused by
-    the single-domain antibody — is **fitted**, which settles from the data
-    whether the label sits isotropically (δ ≈ +1 nm) or radially outward
-    (δ ≈ +4 nm, reproducing the tabulated distances).
+``N_str · S(r)``
+    Distinct labelled sites of one assembly.  ``S`` is the *observed* distance
+    distribution implied by a distribution of true inter-site distances,
+    blurred by the positional error of a pair of centres.
 
 ``A · null(r)``
-    Pairs from different complexes.  Its shape is taken from an
+    Pairs from different assemblies.  Its shape is taken from an
     envelope-preserving surrogate (:func:`envelope_null`) rather than assumed.
+
+The structural term is deliberately not tied to one architecture
+-----------------------------------------------------------------
+The published HlyB diagram describes three dimers in a C3-symmetric trimer, but
+that is a *reference architecture*, not a certainty for a given preparation: the
+trimer may not survive sample handling, leaving dimers whose inter-subunit
+distance can differ from the tabulated one and need not be sharp — a flexible
+linkage produces a broad, even flat, band of distances.  Fixing the five-class
+trimer geometry would impose exactly the answer the experiment is meant to test.
+
+:data:`STRUCTURE_MODELS` therefore holds a family of candidate structural terms,
+and the default analysis is **dimer-centred**:
+
+``dimer_gaussian``
+    One inter-subunit distance with a fitted centre and a fitted conformational
+    spread.  The primary measurement: *what is the dimer distance?*
+``dimer_uniform``
+    The distance lies anywhere in a fitted band, with no preferred value — the
+    fully elastic case, which a flat region of the histogram should select.
+``dimer_lognormal``
+    A skewed distance distribution, the natural shape for a tether that
+    stretches more easily than it compresses.
+``trimer_six_site``
+    The published C3 geometry, retained as **one competing hypothesis among
+    several** rather than as the model.
+
+Every shape supplies a distribution ``p(d)`` over true distances; the observed
+profile is ``∫ p(d)·P(r | d, σ) dd`` with ``P`` the exact 3-D blurred-distance
+density.  The shapes are ranked by AIC, so the data — not the diagram — decides
+whether the distance is sharp, broad, or trimeric.
 
 Pure NumPy/SciPy — Qt-free and unit-testable.  Coordinates: ``loc`` in metres
 (raw, z **not** RIMF-baked); ``z_scaling_factor`` is applied here.
@@ -72,6 +95,137 @@ HLYB_CLASS_DISTANCES_NM = (8.936, 10.138, 11.000, 17.302, 19.000)
 #: labelling efficiency p every class scales as p² and the weights are equal.
 HLYB_CLASS_WEIGHTS = tuple(1.0 / len(HLYB_CLASS_DISTANCES_NM)
                            for _ in HLYB_CLASS_DISTANCES_NM)
+
+#: The tabulated dimer distance of the reference diagram, as an inter-domain
+#: (protein) distance.  Used only as a STARTING VALUE for the fitted dimer
+#: distance and as a reference to quote the fitted value against — never as a
+#: constraint.
+HLYB_REFERENCE_DIMER_NM = HLYB_CLASS_DISTANCES_NM[1]
+
+
+@dataclass(frozen=True)
+class StructureModel:
+    """A candidate distribution of true inter-site distances.
+
+    ``pdf(d_grid, params)`` returns the (unnormalised) density over true
+    distances; the caller convolves it with the positional blur.  Keeping the
+    true-distance distribution separate from the blur is what allows a fitted
+    width to be reported as conformational spread rather than as instrument
+    response.
+    """
+
+    key: str
+    label: str
+    param_names: tuple
+    pdf: object
+    start: object          # (cfg, centres) -> list[float]
+    bounds: object         # (cfg, centres) -> list[tuple]
+    describe: object       # (params) -> str
+
+
+def _delta_pdf(d_grid: np.ndarray, centre: float) -> np.ndarray:
+    """Unit mass at the grid point nearest ``centre`` (a rigid distance)."""
+    out = np.zeros_like(d_grid)
+    if d_grid.size:
+        out[int(np.argmin(np.abs(d_grid - float(centre))))] = 1.0
+    return out
+
+
+def _dimer_gaussian_pdf(d_grid, params):
+    centre, spread = float(params[0]), float(params[1])
+    if spread <= 1e-6:
+        return _delta_pdf(d_grid, centre)
+    return np.exp(-0.5 * ((d_grid - centre) / spread) ** 2)
+
+
+#: Edge softness of the uniform band, in nm.  A hard top-hat has zero gradient
+#: with respect to its edges almost everywhere -- moving an edge by a
+#: finite-difference step does not change which grid points are inside -- so the
+#: optimiser cannot move it and the band stays at its starting values.  A soft
+#: edge of well under one bin makes the shape differentiable while remaining a
+#: flat band for every practical purpose.
+_BAND_EDGE_NM = 0.35
+
+
+def _dimer_uniform_pdf(d_grid, params):
+    lo, hi = float(params[0]), float(params[1])
+    if hi < lo:
+        lo, hi = hi, lo
+    if hi - lo < 1e-6:
+        return _delta_pdf(d_grid, 0.5 * (lo + hi))
+    from scipy.special import expit
+
+    return expit((d_grid - lo) / _BAND_EDGE_NM) * expit((hi - d_grid) / _BAND_EDGE_NM)
+
+
+def _dimer_lognormal_pdf(d_grid, params):
+    median, shape = float(params[0]), max(float(params[1]), 1e-3)
+    safe = np.clip(d_grid, 1e-6, None)
+    out = np.exp(-0.5 * ((np.log(safe) - np.log(max(median, 1e-6))) / shape) ** 2) / safe
+    return np.where(d_grid > 0, out, 0.0)
+
+
+def _trimer_pdf(d_grid, params):
+    """Five equally weighted classes, shifted by a common label offset."""
+    offset = float(params[0])
+    out = np.zeros_like(d_grid)
+    for dist in HLYB_CLASS_DISTANCES_NM:
+        out += _delta_pdf(d_grid, dist + offset)
+    return out
+
+
+def _span(centres) -> float:
+    arr = np.asarray(centres, dtype=float)
+    return float(arr.max()) if arr.size else 60.0
+
+
+STRUCTURE_MODELS: dict[str, StructureModel] = {
+    "dimer_gaussian": StructureModel(
+        key="dimer_gaussian",
+        label="single dimer distance (Gaussian spread)",
+        param_names=("distance_nm", "spread_nm"),
+        pdf=_dimer_gaussian_pdf,
+        start=lambda cfg, c: [float(cfg.dimer_start_nm), 1.5],
+        bounds=lambda cfg, c: [tuple(cfg.dimer_distance_bounds_nm), (0.0, 12.0)],
+        describe=lambda p: (f"distance {p[0]:.2f} nm, conformational spread "
+                            f"{p[1]:.2f} nm"),
+    ),
+    "dimer_uniform": StructureModel(
+        key="dimer_uniform",
+        label="dimer distance uniform in a band (fully elastic)",
+        param_names=("lo_nm", "hi_nm"),
+        pdf=_dimer_uniform_pdf,
+        start=lambda cfg, c: [max(cfg.dimer_distance_bounds_nm[0], 6.0), 16.0],
+        bounds=lambda cfg, c: [tuple(cfg.dimer_distance_bounds_nm),
+                               tuple(cfg.dimer_distance_bounds_nm)],
+        describe=lambda p: (f"band {min(p[0], p[1]):.2f} to {max(p[0], p[1]):.2f} nm "
+                            f"(width {abs(p[1] - p[0]):.2f} nm)"),
+    ),
+    "dimer_lognormal": StructureModel(
+        key="dimer_lognormal",
+        label="single dimer distance (log-normal spread)",
+        param_names=("median_nm", "log_sigma"),
+        pdf=_dimer_lognormal_pdf,
+        start=lambda cfg, c: [float(cfg.dimer_start_nm), 0.2],
+        bounds=lambda cfg, c: [tuple(cfg.dimer_distance_bounds_nm), (0.02, 1.2)],
+        describe=lambda p: (f"median {p[0]:.2f} nm, log-sigma {p[1]:.3f}"),
+    ),
+    "trimer_six_site": StructureModel(
+        key="trimer_six_site",
+        label="published six-site C3 trimer",
+        param_names=("label_offset_nm",),
+        pdf=_trimer_pdf,
+        start=lambda cfg, c: [float(np.clip(cfg.label_offset_nm,
+                                            *cfg.label_offset_bounds_nm))],
+        bounds=lambda cfg, c: [tuple(cfg.label_offset_bounds_nm)],
+        describe=lambda p: f"label offset {p[0]:.2f} nm on the tabulated classes",
+    ),
+}
+
+#: Default ranking.  Dimer shapes first: the trimer is a hypothesis here, not a
+#: constraint, because it may not survive sample preparation.
+DEFAULT_HYPOTHESES = ("dimer_gaussian", "dimer_uniform", "dimer_lognormal",
+                      "trimer_six_site", "no_structure")
 
 
 @dataclass
@@ -117,22 +271,41 @@ class PairFitConfig:
     # its peak far from the modelled distance and impersonate a broad
     # background.  The tabulated allowance is 2 nm per endpoint, hence 6 nm of
     # headroom.
-    label_offset_nm: float = 2.0        # starting value for the fitted δ
+    label_offset_nm: float = 2.0        # starting value for the trimer's δ
     label_offset_bounds_nm: tuple = (0.0, 6.0)
     fit_label_offset: bool = True
-    # σ is a property of the MEASUREMENT, not of the structural hypothesis, so
-    # it is bounded by the measured centroid precision and shared across
-    # hypotheses.  The floor is set from the data (√2 × centroid error); the
-    # headroom covers the antibody-offset and conformational spread.
-    extra_sigma_nm: float = 3.0         # starting value for the fitted σ
+    # Dimer-centred defaults.  The distance is FITTED over a wide range: the
+    # tabulated value is a reference architecture, and the real separation in a
+    # given preparation can differ.
+    dimer_start_nm: float = 12.0
+    dimer_distance_bounds_nm: tuple = (4.0, 40.0)
+    #: Grid over true inter-site distances used to convolve p(d) with the blur.
+    distance_grid_nm: float = 0.25
+    # σ is the positional blur of a pair distance.  It is a property of the
+    # MEASUREMENT and is therefore **not fitted** by default: it is computed
+    # from the measured centroid precision combined in quadrature with the
+    # labelling allowance below.
+    #
+    # Fitting it was actively harmful.  A free σ absorbs the very width the
+    # analysis is meant to measure, and because σ is shared across hypotheses
+    # the shape that best absorbs structure into blur then dictates a σ that
+    # cripples the others: on trimer ground-truth data the trimer hypothesis
+    # lost to a flat band by ~2100 AIC units purely through an inherited σ.
+    # Deriving σ from the measurement removes both problems and makes the
+    # fitted width of p(d) interpretable as a property of the sample.
+    extra_sigma_nm: float = 3.0         # starting value if σ is fitted anyway
     sigma_headroom_nm: float = 3.5
     sigma_floor_nm: float = 2.0         # used when the data cannot supply one
-    fit_extra_sigma: bool = True
+    #: Per-pair spread contributed by the two antibody displacements.  Two
+    #: independent ~2 nm offsets in arbitrary directions perturb a separation by
+    #: roughly this much along the pair axis.
+    label_spread_nm: float = 2.3
+    fit_extra_sigma: bool = False
     fit_r_min_nm: float = 1.0
     fit_r_max_nm: float = 45.0
 
-    #: Hypotheses compared against the data.  ``None`` uses the default set.
-    hypotheses: tuple = field(default=("six_site", "dimer_only", "no_structure"))
+    #: Structural shapes compared against the data, ranked by AIC.
+    hypotheses: tuple = field(default=DEFAULT_HYPOTHESES)
 
 
 # --------------------------------------------------------------------------
@@ -454,6 +627,88 @@ def offset_gaussian_pdf(r: np.ndarray, d: float, sigma: float) -> np.ndarray:
                   - np.exp(-((r + d) ** 2) / (2 * s ** 2)))
 
 
+def distance_grid(cfg_or_step, r_max_nm: float = 60.0) -> np.ndarray:
+    """Grid of candidate TRUE inter-site distances."""
+    step = float(getattr(cfg_or_step, "distance_grid_nm", cfg_or_step))
+    step = step if step > 0 else 0.25
+    return np.arange(step, float(r_max_nm) + step, step)
+
+
+def structure_profile(
+    centres_nm: np.ndarray,
+    model_key: str,
+    params,
+    *,
+    sigma_nm: float,
+    bin_nm: float = 0.5,
+    d_grid: np.ndarray | None = None,
+) -> np.ndarray:
+    """Observed pair-distance profile for a distribution of true distances.
+
+    ``S(r) = ∫ p(d) · P(r | d, σ) dd`` where ``p`` comes from the named
+    structure model and ``P`` is the exact 3-D blurred-distance density.  The
+    result is normalised to unit area, so its amplitude is carried by the fit
+    and the shape alone distinguishes the hypotheses.
+    """
+    centres = np.asarray(centres_nm, dtype=float)
+    model = STRUCTURE_MODELS[model_key]
+    grid = distance_grid(0.25, float(centres[-1]) if centres.size else 60.0) \
+        if d_grid is None else np.asarray(d_grid, dtype=float)
+    weights = np.asarray(model.pdf(grid, params), dtype=float)
+    weights = np.clip(weights, 0.0, None)
+    total = weights.sum()
+    if total <= 0:
+        return np.zeros_like(centres)
+    weights = weights / total
+    keep = weights > 1e-9
+    if not keep.any():
+        return np.zeros_like(centres)
+    out = np.zeros_like(centres)
+    for d, w in zip(grid[keep], weights[keep]):
+        out += w * offset_gaussian_pdf(centres, float(d), sigma_nm)
+    area = out.sum() * bin_nm
+    return out / area if area > 0 else out
+
+
+def structure_distance_summary(model_key: str, params, d_grid: np.ndarray) -> dict:
+    """Summarise the fitted distribution of TRUE inter-site distances.
+
+    Raw shape parameters are not comparable between shapes, and for a broad
+    Gaussian truncated at zero they are not even interpretable — a centre of
+    7 nm with a spread of 9 nm is not "a 7 nm distance".  Reporting the
+    percentiles of ``p(d)`` instead gives one honest description that applies to
+    every shape and shows immediately whether the distance is localized or the
+    population is simply broad.
+    """
+    grid = np.asarray(d_grid, dtype=float)
+    weights = np.clip(np.asarray(STRUCTURE_MODELS[model_key].pdf(grid, params),
+                                 dtype=float), 0.0, None)
+    total = weights.sum()
+    if total <= 0 or grid.size == 0:
+        nan = float("nan")
+        return {"median_nm": nan, "mean_nm": nan, "mode_nm": nan,
+                "p16_nm": nan, "p84_nm": nan, "iqr_nm": nan, "spread_nm": nan}
+    p = weights / total
+    cdf = np.cumsum(p)
+
+    def q(fraction):
+        return float(grid[int(np.searchsorted(cdf, fraction, side="left"))
+                          if np.searchsorted(cdf, fraction, side="left") < grid.size
+                          else grid.size - 1])
+
+    p16, p84 = q(0.16), q(0.84)
+    return {
+        "median_nm": q(0.5),
+        "mean_nm": float(np.sum(p * grid)),
+        "mode_nm": float(grid[int(np.argmax(p))]),
+        "p16_nm": p16,
+        "p84_nm": p84,
+        # half the central 68 % width: the shape-independent "spread"
+        "spread_nm": float(0.5 * (p84 - p16)),
+        "iqr_nm": float(q(0.75) - q(0.25)),
+    }
+
+
 def complex_profile(
     centres_nm: np.ndarray,
     *,
@@ -463,7 +718,11 @@ def complex_profile(
     weights=None,
     bin_nm: float = 0.5,
 ) -> np.ndarray:
-    """Normalised intra-complex pair-distance profile of the HlyB model."""
+    """Normalised profile for a fixed set of equally weighted distances.
+
+    Retained for the trimer hypothesis and for callers that want an explicit
+    distance list; the general path is :func:`structure_profile`.
+    """
     centres = np.asarray(centres_nm, dtype=float)
     dists = np.asarray(distances_nm, dtype=float)
     if weights is None:
@@ -494,20 +753,21 @@ def fit_pair_model(
     null_mean: np.ndarray,
     cfg: PairFitConfig,
     *,
-    distances_nm=HLYB_CLASS_DISTANCES_NM,
-    weights=None,
-    fit_complex: bool = True,
+    structure: str = "dimer_gaussian",
     sigma_floor_nm: float | None = None,
     fixed_sigma_nm: float | None = None,
 ) -> dict:
     """Maximum-likelihood fit of the three-component model to the profile.
 
-    Free parameters: repeat amplitude, complex amplitude, background scale, and
-    — when enabled — the label offset δ and the blur σ.  The class *weights*
-    are never free, and δ and σ are bounded by physics rather than left open
-    (see :class:`PairFitConfig`), so a hypothesis cannot win by translating or
-    inflating its peak into a generic background.  ``fixed_sigma_nm`` pins σ,
-    which is how competing hypotheses are held to the same measurement blur.
+    ``structure`` names an entry of :data:`STRUCTURE_MODELS`, or
+    ``"no_structure"`` to drop the structural term entirely.  Free parameters:
+    the two amplitudes, the background scale, the blur σ, the structure model's
+    own shape parameters, and — when enabled — the repeat-kernel stretch.
+
+    σ describes the measurement, so it is floored by the measured centroid
+    precision and can be pinned with ``fixed_sigma_nm``; holding it common
+    across hypotheses stops a broad shape from winning by absorbing blur that a
+    narrow one is denied.
     """
     from scipy.optimize import minimize
 
@@ -539,44 +799,52 @@ def fit_pair_model(
 
     s_floor = float(sigma_floor_nm if sigma_floor_nm is not None else cfg.sigma_floor_nm)
     s_ceiling = s_floor + float(cfg.sigma_headroom_nm)
-    d_lo, d_hi = (float(cfg.label_offset_bounds_nm[0]),
-                  float(cfg.label_offset_bounds_nm[1]))
     fit_sigma = cfg.fit_extra_sigma and fixed_sigma_nm is None
     if fixed_sigma_nm is not None:
         s_start = float(np.clip(fixed_sigma_nm, s_floor, s_ceiling))
+    elif not cfg.fit_extra_sigma:
+        # measured centroid precision ⊕ labelling allowance
+        s_start = float(np.hypot(s_floor, float(cfg.label_spread_nm)))
     else:
         s_start = float(np.clip(cfg.extra_sigma_nm, s_floor, s_ceiling))
 
     r_lo, r_hi = (float(cfg.repeat_scale_bounds[0]), float(cfg.repeat_scale_bounds[1]))
     fit_scale = cfg.fit_repeat_scale and r_hi > r_lo
 
+    has_structure = structure != "no_structure"
+    model_spec = STRUCTURE_MODELS[structure] if has_structure else None
+    shape_x0 = list(model_spec.start(cfg, centres)) if has_structure else []
+    shape_bounds = list(model_spec.bounds(cfg, centres)) if has_structure else []
+    n_shape = len(shape_x0)
+    grid = distance_grid(cfg, float(centres[-1]) if centres.size else cfg.r_max_nm)
+
     total = max(obs.sum(), 1.0)
 
     def expected(params):
-        n_rep, n_cx, a_bkg, delta, sig, scale = params
+        n_rep, n_str, a_bkg, sig, scale, shape = params
         model = (max(n_rep, 0.0) * stretched_repeat(scale) * bin_nm
                  + max(a_bkg, 0.0) * bkg)
-        if fit_complex:
-            prof = complex_profile(centres, label_offset_nm=delta,
-                                   sigma_nm=max(sig, 0.2),
-                                   distances_nm=distances_nm, weights=weights,
-                                   bin_nm=bin_nm)
-            model = model + max(n_cx, 0.0) * prof * bin_nm
+        if has_structure:
+            prof = structure_profile(centres, structure, shape,
+                                     sigma_nm=max(sig, 0.2), bin_nm=bin_nm,
+                                     d_grid=grid)
+            model = model + max(n_str, 0.0) * prof * bin_nm
         return model
 
-    # The two amplitudes are counts (order 1e3-1e4) while delta, sigma and the
-    # kernel stretch are order 1.  L-BFGS-B takes a single absolute
-    # finite-difference step, so on the raw scale the amplitude derivatives are
-    # evaluated at a relative step of ~1e-12 and the optimiser stalls with the
-    # amplitudes still at their starting values.  Fitting them as FRACTIONS of
-    # the observed total puts every parameter at order 1 and converges properly
-    # (measured: 193 log-likelihood units better on the reference dataset).
+    # The two amplitudes are counts (order 1e3-1e4) while the blur, the kernel
+    # stretch and the shape parameters are order 1.  L-BFGS-B takes a single
+    # absolute finite-difference step, so on the raw scale the amplitude
+    # derivatives are evaluated at a relative step of ~1e-12 and the optimiser
+    # stalls with the amplitudes still at their starting values.  Fitting them
+    # as FRACTIONS of the observed total puts every parameter at order 1 and
+    # converges (measured: 193 log-likelihood units better on the reference
+    # dataset).
     def unpack(free):
         q = list(free)
-        delta = q[3] if cfg.fit_label_offset else float(cfg.label_offset_nm)
-        sig = q[4] if fit_sigma else s_start
-        scale = q[5] if fit_scale else r_lo
-        return [q[0] * total, q[1] * total, q[2], delta, sig, scale]
+        sig = q[3] if fit_sigma else s_start
+        scale = q[4] if fit_scale else r_lo
+        shape = q[5:5 + n_shape]
+        return [q[0] * total, q[1] * total, q[2], sig, scale, shape]
 
     def nll(free):
         params = unpack(free)
@@ -584,49 +852,62 @@ def fit_pair_model(
             return 1e18
         return _poisson_nll(obs[window], expected(params)[window])
 
-    x0 = [0.25, 0.25 if fit_complex else 0.0, 1.0,
-          float(np.clip(cfg.label_offset_nm, d_lo, d_hi)), s_start,
-          float(np.clip(1.3, r_lo, r_hi))]
+    x0 = [0.25, 0.25 if has_structure else 0.0, 1.0, s_start,
+          float(np.clip(1.3, r_lo, r_hi))] + shape_x0
     bounds = [
         (0.0, 10.0), (0.0, 10.0), (0.0, 100.0),
-        (d_lo, d_hi) if cfg.fit_label_offset else (x0[3], x0[3]),
         (s_floor, s_ceiling) if fit_sigma else (s_start, s_start),
-        (r_lo, r_hi) if fit_scale else (x0[5], x0[5]),
-    ]
+        (r_lo, r_hi) if fit_scale else (x0[4], x0[4]),
+    ] + shape_bounds
     res = minimize(nll, x0, method="L-BFGS-B", bounds=bounds)
     p = unpack(res.x)
-    delta, sig, scale = p[3], p[4], p[5]
+    sig, scale, shape = p[3], p[4], list(p[5])
     model = expected(p)
 
-    k = 3 + int(cfg.fit_label_offset) + int(fit_sigma) + int(fit_scale)
-    if not fit_complex:
+    k = 3 + int(fit_sigma) + int(fit_scale) + n_shape
+    if not has_structure:
         k -= 1
     nll_value = _poisson_nll(obs[window], model[window])
 
     tol = 1e-3
     at_bounds = []
-    if cfg.fit_label_offset and (abs(delta - d_lo) < tol or abs(delta - d_hi) < tol):
-        at_bounds.append("label_offset_nm")
     if fit_sigma and (abs(sig - s_floor) < tol or abs(sig - s_ceiling) < tol):
         at_bounds.append("sigma_nm")
     if fit_scale and (abs(scale - r_lo) < tol or abs(scale - r_hi) < tol):
         at_bounds.append("repeat_scale")
+    if has_structure:
+        for name, value, (lo_b, hi_b) in zip(model_spec.param_names, shape, shape_bounds):
+            if abs(value - lo_b) < tol or abs(value - hi_b) < tol:
+                at_bounds.append(name)
+
+    shape_params = dict(zip(model_spec.param_names, shape)) if has_structure else {}
+    summary = (structure_distance_summary(structure, shape, grid) if has_structure
+               else {})
+    structure_component = (
+        max(p[1], 0.0) * structure_profile(centres, structure, shape,
+                                           sigma_nm=max(sig, 0.2), bin_nm=bin_nm,
+                                           d_grid=grid) * bin_nm
+        if has_structure else np.zeros_like(centres)
+    )
     return {
+        "structure": structure,
+        "structure_label": model_spec.label if has_structure else "no structural term",
+        "structure_params": shape_params,
+        "structure_description": (model_spec.describe(shape) if has_structure
+                                  else "no structural term"),
+        "distance_summary": summary,
         "n_repeat_pairs": float(p[0]),
-        "n_complex_pairs": float(p[1]) if fit_complex else 0.0,
+        "n_structure_pairs": float(p[1]) if has_structure else 0.0,
+        # legacy alias, so existing callers keep working
+        "n_complex_pairs": float(p[1]) if has_structure else 0.0,
         "background_scale": float(p[2]),
-        "label_offset_nm": float(delta),
         "sigma_nm": float(sig),
         "repeat_scale": float(scale),
         "model": model,
         "repeat_component": max(p[0], 0.0) * stretched_repeat(scale) * bin_nm,
         "background_component": max(p[2], 0.0) * bkg,
-        "complex_component": (
-            max(p[1], 0.0) * complex_profile(
-                centres, label_offset_nm=delta, sigma_nm=max(sig, 0.2),
-                distances_nm=distances_nm, weights=weights, bin_nm=bin_nm) * bin_nm
-            if fit_complex else np.zeros_like(centres)
-        ),
+        "structure_component": structure_component,
+        "complex_component": structure_component,
         "centres_nm": centres,
         "fit_window": window,
         "nll": nll_value,
@@ -634,6 +915,72 @@ def fit_pair_model(
         "aic": float(2 * k + 2 * nll_value),
         "success": bool(res.success),
         "parameters_at_bounds": at_bounds,
+    }
+
+
+def profile_likelihood_distance(
+    counts: np.ndarray,
+    edges: np.ndarray,
+    repeat_shape: np.ndarray,
+    null_mean: np.ndarray,
+    cfg: PairFitConfig,
+    *,
+    structure: str = "dimer_gaussian",
+    sigma_floor_nm: float | None = None,
+    fixed_sigma_nm: float | None = None,
+    n_points: int = 41,
+) -> dict:
+    """Scan the dimer distance, refitting everything else at each value.
+
+    Gives a confidence interval on the distance rather than a bare point
+    estimate: the 68 % and 95 % intervals are where the negative log-likelihood
+    rises by 0.5 and 1.92 above its minimum.  A scan that stays flat means the
+    data do not localize the distance, and saying so is the point.
+    """
+    import dataclasses
+
+    spec = STRUCTURE_MODELS.get(structure)
+    if spec is None or "distance_nm" not in spec.param_names:
+        if spec is None or "median_nm" not in spec.param_names:
+            return {"available": False}
+    key = "distance_nm" if "distance_nm" in spec.param_names else "median_nm"
+    lo, hi = (float(cfg.dimer_distance_bounds_nm[0]),
+              float(cfg.dimer_distance_bounds_nm[1]))
+    scan = np.linspace(lo, hi, int(max(n_points, 5)))
+    nll_values = []
+    for value in scan:
+        pinned = dataclasses.replace(cfg, dimer_start_nm=float(value),
+                                     dimer_distance_bounds_nm=(float(value), float(value)))
+        fit = fit_pair_model(counts, edges, repeat_shape, null_mean, pinned,
+                             structure=structure, sigma_floor_nm=sigma_floor_nm,
+                             fixed_sigma_nm=fixed_sigma_nm)
+        nll_values.append(fit["nll"])
+    nll_values = np.asarray(nll_values, dtype=float)
+    best = int(np.argmin(nll_values))
+    delta = nll_values - nll_values[best]
+
+    def _interval(threshold):
+        inside = np.flatnonzero(delta <= threshold)
+        if inside.size == 0:
+            return (float("nan"), float("nan"))
+        return float(scan[inside.min()]), float(scan[inside.max()])
+
+    step = float(scan[1] - scan[0]) if scan.size > 1 else float("nan")
+    ci68 = _interval(0.5)
+    return {
+        "available": True,
+        "parameter": key,
+        "distance_nm": scan,
+        "nll": nll_values,
+        "delta_nll": delta,
+        "best_nm": float(scan[best]),
+        "ci68_nm": ci68,
+        "ci95_nm": _interval(1.92),
+        "step_nm": step,
+        # an interval no wider than one scan step is unresolved, not tight
+        "ci68_below_scan_step": bool(np.isfinite(step) and (ci68[1] - ci68[0]) <= step),
+        # a scan that never rises by 1.92 does not constrain the distance
+        "constrained": bool(delta.max() > 1.92),
     }
 
 
@@ -653,31 +1000,28 @@ def compare_hypotheses(
     Letting each hypothesis choose its own blur would let a one-distance model
     inflate into a featureless bump and win for the wrong reason.
     """
-    reference = fit_pair_model(counts, edges, repeat_shape, null_mean, cfg,
-                               sigma_floor_nm=sigma_floor_nm)
-    shared_sigma = float(reference["sigma_nm"])
-
+    names = [n for n in cfg.hypotheses
+             if n == "no_structure" or n in STRUCTURE_MODELS]
+    if not names:
+        return {}
+    # Every shape gets the same blur, derived from the measurement rather than
+    # fitted (see PairFitConfig.fit_extra_sigma).  Fitting it on one "anchor"
+    # shape and imposing the result on the rest was worse than either
+    # alternative: the anchor absorbed structure into blur and then handed the
+    # others a σ that made them fail on their own ground truth.
     out: dict[str, dict] = {}
-    for name in cfg.hypotheses:
-        if name == "six_site":
-            fit = reference
-        elif name == "dimer_only":
-            fit = fit_pair_model(counts, edges, repeat_shape, null_mean, cfg,
-                                 distances_nm=(HLYB_CLASS_DISTANCES_NM[1],),
-                                 weights=(1.0,), sigma_floor_nm=sigma_floor_nm,
-                                 fixed_sigma_nm=shared_sigma)
-        elif name == "no_structure":
-            fit = fit_pair_model(counts, edges, repeat_shape, null_mean, cfg,
-                                 fit_complex=False, sigma_floor_nm=sigma_floor_nm,
-                                 fixed_sigma_nm=shared_sigma)
-        else:
-            continue
-        fit["shared_sigma_nm"] = shared_sigma
+    shared_sigma = None
+    for name in names:
+        fit = fit_pair_model(counts, edges, repeat_shape, null_mean, cfg,
+                             structure=name, sigma_floor_nm=sigma_floor_nm,
+                             fixed_sigma_nm=shared_sigma)
+        if shared_sigma is None:
+            shared_sigma = float(fit["sigma_nm"])
+        fit["shared_sigma_nm"] = float(shared_sigma)
         out[name] = fit
-    if out:
-        best = min(out.values(), key=lambda f: f["aic"])["aic"]
-        for fit in out.values():
-            fit["delta_aic"] = float(fit["aic"] - best)
+    best = min(out.values(), key=lambda f: f["aic"])["aic"]
+    for fit in out.values():
+        fit["delta_aic"] = float(fit["aic"] - best)
     return out
 
 
@@ -737,6 +1081,15 @@ def analyze_hlyb_pairwise(
                                  relaxed_cfg, sigma_floor_nm=sigma_floor)
     relaxed_best = min(relaxed, key=lambda k: relaxed[k]["aic"]) if relaxed else ""
 
+    # Confidence interval on the dimer distance, from a likelihood scan.  A
+    # point estimate alone would not say whether the data localize the distance
+    # at all -- which is exactly the question when the population may be broad.
+    scan_structure = best_name if best_name in STRUCTURE_MODELS else "dimer_gaussian"
+    scan = profile_likelihood_distance(
+        counts, edges, repeat["shape"], null["mean"], cfg,
+        structure=scan_structure, sigma_floor_nm=sigma_floor,
+        fixed_sigma_nm=float(best.get("sigma_nm")) if best else None)
+
     centres = 0.5 * (edges[:-1] + edges[1:])
     excess = counts.astype(float) - null["mean"]
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -763,6 +1116,9 @@ def analyze_hlyb_pairwise(
         "best_fit": best,
         "fits_relaxed_kernel": relaxed,
         "best_hypothesis_relaxed": relaxed_best,
+        "distance_scan": scan,
+        "reference_dimer_nm": float(HLYB_REFERENCE_DIMER_NM),
+        "structure_labels": {k: v.label for k, v in STRUCTURE_MODELS.items()},
         "n_traces_total": int(traces["n_traces_total"]),
         "n_traces_used": int(pts.shape[0]),
         "centroid_sem_nm": median_sem,

@@ -330,7 +330,9 @@ def _pair_fit_method_data(**overrides):
             "bin_nm": 0.5, "fit_r_min_nm": 1.0, "fit_r_max_nm": 45.0,
             "null_cell_nm": 50.0, "null_replicates": 8, "repeat_gap_s": 0.2,
             "repeat_max_nm": 40.0, "label_offset_bounds_nm": [0.0, 6.0],
-            "fit_label_offset": True,
+            "fit_label_offset": True, "dimer_distance_bounds_nm": [4.0, 40.0],
+            "hypotheses": ["dimer_gaussian", "dimer_uniform", "dimer_lognormal",
+                           "trimer_six_site", "no_structure"],
         },
         "observable": {
             "centroid_sem_nm": [1.02, 1.05, 0.61], "sigma_floor_nm": 1.29,
@@ -345,22 +347,35 @@ def _pair_fit_method_data(**overrides):
             "class_names": ["neighboring domains", "dimer", "every second A-domain",
                             "cross-domain", "every second B-domain"],
             "class_distances_nm": [8.936, 10.138, 11.0, 17.302, 19.0],
-            "class_weight": 0.2,
+            "class_weight": 0.2, "reference_dimer_nm": 10.138,
+        },
+        "distance_scan": {
+            "available": True, "parameter": "distance_nm", "best_nm": 7.6,
+            "ci68_nm": [7.6, 8.5], "ci95_nm": [7.6, 8.5], "step_nm": 0.9,
+            "constrained": True, "ci68_below_scan_step": False,
         },
         "fits": {
-            "six_site": {"delta_aic": 0.0, "n_repeat_pairs": 2495.0,
-                         "n_complex_pairs": 4933.0, "background_scale": 0.484,
-                         "label_offset_nm": 0.0, "sigma_nm": 3.23,
-                         "parameters_at_bounds": ["label_offset_nm"]},
-            "dimer_only": {"delta_aic": 609.5, "parameters_at_bounds": []},
-            "no_structure": {"delta_aic": 5569.0, "parameters_at_bounds": []},
+            "dimer_gaussian": {
+                "delta_aic": 0.0, "n_repeat_pairs": 2495.0,
+                "n_structure_pairs": 6944.0, "background_scale": 0.484,
+                "sigma_nm": 2.64, "parameters_at_bounds": [],
+                "structure_description": "distance 8.00 nm, spread 8.77 nm",
+                "distance_summary": {"median_nm": 10.0, "p16_nm": 3.75,
+                                     "p84_nm": 17.75, "mode_nm": 8.0,
+                                     "mean_nm": 10.7, "spread_nm": 7.0}},
+            "dimer_lognormal": {"delta_aic": 28.3, "parameters_at_bounds": []},
+            "dimer_uniform": {"delta_aic": 282.2, "parameters_at_bounds": []},
+            "trimer_six_site": {"delta_aic": 1499.2, "parameters_at_bounds": []},
+            "no_structure": {"delta_aic": 6145.4, "parameters_at_bounds": []},
         },
         "fits_relaxed_kernel": {
-            "six_site": {"delta_aic": 0.0}, "dimer_only": {"delta_aic": 10.4},
-            "no_structure": {"delta_aic": 250.4},
+            "dimer_gaussian": {"delta_aic": 0.0},
+            "dimer_lognormal": {"delta_aic": 22.5},
+            "trimer_six_site": {"delta_aic": 78.5},
+            "no_structure": {"delta_aic": 261.4},
         },
-        "best_hypothesis": "six_site",
-        "best_hypothesis_relaxed": "six_site",
+        "best_hypothesis": "dimer_gaussian",
+        "best_hypothesis_relaxed": "dimer_gaussian",
     }
     data.update(overrides)
     return data
@@ -380,33 +395,69 @@ def test_pair_fit_text_documents_the_measurement_and_its_limits():
     # the kernel calibration must be described as time-selected, not distance-selected
     assert "selected on the acquisition time alone and never on distance" in txt
     assert "224 consecutive trace pairs" in txt
-    # the fixed class weights are what make the fit a test
-    assert "constraint imposed by the structure rather than free parameters" in txt
+    # the published geometry must be a candidate, not an imposed constraint
+    assert "was **not** imposed" in txt
+    assert "fixing it would assume the result" in txt
+    assert "free over 4 to 40 nm" in txt
+    # the distance is reported as a distribution
+    assert "median of 10 nm" in txt
+    assert "central 68 % of the population between 3.75 and 17.75 nm" in txt
     # ranking and sensitivity
-    assert "a single dimer distance worse by 609.5 AIC units" in txt
-    assert "fell from 609.5 to 10.4 AIC units" in txt
+    assert "worse by 1499.2 AIC units" in txt
+    assert "fell from 28.3 to 22.5 AIC units" in txt
     # and the claim must be bounded
-    assert "individual distance classes are not resolved" in txt
-    assert "should not be read as a count of detected complexes" in txt
+    assert "does not identify individual assemblies" in txt
+    assert "not a count of detected complexes" in txt
 
 
-def test_pair_fit_reports_a_bound_offset_as_a_limit():
+def test_pair_fit_states_the_trimer_gap_and_its_biological_reading():
+    """The motivating question is whether the trimer survived preparation; the
+    text must answer it rather than leaving an AIC table to speak for itself."""
     ev = _ev(PAIR_FIT_MSG, name="ds")
     ev["method_data"] = _pair_fit_method_data()
     txt = mt.generate_method_text(_state(), [ev])
-    assert "reached the edge of its permitted range" in txt
-    assert "no support for a radially outward label" in txt
+    assert "published six-site trimer geometry was among the candidates" in txt
+    assert "not surviving sample preparation" in txt
 
 
-def test_pair_fit_reports_a_free_offset_as_an_estimate():
+def test_pair_fit_calls_a_wide_population_a_property_of_the_sample():
+    ev = _ev(PAIR_FIT_MSG, name="ds")
+    ev["method_data"] = _pair_fit_method_data()
+    txt = mt.generate_method_text(_state(), [ev])
+    # spread 7.0 nm against a 2.64 nm blur
+    assert "exceeds the 2.64 nm positional blur" in txt
+    assert "a property of the sample" in txt
+
+
+def test_pair_fit_calls_a_narrow_population_unresolved():
     data = _pair_fit_method_data()
-    data["fits"]["six_site"] = dict(data["fits"]["six_site"],
-                                    label_offset_nm=3.6, parameters_at_bounds=[])
+    tight = dict(data["fits"]["dimer_gaussian"]["distance_summary"], spread_nm=1.0)
+    data["fits"]["dimer_gaussian"] = dict(data["fits"]["dimer_gaussian"],
+                                          distance_summary=tight)
     ev = _ev(PAIR_FIT_MSG, name="ds")
     ev["method_data"] = data
     txt = mt.generate_method_text(_state(), [ev])
-    assert "radially outward label" in txt
-    assert "reached the edge" not in txt
+    assert "does not exceed the 2.64 nm positional blur" in txt
+    assert "consistent with being sharp" in txt
+
+
+def test_pair_fit_flags_an_unresolved_likelihood_interval():
+    data = _pair_fit_method_data()
+    data["distance_scan"] = dict(data["distance_scan"], ci68_below_scan_step=True,
+                                 ci68_nm=[7.6, 7.6])
+    ev = _ev(PAIR_FIT_MSG, name="ds")
+    ev["method_data"] = data
+    txt = mt.generate_method_text(_state(), [ev])
+    assert "unresolved rather than tight" in txt
+
+
+def test_pair_fit_flags_a_scan_that_does_not_localize_the_distance():
+    data = _pair_fit_method_data()
+    data["distance_scan"] = dict(data["distance_scan"], constrained=False)
+    ev = _ev(PAIR_FIT_MSG, name="ds")
+    ev["method_data"] = data
+    txt = mt.generate_method_text(_state(), [ev])
+    assert "do not localize the centre" in txt
 
 
 def test_pair_fit_says_so_when_the_kernel_could_not_be_calibrated():
