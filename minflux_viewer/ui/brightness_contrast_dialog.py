@@ -101,6 +101,8 @@ class HistogramPreview(QWidget):
         x_lo = rect.left() + int(round(lo_frac * rect.width()))
         x_hi = rect.left() + int(round(hi_frac * rect.width()))
         painter.setPen(QPen(QColor("black"), 1))
+        painter.drawLine(x_lo, rect.bottom(), x_lo, rect.top())
+        painter.drawLine(x_hi, rect.bottom(), x_hi, rect.top())
         painter.drawLine(x_lo, rect.bottom(), x_hi, rect.top())
 
 
@@ -201,6 +203,11 @@ class BrightnessContrastDialog(QDialog):
         buttons = QGridLayout()
         self._auto_btn = QPushButton("Auto")
         self._auto_btn.setCheckable(True)
+        self._auto_btn.setToolTip(
+            "ImageJ-style automatic display range. Repeated clicks increase "
+            "clipping; when no valid range remains, the sequence resets and "
+            "starts again."
+        )
         self._auto_btn.clicked.connect(self._on_auto_clicked)
         reset_btn = QPushButton("Reset")
         reset_btn.clicked.connect(self._on_reset_clicked)

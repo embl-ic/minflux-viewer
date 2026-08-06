@@ -267,10 +267,10 @@ def test_distance_histogram_bin_control_and_summary(_app):
     assert win._distance_bin_spin.minimum() == pytest.approx(0.1)
     assert win._distance_bin_spin.maximum() == pytest.approx(10.0)
     assert win._distance_bin_spin.singleStep() == pytest.approx(0.1)
-    assert win._show_lognormal_fit_checkbox.text() == "show lognormal fit"
+    assert win._show_lognormal_fit_checkbox.text() == "show fit"
     assert not win._show_lognormal_fit_checkbox.isChecked()
     assert "Max-count bin:" in win._distance_stats_label.text()
-    assert "Lognormal mean:" not in win._distance_stats_label.text()
+    assert "lognormal" not in win._distance_stats_label.text()
     assert "median" not in win._summary_label().text().lower()
     assert not any(
         isinstance(item, pg.InfiniteLine)
@@ -332,11 +332,15 @@ def test_show_lognormal_fit_checkbox_toggles_cached_fit_and_properties(_app):
     win = HlyBResultWindow(result, HlyBConfig(), title="lognormal")
 
     win._distance_bin_spin.setValue(1.0)
+    # this fixture plants a genuinely log-normal population, so the log-normal
+    # form is selected explicitly -- it is no longer the default
+    win._fit_shape_combo.setCurrentText("lognormal")
     win._show_lognormal_fit_checkbox.setChecked(True)
     _app.processEvents()
 
     fit = win._lognormal_fit_result
     assert fit is not None
+    assert fit["shape"] == "lognormal"
     assert fit["mean_nm"] == pytest.approx(18.0 * np.exp(0.5 * 0.25**2), abs=1.0)
     assert np.isfinite(fit["mu"])
     assert fit["sigma"] > 0
@@ -347,7 +351,7 @@ def test_show_lognormal_fit_checkbox_toggles_cached_fit_and_properties(_app):
     assert "μ =" in fit_text
     assert "σ =" in fit_text
     assert "fit RMSE =" in fit_text
-    assert "Lognormal mean:" in win._distance_stats_label.text()
+    assert "lognormal: " in win._distance_stats_label.text()
 
     win._show_lognormal_fit_checkbox.setChecked(False)
     _app.processEvents()
@@ -455,5 +459,79 @@ def test_template_scatter_y_axis_follows_the_origin_preference(_app):
         win._view_combo.setCurrentText("XY")
         vb = win._scatter_pages["XY"]["plot"].getPlotItem().getViewBox()
         assert not vb.yInverted()
+    finally:
+        win.close()
+
+
+def _rigid_dimer_distances(n=40000, d_true=14.0, sem=1.4, seed=5):
+    """Observed 3-D separations of rigid dimers, randomly oriented.
+
+    A fixed separation is orientation-independent in three dimensions, so where
+    the dimers sit -- flat, or on a curved cell surface -- does not enter; only
+    the localization error broadens the distribution.
+    """
+    rng = np.random.default_rng(seed)
+    axis = rng.normal(size=(n, 3))
+    axis /= np.linalg.norm(axis, axis=1, keepdims=True)
+    a = rng.normal(scale=sem, size=(n, 3))
+    b = axis * d_true + rng.normal(scale=sem, size=(n, 3))
+    return np.linalg.norm(b - a, axis=1)
+
+
+def test_fit_shapes_are_offered_with_the_physical_form_first(_app):
+    win = HlyBResultWindow(_synthetic_result(), HlyBConfig(), title="fit")
+    try:
+        offered = [win._fit_shape_combo.itemText(i)
+                   for i in range(win._fit_shape_combo.count())]
+        assert offered == ["3-D blurred distance", "Gaussian", "lognormal"]
+        assert win._fit_shape() == "3-D blurred distance"
+    finally:
+        win.close()
+
+
+def test_a_rigid_dimer_is_not_lognormal(_app):
+    """The log-normal has no geometric justification for a rigid 3-D separation
+    and fits a simulated one markedly worse than either alternative."""
+    win = HlyBResultWindow(_synthetic_result(), HlyBConfig(), title="fit")
+    try:
+        sample = _rigid_dimer_distances()
+        edges = np.arange(0, 40.25, 0.25)
+        counts = np.histogram(sample, bins=edges)[0].astype(float)
+        rmse = {}
+        for shape in win.FIT_SHAPES:
+            rmse[shape] = win._distance_histogram_fit(counts, edges, shape)["rmse_counts"]
+        assert rmse["lognormal"] > 1.5 * rmse["Gaussian"]
+        assert rmse["lognormal"] > 1.5 * rmse["3-D blurred distance"]
+    finally:
+        win.close()
+
+
+def test_the_exact_form_recovers_the_distance_when_the_blur_is_large(_app):
+    """A symmetric Gaussian cannot represent a positive quantity bounded below
+    by zero, so it reports a distance that is too large once the blur is
+    comparable to it; the exact form does not."""
+    win = HlyBResultWindow(_synthetic_result(), HlyBConfig(), title="fit")
+    try:
+        sample = _rigid_dimer_distances(d_true=10.0, sem=5.0)
+        edges = np.arange(0, 60.25, 0.25)
+        counts = np.histogram(sample, bins=edges)[0].astype(float)
+        exact = win._distance_histogram_fit(counts, edges, "3-D blurred distance")
+        gauss = win._distance_histogram_fit(counts, edges, "Gaussian")
+        logn = win._distance_histogram_fit(counts, edges, "lognormal")
+        assert exact["mean_nm"] == pytest.approx(10.0, abs=0.8)
+        assert gauss["mean_nm"] > exact["mean_nm"] + 1.0
+        assert logn["mean_nm"] > exact["mean_nm"] + 1.0
+    finally:
+        win.close()
+
+
+def test_each_fit_shape_is_reported_by_name(_app):
+    win = HlyBResultWindow(_synthetic_result(), HlyBConfig(), title="fit")
+    try:
+        win._show_lognormal_fit_checkbox.setChecked(True)
+        for shape in win.FIT_SHAPES:
+            win._fit_shape_combo.setCurrentText(shape)
+            assert win._lognormal_fit_result["shape"] == shape
+            assert shape in win._distance_stats_label.text()
     finally:
         win.close()
