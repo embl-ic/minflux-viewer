@@ -552,7 +552,7 @@ def test_template_2d_dialog_exposes_both_border_and_template_controls(_app):
         dlg.close()
 
 
-def test_hlyb_menu_lists_all_four_methods(_app):
+def test_hlyb_menu_lists_new_staged_method_and_keeps_existing_four(_app):
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.ui.main_window import MainWindow
 
@@ -562,7 +562,9 @@ def test_hlyb_menu_lists_all_four_methods(_app):
     win = MainWindow(state)
     try:
         labels = [a.text() for a in win.menuHlyBPair.actions()]
-        assert labels == ["Pair-distance model fit (3D)",
+        assert labels == ["Staged short-range population (3D)",
+                          "",
+                          "Pair-distance model fit (3D)",
                           "Pair-distance model fit (2D)",
                           "Template matching (3D)",
                           "Template matching (2D)"]

@@ -525,6 +525,13 @@ class MainWindow(QMainWindow):
             lambda: self._placeholder("K nearest neighbour", "a later implementation")
         )
         self.menuHlyBPair = QMenu("HlyB subunit pair analysis", self)
+        self.actionHlyBStaged3D = QAction("Staged short-range population (3D)", self)
+        self.actionHlyBStaged3D.setToolTip(
+            "Model-independent staged analysis: conservatively consolidate repeated "
+            "traces, preserve cell/membrane geometry in a conditional surface null, "
+            "and test for a short-range population without template gating or fitting "
+            "a molecular dimer distance.")
+        self.actionHlyBStaged3D.triggered.connect(self._run_hlyb_staged_analysis)
         self.actionHlyBPairFit = QAction("Pair-distance model fit (3D)", self)
         self.actionHlyBPairFit.setToolTip(
             "Measure the pair-distance distribution of trace centroids without "
@@ -551,6 +558,8 @@ class MainWindow(QMainWindow):
         self.actionHlyBTemplate2D.triggered.connect(
             lambda: self._run_hlyb_pair_analysis(mode="TEMPLATE2D")
         )
+        self.menuHlyBPair.addAction(self.actionHlyBStaged3D)
+        self.menuHlyBPair.addSeparator()
         self.menuHlyBPair.addAction(self.actionHlyBPairFit)
         self.menuHlyBPair.addAction(self.actionHlyBPairFit2D)
         self.menuHlyBPair.addAction(self.actionHlyBTemplate3D)
@@ -2404,6 +2413,157 @@ class MainWindow(QMainWindow):
         else:
             self._state.log(
                 "Restore ROI: no other coordinate view open to restore onto.", "WARN")
+
+    def _run_hlyb_staged_analysis(self) -> None:
+        """Run the model-independent staged HlyB short-range workflow."""
+        import numpy as np
+        from ..core.loader import mfx_get
+
+        idx = self._state.active_idx
+        if idx is None or self._state.active_dataset is None:
+            self._no_data_warning()
+            return
+        ds = self._state.datasets[idx]
+
+        def _col(attr):
+            value = mfx_get(ds, attr, itr="last", vld_only=True)
+            return None if value is None else np.asarray(value, dtype=float).ravel()
+
+        lx, ly, lz, tid = _col("loc_x"), _col("loc_y"), _col("loc_z"), _col("tid")
+        finite_z = np.empty(0) if lz is None else lz[np.isfinite(lz)]
+        if (lx is None or ly is None or lz is None or tid is None or lx.size < 3
+                or lz.size != lx.size or finite_z.size < 3
+                or np.ptp(finite_z) * 1e9 < 5.0):
+            QMessageBox.information(
+                self, "HlyB Staged Short-Range Population (3D)",
+                "The active dataset does not contain sufficient genuine 3-D "
+                "localizations with trace IDs.")
+            return
+        loc_m = np.column_stack([lx, ly, lz])
+        tim = _col("tim")
+        if tim is not None and tim.size != lx.size:
+            tim = None
+
+        from ..analysis.hlyb_staged import Staged3DConfig, analyze_hlyb_staged_3d
+        from .hlyb_staged_dialog import HlyBStagedDialog, HlyBStagedWindow
+
+        defaults = getattr(self, "_hlyb_staged_cfg", None)
+        if defaults is None:
+            defaults = Staged3DConfig(z_scaling_factor=0.67)
+        else:
+            # This project's real MINFLUX measurements use the fixed 0.67 RIMF
+            # unless the user explicitly changes it in this run's dialog.
+            defaults = Staged3DConfig(**{**vars(defaults), "z_scaling_factor": 0.67})
+        dlg = HlyBStagedDialog(self, defaults=defaults)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        cfg = dlg.config()
+        self._hlyb_staged_cfg = cfg
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = analyze_hlyb_staged_3d(loc_m, tid, tim, cfg)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "HlyB Staged Short-Range Population (3D)",
+                f"Analysis failed: {exc}")
+            return
+        finally:
+            if QApplication.overrideCursor() is not None:
+                QApplication.restoreOverrideCursor()
+
+        from .modeless import show_modeless
+        win = HlyBStagedWindow(
+            result, title=ds.name, owner=self, prefs=self._state.prefs)
+        show_modeless(win, self)
+
+        summary = result["summary"]
+        sensitivity = result.get("sensitivity") or []
+        robust_ratios = [float(row["band_ratio"]) for row in sensitivity
+                         if np.isfinite(row.get("band_ratio", np.nan))]
+        robust_centroids = [float(row["positive_excess_centroid_nm"])
+                            for row in sensitivity
+                            if np.isfinite(row.get("positive_excess_centroid_nm", np.nan))]
+        method_data = {
+            "schema": "hlyb_staged_short_range_3d/v1",
+            "input": {
+                "dataset_name": ds.name,
+                "source_path": str(
+                    ds.metadata.get("msr_source_path")
+                    or getattr(ds.file, "recent_path", None)
+                    or getattr(ds.file, "path", "") or ""),
+                "n_localizations": int(lx.size),
+                "n_traces_total": int(result["n_traces_total"]),
+                "n_traces_used": int(result["n_traces_used"]),
+                "time_column_available": bool(tim is not None),
+                "iteration_selector": "last",
+                "valid_only": True,
+            },
+            "parameters": {
+                "min_loc_per_trace": int(cfg.min_loc_per_trace),
+                "z_scaling_factor": float(cfg.z_scaling_factor),
+                "site_merge_nm": float(cfg.site_merge_nm),
+                "cell_link_nm": float(cfg.cell_link_nm),
+                "min_sites_per_component": int(cfg.min_sites_per_component),
+                "r_max_nm": float(cfg.r_max_nm),
+                "bin_nm": float(cfg.bin_nm),
+                "short_range_lo_nm": float(cfg.short_range_lo_nm),
+                "short_range_hi_nm": float(cfg.short_range_hi_nm),
+                "null_stratum_sites": int(cfg.null_stratum_sites),
+                "null_replicates": int(cfg.null_replicates),
+                "bootstrap_replicates": int(cfg.bootstrap_replicates),
+            },
+            "site_inference": {
+                "n_sites": int(result["n_sites"]),
+                "n_sites_used": int(result["n_sites_used"]),
+                "n_repeated_sites": int(result["n_repeated_sites"]),
+                "n_traces_consolidated": int(result["n_traces_consolidated"]),
+                "median_within_site_rms_nm": float(
+                    result["median_within_site_rms_nm"]),
+            },
+            "components": {
+                "n_retained": int(result["n_components"]),
+                "n_all": int(result["n_components_all"]),
+                "n_rod_like": int(result["n_rod_like_components"]),
+                "n_excluded_sites": int(result["n_excluded_sites"]),
+            },
+            "result": {
+                key: float(summary[key]) for key in (
+                    "band_observed_pairs", "band_null_mean_pairs",
+                    "band_null_sd_pairs", "band_ratio", "band_z", "band_p",
+                    "peak_nm", "positive_excess_centroid_nm",
+                    "positive_excess_median_nm", "max_pointwise_z",
+                    "max_pointwise_p")
+            },
+            "robust_short_range_excess": result.get("robust_short_range_excess"),
+            "sensitivity_passes": int(result.get("sensitivity_passes", 0)),
+            "sensitivity_valid_variants": int(
+                result.get("sensitivity_valid_variants", 0)),
+            "bootstrap": result.get("bootstrap", {}),
+            "sensitivity": sensitivity,
+        }
+        robust_text = ""
+        if robust_ratios and robust_centroids:
+            robust_text = (
+                f"; sensitivity ratio {min(robust_ratios):.2f}–"
+                f"{max(robust_ratios):.2f}, excess centroid "
+                f"{min(robust_centroids):.2f}–{max(robust_centroids):.2f} nm")
+        robustness = (
+            "PASS" if result.get("robust_short_range_excess") is True else
+            "FAIL" if result.get("robust_short_range_excess") is False else
+            "not run")
+        self._state.log(
+            f"HlyB staged short-range population (3D) on '{ds.name}': "
+            f"{result['n_traces_used']:,}/{result['n_traces_total']:,} trace(s) → "
+            f"{result['n_sites']:,} inferred site(s) "
+            f"({result['n_sites_used']:,} in {result['n_components']} component(s)); "
+            f"{cfg.short_range_lo_nm:g}–{cfg.short_range_hi_nm:g} nm observed/null "
+            f"{summary['band_ratio']:.3f}, empirical p={summary['band_p']:.4f}, "
+            f"positive-excess centroid {summary['positive_excess_centroid_nm']:.2f} nm "
+            f"(same-site diameter {cfg.site_merge_nm:g} nm, surface-null stratum "
+            f"{cfg.null_stratum_sites} sites, {cfg.null_replicates} replicate(s), "
+            f"z-scale {cfg.z_scaling_factor:g}, sensitivity {robustness}){robust_text}.",
+            dataset_idx=idx, method_data=method_data)
 
     def _run_hlyb_pairwise_analysis(self, dimensions: int = 3) -> None:
         """Analyze › Clustering › HlyB subunit pair analysis › Pair-distance model

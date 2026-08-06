@@ -729,6 +729,136 @@ _PAIR_FIT_HYPOTHESIS = {
 }
 
 
+def _render_hlyb_staged_short_range(m, ev, state):
+    """Scientific account of the model-independent staged 3-D workflow."""
+    method = ev.get("method_data")
+    name = m.group("name")
+    if not isinstance(method, dict) or method.get("schema") != "hlyb_staged_short_range_3d/v1":
+        return (
+            f"Analysis. A staged three-dimensional HlyB short-range population "
+            f"analysis was applied to dataset '{name}'. Trace centroids were "
+            f"conservatively consolidated into label-site estimates and their "
+            f"within-component pair-distance profile compared with a conditional "
+            f"rod-surface randomization. The settings of this run were not serialized."
+        ), []
+
+    inp = method.get("input", {})
+    params = method.get("parameters", {})
+    sites = method.get("site_inference", {})
+    components = method.get("components", {})
+    result = method.get("result", {})
+    bootstrap = method.get("bootstrap", {})
+    sensitivity = method.get("sensitivity") or []
+    source_path = str(inp.get("source_path") or "").strip()
+    source = f" (source file '{source_path}')" if source_path else ""
+
+    if bootstrap.get("available"):
+        ci = bootstrap.get("centroid_ci95_nm") or [float("nan"), float("nan")]
+        ratio_ci = bootstrap.get("band_ratio_ci95") or [float("nan"), float("nan")]
+        bootstrap_text = (
+            f"Resampling the {_method_count(bootstrap.get('n_components'))} spatial "
+            f"components as independent units gave a 95 % interval of "
+            f"{_method_number(ci[0], 2)}–{_method_number(ci[1], 2)} nm for the "
+            f"positive-excess centroid and {_method_number(ratio_ci[0], 2)}–"
+            f"{_method_number(ratio_ci[1], 2)} for the band ratio."
+        )
+    else:
+        bootstrap_text = (
+            "A component-level interval was not reported because fewer than three "
+            "independent retained components were available."
+        )
+
+    finite_ratios = [float(row.get("band_ratio")) for row in sensitivity
+                     if isinstance(row, dict) and row.get("band_ratio") is not None
+                     and math.isfinite(float(row.get("band_ratio")))]
+    finite_centroids = [float(row.get("positive_excess_centroid_nm")) for row in sensitivity
+                        if isinstance(row, dict)
+                        and row.get("positive_excess_centroid_nm") is not None
+                        and math.isfinite(float(row.get("positive_excess_centroid_nm")))]
+    if finite_ratios and finite_centroids:
+        robust = method.get("robust_short_range_excess")
+        robust_text = (
+            "The short-range claim passed every valid sensitivity variant."
+            if robust is True else
+            "The short-range claim did not pass every sensitivity variant and was "
+            "therefore classified as parameter-sensitive."
+            if robust is False else "")
+        sensitivity_text = (
+            f"The mandatory sensitivity audit varied the same-site diameter over "
+            f"3, 4 and 5 nm, the axial null stratum over 32, 64 and 128 sites, "
+            f"and the spatial-component link over ±25 % of its primary value. "
+            f"Across those runs the observed/null ratio ranged from "
+            f"{_method_number(min(finite_ratios), 2)} to "
+            f"{_method_number(max(finite_ratios), 2)}, and the positive-excess "
+            f"centroid from {_method_number(min(finite_centroids), 2)} to "
+            f"{_method_number(max(finite_centroids), 2)} nm. {robust_text}"
+        )
+    else:
+        sensitivity_text = "No parameter-sensitivity audit was requested for this run."
+
+    text = (
+        f"Input data. A staged three-dimensional short-range population analysis was "
+        f"performed on dataset '{inp.get('dataset_name') or name}'{source}. "
+        f"{_method_count(inp.get('n_localizations'))} valid localization record(s) at "
+        f"the final iteration were grouped by trace identifier into "
+        f"{_method_count(inp.get('n_traces_total'))} trace(s); "
+        f"{_method_count(inp.get('n_traces_used'))} trace(s) containing at least "
+        f"{_method_count(params.get('min_loc_per_trace'))} localizations entered the "
+        f"analysis. Coordinates were converted to nanometres and raw z multiplied "
+        f"once by the fixed RIMF {_method_number(params.get('z_scaling_factor'), 4)}. "
+        f"Viewer filters and ROIs were not applied.\n\n"
+        f"Site inference. Each trace was represented by its mean localization and "
+        f"coordinate-wise standard error. Repeated traces were consolidated without "
+        f"LoG image filtering or DBSCAN. Candidate merges were weighted by their "
+        f"measured uncertainty and accepted only when every trace-centroid pair in "
+        f"the combined group remained within a hard "
+        f"{_method_number(params.get('site_merge_nm'), 1)} nm complete-link diameter. "
+        f"This produced {_method_count(sites.get('n_sites'))} inferred label-site "
+        f"estimate(s), including {_method_count(sites.get('n_repeated_sites'))} "
+        f"multi-trace site(s); {_method_count(sites.get('n_traces_consolidated'))} "
+        f"redundant trace representation(s) were removed. These are label-site "
+        f"estimates, not assignments to HlyB protomers. Acquisition time imposed no "
+        f"maximum revisit gap, so spatially compatible visits throughout the recording "
+        f"could consolidate; however, this implementation did not fit a complete "
+        f"DDC/BaGoL temporal emitter model.\n\n"
+        f"Spatial null and observable. Sites were connected at "
+        f"{_method_number(params.get('cell_link_nm'), 0)} nm solely to separate "
+        f"coarse spatial/cell components; pairs were formed only within a component. "
+        f"{_method_count(components.get('n_retained'))} component(s) with at least "
+        f"{_method_count(params.get('min_sites_per_component'))} sites were retained, "
+        f"containing {_method_count(sites.get('n_sites_used'))} sites; "
+        f"{_method_count(components.get('n_excluded_sites'))} site(s) in smaller "
+        f"components were explicitly excluded. Pair distances through "
+        f"{_method_number(params.get('r_max_nm'), 0)} nm were histogrammed in "
+        f"{_method_number(params.get('bin_nm'), 2)} nm bins. For each retained "
+        f"component, principal-component coordinates supplied a local rod axis. "
+        f"The observed axial coordinate of every site was held fixed while complete "
+        f"observed transverse membrane coordinates were permuted within adjacent "
+        f"axial-rank strata of {_method_count(params.get('null_stratum_sites'))} sites. "
+        f"Thus every surrogate preserved exact site count, axial density, local "
+        f"radial support, one-sided visibility and component boundaries without "
+        f"filling a three-dimensional volume. "
+        f"{_method_count(params.get('null_replicates'))} conditional randomizations "
+        f"defined the reference distribution.\n\n"
+        f"Result. In the pre-declared {_method_number(params.get('short_range_lo_nm'), 1)}–"
+        f"{_method_number(params.get('short_range_hi_nm'), 1)} nm interval, "
+        f"{_method_count(result.get('band_observed_pairs'))} observed pair(s) were "
+        f"compared with {_method_number(result.get('band_null_mean_pairs'), 1)} ± "
+        f"{_method_number(result.get('band_null_sd_pairs'), 1)} under the surface null, "
+        f"an observed/null ratio of {_method_number(result.get('band_ratio'), 3)} "
+        f"(one-sided conditional-randomization p = "
+        f"{_method_number(result.get('band_p'), 4)}). The positive portion of the "
+        f"observed-minus-null profile had a peak at "
+        f"{_method_number(result.get('peak_nm'), 2)} nm, centroid at "
+        f"{_method_number(result.get('positive_excess_centroid_nm'), 2)} nm and median "
+        f"at {_method_number(result.get('positive_excess_median_nm'), 2)} nm. "
+        f"{bootstrap_text} {sensitivity_text} The centroid and peak describe an excess "
+        f"population only: the analysis neither identifies pair membership nor fits or "
+        f"claims a molecular HlyB dimer distance."
+    )
+    return text, []
+
+
 def _pair_fit_ranking(fits: dict, best: str) -> str:
     """Rank competing hypotheses by AIC difference, worst evidence first."""
     if not isinstance(fits, dict) or not fits:
@@ -1045,6 +1175,8 @@ RULES = [
     (re.compile(r"Localization precision \(FRC\): resolution = (?P<res>[\d.]+) nm "
                 r"\(1/7 threshold, (?P<mode>[^,]+), (?P<n>[\d,]+) points, "
                 r"pixel (?P<px>[\d.]+) nm\)"), "analysis", _render_frc),
+    (re.compile(r"^HlyB staged short-range population \(3D\) on '(?P<name>.+?)':"),
+     "analysis", _render_hlyb_staged_short_range),
     (re.compile(r"^HlyB pair-distance model fit(?: \((?P<dims>[23])D\))? "
                 r"on '(?P<name>.+?)':"),
      "analysis", _render_hlyb_pair_fit),
