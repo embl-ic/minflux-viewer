@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.3.9
+
+### Voronoi density rendering (2-D and 3-D)
+- **New "Voronoi density" renderer** in the advanced render view. Each localization is assigned the density of its own Voronoi cell (multiplicity ÷ cell area), so the image **adapts to the local sampling density** instead of to a fixed pixel or blur width — no bin size and no sigma to choose. It recomputes for the current filters and depth selection.
+- **True 3-D Voronoi volumes.** Opening the 3-D view from a Voronoi render builds a genuine XYZ Voronoi field (multiplicity ÷ cell *volume*), not a stack of 2-D projections. Works for multi-channel overlays.
+
+### Histogram
+- **Right-click Zoom tool** — *horizontal*, *vertical* or *unconstrained* drag-to-zoom, plus *Reset View*. It is one-shot (the next drag pans again), and the guide rides at the cursor so you can line it up against the bars. Horizontal and unconstrained zooms **re-bin and re-fit the height**, so a zoomed peak fills the plot instead of staying squashed.
+- **Fixed: the floating "A" button zoomed further out on every click** (x +26 %, y +42 % over six clicks, compounding). It now performs the same deterministic fit as *Reset*.
+- **Choose which read-outs you see** in *Preferences → Appearance → Histogram Plot*: which trace values (*mean median min max 1st last stdev range*) appear in the **As** dropdown, and which pooled-iteration values (*flatten stacked sum average*) appear in **Iter**. Both apply live.
+- **New `trace 1st` / `trace last` read-outs**, and the Filter dialog now offers the same eight trace read-outs as the histogram.
+
+### Removed: photon (`eco`) weighting in histogram and filter
+Validated against a real two-colour ratiometric `.msr`, the option only had a statistical basis for `dcr`. Localization positions did **not** follow the expected 1/√N precision scaling (measured +0.17…+0.49 against a predicted −0.5 — the scatter is drift-dominated), and the effect was 0.09 nm median anyway; `cfr` is measured at a single iteration; and weighting a photon count by itself inflated it by 14.7 %. The checkbox, the *Weighted* filter column and the saved-preset key are gone; a stale key in an old preset is ignored, not honoured. **The ECO-weighted DCR channel separation is unaffected.**
+
+### Plugins
+- **Implemented for a user project a custom plugin as "HlyB/D subunit pair analysis"** (*Plugins* menu). Running it against a dataset produces a full Methods account in *Plugins → Generate Method Text*, including every parameter and a definition of each reported term.
+- **Plugins can now declare search keywords**, so the Command Finder finds them by synonyms that are not in their menu label.
+
+### Fixes
+- **A single-channel `.msr` import no longer shows as "Overlay"** in the Dataset Manager. It is reported as "Own", and the provisional channel grouping the importer assigns before it knows the channel count no longer survives.
+- **Editing Preferences no longer mutates the built-in defaults** for the rest of the session (a shallow copy meant the preference dictionary *was* the defaults).
+- **Unknown trace aggregation modes now raise instead of silently returning wrong-length data** — this had been quietly breaking `trace 1st` / `trace last` and `trace median` in some paths.
+
+---
+
 ## v0.3.6
 
 ### Two-channel bead alignment — quality feedback & interactive bead selection (MSR reader)
