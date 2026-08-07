@@ -27,8 +27,10 @@ Validated against a real two-colour ratiometric `.msr`, the option only had a st
 - **Plugins can now declare search keywords**, so the Command Finder finds them by synonyms that are not in their menu label.
 
 ### macOS
-- **Fixed: dropping a file on the app icon opened a second copy of the viewer.** The bundle never told macOS which documents it opens, so the system had no running-instance handler and launched a new one. It now declares its document types and handles the system's open-document request in the running instance. Opening a file from Finder — drop, double-click, or *Open With* — reuses the window you already have, and a second instance is prohibited outright. We register as an *alternative* handler for `.msr`, so an Imspector file association is left alone.
+- **Fixed: dropping a file on the app icon opened a second copy of the viewer.** The bundle never told macOS which documents it opens, so the system had no running-instance handler and launched a new one; and nothing in the app handled the system's open-document request even when it did arrive. Both are fixed, and on top of that **only one viewer now runs per user** — a duplicate launch hands its files to the running window and exits immediately, so a second window cannot appear even if macOS ignores the request to prevent one (which it does for a relocated, unsigned, or stale-registered bundle). Set `MINFLUX_VIEWER_ALLOW_MULTIPLE=1` if you *want* several copies.
+- Opening a file from Finder — drop, double-click, or *Open With* — reuses the window you already have. We register as an *alternative* handler for `.msr`, so an Imspector file association is left alone.
 - Each open request is logged with the process id and how it arrived, so it is clear which window handled it.
+- **New `scripts/check_macos_bundle.py`** checks a built `.app`: whether it actually contains the fix, whether the bundle keys landed, and whether stale copies of the app are confusing macOS.
 
 ### Command line
 - **`minflux-viewer <path>` accepts every supported format and folders.** It previously recognised only `.mat`, `.npy`, `.csv` and `.msr` and silently ignored anything else, so `minflux-viewer data.json` opened nothing. Folders are now scanned the same way a dropped folder is.
