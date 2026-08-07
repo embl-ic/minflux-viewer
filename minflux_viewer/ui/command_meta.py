@@ -250,54 +250,10 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "DBSCAN clustering (placeholder).", "analysis"),
     "actionKNearestNeighbour": CommandMeta(U + "main_window.py", ("cluster", "knn", "nearest neighbour"),
                               "K-nearest-neighbour analysis (placeholder).", "analysis"),
-    "actionHlyBStaged3D": CommandMeta(A + "hlyb_staged.py",
-                              ("hlyb", "subunit", "dimer", "pair", "distance", "3d",
-                               "short range", "surface null", "population", "robust"),
-                              "Model-independent staged HlyB short-range analysis: "
-                              "conservative repeated-trace consolidation, within-cell "
-                              "pair distances, a rod-surface conditional null, component "
-                              "bootstrap and parameter-sensitivity audit. It reports a "
-                              "population excess, not a fitted molecular distance.",
-                              "analysis", inputs=("active dataset (loc, tid, tim)",),
-                              outputs=("inferred label sites", "surface-null band",
-                                       "short-range excess", "sensitivity audit")),
-    "actionHlyBPairFit": CommandMeta(A + "hlyb_pairwise.py",
-                              ("hlyb", "subunit", "dimer", "pair", "distance", "cluster",
-                               "correlation", "model fit", "null", "3d"),
-                              "HlyB sub-unit pair distances: trace-centroid pair-distance "
-                              "distribution against an envelope-preserving null, fitted with "
-                              "the six-site HlyB model. No merge radius, so no distance range "
-                              "is removed.", "analysis",
-                              inputs=("active dataset (loc, tid, tim)",),
-                              outputs=("pair-distance profile", "null band",
-                                       "fitted components", "model comparison")),
-    "actionHlyBPairFit2D": CommandMeta(A + "hlyb_pairwise.py",
-                              ("hlyb", "subunit", "dimer", "pair", "distance", "2d",
-                               "projection", "ecoli", "border", "membrane", "tilt"),
-                              "HlyB sub-unit pair distances in the image plane: each "
-                              "E. coli is delineated and shrunk inward to drop the "
-                              "edge-on rim, and the residual foreshortening is modelled "
-                              "from the measured membrane tilt.", "analysis",
-                              inputs=("active dataset (loc, tid, tim)",),
-                              outputs=("cell delineation", "pair-distance profile",
-                                       "null band", "model comparison")),
-    "actionHlyBTemplate2D": CommandMeta(A + "hlyb_clustering.py",
-                              ("hlyb", "template", "subunit", "dimer", "pair", "2d",
-                               "projection", "ecoli", "border", "membrane", "tilt"),
-                              "HlyB template matching in the image plane: E. coli "
-                              "delineation and border shrink first, then six-site "
-                              "matching that forgives the foreshortening the remaining "
-                              "membrane tilt can cause.", "analysis",
-                              inputs=("active dataset (loc, tid)",),
-                              outputs=("cell delineation", "sub-unit centres",
-                                       "matched structures", "pair-distance histogram")),
-    "actionHlyBTemplate3D": CommandMeta(A + "hlyb_clustering.py",
-                              ("hlyb", "template", "subunit", "dimer", "pair", "3d"),
-                              "HlyB template matching (3-D): per-complex assignment of "
-                              "detected sub-unit centres to the six-site model.", "analysis",
-                              inputs=("active dataset (loc, tid)",),
-                              outputs=("sub-unit centres", "matched structures",
-                                       "pair-distance histogram")),
+    # The HlyB/D subunit pair analysis is now a *plugin*, so its metadata lives
+    # on the PluginEntry (name/tooltip/keywords) rather than here — this
+    # registry is keyed by QAction attribute name, and a plugin action has
+    # none.  See plugins/hlyb_pair_analysis/.
 
     # ---- Analyze › Trace ------------------------------------------------------
     "actionTraceSize": CommandMeta(A + "trace_analysis.py",
