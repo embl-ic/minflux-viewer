@@ -67,7 +67,7 @@ from .data_window import DataWindow
 
 _SUPPORTED_EXTS: tuple[str, ...] = (
     ".mat", ".npy", ".csv", ".tsv", ".txt", ".xlsx", ".xlsm", ".msr",
-    ".tif", ".tiff", ".json", ".roi", ".zip",
+    ".tif", ".tiff", ".json", ".zarr", ".roi", ".zip",
 )
 #: ROI-set files (loaded into the ROI Manager, not as datasets).
 _ROI_FILE_EXTS: frozenset[str] = frozenset({".roi", ".zip"})
@@ -76,6 +76,7 @@ _ROI_FILE_EXTS: frozenset[str] = frozenset({".roi", ".zip"})
 _FMT_LOADERS: dict[str, str] = {
     "mat": "_load_mat", "npy": "_load_npy", "spreadsheet": "_load_spreadsheet",
     "msr": "_open_msr_dialog", "tiff": "_load_tiff", "json": "_load_json",
+    "zarr": "_load_zarr",
 }
 
 _ROI_TOOL_DEFS: tuple[tuple[str, str, str], ...] = (
@@ -1341,11 +1342,12 @@ class MainWindow(QMainWindow):
             self,
             "Open MINFLUX data",
             default,
-            "MINFLUX data (*.mat *.npy *.msr *.json);;"
+            "MINFLUX data (*.mat *.npy *.msr *.json *.zarr);;"
             "MATLAB (*.mat);;"
             "NumPy (*.npy);;"
             "Imspector .msr (*.msr);;"
             "MINFLUX JSON (*.json);;"
+            "Zarr (*.zarr);;"
             "All files (*)",
         )
         for p in paths:
@@ -1598,7 +1600,7 @@ class MainWindow(QMainWindow):
                 f"Unsupported file type: '{p.name}'  "
                 f"(extension '{ext or '(none)'}' unrecognised and content could "
                 f"not be identified).  Supported: .mat, .npy, .csv, .tsv, .txt, "
-                f".xlsx, .xlsm, .msr, .tif, .tiff, .json"
+                f".xlsx, .xlsm, .msr, .tif, .tiff, .json, .zarr"
             )
             self._state.log(msg, "WARN")
             self._status_label.setText(f"Skipped: {p.name} (unsupported type)")
@@ -1611,6 +1613,11 @@ class MainWindow(QMainWindow):
         Directories are scanned for all supported files (non-recursive).
         """
         p = Path(path)
+        # A Zarr dataset is a directory with a data suffix, not a folder to
+        # scan.  Route it as one dataset before the generic folder branch.
+        if p.is_dir() and p.suffix.lower() == ".zarr":
+            self._route_file(path)
+            return
         if p.is_dir():
             found = sorted(
                 f for f in p.iterdir()
@@ -1626,7 +1633,7 @@ class MainWindow(QMainWindow):
             else:
                 msg = (
                     f"Folder '{p.name}' contains no supported files "
-                    f"(.mat, .npy, .csv, .tsv, .xlsx, .xlsm, .msr, .tif, .tiff, .json)."
+                    f"(.mat, .npy, .csv, .tsv, .xlsx, .xlsm, .msr, .tif, .tiff, .json, .zarr)."
                 )
                 self._state.log(msg, "WARN")
                 self._status_label.setText(f"No supported files in folder: {p.name}")
@@ -1653,6 +1660,18 @@ class MainWindow(QMainWindow):
         try:
             from ..core.loader import load_npy
             dataset = load_npy(path, prefs=self._state.prefs)
+            self._state.add_dataset(dataset)
+        except Exception as exc:
+            self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
+            QMessageBox.critical(self, "Load error", str(exc))
+            self._status_label.setText("Load failed.")
+
+    def _load_zarr(self, path: str) -> None:
+        self._status_label.setText(f"Loading {Path(path).name}…")
+        self._state.log(f"Opening .zarr: {path}", "INFO")
+        try:
+            from ..core.loader import load_zarr
+            dataset = load_zarr(path, prefs=self._state.prefs)
             self._state.add_dataset(dataset)
         except Exception as exc:
             self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")

@@ -55,3 +55,9 @@ def test_unidentifiable(tmp_path):
     p = tmp_path / "x.bin"
     p.write_bytes(bytes(range(256)) * 4)          # binary, no magic
     assert resolve_format(p) == (None, "")
+
+
+def test_zarr_directory_resolves_to_zarr(tmp_path):
+    p = tmp_path / "canonical.zarr"
+    p.mkdir()
+    assert resolve_format(p) == ("zarr", "")

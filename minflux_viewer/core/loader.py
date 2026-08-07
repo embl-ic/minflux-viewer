@@ -24,6 +24,7 @@ Supported formats
     Already-flattened variants produced by SMAP / Ries-lab export scripts.
 
 Both MATLAB v5/v6 (``scipy.io``) and v7.3 HDF5 (``h5py``) files are
+supported.  Canonical flat Zarr exports (``.zarr`` directories) are also
 supported.
 """
 
@@ -2616,6 +2617,59 @@ def load_npy(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
 
 
 # ---------------------------------------------------------------------------
+# .zarr loader — canonical flat columns
+# ---------------------------------------------------------------------------
+
+def load_zarr(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
+    """Load a canonical flat-column Zarr export.
+
+    Zarr exports are directories rather than ordinary files.  The writer
+    stores vector fields as ``loc_x/y/z`` and ``dcr_0/1`` columns; recompose
+    those columns into the canonical flat m2410 structured array before using
+    the normal loader path.  A Zarr directory without the required MFX columns
+    is rejected explicitly, so an MBM companion cannot be opened as a dataset
+    by accident.
+    """
+    path = Path(path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    if not path.is_dir():
+        raise ValueError(f"Zarr dataset must be a directory: '{path.name}'.")
+
+    try:
+        import zarr
+    except ImportError:
+        raise ImportError("Loading .zarr requires the 'zarr' package.") from None
+
+    root = zarr.open(str(path), mode="r")
+    keys = list(root.array_keys())
+    columns = {str(key): np.asarray(root[key][:]) for key in keys}
+    required = {"loc_x", "loc_y", "itr", "vld"}
+    missing = sorted(required - set(columns))
+    if missing:
+        raise ValueError(
+            f"'{path.name}' is not a canonical MINFLUX Zarr export; "
+            f"missing required column(s): {', '.join(missing)}."
+        )
+
+    from .save import columns_to_mfx_array
+
+    mfx = columns_to_mfx_array(columns)
+    ds = load_from_mfx_array(
+        mfx=mfx,
+        name=path.name,
+        folder=str(path.parent),
+        datetime_str=datetime.fromtimestamp(path.stat().st_mtime).strftime(
+            "%Y-%b-%d, %H:%M:%S"
+        ),
+        prefs=prefs,
+    )
+    apply_metadata_sidecar(ds, path)
+    ds.metadata["source_format"] = "zarr"
+    return ds
+
+
+# ---------------------------------------------------------------------------
 # .csv loader  — tabular MINFLUX data
 # ---------------------------------------------------------------------------
 
@@ -2663,33 +2717,81 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
         sample = f.read(4096)
     dialect = _csv.Sniffer().sniff(sample, delimiters=",\t;")
 
-    # Read into dict of lists
+    # Read the header once.  Values are collected in compact C double arrays,
+    # rather than a Python list of one dict per row; the latter made reopening
+    # a large canonical CSV needlessly consume multiple gigabytes.
     with open(path, newline="", encoding="utf-8-sig") as f:
-        reader = _csv.DictReader(f, dialect=dialect)
-        if reader.fieldnames is None:
+        reader = _csv.reader(f, dialect)
+        try:
+            raw_cols = next(reader)
+        except StopIteration:
             raise ValueError(f"'{path.name}' has no header row.")
-        rows: list[dict] = list(reader)
-
-    if not rows:
-        raise ValueError(f"'{path.name}' is empty.")
-
-    # Normalise column names (lowercase + alias substitution)
-    raw_cols = list(reader.fieldnames)
     col_map: dict[str, str] = {}
     for raw in raw_cols:
         norm = raw.strip().lower().replace(" ", "_")
         col_map[raw] = _CSV_COL_ALIASES.get(norm, norm)
 
-    # Build numpy arrays per column
-    data: dict[str, np.ndarray] = {}
-    for raw_col, attr_name in col_map.items():
+    canonical_names = {str(raw).strip().lower() for raw in raw_cols}
+    if (
+        dialect.delimiter == ","
+        and {"loc_x", "loc_y", "loc_z", "itr", "vld"} <= canonical_names
+        and all(str(raw).strip().lower() == str(raw).strip() for raw in raw_cols)
+    ):
         try:
-            values = np.array([float(r[raw_col]) for r in rows], dtype=np.float64)
-        except (ValueError, KeyError):
-            continue   # skip non-numeric or missing columns
-        data[attr_name] = values
+            matrix = np.loadtxt(
+                path,
+                delimiter=",",
+                skiprows=1,
+                dtype=np.float64,
+                ndmin=2,
+            )
+            if matrix.size == 0:
+                raise ValueError(f"'{path.name}' is empty.")
+            if matrix.shape[1] != len(raw_cols):
+                raise ValueError("canonical CSV column count changed while reading")
+            data = {
+                col_map[raw]: matrix[:, index]
+                for index, raw in enumerate(raw_cols)
+            }
+            n = int(matrix.shape[0])
+        except (ValueError, OSError):
+            # Fall through to the bounded csv.reader path for unusual numeric
+            # spellings or a noncanonical table.
+            data = None
+        if data is not None:
+            # Continue below with the same units/attribute normalization as
+            # the generic reader.
+            pass
+    else:
+        data = None
 
-    n = len(rows)
+    if data is None:
+        from array import array
+
+        buffers = {raw: array("d") for raw in raw_cols}
+        bad_columns: set[str] = set()
+        n = 0
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            reader = _csv.reader(f, dialect)
+            next(reader, None)
+            for row in reader:
+                n += 1
+                for index, raw_col in enumerate(raw_cols):
+                    if raw_col in bad_columns:
+                        continue
+                    try:
+                        buffers[raw_col].append(float(row[index]))
+                    except (IndexError, TypeError, ValueError):
+                        bad_columns.add(raw_col)
+                        buffers.pop(raw_col, None)
+
+        if n == 0:
+            raise ValueError(f"'{path.name}' is empty.")
+
+        data = {
+            col_map[raw_col]: np.frombuffer(buffer, dtype=np.float64)
+            for raw_col, buffer in buffers.items()
+        }
 
     # Normalise any nm coordinate columns to the canonical metres store, so a
     # dataset only ever carries one coordinate convention (loc_x/loc_y/loc_z).
@@ -2754,6 +2856,12 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     path = Path(path).resolve()
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
+
+    # File > Save writes a flat JSON array.  Use the streaming canonical path
+    # for large arrays so reopening a large MSR export does not first create a
+    # Python list of millions of record dictionaries.
+    if path.stat().st_size >= 128 * 1024 * 1024:
+        return _load_json_streaming_canonical(path, prefs)
 
     prefs = prefs or {}
     data_prefs   = prefs.get("data", {}) or {}
@@ -2898,6 +3006,177 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     ds.components.mfx_raw = mfx_raw_store
     if not attr_matches_last_valid(ds):
         ds.components.derived_last = _derived_last_from_raw(mfx_raw_store, _raw_num_itr, prefs)
+    apply_metadata_sidecar(ds, path)
+    return ds
+
+
+def _iter_json_array_records(path: Path):
+    """Yield records from a top-level JSON array without loading the array."""
+    from json import JSONDecodeError, JSONDecoder
+
+    decoder = JSONDecoder()
+    chunk_size = 1024 * 1024
+    with path.open("r", encoding="utf-8-sig") as handle:
+        buffer = ""
+        position = 0
+        eof = False
+
+        def fill() -> bool:
+            nonlocal buffer, eof
+            if eof:
+                return False
+            chunk = handle.read(chunk_size)
+            if chunk:
+                buffer += chunk
+                return True
+            eof = True
+            return False
+
+        while position >= len(buffer) and fill():
+            pass
+        while position < len(buffer) and buffer[position].isspace():
+            position += 1
+        if position >= len(buffer) or buffer[position] != "[":
+            raise ValueError("Large JSON MINFLUX exports must be a top-level record array.")
+        position += 1
+
+        while True:
+            while True:
+                while position >= len(buffer):
+                    if not fill():
+                        raise ValueError("Unexpected end of large JSON record array.")
+                while position < len(buffer) and buffer[position].isspace():
+                    position += 1
+                    if position >= len(buffer) and not fill():
+                        raise ValueError("Unexpected end of large JSON record array.")
+                if position < len(buffer) and buffer[position] == ",":
+                    position += 1
+                    continue
+                break
+            if buffer[position] == "]":
+                return
+
+            while True:
+                try:
+                    record, end = decoder.raw_decode(buffer, position)
+                    break
+                except JSONDecodeError:
+                    if not fill():
+                        raise ValueError("Malformed large JSON record array.") from None
+            if not isinstance(record, dict):
+                raise ValueError("MINFLUX JSON records must be objects.")
+            yield record
+            position = end
+            # Avoid retaining already-decoded record text indefinitely while a
+            # large array is streamed.
+            if position >= chunk_size * 2:
+                buffer = buffer[position:]
+                position = 0
+
+
+def _load_json_streaming_canonical(path: Path, prefs: dict | None) -> "MinfluxDataset":
+    """Load the large flat JSON representation emitted by the canonical saver."""
+    from array import array
+
+    iterator = _iter_json_array_records(path)
+    try:
+        first = next(iterator)
+    except StopIteration:
+        raise ValueError(f"'{path.name}' is empty.") from None
+    if not _looks_like_minflux_json_records([first]) or "loc" not in first:
+        raise ValueError(
+            f"'{path.name}' is not a supported large MINFLUX JSON export."
+        )
+
+    # The canonical writer emits numeric scalars and fixed-width loc/dcr
+    # vectors.  Store them in compact C arrays while decoding, then recompose
+    # the normal structured m2410 array once at the end.
+    specs: dict[str, tuple[str, int | None]] = {}
+    buffers: dict[str, array] = {}
+    row_count = 0
+
+    def add_spec(key: str, value: Any) -> None:
+        if key in specs:
+            return
+        def component_name(col: int) -> str:
+            if key == "dcr":
+                return f"{key}_{col}"
+            return f"{key}_{('x', 'y', 'z')[col]}"
+
+        if key in SPATIAL_COORD_FIELDS:
+            specs[key] = ("vector", 3)
+            for suffix in ("x", "y", "z"):
+                buffers[f"{key}_{suffix}"] = array("d")
+        elif key == "dcr" or isinstance(value, (list, tuple)):
+            width = len(value) if isinstance(value, (list, tuple)) else 2
+            if width not in (2, 3):
+                return
+            specs[key] = ("vector", width)
+            for col in range(width):
+                buffers[component_name(col)] = array("d")
+        else:
+            specs[key] = ("scalar", None)
+            buffers[key] = array("d")
+
+    for key, value in first.items():
+        add_spec(str(key), value)
+
+    def append_record(record: dict) -> None:
+        nonlocal row_count
+        for key, value in record.items():
+            add_spec(str(key), value)
+        for key, (kind, width) in specs.items():
+            value = record.get(key)
+            if kind == "vector":
+                values = value if isinstance(value, (list, tuple)) else ()
+                for col in range(int(width or 0)):
+                    item = values[col] if col < len(values) else np.nan
+                    buffer_name = (
+                        f"{key}_{col}" if key == "dcr"
+                        else f"{key}_{('x', 'y', 'z')[col]}"
+                    )
+                    try:
+                        buffers[buffer_name].append(float(item) if item is not None else np.nan)
+                    except (TypeError, ValueError):
+                        buffers[buffer_name].append(np.nan)
+            else:
+                try:
+                    buffers[key].append(float(value) if value is not None else np.nan)
+                except (TypeError, ValueError):
+                    buffers[key].append(np.nan)
+        row_count += 1
+
+    append_record(first)
+    for record in iterator:
+        append_record(record)
+
+    columns: dict[str, np.ndarray] = {}
+    for key, buffer in buffers.items():
+        values = np.frombuffer(buffer, dtype=np.float64)
+        if key == "vld":
+            columns[key] = values.astype(bool)
+        elif key == "itr":
+            columns[key] = np.nan_to_num(values, nan=0.0).astype(np.int32)
+        elif key == "tid":
+            columns[key] = np.nan_to_num(values, nan=0.0).astype(np.int64)
+        else:
+            columns[key] = values
+
+    from .save import columns_to_mfx_array
+
+    mfx = columns_to_mfx_array(columns)
+    ds = load_from_mfx_array(
+        mfx=mfx,
+        name=path.name,
+        folder=str(path.parent),
+        datetime_str=datetime.fromtimestamp(path.stat().st_mtime).strftime(
+            "%Y-%b-%d, %H:%M:%S"
+        ),
+        prefs=prefs,
+    )
+    ds.metadata["source_version"] = "json"
+    ds.metadata["source_format"] = "json"
+    ds.metadata["raw_num_loc"] = row_count
     apply_metadata_sidecar(ds, path)
     return ds
 

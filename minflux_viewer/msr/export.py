@@ -1,183 +1,243 @@
-# minflux_msr/export.py
+"""MSR export adapters.
+
+The MSR parser returns source arrays, including legacy m2205 nested-iteration
+arrays.  Serialization must not operate on those arrays directly: doing so
+turns the nested ``mfx.itr`` structure into names such as ``itr_itr`` and
+``itr_loc``.  This module is deliberately only an adapter around the canonical
+loader and File > Save writers.
+"""
+
+from __future__ import annotations
+
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 
 import numpy as np
 
-def ensure_dir(p: Path): p.mkdir(parents=True, exist_ok=True)
+
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
 
 def make_export_base(export_root: str, did: str, idx: int) -> str:
-    """Kept for back-compat with your older flows."""
-    out_root = Path(export_root); ensure_dir(out_root)
+    """Backwards-compatible helper for older command-line flows."""
+    out_root = Path(export_root)
+    ensure_dir(out_root)
     return str(out_root / f"data#{idx}_(did#{did})")
 
-# ---------- writers ----------
 
-def _as_column(a: np.ndarray) -> np.ndarray:
-    a = np.asarray(a)
-    if a.ndim == 1:
-        return a.reshape(-1, 1)
-    if a.ndim == 2:
-        return a
-    return a.reshape(a.shape[0], -1)
+def _structured_field_names(array: np.ndarray) -> set[str]:
+    return set(getattr(getattr(array, "dtype", None), "names", None) or ())
 
-def _mat_write_fast(out_path: Path, mfx: Optional[np.ndarray], mbm: Optional[np.ndarray], log=print):
-    """Fast .mat: explode structured fields into plain arrays (v7 via scipy)."""
-    try:
-        from scipy.io import savemat
-        saver = lambda p, obj: savemat(p, obj, do_compression=False, oned_as='column', long_field_names=True)
-    except Exception as e:
-        log(f"[warn] SciPy not available; skipping .mat ({e})")
-        return None
 
-    payload: Dict[str, Any] = {}
+def _nested_field_names(array: np.ndarray, name: str) -> set[str]:
+    fields = getattr(getattr(array, "dtype", None), "fields", None) or {}
+    field = fields.get(name)
+    if field is None:
+        return set()
+    dtype = field[0]
+    # A legacy m2205 field is commonly a structured subarray, whose ``names``
+    # live on ``dtype.base`` rather than on the shaped dtype itself.
+    return set(
+        getattr(dtype, "names", None)
+        or getattr(getattr(dtype, "base", None), "names", None)
+        or ()
+    )
 
-    def add_struct(prefix: str, arr: np.ndarray):
-        names = getattr(arr.dtype, "names", None)
-        if names:
-            for k in names:
-                col = arr[k]
-                subnames = getattr(col.dtype, "names", None)
-                if subnames:
-                    for sk in subnames:
-                        payload[f"{k}_{sk}"] = _as_column(col[sk])
-                else:
-                    payload[k] = _as_column(col)
-        else:
-            payload[prefix] = _as_column(arr)
 
-    if mfx is not None:
-        add_struct("mfx", mfx)
-    if mbm is not None:
-        # mbm usually plain or small-structured; store as-is (columns)
-        payload["mbm"] = _as_column(mbm)
-
-    if not payload:
-        log("[skip] nothing to write to .mat"); return None
-
-    try:
-        saver(str(out_path), payload)
-        log(f"[mat] wrote {out_path}")
-        return str(out_path)
-    except Exception as e:
-        log(f"[error] .mat save failed: {e}")
-        return None
-
-def _npy_write(out_path: Path, name: str, arr: Optional[np.ndarray], log=print):
-    if arr is None:
-        return None
-    fn = out_path.with_name(out_path.stem + f"_{name}.npy")
-    try:
-        np.save(str(fn), arr, allow_pickle=False)
-        log(f"[npy] wrote {fn}")
-        return str(fn)
-    except Exception as e:
-        log(f"[error] .npy save failed for {name}: {e}")
-        return None
-
-def _npz_write(out_path: Path, mfx: Optional[np.ndarray], mbm: Optional[np.ndarray], log=print):
-    fn = out_path.with_suffix(".npz")
-    try:
-        d = {}
-        if mfx is not None: d["mfx"] = mfx
-        if mbm is not None: d["mbm"] = mbm
-        if not d:
-            log("[skip] nothing to write to .npz"); return None
-        np.savez_compressed(str(fn), **d)
-        log(f"[npz] wrote {fn}")
-        return str(fn)
-    except Exception as e:
-        log(f"[error] .npz save failed: {e}")
-        return None
-
-# JSON fast (chunk)
-_WANTED_FIELDS = [
-    "vld","fnl","bot","eot",
-    "sta","tim","tid","gri","thi","sqi","itr",
-    "loc","lnc","eco","ecc","efo","efc","fbg","cfr","dcr"
-]
-
-def _rows_to_dicts(records, fields_present):
-    out = []
-    for r in records:
-        d = {}
-        for k, v in zip(fields_present, r):
-            if isinstance(v, np.ndarray):
-                d[k] = v.tolist()
-            elif isinstance(v, np.generic):
-                d[k] = v.item()
-            else:
-                d[k] = v
-        out.append(d)
-    return out
-
-def _json_write(out_path: Path, mfx: Optional[np.ndarray], chunk_rows: int, log=print):
-    if mfx is None:
-        return None
-    try:
-        import orjson
-        dumps = lambda obj: orjson.dumps(obj, option=orjson.OPT_SERIALIZE_NUMPY)
-    except Exception:
-        import json as _json
-        dumps = lambda obj: _json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-
-    names = getattr(mfx.dtype, "names", None)
+def _validate_mfx_source(mfx: np.ndarray) -> None:
+    """Reject selections that cannot be normalized without inventing data."""
+    arr = np.asarray(mfx)
+    names = _structured_field_names(arr)
     if not names:
-        log("[json] mfx has no named fields; skipping JSON."); return None
-    fields_present = [k for k in _WANTED_FIELDS if k in names]
+        raise ValueError("MSR export requires a one-dimensional structured mfx array.")
+    if arr.ndim != 1:
+        raise ValueError(f"MSR export requires a one-dimensional mfx array; got shape {arr.shape}.")
 
-    fn = out_path.with_suffix(".json")
-    N = int(mfx.shape[0])
-    with open(fn, "wb") as fh:
-        fh.write(b"[\n")
-        first = True
-        for start in range(0, N, chunk_rows):
-            stop = min(start + chunk_rows, N)
-            sub = mfx[start:stop][fields_present]
-            recs = sub.tolist()
-            objs = _rows_to_dicts(recs, fields_present)
-            payload = dumps(objs)
-            if payload.startswith(b"[") and payload.endswith(b"]"):
-                payload = payload[1:-1]
-            if not first and payload:
-                fh.write(b",\n")
-            fh.write(payload)
-            first = False
-        fh.write(b"\n]\n")
-    log(f"[json] wrote {fn}")
-    return str(fn)
+    # m2410 has flat itr/loc; m2205 stores the same fields below mfx.itr.
+    itr_children = _nested_field_names(arr, "itr")
+    if "itr" not in names:
+        raise ValueError("Selected mfx fields omit required 'itr'; cannot produce canonical m2410 data.")
+    if "loc" not in names and "loc" not in itr_children:
+        raise ValueError("Selected mfx fields omit required 'loc'; cannot produce canonical m2410 data.")
+    if "vld" not in names:
+        raise ValueError("Selected mfx fields omit required 'vld'; validity cannot be reconstructed safely.")
 
-# ---------- public: export using arrays ----------
-def export_arrays(out_dir: str,
-                  base_name: str,
-                  formats: List[str],
-                  mfx: Optional[np.ndarray],
-                  mbm: Optional[np.ndarray],
-                  log=print,
-                  json_chunk_rows: int = 100_000) -> List[str]:
+
+def _validate_mbm_source(mbm: np.ndarray) -> None:
+    arr = np.asarray(mbm)
+    if arr.dtype.names is None or arr.ndim != 1:
+        raise ValueError("MSR export requires MBM data to be a one-dimensional structured array.")
+
+
+def _canonical_dataset(
+    mfx: np.ndarray,
+    *,
+    name: str,
+    folder: str,
+    mbm: np.ndarray | None,
+    mbm_meta: dict | None,
+):
+    """Normalize source mfx once, then expose it to ``save_processed``."""
+    _validate_mfx_source(mfx)
+    from ..core.loader import load_from_mfx_array
+
+    # Export is raw and must not depend on the user's last/all-iteration or
+    # valid-only display preference.  mfx_raw is always built from all source
+    # rows; these preferences only control temporary materialization.
+    ds = load_from_mfx_array(
+        np.asarray(mfx),
+        name=name,
+        folder=folder,
+        prefs={"data": {"iter_load": "all", "only_valid_locs": False}},
+    )
+    if mbm is not None and np.asarray(mbm).size:
+        _validate_mbm_source(mbm)
+        from ..core.dataset import AttributeComponent
+
+        points = np.asarray(mbm)
+        ds.mbm = AttributeComponent({"points": points})
+        ds.metadata["mbm_points"] = points
+        meta = dict(mbm_meta or {})
+        if meta.get("points_by_gri"):
+            ds.metadata["mbm_points_by_gri"] = meta["points_by_gri"]
+        if meta.get("used"):
+            ds.metadata["mbm_used"] = meta["used"]
+    return ds
+
+
+def _planned_paths(
+    out_dir: Path,
+    base_name: str,
+    formats: list[str],
+    *,
+    has_mfx: bool,
+    has_mbm: bool,
+) -> list[Path]:
+    from ..core.save import _EXT
+
+    paths: list[Path] = []
+    for fmt in formats:
+        suffix = _EXT[fmt]
+        if fmt == "msr":
+            if has_mfx:
+                paths.append(out_dir / f"{base_name}{suffix}")
+            continue
+        if has_mfx:
+            paths.append(out_dir / f"{base_name}_mfx{suffix}")
+        if has_mbm:
+            paths.append(out_dir / f"{base_name}_mbm{suffix}")
+    return paths
+
+
+def export_arrays(
+    out_dir: str,
+    base_name: str,
+    formats: List[str],
+    mfx: Optional[np.ndarray],
+    mbm: Optional[np.ndarray],
+    log=print,
+    json_chunk_rows: int = 100_000,
+    *,
+    mbm_meta: dict | None = None,
+    overwrite: bool = False,
+) -> List[str]:
+    """Export parsed MSR components through the canonical File > Save writers.
+
+    The mfx output is always normalized to a flat m2410 structured array before
+    any serializer runs.  Non-MSR formats use ``<base>_mfx.<ext>`` and, when
+    present, ``<base>_mbm.<ext>`` companions.  ``.msr`` is the one combined
+    format and preserves MBM metadata through the viewer's MSR writer.
+
+    ``json_chunk_rows`` remains accepted for compatibility with the old fast
+    writer; JSON now intentionally follows the File > Save implementation.
     """
-    Write selected formats to out_dir with base_name.
-    formats: any of ["mat", "npy", "npz", "json", "csv"]
-    Returns list of written file paths.
-    """
-    out_root = Path(out_dir); ensure_dir(out_root)
-    out_base = out_root / base_name
-    written: List[str] = []
+    del json_chunk_rows  # compatibility argument; the canonical writer owns JSON policy
 
-    if "mat" in formats:
-        p = _mat_write_fast(out_base.with_suffix(".mat"), mfx, mbm, log=log)
-        if p: written.append(p)
-    if "npy" in formats:
-        p1 = _npy_write(out_base, "mfx", mfx, log=log);  p2 = _npy_write(out_base, "mbm", mbm, log=log)
-        written.extend([p for p in (p1, p2) if p])
-    if "npz" in formats:
-        p = _npz_write(out_base, mfx, mbm, log=log)
-        if p: written.append(p)
-    if "json" in formats:
-        p = _json_write(out_base, mfx, chunk_rows=json_chunk_rows, log=log)
-        if p: written.append(p)
-    if "csv" in formats:
-        log("[info] CSV of full structured arrays is not supported here. "
-            "Use 'Fields included…' to export selected fields to CSV.")
+    from ..core.save import DATA_FORMATS, save_processed, write_raw_array
+
+    normalized_formats: list[str] = []
+    for value in formats:
+        fmt = str(value).lower().lstrip(".")
+        if fmt not in DATA_FORMATS:
+            raise ValueError(f"Unsupported MSR export format: {value!r}.")
+        if fmt not in normalized_formats:
+            normalized_formats.append(fmt)
+    if not normalized_formats:
+        raise ValueError("Select at least one MSR export format.")
+
+    mfx_arr = None if mfx is None else np.asarray(mfx)
+    mbm_arr = None if mbm is None else np.asarray(mbm)
+    has_mfx = mfx_arr is not None and mfx_arr.size > 0
+    has_mbm = mbm_arr is not None and mbm_arr.size > 0
+    if not has_mfx and not has_mbm:
+        raise ValueError("MSR export has no selected mfx or MBM data.")
+    if "msr" in normalized_formats and not has_mfx:
+        raise ValueError("The .msr export requires mfx localizations; MBM-only output is ambiguous.")
+
+    out_root = Path(out_dir)
+    ensure_dir(out_root)
+    planned = _planned_paths(
+        out_root,
+        str(base_name),
+        normalized_formats,
+        has_mfx=has_mfx,
+        has_mbm=has_mbm,
+    )
+    if len({str(path.resolve()) for path in planned}) != len(planned):
+        raise ValueError("MSR export produced duplicate output paths; choose a unique dataset name.")
+    if not overwrite:
+        existing = [path for path in planned if path.exists()]
+        if existing:
+            joined = ", ".join(str(path) for path in existing)
+            raise FileExistsError(
+                f"Refusing to overwrite existing MSR export file(s): {joined}. "
+                "Choose another output folder/name or pass overwrite=True."
+            )
+
+    ds = None
+    if has_mfx:
+        ds = _canonical_dataset(
+            mfx_arr,
+            name=f"{base_name}.msr",
+            folder=str(out_root),
+            mbm=mbm_arr if has_mbm else None,
+            mbm_meta=mbm_meta,
+        )
+
+    written: list[str] = []
+    for fmt in normalized_formats:
+        if fmt == "msr":
+            paths = save_processed(
+                ds,
+                data_path=out_root / str(base_name),
+                fmt="msr",
+                content="raw",
+                include={"attrs": True, "derived": False, "recipe": False},
+            )
+            written.extend(str(path) for path in paths)
+            log(f"[msr] wrote {paths[0]}")
+            continue
+
+        if has_mfx:
+            paths = save_processed(
+                ds,
+                data_path=out_root / f"{base_name}_mfx",
+                fmt=fmt,
+                content="raw",
+                include={"attrs": True, "derived": False, "recipe": False},
+            )
+            written.extend(str(path) for path in paths)
+            log(f"[{fmt}] wrote {paths[0]}")
+
+        if has_mbm:
+            mbm_path = write_raw_array(
+                out_root / f"{base_name}_mbm",
+                fmt,
+                mbm_arr,
+                root="mbm",
+            )
+            written.append(str(mbm_path))
+            log(f"[{fmt}] wrote {mbm_path}")
 
     return written

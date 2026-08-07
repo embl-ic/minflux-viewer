@@ -9,6 +9,7 @@ no extension at all.
 ``sniff_format(path)`` returns one of:
 
     "npy" | "mat" | "xlsx" | "tiff"      — binary, identified by magic bytes
+    "zarr"                                  — canonical Zarr directory
     "json" | "delimited"                 — text, identified by structure
     None                                 — unrecognised
 
@@ -30,6 +31,7 @@ EXT_TO_FMT: dict[str, str] = {
     ".csv": "spreadsheet", ".tsv": "spreadsheet", ".txt": "spreadsheet",
     ".xlsx": "spreadsheet", ".xlsm": "spreadsheet",
     ".msr": "msr", ".tif": "tiff", ".tiff": "tiff", ".json": "json",
+    ".zarr": "zarr",
 }
 #: Content-sniff result → canonical loader format (xlsx/delimited → spreadsheet).
 _SNIFF_TO_FMT: dict[str, str] = {"xlsx": "spreadsheet", "delimited": "spreadsheet"}

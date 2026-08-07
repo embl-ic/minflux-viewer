@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Canonical MSR export and round-trip loading
+- Unified MSR Reader exports with the File > Save raw-data writers. All localization exports use the canonical flat m2410 representation with a top-level `itr` field, preventing legacy nested names such as `itr_itr` and `itr_loc`.
+- Added viewer loading and routing for canonical `.zarr` directories, with strict validation so MBM-only companions are not opened as localization datasets.
+- Large canonical JSON and CSV exports now use bounded-memory streaming/chunked I/O.
+- Verified `.mat`, `.npy` (NumPy), `.json`, `.csv`, and `.zarr` round trips for 11 MINFLUX datasets from the recursive sample-data set; legacy image-only OBF `.msr` files remain non-exportable as MINFLUX datasets.
+
 ## v0.3.9
 
 ### Voronoi density rendering (2-D and 3-D)

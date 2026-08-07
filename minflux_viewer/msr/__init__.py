@@ -15,7 +15,9 @@ Public API
     Module holding the parsed arrays (``mfx_map``, ``mbm_map``).
 
 ``export_arrays(out_dir, base_name, formats, mfx, mbm, log)``
-    Export arrays to .mat / .npy / .npz / .json.
+    Normalize parsed arrays to flat m2410 mfx and route export through the
+    canonical File > Save writers for .mat / .npy / .npz / .json / .csv /
+    .zarr / .msr.
 
 Platform note
 -------------

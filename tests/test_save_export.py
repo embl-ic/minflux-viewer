@@ -12,6 +12,7 @@ from minflux_viewer.core import loader as L
 from minflux_viewer.core.save import (
     METADATA_JSON_MARKER,
     build_snapshot_table,
+    columns_to_mfx_array,
     columns_to_structured,
     dataset_to_mfx_array,
     flatten_mfx_array,
@@ -73,6 +74,15 @@ def test_columns_to_structured_roundtrip():
     assert arr.shape == (5,)
     assert set(arr.dtype.names) == {"xnm", "tid"}
     np.testing.assert_array_equal(arr["tid"], np.arange(5))
+
+
+def test_flat_canonical_columns_recompose_vectors():
+    source = _make_mfx(8)
+    rebuilt = columns_to_mfx_array(flatten_mfx_array(source))
+    assert set(rebuilt.dtype.names) == set(source.dtype.names)
+    np.testing.assert_array_equal(rebuilt["itr"], source["itr"])
+    np.testing.assert_allclose(rebuilt["loc"], source["loc"])
+    np.testing.assert_allclose(rebuilt["dcr"], source["dcr"])
 
 
 # --- snapshot: RIMF/transform baking + filter ---------------------------------
