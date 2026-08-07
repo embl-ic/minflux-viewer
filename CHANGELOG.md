@@ -1,14 +1,13 @@
 # Changelog
 
-## Unreleased
+## v0.3.9
 
 ### Canonical MSR export and round-trip loading
-- Unified MSR Reader exports with the File > Save raw-data writers. All localization exports use the canonical flat m2410 representation with a top-level `itr` field, preventing legacy nested names such as `itr_itr` and `itr_loc`.
-- Added viewer loading and routing for canonical `.zarr` directories, with strict validation so MBM-only companions are not opened as localization datasets.
-- Large canonical JSON and CSV exports now use bounded-memory streaming/chunked I/O.
-- Verified `.mat`, `.npy` (NumPy), `.json`, `.csv`, and `.zarr` round trips for 11 MINFLUX datasets from the recursive sample-data set; legacy image-only OBF `.msr` files remain non-exportable as MINFLUX datasets.
-
-## v0.3.9
+- **MSR Reader exports now use the same writers as *File → Save*.** The reader previously had its own export path that flattened the nested `mfx.itr` structure into names like `itr_itr` and `itr_loc` — files the viewer could not read back. Every localization export is now the canonical flat m2410 representation with a top-level `itr` field, so **anything you export can be re-opened**.
+- **`.zarr` is now a loadable format,** not just a write target. **Drag a canonical Zarr store onto the window** to open it, with strict validation so an MBM (bead) companion store is not mistaken for a localization dataset. (A Zarr store is a *directory*, so drag-and-drop is the working route — the *File → Open* dialog cannot select one.)
+- **The MSR Reader export gained `.npz` and `.msr` checkboxes**, matching the formats available elsewhere.
+- **Large JSON and CSV exports stream in bounded memory** instead of materializing the whole table — a multi-gigabyte export no longer scales its peak memory with the file size.
+- Round trips verified for `.mat`, `.npy`, `.json`, `.csv` and `.zarr` across 11 MINFLUX datasets from the recursive sample-data set. Legacy image-only OBF `.msr` files remain non-exportable as MINFLUX datasets (they contain no localizations).
 
 ### Voronoi density rendering (2-D and 3-D)
 - **New "Voronoi density" renderer** in the advanced render view. Each localization is assigned the density of its own Voronoi cell (multiplicity ÷ cell area), so the image **adapts to the local sampling density** instead of to a fixed pixel or blur width — no bin size and no sigma to choose. It recomputes for the current filters and depth selection.
@@ -31,6 +30,56 @@ Validated against a real two-colour ratiometric `.msr`, the option only had a st
 - **A single-channel `.msr` import no longer shows as "Overlay"** in the Dataset Manager. It is reported as "Own", and the provisional channel grouping the importer assigns before it knows the channel count no longer survives.
 - **Editing Preferences no longer mutates the built-in defaults** for the rest of the session (a shallow copy meant the preference dictionary *was* the defaults).
 - **Unknown trace aggregation modes now raise instead of silently returning wrong-length data** — this had been quietly breaking `trace 1st` / `trace last` and `trace median` in some paths.
+
+---
+
+## v0.3.8
+
+*Wires the v0.3.7 modules into the menus, plus this release's rendering / ROI / MSR work.*
+
+### Rendering
+- **Switch render engine from inside the window** — right-click *View → Render Mode → Basic / Advanced*. The window swaps engines in place, keeping your zoom, orientation, window geometry **and any ROI draft you were drawing**. The standalone *Render View (advanced)* menu entry is gone; exactly one render window (one engine) exists per dataset.
+- **Advanced rendering is now interactive.** The localization-precision Gaussian is vectorized (≈10–16× faster, identical output), a view change paints an instant coarse preview and then **fills in tiles progressively** instead of blocking until the whole frame is ready. Each reconstruction method (*Histogram · Bilinear · Bicubic · Basic · Fixed Gaussian · Localization-precision Gaussian*) carries hover help explaining what it does.
+- **Fixed: a wide dataset opened with its left and right edges cut off.** The initial fit ran before the window was on screen, so it used a placeholder size. It now re-runs once at the real size — one-shot, so re-raising a window keeps your zoom.
+- **3-D volume:** voxelization follows the 2-D render method; true per-localization precision in 3-D; an anti-alias blur floor that fixes the blocky look when the voxel cap forces a coarse grid; a GPU-aware *Max dim* control; and *Black % / White %* brightness-contrast.
+
+### ROI
+- **New *Process → ROI → Fit*** — fit a *Rectangle, Circle, Ellipse, Polygon, Convex Hull* or *Spline* to **the localizations a region ROI highlights** (distinct from Convert, which fits the ROI's own outline), plus *Interpolate* to resample an outline at a given spacing.
+- **New *Process → ROI → Restore ROI*** — put the active draft onto the dataset's other open views, or bring back the last draft after an accidental delete.
+- **Duplicate / Crop (Shift+D)** defaults tuned, now works on the advanced render view, and its Z-distribution plot is vertically expandable with a hover read-out giving the exact bin and count.
+
+### Segmentation & analysis
+- **Curvilinear structure segmentation** (*Analyze → Segmentation → Curvilinear Structures*): Frangi/Sato ridge filtering or a point-spline, then skeletonization into traced centre-line ROIs, with a live preview and filament-width profiling.
+- **Menu entries for the v0.3.7 modules** — OME-Zarr export, time-window channels and ROI fitting became reachable here.
+
+### MSR reader
+- **Single-channel *Align channel* no longer asks about save outputs** — there is nothing to register. It shows the beads against the data region plus a per-bead drift table instead.
+- **The data-region box is drawn as a translucent, labelled region**, so it stays visible when the fiducial beads are spread far wider than the measured data.
+
+### UX
+- **Menu section separators are visibly drawn** (Fiji-style) — the native etch was near-invisible on some themes and over RDP.
+- **The main window opens toward the top-right of the active monitor**, and the MSR reader opens in the opposite corner, so it no longer lands on top of the main window and Log.
+
+---
+
+## v0.3.7
+
+*Aggregation and drift correction, plus four self-contained modules whose menu entries arrive in v0.3.8.*
+
+### Aggregate Localizations
+- **New *Process → Aggregate Localizations…*** — reproduces Abberior Imspector's post-processing. The `aggN` in an Imspector filename is a **photon threshold, not a point count**: each trace is walked in time order, accumulating photons until the threshold is reached, then emitting one mean-position point. Validated end-to-end against reference raw/aggregated file pairs (98.99 % exact photon match, 0.27 nm median position error, 100 % begin/end flags).
+- Non-destructive — the result is a new `(aggregated N)` dataset. **Multi-channel overlays aggregate every channel** at the same threshold and re-link the results into a new overlay. The threshold is remembered across sessions.
+
+### Drift Correction (plugin)
+- **New *Plugins → Drift Correction*** — time-window auto-correlation drift correction (2-D and 3-D), a faithful reimplementation of pyMINFLUX (Ostersehlt et al. 2022). Estimate the trajectory, inspect it, and if satisfied create a **new corrected dataset** so you can compare before and after. The time window can be set or left on *Auto*.
+
+### Localization precision
+- **CRLB now uses a per-dimension photon budget.** The materialized `eco` is the photon count at the final *axial* iteration — correct for σ_z but too few for σ_xy, whose photons come from the final *lateral* iteration. The lateral count is now detected and used, lowering median σ_xy from ≈2.47 to ≈2.03 nm on the reference file (σ_z unchanged). Single-`eco` datasets behave exactly as before.
+
+### Other
+- **Multi-channel 3-D volumes** — an overlay now composites every channel into one RGBA volume on a shared grid, each in its own LUT colour, instead of rendering only the anchor.
+- **New *Plugins → Spatial Pattern Analysis along Line Profile*** — directed repeating-pattern analysis along a line or curved-centreline ROI.
+- Groundwork landed for **OME-NGFF 0.5 / Zarr v3 pyramid export**, **time-window channels** and **ROI shape fitting**; their menu entries arrive in v0.3.8.
 
 ---
 
