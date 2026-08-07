@@ -22,6 +22,7 @@ def main() -> int:
     from PyQt6.QtGui import QIcon
     from PyQt6.QtWidgets import QApplication
     from . import __version__, resource_path
+    from .ui.file_open_app import FileOpenApplication
 
     # pyqtgraph caches compiled GL shader programs globally, but GL program
     # objects are per-context. Without context sharing, a second GLViewWidget
@@ -34,23 +35,31 @@ def main() -> int:
     # native/global menu bar (macOS, and some Linux desktop environments).
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeMenuBar, True)
 
-    app = QApplication(sys.argv)
+    # FileOpenApplication also captures the macOS Open-Document (odoc) event,
+    # which is the ONLY way a running instance is told about a file dropped on
+    # the app icon — macOS never puts it in argv. It must exist before the
+    # window, because the event can arrive during QApplication construction; it
+    # queues those until the handler is installed below.
+    app = FileOpenApplication(sys.argv)
     app.setApplicationName("MINFLUX Data Viewer")
     app.setApplicationVersion(__version__)
     app.setOrganizationName("EMBL-IC")
     app.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
 
     from .core.app_state import AppState
-    from .ui.main_window import MainWindow
+    from .ui.main_window import MainWindow, startup_paths_from_argv
 
     state  = AppState()
     window = MainWindow(state)
     window.show()
 
-    # Allow passing supported data files as CLI arguments
-    for arg in sys.argv[1:]:
-        if arg.lower().endswith((".mat", ".npy", ".csv", ".msr")):
-            window._route_file(arg)
+    # Files named on the command line (every platform), then anything macOS
+    # delivered as an open-document request while we were starting up.
+    for path in startup_paths_from_argv(sys.argv[1:]):
+        window.open_path_from_desktop(path, source="command line")
+    app.set_open_handler(
+        lambda path: window.open_path_from_desktop(
+            path, source="macOS Open-Document event"))
 
     exit_code = app.exec()
 
