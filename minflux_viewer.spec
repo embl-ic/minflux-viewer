@@ -186,5 +186,39 @@ if sys.platform == "darwin":
             "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
+            # Declare the documents we open.  Without this, Launch Services has
+            # no registered handler for e.g. ".msr", so dropping one on the app
+            # icon does NOT reach the running instance — macOS launches a second
+            # copy instead.  The running instance receives the document as a
+            # QFileOpenEvent, handled by ui/file_open_app.py; the two changes
+            # are required together, neither works on its own.
+            "CFBundleDocumentTypes": [
+                {
+                    "CFBundleTypeName": "MINFLUX data",
+                    "CFBundleTypeRole": "Viewer",
+                    # "Alternate", not "Owner": Imspector owns .msr on a machine
+                    # that has it, and we should not take the association over.
+                    "LSHandlerRank": "Alternate",
+                    "LSTypeIsPackage": False,
+                    "CFBundleTypeExtensions": [
+                        "msr", "mat", "npy", "json",
+                        "csv", "tsv", "txt", "xlsx", "xlsm",
+                        "tif", "tiff", "roi",
+                    ],
+                },
+                {
+                    # A Zarr store is a *directory*, so it needs its own entry
+                    # with LSTypeIsPackage — otherwise Finder treats it as a
+                    # folder to open rather than a document to hand over.
+                    "CFBundleTypeName": "MINFLUX Zarr store",
+                    "CFBundleTypeRole": "Viewer",
+                    "LSHandlerRank": "Alternate",
+                    "LSTypeIsPackage": True,
+                    "CFBundleTypeExtensions": ["zarr"],
+                },
+            ],
+            # One running copy handles every document; without this a drop can
+            # still spawn a second instance.
+            "LSMultipleInstancesProhibited": True,
         },
     )

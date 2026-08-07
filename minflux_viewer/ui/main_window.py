@@ -79,6 +79,31 @@ _FMT_LOADERS: dict[str, str] = {
     "zarr": "_load_zarr",
 }
 
+
+def startup_paths_from_argv(args) -> list[str]:
+    """Filesystem paths to open from the command line, in order.
+
+    Accepts any supported file **and directories** (routed through
+    ``_route_path``, so a folder is scanned like a drop), and drops arguments
+    that are not paths to open — notably the ``-psn_0_…`` process-serial-number
+    argument macOS passes to a bundled ``.app``, and any other option-like
+    argument, which would otherwise be probed as a file.
+
+    Note this is the *command-line* route only. On macOS a file dropped on the
+    app icon does **not** arrive here — see ``MainWindow.open_path_from_desktop``.
+    """
+    paths: list[str] = []
+    for arg in args:
+        text = str(arg)
+        if not text or text.startswith("-"):
+            continue                    # -psn_0_…, -style, -platform, …
+        candidate = Path(text)
+        suffix = candidate.suffix.lower()
+        # A ``.zarr`` store is a directory, so check the suffix before is_dir().
+        if suffix in _SUPPORTED_EXTS or candidate.is_dir():
+            paths.append(text)
+    return paths
+
 _ROI_TOOL_DEFS: tuple[tuple[str, str, str], ...] = (
     ("Rectangle", "rectangle", "toolRect"),
     ("Oval", "oval", "toolOval"),
@@ -1606,6 +1631,36 @@ class MainWindow(QMainWindow):
             self._status_label.setText(f"Skipped: {p.name} (unsupported type)")
             return
         getattr(self, loader)(path)
+
+    def open_path_from_desktop(self, path: str, *, source: str = "desktop") -> None:
+        """Open *path* on behalf of the OS (command line, or a file dropped on
+        the application icon), raising this window so the result is visible.
+
+        This is the single entry point for "the operating system asked us to
+        open this", and it **logs which process handled the request and how**:
+
+            Open request (macOS Open-Document event, pid 4711): 'x.msr'
+
+        That line is the way to tell, on macOS, whether a dropped file was
+        handled by the already-running instance (Open-Document event) or by a
+        freshly launched one (command line) — the two are otherwise hard to
+        tell apart, because both processes share one Dock icon and analysis
+        windows are non-owned top-levels.
+        """
+        import os
+
+        self._state.log(
+            f"Open request ({source}, pid {os.getpid()}): '{Path(path).name}'", "INFO")
+        # A second instance would be a separate process, so raising is only
+        # meaningful for the instance that actually received the request.
+        try:
+            if self.isMinimized():
+                self.showNormal()
+            self.raise_()
+            self.activateWindow()
+        except RuntimeError:
+            pass
+        self._route_path(path)
 
     def _route_path(self, path: str) -> None:
         """
