@@ -6975,7 +6975,7 @@ class _WelcomeWidget(QWidget):
         layout.setContentsMargins(20, 16, 20, 16)
 
         hint = QLabel(
-            "Drag files or folders here  ·  supported: .mat  .npy  .csv  .msr  ·  or use  File › Open"
+            "Drag and Drop data files here <supported .msr / .npy / .mat / .json / .zarr /...>   or use  File › Open"
         )
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint.setStyleSheet("color: gray; font-size: 12px;")
