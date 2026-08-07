@@ -552,7 +552,13 @@ def test_template_2d_dialog_exposes_both_border_and_template_controls(_app):
         dlg.close()
 
 
-def test_hlyb_menu_lists_new_staged_method_and_keeps_existing_four(_app):
+def test_hlyb_analysis_left_the_clustering_menu_for_plugins(_app):
+    """Analyze › Clustering keeps only the generic clustering placeholders.
+
+    The HlyB/D workflow is a single Plugins entry now; the retired variants
+    (2D/3D, pair-distance fit, template matching) are unexposed but their
+    modules are kept, so this asserts the menu shape rather than the code.
+    """
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.ui.main_window import MainWindow
 
@@ -561,13 +567,13 @@ def test_hlyb_menu_lists_new_staged_method_and_keeps_existing_four(_app):
                                               "show_render": False})
     win = MainWindow(state)
     try:
-        labels = [a.text() for a in win.menuHlyBPair.actions()]
-        assert labels == ["Staged short-range population (3D)",
-                          "",
-                          "Pair-distance model fit (3D)",
-                          "Pair-distance model fit (2D)",
-                          "Template matching (3D)",
-                          "Template matching (2D)"]
+        labels = [a.text() for a in win.menuAnalyzeClustering.actions()]
+        assert labels == ["DBSCAN", "K Nearest Neighbour"]
+        assert not hasattr(win, "menuHlyBPair")
+        # The retired analysis modules stay importable.
+        from minflux_viewer.analysis import hlyb_clustering, hlyb_pairwise
+        assert hasattr(hlyb_clustering, "analyze_hlyb_2d")
+        assert hasattr(hlyb_pairwise, "analyze_hlyb_pairwise")
     finally:
         win.close()
         _app.processEvents()

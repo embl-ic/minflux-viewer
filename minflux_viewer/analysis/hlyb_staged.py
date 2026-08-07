@@ -883,7 +883,7 @@ def analyze_hlyb_staged_3d(
             [float(ratio_spread.min()), float(ratio_spread.max())]
             if ratio_spread.size else [float("nan"), float("nan")]),
         "limitations": [
-            "Inferred sites are label-site estimates, not identified HlyB protomers.",
+            "Inferred sites are label-site estimates, not identified HlyB/HlyD protomers.",
             "Time spans are retained across all visits, but this implementation does not yet fit a full DDC/BaGoL temporal emitter model.",
             "The conditional null relies on coarse spatial components and a local rod axis.",
             "A short-range excess is not by itself a molecular dimer-distance estimate.",

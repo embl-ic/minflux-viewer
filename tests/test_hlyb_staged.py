@@ -306,3 +306,93 @@ def test_batch_summary_treats_acquisitions_not_pair_counts_as_replicates():
     assert summary["all"]["median_excess_centroid_nm"] == 14.0
     assert summary["Bonly"]["median_band_ratio"] == 1.5
     assert "acquisition_bootstrap_centroid_ci95_nm" in summary["Bonly"]
+
+
+def test_analysis_is_a_plugin_not_an_analyze_clustering_submenu(qtbot):
+    """The workflow moved to Plugins as a single entry.
+
+    It is one project-specific analysis, not a family of general clustering
+    tools, and the retired variants (2D/3D, pair-distance fit, template
+    matching) are no longer exposed -- though their modules are kept.
+    """
+    from minflux_viewer import plugins
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.command_finder import collect_commands, filter_commands
+    from minflux_viewer.ui.main_window import MainWindow
+
+    plugins.ensure_loaded()
+    names = [entry.name for entry in plugins.available()]
+    assert "HlyB/D subunit pair analysis" in names
+
+    window = MainWindow(AppState())
+    qtbot.addWidget(window)
+    commands = collect_commands(window.menuBar())
+
+    hlyb = [c for c in commands if "hlyb" in c.text.lower()]
+    assert len(hlyb) == 1, [c.text for c in hlyb]
+    assert hlyb[0].path == "Plugins"
+    # Plugin entries carry their implementing file for the Command Finder.
+    assert hlyb[0].source.endswith("__init__.py")
+
+    clustering = [c.text for c in commands if c.path.endswith("Clustering")]
+    assert clustering == ["DBSCAN", "K Nearest Neighbour"]
+
+    # Findable by domain terms that are not in the menu label.
+    for query in ("dimer", "surface null", "ecoli"):
+        assert "HlyB/D subunit pair analysis" in [
+            c.text for c in filter_commands(commands, query)]
+
+
+def test_method_text_documents_parameters_and_terms():
+    """Generate Method Text must be self-contained for a Methods section."""
+    from types import SimpleNamespace
+
+    from minflux_viewer.analysis.method_text import (
+        RULES, _render_hlyb_staged_short_range)
+    from minflux_viewer.plugins.hlyb_pair_analysis.runner import (
+        _log_line, _method_payload)
+
+    rng = np.random.default_rng(3)
+    all_sites = []
+    for offset in (0.0, 2600.0, 5200.0):
+        sites = _rod_sites(rng, 90, offset_x=offset)
+        anchors = _rod_sites(rng, 20, offset_x=offset)
+        partners = anchors.copy()
+        partners[:, 0] += 14.0
+        all_sites.append(np.vstack([sites, anchors, partners]))
+    loc, tid, tim = _localizations_from_sites(np.vstack(all_sites), rng)
+    cfg = Staged3DConfig(
+        z_scaling_factor=1.0, cell_link_nm=300.0, min_sites_per_component=30,
+        null_stratum_sites=48, null_replicates=39, bootstrap_replicates=79,
+        sensitivity_replicates=19, stratum_profile_sites=(24, 48, 96))
+    result = analyze_hlyb_staged_3d(loc, tid, tim, cfg)
+
+    ds = SimpleNamespace(name="sample", metadata={},
+                         file=SimpleNamespace(path="sample.mat"))
+    line = _log_line(ds, cfg, result)
+    payload = _method_payload(ds, cfg, result,
+                              n_localizations=loc.shape[0], has_time=True)
+
+    match = next((pattern.match(line) for pattern, _stage, fn in RULES
+                  if fn is _render_hlyb_staged_short_range
+                  and pattern.match(line)), None)
+    assert match is not None, "the plugin log line must match a method-text rule"
+    text, _ = _render_hlyb_staged_short_range(
+        match, {"method_data": payload}, None)
+
+    for heading in ("Input data.", "Site inference.", "Parameters.",
+                    "Definitions of reported terms.", "Result.",
+                    "Interpretation and limitations."):
+        assert heading in text, heading
+    # Every operator-set parameter is stated, so the run is reproducible.
+    for label in ("Same-site consolidation diameter", "Null stratum (sites)",
+                  "Test band lower edge", "Null replicates",
+                  "Component link distance"):
+        assert label in text, label
+    # Terms used in the numbers are defined.
+    for term in ("inferred labelling site", "observed/null ratio",
+                 "positive excess", "null stratum", "sensitivity audit"):
+        assert term in text, term
+    # The claim stays a distribution descriptor.
+    assert "not fitted distances" in text
+    assert "neither identifies pair membership" in text

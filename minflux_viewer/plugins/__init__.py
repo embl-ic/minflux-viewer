@@ -46,6 +46,12 @@ class PluginEntry:
     name: str
     tooltip: str
     launch: Callable[..., None]   # launch(state, parent=None)
+    # Extra search tags for the Command Finder — synonyms and domain terms that
+    # are NOT already in ``name``. Optional; the plugin is findable by its name
+    # either way. Built-in menu commands get the equivalent from
+    # ``ui/command_meta.py``, which is keyed by QAction attribute name and so
+    # cannot describe a plugin action (it has none).
+    keywords: tuple[str, ...] = ()
 
 
 _REGISTRY: List[PluginEntry] = []
@@ -85,5 +91,6 @@ def ensure_loaded() -> None:
     from . import drift_correction  # noqa: F401
     from . import trace_viewer    # noqa: F401
     from . import spatial_line_pattern  # noqa: F401
+    from . import hlyb_pair_analysis  # noqa: F401  (project-specific)
     from . import generate_method_text  # noqa: F401
     from . import script_editor   # noqa: F401  (moved to the bottom of the list)

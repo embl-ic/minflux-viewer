@@ -356,20 +356,23 @@ def test_two_d_report_documents_the_projection_and_its_limit(_app):
     assert "superimposes the upper and lower" in text
 
 
-def test_hlyb_menu_offers_the_new_method_and_no_longer_the_plain_2d_3d(_app):
-    """The plain 2-D / 3-D entries are retired; their analysis code stays in
-    hlyb_clustering.py so a proper 2-D workflow can be rebuilt on it."""
+def test_every_hlyb_menu_variant_is_retired_in_favour_of_the_plugin(_app):
+    """Only the staged workflow is exposed, and only as a Plugins entry.
+
+    Every earlier variant -- the plain 2-D/3-D entries, the pair-distance model
+    fits and the template matchers -- is unexposed. Their analysis code stays
+    (see the import test below) so a 2-D workflow can be rebuilt on it.
+    """
     win = _main_window(_app)
     try:
-        labels = [a.text() for a in win.menuHlyBPair.actions()]
-        assert "Pair-distance model fit (3D)" in labels
-        assert "Pair-distance model fit (2D)" in labels
-        assert "Template matching (3D)" in labels
-        # the retired bare entries, not the new qualified ones
-        assert "2D" not in labels
-        assert "3D" not in labels
-        assert not hasattr(win, "actionHlyB2D")
-        assert not hasattr(win, "actionHlyB3D")
+        assert not hasattr(win, "menuHlyBPair")
+        for attr in ("actionHlyB2D", "actionHlyB3D", "actionHlyBStaged3D",
+                     "actionHlyBPairFit", "actionHlyBPairFit2D",
+                     "actionHlyBTemplate3D", "actionHlyBTemplate2D"):
+            assert not hasattr(win, attr), attr
+        # The handlers behind the retired entries remain callable.
+        assert callable(win._run_hlyb_pair_analysis)
+        assert callable(win._run_hlyb_pairwise_analysis)
     finally:
         win.close()
         _app.processEvents()
@@ -385,15 +388,16 @@ def test_retired_analysis_functions_are_still_importable():
     )
 
 
-def test_new_command_is_traceable_to_its_source(_app):
+def test_the_plugin_command_is_traceable_to_its_source(_app):
     from minflux_viewer.ui import command_finder
 
     win = _main_window(_app)
     try:
         entries = command_finder.collect_commands(win.menuBar())
-        match = [e for e in entries if e.text == "Pair-distance model fit (3D)"]
-        assert match, "the new command must appear in the command finder"
-        assert "hlyb_pairwise.py" in (match[0].source or "")
+        match = [e for e in entries if e.text == "HlyB/D subunit pair analysis"]
+        assert match, "the plugin must appear in the command finder"
+        assert "hlyb_pair_analysis" in (match[0].source or "")
+        assert match[0].path == "Plugins"
     finally:
         win.close()
         _app.processEvents()

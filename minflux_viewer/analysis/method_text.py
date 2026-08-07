@@ -729,6 +729,93 @@ _PAIR_FIT_HYPOTHESIS = {
 }
 
 
+# Terms used in the result report, defined once so the generated Methods text is
+# self-contained.  Wording is deliberately operational: each entry says what the
+# quantity is computed from, not what it is believed to mean biologically.
+_HLYB_DEFINITIONS = (
+    "Definitions of reported terms. "
+    "An *inferred labelling site* is a group of trace centroids that the "
+    "consolidation step judged compatible with one labelled position; it is an "
+    "estimate of where a label sat, not an identified protein subunit. "
+    "A *spatial component* is a coarse connected group of sites, intended to "
+    "approximate one cell or field object; pair distances are never formed "
+    "across components. "
+    "The *band* is the pre-declared short-range distance interval in which the "
+    "primary test is made. "
+    "The *observed/null ratio* (band ratio) is the number of observed pair "
+    "distances inside the band divided by the mean number produced by the "
+    "conditional randomizations; 1 means the data are indistinguishable from "
+    "the geometry-preserving null. "
+    "The *null replicate distribution* is the spread of that same ratio among "
+    "the randomizations themselves, and the reported σ is the observation's "
+    "distance from it — the evidential statistic here, because the rank-based "
+    "p-value cannot fall below one over the replicate count plus one. "
+    "The *positive excess* is the part of the observed-minus-null profile that "
+    "is above zero inside the band; its *peak* is the single most enriched bin, "
+    "its *centroid* the excess-weighted mean distance and its *median* the "
+    "distance splitting the excess into equal halves. These three describe "
+    "where the surplus pairs sit and are distribution descriptors, not fitted "
+    "distances. "
+    "The *null stratum* is the number of consecutive sites, ranked along the "
+    "local cell axis, within which coordinates are exchanged; it sets the "
+    "length scale below which the randomization destroys structure. "
+    "The *sensitivity audit* re-runs the whole workflow under deliberately "
+    "varied parameter choices, and the claim is called robust only if every "
+    "evaluable variant still shows the excess."
+)
+
+
+def _hlyb_parameter_block(params: dict) -> str:
+    """Operator-set parameters of one run, with what each one controls."""
+    rows = (
+        ("Minimum localizations per trace", params.get("min_loc_per_trace"), 0,
+         "traces below this are discarded before anything else"),
+        ("Refractive-index mismatch factor (z scaling)",
+         params.get("z_scaling_factor"), 4,
+         "applied once to raw z; no other z correction is applied"),
+        ("Same-site consolidation diameter (nm)", params.get("site_merge_nm"), 1,
+         "hard maximum extent of one labelling site; chosen well below the "
+         "distance range of interest so the test band is not eroded"),
+        ("Component link distance (nm)", params.get("cell_link_nm"), 0,
+         "separates cells/field objects; pairs never cross a component"),
+        ("Minimum sites per component", params.get("min_sites_per_component"), 0,
+         "components smaller than this are excluded outright"),
+        ("Pair-distance range (nm)", params.get("r_max_nm"), 0,
+         "upper limit of the measured pair-distance profile"),
+        ("Pair-distance bin width (nm)", params.get("bin_nm"), 2,
+         "resolution of that profile"),
+        ("Test band lower edge (nm)", params.get("short_range_lo_nm"), 1,
+         "pre-declared; set to twice the consolidation diameter so residual "
+         "same-site pairs stay below it"),
+        ("Test band upper edge (nm)", params.get("short_range_hi_nm"), 1,
+         "pre-declared upper limit of the primary test"),
+        ("Null stratum (sites)", params.get("null_stratum_sites"), 0,
+         "axial window within which coordinates are exchanged"),
+        ("Null replicates", params.get("null_replicates"), 0,
+         "number of conditional randomizations"),
+        ("Component bootstrap replicates", params.get("bootstrap_replicates"), 0,
+         "resamples of the retained components"),
+    )
+    lines = [
+        f"  {label}: {_method_number(value, digits)} — {note}"
+        for label, value, digits, note in rows
+        if value is not None
+    ]
+    return ("Parameters. All values below were set by the operator for this run "
+            "and are reported so it can be reproduced exactly.\n"
+            + "\n".join(lines))
+
+
+def _hlyb_limitations_block(method: dict) -> str:
+    """The run's own recorded limitations, as sentences rather than bullets."""
+    items = [str(item).strip() for item in (method.get("limitations") or [])
+             if str(item).strip()]
+    if not items:
+        return ""
+    return " " + " ".join(
+        item if item.endswith(".") else item + "." for item in items)
+
+
 def _render_hlyb_staged_short_range(m, ev, state):
     """Scientific account of the model-independent staged 3-D workflow."""
     method = ev.get("method_data")
@@ -855,7 +942,7 @@ def _render_hlyb_staged_short_range(m, ev, state):
         f"estimate(s), including {_method_count(sites.get('n_repeated_sites'))} "
         f"multi-trace site(s); {_method_count(sites.get('n_traces_consolidated'))} "
         f"redundant trace representation(s) were removed. These are label-site "
-        f"estimates, not assignments to HlyB protomers. Acquisition time imposed no "
+        f"estimates, not assignments to HlyB/HlyD protomers. Acquisition time imposed no "
         f"maximum revisit gap, so spatially compatible visits throughout the recording "
         f"could consolidate; however, this implementation did not fit a complete "
         f"DDC/BaGoL temporal emitter model.\n\n"
@@ -878,6 +965,8 @@ def _render_hlyb_staged_short_range(m, ev, state):
         f"filling a three-dimensional volume. "
         f"{_method_count(params.get('null_replicates'))} conditional randomizations "
         f"defined the reference distribution.\n\n"
+        f"{_hlyb_parameter_block(params)}\n\n"
+        f"{_HLYB_DEFINITIONS}\n\n"
         f"Result. In the pre-declared {_method_number(params.get('short_range_lo_nm'), 1)}–"
         f"{_method_number(params.get('short_range_hi_nm'), 1)} nm interval, "
         f"{_method_count(result.get('band_observed_pairs'))} observed pair(s) were "
@@ -902,9 +991,10 @@ def _render_hlyb_staged_short_range(m, ev, state):
         f"{bootstrap_text} {sensitivity_text}"
         + (f"\n\nDependence on the null stratification. {profile_text}"
            if profile_text else "")
-        + f"\n\nThe centroid and peak describe an excess "
+        + f"\n\nInterpretation and limitations. The centroid and peak describe an excess "
         f"population only: the analysis neither identifies pair membership nor fits or "
-        f"claims a molecular HlyB dimer distance."
+        f"claims a molecular HlyB/HlyD subunit distance."
+        + _hlyb_limitations_block(method)
     )
     return text, []
 
@@ -1225,6 +1315,10 @@ RULES = [
     (re.compile(r"Localization precision \(FRC\): resolution = (?P<res>[\d.]+) nm "
                 r"\(1/7 threshold, (?P<mode>[^,]+), (?P<n>[\d,]+) points, "
                 r"pixel (?P<px>[\d.]+) nm\)"), "analysis", _render_frc),
+    # The plugin's current log prefix, plus the pre-plugin one so method text can
+    # still be generated from a Log written before the menu move.
+    (re.compile(r"^HlyB/D subunit pair analysis on '(?P<name>.+?)':"),
+     "analysis", _render_hlyb_staged_short_range),
     (re.compile(r"^HlyB staged short-range population \(3D\) on '(?P<name>.+?)':"),
      "analysis", _render_hlyb_staged_short_range),
     (re.compile(r"^HlyB pair-distance model fit(?: \((?P<dims>[23])D\))? "
