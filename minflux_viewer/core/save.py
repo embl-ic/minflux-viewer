@@ -187,6 +187,54 @@ def columns_to_structured(columns: dict[str, np.ndarray]) -> np.ndarray:
     return arr
 
 
+def columns_to_mfx_array(columns: dict[str, np.ndarray]) -> np.ndarray:
+    """Recompose flat canonical columns into a structured m2410 ``mfx`` array.
+
+    ``flatten_mfx_array`` is used by CSV/NPZ/Zarr exports.  The ordinary
+    structured-array readers can consume ``loc``/``dcr`` vectors, but cannot
+    infer those vectors from component columns on their own.  Keep this inverse
+    next to the writer so Zarr (and any future flat-column reader) has one
+    canonical recomposition rule.
+    """
+    if not columns:
+        raise ValueError("The flat export contains no columns.")
+
+    ordered = {str(k): np.asarray(v).ravel() for k, v in columns.items()}
+    n = len(next(iter(ordered.values())))
+    if any(values.size != n for values in ordered.values()):
+        raise ValueError("Flat export columns do not have a common row count.")
+
+    fields: list[tuple] = []
+    fill: dict[str, np.ndarray] = {}
+    used: set[str] = set()
+
+    for base, suffixes in _VEC_BASES.items():
+        names = [f"{base}_{suffix}" for suffix in suffixes]
+        if all(name in ordered for name in names):
+            values = [ordered[name] for name in names]
+            fields.append((base, np.result_type(*[value.dtype for value in values]), (3,)))
+            fill[base] = np.column_stack(values)
+            used.update(names)
+
+    dcr_names = ("dcr_0", "dcr_1")
+    if all(name in ordered for name in dcr_names):
+        values = [ordered[name] for name in dcr_names]
+        fields.append(("dcr", np.result_type(*[value.dtype for value in values]), (2,)))
+        fill["dcr"] = np.column_stack(values)
+        used.update(dcr_names)
+
+    for name, values in ordered.items():
+        if name in used:
+            continue
+        fields.append((name, values.dtype))
+        fill[name] = values
+
+    arr = np.zeros(n, dtype=np.dtype(fields))
+    for name, values in fill.items():
+        arr[name] = values
+    return arr
+
+
 def build_snapshot_table(
     ds, *, include_attrs: bool = True, include_derived: bool = False,
     filter_mode: str = "flag",
@@ -324,13 +372,13 @@ def build_metadata(ds, *, data_filename: str | None = None,
 # ---------------------------------------------------------------------------
 # Data writers (Abberior-style structured mfx)
 # ---------------------------------------------------------------------------
-def _write_mat(path: Path, mfx: np.ndarray) -> None:
+def _write_mat(path: Path, mfx: np.ndarray, *, root: str = "mfx") -> None:
     from scipy.io import savemat
 
     # A single MATLAB struct with length-N array fields (Abberior 'data_new'
     # layout) — NOT a length-N struct array (which a structured ndarray becomes).
     fields = {name: mfx[name] for name in mfx.dtype.names}
-    savemat(str(path), {"mfx": fields}, do_compression=True, long_field_names=True)
+    savemat(str(path), {str(root): fields}, do_compression=True, long_field_names=True)
 
 
 def _write_npy(path: Path, mfx: np.ndarray) -> None:
@@ -339,15 +387,34 @@ def _write_npy(path: Path, mfx: np.ndarray) -> None:
 
 def _write_json(path: Path, mfx: np.ndarray) -> None:
     names = mfx.dtype.names
-    records = []
-    for row in mfx:
-        rec = {}
-        for k in names:
-            val = row[k]
-            rec[k] = val.tolist() if isinstance(val, np.ndarray) else (
-                val.item() if isinstance(val, np.generic) else val)
-        records.append(rec)
-    path.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
+    # Keep the File > Save JSON shape (a JSON array of records), but stream one
+    # record at a time.  Building a Python dict/list for every row made a large
+    # MSR export consume many times the raw data size before it reached disk.
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("[")
+        first_chunk = True
+        chunk: list[dict] = []
+        for row in mfx:
+            record = {}
+            for key in names:
+                value = row[key]
+                record[key] = value.tolist() if isinstance(value, np.ndarray) else (
+                    value.item() if isinstance(value, np.generic) else value)
+            chunk.append(record)
+            if len(chunk) < 4096:
+                continue
+            if not first_chunk:
+                handle.write(",")
+            encoded = json.dumps(chunk, ensure_ascii=False, separators=(",", ":"))
+            handle.write(encoded[1:-1])
+            first_chunk = False
+            chunk.clear()
+        if chunk:
+            if not first_chunk:
+                handle.write(",")
+            encoded = json.dumps(chunk, ensure_ascii=False, separators=(",", ":"))
+            handle.write(encoded[1:-1])
+        handle.write("]")
 
 
 _WRITERS = {"mat": _write_mat, "npy": _write_npy, "json": _write_json}
@@ -359,11 +426,41 @@ def _write_csv(path: Path, columns: dict[str, np.ndarray]) -> None:
     if not names:
         path.write_text("", encoding="utf-8")
         return
-    data = np.column_stack([np.asarray(columns[k], dtype=float).ravel() for k in names])
-    # %.10g keeps coordinate precision while staying compact; ints/bools round-trip
-    # as their numeric value (the flat-table loader re-casts on read).
-    np.savetxt(str(path), data, delimiter=",", header=",".join(names),
-               comments="", fmt="%.10g")
+    arrays = {name: np.asarray(columns[name]).ravel() for name in names}
+    if all(
+        np.issubdtype(values.dtype, np.number) or np.issubdtype(values.dtype, np.bool_)
+        for values in arrays.values()
+    ):
+        # Numeric canonical exports are common and can be written much faster
+        # in bounded chunks than one csv.writer call per row.  Per-column
+        # formats keep integer/bool fields textual-exact while floats retain
+        # enough precision for a lossless reload.
+        formats = [
+            "%d" if np.issubdtype(arrays[name].dtype, np.integer) or
+            np.issubdtype(arrays[name].dtype, np.bool_) else "%.17g"
+            for name in names
+        ]
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(",".join(names) + "\n")
+            n = len(arrays[names[0]])
+            for start in range(0, n, 100_000):
+                stop = min(start + 100_000, n)
+                matrix = np.column_stack([arrays[name][start:stop] for name in names])
+                np.savetxt(handle, matrix, delimiter=",", fmt=formats)
+        return
+    # Keep integer/bool columns textual-exact.  The previous float conversion
+    # made CSV a lossy format for large integer identifiers and timestamps.
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(names)
+        n = len(arrays[names[0]])
+        values = arrays
+        for row_idx in range(n):
+            row = []
+            for name in names:
+                value = values[name][row_idx]
+                row.append(value.item() if isinstance(value, np.generic) else value)
+            writer.writerow(row)
 
 
 def spreadsheet_export_columns(ds) -> dict[str, np.ndarray]:
@@ -481,6 +578,51 @@ def _write_columns(fmt: str, path: Path, columns: dict[str, np.ndarray]) -> None
         _WRITERS[fmt](path, columns_to_structured(columns))
     else:
         raise ValueError(f"Unsupported data format: {fmt!r}")
+
+
+def write_raw_array(
+    path: str | Path,
+    fmt: str,
+    array: np.ndarray,
+    *,
+    root: str = "mfx",
+) -> Path:
+    """Write one structured raw component using the canonical save writers.
+
+    ``mfx`` arrays passed to this helper must already be canonical flat m2410
+    arrays.  The MSR reader uses this for the optional MBM companion, which is
+    a separate structured component and therefore is not normalized as mfx.
+    Keeping this small public adapter prevents the plugin from maintaining a
+    second set of MATLAB/NumPy/JSON/CSV/Zarr serializers.
+
+    ``root`` affects MATLAB only (for example ``"mbm"`` for an MBM companion);
+    column formats remain flat by design.
+    """
+    fmt = str(fmt).lower().lstrip(".")
+    if fmt not in _EXT:
+        raise ValueError(f"Unsupported data format: {fmt!r}")
+    if fmt == "msr":
+        raise ValueError("The .msr format must be written from a dataset so MBM metadata is preserved.")
+
+    arr = np.asarray(array)
+    if arr.dtype.names is None:
+        raise ValueError("Raw export components must be one-dimensional structured arrays.")
+    if arr.ndim != 1:
+        raise ValueError(f"Raw export components must be one-dimensional; got shape {arr.shape}.")
+
+    output = Path(path).with_suffix(_EXT[fmt])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if fmt in _COLUMN_FORMATS:
+        _write_columns(fmt, output, flatten_mfx_array(arr))
+    elif fmt == "mat":
+        _write_mat(output, arr, root=root)
+    elif fmt == "npy":
+        _write_npy(output, arr)
+    elif fmt == "json":
+        _write_json(output, arr)
+    else:  # pragma: no cover - guarded by _EXT above
+        raise ValueError(f"Unsupported raw export format: {fmt!r}")
+    return output
 
 
 # --- Picasso localization HDF5 ---------------------------------------------
@@ -718,10 +860,7 @@ def save_processed(
                              "n_rows": len(next(iter(columns.values()))) if columns else 0}
         else:
             mfx = dataset_to_mfx_array(ds)
-            if fmt in _COLUMN_FORMATS:
-                _write_columns(fmt, data_path, flatten_mfx_array(mfx))
-            else:
-                _WRITERS[fmt](data_path, mfx)
+            write_raw_array(data_path, fmt, mfx)
         written.append(data_path)
         sidecar = metadata_sidecar_path(data_path)
         data_filename = data_path.name

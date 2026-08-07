@@ -2206,7 +2206,7 @@ class MsrReaderDialog(QWidget):
             "preview_all_rows": False,
             "mode_folder": False,
             "plot_new_window": True,
-            "formats": {"mat": True, "npy": False, "json": False, "csv": False, "zarr": False},
+            "formats": {"mat": True, "npy": False, "npz": False, "json": False, "csv": False, "zarr": False, "msr": False},
             "field_selection": {},
         }
         try:
@@ -2251,9 +2251,11 @@ class MsrReaderDialog(QWidget):
             "formats": {
                 "mat": bool(self.fmt_mat.isChecked()),
                 "npy": bool(self.fmt_npy.isChecked()),
+                "npz": bool(self.fmt_npz.isChecked()),
                 "json": bool(self.fmt_json.isChecked()),
                 "csv": bool(self.fmt_csv.isChecked()),
                 "zarr": bool(self.fmt_zarr.isChecked()),
+                "msr": bool(self.fmt_msr.isChecked()),
             },
             "field_selection": clean_selection(self.field_selection),
             "image_field_selection": sorted(int(i) for i in (self.image_field_selection or set())),
@@ -2386,24 +2388,30 @@ class MsrReaderDialog(QWidget):
         export_row.addWidget(QLabel("Formats:"))
         self.fmt_mat = QCheckBox("MATLAB (.mat)")
         self.fmt_npy = QCheckBox("NumPy (.npy)")
+        self.fmt_npz = QCheckBox("NumPy zip (.npz)")
         self.fmt_json = QCheckBox("JSON (.json)")
         self.fmt_csv = QCheckBox("(.csv)")
         self.fmt_zarr = QCheckBox("Zarr (.zarr)")
+        self.fmt_msr = QCheckBox("MINFLUX (.msr)")
         self.fmt_zarr.setToolTip(
-            "Write the dataset's embedded zarr store to a .zarr directory "
-            "(the full MINFLUX container: mfx + beads)."
+            "Write canonical flat m2410 columns to a .zarr directory. "
+            "MBM is written as a separate companion when present."
         )
         formats = settings.get("formats") or {}
         self.fmt_mat.setChecked(bool(formats.get("mat", True)))
         self.fmt_npy.setChecked(bool(formats.get("npy", False)))
+        self.fmt_npz.setChecked(bool(formats.get("npz", False)))
         self.fmt_json.setChecked(bool(formats.get("json", False)))
         self.fmt_csv.setChecked(bool(formats.get("csv", False)))
         self.fmt_zarr.setChecked(bool(formats.get("zarr", False)))
+        self.fmt_msr.setChecked(bool(formats.get("msr", False)))
         export_row.addWidget(self.fmt_mat)
         export_row.addWidget(self.fmt_npy)
+        export_row.addWidget(self.fmt_npz)
         export_row.addWidget(self.fmt_json)
         export_row.addWidget(self.fmt_csv)
         export_row.addWidget(self.fmt_zarr)
+        export_row.addWidget(self.fmt_msr)
         export_row.addStretch(1)
         root.addLayout(export_row)
 
@@ -3288,95 +3296,14 @@ class MsrReaderDialog(QWidget):
         MFSTATE = self._msr_state()
         os.makedirs(out_dir, exist_ok=True)
 
-        # dataset display-name -> in-memory zarr store (for the .zarr export)
-        store_by_name = {
-            (ds.get("display_name") or ds.get("did") or "dataset"): ds.get("zroot")
-            for ds in (self.parsed.get("datasets") or [])
-        }
-
-        def subset_struct(arr, names_sel):
-            return self._subset_struct_fields(arr, names_sel)
-
-        def save_zarr(key: str):
-            from ...msr.mfxdta import unpack_zarr_store_to_dir
-            store = store_by_name.get(key)
-            if not store:
-                self.log(f"[zarr] skipping '{key}' (no embedded store).")
-                return None
-            path = Path(out_dir) / f"{key}.zarr"
-            unpack_zarr_store_to_dir(store, path)
-            self.log(f"[zarr] wrote {path}")
-
-        def save_mat(fn_base: str, arr):
-            if arr is None:
-                return None
-            try:
-                from scipy.io import savemat
-            except Exception as exc:
-                self.log(f"[warn] SciPy not available; skip .mat ({exc})")
-                return None
-            def as_col(a):
-                a = np.asarray(a)
-                if a.ndim == 1:
-                    return a.reshape(-1, 1)
-                if a.ndim == 2:
-                    return a
-                return a.reshape(a.shape[0], -1)
-            payload = {}
-            names = getattr(getattr(arr, "dtype", None), "names", None)
-            if names:
-                for k in names:
-                    col = arr[k]
-                    subnames = getattr(col.dtype, "names", None)
-                    if subnames:
-                        for sk in subnames:
-                            payload[f"{k}_{sk}"] = as_col(col[sk])
-                    else:
-                        payload[k] = as_col(col)
-            else:
-                payload["data"] = as_col(arr)
-            path = Path(out_dir) / f"{fn_base}.mat"
-            savemat(str(path), payload, do_compression=False, oned_as="column", long_field_names=True)
-            self.log(f"[mat] wrote {path}")
-
-        def save_npy(fn_base: str, arr):
-            if arr is None:
-                return None
-            path = Path(out_dir) / f"{fn_base}.npy"
-            np.save(str(path), arr, allow_pickle=False)
-            self.log(f"[npy] wrote {path}")
-
-        def save_json(fn_base: str, arr):
-            if arr is None:
-                return None
-            names = getattr(getattr(arr, "dtype", None), "names", None)
-            if not names:
-                self.log("[json] skipping (no named fields).")
-                return None
-            path = Path(out_dir) / f"{fn_base}.json"
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump(arr.tolist(), fh, ensure_ascii=False)
-            self.log(f"[json] wrote {path}")
-
-        def save_csv(fn_base: str, arr):
-            if arr is None:
-                return None
-            names = getattr(getattr(arr, "dtype", None), "names", None)
-            if not names:
-                self.log("[csv] skipping (no named fields).")
-                return None
-            path = Path(out_dir) / f"{fn_base}.csv"
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(list(names))
-                for row in arr:
-                    writer.writerow([np.asarray(row[k]).tolist() if hasattr(row[k], "shape") else row[k] for k in names])
-            self.log(f"[csv] wrote {path}")
+        from ...msr.export import export_arrays
 
         if self.parsed.get("mode") == "modern":
             datasets = [(ds.get("display_name") or ds.get("did") or "dataset") for ds in self.parsed.get("datasets") or []]
         else:
             datasets = list(getattr(MFSTATE, "mfx_map", {}).keys() | getattr(MFSTATE, "mbm_map", {}).keys()) or ["legacy"]
+
+        used_names: set[str] = set()
 
         for key in datasets:
             mfx_arr = MFSTATE.mfx_map.get(key)
@@ -3391,27 +3318,46 @@ class MsrReaderDialog(QWidget):
                     continue
                 mfx_sel = sel.get("mfx")
                 mbm_sel = sel.get("mbm")
-            mfx_sub = subset_struct(mfx_arr, mfx_sel)
-            mbm_sub = subset_struct(mbm_arr, mbm_sel)
+            mfx_sub = self._subset_struct_fields(mfx_arr, mfx_sel)
+            mbm_sub = self._subset_struct_fields(mbm_arr, mbm_sel)
+            if mfx_sub is None and mbm_sub is None:
+                self.log(f"[export] skip dataset '{key}' (no selected data).")
+                continue
+
+            # Dataset labels come from the source file and can contain Windows
+            # path separators or collide after sanitization.  Never let a label
+            # escape the selected output folder or silently overwrite another
+            # channel's export.
+            stem = self._safe_export_dataset_stem(key)
+            if stem in used_names:
+                raise ValueError(
+                    f"Dataset names collide after filename sanitization: {key!r} -> {stem!r}."
+                )
+            used_names.add(stem)
             kept = (list(getattr(getattr(mfx_sub, "dtype", None), "names", []) or [])
                     if mfx_sel is not None else "all")
             self.log(f"[export] '{key}': mfx fields = "
-                     f"{', '.join(kept) if isinstance(kept, list) else kept}"
-                     + ("" if "zarr" not in formats else "  (.zarr writes the full store)"))
-            if "mat" in formats:
-                save_mat(f"{key}_mfx", mfx_sub)
-                save_mat(f"{key}_mbm", mbm_sub)
-            if "npy" in formats:
-                save_npy(f"{key}_mfx", mfx_sub)
-                save_npy(f"{key}_mbm", mbm_sub)
-            if "json" in formats:
-                save_json(f"{key}_mfx", mfx_sub)
-                save_json(f"{key}_mbm", mbm_sub)
-            if "csv" in formats:
-                save_csv(f"{key}_mfx", mfx_sub)
-                save_csv(f"{key}_mbm", mbm_sub)
-            if "zarr" in formats:
-                save_zarr(key)
+                     f"{', '.join(kept) if isinstance(kept, list) else kept}")
+            export_arrays(
+                out_dir,
+                stem,
+                formats,
+                mfx_sub,
+                mbm_sub,
+                log=self.log,
+                mbm_meta=getattr(MFSTATE, "mbm_meta_map", {}).get(key),
+            )
+
+    @staticmethod
+    def _safe_export_dataset_stem(value: str) -> str:
+        """Convert a source dataset label to a safe single-folder stem."""
+        import re
+
+        text = str(value or "").strip()
+        text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text).strip(" .")
+        if not text:
+            raise ValueError(f"Dataset label {value!r} has no usable export filename.")
+        return text
 
     def _find_msr_files(self, path_str: str):
         p = Path(path_str)
@@ -4245,12 +4191,16 @@ class MsrReaderDialog(QWidget):
             formats.append("mat")
         if self.fmt_npy.isChecked():
             formats.append("npy")
+        if self.fmt_npz.isChecked():
+            formats.append("npz")
         if self.fmt_json.isChecked():
             formats.append("json")
         if self.fmt_csv.isChecked():
             formats.append("csv")
         if self.fmt_zarr.isChecked():
             formats.append("zarr")
+        if self.fmt_msr.isChecked():
+            formats.append("msr")
         if not formats:
             QMessageBox.critical(self, "No formats", "Pick at least one export format.")
             return
@@ -4283,7 +4233,15 @@ class MsrReaderDialog(QWidget):
                 self.log("no msr file found!")
                 return
             self._store_parse_result(parse_msr_general(msr, tmp, log=self.log))
-        self._export_current_parsed(out_dir, formats)
+        try:
+            self._export_current_parsed(out_dir, formats)
+        except Exception as exc:
+            # Export preflight deliberately raises on ambiguous selections,
+            # collisions, and overwrite attempts.  Surface the exact conflict
+            # instead of leaving a partial-looking success message.
+            self.log(f"[error] export failed: {exc}")
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
         self.log("[done] Export complete.")
 
     # ------------------------------------------------------------------
