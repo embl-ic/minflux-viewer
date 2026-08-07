@@ -5,6 +5,8 @@ the gamma tilt line. Plus the make_colormap gamma warp (pure).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -144,3 +146,78 @@ def test_viewbox_left_drag_routes_to_gamma(qtbot):
 
     dlg._gamma_vb.mouseDragEvent(_Ev())
     assert rec["gammas"] and dlg._gamma < 1.0                # pulled up → brighter
+
+
+def test_auto_uses_same_repeated_imagej_cycle_as_brightness_contrast(qtbot):
+    from minflux_viewer.ui.lut_dialog import LutDialog
+    from minflux_viewer.ui.render_window import RenderWindow
+
+    rng = np.random.default_rng(7)
+    pixels = np.zeros(20_000, dtype=float)
+    pixels[:5_000] = rng.lognormal(mean=0.0, sigma=0.8, size=5_000)
+    recorded = []
+    dlg = LutDialog(
+        on_levels_changed=lambda lo, hi: recorded.append((lo, hi)),
+        on_cmap_changed=lambda _name, _invert: None,
+    )
+    qtbot.addWidget(dlg)
+    dlg.load_image(
+        pixels=pixels,
+        data_lo=float(pixels.min()),
+        data_hi=float(pixels.max()),
+        lo=float(pixels.min()),
+        hi=float(pixels.max()),
+        cmap_name="hot",
+        invert=False,
+    )
+
+    reference = SimpleNamespace(_bc_auto_threshold=0)
+    expected_first = RenderWindow._compute_auto_levels(
+        reference, pixels, advance_auto_threshold=True
+    )
+    dlg._auto_btn.click()
+    assert (dlg._lo, dlg._hi) == pytest.approx(expected_first)
+    assert dlg._auto_threshold == reference._bc_auto_threshold == 5000
+    assert dlg._auto_btn.isChecked()
+
+    expected_second = RenderWindow._compute_auto_levels(
+        reference, pixels, advance_auto_threshold=True
+    )
+    dlg._auto_btn.click()
+    assert (dlg._lo, dlg._hi) == pytest.approx(expected_second)
+    assert dlg._auto_threshold == reference._bc_auto_threshold == 2500
+    assert dlg._auto_btn.isChecked()
+    assert len(recorded) == 2
+
+    dlg._min_spin.setValue(dlg._lo + 0.1 * (dlg._hi - dlg._lo))
+    assert dlg._auto_threshold == 0
+    assert not dlg._auto_btn.isChecked()
+
+
+def test_owner_managed_auto_updates_lut_controls_without_double_emitting(qtbot):
+    from minflux_viewer.ui.lut_dialog import LutDialog
+
+    auto_calls = []
+    level_calls = []
+    dlg = LutDialog(
+        on_levels_changed=lambda lo, hi: level_calls.append((lo, hi)),
+        on_cmap_changed=lambda _name, _invert: None,
+        on_auto=lambda: auto_calls.append(True) or (12.5, 87.5),
+    )
+    qtbot.addWidget(dlg)
+    dlg.load_image(
+        pixels=np.linspace(0.0, 100.0, 1000),
+        data_lo=0.0,
+        data_hi=100.0,
+        lo=0.0,
+        hi=100.0,
+        cmap_name="gray",
+        invert=False,
+    )
+
+    dlg._auto_btn.click()
+
+    assert auto_calls == [True]
+    assert level_calls == []
+    assert (dlg._lo, dlg._hi) == (12.5, 87.5)
+    assert dlg._auto_btn.isChecked()
