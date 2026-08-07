@@ -78,10 +78,15 @@ hidden_imports = [
     "roifile",
     # psutil per-OS backend (Windows/macOS/Linux)
     PSUTIL_BACKEND,
+    # QtNetwork — QLocalServer/QLocalSocket back the single-instance guard
+    # (ui/single_instance.py). Stated explicitly because losing it does not
+    # degrade a feature, it stops the app booting at all.
+    "PyQt6.QtNetwork",
     # minflux_viewer plugins (loaded at runtime via importlib)
     "minflux_viewer.plugins.msr_reader",
     "minflux_viewer.plugins.paraview",
     "minflux_viewer.plugins.generate_method_text",
+    "minflux_viewer.plugins.hlyb_pair_analysis",
 ]
 
 # ---------------------------------------------------------------------------

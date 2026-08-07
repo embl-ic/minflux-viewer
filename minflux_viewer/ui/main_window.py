@@ -1632,6 +1632,25 @@ class MainWindow(QMainWindow):
             return
         getattr(self, loader)(path)
 
+    def raise_from_second_launch(self) -> None:
+        """Someone launched the app again with no file — show this window.
+
+        The duplicate process exits without a UI (see ``ui/single_instance.py``),
+        so bringing this one forward is the whole visible response; otherwise
+        double-clicking the app while it runs would appear to do nothing.
+        """
+        import os
+
+        self._state.log(
+            f"Second launch handed over to this instance (pid {os.getpid()}).", "INFO")
+        try:
+            if self.isMinimized():
+                self.showNormal()
+            self.raise_()
+            self.activateWindow()
+        except RuntimeError:
+            pass
+
     def open_path_from_desktop(self, path: str, *, source: str = "desktop") -> None:
         """Open *path* on behalf of the OS (command line, or a file dropped on
         the application icon), raising this window so the result is visible.

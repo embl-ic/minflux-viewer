@@ -100,3 +100,13 @@ class FileOpenApplication(QApplication):
     def pending_paths(self) -> list[str]:
         """Paths received before a handler was installed (diagnostics/tests)."""
         return list(self._pending_paths)
+
+    def take_pending_paths(self) -> list[str]:
+        """Remove and return everything queued so far.
+
+        Used at startup by the single-instance guard: a duplicate launch must
+        hand these over to the running instance rather than leave them queued
+        for a UI it is about to not build.
+        """
+        pending, self._pending_paths = self._pending_paths, []
+        return pending
