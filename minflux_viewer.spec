@@ -78,15 +78,10 @@ hidden_imports = [
     "roifile",
     # psutil per-OS backend (Windows/macOS/Linux)
     PSUTIL_BACKEND,
-    # QtNetwork — QLocalServer/QLocalSocket back the macOS document-open relay
-    # (ui/document_open_relay.py). Stated explicitly because PyInstaller's
-    # static analysis can otherwise miss the dynamically imported module.
-    "PyQt6.QtNetwork",
     # minflux_viewer plugins (loaded at runtime via importlib)
     "minflux_viewer.plugins.msr_reader",
     "minflux_viewer.plugins.paraview",
     "minflux_viewer.plugins.generate_method_text",
-    "minflux_viewer.plugins.hlyb_pair_analysis",
 ]
 
 # ---------------------------------------------------------------------------
@@ -191,34 +186,5 @@ if sys.platform == "darwin":
             "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
-            # Declare the documents we open so Launch Services sends an odoc
-            # Apple Event. Qt exposes it as QFileOpenEvent, handled by
-            # ui/file_open_app.py. A document-bearing process that macOS starts
-            # unexpectedly is covered by ui/document_open_relay.py.
-            "CFBundleDocumentTypes": [
-                {
-                    "CFBundleTypeName": "MINFLUX data",
-                    "CFBundleTypeRole": "Viewer",
-                    # "Alternate", not "Owner": Imspector owns .msr on a machine
-                    # that has it, and we should not take the association over.
-                    "LSHandlerRank": "Alternate",
-                    "LSTypeIsPackage": False,
-                    "CFBundleTypeExtensions": [
-                        "msr", "mat", "npy", "json",
-                        "csv", "tsv", "txt", "xlsx", "xlsm",
-                        "tif", "tiff", "roi",
-                    ],
-                },
-                {
-                    # A Zarr store is a *directory*, so it needs its own entry
-                    # with LSTypeIsPackage — otherwise Finder treats it as a
-                    # folder to open rather than a document to hand over.
-                    "CFBundleTypeName": "MINFLUX Zarr store",
-                    "CFBundleTypeRole": "Viewer",
-                    "LSHandlerRank": "Alternate",
-                    "LSTypeIsPackage": True,
-                    "CFBundleTypeExtensions": ["zarr"],
-                },
-            ],
         },
     )
