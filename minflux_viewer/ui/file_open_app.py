@@ -37,9 +37,15 @@ class FileOpenApplication(QApplication):
     """``QApplication`` that forwards OS open-document requests to a handler."""
 
     def __init__(self, argv) -> None:
-        super().__init__(argv)
+        # Qt may deliver a QFileOpenEvent while QApplication.__init__ is still
+        # running.  This happens on macOS when Launch Services starts a frozen
+        # .app with a document.  Initialize the Python-side queue *before*
+        # entering Qt, otherwise the early event calls open_path() before
+        # these attributes exist and the document is reported as unhandled.
         self._pending_paths: list[str] = []
         self._open_handler = None
+        self._accept_open_events = True
+        super().__init__(argv)
 
     # -- Qt ----------------------------------------------------------------
     def event(self, event) -> bool:                        # noqa: D102 - Qt API
@@ -75,6 +81,8 @@ class FileOpenApplication(QApplication):
         Called once the main window exists. ``handler(path)`` is invoked for
         each queued path in arrival order, then for every later request.
         """
+        if not self._accept_open_events:
+            return
         self._open_handler = handler
         pending, self._pending_paths = self._pending_paths, []
         for path in pending:
@@ -82,10 +90,24 @@ class FileOpenApplication(QApplication):
 
     def open_path(self, path: str) -> None:
         """Handle one open request now, or queue it until a handler exists."""
+        if not self._accept_open_events:
+            return
         if self._open_handler is None:
             self._pending_paths.append(path)
             return
         self._dispatch(path)
+
+    def stop_opening(self) -> None:
+        """Reject late macOS open events while the application is quitting.
+
+        ``main()`` performs one final Qt event-processing turn after
+        ``aboutToQuit``.  Without disabling the handler, a late Apple Event can
+        call into a MainWindow that is already closing and make the app appear
+        to reopen a second reader during shutdown.
+        """
+        self._accept_open_events = False
+        self._open_handler = None
+        self._pending_paths.clear()
 
     def _dispatch(self, path: str) -> None:
         # A failure here must not kill the event loop: an unhandled exception
