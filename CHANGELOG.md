@@ -26,16 +26,6 @@ Validated against a real two-colour ratiometric `.msr`, the option only had a st
 - **Implemented for a user project a custom plugin as "HlyB/D subunit pair analysis"** (*Plugins* menu). Running it against a dataset produces a full Methods account in *Plugins → Generate Method Text*, including every parameter and a definition of each reported term.
 - **Plugins can now declare search keywords**, so the Command Finder finds them by synonyms that are not in their menu label.
 
-### macOS
-- **Fixed: dropping a file on the app icon opened another viewer process.** The bundle declares its document types and the application handles macOS Open-Document events. If Launch Services nevertheless starts a document-bearing helper process (for example because several registered bundle copies exist), a document-only relay hands the paths to a running viewer and exits only after explicit acceptance.
-- **Independent viewer instances remain supported.** A normal no-document launch is never suppressed. `open -n -a "MINFLUX Viewer"` starts another instance on macOS; `--new-instance` (or the compatibility environment variable `MINFLUX_VIEWER_ALLOW_MULTIPLE=1`) also keeps document arguments in that new instance.
-- Opening a file from Finder — drop, double-click, or *Open With* — reuses the window you already have. We register as an *alternative* handler for `.msr`, so an Imspector file association is left alone.
-- Each open request is logged with the process id and how it arrived, so it is clear which window handled it.
-- **New `scripts/check_macos_bundle.py`** checks a built `.app`: whether it actually contains the fix, whether the bundle keys landed, and whether stale copies of the app are confusing macOS.
-
-### Command line
-- **`minflux-viewer <path>` accepts every supported format and folders.** It previously recognised only `.mat`, `.npy`, `.csv` and `.msr` and silently ignored anything else, so `minflux-viewer data.json` opened nothing. Folders are now scanned the same way a dropped folder is.
-
 ### Fixes
 - **A single-channel `.msr` import no longer shows as "Overlay"** in the Dataset Manager. It is reported as "Own", and the provisional channel grouping the importer assigns before it knows the channel count no longer survives.
 - **Editing Preferences no longer mutates the built-in defaults** for the rest of the session (a shallow copy meant the preference dictionary *was* the defaults).
