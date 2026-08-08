@@ -41,16 +41,16 @@ def main() -> int:
     app.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
 
     from .core.app_state import AppState
-    from .ui.main_window import MainWindow
+    from .ui.main_window import MainWindow, startup_paths_from_argv
 
     state  = AppState()
     window = MainWindow(state)
     window.show()
 
-    # Allow passing supported data files as CLI arguments
-    for arg in sys.argv[1:]:
-        if arg.lower().endswith((".mat", ".npy", ".csv", ".msr")):
-            window._route_file(arg)
+    # Data files named on the command line. _route_path (not _route_file) so a
+    # directory is scanned for supported files, exactly as dropping it is.
+    for path in startup_paths_from_argv(sys.argv[1:]):
+        window._route_path(path)
 
     exit_code = app.exec()
 
