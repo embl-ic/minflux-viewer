@@ -79,6 +79,32 @@ _FMT_LOADERS: dict[str, str] = {
     "zarr": "_load_zarr",
 }
 
+
+def startup_paths_from_argv(args) -> list[str]:
+    """Filesystem paths to open from the command line, in order.
+
+    Accepts any supported file **and directories** (the caller routes them
+    through ``_route_path``, so a folder is scanned like a drop), and drops
+    arguments that are not paths to open — option-like arguments, which would
+    otherwise be probed as files, and notably the ``-psn_0_…``
+    process-serial-number argument macOS passes to a bundled ``.app``.
+
+    Before this, the startup loop matched only ``.mat/.npy/.csv/.msr`` and
+    passed each straight to ``_route_file``, so ``minflux-viewer data.json``
+    and ``minflux-viewer some_folder/`` silently opened nothing.
+    """
+    paths: list[str] = []
+    for arg in args:
+        text = str(arg)
+        if not text or text.startswith("-"):
+            continue                    # -psn_0_…, -style, -platform, …
+        candidate = Path(text)
+        suffix = candidate.suffix.lower()
+        # A ``.zarr`` store is a directory, so check the suffix before is_dir().
+        if suffix in _SUPPORTED_EXTS or candidate.is_dir():
+            paths.append(text)
+    return paths
+
 _ROI_TOOL_DEFS: tuple[tuple[str, str, str], ...] = (
     ("Rectangle", "rectangle", "toolRect"),
     ("Oval", "oval", "toolOval"),
