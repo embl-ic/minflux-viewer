@@ -11,6 +11,24 @@ Run with::
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+
+def _deduplicate_startup_paths(paths) -> list[str]:
+    """Keep one request when macOS/PyInstaller report the same document twice."""
+    seen: set[str] = set()
+    unique: list[str] = []
+    for raw in paths:
+        path = str(raw)
+        try:
+            key = str(Path(path).expanduser().resolve(strict=False))
+        except (OSError, RuntimeError, ValueError):
+            key = path
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
 
 
 def main() -> int:
@@ -55,7 +73,9 @@ def main() -> int:
     # QApplication exists — so drain the event queue once before deciding
     # whether we are a duplicate, or a hand-off would lose the file.
     app.processEvents()
-    startup_paths = startup_paths_from_argv(sys.argv[1:]) + app.take_pending_paths()
+    startup_paths = _deduplicate_startup_paths(
+        startup_paths_from_argv(sys.argv[1:]) + app.take_pending_paths()
+    )
 
     # If a viewer is already running, give it the files and stop. Launch
     # Services is supposed to prevent a second copy (LSMultipleInstancesProhibited)
@@ -73,15 +93,19 @@ def main() -> int:
     def _open(path: str, source: str) -> None:
         window.open_path_from_desktop(path, source=source)
 
+    # Install the handler before opening startup paths.  A second Apple Event
+    # can arrive during a slow MSR startup and must be dispatched through the
+    # same live-window route instead of being left in a queue until teardown.
+    app.set_open_handler(lambda p: _open(p, "macOS Open-Document event"))
     for path in startup_paths:
         _open(path, "command line")
     # Later requests: macOS Apple Event to this process, or a duplicate launch
     # that handed its files over rather than opening a window of its own.
-    app.set_open_handler(lambda p: _open(p, "macOS Open-Document event"))
     guard.path_received.connect(lambda p: _open(p, "second launch, handed over"))
     guard.raise_requested.connect(window.raise_from_second_launch)
     # Stop accepting hand-offs while shutting down, so a newcomer becomes the
     # primary instead of handing files to a dying process.
+    app.aboutToQuit.connect(app.stop_opening)
     app.aboutToQuit.connect(guard.stop)
 
     exit_code = app.exec()

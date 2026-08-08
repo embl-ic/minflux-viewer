@@ -90,6 +90,7 @@ class SingleInstanceGuard(QObject):
         self._name = name or server_name()
         self._server: QLocalServer | None = None
         self._buffers: dict = {}
+        self._accepting = True
 
     @property
     def name(self) -> str:
@@ -141,6 +142,7 @@ class SingleInstanceGuard(QObject):
         """
         if allow_multiple_instances():
             return False
+        self._accepting = True
         server = QLocalServer(self)
         server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
         if not server.listen(self._name):
@@ -151,6 +153,17 @@ class SingleInstanceGuard(QObject):
         self._server = server
         return True
 
+    def begin_shutdown(self) -> None:
+        """Reject new hand-offs while keeping the server name claimed.
+
+        Closing the server immediately during aboutToQuit creates a race: a
+        delayed macOS document launch sees no primary and promotes itself to a
+        new visible viewer while this process is still tearing down. Keep the
+        socket alive long enough to reject that request; stop() closes it only
+        after the Qt event loop has returned.
+        """
+        self._accepting = False
+
     def stop(self) -> None:
         """Stop accepting hand-offs.
 
@@ -158,6 +171,7 @@ class SingleInstanceGuard(QObject):
         tearing down would otherwise hand over paths that are never opened.
         Better to refuse, so the newcomer becomes the primary and opens them.
         """
+        self._accepting = False
         if self._server is not None:
             try:
                 self._server.close()

@@ -62,6 +62,15 @@ def test_argv_preserves_order(tmp_path):
         str(second), str(first)]
 
 
+def test_startup_paths_are_deduplicated_across_argv_and_apple_event(tmp_path):
+    from minflux_viewer.__main__ import _deduplicate_startup_paths
+
+    path = tmp_path / "sample.msr"
+    path.write_bytes(b"")
+
+    assert _deduplicate_startup_paths([str(path), str(path)]) == [str(path)]
+
+
 # ------------------------------------------------------- macOS odoc delivery
 class _FakeFileOpenEvent:
     """Stand-in for QFileOpenEvent, which PyQt6 refuses to instantiate."""
@@ -113,6 +122,19 @@ def test_paths_arriving_before_the_window_exists_are_queued(qapp_class):
     app.set_open_handler(seen.append)
 
     assert seen == ["/tmp/early_one.msr", "/tmp/early_two.mat"]  # in order
+    assert app.pending_paths == []
+
+
+def test_shutdown_drops_late_open_requests(qapp_class):
+    """A late Apple Event must not reopen a reader during Qt teardown."""
+    app = qapp_class
+    seen: list[str] = []
+    app.set_open_handler(seen.append)
+    app.stop_opening()
+
+    app.open_path("/tmp/late.msr")
+
+    assert seen == []
     assert app.pending_paths == []
 
 
@@ -206,6 +228,7 @@ def qapp_class(qapp):
     app = FileOpenApplication.__new__(FileOpenApplication)
     app._pending_paths = []
     app._open_handler = None
+    app._accept_open_events = True
     return app
 
 
@@ -264,6 +287,7 @@ def test_the_application_handler_routes_through_the_window(qtbot, tmp_path):
     app = FileOpenApplication.__new__(FileOpenApplication)
     app._pending_paths = []
     app._open_handler = None
+    app._accept_open_events = True
     # Arrives before the window is ready, as on a cold launch-with-document.
     app.open_path(str(tmp_path / "early.msr"))
     app.set_open_handler(
