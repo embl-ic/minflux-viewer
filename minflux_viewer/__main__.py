@@ -6,6 +6,7 @@ Run with::
     python -m minflux_viewer            # from source tree
     minflux-viewer                      # after  poetry install
     minflux-viewer /path/to/data.mat    # open file on launch
+    minflux-viewer --new-instance data  # do not relay startup documents
 """
 
 from __future__ import annotations
@@ -66,25 +67,40 @@ def main() -> int:
 
     from .core.app_state import AppState
     from .ui.main_window import MainWindow, startup_paths_from_argv
-    from .ui.single_instance import SingleInstanceGuard
+    relay = None
+    relayed_startup_paths: list[str] = []
+    relayed_startup_requests: list[dict] = []
+    queue_relay_path = relayed_startup_paths.append
+    queue_relay_request = relayed_startup_requests.append
+    if sys.platform == "darwin":
+        from .ui.document_open_relay import (
+            DocumentOpenRelay,
+            should_handoff_documents,
+        )
 
     # Everything this process was asked to open. On macOS the request can be an
     # Apple Event rather than argv, and it is delivered as soon as the
-    # QApplication exists — so drain the event queue once before deciding
-    # whether we are a duplicate, or a hand-off would lose the file.
+    # QApplication exists — so drain the event queue before deciding whether a
+    # document-bearing launch should offer its paths to a running viewer.
     app.processEvents()
     startup_paths = _deduplicate_startup_paths(
         startup_paths_from_argv(sys.argv[1:]) + app.take_pending_paths()
     )
 
-    # If a viewer is already running, give it the files and stop. Launch
-    # Services is supposed to prevent a second copy (LSMultipleInstancesProhibited)
-    # but does not reliably do so for an unregistered/relocated bundle, so the
-    # guard does not depend on it. Must happen before any UI is built.
-    guard = SingleInstanceGuard()
-    if guard.hand_off_to_primary(startup_paths):
-        return 0
-    guard.listen()
+    if sys.platform == "darwin":
+        # This is a document-only fallback, not a single-instance policy. A
+        # normal second launch has no paths and always continues to its own UI.
+        # A process unexpectedly launched for an odoc request exits only after
+        # a live viewer explicitly acknowledges accepting the paths.
+        relay = DocumentOpenRelay()
+        if (
+            should_handoff_documents(startup_paths)
+            and relay.hand_off_documents(startup_paths)
+        ):
+            return 0
+        relay.path_received.connect(queue_relay_path)
+        relay.request_received.connect(queue_relay_request)
+        relay.start()
 
     state  = AppState()
     window = MainWindow(state)
@@ -93,22 +109,49 @@ def main() -> int:
     def _open(path: str, source: str) -> None:
         window.open_path_from_desktop(path, source=source)
 
-    # Install the handler before opening startup paths.  A second Apple Event
+    def _log_relay_request(request: dict) -> None:
+        pid = request.get("pid")
+        executable = request.get("executable") or "unknown executable"
+        state.log(
+            f"macOS document relay accepted request from pid {pid}: "
+            f"'{executable}'",
+            "INFO",
+        )
+
+    # Install the handler before opening startup paths. A second Apple Event
     # can arrive during a slow MSR startup and must be dispatched through the
     # same live-window route instead of being left in a queue until teardown.
     app.set_open_handler(lambda p: _open(p, "macOS Open-Document event"))
+    if relay is not None:
+        try:
+            relay.path_received.disconnect(queue_relay_path)
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            relay.request_received.disconnect(queue_relay_request)
+        except (TypeError, RuntimeError):
+            pass
+        relay.request_received.connect(_log_relay_request)
+        relay.path_received.connect(
+            lambda p: _open(p, "macOS document relay")
+        )
+    for request in relayed_startup_requests:
+        _log_relay_request(request)
+    startup_paths = _deduplicate_startup_paths(
+        startup_paths + relayed_startup_paths
+    )
     for path in startup_paths:
         _open(path, "command line")
-    # Later requests: macOS Apple Event to this process, or a duplicate launch
-    # that handed its files over rather than opening a window of its own.
-    guard.path_received.connect(lambda p: _open(p, "second launch, handed over"))
-    guard.raise_requested.connect(window.raise_from_second_launch)
-    # Stop accepting hand-offs while shutting down, so a newcomer becomes the
-    # primary instead of handing files to a dying process.
     app.aboutToQuit.connect(app.stop_opening)
-    app.aboutToQuit.connect(guard.stop)
+    if relay is not None:
+        # Reject (rather than falsely acknowledge) requests once teardown has
+        # begun. Keep the server name claimed until app.exec() returns.
+        app.aboutToQuit.connect(relay.begin_shutdown)
 
     exit_code = app.exec()
+
+    if relay is not None:
+        relay.stop()
 
     # Give Qt one explicit cleanup turn before Python starts tearing down
     # module globals and local QWidget wrappers. This is especially helpful on

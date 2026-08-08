@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check a built macOS ``.app`` for the things that cause a second instance.
+"""Check a built macOS ``.app`` for document-open integration problems.
 
 Run on the Mac, against the bundle you actually launched::
 
@@ -8,10 +8,11 @@ Run on the Mac, against the bundle you actually launched::
 It answers, in order, the questions that matter when a dropped file opens a
 second copy of the viewer:
 
-1. Does this build contain the fix at all, or was it built from an older tree?
-2. Did the Info.plist keys make it into the bundle?
-3. Are there other copies of the same bundle identifier registered, so Launch
-   Services can hand the document to a different copy than the running one?
+1. Does this build contain the native event handler and document-only relay?
+2. Did the document declarations make it into ``Info.plist`` without imposing
+   a global single-instance policy?
+3. Are other copies of the same bundle identifier registered, so Launch
+   Services may select a different bundle path?
 
 Read-only; it changes nothing.
 """
@@ -24,7 +25,7 @@ import sys
 from pathlib import Path
 
 #: Modules that must be inside the bundle for the fix to be present.
-REQUIRED_MODULES = ("single_instance", "file_open_app")
+REQUIRED_MODULES = ("document_open_relay", "file_open_app")
 
 
 def _find_plist(app: Path) -> Path:
@@ -71,8 +72,7 @@ def check_plist(app: Path) -> bool:
     ok = True
     types = plist.get("CFBundleDocumentTypes") or []
     if not types:
-        print("   MISS CFBundleDocumentTypes  <- Launch Services has no handler,")
-        print("        so it launches a new copy instead of using the running one")
+        print("   MISS CFBundleDocumentTypes  <- no macOS open-document events")
         ok = False
     else:
         exts = sorted({e.lower()
@@ -86,8 +86,12 @@ def check_plist(app: Path) -> bool:
                       f"{entry.get('CFBundleTypeName')!r} (expected 'Alternate')")
 
     multi = plist.get("LSMultipleInstancesProhibited")
-    print(f"   {'OK  ' if multi else 'MISS'} LSMultipleInstancesProhibited: {multi!r}")
-    ok = ok and bool(multi)
+    if multi:
+        print("   FAIL LSMultipleInstancesProhibited is enabled")
+        print("        intentional independent launches must remain possible")
+        ok = False
+    else:
+        print("   OK   no global multiple-instance prohibition")
 
     print(f"   ..   CFBundleIdentifier: {plist.get('CFBundleIdentifier')!r}")
     print(f"   ..   CFBundleShortVersionString: "
@@ -147,8 +151,8 @@ def main(argv: list[str]) -> int:
     print("\nSummary")
     if code_ok and plist_ok:
         print("  Build looks correct. If a drop still opens a second window, the")
-        print("  single-instance guard will now catch it: check the Log window for")
-        print("  'Open request (..., pid ...)' / 'second launch, handed over'.")
+        print("  native odoc handling and the document-only relay are present.")
+        print("  Check the Log for 'Open request (..., pid ...)' while reproducing.")
     else:
         print("  Rebuild (and/or refresh Launch Services) before testing again.")
     return 0 if (code_ok and plist_ok) else 1

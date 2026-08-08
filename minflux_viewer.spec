@@ -78,9 +78,9 @@ hidden_imports = [
     "roifile",
     # psutil per-OS backend (Windows/macOS/Linux)
     PSUTIL_BACKEND,
-    # QtNetwork — QLocalServer/QLocalSocket back the single-instance guard
-    # (ui/single_instance.py). Stated explicitly because losing it does not
-    # degrade a feature, it stops the app booting at all.
+    # QtNetwork — QLocalServer/QLocalSocket back the macOS document-open relay
+    # (ui/document_open_relay.py). Stated explicitly because PyInstaller's
+    # static analysis can otherwise miss the dynamically imported module.
     "PyQt6.QtNetwork",
     # minflux_viewer plugins (loaded at runtime via importlib)
     "minflux_viewer.plugins.msr_reader",
@@ -191,12 +191,10 @@ if sys.platform == "darwin":
             "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
-            # Declare the documents we open.  Without this, Launch Services has
-            # no registered handler for e.g. ".msr", so dropping one on the app
-            # icon does NOT reach the running instance — macOS launches a second
-            # copy instead.  The running instance receives the document as a
-            # QFileOpenEvent, handled by ui/file_open_app.py; the two changes
-            # are required together, neither works on its own.
+            # Declare the documents we open so Launch Services sends an odoc
+            # Apple Event. Qt exposes it as QFileOpenEvent, handled by
+            # ui/file_open_app.py. A document-bearing process that macOS starts
+            # unexpectedly is covered by ui/document_open_relay.py.
             "CFBundleDocumentTypes": [
                 {
                     "CFBundleTypeName": "MINFLUX data",
@@ -222,8 +220,5 @@ if sys.platform == "darwin":
                     "CFBundleTypeExtensions": ["zarr"],
                 },
             ],
-            # One running copy handles every document; without this a drop can
-            # still spawn a second instance.
-            "LSMultipleInstancesProhibited": True,
         },
     )
