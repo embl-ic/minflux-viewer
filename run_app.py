@@ -11,6 +11,7 @@ from minflux_viewer.__main__ import main
 
 if __name__ == "__main__":
     # Propagate the exit code: main() returns 0 without building a UI when it
-    # handed its files to an already-running instance (ui/single_instance.py),
-    # and a nonzero code on failure. Calling main() bare discarded both.
+    # handed macOS startup documents to a running viewer
+    # (ui/document_open_relay.py), and a nonzero code on failure. Calling
+    # main() bare discarded both.
     sys.exit(main())

@@ -4,10 +4,7 @@ On **macOS** a file dropped on the application icon (or double-clicked in
 Finder, or passed to ``open -a``) is *not* delivered in ``sys.argv``. Launch
 Services sends the running process an ``kAEOpenDocuments`` ("odoc") Apple
 Event, which Qt translates into a :class:`QFileOpenEvent` on the application
-object. An app that does not handle that event silently ignores the file — and
-because macOS then has no running-instance handler for the document, it can
-launch a *second* copy of the app instead, which is how one dropped ``.msr``
-ended up opening a new viewer window.
+object. An app that does not handle that event silently ignores the file.
 
 Two things are needed to make the running instance handle it, and neither works
 alone:
@@ -101,9 +98,9 @@ class FileOpenApplication(QApplication):
         """Reject late macOS open events while the application is quitting.
 
         ``main()`` performs one final Qt event-processing turn after
-        ``aboutToQuit``.  Without disabling the handler, a late Apple Event can
-        call into a MainWindow that is already closing and make the app appear
-        to reopen a second reader during shutdown.
+        ``aboutToQuit``. Without disabling the handler, a late Apple Event can
+        call into a MainWindow that is already closing and reopen a reader in
+        that same process during teardown.
         """
         self._accept_open_events = False
         self._open_handler = None
@@ -126,9 +123,9 @@ class FileOpenApplication(QApplication):
     def take_pending_paths(self) -> list[str]:
         """Remove and return everything queued so far.
 
-        Used at startup by the single-instance guard: a duplicate launch must
-        hand these over to the running instance rather than leave them queued
-        for a UI it is about to not build.
+        Used at startup by the macOS document relay: a process launched for an
+        Open-Document request can offer these paths to a running viewer before
+        deciding whether it needs to build its own UI.
         """
         pending, self._pending_paths = self._pending_paths, []
         return pending

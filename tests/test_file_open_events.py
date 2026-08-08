@@ -90,8 +90,7 @@ class _FakeFileOpenEvent:
 
 
 def test_file_open_event_is_forwarded_to_the_handler(qapp_class):
-    """QFileOpenEvent must reach the handler, or the running instance ignores
-    the dropped file and macOS launches a second copy."""
+    """QFileOpenEvent must reach the handler so the requested file is opened."""
     app = qapp_class
     seen: list[str] = []
     app.set_open_handler(seen.append)
@@ -180,8 +179,7 @@ def _info_plist() -> dict:
 
 
 def test_bundle_declares_the_document_types_it_opens():
-    """Without CFBundleDocumentTypes, Launch Services has no running-instance
-    handler and launches a second copy of the app for a dropped file."""
+    """Document declarations make Launch Services send Open-Document events."""
     plist = _info_plist()
     types = plist.get("CFBundleDocumentTypes")
     assert types, "CFBundleDocumentTypes missing"
@@ -204,8 +202,8 @@ def test_zarr_is_declared_as_a_package_and_others_are_not():
     assert all(e.get("LSTypeIsPackage") is False for e in others)
 
 
-def test_bundle_prohibits_a_second_instance():
-    assert _info_plist().get("LSMultipleInstancesProhibited") is True
+def test_bundle_allows_intentional_independent_instances():
+    assert not _info_plist().get("LSMultipleInstancesProhibited", False)
 
 
 def test_we_do_not_claim_ownership_of_the_msr_association():
