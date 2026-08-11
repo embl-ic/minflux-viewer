@@ -2365,8 +2365,13 @@ def _normalize_mfx_attrs(
                 _add_mfx_attr(attrs, field_name, selected, int(selected.shape[0]))
 
         num_raw = int(np.count_nonzero(select_mask))
-        detail = "legacy nested iteration table: per-iteration values stored in mfx.itr"
-        return attrs, num_raw, num_itr, "legacy", detail
+        # This is the native m2205 layout used by Imspector: every outer
+        # localization owns a fixed-width structured ``itr`` subarray.  The
+        # MAT loader has always called the equivalent unwrapped layout m2205;
+        # calling the direct MSR path "legacy" made the same acquisition change
+        # version merely because it arrived through a different container.
+        detail = "m2205: per-iteration values stored in the structured mfx.itr table"
+        return attrs, num_raw, num_itr, "m2205", detail
 
     # The mfx array is in m2410-style flat format (already flattened per-loc).
     for field_name in field_names:

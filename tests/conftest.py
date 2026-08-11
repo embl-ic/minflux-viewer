@@ -14,6 +14,13 @@ constructor (it stays ``NativeFormat``), and ``setPath`` is ignored for the Wind
 registry — so redirecting QSettings itself does not work. Instead we patch the two
 ``AppState`` persistence methods (the only pref read/write path) to use a throwaway
 temp file for the whole test session.
+
+The **MSR reader plugin** keeps its own settings in a JSON file at
+``~/.minflux_viewer_msr_settings.json``, likewise a single shared location.
+Merely constructing ``MsrReaderDialog`` writes it (several handlers call
+``_save_settings``), so any test that opens the dialog would otherwise overwrite
+the user's real output folder, format selection and last-used input path. It is
+redirected the same way.
 """
 
 from __future__ import annotations
@@ -60,4 +67,20 @@ def _isolate_preferences(tmp_path_factory):
     # patch in place is harmless — the process exits at session end regardless.
     _mod.AppState._load_prefs = _load
     _mod.AppState.save_prefs = _save
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_msr_reader_settings(tmp_path_factory):
+    """Redirect the MSR reader plugin's settings file away from the real one."""
+    try:
+        from minflux_viewer.plugins.msr_reader import msr_reader_dialog as _dlg
+    except Exception:                       # PyQt6 missing → pure tests still run
+        yield
+        return
+
+    settings_file = tmp_path_factory.mktemp("msr") / "msr_settings.json"
+    # Patched for the whole process, like the preferences above: a dialog's
+    # close/destroy can save during interpreter teardown.
+    _dlg.MsrReaderDialog._settings_path = lambda self: settings_file
     yield

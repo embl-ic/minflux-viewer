@@ -47,6 +47,7 @@ channel alignment are intentionally **not** handled here.
 
 from __future__ import annotations
 
+import json
 import mmap
 import re
 import struct
@@ -203,9 +204,10 @@ def extract_did_label_map(msr_path) -> dict[str, str]:
     """Map each dataset ``did`` (UUID) → its human label.
 
     Modern multi-channel ``.msr`` files embed ``{"did":…,"label":…}`` descriptors
-    (e.g. ``1_anti_ELYS_F2_Atto655_100pM``); each MFXDTA store records its ``did``
-    in ``mfx/.zattrs``, so the two can be joined to name channels without specpy.
-    Returns ``{}`` for early single-channel files (which carry no such labels).
+    (e.g. ``1_anti_ELYS_F2_Atto655_100pM``). Newer stores may repeat ``did`` in
+    ``mfx/.zattrs``; m2205 stores often keep it only in the enclosing OBF stack
+    tag (handled by :func:`extract_minflux_stack_tags`). Returns ``{}`` for early
+    single-channel files that carry no labels.
     """
     out: dict[str, str] = {}
     try:
@@ -221,6 +223,34 @@ def extract_did_label_map(msr_path) -> dict[str, str]:
                 mm.close()
     except Exception:
         pass
+    return out
+
+
+def extract_minflux_stack_tags(msr_path) -> dict[int, dict]:
+    """Return parsed per-stack ``minflux`` JSON tags keyed by OBF index.
+
+    The tag is the authoritative identity record for older m2205 MFXDTA
+    stores, whose ``mfx/.zattrs`` may omit ``did`` even though the surrounding
+    OBF stack records it.  Non-JSON placeholders used by ordinary confocal
+    stacks are ignored.
+    """
+    from msr_reader import OBFFile
+
+    out: dict[int, dict] = {}
+    try:
+        with OBFFile(str(msr_path)) as obf:
+            for index, footer in enumerate(obf.stack_footers):
+                raw = (getattr(footer, "tag_dictionary", None) or {}).get("minflux")
+                if not raw:
+                    continue
+                try:
+                    tag = json.loads(raw)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if isinstance(tag, dict):
+                    out[index] = tag
+    except Exception:
+        return {}
     return out
 
 
