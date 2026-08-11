@@ -132,6 +132,53 @@ def test_full_roundtrip_to_mfx_array(tmp_path):
     np.testing.assert_array_equal(mfx["tid"], arr["tid"])
 
 
+def test_parser_uses_obf_stack_did_when_zarr_attrs_omit_it():
+    from minflux_viewer.msr.io import collect_zarr_fields
+    from minflux_viewer.msr.msr_parser import GeneralMSRParser
+
+    arr = _sample_mfx()
+    zstore = _zarr_store_for(arr)  # deliberately has no mfx.attrs['did']
+    entries = [("zarr\\" + key.replace("/", "\\"), 0, value)
+               for key, value in zstore.items()]
+    blob = _pack_mfxdta(entries)
+    actual_did = "7aa5-test-dataset-id"
+    entry = GeneralMSRParser()._mfxdta_dataset_entry(
+        10,
+        "",
+        blob,
+        collect_zarr_fields,
+        {},
+        {"type": "data", "did": actual_did, "label": "tracked sample"},
+        lambda *_: None,
+    )
+    assert entry is not None
+    assert entry["did"] == actual_did
+    assert entry["display_name"] == "tracked sample"
+    assert entry["obf_stack_index"] == 10
+
+
+def test_nested_structured_mfx_is_labelled_m2205_not_legacy():
+    from minflux_viewer.core.loader import _normalize_mfx_attrs
+
+    iteration = np.dtype([
+        ("itr", "<u4"),
+        ("vld", "?"),
+        ("tid", "<i4"),
+        ("loc", "<f8", (3,)),
+    ])
+    mfx = np.zeros(3, dtype=[("itr", iteration, (4,)), ("tim", "<f8")])
+    mfx["itr"]["itr"] = np.arange(4)
+    mfx["itr"]["vld"] = True
+    mfx["itr"]["tid"] = np.arange(3)[:, None]
+    attrs, _n_raw, n_itr, source_version, detail = _normalize_mfx_attrs(
+        mfx, load_all_itr=False
+    )
+    assert n_itr == 4
+    assert source_version == "m2205"
+    assert "structured mfx.itr" in detail
+    assert attrs["loc_x"].shape == (3,)
+
+
 def test_extract_rejects_blob_without_mfx():
     blob = _pack_mfxdta([("zarr\\.zgroup", 0, b'{"zarr_format":2}')])
     with pytest.raises(ValueError):

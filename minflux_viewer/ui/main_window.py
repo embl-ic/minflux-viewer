@@ -4959,10 +4959,49 @@ class MainWindow(QMainWindow):
             ds.metadata["overlay_index"] = overlay_index
             ds.metadata["overlay_alignment_mode"] = dlg.align_combo.currentText()
         anchor_idx = specs[0].dataset_idx
+        had_scatter = self._collapse_member_coordinate_views(
+            [spec.dataset_idx for spec in specs], anchor_idx)
         self._state.set_active(anchor_idx)
         self._show_render(anchor_idx)
+        if had_scatter:
+            self._show_scatter(anchor_idx)
+        # Any other open overlay view (e.g. one keyed by a dataset that was
+        # already a channel) re-reads its channel list.
+        self._refresh_overlay_windows()
         self._notify_view_state_changed()
         self._state.log(f"Created overlay {overlay_index} with {len(specs)} dataset(s).")
+
+    def _collapse_member_coordinate_views(self, member_indices, anchor_idx: int) -> bool:
+        """Fold the members' standalone render/scatter windows into the anchor's.
+
+        Render and scatter are **overlay-aware**: one window, keyed by the anchor,
+        draws every channel. So once datasets are combined in place (*keep source
+        dataset* unchecked) the other members' own windows are stale duplicates —
+        each still titled and drawn as a standalone dataset, i.e. exactly the
+        "Own" views the Dataset Manager no longer lists. They are closed here;
+        nothing folds them by itself, which is why one was always left behind.
+
+        Only the coordinate views are folded. A histogram, attribute plot or data
+        window of a single channel stays meaningful and is left open, and **no
+        dataset is closed** — combining changes how they are viewed, not what
+        exists. Returns whether any member had a scatter window, so the caller
+        can reopen it on the anchor rather than leaving the user with none.
+        """
+        wanted_scatter = anchor_idx in self._scatter_windows
+        for idx in member_indices:
+            if idx == anchor_idx:
+                continue
+            for registry in (self._render_windows, self._scatter_windows):
+                win = registry.pop(idx, None)
+                if win is None:
+                    continue
+                if registry is self._scatter_windows:
+                    wanted_scatter = True
+                try:
+                    win.close()
+                except Exception:
+                    pass
+        return wanted_scatter
 
     def _show_channel_separation(self) -> None:
         """Process › Channel… › Separate Channel by DCR — open the DCR two-colour

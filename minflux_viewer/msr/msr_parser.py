@@ -6,7 +6,19 @@ import zarr
 from .state import reset as reset_state, set_mfx_for, set_mbm_for, set_mbm_meta_for
 
 
-def _ome_metadata(msr_file: str) -> dict | None:
+def _ome_xml_metadata(msr_file: str) -> str | None:
+    """Return the file-level OME-XML document exactly as stored in OBF."""
+    try:
+        from msr_reader import OBFFile
+
+        with OBFFile(msr_file) as obf:
+            xml = obf.get_ome_xml_metadata()
+        return str(xml) if xml else None
+    except Exception:
+        return None
+
+
+def _ome_metadata(msr_file: str, xml: str | None = None) -> dict | None:
     """Return the OBF/OME metadata as a dict via msr-reader, or ``None``.
 
     Used for the legacy ``<metadata>`` tree of image-only ``.msr`` files (those
@@ -15,10 +27,7 @@ def _ome_metadata(msr_file: str) -> dict | None:
     try:
         import xml.etree.ElementTree as ET
 
-        from msr_reader import OBFFile
-
-        with OBFFile(msr_file) as obf:
-            xml = obf.get_ome_xml_metadata()
+        xml = xml if xml is not None else _ome_xml_metadata(msr_file)
         if not xml:
             return None
         return {"OME": _xml_to_dict(ET.fromstring(xml))}
@@ -88,7 +97,9 @@ class LegacyMSRParser:
                     entries.append(
                         {
                             "index": i,
-                            "display_name": str(name).replace("_", " "),
+                            # Verbatim: the stack name is what Imspector shows
+                            # and what an image export is named after.
+                            "display_name": str(name),
                             "shape_str": shape_str,
                             "dtype": self._dtype_name(getattr(header, "dtype", 0)),
                         }
@@ -118,7 +129,12 @@ class GeneralMSRParser:
         explicit ``.zarr`` export option, not a parse-time cache.
         """
         from .io import collect_zarr_fields
-        from .mfxdta import SOURCE_FORMAT, extract_did_label_map, read_obf_mfxdta_stacks
+        from .mfxdta import (
+            SOURCE_FORMAT,
+            extract_did_label_map,
+            extract_minflux_stack_tags,
+            read_obf_mfxdta_stacks,
+        )
 
         reset_state()
 
@@ -131,11 +147,13 @@ class GeneralMSRParser:
         if stacks:
             log(f"[parse] {SOURCE_FORMAT}: {len(stacks)} MINFLUX dataset(s)")
             label_map = extract_did_label_map(msr_file)
+            stack_tags = extract_minflux_stack_tags(msr_file)
             datasets = [
                 entry
                 for idx, desc, blob in stacks
                 if (entry := self._mfxdta_dataset_entry(
-                    idx, desc, blob, collect_zarr_fields, label_map, log)) is not None
+                    idx, desc, blob, collect_zarr_fields, label_map,
+                    stack_tags.get(idx, {}), log)) is not None
             ]
             if datasets:
                 # Per-parse maps (name -> array) assembled from the entries, so a
@@ -156,14 +174,19 @@ class GeneralMSRParser:
             log(f"[parse] {SOURCE_FORMAT} detected but could not be decoded")
 
         log("[parse] no MINFLUX data — building legacy image-series tree")
+        metadata_xml = _ome_xml_metadata(msr_file)
         return {
             "mode": "legacy",
             "msr": str(msr_file),
-            "metadata": _ome_metadata(msr_file),
+            "metadata": _ome_metadata(msr_file, metadata_xml),
+            "metadata_xml": metadata_xml,
             "legacy_series_tree": self.legacy.build_series_tree_entries(str(msr_file), log=log),
         }
 
-    def _mfxdta_dataset_entry(self, stack_idx, desc, blob, collect_zarr_fields, label_map, log):
+    def _mfxdta_dataset_entry(
+        self, stack_idx, desc, blob, collect_zarr_fields, label_map,
+        stack_tag, log,
+    ):
         """Decode one MFXDTA blob to an in-memory zarr store, register its
         ``mfx`` (and any ``grd/mbm/points`` beads), and return a modern-style
         dataset dict — or ``None`` on error. ``zroot`` holds the in-memory store
@@ -185,8 +208,11 @@ class GeneralMSRParser:
         mbm_meta = None
         try:
             mfx_node = arch["mfx"]
-            did = str(getattr(mfx_node, "attrs", {}).get("did", "") or "")
-            name = label_map.get(did) or str(desc) or f"minflux_{stack_idx}"
+            attrs_did = str(getattr(mfx_node, "attrs", {}).get("did", "") or "")
+            tag_did = str((stack_tag or {}).get("did", "") or "")
+            did = attrs_did or tag_did
+            tag_label = str((stack_tag or {}).get("label", "") or "")
+            name = label_map.get(did) or tag_label or str(desc) or f"minflux_{stack_idx}"
             arr = mfx_node[:]
             set_mfx_for(name, arr)
             log(f"    [mfx] loaded key='{name}' shape={arr.shape} dtype={arr.dtype}")
@@ -213,6 +239,7 @@ class GeneralMSRParser:
             return None
         return {
             "did": did or f"mfxdta:{stack_idx}",
+            "obf_stack_index": int(stack_idx),
             "display_name": name,
             "zroot": store,                             # in-memory zarr store
             "fields": collect_zarr_fields(store),

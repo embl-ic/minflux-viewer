@@ -7,6 +7,8 @@ render-view style while reading selected TIFF planes lazily from disk.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
@@ -14,22 +16,26 @@ from PyQt6.QtGui import QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
+    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QMenu,
-    QPlainTextEdit,
+    QMessageBox,
     QPushButton,
-    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from typing import TYPE_CHECKING
-
 from .. import resource_path
-from .render_window import _CHANNEL_COLORS, _COLORMAPS, _PURE_COLOR_LUTS
+from .metadata_viewer import MetadataDocumentView
+from .render_window import (
+    _CHANNEL_COLORS,
+    _COLORMAPS,
+    _PURE_COLOR_LUTS,
+    DepthRangeSlider,
+)
 
 if TYPE_CHECKING:
     from ..core.obf_image_source import ObfImageSource
@@ -43,10 +49,42 @@ _IMAGEJ_AUTO_RESET_THRESHOLD = 10
 _IMAGEJ_AUTO_HIST_BINS = 256
 
 
+def _z_sum_dtype(dtype) -> np.dtype:
+    """Return a safe accumulator dtype for an image Z projection."""
+    dtype = np.dtype(dtype)
+    if np.issubdtype(dtype, np.bool_) or np.issubdtype(dtype, np.unsignedinteger):
+        return np.dtype(np.uint64)
+    if np.issubdtype(dtype, np.signedinteger):
+        return np.dtype(np.int64)
+    if np.issubdtype(dtype, np.floating):
+        return np.dtype(np.float64)
+    if np.issubdtype(dtype, np.complexfloating):
+        return np.dtype(np.complex128)
+    raise TypeError(f"Cannot sum image planes with dtype {dtype}")
+
+
+def _sum_z_planes(source, *, t: int, c: int, z_start: int, z_stop: int) -> np.ndarray:
+    """Read and sum an inclusive, zero-based Z range without integer overflow."""
+    if z_stop < z_start:
+        raise ValueError("Z range end must be greater than or equal to its start")
+    first = np.asarray(source.read_plane(t=t, c=c, z=z_start))
+    if z_start == z_stop:
+        return first
+    accumulator = np.array(first, dtype=_z_sum_dtype(first.dtype), copy=True)
+    for z_index in range(z_start + 1, z_stop + 1):
+        plane = np.asarray(source.read_plane(t=t, c=c, z=z_index))
+        if plane.shape != first.shape:
+            raise ValueError(
+                f"Z plane {z_index + 1} has shape {plane.shape}, expected {first.shape}"
+            )
+        np.add(accumulator, plane, out=accumulator, casting="unsafe")
+    return accumulator
+
+
 class TiffViewerWindow(QWidget):
     """Fiji-like single-file TIFF viewer backed by lazy plane reads."""
 
-    def __init__(self, source: "ImageSource", parent: QWidget | None = None) -> None:
+    def __init__(self, source: ImageSource, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._source = source
         self._plane: np.ndarray | None = None
@@ -57,6 +95,8 @@ class TiffViewerWindow(QWidget):
         self._info_window: TiffInfoWindow | None = None
         self._active_cmap = "gray"
         self._show_axes = False          # axes/ticks hidden by default (right-click › Axis)
+        self._roi_overlay = None         # single active ROI (ImageJ-style)
+        self._z_range_values = (1, 1)
 
         self.setWindowTitle(self._title_text())
         self.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
@@ -68,8 +108,15 @@ class TiffViewerWindow(QWidget):
         self._install_shortcuts()
         self._refresh_controls()
         self._load_current_plane(fit_view=True)
+        self._init_roi_overlay()
 
     def closeEvent(self, event) -> None:
+        if self._roi_overlay is not None:
+            try:
+                self._roi_overlay.detach()
+            except Exception:
+                pass
+            self._roi_overlay = None
         if self._info_window is not None:
             try:
                 self._info_window.close()
@@ -138,13 +185,16 @@ class TiffViewerWindow(QWidget):
         control.addWidget(self._c_label)
         control.addWidget(self._c_spin)
 
-        # Z as a horizontal slice slider (render-view style) + a value read-out.
+        # Z as an inclusive range; the selected planes are displayed as a sum
+        # projection. The slider handles and highlighted range provide all input.
         self._z_label = QLabel("Z:")
-        self._z_slider = QSlider(Qt.Orientation.Horizontal)
-        self._z_slider.setMinimum(1)
-        self._z_slider.setMaximum(1)
-        self._z_slider.valueChanged.connect(lambda _v: self._on_axis_changed("Z"))
-        self._z_value = QLabel("1/1")
+        self._z_slider = DepthRangeSlider()
+        self._z_slider.set_scroll_options(1.0, False)
+        self._z_slider.setToolTip(
+            "Drag either edge to select an inclusive Z range; all selected slices are summed"
+        )
+        self._z_slider.rangeChanged.connect(self._on_z_slider_changed)
+        self._z_value = QLabel("1-1 / 1")
         control.addWidget(self._z_label)
         control.addWidget(self._z_slider, 1)
         control.addWidget(self._z_value)
@@ -189,14 +239,14 @@ class TiffViewerWindow(QWidget):
             spin.setVisible(visible)
             lbl.setVisible(visible)
             any_visible = any_visible or visible
-        # Z slice slider
-        z_size = self._source.axis_size("Z")
+        # Inclusive Z range, reset to the first plane when the series changes.
+        z_size = max(self._source.axis_size("Z"), 1)
         self._z_slider.blockSignals(True)
-        self._z_slider.setMinimum(1)
-        self._z_slider.setMaximum(max(z_size, 1))
-        self._z_slider.setValue(1)
+        self._z_slider.set_limits(1, max(z_size, 2), reset_range=True)
+        self._z_slider.set_range(1, 1)
         self._z_slider.blockSignals(False)
-        self._z_value.setText(f"1/{max(z_size, 1)}")
+        self._z_range_values = (1, 1)
+        self._z_value.setText(f"1-1 / {z_size}")
         z_visible = "Z" in axes and z_size > 1
         self._z_label.setVisible(z_visible)
         self._z_slider.setVisible(z_visible)
@@ -238,18 +288,52 @@ class TiffViewerWindow(QWidget):
         self.setWindowTitle(self._title_text())
         self._refresh_controls()
         self._load_current_plane(fit_view=True)
+        if self._info_window is not None:
+            self._info_window.refresh(self._source)
+        if self._roi_overlay is not None:
+            # A different series means a different calibration and a different
+            # ROI — carrying the old one over would place it arbitrarily.
+            meta = self._source.metadata
+            self._roi_overlay.clear()
+            self._roi_overlay.set_pixel_size(meta.pixel_size_x_nm, meta.pixel_size_y_nm)
+            self._roi_overlay.set_roi(self._source_roi(), notify=False)
+            self._update_roi_label()
 
     def _on_axis_changed(self, axis: str) -> None:
         self._bc_auto_threshold = 0
-        if axis == "Z":
-            self._z_value.setText(f"{self._z_slider.value()}/{self._z_slider.maximum()}")
         self._load_current_plane(fit_view=False)
 
+    def _on_z_slider_changed(self, lo: float, hi: float) -> None:
+        # The shared render range slider is continuous. Snap it to image-plane
+        # indices before reading so the TIFF/OBF source always receives integers.
+        lo_int = int(np.floor(float(lo) + 0.5))
+        hi_int = int(np.floor(float(hi) + 0.5))
+        self._set_z_range(lo_int, hi_int, reload=True)
+
+    def _set_z_range(self, lo: int, hi: int, *, reload: bool) -> None:
+        z_size = max(self._source.axis_size("Z"), 1)
+        lo = int(np.clip(lo, 1, z_size))
+        hi = int(np.clip(hi, 1, z_size))
+        if hi < lo:
+            lo, hi = hi, lo
+        changed = (lo, hi) != self._z_range_values
+        self._z_range_values = (lo, hi)
+        self._z_slider.blockSignals(True)
+        self._z_slider.set_range(lo, hi)
+        self._z_slider.blockSignals(False)
+        self._z_value.setText(f"{lo}-{hi} / {z_size}")
+        if reload and changed:
+            self._bc_auto_threshold = 0
+            self._load_current_plane(fit_view=False)
+
     def _load_current_plane(self, *, fit_view: bool) -> None:
-        self._plane = self._source.read_plane(
+        z_lo, z_hi = self._z_range_values
+        self._plane = _sum_z_planes(
+            self._source,
             t=self._t_spin.value() - 1,
             c=self._c_spin.value() - 1,
-            z=self._z_slider.value() - 1,
+            z_start=z_lo - 1,
+            z_stop=z_hi - 1,
         )
         if self._auto_bc and not self._is_color_plane(self._plane):
             levels = self._compute_auto_levels(self._plane)
@@ -288,9 +372,10 @@ class TiffViewerWindow(QWidget):
         meta = self._source.metadata
         position = self._position_text()
         self._info_label.setText(
-            f"{meta.axes}  |  {w} x {h} px  |  dtype={meta.dtype}  |  "
+            f"{meta.axes}  |  {w} x {h} px  |  dtype={plane.dtype}  |  "
             f"px=({sx:.4g}, {sy:.4g}) nm{position}"
         )
+        self._update_roi_label()
 
     def _fit_view(self) -> None:
         if self._plane is None:
@@ -302,9 +387,12 @@ class TiffViewerWindow(QWidget):
 
     def _position_text(self) -> str:
         parts = []
-        for axis, w in (("T", self._t_spin), ("C", self._c_spin), ("Z", self._z_slider)):
+        for axis, w in (("T", self._t_spin), ("C", self._c_spin)):
             if w.isVisible():
                 parts.append(f"{axis}={w.value()}/{w.maximum()}")
+        if self._z_slider.isVisible():
+            lo, hi = self._z_range_values
+            parts.append(f"Z={lo}-{hi}/{max(self._source.axis_size('Z'), 1)}")
         return "  |  " + ", ".join(parts) if parts else ""
 
     @staticmethod
@@ -326,11 +414,29 @@ class TiffViewerWindow(QWidget):
             action.setChecked(self._active_cmap == name)
             action.triggered.connect(lambda _checked=False, value=name: self._on_cmap_changed(value))
         menu.addAction("Brightness/Contrast", self._show_brightness_contrast)
+
+        # One active ROI per image, ImageJ-style: drawing replaces it, and it is
+        # written into / read from the TIFF itself. No ROI Manager here.
+        roi_menu = menu.addMenu("ROI")
+        armed = self._roi_overlay.tool if self._roi_overlay is not None else None
+        for tool, label in (("rectangle", "Draw Rectangle"), ("oval", "Draw Oval")):
+            action = roi_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(armed == tool)
+            action.setToolTip("Drag on the image to draw; pick again to stop drawing.")
+            action.triggered.connect(lambda _c=False, t=tool: self._set_roi_tool(t))
+        roi_menu.addSeparator()
+        delete = roi_menu.addAction("Delete ROI")
+        delete.setEnabled(self._roi_overlay is not None and self._roi_overlay.has_roi())
+        delete.triggered.connect(self._delete_roi)
+        roi_menu.setToolTipsVisible(True)
+
+        menu.addAction("Save As TIFF…", self._save_as_tiff)
         axis_action = menu.addAction("Axis")
         axis_action.setCheckable(True)
         axis_action.setChecked(self._show_axes)
         axis_action.triggered.connect(self._set_axes_visible)
-        menu.addAction("Show Info", self._show_info_window)
+        menu.addAction("Show Info...", self._show_info_window)
         menu.addAction("Reset View", self._reset_view)
         menu.exec(self._image_view.ui.graphicsView.mapToGlobal(pos))
 
@@ -507,6 +613,69 @@ class TiffViewerWindow(QWidget):
             lo, hi = data_min, data_max
         return (float(lo), float(hi if hi > lo else lo + 1.0))
 
+    # ------------------------------------------------------------------
+    # Active ROI (ImageJ-style: one per image, stored in the file)
+    # ------------------------------------------------------------------
+
+    def _init_roi_overlay(self) -> None:
+        """Attach the overlay and show the ROI the file already carries."""
+        from .image_roi_overlay import ImageRoiOverlay
+
+        meta = self._source.metadata
+        self._roi_overlay = ImageRoiOverlay(
+            self._view_box,
+            pixel_size=(meta.pixel_size_x_nm, meta.pixel_size_y_nm),
+            on_changed=self._on_roi_changed,
+        )
+        self._roi_overlay.set_roi(self._source_roi(), notify=False)
+        self._update_roi_label()
+
+    def _source_roi(self):
+        getter = getattr(self._source, "active_roi", None)
+        try:
+            return getter() if callable(getter) else None
+        except Exception:
+            return None
+
+    def _on_roi_changed(self) -> None:
+        self._update_roi_label()
+
+    def _update_roi_label(self) -> None:
+        """Append the ROI read-out to the info line (rebuilt by ``_show_plane``)."""
+        if self._roi_overlay is None:
+            return
+        roi = self._roi_overlay.current_roi()
+        base = self._info_label.text().split("  |  ROI: ")[0]
+        self._info_label.setText(base + (f"  |  ROI: {roi.summary()}" if roi else ""))
+
+    def _set_roi_tool(self, tool: str | None) -> None:
+        if self._roi_overlay is None:
+            return
+        # Re-picking the armed tool disarms it, so a drag pans again.
+        self._roi_overlay.set_tool(None if self._roi_overlay.tool == tool else tool)
+
+    def _delete_roi(self) -> None:
+        if self._roi_overlay is not None:
+            self._roi_overlay.clear(notify=True)
+
+    def _save_as_tiff(self) -> None:
+        """Write the current series — with its active ROI — as an OME-TIFF."""
+        from ..core.tiff_export import export_image_series_to_tiff
+
+        suggested = f"{self._source.metadata.image_name or self._source.path.stem}.tif"
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Save image as OME-TIFF", suggested, "TIFF image (*.tif *.tiff)")
+        if not path:
+            return
+        roi = self._roi_overlay.current_roi() if self._roi_overlay is not None else None
+        try:
+            export_image_series_to_tiff(self._source, path, roi=roi)
+        except Exception as exc:                                   # noqa: BLE001
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        note = "with its active ROI" if roi else "without a ROI (none is set)"
+        QMessageBox.information(self, "Image saved", f"Saved {note}:\n{path}")
+
     def _show_info_window(self) -> None:
         if self._info_window is None:
             self._info_window = TiffInfoWindow(self._source)
@@ -517,35 +686,39 @@ class TiffViewerWindow(QWidget):
 
 
 class TiffInfoWindow(QDialog):
-    """Small metadata dialog for a standalone TIFF image source."""
+    """Structured, series-specific metadata dialog for an image source."""
 
-    def __init__(self, source: TiffImageSource, parent: QWidget | None = None) -> None:
+    def __init__(self, source: ImageSource, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("TIFF Image Information")
-        self.resize(640, 520)
-        root = QVBoxLayout(self)
-        grid = QGridLayout()
-        grid.setColumnStretch(1, 1)
-        root.addLayout(grid)
-        for row, (key, value) in enumerate(source.metadata.raw_summary):
-            key_label = QLabel(key)
-            key_label.setStyleSheet("color: gray; font-size: 11px;")
-            value_label = QLabel(value)
-            value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            value_label.setWordWrap(True)
-            grid.addWidget(key_label, row, 0)
-            grid.addWidget(value_label, row, 1)
-
-        if source.metadata.ome_xml:
-            root.addWidget(QLabel("OME-XML"))
-            text = QPlainTextEdit()
-            text.setReadOnly(True)
-            text.setPlainText(source.metadata.ome_xml)
-            root.addWidget(text, stretch=1)
+        self.setWindowTitle("Image Information")
+        self.resize(980, 760)
+        self._root = QVBoxLayout(self)
+        self._summary = QWidget()
+        self._grid = QGridLayout(self._summary)
+        self._grid.setColumnStretch(1, 1)
+        self._root.addWidget(self._summary)
+        self._documents = MetadataDocumentView(parent=self)
+        self._root.addWidget(self._documents, stretch=1)
 
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
         row = QHBoxLayout()
         row.addStretch()
         row.addWidget(close_btn)
-        root.addLayout(row)
+        self._root.addLayout(row)
+        self.refresh(source)
+
+    def refresh(self, source: ImageSource) -> None:
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        for row, (key, value) in enumerate(source.metadata.raw_summary):
+            key_label = QLabel(key)
+            key_label.setStyleSheet("color: gray; font-size: 11px;")
+            value_label = QLabel(value)
+            value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            value_label.setWordWrap(True)
+            self._grid.addWidget(key_label, row, 0)
+            self._grid.addWidget(value_label, row, 1)
+        self._documents.set_documents(source.metadata.documents)

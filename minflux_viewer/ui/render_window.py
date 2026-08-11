@@ -406,9 +406,17 @@ class DepthRangeSlider(QWidget):
     def _set_drag_value(self, x: float) -> None:
         value = self._pos_to_value(x)
         if self._drag_handle == "lo":
-            self.set_range(value, self._hi, emit=True)
+            if value > self._hi:
+                self._drag_handle = "hi"
+                self.set_range(self._hi, value, emit=True)
+            else:
+                self.set_range(value, self._hi, emit=True)
         elif self._drag_handle == "hi":
-            self.set_range(self._lo, value, emit=True)
+            if value < self._lo:
+                self._drag_handle = "lo"
+                self.set_range(value, self._lo, emit=True)
+            else:
+                self.set_range(self._lo, value, emit=True)
 
     def _track_bounds(self) -> tuple[int, int]:
         margin = self._handle_radius + 2

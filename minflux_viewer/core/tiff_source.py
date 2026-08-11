@@ -8,12 +8,22 @@ localization datasets.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
 import numpy as np
+
+from .tiff_roi import read_roi_from_tiff
+
+SOURCE_METADATA_NAMESPACE = "https://minflux-viewer.org/ome/source-metadata/1.0"
+SOURCE_OME_XML_KEY = "OriginalOMEImageXML"
+SOURCE_IMSPECTOR_XML_KEY = "ImspectorXML"
+SOURCE_OBF_JSON_KEY = "OBFStackMetadataJSON"
+SOURCE_MINFLUX_JSON_KEY = "MINFLUXStackTagJSON"
 
 
 @dataclass(frozen=True)
@@ -36,6 +46,9 @@ class PhysicalSize:
             "micron": 1000.0,
             "microns": 1000.0,
             "mm": 1_000_000.0,
+            "cm": 10_000_000.0,
+            "inch": 25_400_000.0,
+            "in": 25_400_000.0,
             "m": 1_000_000_000.0,
         }.get(unit)
         if scale is None:
@@ -46,6 +59,15 @@ class PhysicalSize:
         if self.value is None:
             return "unknown"
         return f"{self.value:g} {self.unit or ''}".strip()
+
+
+@dataclass(frozen=True)
+class MetadataDocument:
+    """One source metadata document attached to an image series."""
+
+    name: str
+    format: str
+    content: str
 
 
 @dataclass(frozen=True)
@@ -65,6 +87,10 @@ class TiffMetadata:
     image_name: str
     raw_summary: tuple[tuple[str, str], ...]
     ome_xml: str | None = None
+    acquisition_date: str = ""
+    description: str = ""
+    time_interval: PhysicalSize = field(default_factory=lambda: PhysicalSize(None, "s"))
+    documents: tuple[MetadataDocument, ...] = ()
 
     def axis_size(self, axis: str) -> int:
         if axis not in self.axes:
@@ -143,6 +169,10 @@ class TiffImageSource:
 
     def axis_size(self, axis: str) -> int:
         return self.metadata.axis_size(axis)
+
+    def active_roi(self):
+        """The image's ImageJ active ROI (:class:`TiffRoi`), or ``None``."""
+        return self._roi
 
     def read_plane(self, *, t: int = 0, c: int = 0, z: int = 0) -> np.ndarray:
         """Read one 2-D plane lazily, returning YX or YXS data."""
@@ -227,12 +257,27 @@ class TiffImageSource:
         dtype = str(getattr(series, "dtype", "unknown"))
         ome_xml = getattr(self._tf, "ome_metadata", None)
         imagej_metadata = getattr(self._tf, "imagej_metadata", None) or {}
-        ome_info = _parse_ome_metadata(ome_xml, self.series_index)
+        # The ImageJ active-ROI tag is a per-file block, so it belongs to the
+        # first series; a multi-series file cannot address a ROI per series.
+        self._roi = read_roi_from_tiff(self._tf) if self.series_index == 0 else None
+        series_ome_xml = extract_ome_image_xml(ome_xml, self.series_index)
+        ome_info = _parse_ome_metadata(series_ome_xml, 0)
         imagej_info = _parse_imagej_metadata(imagej_metadata)
+        tiff_info = _parse_tiff_resolution(series)
 
-        px = ome_info.get("pixel_size_x") or imagej_info.get("pixel_size_x") or PhysicalSize(None, "")
-        py = ome_info.get("pixel_size_y") or imagej_info.get("pixel_size_y") or PhysicalSize(None, "")
+        px = (ome_info.get("pixel_size_x") or imagej_info.get("pixel_size_x")
+              or tiff_info.get("pixel_size_x") or PhysicalSize(None, ""))
+        py = (ome_info.get("pixel_size_y") or imagej_info.get("pixel_size_y")
+              or tiff_info.get("pixel_size_y") or PhysicalSize(None, ""))
         pz = ome_info.get("pixel_size_z") or imagej_info.get("pixel_size_z") or PhysicalSize(None, "")
+        time_interval = (
+            ome_info.get("time_interval")
+            or imagej_info.get("time_interval")
+            or PhysicalSize(None, "s")
+        )
+        acquisition_date = str(
+            ome_info.get("acquisition_date") or tiff_info.get("acquisition_date") or ""
+        )
         channel_names = tuple(ome_info.get("channel_names") or ())
         image_name = str(
             ome_info.get("image_name")
@@ -255,6 +300,23 @@ class TiffImageSource:
         ]
         if channel_names:
             summary.append(("Channels", ", ".join(channel_names)))
+        if acquisition_date:
+            summary.append(("Acquisition date", acquisition_date))
+        if time_interval.value is not None:
+            summary.append(("Frame interval", time_interval.display()))
+        summary.append(("Active ROI", self._roi.summary() if self._roi else "none"))
+        documents: list[MetadataDocument] = []
+        if series_ome_xml:
+            documents.append(MetadataDocument("OME-XML", "xml", series_ome_xml))
+        documents.extend(_source_documents_from_ome(ome_info))
+        if imagej_metadata:
+            documents.append(MetadataDocument(
+                "ImageJ metadata", "json",
+                json.dumps(imagej_metadata, indent=2, ensure_ascii=False, default=str),
+            ))
+        header = _tiff_header_document(series)
+        if header:
+            documents.append(MetadataDocument("TIFF header", "json", header))
         return TiffMetadata(
             path=self.path,
             series_index=self.series_index,
@@ -270,7 +332,11 @@ class TiffImageSource:
             channel_names=channel_names,
             image_name=image_name,
             raw_summary=tuple(summary),
-            ome_xml=str(ome_xml) if ome_xml else None,
+            ome_xml=series_ome_xml,
+            acquisition_date=acquisition_date,
+            description=str(ome_info.get("description") or ""),
+            time_interval=time_interval,
+            documents=tuple(documents),
         )
 
     @staticmethod
@@ -305,6 +371,55 @@ class TiffImageSource:
         return "".join(chars)
 
 
+def extract_ome_image_xml(ome_xml: str | None, series_index: int) -> str | None:
+    """Return a self-contained OME document for exactly one image series.
+
+    OBF stores one file-level OME document containing every stack. Passing that
+    whole document to a per-image viewer made Ch1 appear to own Ch2's metadata.
+    The selected ``Image`` and only its referenced structured annotations are
+    retained here.
+    """
+    if not ome_xml:
+        return None
+    try:
+        root = ET.fromstring(ome_xml)
+    except ET.ParseError:
+        return None
+    images = [child for child in list(root) if _local_name(child.tag) == "Image"]
+    if not images:
+        images = [el for el in root.iter() if _local_name(el.tag) == "Image"]
+    if not images:
+        return None
+    selected = images[min(max(int(series_index), 0), len(images) - 1)]
+    selected_copy = deepcopy(selected)
+
+    for child in list(root):
+        if _local_name(child.tag) == "Image":
+            root.remove(child)
+    insert_at = next(
+        (i for i, child in enumerate(list(root)) if _local_name(child.tag) == "StructuredAnnotations"),
+        len(root),
+    )
+    root.insert(insert_at, selected_copy)
+
+    referenced = {
+        str(el.attrib.get("ID") or "")
+        for el in selected_copy.iter()
+        if _local_name(el.tag) == "AnnotationRef"
+    }
+    for annotations_el in [el for el in root if _local_name(el.tag) == "StructuredAnnotations"]:
+        for annotation in list(annotations_el):
+            if str(annotation.attrib.get("ID") or "") not in referenced:
+                annotations_el.remove(annotation)
+        if len(annotations_el) == 0:
+            root.remove(annotations_el)
+    try:
+        ET.indent(root, space="  ")
+    except AttributeError:  # pragma: no cover - Python < 3.9
+        pass
+    return ET.tostring(root, encoding="unicode", xml_declaration=True)
+
+
 def _parse_ome_metadata(ome_xml: str | None, series_index: int) -> dict[str, Any]:
     if not ome_xml:
         return {}
@@ -331,13 +446,34 @@ def _parse_ome_metadata(ome_xml: str | None, series_index: int) -> dict[str, Any
     for idx, ch in enumerate(channels):
         name = ch.get("Name") or ch.get("ID") or f"C{idx + 1}"
         channel_names.append(str(name))
-    return {
+    result: dict[str, Any] = {
         "image_name": image.get("Name") or image.get("ID"),
         "pixel_size_x": _physical_size(pixels, "PhysicalSizeX", "PhysicalSizeXUnit"),
         "pixel_size_y": _physical_size(pixels, "PhysicalSizeY", "PhysicalSizeYUnit"),
         "pixel_size_z": _physical_size(pixels, "PhysicalSizeZ", "PhysicalSizeZUnit"),
         "channel_names": tuple(channel_names),
+        "acquisition_date": next(
+            ((el.text or "").strip() for el in image_el
+             if _local_name(el.tag) == "AcquisitionDate"),
+            "",
+        ),
+        "description": next(
+            ((el.text or "").strip() for el in image_el
+             if _local_name(el.tag) == "Description"),
+            "",
+        ),
+        "source_annotations": _ome_map_annotations(root),
+        "sizes": {
+            axis: int(pixels.get(f"Size{axis}", "1"))
+            for axis in "TCZYX"
+            if str(pixels.get(f"Size{axis}", "")).isdigit()
+        },
+        "dimension_order": str(pixels.get("DimensionOrder") or ""),
     }
+    time_increment = _physical_size(pixels, "TimeIncrement", "TimeIncrementUnit")
+    if time_increment is not None:
+        result["time_interval"] = time_increment
+    return result
 
 
 def _parse_imagej_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -349,7 +485,118 @@ def _parse_imagej_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
             result["pixel_size_z"] = PhysicalSize(float(spacing), unit)
         except Exception:
             pass
+    interval = metadata.get("finterval")
+    if interval is None:
+        try:
+            fps = float(metadata.get("fps"))
+            interval = 1.0 / fps if fps > 0 else None
+        except Exception:
+            interval = None
+    if interval is not None:
+        try:
+            result["time_interval"] = PhysicalSize(float(interval), "s")
+        except Exception:
+            pass
     return result
+
+
+def _parse_tiff_resolution(series) -> dict[str, Any]:
+    """Read calibration and acquisition time from standard TIFF tags."""
+    try:
+        page = series.pages[0]
+        tags = page.tags
+    except Exception:
+        return {}
+    result: dict[str, Any] = {}
+    try:
+        result["acquisition_date"] = str(tags["DateTime"].value)
+    except Exception:
+        pass
+    try:
+        x_res = _resolution_value(tags["XResolution"].value)
+        y_res = _resolution_value(tags["YResolution"].value)
+        raw_unit = tags["ResolutionUnit"].value
+        unit_name = str(getattr(raw_unit, "name", raw_unit)).upper()
+    except Exception:
+        return result
+    if x_res <= 0 or y_res <= 0:
+        return result
+    if unit_name in {"3", "CENTIMETER"}:
+        unit = "cm"
+    elif unit_name in {"2", "INCH"}:
+        unit = "inch"
+    else:
+        # ResolutionUnit=NONE is commonly paired with ImageJ's unit string.
+        try:
+            unit = str((page.parent.imagej_metadata or {}).get("unit") or "")
+        except Exception:
+            unit = ""
+    if not unit:
+        return result
+    result.update({
+        "pixel_size_x": PhysicalSize(1.0 / x_res, unit),
+        "pixel_size_y": PhysicalSize(1.0 / y_res, unit),
+    })
+    return result
+
+
+def _resolution_value(value) -> float:
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        return float(value[0]) / float(value[1])
+    return float(value)
+
+
+def _ome_map_annotations(root) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for annotation in root.iter():
+        if _local_name(annotation.tag) != "MapAnnotation":
+            continue
+        namespace = str(annotation.attrib.get("Namespace") or "")
+        if namespace and namespace != SOURCE_METADATA_NAMESPACE:
+            continue
+        for entry in annotation.iter():
+            if _local_name(entry.tag) != "M":
+                continue
+            key = str(entry.attrib.get("K") or "")
+            if key:
+                result[key] = entry.text or ""
+    return result
+
+
+def _source_documents_from_ome(info: dict[str, Any]) -> list[MetadataDocument]:
+    annotations = info.get("source_annotations") or {}
+    labels = {
+        SOURCE_OME_XML_KEY: ("Original OME-XML", "xml"),
+        SOURCE_IMSPECTOR_XML_KEY: ("Imspector XML", "xml"),
+        SOURCE_OBF_JSON_KEY: ("OBF stack metadata", "json"),
+        SOURCE_MINFLUX_JSON_KEY: ("MINFLUX stack tag", "json"),
+    }
+    return [
+        MetadataDocument(labels[key][0], labels[key][1], str(value))
+        for key, value in annotations.items()
+        if key in labels and value
+    ]
+
+
+def _tiff_header_document(series) -> str:
+    """Readable JSON representation of the first page's TIFF IFD tags."""
+    try:
+        page = series.pages[0]
+    except Exception:
+        return ""
+    values: dict[str, Any] = {}
+    for tag in page.tags.values():
+        name = str(getattr(tag, "name", tag.code))
+        value = getattr(tag, "value", None)
+        if name == "ImageDescription" and isinstance(value, str) and len(value) > 4000:
+            values[name] = f"<{len(value)} characters; see the metadata documents>"
+        elif isinstance(value, (bytes, bytearray)):
+            values[name] = f"<{len(value)} bytes>"
+        elif isinstance(value, np.ndarray):
+            values[name] = value.tolist() if value.size <= 64 else f"<array shape={value.shape}>"
+        else:
+            values[name] = value
+    return json.dumps(values, indent=2, ensure_ascii=False, default=str)
 
 
 def _physical_size(attrs: dict[str, str], value_key: str, unit_key: str) -> PhysicalSize | None:

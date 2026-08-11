@@ -6,6 +6,7 @@ from minflux_viewer.core.tiff_export import (
     build_edges,
     choose_dtype,
     export_render_to_tiff,
+    write_ome_tiff,
 )
 
 tifffile = pytest.importorskip("tifffile")
@@ -109,6 +110,51 @@ def test_export_multichannel_ome(tmp_path):
         assert src.metadata.channel_names == ("red", "green")
     finally:
         src.close()
+
+
+def test_ome_export_roundtrips_timing_and_source_documents(tmp_path):
+    from minflux_viewer.core.tiff_source import (
+        SOURCE_IMSPECTOR_XML_KEY,
+        SOURCE_OBF_JSON_KEY,
+        SOURCE_OME_XML_KEY,
+        TiffImageSource,
+    )
+
+    out = tmp_path / "metadata.ome.tif"
+    write_ome_tiff(
+        out,
+        np.zeros((2, 7, 8), dtype=np.uint16),
+        axes="TYX",
+        shape=(2, 7, 8),
+        dtype=np.uint16,
+        pixel_size_x_nm=50.0,
+        pixel_size_y_nm=60.0,
+        image_name="Ch1 {12}",
+        acquisition_date="2022-06-01T12:34:56",
+        description="source image",
+        time_interval=(0.25, "s"),
+        source_metadata={
+            SOURCE_OME_XML_KEY: "<OME><Image Name='original'/></OME>",
+            SOURCE_IMSPECTOR_XML_KEY: "<doc><laser>on</laser></doc>",
+            SOURCE_OBF_JSON_KEY: '{"stack_version": 7}',
+        },
+    )
+    source = TiffImageSource(out)
+    try:
+        meta = source.metadata
+        assert meta.image_name == "Ch1 {12}"
+        assert meta.acquisition_date == "2022-06-01T12:34:56"
+        assert meta.description == "source image"
+        assert meta.time_interval.value == pytest.approx(0.25)
+        assert meta.time_interval.unit == "s"
+        assert meta.pixel_size_x.nm == pytest.approx(50.0)
+        assert meta.pixel_size_y.nm == pytest.approx(60.0)
+        docs = {document.name: document.content for document in meta.documents}
+        assert docs["Original OME-XML"].startswith("<OME>")
+        assert "<laser>on</laser>" in docs["Imspector XML"]
+        assert '"stack_version": 7' in docs["OBF stack metadata"]
+    finally:
+        source.close()
 
 
 def test_progress_callback_reports_every_page(tmp_path):

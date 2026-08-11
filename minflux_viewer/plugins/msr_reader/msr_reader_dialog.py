@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, Qt, QThread, QThreadPool, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication,
@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QRadioButton,
     QSpinBox,
@@ -693,18 +694,27 @@ class AlignmentSaveDialog(QDialog):
 
 
 class FieldDialog(QDialog):
+    """Pick which datasets/fields — and which image series — an export includes.
+
+    ``prechecked_images`` mirrors the mfx/mbm "all" convention: ``None`` means
+    *every* image series (the master checkbox), a set means exactly those raw
+    stack indices, and the default empty set means none.
+    """
+
     def __init__(self, datasets: list[dict], prechecked: Optional[dict[str, dict]] = None,
                  parent=None, image_series: Optional[list[dict]] = None,
-                 prechecked_images: Optional[set] = None):
+                 prechecked_images: Optional[set] = frozenset()):
         super().__init__(parent)
         self.setWindowTitle("Datasets / Fields included…")
-        self.resize(max(500, 320 * max(1, len(datasets))), 520)
+        self.resize(max(560, 320 * max(1, len(datasets))), 560)
         self._vars: dict[str, dict[str, Any]] = {}
         self._image_checks: dict[int, QCheckBox] = {}
+        self._image_all: Optional[QCheckBox] = None
 
         root = QVBoxLayout(self)
         outer = QHBoxLayout()
         root.addLayout(outer)
+        column = QVBoxLayout()
 
         for ds in datasets:
             prev = prechecked.get(ds["key"], {}) if prechecked else {}
@@ -756,20 +766,42 @@ class FieldDialog(QDialog):
 
         # Image series (OBF stacks) → opened in the standalone image viewer, not
         # as MINFLUX datasets. Checked ones open on "Open in MINFLUX viewer".
+        # Laid out like a dataset panel: an "all" master above a box of the
+        # individual series, because the usual choice is all-or-nothing and only
+        # a single-file export cares about picking one channel.
         if image_series:
-            pre_img = set(prechecked_images or set())
-            img_box = QGroupBox("Image series (open in image viewer)")
+            include_all = prechecked_images is None
+            pre_img = set() if include_all else set(prechecked_images or set())
+            panel = QGroupBox("Image series (open in image viewer)")
+            panel_layout = QVBoxLayout(panel)
+            self._image_all = QCheckBox("Include all images")
+            self._image_all.setToolTip(
+                "Export/open every image series of every processed file. "
+                "Unlike the individual ticks below (which address one file's "
+                "stack list) this also covers files with different channels.")
+            self._image_all.setChecked(include_all)
+            panel_layout.addWidget(self._image_all)
+
+            img_box = QGroupBox("images")
             img_layout = QVBoxLayout(img_box)
             for s in image_series:
                 raw = int(s.get("raw_index"))
                 extra = "  ·  ".join(p for p in (s.get("shape_str", ""), s.get("dtype", "")) if p)
                 cb = QCheckBox(f"{s.get('name', f'Series {raw}')}"
                                + (f"    [{extra}]" if extra else ""))
-                cb.setChecked(raw in pre_img)
+                cb.setChecked(include_all or raw in pre_img)
                 img_layout.addWidget(cb)
                 self._image_checks[raw] = cb
+            self._image_all.toggled.connect(
+                lambda checked, checks=self._image_checks:
+                    [cb.setChecked(checked) for cb in checks.values()])
             img_layout.addStretch(1)
-            outer.addWidget(img_box)
+            panel_layout.addWidget(img_box)
+            panel_layout.addStretch(1)
+            column.addWidget(panel)
+
+        if column.count():
+            outer.addLayout(column)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -786,8 +818,14 @@ class FieldDialog(QDialog):
             }
         return out
 
-    def image_payload(self) -> set:
-        """Raw OBF stack indices of the checked image series."""
+    def image_payload(self) -> Optional[set]:
+        """The chosen image series: ``None`` for *all*, else raw stack indices.
+
+        ``None`` is not the same as "every box happens to be ticked" — it is the
+        instruction to take whatever image series each processed file has, which
+        is what a batch over files with differing channels needs."""
+        if self._image_all is not None and self._image_all.isChecked():
+            return None
         return {raw for raw, cb in self._image_checks.items() if cb.isChecked()}
 
 
@@ -2091,6 +2129,504 @@ class AlignmentPlotWindow(QDialog):
         )
 
 
+#: Window title of the reader; the batch run appends its percentage to it.
+_READER_TITLE = "MINFLUX .msr Reader & Converter"
+#: Header used for the main-window status line and the Log progress bar.
+_BATCH_STATUS_HEADER = "MSR batch export"
+
+
+def state_namespace_for(parsed: dict):
+    """A stand-in for the module-global ``msr.state`` over ONE parse result.
+
+    Exposes ``mfx_map`` / ``mbm_map`` / ``mbm_meta_map`` plus ``mfx`` / ``mbm``
+    (the first array).  Used so a reader dialog — and the batch worker, which
+    has no dialog at all — stay independent of the shared global, which only
+    ever reflects the most-recently-parsed file.
+    """
+    from types import SimpleNamespace
+
+    mfx_map = dict((parsed or {}).get("mfx_map") or {})
+    mbm_map = dict((parsed or {}).get("mbm_map") or {})
+    return SimpleNamespace(
+        mfx_map=mfx_map,
+        mbm_map=mbm_map,
+        mbm_meta_map=dict((parsed or {}).get("mbm_meta_map") or {}),
+        mfx=next(iter(mfx_map.values()), None),
+        mbm=next(iter(mbm_map.values()), None),
+    )
+
+
+#: Tree-node types that stand for one OBF image series (``legacy_series`` is the
+#: image-only-file tree, ``image_series`` the modern per-file/per-dataset groups).
+_IMAGE_NODE_TYPES = ("legacy_series", "image_series")
+
+#: Characters no mainstream filesystem accepts in a name (Windows is the strict
+#: one; ``/`` and NUL cover POSIX). Everything else — spaces, braces, brackets,
+#: parentheses — is kept so an exported image keeps the name the ``.msr`` uses.
+_FILENAME_FORBIDDEN = set('<>:"/\\|?*') | {chr(c) for c in range(32)}
+
+#: Windows refuses these stems whatever the extension.
+_RESERVED_STEMS = {"CON", "PRN", "AUX", "NUL"} | {
+    f"{p}{i}" for p in ("COM", "LPT") for i in range(1, 10)}
+
+
+def safe_export_stem(value: str) -> str:
+    """Sanitize a dataset/series label into a file stem."""
+    safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in str(value))
+    return safe.strip("._") or "export"
+
+
+def image_export_stem(name: str) -> str:
+    """File stem for an exported image series — its ``.msr`` name, verbatim.
+
+    Imspector names image stacks ``Ch1 {1}`` / ``MF(<run>)/density/loc``, and an
+    image is only findable again if the export keeps that name, so only
+    genuinely illegal characters are replaced (a run of them collapses to one
+    ``_``).  Unlike :func:`safe_export_stem` this preserves spaces, braces and
+    parentheses.
+    """
+    out: list[str] = []
+    for ch in str(name):
+        if ch in _FILENAME_FORBIDDEN:
+            if out and out[-1] == "_":
+                continue
+            out.append("_")
+        else:
+            out.append(ch)
+    # Windows silently strips trailing dots/spaces, which would break a later
+    # exact-name lookup, so they go here instead.
+    stem = "".join(out).strip().strip(".").strip() or "image"
+    if stem.upper() in _RESERVED_STEMS:
+        stem = f"{stem}_"
+    return stem
+
+
+def unique_export_stem(key: str, used: set[str], log=None) -> str:
+    """A file stem for *key* that no earlier dataset already took.
+
+    Two datasets can want the same stem either because the source labels collide
+    after sanitization, or because the file genuinely lists the same label twice
+    with different data.  Both used to raise, which aborted the export part-way
+    and dropped every dataset after the clash — including, in a real file, its
+    largest one.  Disambiguating with a numeric suffix keeps all of the data.
+    """
+    base = safe_export_stem(key)
+    if base not in used:
+        used.add(base)
+        return base
+    index = 2
+    while f"{base}_{index}" in used:
+        index += 1
+    stem = f"{base}_{index}"
+    used.add(stem)
+    if log is not None:
+        log(f"[export] '{key}' would reuse the file name '{base}'; "
+            f"writing it as '{stem}' instead.")
+    return stem
+
+
+def prepare_export_output_dir(value: str | os.PathLike[str]) -> Path:
+    """Validate and prepare the MSR export destination entered by the user.
+
+    The dialog's output-folder field is intentionally absolute: a relative
+    value such as ``=====`` otherwise becomes a silently-created directory
+    below whatever directory launched the application.  Missing directories
+    are created when their parent is usable, then a temporary file proves that
+    the destination is actually writable before export starts.
+    """
+    raw = os.path.expandvars(os.path.expanduser(str(value).strip()))
+    if not raw:
+        raise ValueError("Please set an output folder.")
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        raise ValueError(
+            f"Output folder must be an absolute path; got {str(value)!r}."
+        )
+    try:
+        output = candidate.resolve(strict=False)
+    except OSError as exc:
+        raise ValueError(f"Output folder is not available: {candidate}\n{exc}") from exc
+    if output.exists() and not output.is_dir():
+        raise ValueError(f"Output path is not a folder: {output}")
+    try:
+        output.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(f"Output folder is not available: {candidate}\n{exc}") from exc
+    if not output.is_dir():
+        raise ValueError(f"Output path is not a folder: {output}")
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=".minflux-viewer-write-test-", dir=output, delete=True
+        ):
+            pass
+    except OSError as exc:
+        raise ValueError(f"Output folder is not writable: {output}\n{exc}") from exc
+    return output
+
+
+def subset_struct_fields(arr, names_sel):
+    """Structured *arr* restricted to *names_sel* (``None`` = keep every field)."""
+    if arr is None:
+        return None
+    names = getattr(getattr(arr, "dtype", None), "names", None)
+    if names and names_sel is not None:
+        keep = [n for n in names if n in names_sel]
+        if not keep:
+            return None
+        try:
+            return arr[keep]
+        except Exception:
+            pass
+    return arr
+
+
+def image_series_of(parsed: dict, log=None) -> list[dict]:
+    """Viewable OBF image series of a parsed ``.msr`` (empty when it has none)."""
+    msr_path = (parsed or {}).get("msr")
+    if not msr_path:
+        return []
+    try:
+        from ...core.obf_image_source import list_obf_image_series
+        return list_obf_image_series(msr_path)
+    except Exception as exc:                                   # noqa: BLE001
+        if log is not None:
+            log(f"[image] could not list image series: {exc}")
+        return []
+
+
+def select_image_series(series: list[dict], *, names=None, indices=None) -> list[dict]:
+    """The series to export: by *names* when given, else by raw stack *indices*.
+
+    Batch export matches on **name** because raw stack indices address one
+    file's stack table and mean nothing in another.  ``indices=None`` (with no
+    *names*) means **every** series — the "include all images" selection, which
+    neither indices nor names can express across files whose stack tables and
+    channel labels differ.
+    """
+    if not series:
+        return []
+    if names is not None:
+        return [s for s in series if s.get("name") in names]
+    if indices is None:
+        return list(series)
+    wanted = {int(i) for i in indices}
+    return [s for s in series if int(s.get("raw_index", -1)) in wanted]
+
+
+def export_image_series(out_dir: str, msr_path: str, series: list[dict],
+                        log=None, used: set[str] | None = None) -> None:
+    """Write each selected OBF image series as an OME-TIFF beside the datasets.
+
+    Images go out through the shared writer in ``core/tiff_export.py`` — the
+    same path the render view's "Export to TIFF…" uses — so the pixel
+    calibration round-trips into the viewer's TIFF reader.  Image data is copied
+    through unchanged; the chosen data formats (.mat/.npy/…) apply to the
+    localization arrays, not to images.
+
+    *used* is the set of file stems already written for this output folder. The
+    caller owns it so a series-at-a-time loop (which is what gives the batch a
+    per-image progress tick) still detects duplicate ``.msr`` labels.
+    """
+    if not msr_path or not series:
+        return
+    from ...core.obf_image_source import ObfImageSource
+    from ...core.tiff_export import export_image_series_to_tiff
+
+    used = set() if used is None else used
+    for entry in series:
+        raw_index = int(entry.get("raw_index", -1))
+        stem = image_export_stem(str(entry.get("name") or f"image_{raw_index}"))
+        # Two OBF stacks can carry the same label; keep both addressable.
+        if stem in used:
+            stem = f"{stem}_{raw_index}"
+        used.add(stem)
+        target = Path(out_dir) / f"{stem}.tif"
+        source = None
+        try:
+            source = ObfImageSource(msr_path, raw_stack_index=raw_index)
+            result = export_image_series_to_tiff(source, target)
+            if log is not None:
+                log(f"[tif] wrote {target} "
+                    f"({result.axes} {'x'.join(str(v) for v in result.shape)}, "
+                    f"{result.dtype})")
+        except Exception as exc:                               # noqa: BLE001
+            if log is not None:
+                log(f"[error] image series {raw_index} "
+                    f"('{entry.get('name')}'): {exc}")
+            raise
+        finally:
+            if source is not None:
+                source.close()
+
+
+def export_source_store(out_dir: str, stem: str, formats: list[str], zroot,
+                        log=None) -> None:
+    """Unpack the dataset's embedded MFXDTA store beside its ``.zarr`` export.
+
+    The container holds more than the localization table the data formats
+    write: the acquisition ROIs (root ``.zattrs``), the search grid
+    (``grd/search_0``), which beads were used, and the acquisition date,
+    MINFLUX sequence and scan geometry (``mfx/.zattrs``).  Unpacking it costs
+    one decode layer and yields a plain **zarr v2 store any tool can open**, so
+    none of that is lost.
+
+    Only for ``.zarr`` — the one export format that is already a directory
+    store, so this rides along naturally.  Every other format ignores it; the
+    raw container has no meaningful representation as a ``.mat``/``.csv`` table.
+    Written as ``<stem>_mfxdta.zarr``, beside the canonical ``<stem>_mfx.zarr``.
+    """
+    if "zarr" not in formats or not zroot:
+        return
+    from ...msr.mfxdta import unpack_zarr_store_to_dir
+
+    target = Path(out_dir) / f"{stem}_mfxdta.zarr"
+    try:
+        unpack_zarr_store_to_dir(zroot, target)
+    except Exception as exc:                                       # noqa: BLE001
+        if log is not None:
+            log(f"[warn] could not unpack the source store for '{stem}': {exc}")
+        return
+    if log is not None:
+        log(f"[zarr] wrote {target} (source MFXDTA store, unpacked)")
+
+
+def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
+                         mfx_sel_global=None, mbm_sel_global=None,
+                         image_names=None, image_indices=None,
+                         field_selection=None, log=None, progress=None) -> None:
+    """Write every selected dataset and image series of one parsed ``.msr``.
+
+    Free of Qt and of dialog state so the batch runner can call it from a
+    worker thread; the dialog's own export is a thin wrapper over it.
+    ``progress(done, total)`` — when given — is called once per exported unit
+    (dataset or image series), which is what gives the batch a finer progress
+    reading than one step per file.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    _log = log if log is not None else (lambda _m: None)
+
+    from ...msr.export import export_arrays
+
+    # Pair each dataset with its own arrays.  A .msr can carry two entries under
+    # one display name (same did, different data — seen in the wild with a large
+    # localization store beside a small companion), and ``mfx_map`` is keyed by
+    # name, so the map alone silently keeps only one of them.  The per-entry
+    # ``_mfx``/``_mbm`` captured at parse time are authoritative; the map is the
+    # fallback for the legacy path.
+    if (parsed or {}).get("mode") == "modern":
+        entries = [((ds.get("display_name") or ds.get("did") or "dataset"), ds)
+                   for ds in (parsed or {}).get("datasets") or []]
+    else:
+        keys = (getattr(msr_state, "mfx_map", {}).keys()
+                | getattr(msr_state, "mbm_map", {}).keys())
+        entries = [(key, None) for key in sorted(keys)] or [("legacy", None)]
+
+    images = select_image_series(image_series_of(parsed, _log),
+                                 names=image_names, indices=image_indices)
+    total = len(entries) + len(images)
+    done = 0
+
+    def _tick():
+        nonlocal done
+        done += 1
+        if progress is not None:
+            progress(done, total)
+
+    used_names: set[str] = set()
+    selection = field_selection or {}
+    for key, entry in entries:
+        mfx_arr = (entry or {}).get("_mfx")
+        mbm_arr = (entry or {}).get("_mbm")
+        if mfx_arr is None:
+            mfx_arr = getattr(msr_state, "mfx_map", {}).get(key)
+        if mbm_arr is None:
+            mbm_arr = getattr(msr_state, "mbm_map", {}).get(key)
+        if mfx_sel_global is not None or mbm_sel_global is not None:
+            mfx_sel, mbm_sel = mfx_sel_global, mbm_sel_global
+        else:
+            sel = selection.get(key, {"checked": True, "mfx": None, "mbm": None})
+            if not sel.get("checked", True):
+                _log(f"[export] skip dataset '{key}' (unchecked).")
+                _tick()
+                continue
+            mfx_sel = sel.get("mfx")
+            mbm_sel = sel.get("mbm")
+        mfx_sub = subset_struct_fields(mfx_arr, mfx_sel)
+        mbm_sub = subset_struct_fields(mbm_arr, mbm_sel)
+        if mfx_sub is None and mbm_sub is None:
+            _log(f"[export] skip dataset '{key}' (no selected data).")
+            _tick()
+            continue
+
+        stem = unique_export_stem(key, used_names, _log)
+        kept = (list(getattr(getattr(mfx_sub, "dtype", None), "names", []) or [])
+                if mfx_sel is not None else "all")
+        _log(f"[export] '{key}': mfx fields = "
+             f"{', '.join(kept) if isinstance(kept, list) else kept}")
+        export_arrays(
+            out_dir, stem, formats, mfx_sub, mbm_sub, log=_log,
+            mbm_meta=getattr(msr_state, "mbm_meta_map", {}).get(key),
+        )
+        export_source_store(out_dir, stem, formats, (entry or {}).get("zroot"), _log)
+        _tick()
+
+    if images:
+        # ASCII only: the dialog's log() falls back to print(), which raises on
+        # a cp1252 console.
+        _log(f"[export] {len(images)} image series -> OME-TIFF")
+        used_image_stems: set[str] = set()
+        for entry in images:
+            export_image_series(out_dir, parsed.get("msr"), [entry], _log,
+                                used=used_image_stems)
+            _tick()
+
+
+class _BatchExportSignals(QObject):
+    progress = pyqtSignal(float, str)          # fraction 0..1, current file name
+    message = pyqtSignal(str)                  # a Log line
+    finished = pyqtSignal(int, list, bool)     # exported, failures, cancelled
+
+
+class _BatchExportTask(QRunnable):
+    """Parse and export a list of ``.msr`` files off the UI thread.
+
+    Cancellation is checked between files: one file's parse+export is a single
+    uninterruptible unit, so a cancel takes effect at the next file boundary
+    rather than leaving a half-written export behind.
+    """
+
+    def __init__(self, files, targets, formats, tmp_dir, *, mfx_sel, mbm_sel,
+                 image_names, field_selection, image_indices=frozenset()):
+        super().__init__()
+        self.signals = _BatchExportSignals()
+        self._files = list(files)
+        self._targets = dict(targets)
+        self._formats = list(formats)
+        self._tmp = tmp_dir
+        self._mfx_sel = mfx_sel
+        self._mbm_sel = mbm_sel
+        self._image_names = image_names
+        # Only consulted when there is no name filter: ``None`` = every image
+        # series of every file, empty = none.
+        self._image_indices = image_indices
+        self._field_selection = dict(field_selection or {})
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self):
+        from ...msr import parse_msr_general
+
+        total = max(len(self._files), 1)
+        exported = 0
+        failures: list[tuple[Path, str]] = []
+        log = self.signals.message.emit
+        for index, msr_path in enumerate(self._files):
+            if self._cancelled:
+                break
+            base = index / total
+            self.signals.progress.emit(base, msr_path.name)
+            sub_out = self._targets[msr_path]
+            try:
+                os.makedirs(sub_out, exist_ok=True)
+                log(f"[batch {index + 1}/{len(self._files)}] parse & export: "
+                    f"{msr_path} -> {sub_out}")
+                parsed = parse_msr_general(str(msr_path), self._tmp, log=log)
+                export_parsed_result(
+                    parsed, state_namespace_for(parsed), str(sub_out),
+                    self._formats,
+                    mfx_sel_global=self._mfx_sel, mbm_sel_global=self._mbm_sel,
+                    image_names=self._image_names,
+                    image_indices=self._image_indices,
+                    field_selection=self._field_selection,
+                    log=log,
+                    progress=lambda d, t, _b=base: self.signals.progress.emit(
+                        _b + (d / max(t, 1)) / total, msr_path.name),
+                )
+                exported += 1
+            except Exception as exc:                           # noqa: BLE001
+                failures.append((msr_path, str(exc)))
+                log(f"[batch error] {msr_path}: {exc}")
+        self.signals.progress.emit(1.0, "")
+        self.signals.finished.emit(exported, failures, self._cancelled)
+
+
+class PathDropLineEdit(QLineEdit):
+    """Path field that accepts a dropped file or folder.
+
+    ``accept`` decides which dropped paths are taken: ``"dir"`` for a folder
+    only, ``"msr_or_dir"`` for an ``.msr`` file or a folder.  The first
+    acceptable path of the drop wins, and :attr:`pathDropped` carries it so the
+    owner can react (switch input mode, start a parse, persist settings).
+    """
+
+    pathDropped = pyqtSignal(str)
+
+    def __init__(self, text: str = "", *, accept: str = "msr_or_dir", parent=None):
+        super().__init__(text, parent)
+        self._accept = accept
+        self.setAcceptDrops(True)
+
+    def _acceptable(self, path: str) -> bool:
+        if not path:
+            return False
+        candidate = Path(path)
+        if candidate.is_dir():
+            return True
+        if self._accept == "dir":
+            return False
+        return candidate.suffix.lower() == ".msr" and candidate.is_file()
+
+    def _first_acceptable(self, event) -> str:
+        data = event.mimeData()
+        if data is None or not data.hasUrls():
+            return ""
+        for url in data.urls():
+            local = url.toLocalFile()
+            if self._acceptable(local):
+                return local
+        return ""
+
+    @staticmethod
+    def _has_urls(event) -> bool:
+        data = event.mimeData()
+        return bool(data is not None and data.hasUrls())
+
+    def _handle_drag(self, event, fallback) -> None:
+        """A file/folder drag is ours to judge; anything else is plain text.
+
+        Delegating a rejected *file* drag to QLineEdit would let it through as
+        text and paste the ``file:///…`` URL into the path, which looks like a
+        successful drop of an unsupported file.
+        """
+        if self._has_urls(event):
+            if self._first_acceptable(event):
+                event.acceptProposedAction()
+            else:
+                event.ignore()
+            return
+        fallback(event)
+
+    def dragEnterEvent(self, event):
+        self._handle_drag(event, super().dragEnterEvent)
+
+    def dragMoveEvent(self, event):
+        self._handle_drag(event, super().dragMoveEvent)
+
+    def dropEvent(self, event):
+        if not self._has_urls(event):
+            super().dropEvent(event)
+            return
+        path = self._first_acceptable(event)
+        if not path:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.setText(path)
+        self.pathDropped.emit(path)
+
+
 class _ParseWorker(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(dict)
@@ -2134,8 +2670,12 @@ class MsrReaderDialog(QWidget):
         # few main-window lookups below (``self._owner``).
         super().__init__(None)
         self._owner = parent
-        self.setWindowTitle("MINFLUX .msr Reader & Converter")
+        self.setWindowTitle(_READER_TITLE)
         self.setWindowFlags(Qt.WindowType.Window)
+        # Batch export runs on a worker; these track it for progress + shutdown.
+        self._batch_task = None
+        self._batch_context: dict | None = None
+        self._last_batch_pct = -1
         self.resize(980, 860)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._positioned = False
@@ -2153,7 +2693,10 @@ class MsrReaderDialog(QWidget):
         self._mbm_map: dict[str, Any] = {}
         self._mbm_meta_map: dict[str, dict] = {}
         self.field_selection = {}
-        self.image_field_selection: set = set()   # raw OBF stack indices to open as images
+        # Image series to export / open as images: ``None`` = all of whatever
+        # each file has, a set of raw OBF stack indices = exactly those,
+        # empty set = none.
+        self.image_field_selection: Optional[set] = set()
         # gri-IDs the user excluded via "Show Beads Drift". Alignment always
         # starts from metadata-marked used beads; these exclusions further
         # narrow that set after the user applies a manual selection.
@@ -2206,7 +2749,9 @@ class MsrReaderDialog(QWidget):
             "preview_all_rows": False,
             "mode_folder": False,
             "plot_new_window": True,
-            "formats": {"mat": True, "npy": False, "npz": False, "json": False, "csv": False, "zarr": False, "msr": False},
+            "recursive": False,
+            "reproduce_tree": False,
+            "formats": {"mat": True, "npy": False, "npz": False, "json": False, "csv": False, "zarr": False},
             "field_selection": {},
         }
         try:
@@ -2248,6 +2793,8 @@ class MsrReaderDialog(QWidget):
             "preview_all_rows": bool(self.preview_all_rows_check.isChecked()),
             "mode_folder": bool(self.mode_folder.isChecked()),
             "plot_new_window": bool(self.plot_new_window_check.isChecked()),
+            "recursive": bool(self.recursive_check.isChecked()),
+            "reproduce_tree": bool(self.reproduce_tree_check.isChecked()),
             "formats": {
                 "mat": bool(self.fmt_mat.isChecked()),
                 "npy": bool(self.fmt_npy.isChecked()),
@@ -2255,10 +2802,13 @@ class MsrReaderDialog(QWidget):
                 "json": bool(self.fmt_json.isChecked()),
                 "csv": bool(self.fmt_csv.isChecked()),
                 "zarr": bool(self.fmt_zarr.isChecked()),
-                "msr": bool(self.fmt_msr.isChecked()),
             },
             "field_selection": clean_selection(self.field_selection),
-            "image_field_selection": sorted(int(i) for i in (self.image_field_selection or set())),
+            # None (= all images) must survive a round trip; an empty list means
+            # "none selected", which is a different instruction.
+            "image_field_selection": (
+                None if self.image_field_selection is None
+                else sorted(int(i) for i in self.image_field_selection)),
             "alignment_save": dict(self._alignment_save_options or {}),
         }
         try:
@@ -2298,6 +2848,19 @@ class MsrReaderDialog(QWidget):
 
     def closeEvent(self, event):
         self._save_settings()
+        # The dialog is WA_DeleteOnClose, so a running batch task must stop
+        # signalling into it before Qt tears the widgets down.
+        if self._batch_task is not None:
+            self._batch_task.cancel()
+            for signal in (self._batch_task.signals.progress,
+                           self._batch_task.signals.message,
+                           self._batch_task.signals.finished):
+                try:
+                    signal.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+            self._batch_task = None
+            self._batch_context = None
         for win in list(self._plot_windows):
             try:
                 win.close()
@@ -2332,11 +2895,20 @@ class MsrReaderDialog(QWidget):
         input_type_row.addStretch(1)
         root.addLayout(input_type_row)
 
-        self.input_path_edit = QLineEdit()
+        self.input_path_edit = PathDropLineEdit(accept="msr_or_dir")
         # Enter in the path field parses a single file (same as Browse / drop).
         self.input_path_edit.returnPressed.connect(self._auto_parse_single_input)
+        self.input_path_edit.pathDropped.connect(self._on_input_path_dropped)
         self._last_input_dir = settings.get("last_input_dir") or str(Path.home())
-        root.addLayout(self._browse_row("MSR file or folder:", self.input_path_edit, self.browse_input))
+        self.recursive_check = QCheckBox("recursive")
+        self.recursive_check.setChecked(bool(settings.get("recursive", False)))
+        self.recursive_check.setToolTip(
+            "Search the folder and every sub-folder for .msr files.\n"
+            "Off: only .msr files directly inside the folder are exported.")
+        self.recursive_check.toggled.connect(lambda _checked: self._save_settings())
+        root.addLayout(self._browse_row(
+            "MSR file or folder:", self.input_path_edit, self.browse_input,
+            extra=self.recursive_check))
 
         action_row = QHBoxLayout()
         # A single .msr file auto-parses (on drop / Browse / Enter). This button is
@@ -2378,8 +2950,19 @@ class MsrReaderDialog(QWidget):
         tree_layout.addWidget(self.tree)
         root.addWidget(tree_group, 1)
 
-        self.out_dir_edit = QLineEdit(settings["out_dir"])
-        root.addLayout(self._browse_row("Output folder:", self.out_dir_edit, self.browse_out))
+        self.out_dir_edit = PathDropLineEdit(settings["out_dir"], accept="dir")
+        self.out_dir_edit.pathDropped.connect(lambda _path: self._save_settings())
+        self.reproduce_tree_check = QCheckBox("reproduce input folder structure")
+        self.reproduce_tree_check.setChecked(bool(settings.get("reproduce_tree", False)))
+        self.reproduce_tree_check.setToolTip(
+            "Mirror each input file's path below the output folder.\n"
+            "root/1st_dir/2nd_dir/test.msr  →  output/1st_dir/2nd_dir/test.mat\n"
+            "Off: every file exports into its own <name> sub-folder directly "
+            "under the output folder.")
+        self.reproduce_tree_check.toggled.connect(lambda _checked: self._save_settings())
+        root.addLayout(self._browse_row(
+            "Output folder:", self.out_dir_edit, self.browse_out,
+            extra=self.reproduce_tree_check))
 
         export_row = QHBoxLayout()
         field_button = QPushButton("Datasets / Fields included…")
@@ -2392,10 +2975,20 @@ class MsrReaderDialog(QWidget):
         self.fmt_json = QCheckBox("JSON (.json)")
         self.fmt_csv = QCheckBox("(.csv)")
         self.fmt_zarr = QCheckBox("Zarr (.zarr)")
-        self.fmt_msr = QCheckBox("MINFLUX (.msr)")
         self.fmt_zarr.setToolTip(
             "Write canonical flat m2410 columns to a .zarr directory. "
-            "MBM is written as a separate companion when present."
+            "MBM is written as a separate companion when present. "
+            "Re-opens in the viewer (drag the .zarr directory onto the window).\n\n"
+            "Also writes <name>_mfxdta.zarr: the measurement's embedded source "
+            "store, unpacked. It carries what the flat table cannot — the "
+            "acquisition ROIs, the search grid, which beads were used, and the "
+            "acquisition date, MINFLUX sequence and scan geometry."
+        )
+        self.fmt_npz.setToolTip(
+            "Zipped NumPy archive of the canonical flat m2410 columns — compact, "
+            "dtype-preserving, and read anywhere with numpy.load().\n\n"
+            "Write-only: the viewer cannot re-open a .npz. Use .mat, .npy, "
+            ".json, .csv or .zarr for a round trip."
         )
         formats = settings.get("formats") or {}
         self.fmt_mat.setChecked(bool(formats.get("mat", True)))
@@ -2404,21 +2997,40 @@ class MsrReaderDialog(QWidget):
         self.fmt_json.setChecked(bool(formats.get("json", False)))
         self.fmt_csv.setChecked(bool(formats.get("csv", False)))
         self.fmt_zarr.setChecked(bool(formats.get("zarr", False)))
-        self.fmt_msr.setChecked(bool(formats.get("msr", False)))
         export_row.addWidget(self.fmt_mat)
         export_row.addWidget(self.fmt_npy)
         export_row.addWidget(self.fmt_npz)
         export_row.addWidget(self.fmt_json)
         export_row.addWidget(self.fmt_csv)
         export_row.addWidget(self.fmt_zarr)
-        export_row.addWidget(self.fmt_msr)
         export_row.addStretch(1)
         root.addLayout(export_row)
 
         self.logbox = None
         self.field_selection = settings.get("field_selection") or {}
-        self.image_field_selection = set(settings.get("image_field_selection") or [])
+        stored_images = settings.get("image_field_selection", [])
+        self.image_field_selection = (
+            None if stored_images is None else {int(i) for i in stored_images})
         self._alignment_save_options = settings.get("alignment_save") or {}
+
+        # Batch progress: hidden until a run starts, so the dialog looks the
+        # same as before for single-file work.
+        self._progress_row = QWidget()
+        progress_layout = QHBoxLayout(self._progress_row)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 1000)          # 0.1 % resolution
+        self._progress_bar.setTextVisible(True)
+        self._progress_label = QLabel("")
+        self._cancel_batch_btn = QPushButton("Stop")
+        self._cancel_batch_btn.setToolTip(
+            "Stop after the file currently being exported finishes.")
+        self._cancel_batch_btn.clicked.connect(self._cancel_batch_export)
+        progress_layout.addWidget(self._progress_bar, 1)
+        progress_layout.addWidget(self._progress_label)
+        progress_layout.addWidget(self._cancel_batch_btn)
+        self._progress_row.setVisible(False)
+        root.addWidget(self._progress_row)
 
         bottom = QHBoxLayout()
         self._beads_drift_btn = QPushButton("Show beads drift")
@@ -2433,6 +3045,7 @@ class MsrReaderDialog(QWidget):
         self._open_viewer_btn.setEnabled(self._state is not None)
         export_button = QPushButton("OK (export)")
         export_button.clicked.connect(self.on_ok)
+        self._export_button = export_button
         cancel_button = QPushButton("Cancel")
         cancel_button.clicked.connect(self.close)
         bottom.addWidget(self._beads_drift_btn)
@@ -2447,13 +3060,18 @@ class MsrReaderDialog(QWidget):
         # persisted input mode (enabled only in Folder (batch) mode).
         self._on_mode_changed()
 
-    def _browse_row(self, label: str, lineedit: QLineEdit, callback):
+    def _browse_row(self, label: str, lineedit: QLineEdit, callback, *, extra=None):
         row = QHBoxLayout()
         row.addWidget(QLabel(label))
+        # The field is the only stretching item, so a trailing checkbox takes
+        # its width out of the field rather than widening the dialog.
+        lineedit.setMinimumWidth(180)
         row.addWidget(lineedit, 1)
         button = QPushButton("Browse…")
         button.clicked.connect(callback)
         row.addWidget(button)
+        if extra is not None:
+            row.addWidget(extra)
         return row
 
     # ------------------------------------------------------------------
@@ -2613,12 +3231,30 @@ class MsrReaderDialog(QWidget):
         if path:
             self._parse_specific_file(path)
 
+    def _on_input_path_dropped(self, path: str) -> None:
+        """A dropped path also selects the input mode it implies."""
+        candidate = Path(path)
+        if candidate.is_dir():
+            self.mode_folder.setChecked(True)
+            self._last_input_dir = str(candidate)
+            self._save_settings()
+            return
+        self.mode_file.setChecked(True)
+        self._last_input_dir = str(candidate.parent)
+        self._save_settings()
+        self._parse_specific_file(str(candidate))
+
     def _on_mode_changed(self) -> None:
         """Keep the button meaningful per input type: a single file auto-parses,
         so "Select a file to view content" is only enabled in Folder (batch)
         mode (where it picks which file in the folder to preview)."""
         folder = self.mode_folder.isChecked()
         self._parse_button.setEnabled(folder)
+        # Both batch options are meaningless for a single file.
+        if hasattr(self, "recursive_check"):
+            self.recursive_check.setEnabled(folder)
+        if hasattr(self, "reproduce_tree_check"):
+            self.reproduce_tree_check.setEnabled(folder)
         self._parse_button.setToolTip(
             "Pick which .msr file in the folder to parse and preview."
             if folder else
@@ -2656,6 +3292,17 @@ class MsrReaderDialog(QWidget):
             mfx=next(iter(self._mfx_map.values()), None),
             mbm=next(iter(self._mbm_map.values()), None),
         )
+
+    # The dialog-facing names delegate to the module-level implementations that
+    # the batch worker also uses, so there is one export path, not two.
+    def _unique_export_stem(self, key: str, used: set[str]) -> str:
+        return unique_export_stem(key, used, self.log)
+
+    def _subset_struct_fields(self, arr, names_sel):
+        return subset_struct_fields(arr, names_sel)
+
+    def _export_image_series(self, out_dir: str, series: list[dict]) -> None:
+        export_image_series(out_dir, self.parsed.get("msr"), series, self.log)
 
     def _on_parse_done(self, result: dict):
         self._store_parse_result(result)
@@ -2749,11 +3396,15 @@ class MsrReaderDialog(QWidget):
             self._set_item_tooltip(
                 meta_item,
                 "OME metadata of this legacy MSR file. Right-click > Show metadata "
-                "opens it in a searchable JSON viewer.",
+                "opens it as an XML table and formatted XML document.",
             )
             root_item.addChild(meta_item)
             if isinstance(meta, dict):
-                self.nodeinfo[self._item_id(meta_item)] = {"type": "legacy_metadata", "data": meta}
+                self.nodeinfo[self._item_id(meta_item)] = {
+                    "type": "legacy_metadata",
+                    "data": meta,
+                    "xml": result.get("metadata_xml"),
+                }
                 _populate_metadata_items(meta_item, _json_compact(meta))
             else:
                 meta_item.addChild(QTreeWidgetItem(["(metadata unavailable)", "", "", ""]))
@@ -2767,8 +3418,101 @@ class MsrReaderDialog(QWidget):
                 child.setExpanded(child.text(0) == "grd")
                 for k in range(child.childCount()):
                     child.child(k).setExpanded(False)
+        # After the expansion pass, so the image groups keep their collapsed
+        # default instead of being expanded along with the dataset nodes.
+        if result.get("mode") == "modern":
+            self._add_image_series_nodes(root_item, result)
         for column in range(self.tree.columnCount()):
             self.tree.resizeColumnToContents(column)
+
+    def _add_image_series_nodes(self, root_item, result: dict) -> None:
+        """Show the file's OBF image series in the parsed-contents tree.
+
+        A density/trace render names the MINFLUX dataset it was computed from
+        (``source_did``), so it is nested under that dataset's node, parallel to
+        ``mfx``/``grd``.  Confocal channels belong to no dataset and go into one
+        ``Image series`` group beside the datasets, last.  Both groups start
+        **collapsed** — they are usually many and rarely the reason the tree was
+        opened.
+        """
+        series = self._gather_image_series_for_dialog()
+        if not series:
+            return
+
+        # A did can appear twice (a dataset and its aggregated companion share
+        # one); the first node carrying it owns the linked images.
+        ds_item_by_did: dict[str, QTreeWidgetItem] = {}
+        for i in range(root_item.childCount()):
+            item = root_item.child(i)
+            did = str((self.datasetnode_info.get(self._item_id(item)) or {}).get("did") or "")
+            if did:
+                ds_item_by_did.setdefault(did, item)
+
+        loose: list[dict] = []
+        historical: list[dict] = []
+        nested: dict[int, list[dict]] = {}
+        for entry in series:
+            owner = ds_item_by_did.get(str(entry.get("source_did") or ""))
+            if owner is None:
+                # Project-style .msr files can retain trace rasters from old
+                # runs after their localization payload has been replaced.
+                # Keep these useful images, but never misassociate them with
+                # whichever dataset happens to remain in the file.
+                if entry.get("source_did"):
+                    historical.append(entry)
+                else:
+                    loose.append(entry)
+            else:
+                nested.setdefault(id(owner), []).append(entry)
+
+        for i in range(root_item.childCount()):
+            item = root_item.child(i)
+            group = nested.get(id(item))
+            if group:
+                self._add_image_series_group(
+                    item, group,
+                    "Image series rendered from this MINFLUX dataset "
+                    "(density / trace). Right-click > Open as image.")
+        if loose:
+            self._add_image_series_group(
+                root_item, loose,
+                "Image series stored in this .msr file (confocal / overview "
+                "channels). Right-click > Open as image.")
+        if historical:
+            self._add_image_series_group(
+                root_item,
+                historical,
+                "Historical MINFLUX-derived image series whose source DID is no "
+                "longer present as a localization payload in this project file. "
+                "The raster remains viewable and exportable, but is not attached "
+                "to the unrelated current dataset.",
+                label="Historical MINFLUX images",
+            )
+
+    def _add_image_series_group(
+        self, parent, series: list[dict], tooltip: str, *, label: str = "Image series"
+    ) -> None:
+        group = QTreeWidgetItem([f"{label} ({len(series)})", "", "", ""])
+        self._set_item_tooltip(group, tooltip)
+        parent.addChild(group)
+        self.nodeinfo[self._item_id(group)] = {
+            "type": "image_series_group", "description": group.toolTip(0)}
+        for entry in series:
+            raw = int(entry.get("raw_index", -1))
+            name = str(entry.get("name") or f"Series {raw + 1}")
+            item = QTreeWidgetItem(
+                [name, "image", str(entry.get("shape_str", "")), str(entry.get("dtype", ""))])
+            self._set_item_tooltip(
+                item,
+                f"OBF image stack {raw}. Source DID: "
+                f"{entry.get('source_did') or 'none'}. Right-click > Show metadata "
+                "or Open as image.",
+            )
+            group.addChild(item)
+            self.nodeinfo[self._item_id(item)] = {
+                "type": "image_series", "index": raw, "name": name,
+                "description": item.toolTip(0)}
+        group.setExpanded(False)
 
     def _add_dtype_field_nodes(self, parent_item, path_prefix: str, fields: list):
         from ...msr.descriptions import describe_path
@@ -2946,7 +3690,7 @@ class MsrReaderDialog(QWidget):
         selected_arrays = self._selected_array_items()
         can_export = bool(selected_arrays)
         image_series = [self.nodeinfo.get(self._item_id(it), {}) for it in self._selected_items()]
-        image_series = [info for info in image_series if info.get("type") == "legacy_series"]
+        image_series = [info for info in image_series if info.get("type") in _IMAGE_NODE_TYPES]
         open_image = None
         if image_series:
             open_image = menu.addAction(
@@ -3001,8 +3745,19 @@ class MsrReaderDialog(QWidget):
             item = item.parent()
         return None
 
+    def _legacy_metadata_xml_of(self, item):
+        while item is not None:
+            info = self.nodeinfo.get(self._item_id(item), {})
+            if info.get("type") == "legacy_metadata":
+                return info.get("xml")
+            item = item.parent()
+        return None
+
     def _can_show_metadata(self, item) -> bool:
         from ...msr.io import read_zarr_attrs
+        info = self.nodeinfo.get(self._item_id(item), {})
+        if info.get("type") in _IMAGE_NODE_TYPES:
+            return True
         if self._legacy_metadata_of(item) is not None:
             return True
         zroot, path = self._node_metadata_target(item)
@@ -3014,15 +3769,47 @@ class MsrReaderDialog(QWidget):
             return False
 
     def _ctx_show_metadata(self):
+        from ...core.tiff_source import MetadataDocument
         from ...msr.io import read_zarr_attrs
+        from ...ui.metadata_viewer import MetadataViewDialog
+
         shown = 0
         legacy_shown = False
         for item in self._selected_items():
+            info = self.nodeinfo.get(self._item_id(item), {})
+            if info.get("type") in _IMAGE_NODE_TYPES:
+                try:
+                    from ...core.obf_image_source import ObfImageSource
+
+                    source = ObfImageSource(
+                        self.parsed.get("msr", ""), raw_stack_index=int(info["index"])
+                    )
+                    try:
+                        documents = source.metadata.documents
+                        title = source.metadata.image_name or item.text(0)
+                    finally:
+                        source.close()
+                    self._show_child_dialog(
+                        MetadataViewDialog(f"Metadata: {title}", documents, self)
+                    )
+                    shown += 1
+                except Exception as exc:
+                    self.log(f"[metadata] failed for {item.text(0)}: {exc}")
+                continue
             legacy_meta = self._legacy_metadata_of(item)
             if legacy_meta is not None:
                 if not legacy_shown:
                     name = Path(self.parsed.get("msr", "")).name or "legacy file"
-                    self._show_child_dialog(JsonViewDialog(f"Metadata: {name}", legacy_meta, self))
+                    xml = self._legacy_metadata_xml_of(item)
+                    if xml:
+                        dialog = MetadataViewDialog(
+                            f"Metadata: {name}",
+                            [MetadataDocument("OME-XML", "xml", xml)],
+                            self,
+                        )
+                    else:
+                        dialog = JsonViewDialog(f"Metadata: {name}", legacy_meta, self)
+                    self._show_child_dialog(dialog)
                     legacy_shown = True
                     shown += 1
                 continue
@@ -3054,7 +3841,7 @@ class MsrReaderDialog(QWidget):
         return [
             int(info["index"])
             for it in self._selected_items()
-            if (info := self.nodeinfo.get(self._item_id(it), {})).get("type") == "legacy_series"
+            if (info := self.nodeinfo.get(self._item_id(it), {})).get("type") in _IMAGE_NODE_TYPES
         ]
 
     def _ctx_preview(self):
@@ -3220,12 +4007,43 @@ class MsrReaderDialog(QWidget):
             return
         dlg = FieldDialog(ds_list, self.field_selection or None, self,
                           image_series=image_series,
-                          prechecked_images=self.image_field_selection or None)
+                          prechecked_images=self.image_field_selection)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.field_selection = dlg.result_payload()
             self.image_field_selection = dlg.image_payload()
             self._save_settings()
             self.log("[select] updated datasets/fields selection.")
+
+    def _selected_image_names(self) -> set[str] | None:
+        """Names of the image series the user ticked, or ``None`` when names
+        cannot express the choice (all images, or none).
+
+        The Fields dialog records *raw stack indices*, which address one file's
+        stack table and mean nothing in another.  Batch export therefore carries
+        the **names** across files instead, matching the way dataset field
+        filters are already applied globally.  "All images" and "no images" are
+        both carried by :attr:`image_field_selection` itself (``None`` / empty),
+        since neither is a name list.
+        """
+        selected = self.image_field_selection
+        if not selected:                      # None (all) or empty (none)
+            return None
+        wanted = {int(i) for i in selected}
+        names = {entry["name"] for entry in self._gather_image_series_for_dialog()
+                 if int(entry.get("raw_index", -1)) in wanted}
+        return names or None
+
+    def _image_filter_summary(self, image_names: set[str] | None) -> str:
+        """One-word/one-list description of the image selection, for the Log."""
+        if image_names is not None:
+            return str(sorted(image_names))
+        return "ALL" if self.image_field_selection is None else "none"
+
+    def _image_series_to_export(self, image_names: set[str] | None) -> list[dict]:
+        """Image series of the currently parsed file that should be exported."""
+        return select_image_series(self._gather_image_series_for_dialog(),
+                                   names=image_names,
+                                   indices=self.image_field_selection)
 
     def _gather_image_series_for_dialog(self) -> list[dict]:
         """The viewable OBF image series of the parsed .msr (both legacy and modern
@@ -3278,75 +4096,17 @@ class MsrReaderDialog(QWidget):
         mbm_sel = None if any_all_mbm else set().union(*(set(v.get("mbm") or []) for v in active))
         return mfx_sel, mbm_sel
 
-    def _subset_struct_fields(self, arr, names_sel):
-        if arr is None:
-            return None
-        names = getattr(getattr(arr, "dtype", None), "names", None)
-        if names and names_sel is not None:
-            keep = [n for n in names if n in names_sel]
-            if not keep:
-                return None
-            try:
-                return arr[keep]
-            except Exception:
-                pass
-        return arr
-
-    def _export_current_parsed(self, out_dir: str, formats: list[str], mfx_sel_global=None, mbm_sel_global=None):
-        MFSTATE = self._msr_state()
-        os.makedirs(out_dir, exist_ok=True)
-
-        from ...msr.export import export_arrays
-
-        if self.parsed.get("mode") == "modern":
-            datasets = [(ds.get("display_name") or ds.get("did") or "dataset") for ds in self.parsed.get("datasets") or []]
-        else:
-            datasets = list(getattr(MFSTATE, "mfx_map", {}).keys() | getattr(MFSTATE, "mbm_map", {}).keys()) or ["legacy"]
-
-        used_names: set[str] = set()
-
-        for key in datasets:
-            mfx_arr = MFSTATE.mfx_map.get(key)
-            mbm_arr = MFSTATE.mbm_map.get(key)
-            if mfx_sel_global is not None or mbm_sel_global is not None:
-                mfx_sel = mfx_sel_global
-                mbm_sel = mbm_sel_global
-            else:
-                sel = self.field_selection.get(key, {"checked": True, "mfx": None, "mbm": None})
-                if not sel.get("checked", True):
-                    self.log(f"[export] skip dataset '{key}' (unchecked).")
-                    continue
-                mfx_sel = sel.get("mfx")
-                mbm_sel = sel.get("mbm")
-            mfx_sub = self._subset_struct_fields(mfx_arr, mfx_sel)
-            mbm_sub = self._subset_struct_fields(mbm_arr, mbm_sel)
-            if mfx_sub is None and mbm_sub is None:
-                self.log(f"[export] skip dataset '{key}' (no selected data).")
-                continue
-
-            # Dataset labels come from the source file and can contain Windows
-            # path separators or collide after sanitization.  Never let a label
-            # escape the selected output folder or silently overwrite another
-            # channel's export.
-            stem = self._safe_export_dataset_stem(key)
-            if stem in used_names:
-                raise ValueError(
-                    f"Dataset names collide after filename sanitization: {key!r} -> {stem!r}."
-                )
-            used_names.add(stem)
-            kept = (list(getattr(getattr(mfx_sub, "dtype", None), "names", []) or [])
-                    if mfx_sel is not None else "all")
-            self.log(f"[export] '{key}': mfx fields = "
-                     f"{', '.join(kept) if isinstance(kept, list) else kept}")
-            export_arrays(
-                out_dir,
-                stem,
-                formats,
-                mfx_sub,
-                mbm_sub,
-                log=self.log,
-                mbm_meta=getattr(MFSTATE, "mbm_meta_map", {}).get(key),
-            )
+    def _export_current_parsed(self, out_dir: str, formats: list[str],
+                               mfx_sel_global=None, mbm_sel_global=None,
+                               image_names_global=None):
+        export_parsed_result(
+            self.parsed, self._msr_state(), out_dir, formats,
+            mfx_sel_global=mfx_sel_global, mbm_sel_global=mbm_sel_global,
+            image_names=image_names_global,
+            image_indices=self.image_field_selection,
+            field_selection=self.field_selection,
+            log=self.log,
+        )
 
     @staticmethod
     def _safe_export_dataset_stem(value: str) -> str:
@@ -3359,10 +4119,54 @@ class MsrReaderDialog(QWidget):
             raise ValueError(f"Dataset label {value!r} has no usable export filename.")
         return text
 
-    def _find_msr_files(self, path_str: str):
+    def _batch_root(self, path_str: str) -> Path:
+        """Folder a batch run searches from — the parent when given a file."""
         p = Path(path_str)
-        folder = p.parent if p.is_file() else p
-        return sorted(list(folder.glob("*.msr")) + list(folder.glob("*.MSR")))
+        return p.parent if p.is_file() else p
+
+    def _find_msr_files(self, path_str: str, recursive: bool | None = None):
+        """``.msr`` files under *path_str*, optionally including sub-folders.
+
+        Case-insensitive on the suffix rather than globbing both cases, so a
+        case-insensitive filesystem cannot yield the same file twice.
+        """
+        if recursive is None:
+            recursive = bool(getattr(self, "recursive_check", None)
+                             and self.recursive_check.isChecked())
+        folder = self._batch_root(path_str)
+        if not folder.is_dir():
+            return []
+        entries = folder.rglob("*") if recursive else folder.glob("*")
+        return sorted(
+            entry for entry in entries
+            if entry.is_file() and entry.suffix.lower() == ".msr")
+
+    def _batch_output_dir(self, out_root: Path, msr_path: Path,
+                          in_root: Path, reproduce_tree: bool) -> Path:
+        """Where one input file's exports go.
+
+        **Every input file always gets its own folder, named exactly after the
+        ``.msr``.**  One ``.msr`` holds several datasets and may hold image
+        series too, and the exported files are named after those *datasets*, not
+        after the source file — so without a per-file folder two inputs writing
+        into one directory could overwrite each other, and the outputs would in
+        any case not be attributable to their source.
+
+        *reproduce_tree* additionally mirrors the input's directory path below
+        the batch root::
+
+            off:  root/a/b/test.msr  ->  out/test/
+            on:   root/a/b/test.msr  ->  out/a/b/test/
+        """
+        if not reproduce_tree:
+            return out_root / msr_path.stem
+        try:
+            relative = msr_path.parent.relative_to(in_root)
+        except ValueError:
+            # Outside the batch root (should not happen); keep it addressable
+            # rather than writing somewhere unexpected.
+            return out_root / msr_path.stem
+        return out_root / relative / msr_path.stem
 
     def _viewer_import_plan(self) -> dict[str, set[str] | None]:
         """Return dataset -> selected mfx fields, or None for all fields."""
@@ -4179,13 +4983,165 @@ class MsrReaderDialog(QWidget):
     # Export
     # ------------------------------------------------------------------
 
-    def on_ok(self):
-        self._save_settings()
-        out_dir = self.out_dir_edit.text().strip() or self._temp_dir()
-        if not out_dir:
-            QMessageBox.critical(self, "Missing output", "Please set an output folder.")
+    def _run_batch_export(self, ipath: str, out_dir: str, formats: list[str],
+                          tmp: str) -> None:
+        """Parse and export every ``.msr`` under the input folder.
+
+        Failures are reported, not swallowed: an empty search and a run in which
+        some files failed both end in a dialog, because the alternative is a
+        button that visibly does nothing.
+        """
+        from ...msr import parse_msr_general
+
+        recursive = bool(self.recursive_check.isChecked())
+        reproduce_tree = bool(self.reproduce_tree_check.isChecked())
+        in_root = self._batch_root(ipath)
+        files = self._find_msr_files(ipath, recursive)
+        if not files:
+            where = "folder and its sub-folders" if recursive else "folder"
+            hint = "" if recursive else (
+                "\n\nThe search is not recursive. Tick “recursive” next to the "
+                "input field to include sub-folders.")
+            message = (f"No .msr files were found in the {where}:\n{in_root}{hint}")
+            self.log(f"[batch] no .msr files found in the {where}: {in_root}")
+            QMessageBox.warning(self, "Nothing to export", message)
             return
-        os.makedirs(out_dir, exist_ok=True)
+
+        mfx_sel_global, mbm_sel_global = self._derive_global_field_filters()
+        # Captured from the previewed file: raw stack indices do not transfer
+        # between files, names do.
+        image_names_global = self._selected_image_names()
+        self.log(
+            f"[batch] exporting {len(files)} file(s) from {in_root} "
+            f"({'recursive' if recursive else 'top level only'}, "
+            f"{'mirroring the input tree' if reproduce_tree else 'one sub-folder per file'}) "
+            f"as {', '.join(formats)}; global filters: "
+            f"mfx={'ALL' if mfx_sel_global is None else sorted(mfx_sel_global)}; "
+            f"mbm={'ALL' if mbm_sel_global is None else sorted(mbm_sel_global)}; "
+            f"images={self._image_filter_summary(image_names_global)}")
+
+        targets = {msr: self._batch_output_dir(Path(out_dir), msr, in_root,
+                                               reproduce_tree)
+                   for msr in files}
+        # Each file owns a folder named after it, so the only way two inputs can
+        # share one is a recursive search finding the same file name in
+        # different sub-folders while the input tree is *not* being mirrored.
+        # Refuse up front rather than let the second file overwrite the first.
+        collisions: dict[Path, list[Path]] = {}
+        for msr, target in targets.items():
+            collisions.setdefault(target, []).append(msr)
+        clashing = {t: srcs for t, srcs in collisions.items() if len(srcs) > 1}
+        if clashing:
+            detail = "\n".join(
+                f"• {target.name}/  ←  "
+                + ", ".join(str(s.relative_to(in_root)) for s in srcs)
+                for target, srcs in sorted(clashing.items()))
+            self.log(f"[batch] aborted: {len(clashing)} output folder(s) would "
+                     f"receive more than one input file.")
+            QMessageBox.warning(
+                self, "Output folders would collide",
+                "These input files share a name and would export into the same "
+                f"folder, overwriting each other:\n\n{detail}\n\n"
+                "Tick “reproduce input folder structure” to keep them apart.")
+            return
+
+        # Off the UI thread: a batch is minutes of parsing and writing, and
+        # running it inline froze both this dialog and the main window.
+        self._batch_context = {"out_dir": out_dir, "total": len(files)}
+        task = _BatchExportTask(
+            files, targets, formats, tmp,
+            mfx_sel=mfx_sel_global, mbm_sel=mbm_sel_global,
+            image_names=image_names_global,
+            image_indices=self.image_field_selection,
+            field_selection=self.field_selection,
+        )
+        task.signals.message.connect(self.log)
+        task.signals.progress.connect(self._on_batch_progress)
+        task.signals.finished.connect(self._on_batch_finished)
+        self._batch_task = task
+        self._set_batch_running(True, len(files))
+        QThreadPool.globalInstance().start(task)
+
+    # -- batch progress -------------------------------------------------
+
+    def _set_batch_running(self, running: bool, total: int = 0) -> None:
+        self._progress_row.setVisible(running)
+        self._export_button.setEnabled(not running)
+        self._parse_button.setEnabled(not running and self.mode_folder.isChecked())
+        if running:
+            self._progress_bar.setValue(0)
+            self._progress_label.setText(f"0 / {total}")
+            self._last_batch_pct = -1
+            if self._state is not None:
+                from ...core.app_state import format_progress_bar
+                self._state.log_progress(format_progress_bar(0.0))
+                self._state.status_progress(_BATCH_STATUS_HEADER, 0.0)
+        else:
+            self.setWindowTitle(_READER_TITLE)
+
+    def _on_batch_progress(self, fraction: float, current: str) -> None:
+        fraction = max(0.0, min(1.0, float(fraction)))
+        self._progress_bar.setValue(int(round(fraction * 1000)))
+        total = int((self._batch_context or {}).get("total", 0))
+        done = int(fraction * total)
+        self._progress_label.setText(
+            f"{done} / {total}" + (f"  ·  {current}" if current else ""))
+        # The title carries the percentage so it is legible even when the
+        # dialog is behind another window, as requested.
+        self.setWindowTitle(f"{_READER_TITLE} (batch export {fraction * 100:.1f}%…)")
+        pct = int(fraction * 1000)                    # throttle at 0.1 %
+        if self._state is not None and pct != self._last_batch_pct:
+            self._last_batch_pct = pct
+            from ...core.app_state import format_progress_bar
+            self._state.log_progress(format_progress_bar(fraction))
+            self._state.status_progress(_BATCH_STATUS_HEADER, fraction)
+
+    def _cancel_batch_export(self) -> None:
+        if self._batch_task is not None:
+            self._batch_task.cancel()
+            self._cancel_batch_btn.setEnabled(False)
+            self.log("[batch] stopping after the current file…")
+
+    def _on_batch_finished(self, exported: int, failures: list, cancelled: bool) -> None:
+        context = self._batch_context or {}
+        out_dir = str(context.get("out_dir", ""))
+        total = int(context.get("total", 0))
+        self._batch_task = None
+        self._batch_context = None
+        self._cancel_batch_btn.setEnabled(True)
+        self._set_batch_running(False)
+        state = self._state
+        if state is not None:
+            from ...core.app_state import format_progress_bar
+            state.log_progress(format_progress_bar(1.0, done=True), final=True)
+            state.status_message.emit(
+                f"MSR batch export: {'stopped' if cancelled else 'done'} "
+                f"({exported}/{total} file(s)).")
+        verb = "stopped after" if cancelled else "complete:"
+        self.log(f"[done] Batch export {verb} {exported}/{total} file(s) "
+                 f"exported to {out_dir}"
+                 + (f", {len(failures)} failed." if failures else "."))
+        if failures:
+            detail = "\n".join(f"• {Path(path).name}: {reason}"
+                               for path, reason in failures[:10])
+            if len(failures) > 10:
+                detail += f"\n… and {len(failures) - 10} more (see the Log)."
+            QMessageBox.warning(
+                self, "Batch export finished with errors",
+                f"Exported {exported} of {total} file(s) to:\n{out_dir}\n\n"
+                f"Failed:\n{detail}")
+        elif cancelled:
+            QMessageBox.information(
+                self, "Batch export stopped",
+                f"Stopped after {exported} of {total} file(s).\n"
+                f"What was exported is in:\n{out_dir}")
+        else:
+            QMessageBox.information(
+                self, "Batch export complete",
+                f"Exported {exported} file(s) to:\n{out_dir}")
+
+    def on_ok(self):
+        out_dir_text = self.out_dir_edit.text().strip() or self._temp_dir()
         formats = []
         if self.fmt_mat.isChecked():
             formats.append("mat")
@@ -4199,32 +5155,20 @@ class MsrReaderDialog(QWidget):
             formats.append("csv")
         if self.fmt_zarr.isChecked():
             formats.append("zarr")
-        if self.fmt_msr.isChecked():
-            formats.append("msr")
         if not formats:
             QMessageBox.critical(self, "No formats", "Pick at least one export format.")
             return
+        try:
+            out_dir = str(prepare_export_output_dir(out_dir_text))
+        except ValueError as exc:
+            self.log(f"[error] export preflight failed: {exc}")
+            QMessageBox.critical(self, "Invalid output folder", str(exc))
+            return
+        self._save_settings()
         tmp = self._temp_dir()
         ipath = self.input_path_edit.text().strip()
         if self.mode_folder.isChecked():
-            from ...msr import parse_msr_general
-            files = self._find_msr_files(ipath)
-            if not files:
-                self.log("[batch] no .msr files found in the folder.")
-                return
-            mfx_sel_global, mbm_sel_global = self._derive_global_field_filters()
-            self.log(f"[batch] exporting {len(files)} files with global filters: mfx={'ALL' if mfx_sel_global is None else sorted(mfx_sel_global)}; mbm={'ALL' if mbm_sel_global is None else sorted(mbm_sel_global)}")
-            for idx, msr_path in enumerate(files, start=1):
-                try:
-                    sub_out = Path(out_dir) / msr_path.stem
-                    os.makedirs(sub_out, exist_ok=True)
-                    self.log(f"[batch {idx}/{len(files)}] parse & export: {msr_path} -> {sub_out}")
-                    self._store_parse_result(parse_msr_general(str(msr_path), tmp, log=self.log))
-                    self._export_current_parsed(str(sub_out), formats, mfx_sel_global, mbm_sel_global)
-                    QApplication.processEvents()
-                except Exception as exc:
-                    self.log(f"[batch error] {msr_path}: {exc}")
-            self.log("[done] Batch export complete.")
+            self._run_batch_export(ipath, out_dir, formats, tmp)
             return
         if not self.parsed:
             from ...msr import pick_one_msr, parse_msr_general
@@ -4259,7 +5203,10 @@ class MsrReaderDialog(QWidget):
 
         # Image series selected in "Datasets / Fields included…" open in the
         # standalone image viewer (they are not MINFLUX datasets).
-        image_raws = sorted(int(i) for i in (self.image_field_selection or set()))
+        image_raws = sorted(
+            int(s["raw_index"])
+            for s in select_image_series(self._gather_image_series_for_dialog(),
+                                         indices=self.image_field_selection))
         opened_images = sum(1 for raw in image_raws if self._open_obf_series(raw))
         if opened_images:
             self.log(f"[viewer] opened {opened_images} image series in the image viewer.")
