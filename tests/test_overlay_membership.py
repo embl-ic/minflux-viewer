@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from minflux_viewer.core.overlay import (
     clear_overlay_assignment,
     is_multichannel_overlay,
+    manual_alignment_matrix4,
 )
 
 
@@ -78,3 +79,12 @@ def test_dataset_manager_status_keeps_multichannel_label():
     )
 
     assert MainWindow.dataset_view_status(window, 0) == "Overlay 3"
+
+
+def test_manual_alignment_matrix4_translates_in_requested_plane():
+    matrix = manual_alignment_matrix4(
+        {"dx_nm": 12.0, "dy_nm": -4.0, "angle": 0.0}, "XZ"
+    )
+    assert matrix[0, 3] == 12.0
+    assert matrix[2, 3] == -4.0
+    assert matrix[1, 3] == 0.0

@@ -153,11 +153,20 @@ class _TimeColorBar(QWidget):
 
 
 class BeadsDriftDialog(QDialog):
-    """Inspect per-bead drift and select beads for alignment."""
+    """Inspect per-bead drift and select beads for alignment.
 
-    def __init__(self, datasets: list[dict], *, unchecked_gris=None, parent=None) -> None:
+    ``info_mode`` turns it into a **read-only view** of the drift, for embedding
+    in the MBM-info window: the per-bead selection checkboxes and the
+    Reset/Apply/Cancel box are hidden, because there is no alignment for a
+    selection to feed.  The plots are identical.
+    """
+
+    def __init__(self, datasets: list[dict], *, unchecked_gris=None, parent=None,
+                 info_mode: bool = False) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Beads drift — manual selection")
+        self._info_mode = bool(info_mode)
+        self.setWindowTitle(
+            "Bead drift" if self._info_mode else "Beads drift — manual selection")
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
 
@@ -192,12 +201,17 @@ class BeadsDriftDialog(QDialog):
         self._plots: list[tuple] = []
 
         root = QVBoxLayout(self)
-        for line in (
+        lines = (
+            "Drift of each beam-monitoring (MBM) fiducial bead over the acquisition, "
+            "coloured by time (blue → red). Positions are re-zeroed to each bead's "
+            "median, so the plots show excursion, not stage position.",
+        ) if self._info_mode else (
             "Check bead drift and select beads for alignment; by default all common beads will be used.",
             "Uncheck a bead to exclude it — the selection is linked across datasets by bead ID.",
             "Minimum matched beads: 2 (translational XYZ), 3 (also rigid XY + translational Z), 4 (full rigid XYZ).",
             "When finished, click <b>Apply</b> to update the bead selection.",
-        ):
+        )
+        for line in lines:
             lbl = QLabel(line)
             lbl.setWordWrap(True)
             root.addWidget(lbl)
@@ -205,6 +219,8 @@ class BeadsDriftDialog(QDialog):
         self._selection_label = QLabel("")
         self._selection_label.setWordWrap(True)
         self._selection_label.setStyleSheet("color: #1a6; font-weight: bold;")
+        # The line counts beads "selected for alignment" — meaningless read-only.
+        self._selection_label.setVisible(not self._info_mode)
         root.addWidget(self._selection_label)
 
         cbar_row = QHBoxLayout()
@@ -221,18 +237,27 @@ class BeadsDriftDialog(QDialog):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self._tabs, 1)
 
-        buttons = QDialogButtonBox()
-        reset_btn = buttons.addButton("Reset", QDialogButtonBox.ButtonRole.ResetRole)
-        reset_btn.setToolTip(
-            "Reset to the default selection (common beads checked, single-dataset "
-            "beads unchecked) and restore all plot views.")
-        reset_btn.clicked.connect(self._reset)
-        apply_btn = buttons.addButton("Apply", QDialogButtonBox.ButtonRole.AcceptRole)
-        apply_btn.setToolTip("Use the checked beads for alignment and close.")
-        cancel_btn = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
-        apply_btn.clicked.connect(self.accept)
-        cancel_btn.clicked.connect(self.reject)
-        root.addWidget(buttons)
+        if self._info_mode:
+            # Read-only: Reset restores the plot views only (there is no selection
+            # to reset), and Apply/Cancel would commit a selection nothing reads.
+            buttons = QDialogButtonBox()
+            reset_btn = buttons.addButton("Reset views", QDialogButtonBox.ButtonRole.ResetRole)
+            reset_btn.setToolTip("Restore every plot to its default zoom and pan.")
+            reset_btn.clicked.connect(self._reset)
+            root.addWidget(buttons)
+        else:
+            buttons = QDialogButtonBox()
+            reset_btn = buttons.addButton("Reset", QDialogButtonBox.ButtonRole.ResetRole)
+            reset_btn.setToolTip(
+                "Reset to the default selection (common beads checked, single-dataset "
+                "beads unchecked) and restore all plot views.")
+            reset_btn.clicked.connect(self._reset)
+            apply_btn = buttons.addButton("Apply", QDialogButtonBox.ButtonRole.AcceptRole)
+            apply_btn.setToolTip("Use the checked beads for alignment and close.")
+            cancel_btn = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+            apply_btn.clicked.connect(self.accept)
+            cancel_btn.clicked.connect(self.reject)
+            root.addWidget(buttons)
 
         self._update_selection_line()
         if self._datasets:
@@ -324,6 +349,7 @@ class BeadsDriftDialog(QDialog):
         grid.setVerticalSpacing(10)
 
         grid.addWidget(QLabel("<b>bead</b>"), 0, 0, 1, 2)
+        show_checks = not self._info_mode
         for c, title in enumerate(_COL_TITLES):
             head = QLabel(f"<b>{title}</b>")
             head.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -333,12 +359,15 @@ class BeadsDriftDialog(QDialog):
             gri = bead["gri"]
             common = gri in self._common_gris
 
+            # Built even when hidden, so the linked-selection bookkeeping
+            # (_checkboxes / _on_toggle / _reset) stays uniform across modes.
             cb = QCheckBox()
             cb.setChecked(self._gri_checked.get(gri, True))
             cb.setToolTip("uncheck to remove this bead from alignment computation")
             cb.toggled.connect(lambda checked, g=gri: self._on_toggle(g, checked))
             self._checkboxes[gri].append(cb)
-            grid.addWidget(cb, r, 0, Qt.AlignmentFlag.AlignTop)
+            if show_checks:
+                grid.addWidget(cb, r, 0, Qt.AlignmentFlag.AlignTop)
 
             gri_txt = f"<b>{gri}</b>" if common else str(gri)
             ds_txt = ", ".join(str(i) for i in self._gri_to_ds.get(gri, []))

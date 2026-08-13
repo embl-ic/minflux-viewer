@@ -20,9 +20,21 @@ from ..core.overlay import CHANNEL_LUTS
 
 
 class ChannelCombineDialog(QDialog):
-    """Pick arbitrary loaded datasets and create a display overlay."""
+    """Pick arbitrary loaded datasets and create a display overlay.
 
-    def __init__(self, state: AppState, *, previous: dict | None = None, parent=None) -> None:
+    ``dataset_indices`` restricts the table to those datasets (the Dataset
+    Manager's multi-selection *Combine as multi-channel overlay*), all of them
+    pre-checked; ``None`` lists every loaded dataset.
+    """
+
+    def __init__(
+        self,
+        state: AppState,
+        *,
+        previous: dict | None = None,
+        dataset_indices=None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._state = state
         self._checks: list[QCheckBox] = []
@@ -30,13 +42,20 @@ class ChannelCombineDialog(QDialog):
         self._luts: list[QComboBox] = []
         self._previous = previous or {}
 
+        # Dataset index shown on each table row (identity, not position).
+        restricted = dataset_indices is not None
+        if restricted:
+            self._rows = [i for i in dataset_indices if 0 <= i < len(state.datasets)]
+        else:
+            self._rows = list(range(len(state.datasets)))
+
         self.setWindowTitle("Combine datasets")
         self.resize(860, 420)
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        self._table = QTableWidget(len(state.datasets), 5, self)
+        self._table = QTableWidget(len(self._rows), 5, self)
         self._table.setHorizontalHeaderLabels(["Include", "Dataset", "Dims / locs / loaded", "Order", "LUT / color"])
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -45,35 +64,43 @@ class ChannelCombineDialog(QDialog):
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         root.addWidget(self._table, stretch=1)
 
-        order_values = [str(i + 1) for i in range(max(1, len(state.datasets)))]
+        order_values = [str(i + 1) for i in range(max(1, len(self._rows)))]
         selected = set(self._previous.get("selected", []))
         orders = self._previous.get("orders", {})
         luts = self._previous.get("luts", {})
-        for idx, ds in enumerate(state.datasets):
+        for row, idx in enumerate(self._rows):
+            ds = state.datasets[idx]
             chk = QCheckBox()
-            chk.setChecked(idx in selected if selected else idx < 2)
-            self._table.setCellWidget(idx, 0, chk)
+            # A restricted list *is* the user's selection — check all of it.
+            chk.setChecked(True if restricted else (idx in selected if selected else idx < 2))
+            self._table.setCellWidget(row, 0, chk)
             self._checks.append(chk)
 
             name = QTableWidgetItem(ds.name)
             name.setFlags(name.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self._table.setItem(idx, 1, name)
+            self._table.setItem(row, 1, name)
             summary = QTableWidgetItem(
                 f"{ds.prop.num_dim}D / {ds.prop.num_loc:,} locs / {ds.file.datetime or '-'}"
             )
             summary.setFlags(summary.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self._table.setItem(idx, 2, summary)
+            self._table.setItem(row, 2, summary)
 
             order = QComboBox()
             order.addItems(order_values)
-            order.setCurrentText(str(orders.get(idx, idx + 1)))
-            self._table.setCellWidget(idx, 3, order)
+            # Remembered orders/LUTs are keyed by dataset index over the *full*
+            # list, so they only apply when the full list is shown.
+            order.setCurrentText(str(row + 1) if restricted else str(orders.get(idx, idx + 1)))
+            self._table.setCellWidget(row, 3, order)
             self._orders.append(order)
 
             lut = QComboBox()
             lut.addItems(CHANNEL_LUTS)
-            lut.setCurrentText(str(luts.get(idx, CHANNEL_LUTS[idx % len(CHANNEL_LUTS)])))
-            self._table.setCellWidget(idx, 4, lut)
+            default_lut = CHANNEL_LUTS[row % len(CHANNEL_LUTS)]
+            lut.setCurrentText(
+                default_lut if restricted
+                else str(luts.get(idx, CHANNEL_LUTS[idx % len(CHANNEL_LUTS)]))
+            )
+            self._table.setCellWidget(row, 4, lut)
             self._luts.append(lut)
 
         bottom = QHBoxLayout()
@@ -97,21 +124,21 @@ class ChannelCombineDialog(QDialog):
 
     def session_state(self) -> dict:
         return {
-            "selected": [i for i, chk in enumerate(self._checks) if chk.isChecked()],
-            "orders": {i: int(combo.currentText()) for i, combo in enumerate(self._orders)},
-            "luts": {i: combo.currentText() for i, combo in enumerate(self._luts)},
+            "selected": [self._rows[r] for r, chk in enumerate(self._checks) if chk.isChecked()],
+            "orders": {self._rows[r]: int(c.currentText()) for r, c in enumerate(self._orders)},
+            "luts": {self._rows[r]: c.currentText() for r, c in enumerate(self._luts)},
             "align_with": self.align_combo.currentText(),
             "keep_source": self.keep_source_check.isChecked(),
         }
 
     def selected_rows(self) -> list[dict]:
         rows = []
-        for idx, chk in enumerate(self._checks):
+        for row, chk in enumerate(self._checks):
             if not chk.isChecked():
                 continue
             rows.append({
-                "dataset_idx": idx,
-                "order": int(self._orders[idx].currentText()),
-                "lut": self._luts[idx].currentText(),
+                "dataset_idx": self._rows[row],
+                "order": int(self._orders[row].currentText()),
+                "lut": self._luts[row].currentText(),
             })
         return sorted(rows, key=lambda row: (row["order"], row["dataset_idx"]))

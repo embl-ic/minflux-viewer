@@ -58,6 +58,7 @@ from PyQt6.QtWidgets import (
 from ..core.app_state import AppState, DEFAULT_PREFS
 from ..core.attributes import aggregation_description
 from ..core.iteration import POOL_KEYS
+from ..core.overlay import PURE_COLOR_NAMES
 from ..msr.descriptions import describe_path
 from .precision_render import (
     RENDER_METHOD_DEFAULT,
@@ -87,14 +88,10 @@ _SCATTER_CMAPS = ["glasbey", "jet", "HiLo", "parula", "turbo", "hot"]
 
 _SCATTER_COLOR_BY_OPTIONS = ["tid", "efo", "cfr", "dcr", "den", "vld", "itr", "eco", "ecc"]
 
-_ROI_COLORS = [
-    "Yellow", "Red", "Green", "Cyan", "Magenta", "White", "Black",
-]
+_ROI_COLORS = list(PURE_COLOR_NAMES)
 
 # Overlay channel colour choices (Preferences > Appearance > Overlay).
-_OVERLAY_COLORS = [
-    "Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray", "White",
-]
+_OVERLAY_COLORS = list(PURE_COLOR_NAMES)
 _OVERLAY_DEFAULTS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"]
 _OVERLAY_ORDINALS = ["1st", "2nd", "3rd", "4th", "5th", "6th"]
 

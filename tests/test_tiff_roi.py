@@ -317,6 +317,70 @@ def test_overlay_holds_only_one_roi(_app):
         view.close()
 
 
+def test_live_msr_acquisition_roi_is_toggleable_and_read_only(tmp_path, _app):
+    """Only a live MSR source advertises a metadata-controlled acquisition ROI.
+
+    The checkbox is display state, not data state: hiding the graphics keeps the
+    exact source ROI available for TIFF export.
+    """
+    from PyQt6.QtCore import Qt
+
+    from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+
+    source = TiffImageSource(_write(tmp_path, "live_source.tif"))
+    source_roi = rectangle_roi(3, 4, 12, 9, name="MINFLUX acquisition ROI")
+    source.active_roi_role = "acquisition"
+    source.active_roi_label = "acquisition ROI"
+    source.active_roi_read_only = True
+    source.active_roi = lambda: source_roi
+
+    window = TiffViewerWindow(source)
+    try:
+        layout = window._control_row.layout()
+        assert not window._acquisition_roi_check.isHidden()
+        assert window._acquisition_roi_check.isChecked()
+        assert layout.indexOf(window._series_combo) < layout.indexOf(
+            window._acquisition_roi_check
+        )
+
+        overlay = window._roi_overlay
+        assert overlay.current_roi() is source_roi
+        assert not overlay.editable
+        assert overlay.visible
+        assert overlay._item.translatable is False
+        assert overlay._item.acceptedMouseButtons() == Qt.MouseButton.NoButton
+        assert not overlay._item.handles
+
+        window._acquisition_roi_check.setChecked(False)
+        assert not overlay.visible
+        assert not overlay._item.isVisible()
+        assert overlay.current_roi() is source_roi
+        assert "  |  ROI: " not in window._info_label.text()
+
+        window._acquisition_roi_check.setChecked(True)
+        assert overlay.visible
+        assert overlay._item.isVisible()
+    finally:
+        window.close()
+        _app.processEvents()
+
+
+def test_roi_reopened_from_tiff_remains_an_ordinary_editable_roi(tmp_path, _app):
+    from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+
+    source = TiffImageSource(
+        _write(tmp_path, "exported.tif", rectangle_roi(3, 4, 12, 9, name="acq"))
+    )
+    window = TiffViewerWindow(source)
+    try:
+        assert window._acquisition_roi_check.isHidden()
+        assert window._roi_overlay.editable
+        assert window._roi_overlay._item.handles
+    finally:
+        window.close()
+        _app.processEvents()
+
+
 class _Drag:
     """Stand-in for a pyqtgraph mouse-drag event in scene coordinates."""
 

@@ -30,6 +30,11 @@ _VIEW_AXES = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
 _AXIS_LABELS = {"XY": ("X", "Y"), "XZ": ("X", "Z"), "YZ": ("Y", "Z")}
 _MAX_RAW_POINTS = 100_000
 
+_COMPONENT_MODES = (
+    ("Neighbour link (single-linkage)", "link"),
+    ("Rod cell detection (XY projection)", "rod"),
+)
+
 
 class HlyBStagedDialog(QDialog):
     """Parameter picker for the staged 3-D population analysis."""
@@ -69,6 +74,28 @@ class HlyBStagedDialog(QDialog):
             "3/4/5 nm sensitivity audit is enabled below.")
         form.addRow("Same-site max diameter:", self._merge)
 
+        self._form = form
+        self._component_mode = QComboBox()
+        for label, key in _COMPONENT_MODES:
+            self._component_mode.addItem(label, key)
+        self._component_mode.setCurrentIndex(
+            max(self._component_mode.findData(d.component_mode), 0))
+        self._component_mode.setToolTip(
+            "How the field is separated into cells. Pairs are never formed "
+            "between components, and the null fits one local axis per "
+            "component.\n\n"
+            "Neighbour link groups sites by distance. Every pair closer than "
+            "the link distance is linked directly, so the short-range pair "
+            "counts are unaffected by how it carves the field up — but a "
+            "fragment or a clump still gets an unreliable local axis, and "
+            "nothing reports that it happened.\n\n"
+            "Rod cell detection delineates rod-shaped cells of a stated width "
+            "in the XY projection, supplies each cell's measured long axis to "
+            "the null, and rejects objects that are the wrong size or shape "
+            "instead of analysing them.")
+        self._component_mode.currentIndexChanged.connect(self._sync_component_mode)
+        form.addRow("Spatial components:", self._component_mode)
+
         self._cell_link = self._dspin(20.0, 1000.0, d.cell_link_nm, 0, 10.0, " nm")
         self._cell_link.setToolTip(
             "Coarse neighbor link used only to separate spatial/cell components. "
@@ -77,6 +104,68 @@ class HlyBStagedDialog(QDialog):
 
         self._min_sites = self._ispin(3, 10000, d.min_sites_per_component)
         form.addRow("Min sites per component:", self._min_sites)
+
+        self._rod_width = self._range_row(
+            "_rod_min_width", "_rod_max_width", d.rod_min_width_nm,
+            d.rod_max_width_nm, 100.0, 5000.0, 25.0)
+        self._rod_width.setToolTip(
+            "Width of the cells to detect — for E. coli typically 800–1100 nm.\n\n"
+            "This is the width of the structure. It is measured on the "
+            "smoothed density mask, which envelopes the cell somewhat wider, "
+            "so the gate is automatically widened by twice the smoothing "
+            "length. Every region's measured width is listed in the report, "
+            "rejected ones included, so a window that is merely slightly off "
+            "shows up immediately.")
+        form.addRow("Cell width:", self._rod_width)
+
+        self._rod_length = self._range_row(
+            "_rod_min_length", "_rod_max_length", d.rod_min_length_nm,
+            d.rod_max_length_nm, 100.0, 50000.0, 100.0)
+        self._rod_length.setToolTip(
+            "Length of the cells to detect. The upper bound is what rejects "
+            "two cells merged end to end, which would otherwise pass every "
+            "other gate as one long cell of exactly the right width.")
+        form.addRow("Cell length:", self._rod_length)
+
+        self._rod_smooth = self._dspin(
+            0.0, 1000.0, max(d.rod_smooth_nm, 0.0), 0, 10.0, " nm")
+        self._rod_smooth.setSpecialValueText("auto")
+        self._rod_smooth.setToolTip(
+            "How far apart two labelled positions may be and still land in one "
+            "cell body. 0 = auto, derived from the measured spacing of the "
+            "inferred sites.\n\n"
+            "This is the setting that decides whether one cell is found as one "
+            "cell. It is governed by the labelling sparsity, not by the optics: "
+            "a sparsely labelled cell needs a longer bridging length, and too "
+            "short a value shatters it into fragments. The value actually used "
+            "is reported in the result.")
+        form.addRow("Bridging length:", self._rod_smooth)
+
+        self._rod_pixel = self._dspin(2.0, 200.0, d.rod_pixel_size_nm, 0, 5.0, " nm")
+        self._rod_pixel.setToolTip(
+            "Pixel size of the detection image. Must be at most an eighth of "
+            "the minimum cell width, or the mask and its distance transform "
+            "cannot resolve the cell across its width.")
+        form.addRow("Detection pixel:", self._rod_pixel)
+
+        self._rod_split = QCheckBox("cut thin bridges between cells")
+        self._rod_split.setChecked(bool(d.rod_split_touching))
+        self._rod_split.setToolTip(
+            "Separate cell bodies joined by a constriction — nearly touching "
+            "caps bridged by the morphological closing, a dividing cell, a "
+            "spurious filament. Cells that overlap in projection while running "
+            "parallel cannot be separated by any 2-D method; those are "
+            "rejected by the width gate instead.")
+        form.addRow("", self._rod_split)
+
+        self._rod_axis = QCheckBox("null axis from the fitted cell axis")
+        self._rod_axis.setChecked(bool(d.rod_use_axis))
+        self._rod_axis.setToolTip(
+            "Give the conditional randomization each cell's measured long axis "
+            "instead of the component's own principal axis. The principal axis "
+            "is the part that goes wrong on a fragment or a clump, so this is "
+            "the main reason to prefer rod detection.")
+        form.addRow("", self._rod_axis)
 
         self._r_max = self._dspin(20.0, 500.0, d.r_max_nm, 0, 5.0, " nm")
         form.addRow("Max displayed distance:", self._r_max)
@@ -122,7 +211,41 @@ class HlyBStagedDialog(QDialog):
         buttons.accepted.connect(self._accept_if_valid)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+        self._sync_component_mode()
         make_labels_selectable(self)
+
+    def _range_row(self, lo_attr, hi_attr, lo_value, hi_value,
+                   lo_limit, hi_limit, step) -> QWidget:
+        """A ``<from> to <to>`` pair of nm spin boxes on one form row."""
+        lo_spin = self._dspin(lo_limit, hi_limit, lo_value, 0, step, " nm")
+        hi_spin = self._dspin(lo_limit, hi_limit, hi_value, 0, step, " nm")
+        setattr(self, lo_attr, lo_spin)
+        setattr(self, hi_attr, hi_spin)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(lo_spin)
+        row.addWidget(QLabel("to"))
+        row.addWidget(hi_spin)
+        holder = QWidget()
+        holder.setLayout(row)
+        return holder
+
+    def component_mode(self) -> str:
+        return str(self._component_mode.currentData())
+
+    def _sync_component_mode(self, *_args) -> None:
+        """Grey out the knobs the selected component mode does not use."""
+        rod = self.component_mode() == "rod"
+        self._set_row_enabled(self._cell_link, not rod)
+        for widget in (self._rod_width, self._rod_length, self._rod_smooth,
+                       self._rod_pixel, self._rod_split, self._rod_axis):
+            self._set_row_enabled(widget, rod)
+
+    def _set_row_enabled(self, widget: QWidget, enabled: bool) -> None:
+        widget.setEnabled(enabled)
+        label = self._form.labelForField(widget)
+        if label is not None:
+            label.setEnabled(enabled)
 
     @staticmethod
     def _dspin(lo, hi, value, decimals, step, suffix) -> QDoubleSpinBox:
@@ -146,6 +269,16 @@ class HlyBStagedDialog(QDialog):
             self._r_max.setValue(self._short_hi.value())
         if self._short_lo.value() >= self._short_hi.value():
             self._short_lo.setValue(max(0.0, self._short_hi.value() - 1.0))
+        if self.component_mode() == "rod":
+            for lo, hi in ((self._rod_min_width, self._rod_max_width),
+                           (self._rod_min_length, self._rod_max_length)):
+                if lo.value() > hi.value():
+                    lo.setValue(hi.value())
+            # The analysis rejects a pixel too coarse to resolve the width;
+            # clamp here so that never surfaces as a failed run.
+            coarsest = self._rod_min_width.value() / 8.0
+            if self._rod_pixel.value() > coarsest:
+                self._rod_pixel.setValue(coarsest)
         self.accept()
 
     def config(self) -> Staged3DConfig:
@@ -156,8 +289,20 @@ class HlyBStagedDialog(QDialog):
             site_merge_nm=float(self._merge.value()),
             site_sigma_factor=base.site_sigma_factor,
             site_precision_floor_nm=base.site_precision_floor_nm,
+            component_mode=self.component_mode(),
             cell_link_nm=float(self._cell_link.value()),
             min_sites_per_component=int(self._min_sites.value()),
+            rod_min_width_nm=float(self._rod_min_width.value()),
+            rod_max_width_nm=float(self._rod_max_width.value()),
+            rod_min_length_nm=float(self._rod_min_length.value()),
+            rod_max_length_nm=float(self._rod_max_length.value()),
+            rod_pixel_size_nm=float(self._rod_pixel.value()),
+            # 0 in the spin box means "auto"; the analysis spells that -1.
+            rod_smooth_nm=(float(self._rod_smooth.value())
+                           if self._rod_smooth.value() > 0 else -1.0),
+            rod_close_nm=base.rod_close_nm,
+            rod_split_touching=bool(self._rod_split.isChecked()),
+            rod_use_axis=bool(self._rod_axis.isChecked()),
             r_max_nm=float(self._r_max.value()),
             bin_nm=float(self._bin.value()),
             short_range_lo_nm=float(self._short_lo.value()),
@@ -171,6 +316,7 @@ class HlyBStagedDialog(QDialog):
             sensitivity_site_merge_nm=base.sensitivity_site_merge_nm,
             sensitivity_stratum_sites=base.sensitivity_stratum_sites,
             sensitivity_cell_link_factors=base.sensitivity_cell_link_factors,
+            sensitivity_rod_width_factors=base.sensitivity_rod_width_factors,
             # The stratification profile rides on the sensitivity switch: both
             # are robustness reporting rather than the primary computation.
             run_stratum_profile=bool(self._sensitivity.isChecked()),
@@ -270,7 +416,18 @@ class HlyBStagedWindow(QDialog):
         self._site_check.setChecked(True)
         self._null_check = QCheckBox("one surface-null draw")
         self._null_check.setChecked(False)
-        for box in (self._raw_check, self._trace_check, self._site_check, self._null_check):
+        self._rod_check = QCheckBox("detected cell")
+        has_rods = self._result.get("rod_detection") is not None
+        self._rod_check.setChecked(has_rods)
+        self._rod_check.setEnabled(has_rods)
+        self._rod_check.setToolTip(
+            "Outlines of the detected cells (XY projection only). Accepted "
+            "cells are drawn solid; regions rejected by the size or shape "
+            "gates are dashed — those took no part in the analysis."
+            if has_rods else
+            "Available when the spatial components come from rod cell detection.")
+        for box in (self._raw_check, self._trace_check, self._site_check,
+                    self._null_check, self._rod_check):
             box.toggled.connect(self._refresh_spatial)
             row.addWidget(box)
         row.addStretch(1)
@@ -318,6 +475,8 @@ class HlyBStagedWindow(QDialog):
             plot.addItem(pg.ScatterPlotItem(
                 x=null[:, a], y=null[:, b], size=5,
                 pen=pg.mkPen(120, 190, 255, 180), brush=None, pxMode=True))
+        if self._rod_check.isChecked():
+            self._draw_detected_cells(plot, view)
         if self._site_check.isChecked():
             sites = np.asarray(self._result.get("site_centers_nm", np.empty((0, 3))))
             labels = np.asarray(self._result.get("component_labels", np.full(sites.shape[0], -1)))
@@ -326,6 +485,19 @@ class HlyBStagedWindow(QDialog):
             plot.addItem(pg.ScatterPlotItem(
                 spots=spots, size=7, pen=pg.mkPen(230, 230, 230, 90), pxMode=True))
         plot.enableAutoRange()
+
+    def _draw_detected_cells(self, plot, view: str) -> None:
+        """Capsule outlines of the detected cells — an XY-plane geometry."""
+        detection = self._result.get("rod_detection")
+        if detection is None or view != "XY":
+            return
+        from ..analysis.rod_segmentation import capsule_outline
+
+        for rod in detection.rods:
+            outline = capsule_outline(rod)
+            pen = (pg.mkPen(90, 235, 150, width=2) if rod.accepted else
+                   pg.mkPen(235, 120, 95, width=1, style=Qt.PenStyle.DashLine))
+            plot.addItem(pg.PlotCurveItem(outline[:, 0], outline[:, 1], pen=pen))
 
     def _build_profile_view(self) -> QWidget:
         holder = QWidget()
@@ -372,6 +544,55 @@ class HlyBStagedWindow(QDialog):
         root.addWidget(excess, 1)
         return holder
 
+    def _rod_report_lines(self) -> list[str]:
+        """Detection block: what was found, what was rejected, and on what number.
+
+        The measured width of every region is listed, rejected ones included,
+        so a width window that is merely slightly off reads as such instead of
+        as an empty result.
+        """
+        summary = self._result.get("rod_segmentation")
+        if not summary:
+            return []
+        cfg = self._result["config"]
+        window = summary.get("width_window_nm") or [
+            cfg.rod_min_width_nm, cfg.rod_max_width_nm]
+        lines = [
+            "",
+            "ROD CELL DETECTION",
+            f"Accepted {summary.get('n_accepted', 0)} of "
+            f"{summary.get('n_regions', 0)} region(s); "
+            f"{summary.get('n_components_kept', 0)} kept as component(s) after the "
+            f"minimum-site cut",
+            f"Width window: {window[0]:g}–{window[1]:g} nm "
+            f"(±{summary.get('width_tolerance_nm', 0.0):.0f} nm mask tolerance) at "
+            f"{summary.get('pixel_size_nm', 0.0):g} nm/pixel",
+            f"Bridging length: {summary.get('smooth_nm', 0.0):.0f} nm"
+            + (" (auto, from the measured site spacing)"
+               if summary.get("smooth_is_auto") else " (set manually)")
+            + f", closing {summary.get('close_nm', 0.0):.0f} nm",
+        ]
+        if summary.get("n_split"):
+            lines.append(
+                f"Thin bridges cut: {summary['n_split']} region(s) separated that "
+                "the density mask had joined")
+        accepted = [rod for rod in summary.get("rods", []) if rod.get("accepted")]
+        if accepted:
+            lines.append(
+                "Accepted cells (width × length nm, sites): " + ", ".join(
+                    f"{rod['width_nm']:.0f}×{rod['length_nm']:.0f} ({rod['n_sites']})"
+                    for rod in accepted))
+        rejections = summary.get("rejections") or {}
+        if rejections:
+            lines.append("Rejected: " + ", ".join(
+                f"{count} {reason}" for reason, count in sorted(rejections.items())))
+        widths = [float(w) for w in (summary.get("region_widths_nm") or [])]
+        if widths:
+            lines.append(
+                f"Measured widths of all regions: {min(widths):.0f}–{max(widths):.0f} nm "
+                "— widen the window if genuine cells sit just outside it")
+        return lines
+
     def _build_report(self) -> QTextEdit:
         r = self._result
         s = r["summary"]
@@ -409,6 +630,7 @@ class HlyBStagedWindow(QDialog):
             f"Rod-like PCA diagnostic: {r['n_rod_like_components']} of "
             f"{r['n_components']} retained component(s)",
         ]
+        lines += self._rod_report_lines()
         span = r.get("centroid_sensitivity_range_nm") or []
         if len(span) == 2 and np.isfinite(span[0]) and np.isfinite(span[1]):
             lines += [

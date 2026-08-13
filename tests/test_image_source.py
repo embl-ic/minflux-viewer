@@ -239,6 +239,55 @@ def test_tiff_viewer_z_range_controls_sum_selected_planes(tmp_path, _app):
         _app.processEvents()
 
 
+def test_tiff_viewer_keeps_series_selector_left_of_xyz_controls(tmp_path, _app):
+    tifffile = pytest.importorskip("tifffile")
+    from minflux_viewer.core.tiff_source import TiffImageSource
+    from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+
+    path = tmp_path / "single_series_xyz.tif"
+    tifffile.imwrite(path, np.zeros((3, 4, 5), dtype=np.uint16),
+                     imagej=True, metadata={"axes": "ZYX"})
+    source = TiffImageSource(path)
+    window = TiffViewerWindow(source)
+    try:
+        # The selector remains at the left of the row even for a one-series
+        # XYZ image; it is informational/disabled because there is nothing to
+        # switch.
+        assert not window._series_label.isHidden()
+        assert not window._series_combo.isHidden()
+        assert not window._series_combo.isEnabled()
+        assert window._series_combo.count() == 1
+        layout = window._control_row.layout()
+        assert layout.indexOf(window._series_label) < layout.indexOf(window._z_controls)
+    finally:
+        window.close()
+        _app.processEvents()
+
+
+def test_tiff_viewer_series_selector_stays_left_for_2d_series(tmp_path, _app):
+    tifffile = pytest.importorskip("tifffile")
+    from minflux_viewer.core.tiff_source import TiffImageSource
+    from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+
+    path = tmp_path / "xyz_and_2d.ome.tif"
+    _write_two_series(path)
+    source = TiffImageSource(path)
+    window = TiffViewerWindow(source)
+    try:
+        window.resize(800, 500)
+        window.show()
+        _app.processEvents()
+        window.set_series_index(1)  # YX series: no Z slider is visible.
+        _app.processEvents()
+
+        assert source.metadata.axes == "YX"
+        assert not window._z_controls.isVisible()
+        assert window._series_combo.geometry().left() < window.width() // 2
+    finally:
+        window.close()
+        _app.processEvents()
+
+
 # ---- OBF / .msr (gated on the sample file) --------------------------------
 
 _SAMPLE = (r"D:\Workspace\Microscopes\MINFLUX\sample data"

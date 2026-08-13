@@ -1799,13 +1799,46 @@ def apply_saved_filters(ds: "MinfluxDataset") -> bool:
     return applied
 
 
+def apply_metadata_recipe(ds: "MinfluxDataset", meta: dict) -> list[str]:
+    """Apply an already-parsed metadata-sidecar payload to *ds*.
+
+    Restores RIMF (pinned via ``ds.derived['rimf']`` so post-load auto-estimation
+    is suppressed), the overlay transform, and the filter specs (applying what is
+    evaluable now).  Returns user-facing phrases for what was applied, so a
+    caller can report an empty recipe rather than claiming success.
+    """
+    applied: list[str] = []
+
+    rimf = (meta.get("calibration") or {}).get("rimf")
+    if rimf is not None:
+        try:
+            ds.set_rimf(float(rimf), source="processed (metadata sidecar)")
+            ds.derived["rimf"] = np.asarray([float(rimf)], dtype=float)
+            applied.append(f"RIMF {float(rimf):.4g}")
+        except Exception:
+            pass
+
+    tf = meta.get("transform")
+    if tf is not None:
+        try:
+            ds.state["overlay_transform"] = np.asarray(tf, dtype=float)
+            applied.append("overlay transform")
+        except Exception:
+            pass
+
+    filters = meta.get("filters") or []
+    if filters:
+        ds.state["filter_specs"] = list(filters)
+        apply_saved_filters(ds)
+        applied.append(f"{len(filters)} filter(s)")
+    return applied
+
+
 def apply_metadata_sidecar(ds: "MinfluxDataset", data_path: "str | Path") -> bool:
     """Restore the processing recipe from a ``<stem>_metadata.json`` sidecar.
 
-    If a metadata sidecar sits next to *data_path*, restore RIMF (pinned via
-    ``ds.derived['rimf']`` so post-load auto-estimation is suppressed), the
-    overlay transform, and the filter specs (and apply what is evaluable now).
-    Returns True if a sidecar was consumed.
+    If a metadata sidecar sits next to *data_path*, its recipe is applied via
+    :func:`apply_metadata_recipe`.  Returns True if a sidecar was consumed.
     """
     from .save import is_metadata_json_payload, metadata_sidecar_path
 
@@ -1818,27 +1851,24 @@ def apply_metadata_sidecar(ds: "MinfluxDataset", data_path: "str | Path") -> boo
         return False
     if not is_metadata_json_payload(meta):
         return False
-
-    rimf = (meta.get("calibration") or {}).get("rimf")
-    if rimf is not None:
-        try:
-            ds.set_rimf(float(rimf), source="processed (metadata sidecar)")
-            ds.derived["rimf"] = np.asarray([float(rimf)], dtype=float)
-        except Exception:
-            pass
-
-    tf = meta.get("transform")
-    if tf is not None:
-        try:
-            ds.state["overlay_transform"] = np.asarray(tf, dtype=float)
-        except Exception:
-            pass
-
-    filters = meta.get("filters") or []
-    if filters:
-        ds.state["filter_specs"] = list(filters)
-        apply_saved_filters(ds)
+    apply_metadata_recipe(ds, meta)
     return True
+
+
+def apply_metadata_sidecar_file(ds: "MinfluxDataset", sidecar_path: "str | Path") -> list[str]:
+    """Apply a metadata sidecar addressed **by its own path** to *ds*.
+
+    :func:`apply_metadata_sidecar` finds the sidecar beside a data file; this is
+    the entry point for one handed over directly (dropping it on a Dataset
+    Manager row).  Raises ``ValueError`` if the file is not a sidecar, so the
+    caller can report it instead of silently doing nothing.
+    """
+    from .save import is_metadata_json_payload
+
+    meta = json.loads(Path(sidecar_path).read_text(encoding="utf-8"))
+    if not is_metadata_json_payload(meta):
+        raise ValueError(f"'{Path(sidecar_path).name}' is not a metadata sidecar.")
+    return apply_metadata_recipe(ds, meta)
 
 
 def _attrs_include_invalid(attrs: "AttrStore") -> bool:

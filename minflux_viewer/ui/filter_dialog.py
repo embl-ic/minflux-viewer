@@ -245,6 +245,11 @@ class FilterDialog(QDialog):
         self._table.viewport().setAcceptDrops(False)
 
         state.active_changed.connect(self._on_active_changed)
+        state.attributes_changed.connect(self._on_attributes_changed)
+
+    def _on_attributes_changed(self, idx: int) -> None:
+        if idx == self._dataset_idx:
+            self._populate_attr_lists()
 
     @property
     def dataset_idx(self) -> int | None:

@@ -48,8 +48,38 @@ class Staged3DConfig:
 
     # Spatial components approximate individual cells/FOV objects.  The
     # analysis never forms pairs across components.
+    #
+    # ``component_mode="link"`` groups sites by single-link neighbour distance.
+    # Because every pair closer than ``cell_link_nm`` is linked directly, the
+    # sub-link-distance pair counts the test is built on are invariant to how
+    # that linkage carves the field up -- but the *null* is not, since it fits
+    # one local axis per component.  ``component_mode="rod"`` instead detects
+    # rod-shaped cells of a stated width in the projected XY view, which both
+    # rejects mis-segmented objects explicitly and supplies a measured cell
+    # axis in place of a per-component PCA axis.
+    component_mode: str = "link"
     cell_link_nm: float = 180.0
     min_sites_per_component: int = 20
+
+    # Rod/cell detection (component_mode="rod").  Detection runs on the raw
+    # localization cloud -- the best available image of the cell footprint --
+    # and the inferred sites are then assigned to the detected cells.
+    rod_min_width_nm: float = 800.0
+    rod_max_width_nm: float = 1100.0
+    rod_min_length_nm: float = 1000.0
+    rod_max_length_nm: float = 8000.0
+    rod_pixel_size_nm: float = 20.0
+    # Bridging length, i.e. how far apart two labelled positions may be and
+    # still land in one cell body.  Negative means auto, derived from the
+    # measured spacing of the inferred sites — the right scale is set by the
+    # labelling sparsity, and a fixed short value shatters a sparsely labelled
+    # cell into fragments.
+    rod_smooth_nm: float = -1.0
+    rod_close_nm: float = -1.0
+    rod_split_touching: bool = True
+    # Take the null's axial direction from the fitted cell axis rather than
+    # from the component's own principal axis.
+    rod_use_axis: bool = True
 
     # Pair observable and pre-declared short-range band.
     r_max_nm: float = 60.0
@@ -76,6 +106,11 @@ class Staged3DConfig:
     sensitivity_site_merge_nm: tuple[float, ...] = (3.0, 4.0, 5.0)
     sensitivity_stratum_sites: tuple[int, ...] = (32, 64, 128)
     sensitivity_cell_link_factors: tuple[float, ...] = (0.75, 1.0, 1.25)
+    # Rod mode's counterpart of the component-link audit: the accepted width
+    # window is shifted, asking what happens if the cells are in fact somewhat
+    # wider or narrower than stated.  A tighter span than the link factors,
+    # because the width window is a measured quantity rather than a free knob.
+    sensitivity_rod_width_factors: tuple[float, ...] = (0.9, 1.0, 1.1)
 
     # Stratum profile.  ``null_stratum_sites`` sets the axial window inside
     # which the randomization destroys structure, so it also sets how much
@@ -138,6 +173,21 @@ def _validate_config(cfg: Staged3DConfig) -> None:
         raise ValueError("cell_link_nm must exceed site_merge_nm")
     if cfg.min_sites_per_component < 3:
         raise ValueError("min_sites_per_component must be at least 3")
+    if cfg.component_mode not in ("link", "rod"):
+        raise ValueError("component_mode must be 'link' or 'rod'")
+    if cfg.component_mode == "rod":
+        if cfg.rod_min_width_nm <= 0 or cfg.rod_max_width_nm < cfg.rod_min_width_nm:
+            raise ValueError("rod width window must be positive with max >= min")
+        if cfg.rod_min_length_nm <= 0 or cfg.rod_max_length_nm < cfg.rod_min_length_nm:
+            raise ValueError("rod length window must be positive with max >= min")
+        if cfg.rod_pixel_size_nm <= 0:
+            raise ValueError("rod_pixel_size_nm must be positive")
+        # A cell must be resolvable across its width, or the mask, its distance
+        # transform and every gate derived from them are meaningless.
+        if cfg.rod_pixel_size_nm > cfg.rod_min_width_nm / 8.0:
+            raise ValueError(
+                "rod_pixel_size_nm must be at most an eighth of the minimum "
+                "rod width")
     if cfg.bin_nm <= 0 or cfg.r_max_nm <= cfg.bin_nm:
         raise ValueError("r_max_nm must exceed a positive bin_nm")
     if not 0 <= cfg.short_range_lo_nm < cfg.short_range_hi_nm <= cfg.r_max_nm:
@@ -302,7 +352,7 @@ def segment_spatial_components(
     n = pts.shape[0]
     if n == 0:
         return {"labels": np.empty(0, dtype=np.int64), "components": [],
-                "n_excluded_sites": 0, "n_all_components": 0}
+                "n_excluded_sites": 0, "n_all_components": 0, "detection": None}
     uf = _UnionFind(n)
     edges = cKDTree(pts).query_pairs(float(link_nm), output_type="ndarray")
     for i, j in edges:
@@ -315,28 +365,151 @@ def segment_spatial_components(
     for new_id, old_id in enumerate(keep_ids):
         idx = np.flatnonzero(raw == old_id)
         labels[idx] = new_id
-        block = pts[idx]
-        centre = block.mean(axis=0)
-        centered = block - centre
-        cov = centered.T @ centered / max(block.shape[0] - 1, 1)
-        values, vectors = np.linalg.eigh(cov)
-        order = np.argsort(values)[::-1]
-        values, vectors = values[order], vectors[:, order]
-        q = centered @ vectors
-        aspect = float(np.sqrt(max(values[0], 0) / max(values[1], 1e-12)))
-        components.append({
-            "id": int(new_id), "indices": idx, "center_nm": centre,
-            "axes": vectors, "eigenvalues_nm2": values,
-            "aspect_ratio": aspect,
-            "axial_span_nm": float(np.ptp(q[:, 0])),
-            "n_sites": int(idx.size), "rod_like": bool(aspect >= 1.25),
-        })
+        components.append(_component_record(new_id, idx, pts, None))
     return {
         "labels": labels,
         "components": components,
         "n_excluded_sites": int(np.sum(labels < 0)),
         "n_all_components": int(ids.size),
         "n_graph_edges": int(edges.shape[0]),
+        "detection": None,
+    }
+
+
+def _frame_from_axis(axis_xy) -> np.ndarray:
+    """Orthonormal 3-D frame whose first column is the in-plane cell axis.
+
+    Column 0 is the measured rod axis, column 1 the in-plane perpendicular and
+    column 2 the optical axis, so the null's "hold the axial coordinate, permute
+    the transverse pair" acts in the transverse membrane plane of a rod lying in
+    the coverslip plane.
+    """
+    axis = np.asarray(axis_xy, dtype=float).ravel()[:2]
+    norm = float(np.hypot(axis[0], axis[1]))
+    if norm <= 0:
+        return np.eye(3)
+    ax, ay = axis / norm
+    return np.column_stack([
+        np.array([ax, ay, 0.0]),
+        np.array([-ay, ax, 0.0]),
+        np.array([0.0, 0.0, 1.0]),
+    ])
+
+
+def _component_record(
+    component_id: int,
+    indices: np.ndarray,
+    points_nm: np.ndarray,
+    axes: np.ndarray | None,
+) -> dict:
+    """One component's frame and shape descriptors.
+
+    *axes* is the frame to use, or ``None`` to take the component's own
+    principal axes.  Everything downstream — the surface null, the reported
+    aspect ratio and axial span — reads these keys and never re-derives them.
+    """
+    block = np.asarray(points_nm, dtype=float)[indices]
+    centre = block.mean(axis=0)
+    centered = block - centre
+    if axes is None:
+        cov = centered.T @ centered / max(block.shape[0] - 1, 1)
+        values, vectors = np.linalg.eigh(cov)
+        order = np.argsort(values)[::-1]
+        axes = vectors[:, order]
+    q = centered @ axes
+    values = (np.var(q, axis=0, ddof=1) if block.shape[0] > 1
+              else np.zeros(3, dtype=float))
+    aspect = float(np.sqrt(max(values[0], 0.0) / max(values[1], 1e-12)))
+    return {
+        "id": int(component_id), "indices": np.asarray(indices, dtype=np.int64),
+        "center_nm": centre, "axes": axes, "eigenvalues_nm2": values,
+        "aspect_ratio": aspect,
+        "axial_span_nm": float(np.ptp(q[:, 0])) if block.shape[0] else 0.0,
+        "n_sites": int(np.asarray(indices).size),
+        "rod_like": bool(aspect >= 1.25),
+    }
+
+
+def rod_config_for(cfg: Staged3DConfig, *, width_scale: float = 1.0):
+    """Detector configuration derived from the staged workflow's own config."""
+    from .rod_segmentation import RodConfig
+
+    return RodConfig(
+        pixel_size_nm=float(cfg.rod_pixel_size_nm),
+        smooth_nm=float(cfg.rod_smooth_nm),
+        close_nm=float(cfg.rod_close_nm),
+        min_width_nm=float(cfg.rod_min_width_nm) * float(width_scale),
+        max_width_nm=float(cfg.rod_max_width_nm) * float(width_scale),
+        min_length_nm=float(cfg.rod_min_length_nm),
+        max_length_nm=float(cfg.rod_max_length_nm),
+        split_touching=bool(cfg.rod_split_touching),
+    )
+
+
+def segment_rod_components(
+    sites_nm: np.ndarray,
+    image_points_nm: np.ndarray | None = None,
+    *,
+    rod_cfg=None,
+    min_sites: int = 20,
+    use_axis: bool = True,
+) -> dict:
+    """Spatial components from detected rod cells.
+
+    Returns the same structure as :func:`segment_spatial_components` so the rest
+    of the workflow is indifferent to which produced it.  Detection runs on
+    *image_points_nm* (the raw localization cloud, when available — a far
+    better image of the cell footprint than the sparse sites) and the sites are
+    then assigned to the detected cells.  Sites outside every accepted cell are
+    excluded, which is the point: a merged or wrongly-sized object is dropped
+    rather than analysed as if it were one cell.
+    """
+    from .rod_segmentation import assign_points, detect_rods
+
+    pts = np.asarray(sites_nm, dtype=float)
+    n = int(pts.shape[0])
+    if n == 0:
+        return {"labels": np.empty(0, dtype=np.int64), "components": [],
+                "n_excluded_sites": 0, "n_all_components": 0, "detection": None}
+
+    image = pts if image_points_nm is None else np.asarray(image_points_nm, dtype=float)
+    if image.ndim != 2 or image.shape[0] == 0:
+        image = pts
+    # The image comes from the dense cloud, but the bridging length must be set
+    # by the spacing of *distinct* label sites — raw localizations pile up tens
+    # deep at one molecule and would report a far smaller spacing than the gaps
+    # the mask actually has to bridge.
+    detection = detect_rods(image[:, :2], rod_cfg, spacing_points_nm=pts[:, :2])
+    _, assigned = assign_points(detection, pts[:, :2])
+
+    accepted = detection.accepted
+    for index, rod in enumerate(accepted):
+        rod.n_sites = int(np.count_nonzero(assigned == index))
+
+    labels = np.full(n, -1, dtype=np.int64)
+    components = []
+    for index, rod in enumerate(accepted):
+        idx = np.flatnonzero(assigned == index)
+        if idx.size < int(min_sites):
+            continue
+        new_id = len(components)
+        labels[idx] = new_id
+        record = _component_record(
+            new_id, idx, pts,
+            _frame_from_axis(rod.axis_nm) if use_axis else None)
+        record.update({
+            "rod": rod, "rod_width_nm": float(rod.width_nm),
+            "rod_length_nm": float(rod.length_nm),
+            "rod_angle_deg": float(rod.angle_deg),
+        })
+        components.append(record)
+
+    return {
+        "labels": labels,
+        "components": components,
+        "n_excluded_sites": int(np.sum(labels < 0)),
+        "n_all_components": int(len(detection.rods)),
+        "detection": detection,
     }
 
 
@@ -666,6 +839,7 @@ def _analyze_sites(
     stratum_sites: int,
     null_replicates: int,
     rng_seed: int,
+    rod_width_scale: float = 1.0,
 ) -> dict:
     sites = infer_label_sites(
         traces["centroids_nm"], traces["sem_nm"], traces["n_locs"],
@@ -673,10 +847,21 @@ def _analyze_sites(
         sigma_factor=cfg.site_sigma_factor,
         precision_floor_nm=cfg.site_precision_floor_nm,
     )
-    components = segment_spatial_components(
-        sites["centers_nm"], link_nm=cell_link_nm,
-        min_sites=cfg.min_sites_per_component,
-    )
+    if cfg.component_mode == "rod":
+        image = traces.get("points_nm")
+        if image is None or np.asarray(image).size == 0:
+            image = traces["centroids_nm"]
+        components = segment_rod_components(
+            sites["centers_nm"], image,
+            rod_cfg=rod_config_for(cfg, width_scale=rod_width_scale),
+            min_sites=cfg.min_sites_per_component,
+            use_axis=cfg.rod_use_axis,
+        )
+    else:
+        components = segment_spatial_components(
+            sites["centers_nm"], link_nm=cell_link_nm,
+            min_sites=cfg.min_sites_per_component,
+        )
     observed, observed_by_component, edges = _profile_components(
         sites["centers_nm"], components["labels"],
         r_max_nm=cfg.r_max_nm, bin_nm=cfg.bin_nm,
@@ -728,6 +913,16 @@ def analyze_hlyb_staged_3d(
         null_replicates=cfg.null_replicates, rng_seed=cfg.rng_seed,
     )
     if not base["components"]["components"]:
+        if cfg.component_mode == "rod":
+            detection = base["components"].get("detection")
+            reasons = (detection.stats.get("rejections") if detection else None) or {}
+            detail = ("; ".join(f"{count} {reason}"
+                                for reason, count in sorted(reasons.items()))
+                      or "no region survived the density mask")
+            raise ValueError(
+                "Rod detection accepted no cell of the configured size "
+                f"({cfg.rod_min_width_nm:g}–{cfg.rod_max_width_nm:g} nm wide): "
+                f"{detail}. Check the width window and the detection pixel size.")
         raise ValueError(
             "No spatial component contains the configured minimum number of inferred sites")
 
@@ -741,25 +936,35 @@ def analyze_hlyb_staged_3d(
 
     sensitivity = []
     if cfg.run_sensitivity:
-        seen: set[tuple[float, float, int]] = set()
+        seen: set[tuple[float, float, int, float]] = set()
         variants = [(float(v), float(cfg.cell_link_nm),
-                     int(cfg.null_stratum_sites), "site radius")
+                     int(cfg.null_stratum_sites), 1.0, "site radius")
                     for v in cfg.sensitivity_site_merge_nm]
         variants += [(float(cfg.site_merge_nm), float(cfg.cell_link_nm),
-                      int(v), "null stratum")
+                      int(v), 1.0, "null stratum")
                      for v in cfg.sensitivity_stratum_sites]
-        variants += [(float(cfg.site_merge_nm),
-                      float(cfg.cell_link_nm) * float(factor),
-                      int(cfg.null_stratum_sites), "component link")
-                     for factor in cfg.sensitivity_cell_link_factors]
-        for vi, (merge_nm, cell_link_nm, stratum, source) in enumerate(variants):
-            key = (round(merge_nm, 6), round(cell_link_nm, 6), stratum)
+        # Both families vary the spatial segmentation; which knob expresses it
+        # depends on how the components were formed.
+        if cfg.component_mode == "rod":
+            variants += [(float(cfg.site_merge_nm), float(cfg.cell_link_nm),
+                          int(cfg.null_stratum_sites), float(factor),
+                          "rod width window")
+                         for factor in cfg.sensitivity_rod_width_factors]
+        else:
+            variants += [(float(cfg.site_merge_nm),
+                          float(cfg.cell_link_nm) * float(factor),
+                          int(cfg.null_stratum_sites), 1.0, "component link")
+                         for factor in cfg.sensitivity_cell_link_factors]
+        for vi, (merge_nm, cell_link_nm, stratum, width_scale, source) in enumerate(variants):
+            key = (round(merge_nm, 6), round(cell_link_nm, 6), stratum,
+                   round(width_scale, 6))
             if key in seen:
                 continue
             seen.add(key)
             if (abs(merge_nm - cfg.site_merge_nm) < 1e-9
                     and abs(cell_link_nm - cfg.cell_link_nm) < 1e-9
-                    and stratum == cfg.null_stratum_sites):
+                    and stratum == cfg.null_stratum_sites
+                    and abs(width_scale - 1.0) < 1e-9):
                 variant = base
             else:
                 variant = _analyze_sites(
@@ -767,12 +972,14 @@ def analyze_hlyb_staged_3d(
                     stratum_sites=stratum,
                     null_replicates=cfg.sensitivity_replicates,
                     rng_seed=cfg.rng_seed + 1009 * (vi + 1),
+                    rod_width_scale=width_scale,
                 )
             s = variant["summary"]
             sensitivity.append({
                 "source": source, "site_merge_nm": merge_nm,
                 "cell_link_nm": cell_link_nm,
                 "null_stratum_sites": stratum,
+                "rod_width_scale": float(width_scale),
                 "n_sites": int(variant["sites"]["centers_nm"].shape[0]),
                 "n_sites_used": int(np.sum(variant["components"]["labels"] >= 0)),
                 "n_components": int(len(variant["components"]["components"])),
@@ -838,6 +1045,11 @@ def analyze_hlyb_staged_3d(
         "n_components_all": int(components["n_all_components"]),
         "n_rod_like_components": int(rod_components),
         "n_excluded_sites": int(components["n_excluded_sites"]),
+        "component_mode": str(cfg.component_mode),
+        # The live detection (images, labels, fitted rods) for the result view;
+        # ``rod_segmentation`` is its plain-Python counterpart for payloads.
+        "rod_detection": components.get("detection"),
+        "rod_segmentation": _rod_summary(components),
         "n_repeated_sites": int(np.sum(repeated)),
         "n_traces_consolidated": int(np.sum(np.clip(trace_counts - 1, 0, None))),
         "median_within_site_rms_nm": (float(np.median(sites["within_site_rms_nm"][repeated]))
@@ -882,16 +1094,50 @@ def analyze_hlyb_staged_3d(
         "band_ratio_sensitivity_range": (
             [float(ratio_spread.min()), float(ratio_spread.max())]
             if ratio_spread.size else [float("nan"), float("nan")]),
-        "limitations": [
-            "Inferred sites are label-site estimates, not identified HlyB/HlyD protomers.",
-            "Time spans are retained across all visits, but this implementation does not yet fit a full DDC/BaGoL temporal emitter model.",
-            "The conditional null relies on coarse spatial components and a local rod axis.",
-            "A short-range excess is not by itself a molecular dimer-distance estimate.",
-            "Biological replication must be assessed across acquisitions, not pair counts.",
-            "The randomization p-value is bounded below by 1/(replicates + 1) and is anti-conservative; quote the band ratio and its calibrated z instead.",
-            "The band ratio is conditional on the null stratification scale and must be quoted together with it; the excess location is the stable descriptor.",
-        ],
+        "limitations": _limitations(cfg, components),
     }
+
+
+def _rod_summary(components: dict) -> dict | None:
+    """Plain-Python view of the rod detection, or ``None`` in link mode."""
+    detection = components.get("detection")
+    if detection is None:
+        return None
+    return {
+        **{key: value for key, value in detection.stats.items()},
+        "n_components_kept": int(len(components["components"])),
+        "rods": [rod.as_dict() for rod in detection.rods],
+    }
+
+
+def _limitations(cfg: Staged3DConfig, components: dict) -> list[str]:
+    items = [
+        "Inferred sites are label-site estimates, not identified HlyB/HlyD protomers.",
+        "Time spans are retained across all visits, but this implementation does not yet fit a full DDC/BaGoL temporal emitter model.",
+        "A short-range excess is not by itself a molecular dimer-distance estimate.",
+        "Biological replication must be assessed across acquisitions, not pair counts.",
+        "The randomization p-value is bounded below by 1/(replicates + 1) and is anti-conservative; quote the band ratio and its calibrated z instead.",
+        "The band ratio is conditional on the null stratification scale and must be quoted together with it; the excess location is the stable descriptor.",
+    ]
+    if cfg.component_mode == "rod":
+        detection = components.get("detection")
+        rejected = int((detection.stats.get("n_rejected", 0)) if detection else 0)
+        items.insert(2, (
+            "Cells were delineated by rod detection in the XY projection, so the "
+            "conditional null uses each cell's measured long axis; cells that "
+            "overlap in projection cannot be separated by any 2-D method and are "
+            "rejected rather than analysed"
+            + (f" ({rejected} region(s) rejected here)." if rejected else ".")))
+        items.append(
+            "Sites outside every accepted cell take no part in the analysis, so "
+            "the result describes the detected cell population rather than the "
+            "whole field.")
+    else:
+        items.insert(2, (
+            "The conditional null relies on coarse spatial components and a local "
+            "rod axis; over- or under-segmentation of touching cells is not "
+            "detected in this mode."))
+    return items
 
 
 def config_with(cfg: Staged3DConfig, **changes) -> Staged3DConfig:

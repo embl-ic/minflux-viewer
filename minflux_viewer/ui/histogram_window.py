@@ -167,6 +167,7 @@ class HistogramWindow(QWidget):
         self._refresh()
 
         state.filter_changed.connect(self._on_filter_changed)
+        state.attributes_changed.connect(self._on_attributes_changed)
 
     @property
     def dataset_idx(self) -> int | None:
@@ -1924,6 +1925,10 @@ class HistogramWindow(QWidget):
             else:
                 self._draw(preserve_histogram_frame=True)
                 self._fit_histogram_view()
+
+    def _on_attributes_changed(self, idx: int) -> None:
+        if idx == self._dataset_idx:
+            self._refresh()
 
     def focusInEvent(self, event) -> None:
         if self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets):

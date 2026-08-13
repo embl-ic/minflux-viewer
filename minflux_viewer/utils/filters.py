@@ -22,8 +22,47 @@ def _trace_last(a: np.ndarray) -> float:
     return float(a[-1]) if a.size else float("nan")
 
 
+def _nan_stat(a: np.ndarray, fn) -> float:
+    """Apply a NaN-skipping statistic, defining empty/all-NaN as missing.
+
+    NumPy returns NaN for these inputs but also emits ``RuntimeWarning``. Fully
+    unmapped traces are expected for fluorescent attributes outside the image
+    footprint, so handle that state explicitly instead of treating it as an
+    exceptional numerical condition.
+    """
+    values = np.asarray(a, dtype=float).ravel()
+    if values.size == 0 or np.isnan(values).all():
+        return float("nan")
+    with np.errstate(all="ignore"):
+        return float(fn(values))
+
+
+def _trace_mean(a: np.ndarray) -> float:
+    return _nan_stat(a, np.nanmean)
+
+
+def _trace_median(a: np.ndarray) -> float:
+    return _nan_stat(a, np.nanmedian)
+
+
+def _trace_min(a: np.ndarray) -> float:
+    return _nan_stat(a, np.nanmin)
+
+
+def _trace_max(a: np.ndarray) -> float:
+    return _nan_stat(a, np.nanmax)
+
+
+def _trace_stdev(a: np.ndarray) -> float:
+    return _nan_stat(a, np.nanstd)
+
+
 def _trace_range(a: np.ndarray) -> float:
-    return float(np.nanmax(a)) - float(np.nanmin(a))
+    values = np.asarray(a, dtype=float).ravel()
+    if values.size == 0 or np.isnan(values).all():
+        return float("nan")
+    with np.errstate(all="ignore"):
+        return float(np.nanmax(values)) - float(np.nanmin(values))
 
 
 #: The one registry of trace read-outs: label -> function over a trace's values.
@@ -39,13 +78,13 @@ def _trace_range(a: np.ndarray) -> float:
 #: **positional** — the trace's first and last row in store (time) order, taken
 #: literally rather than skipping NaN.
 TRACE_AGG_FUNCS = {
-    "trace mean":   np.nanmean,
-    "trace median": np.nanmedian,
-    "trace min":    np.nanmin,
-    "trace max":    np.nanmax,
+    "trace mean":   _trace_mean,
+    "trace median": _trace_median,
+    "trace min":    _trace_min,
+    "trace max":    _trace_max,
     "trace 1st":    _trace_first,
     "trace last":   _trace_last,
-    "trace stdev":  np.nanstd,
+    "trace stdev":  _trace_stdev,
     "trace range":  _trace_range,
 }
 

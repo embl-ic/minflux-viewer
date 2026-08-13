@@ -19,6 +19,7 @@ silently degraded to per-localization values.
 from __future__ import annotations
 
 import sys
+import warnings
 
 import numpy as np
 import pytest
@@ -131,6 +132,60 @@ def test_positional_read_outs_are_literal_not_order_statistics():
     # Empty trace -> NaN rather than an IndexError.
     assert np.isnan(TRACE_AGG_FUNCS["trace 1st"](np.array([])))
     assert np.isnan(TRACE_AGG_FUNCS["trace last"](np.array([])))
+
+
+def test_all_nan_trace_statistics_are_missing_without_runtime_warnings():
+    """Unmapped fluorescent traces are valid missing data, not warning cases."""
+    all_nan = np.array([np.nan, np.nan])
+    mixed = np.array([1.0, np.nan, 3.0])
+    raw = np.concatenate([all_nan, mixed])
+    trace_idx = np.array([[0, 1], [2, 4]])
+    counts = np.array([2, 3])
+    tid = np.array([0, 0, 1, 1, 1])
+    nan_skipping_modes = (
+        "trace mean",
+        "trace median",
+        "trace min",
+        "trace max",
+        "trace stdev",
+        "trace range",
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        for mode in nan_skipping_modes:
+            assert np.isnan(TRACE_AGG_FUNCS[mode](all_nan)), mode
+            values = aggregate(
+                raw, np.ones(raw.size, dtype=bool), mode, trace_idx, 2
+            )
+            assert np.isnan(values[0]), mode
+            assert np.isfinite(values[1]), mode
+            raw_values = raw_trace_aggregate(raw, tid, mode)
+            assert np.isnan(raw_values[0]), mode
+            assert np.isfinite(raw_values[1]), mode
+
+            mask = compute_filter_mask(
+                raw, mode, -1.0, 10.0, trace_idx, counts, 2
+            )
+            assert mask.tolist() == [False, False, True, True, True], mode
+            raw_mask = raw_spec_mask(raw, tid, mode, -1.0, 10.0)
+            assert raw_mask.tolist() == mask.tolist(), mode
+
+
+def test_histogram_trace_mean_and_median_accept_fully_unmapped_traces():
+    _qapp()
+    win, ds, _state = _histogram()
+    try:
+        raw = np.array([np.nan, np.nan, np.nan, 1.0, np.nan, 3.0])
+        ftr = np.ones(raw.size, dtype=bool)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            for mode in ("trace mean", "trace median"):
+                values = win._aggregate(raw, ftr, mode, ds)
+                assert np.isnan(values[0]), mode
+                assert values[1] == pytest.approx(2.0), mode
+    finally:
+        win.close()
 
 
 def test_every_dispatch_path_agrees_for_every_mode():

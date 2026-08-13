@@ -133,6 +133,13 @@ DEFAULT_PREFS: dict = {
         "histogram_iterations": ["flatten", "stacked", "sum", "average"],
         # Per-dataset overlay channel colours (1st..6th), cycled for overlays.
         "overlay_colors": ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"],
+        # Last-used manual overlay-alignment controls. Translation is physical nm.
+        "render_alignment_translation_nm": 1.0,
+        "render_alignment_rotation_deg": 0.1,
+        "scatter_alignment_translation_nm": 1.0,
+        "scatter_alignment_rotation_deg": 0.1,
+        "confocal_alignment_translation_px": 0.5,
+        "confocal_alignment_rotation_deg": 0.1,
     },
     "plugin": {
         "msr_export_folder": "",
@@ -277,6 +284,14 @@ def _migrate_prefs(prefs: dict) -> dict:
         plot["use_fixed_rimf"] = True
         plot["rimf_value"] = 0.67
         migrations["v036_fixed_rimf_default"] = True
+    if not migrations.get("v037_metric_overlay_alignment_steps"):
+        plot = prefs.setdefault("plot", {})
+        plot.pop("render_alignment_translation_px", None)
+        plot["render_alignment_translation_nm"] = 1.0
+        for key in ("render_alignment_rotation_deg", "scatter_alignment_rotation_deg"):
+            if float(plot.get(key, 0.5)) == 0.5:
+                plot[key] = 0.1
+        migrations["v037_metric_overlay_alignment_steps"] = True
     return prefs
 
 
@@ -298,6 +313,8 @@ class AppState(QObject):
         Emitted when the active dataset changes; carries the new index.
     filter_changed(int)
         Emitted when ``dataset[idx].filter_mask`` is modified.
+    attributes_changed(int)
+        Emitted when user-visible columns are added to an existing dataset.
     roi_selection_changed(int)
         Emitted when a dataset's cached ROI selection mask is modified.
     status_message(str)
@@ -308,6 +325,7 @@ class AppState(QObject):
     dataset_removed = pyqtSignal(int)
     active_changed  = pyqtSignal(int)
     filter_changed  = pyqtSignal(int)
+    attributes_changed = pyqtSignal(int)
     calibration_changed = pyqtSignal(int)   # RIMF / z-scaling changed for a dataset
     roi_selection_changed = pyqtSignal(int)
     status_message  = pyqtSignal(str)
@@ -478,6 +496,13 @@ class AppState(QObject):
             idx = self._active_idx
         if idx is not None:
             self.filter_changed.emit(idx)
+
+    def notify_attributes_changed(self, idx: int | None = None) -> None:
+        """Notify attribute/filter windows that dataset columns changed."""
+        if idx is None:
+            idx = self._active_idx
+        if idx is not None:
+            self.attributes_changed.emit(idx)
 
     def notify_roi_selection_changed(self, idx: int | None = None) -> None:
         """Notify views that cached ROI selection masks changed."""
