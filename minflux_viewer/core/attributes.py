@@ -138,7 +138,11 @@ def plot_attribute_names(
 
     for name in _dataset_attribute_keys(dataset):
         base = _base_attribute_name(name)
-        if base not in enabled and not (include_derived and name in enabled_computed):
+        meta = getattr(getattr(dataset, "mfx", None), "meta", {}).get(name, {})
+        user_visible = bool(meta.get("user_visible", False))
+        if (base not in enabled
+                and not (include_derived and name in enabled_computed)
+                and not user_visible):
             continue
         if name in exclude_set:
             continue

@@ -846,13 +846,32 @@ class ViewerAlignmentDialog(QDialog):
     dialog aborts the whole "Open in MINFLUX viewer" action.
     """
 
-    def __init__(self, selected: list[str], mbm_check, parent=None):
+    def __init__(
+        self,
+        selected: list[str],
+        mbm_check,
+        parent=None,
+        *,
+        confocal_candidates=None,
+        reserved_names=(),
+    ):
         super().__init__(parent)
         self.setWindowTitle("Open in MINFLUX viewer")
-        self.resize(520, 180)
+        self.setMinimumWidth(650 if confocal_candidates else 520)
         self._mbm_check = mbm_check
+        self.confocal_widget = None
 
         layout = QVBoxLayout(self)
+        if confocal_candidates:
+            from ...ui.confocal_mapping_dialog import ConfocalMappingOptionsWidget
+
+            self.confocal_widget = ConfocalMappingOptionsWidget(
+                list(confocal_candidates),
+                self,
+                reserved_names=reserved_names,
+            )
+            layout.addWidget(self.confocal_widget)
+
         label = QLabel(
             "This MSR file contains multiple datasets.\n"
             "Choose how to align them when opening as a multi-channel render overlay, "
@@ -869,7 +888,8 @@ class ViewerAlignmentDialog(QDialog):
         layout.addWidget(self.individual_check)
 
         ref_row = QHBoxLayout()
-        ref_row.addWidget(QLabel("Reference dataset:"))
+        self._ref_label = QLabel("Reference dataset:")
+        ref_row.addWidget(self._ref_label)
         self.ref_combo = QComboBox(self)
         self.ref_combo.addItems(selected)
         self.ref_combo.setCurrentIndex(0)
@@ -878,7 +898,8 @@ class ViewerAlignmentDialog(QDialog):
         layout.addLayout(ref_row)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("align with:"))
+        self._align_label = QLabel("align with:")
+        row.addWidget(self._align_label)
         self.align_combo = QComboBox(self)
         self.align_combo.addItems(["mbm info", "stage origin", "data centroid"])
         row.addWidget(self.align_combo, 1)
@@ -891,11 +912,31 @@ class ViewerAlignmentDialog(QDialog):
         layout.addWidget(self._mbm_note)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._accept_if_valid)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
         self._on_reference_changed(self.ref_combo.currentText())
+        if len(selected) < 2:
+            for widget in (
+                label,
+                self.individual_check,
+                self._ref_label,
+                self.ref_combo,
+                self._align_label,
+                self.align_combo,
+                self._mbm_note,
+            ):
+                widget.setVisible(False)
+        self.adjustSize()
+
+    def _accept_if_valid(self) -> None:
+        if self.confocal_widget is not None:
+            valid, reason = self.confocal_widget.validate(require_selection=False)
+            if not valid:
+                QMessageBox.warning(self, "Open in MINFLUX viewer", reason)
+                return
+        self.accept()
 
     def _on_individual_toggled(self, checked: bool) -> None:
         """Disable the overlay alignment controls when opening individually."""
@@ -931,6 +972,9 @@ class ViewerAlignmentDialog(QDialog):
 
     def reference_dataset(self) -> str:
         return self.ref_combo.currentText()
+
+    def confocal_options(self):
+        return None if self.confocal_widget is None else self.confocal_widget.options()
 
 
 class AlignmentPlotWindow(QDialog):
@@ -3831,8 +3875,7 @@ class MsrReaderDialog(QWidget):
     def _ctx_open_as_image(self, raw_indices):
         """Open the selected OBF series (by raw stack index) in the standalone
         TIFF/image viewer."""
-        opened = sum(1 for raw in raw_indices if self._open_obf_series(raw))
-        if opened == 0:
+        if not self._open_obf_series_group(raw_indices):
             QMessageBox.information(
                 self, "Open as image",
                 "The selected series could not be opened as an image.")
@@ -3847,8 +3890,8 @@ class MsrReaderDialog(QWidget):
     def _ctx_preview(self):
         # Previewing an image series as a table is useless — open the image viewer.
         image_series = self._selected_image_series_indices()
-        for raw in image_series:
-            self._open_obf_series(raw)
+        if image_series:
+            self._open_obf_series_group(image_series)
         shown = 0
         for item in self._selected_array_items():
             path, arr, err = self._resolve_context_array(item)
@@ -4058,30 +4101,62 @@ class MsrReaderDialog(QWidget):
             self.log(f"[image] could not list image series: {exc}")
             return []
 
-    def _open_obf_series(self, raw_index) -> bool:
-        """Open one OBF image series (by raw stack index) in the standalone image
-        viewer — preferring the main window's registry (dedup/persist), else held
-        as a child of this dialog."""
+    def _open_obf_series_group(self, raw_indices) -> bool:
+        """Open one file-backed image viewer for the selected OBF series.
+
+        ``ObfImageSource`` exposes every viewable stack through its Series
+        dropdown, so opening N selected stacks must not create N windows. The
+        first selected stack becomes the current series; the rest remain
+        available in that same dropdown.
+        """
         msr_path = self.parsed.get("msr")
         if not msr_path:
             return False
+        requested = []
+        for raw in raw_indices or ():
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value not in requested:
+                requested.append(value)
+        if not requested:
+            return False
+
+        source = None
+        for raw in requested:
+            try:
+                from ...core.obf_image_source import ObfImageSource
+                source = ObfImageSource(msr_path, raw_stack_index=raw)
+                break
+            except Exception as exc:
+                self.log(f"[image] stack {raw}: {exc}")
+        if source is None:
+            return False
         try:
-            from ...core.obf_image_source import ObfImageSource
             from ...ui.tiff_viewer_window import TiffViewerWindow
-            source = ObfImageSource(msr_path, raw_stack_index=int(raw_index))
         except Exception as exc:
-            self.log(f"[image] stack {raw_index}: {exc}")
+            source.close()
+            self.log(f"[image] {exc}")
             return False
         owner = self._owner
-        key = f"{Path(msr_path).resolve()}#obf{int(raw_index)}"
+        key = f"{Path(msr_path).resolve()}#obf-images"
         if owner is not None and hasattr(owner, "_open_image_viewer"):
             try:
-                owner._open_image_viewer(source, key)
+                owner._open_image_viewer(
+                    source,
+                    key,
+                    initial_series_index=int(source.metadata.series_index),
+                )
                 return True
             except Exception as exc:
                 self.log(f"[image] {exc}")
         self._show_child_dialog(TiffViewerWindow(source))
         return True
+
+    def _open_obf_series(self, raw_index) -> bool:
+        """Compatibility wrapper for one selected series."""
+        return self._open_obf_series_group([raw_index])
 
     def _derive_global_field_filters(self):
         sel = self.field_selection or {}
@@ -4221,27 +4296,72 @@ class MsrReaderDialog(QWidget):
         return None
 
     def _ask_viewer_channel_alignment(self, import_plan: dict[str, set[str] | None]):
-        """Ask for reference dataset + alignment mode.
+        """Ask for confocal mapping plus reference dataset/alignment mode.
 
-        Returns ``(mode, ref_name)``, ``None`` when no alignment question
-        applies (legacy file or fewer than two datasets), or
+        Returns ``(mode, ref_name)``, ``None`` when no dataset-overlay alignment
+        applies (the dialog can still have collected confocal mapping options), or
         ``_ALIGN_CANCELLED`` when the user cancelled — which must abort the
         whole open, not just skip the transforms.
         """
+        self._pending_confocal_options = None
         if self.parsed.get("mode") != "modern":
             return None
         selected = self._viewer_selected_dataset_names(import_plan)
-        if len(selected) < 2:
+        if not selected:
             return None
+
+        confocal_candidates = []
+        msr_path = Path(self.parsed.get("msr", ""))
+        selected_info = []
+        for ds in self.parsed.get("datasets", []) or []:
+            key = ds.get("display_name") or ds.get("did") or "dataset"
+            if key in selected:
+                selected_info.append({"dataset_key": key, "did": ds.get("did", "")})
+        if msr_path.is_file():
+            try:
+                from ...core.confocal_mapping import discover_confocal_candidates
+
+                confocal_candidates = discover_confocal_candidates(msr_path, selected_info)
+                if confocal_candidates:
+                    self.log(
+                        f"[viewer] detected {len(confocal_candidates)} potential fluorescent "
+                        "image channel(s) by calibrated XY/ROI match (1% tolerance)"
+                    )
+            except Exception as exc:
+                self.log(f"[warn] confocal candidate detection failed: {exc}")
+
+        if len(selected) < 2 and not confocal_candidates:
+            return None
+
+        reserved_names: set[str] = set()
+        MFSTATE = self._msr_state()
+        for name in selected:
+            mfx = MFSTATE.mfx_map.get(name)
+            reserved_names.update(
+                getattr(getattr(mfx, "dtype", None), "names", ()) or ()
+            )
+        from ...core.attributes import DERIVED_ATTRIBUTE_NAMES
+
+        reserved_names.update(DERIVED_ATTRIBUTE_NAMES)
+        reserved_names.update({"loc_x", "loc_y", "loc_z", "xnm", "ynm", "znm"})
 
         def mbm_check(ref_name: str) -> tuple[bool, str]:
             ordered = [ref_name] + [n for n in selected if n != ref_name]
             return self._viewer_mbm_alignment_available(ordered)
 
-        dlg = ViewerAlignmentDialog(selected, mbm_check, self)
+        dlg = ViewerAlignmentDialog(
+            selected,
+            mbm_check,
+            self,
+            confocal_candidates=confocal_candidates,
+            reserved_names=reserved_names,
+        )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             self.log("[viewer align] cancelled; open aborted")
             return _ALIGN_CANCELLED
+        self._pending_confocal_options = dlg.confocal_options()
+        if len(selected) < 2:
+            return None
         if dlg.open_individual():
             self.log("[viewer] opening each selected dataset as an individual dataset")
             return _OPEN_INDIVIDUAL
@@ -4782,6 +4902,28 @@ class MsrReaderDialog(QWidget):
         return (self._state.prefs.get("mbm_handling", {}) or {}).get(
             "transform_type", default) or default
 
+    def _mbm_naming_metadata(self, key: str, zroot) -> tuple[dict, list]:
+        """``(points_by_gri, used)`` for one dataset — the gri↔R-ID map and the
+        beads the acquisition marked as used.
+
+        Same two sources as :func:`beads_drift.gather_msr_bead_drift`: the
+        translated legacy MBM metadata first, then the modern in-store zarr attrs.
+        """
+        MFSTATE = self._msr_state()
+        meta = (getattr(MFSTATE, "mbm_meta_map", None) or {}).get(key) or {}
+        pbg = meta.get("points_by_gri") or {}
+        used = meta.get("used") or []
+        if (not pbg or not used) and zroot is not None:
+            try:
+                if not pbg:
+                    pbg = (self._read_zarr_attrs_safe(zroot, "grd/mbm/points") or {}).get(
+                        "points_by_gri", {})
+                if not used:
+                    used = (self._read_zarr_attrs_safe(zroot, "mbm") or {}).get("used", [])
+            except Exception:
+                pass
+        return dict(pbg or {}), list(used or [])
+
     def _combined_loc_bounds_nm(self, names) -> tuple[np.ndarray, np.ndarray] | None:
         """Combined raw-localization bounding box (nm) across *names*, for the
         alignment plot's data-range overlay.
@@ -4950,31 +5092,23 @@ class MsrReaderDialog(QWidget):
         save-outputs dialog."""
         import numpy as np
 
-        from .beads_drift import gather_msr_bead_drift
+        from .beads_drift import gather_msr_bead_drift, single_channel_bead_summary
         MFSTATE = self._msr_state()
         name = ds.get("display_name") or ds.get("did") or "channel_1"
         gathered = gather_msr_bead_drift(
             [ds], MFSTATE.mbm_map, getattr(MFSTATE, "mbm_meta_map", None))
         beads = gathered[0]["beads"] if gathered else []
-        if not beads:
+        data = single_channel_bead_summary(name, beads)
+        if data is None:
             QMessageBox.information(
                 self, "Align channel",
                 f"No bead (grd/mbm/points) data to show for the single channel '{name}'.")
             return
-        ids = np.array([b["gri"] for b in beads], dtype=np.uint32)
-        rids = [b.get("rid", str(b["gri"])) for b in beads]
-        pos = np.array([b["pos_nm"] for b in beads], dtype=float)
-        drift = np.array([
-            (np.ptp(np.asarray(b["xyz_nm"]), axis=0)
-             if np.asarray(b["xyz_nm"]).shape[0] else np.zeros(3))
-            for b in beads], dtype=float)
-        data = {"name": name, "bead_ids": ids, "rids": rids,
-                "pos_nm": pos, "drift_nm": drift}
         bounds = self._combined_loc_bounds_nm([name])
         excluded = sorted(int(g) for g in (self._bead_unchecked_gris or set()))
         self.log(
             f"[align] single channel '{name}': no alignment needed — showing "
-            f"{len(ids)} bead(s) + the data region (per-bead drift). "
+            f"{len(beads)} bead(s) + the data region (per-bead drift). "
             f"user-excluded {len(excluded)} bead(s).")
         self._show_child_dialog(
             AlignmentPlotWindow([], self, data_bounds_nm=bounds, single_channel=data))
@@ -5203,13 +5337,18 @@ class MsrReaderDialog(QWidget):
 
         # Image series selected in "Datasets / Fields included…" open in the
         # standalone image viewer (they are not MINFLUX datasets).
-        image_raws = sorted(
-            int(s["raw_index"])
-            for s in select_image_series(self._gather_image_series_for_dialog(),
-                                         indices=self.image_field_selection))
-        opened_images = sum(1 for raw in image_raws if self._open_obf_series(raw))
+        selected_images = select_image_series(
+            self._gather_image_series_for_dialog(),
+            indices=self.image_field_selection,
+        )
+        image_raws = [int(s["raw_index"]) for s in selected_images]
+        opened_images = bool(self._open_obf_series_group(image_raws))
         if opened_images:
-            self.log(f"[viewer] opened {opened_images} image series in the image viewer.")
+            first_name = selected_images[0].get("name", f"stack {image_raws[0]}")
+            self.log(
+                f"[viewer] opened 1 image viewer for {len(image_raws)} selected "
+                f"image series (showing '{first_name}')."
+            )
 
         datasets_info = self.parsed.get("datasets", [])
         if not datasets_info:
@@ -5244,6 +5383,8 @@ class MsrReaderDialog(QWidget):
             self.log("[viewer] open in viewer aborted by user")
             return
         individual = align_choice is _OPEN_INDIVIDUAL
+        confocal_options = getattr(self, "_pending_confocal_options", None)
+        confocal_transform_cache: dict = {}
         if align_choice and not individual:
             alignment_mode, reference_name = align_choice
             try:
@@ -5310,6 +5451,7 @@ class MsrReaderDialog(QWidget):
                     dataset.metadata["msr_source_path"] = str(msr_path)
                     dataset.metadata["msr_dataset_key"] = key
                     dataset.metadata["msr_dataset_name"] = key
+                    dataset.metadata["msr_dataset_did"] = str(ds.get("did") or "")
                     # Record the acquisition sequence so the photon-bearing
                     # iterations (used by aggregation and per-dimension CRLB) can
                     # be detected from the beam scale rather than a heuristic.
@@ -5340,6 +5482,14 @@ class MsrReaderDialog(QWidget):
                     if key in MFSTATE.mbm_map:
                         dataset.mbm = AttributeComponent({"points": MFSTATE.mbm_map[key]})
                         dataset.metadata["mbm_points"] = MFSTATE.mbm_map[key]
+                        # Carry the bead NAMING/selection metadata too, not just the
+                        # points: without it a loaded dataset can only fall back to
+                        # bare gri ids, losing the R-IDs and which beads were used.
+                        pbg, used = self._mbm_naming_metadata(key, ds.get("zroot"))
+                        if pbg:
+                            dataset.metadata["mbm_points_by_gri"] = pbg
+                        if used:
+                            dataset.metadata["mbm_used"] = used
                     if key in viewer_transforms:
                         transform = viewer_transforms[key]
                         dataset.state["overlay_transform"] = transform
@@ -5347,6 +5497,21 @@ class MsrReaderDialog(QWidget):
                         dataset.metadata["overlay_transform"] = transform
                         dataset.metadata["render_transform_2d"] = transform
                         dataset.metadata["transformed"] = bool(transform.get("moving_channel") != transform.get("reference_channel"))
+                    if confocal_options is not None and confocal_options.choices:
+                        from ...ui.confocal_mapping_dialog import apply_confocal_mapping_options
+
+                        mapping_results = apply_confocal_mapping_options(
+                            dataset,
+                            msr_path,
+                            confocal_options,
+                            self,
+                            transform_cache=confocal_transform_cache,
+                        )
+                        for result in mapping_results:
+                            self.log(
+                                f"[viewer confocal] '{result.attribute_name}' on '{key}': "
+                                f"{result.finite_count:,}/{result.total_count:,} localizations in bounds"
+                            )
                     idx = self._state.add_dataset(dataset)
                     loaded = self._state.datasets[idx]
                     if not individual:
@@ -5359,6 +5524,7 @@ class MsrReaderDialog(QWidget):
                     loaded.metadata["msr_source_path"] = str(msr_path)
                     loaded.metadata["msr_dataset_key"] = key
                     loaded.metadata["msr_dataset_name"] = key
+                    loaded.metadata["msr_dataset_did"] = str(ds.get("did") or "")
                     if not individual:
                         loaded.metadata["overlay_id"] = render_group_id
                         loaded.metadata["overlay_index"] = overlay_index
@@ -5376,6 +5542,10 @@ class MsrReaderDialog(QWidget):
                     imported.append(key)
                     self.log(f"[viewer] '{key}' → {loaded.prop.num_loc:,} loc")
                 except Exception as exc:
+                    if "Manual confocal alignment was cancelled" in str(exc):
+                        self.log("[viewer confocal] manual alignment cancelled; open aborted")
+                        errors.append("Open aborted during manual confocal alignment.")
+                        break
                     errors.append(f"Dataset '{key}': {exc}")
                     self.log(f"[error] {key}: {exc}")
         finally:

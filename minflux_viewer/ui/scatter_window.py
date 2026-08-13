@@ -38,8 +38,18 @@ from PyQt6.QtWidgets import (
 from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
 from ..core.loader import attr_values_1d
-from ..core.overlay import CHANNEL_LUTS, PURE_COLOR_RGB, apply_display_transform_nm, overlay_members
-from ..core.roi_selection import active_roi_mask, rectangle_mask, roi_region_mask
+from ..core.overlay import (
+    CHANNEL_LUTS,
+    PURE_COLOR_NAMES,
+    PURE_COLOR_RGB,
+    apply_display_transform_nm,
+    identity_matrix4,
+    manual_alignment_matrix4,
+    matrix4_to_xy3,
+    overlay_members,
+    transform_to_matrix4,
+)
+from ..core.roi_selection import active_roi_mask, roi_region_mask
 from .plot_format import plot_widget
 
 # ---------------------------------------------------------------------------
@@ -133,7 +143,7 @@ _AXIS_OPTIONS = ["XY", "XZ", "YZ", "3D"]
 _MAX_DISPLAY_POINTS_2D = 100_000
 _MAX_DISPLAY_POINTS_3D = 150_000
 
-_SOLID_COLOR_NAMES = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Black", "White", "Gray"]
+_SOLID_COLOR_NAMES = list(PURE_COLOR_NAMES)
 _SOLID_COLOR_RGB: dict[str, tuple[int, int, int]] = {
     "Red":     (220,  40,  40),
     "Green":   ( 20, 170,  70),
@@ -141,6 +151,7 @@ _SOLID_COLOR_RGB: dict[str, tuple[int, int, int]] = {
     "Cyan":    (  0, 170, 190),
     "Magenta": (190,  50, 190),
     "Yellow":  (210, 170,  20),
+    "Orange":  (245, 130,  20),
     "Black":   (  0,   0,   0),
     "White":   (255, 255, 255),
     "Gray":    (120, 120, 120),
@@ -148,7 +159,7 @@ _SOLID_COLOR_RGB: dict[str, tuple[int, int, int]] = {
 _NAMED_CMAPS = ["glasbey", "jet", "HiLo", "parula", "turbo", "hot"]
 # Single-colour ramp names the LUT dialog offers (black → colour), matching the
 # render's channel LUTs. Distinct from the flat "solid:<Name>" scatter colours.
-_LUT_SINGLE_COLOURS = {"Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray"}
+_LUT_SINGLE_COLOURS = set(PURE_COLOR_NAMES)
 
 
 class ScatterWindow(QWidget):
@@ -186,6 +197,9 @@ class ScatterWindow(QWidget):
         self._last_axis_text = "XY"
         self._channels: list[dict] = []
         self._channel_rows: list[tuple[QLabel, QLabel]] = []
+        self._overlay_alignment_panel = None
+        self._overlay_alignment_original: list[dict] | None = None
+        self._overlay_alignment_original_visibility: list[bool] | None = None
         self._roi_highlight_2d = None
         self._roi_highlight_3d = None
 
@@ -198,6 +212,7 @@ class ScatterWindow(QWidget):
         self._refresh()
 
         state.filter_changed.connect(self._on_filter_changed)
+        state.attributes_changed.connect(self._on_attributes_changed)
         state.calibration_changed.connect(self._on_calibration_changed)
         state.roi_selection_changed.connect(self._on_roi_selection_changed)
         state.rois.selection_changed.connect(self._redraw_roi_highlight)
@@ -224,6 +239,7 @@ class ScatterWindow(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
+        self._root_layout = root
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
@@ -307,6 +323,7 @@ class ScatterWindow(QWidget):
         self._channel_layout.setSpacing(2)
         self._channel_area.setWidget(self._channel_widget)
         root.addWidget(self._channel_area)
+        self._channel_area_layout_index = root.indexOf(self._channel_area)
 
         # Status line
         self._info_label = QLabel("")
@@ -574,6 +591,10 @@ class ScatterWindow(QWidget):
     def _on_filter_changed(self, idx: int) -> None:
         if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
             self._redraw_current(save_state=False)
+
+    def _on_attributes_changed(self, idx: int) -> None:
+        if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
+            self._refresh()
 
     def _on_calibration_changed(self, idx: int) -> None:
         # RIMF / z-scaling changed: the cached loc_nm (keyed only by dataset
@@ -843,7 +864,8 @@ class ScatterWindow(QWidget):
         previous = {
             ch.get("dataset_idx"): {"visible": ch.get("visible", True),
                                     "lut": ch.get("lut"),
-                                    "color_by": ch.get("color_by")}
+                                    "color_by": ch.get("color_by"),
+                                    "transform": ch.get("transform")}
             for ch in self._channels
         }
         self._channels = []
@@ -857,6 +879,8 @@ class ScatterWindow(QWidget):
                 "visible": bool(prev.get("visible", True)),
                 "lut": prev.get("lut") or ds.state.get("overlay_lut") or ds.state.get("render_channel_lut") or CHANNEL_LUTS[pos % len(CHANNEL_LUTS)],
                 "color_by": prev.get("color_by"),   # None = solid; else attribute
+                "loc_transform": ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"),
+                "transform": dict(prev.get("transform") or {}),
             })
 
     def _rebuild_channel_ui(self) -> None:
@@ -897,6 +921,196 @@ class ScatterWindow(QWidget):
         swatch.setStyleSheet(
             f"background-color: rgb({r},{g},{b}); border: 1px solid #888;")
 
+    def _locs_for_dataset_raw(self, ds_idx: int | None) -> np.ndarray:
+        if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
+            return np.empty((0, 3), dtype=float)
+        locs = np.asarray(self._state.datasets[ds_idx].loc_nm, dtype=float)
+        if locs.ndim == 2 and locs.shape[1] == 2:
+            locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
+        return locs
+
+    def _manual_align_channel(self, ch_idx: int) -> None:
+        if len(self._channels) < 2 or not (0 <= ch_idx < len(self._channels)):
+            return
+        if self._overlay_alignment_panel is not None:
+            self._overlay_alignment_panel._channel_combo.setCurrentIndex(ch_idx)
+            self._overlay_alignment_panel.setFocus()
+            return
+        self._overlay_alignment_original = [dict(ch.get("transform") or {}) for ch in self._channels]
+        self._overlay_alignment_original_visibility = [bool(ch.get("visible", True)) for ch in self._channels]
+        for ch in self._channels:
+            self._ensure_channel_world_transform(ch)
+        from .overlay_alignment import OverlayAlignmentPanel
+
+        self._channel_area.hide()
+        self._overlay_alignment_panel = OverlayAlignmentPanel(self, self._channels, ch_idx)
+        self._root_layout.insertWidget(self._channel_area_layout_index, self._overlay_alignment_panel)
+        self._overlay_alignment_panel.show()
+        self._overlay_alignment_panel.setFocus()
+
+    def _overlay_alignment_control_config(self) -> dict:
+        plot = self._state.prefs.setdefault("plot", {})
+        return {
+            "translation_unit": "nm",
+            "translation_step": float(plot.get("scatter_alignment_translation_nm", 1.0)),
+            "translation_maximum": 100000.0,
+            "rotation_step": float(plot.get("scatter_alignment_rotation_deg", 0.1)),
+        }
+
+    def _overlay_alignment_steps_changed(
+        self, translation_step: float, rotation_step: float
+    ) -> None:
+        plot = self._state.prefs.setdefault("plot", {})
+        plot["scatter_alignment_translation_nm"] = float(translation_step)
+        plot["scatter_alignment_rotation_deg"] = float(rotation_step)
+        self._state.save_prefs()
+
+    def _overlay_alignment_drag_view(self):
+        if self._axis_combo.currentText() == "3D":
+            return None
+        return self._plot_2d.viewport()
+
+    def _overlay_alignment_view_delta(self, start, end) -> tuple[float, float]:
+        view_box = self._plot_2d.getPlotItem().getViewBox()
+        start_view = view_box.mapSceneToView(self._plot_2d.mapToScene(start.toPoint()))
+        end_view = view_box.mapSceneToView(self._plot_2d.mapToScene(end.toPoint()))
+        return float(end_view.x() - start_view.x()), float(end_view.y() - start_view.y())
+
+    def _overlay_alignment_rotation_sign(self) -> float:
+        """Stored-angle sign that appears counter-clockwise in the current view."""
+        invert_y = self._axis_combo.currentText() == "XY" and self._xy_origin_top_left()
+        return -1.0 if invert_y else 1.0
+
+    def _ensure_channel_world_transform(self, ch: dict) -> None:
+        transform = ch.setdefault("transform", {})
+        if "anchor_x_nm" not in transform or "anchor_y_nm" not in transform:
+            axis = self._axis_combo.currentText()
+            axes = (0, 2) if axis == "XZ" else (1, 2) if axis == "YZ" else (0, 1)
+            if axis == "3D":
+                ds_idx = ch.get("dataset_idx")
+                locs = self._locs_for_dataset_raw(ds_idx)
+                centre = np.nanmedian(locs[:, :3], axis=0) if locs.size else np.zeros(3)
+                transform["anchor_x_nm"] = float(centre[axes[0]])
+                transform["anchor_y_nm"] = float(centre[axes[1]])
+            else:
+                ranges = self._plot_2d.getPlotItem().getViewBox().viewRange()
+                transform["anchor_x_nm"] = float(sum(ranges[0]) / 2.0)
+                transform["anchor_y_nm"] = float(sum(ranges[1]) / 2.0)
+        transform.setdefault("dx_nm", float(transform.get("dx", 0.0)))
+        transform.setdefault("dy_nm", float(transform.get("dy", 0.0)))
+        transform.setdefault("angle", 0.0)
+
+    def _overlay_alignment_visibility(self, ch_idx: int, visible: bool) -> None:
+        self._on_channel_visible(ch_idx, visible)
+
+    def _overlay_alignment_set_channel(self, _ch_idx: int) -> None:
+        self._redraw_current(save_state=False)
+
+    def _overlay_alignment_nudge(
+        self, ch_idx: int, dx_nm: float, dy_nm: float, rotation: float
+    ) -> None:
+        self._update_overlay_alignment_transform(ch_idx, dx_nm, dy_nm, rotation)
+
+    def _overlay_alignment_drag(self, ch_idx: int, dx_nm: float, dy_nm: float) -> None:
+        self._update_overlay_alignment_transform(ch_idx, dx_nm, dy_nm, 0.0)
+
+    def _update_overlay_alignment_transform(
+        self, ch_idx: int, dx_nm: float, dy_nm: float, rotation: float
+    ) -> None:
+        if not (0 <= ch_idx < len(self._channels)):
+            return
+        ch = self._channels[ch_idx]
+        self._ensure_channel_world_transform(ch)
+        transform = ch["transform"]
+        transform["dx_nm"] = float(transform.get("dx_nm", 0.0)) + dx_nm
+        transform["dy_nm"] = float(transform.get("dy_nm", 0.0)) + dy_nm
+        transform["angle"] = float(transform.get("angle", 0.0)) + rotation
+        self._cached_dataset_idx = None
+        self._cached_locs_nm = None
+        self._redraw_current(save_state=False)
+
+    def _overlay_alignment_status(self, ch_idx: int) -> str:
+        if not (0 <= ch_idx < len(self._channels)):
+            return "X +0.0 nm | Y +0.0 nm | rotation +0.0°"
+        transform = self._channels[ch_idx].get("transform") or {}
+        dx = float(transform.get("dx_nm", 0.0))
+        dy = float(transform.get("dy_nm", 0.0))
+        return f"X {dx:+.1f} nm | Y {dy:+.1f} nm | rotation {float(transform.get('angle', 0.0)):+.1f}°"
+
+    def _overlay_alignment_reset(self) -> None:
+        panel = self._overlay_alignment_panel
+        if panel is None:
+            return
+        ch_idx = panel.selected_index
+        if 0 <= ch_idx < len(self._channels):
+            self._channels[ch_idx]["transform"] = dict(
+                self._overlay_alignment_original[ch_idx]
+                if self._overlay_alignment_original is not None else {}
+            )
+        self._cached_dataset_idx = None
+        self._cached_locs_nm = None
+        self._redraw_current(save_state=False)
+        panel.refresh_status()
+        panel.setFocus()
+
+    def _overlay_alignment_apply(self) -> None:
+        if self._overlay_alignment_panel is None:
+            return
+        for ch in self._channels:
+            transform = ch.get("transform") or {}
+            if not any(abs(float(transform.get(key, 0.0))) > 1e-12 for key in ("dx_nm", "dy_nm", "angle")):
+                continue
+            ds_idx = ch.get("dataset_idx")
+            if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
+                continue
+            ds = self._state.datasets[ds_idx]
+            base_transform = ch.get("loc_transform") or ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
+            base = transform_to_matrix4(base_transform)
+            if base is None:
+                base = identity_matrix4()
+            matrix = manual_alignment_matrix4(transform, self._axis_combo.currentText()) @ base
+            record = dict(base_transform or {})
+            record["matrix_4x4"] = matrix.tolist()
+            record["matrix_3x3"] = matrix4_to_xy3(matrix).tolist()
+            record["alignment_mode"] = "manual"
+            provenance = dict(record.get("provenance") or {})
+            provenance["manual_alignment"] = {
+                "orientation": self._axis_combo.currentText(),
+                "method": "keyboard/drag translation and keyboard rotation",
+            }
+            record["provenance"] = provenance
+            ds.state["overlay_transform"] = record
+            ds.state["render_transform_2d"] = record
+            ch["loc_transform"] = record
+            ch["transform"] = {}
+        self._cached_dataset_idx = None
+        self._cached_locs_nm = None
+        self._redraw_current(save_state=False)
+        self._end_overlay_alignment()
+
+    def _overlay_alignment_cancel(self) -> None:
+        if self._overlay_alignment_original is not None:
+            for ch, original in zip(self._channels, self._overlay_alignment_original, strict=True):
+                ch["transform"] = dict(original)
+        if self._overlay_alignment_original_visibility is not None:
+            for ch, visible in zip(self._channels, self._overlay_alignment_original_visibility, strict=True):
+                ch["visible"] = visible
+        self._cached_dataset_idx = None
+        self._cached_locs_nm = None
+        self._redraw_current(save_state=False)
+        self._end_overlay_alignment()
+
+    def _end_overlay_alignment(self) -> None:
+        panel = self._overlay_alignment_panel
+        self._overlay_alignment_panel = None
+        self._overlay_alignment_original = None
+        self._overlay_alignment_original_visibility = None
+        if panel is not None:
+            panel.detach()
+            self._root_layout.removeWidget(panel)
+            panel.deleteLater()
+        self._channel_area.show()
+
     def _active_channel_index(self) -> "int | None":
         for i, ch in enumerate(self._channels):
             if ch.get("dataset_idx") == self._dataset_idx:
@@ -912,6 +1126,13 @@ class ScatterWindow(QWidget):
             name_lbl.setFont(font)
 
     def _on_channel_row_pressed(self, row: QWidget, event, ch_idx: int) -> None:
+        if event.button() == Qt.MouseButton.RightButton:
+            menu = QMenu(row)
+            action = menu.addAction("Manual align")
+            action.setEnabled(len(self._channels) > 1)
+            action.triggered.connect(lambda _checked=False: self._manual_align_channel(ch_idx))
+            menu.exec(event.globalPosition().toPoint())
+            return
         if event.button() == Qt.MouseButton.LeftButton and 0 <= ch_idx < len(self._channels):
             ds_idx = self._channels[ch_idx]["dataset_idx"]
             if 0 <= ds_idx < len(self._state.datasets):
@@ -963,6 +1184,8 @@ class ScatterWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _refresh(self) -> None:
+        if self._overlay_alignment_panel is not None:
+            self._overlay_alignment_cancel()
         ds = self._dataset()
         if ds is None:
             self._scatter_2d.setData([], [])
@@ -1056,10 +1279,24 @@ class ScatterWindow(QWidget):
         locs = np.asarray(ds.loc_nm, dtype=float)
         if locs.ndim == 2 and locs.shape[1] == 2:
             locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
-        return apply_display_transform_nm(
-            locs,
-            ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"),
+        transform = ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
+        ds_idx = next(
+            (index for index, candidate in enumerate(self._state.datasets) if candidate is ds),
+            None,
         )
+        channel = next(
+            (ch for ch in self._channels if ch.get("dataset_idx") == ds_idx),
+            None,
+        )
+        if channel is not None:
+            preview = channel.get("transform") or {}
+            if any(abs(float(preview.get(key, 0.0))) > 1e-12 for key in ("dx_nm", "dy_nm", "angle")):
+                base = transform_to_matrix4(transform)
+                if base is None:
+                    base = identity_matrix4()
+                matrix = manual_alignment_matrix4(preview, self._axis_combo.currentText()) @ base
+                transform = {"matrix_4x4": matrix.tolist()}
+        return apply_display_transform_nm(locs, transform)
 
     def _roi_masks_for_dataset(self, ds) -> list[tuple[object, np.ndarray]]:
         records = [r for r in self._state.rois.records if r.id in set(self._state.rois.selected_ids)]

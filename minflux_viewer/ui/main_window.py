@@ -1729,16 +1729,24 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load error", str(exc))
             self._status_label.setText("Load failed.")
 
-    def _open_image_viewer(self, source, key: str) -> None:
+    def _open_image_viewer(self, source, key: str, *, initial_series_index: int | None = None) -> None:
         """Show *source* (a TIFF or OBF image source) in a TIFF viewer window,
-        de-duplicated by *key* (path + series). The window owns / closes the
-        source; a multi-series source can switch series in-window."""
+        de-duplicated by *key* (normally one key per file). The window owns /
+        closes the source; a multi-series source can switch series in-window.
+        When a file already has an image window, *initial_series_index* selects
+        the requested series in that existing window and the replacement source
+        is closed immediately.
+        """
         existing = self._tiff_windows.get(key)
         if existing is not None:
             try:
+                if initial_series_index is not None:
+                    existing.set_series_index(int(initial_series_index))
                 existing.show()
                 existing.raise_()
                 existing.activateWindow()
+                if getattr(existing, "_source", None) is not source:
+                    source.close()
                 return
             except RuntimeError:
                 self._tiff_windows.pop(key, None)
@@ -4003,7 +4011,9 @@ class MainWindow(QMainWindow):
             return
 
         lut_by_idx = self._current_group_luts(group_indices)
-        fallback_luts = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray"]
+        from ..core.overlay import PURE_COLOR_NAMES
+
+        fallback_luts = list(PURE_COLOR_NAMES)
         for pos, idx in enumerate(group_indices):
             ds = self._state.datasets[idx]
             ds.state["render_channel_lut"] = lut_by_idx.get(idx, fallback_luts[pos % len(fallback_luts)])
@@ -4505,8 +4515,6 @@ class MainWindow(QMainWindow):
         self._memory_win.activateWindow()
 
     def _close_active_dataset(self) -> None:
-        from ..core.overlay import dataset_group_id
-
         # For multi-channel overlay views (render/scatter with multiple channels),
         # honour the active dataset that the user selected in the channel panel.
         # For standalone single-dataset windows, resolve active from the focused window.
@@ -4518,34 +4526,337 @@ class MainWindow(QMainWindow):
         idx = self._state.active_idx
         if idx is None:
             return
+        self.close_datasets([idx])
 
-        ds = self._state.datasets[idx]
-        group_id = dataset_group_id(ds)
+    def close_datasets(self, indices) -> None:
+        """Close (remove) every dataset in *indices*, and its windows.
 
-        if group_id:
-            remaining = [
-                i for i, d in enumerate(self._state.datasets)
-                if i != idx and dataset_group_id(d) == group_id
-            ]
-            # Last surviving member: strip overlay state so it renders standalone
-            if len(remaining) == 1:
-                survivor = self._state.datasets[remaining[0]]
-                for key in (
-                    "overlay_id", "render_group_id", "overlay_index",
-                    "overlay_order", "overlay_lut", "overlay_transform",
-                    "render_transform_2d",
-                ):
-                    survivor.state.pop(key, None)
+        Shared by ``Ctrl+W`` (the active dataset) and the Dataset Manager's
+        *Close* button / multi-selection *Close all*.  Removal runs highest
+        index first so the remaining indices stay valid while iterating.
+        """
+        from ..core.overlay import dataset_group_id
 
-        self._state.remove_dataset(idx)
+        wanted = sorted(
+            {int(i) for i in indices if 0 <= int(i) < len(self._state.datasets)},
+            reverse=True,
+        )
+        if not wanted:
+            return
+
+        touched_group = False
+        for idx in wanted:
+            group_id = dataset_group_id(self._state.datasets[idx])
+            if group_id:
+                touched_group = True
+                remaining = [
+                    i for i, d in enumerate(self._state.datasets)
+                    if i != idx and dataset_group_id(d) == group_id
+                ]
+                # Last surviving member: strip overlay state so it renders standalone
+                if len(remaining) == 1:
+                    survivor = self._state.datasets[remaining[0]]
+                    for key in (
+                        "overlay_id", "render_group_id", "overlay_index",
+                        "overlay_order", "overlay_lut", "overlay_transform",
+                        "render_transform_2d",
+                    ):
+                        survivor.state.pop(key, None)
+
+            self._state.remove_dataset(idx)
 
         if self._state.active_idx is None:
             self.setWindowTitle(self.APP_NAME)
 
         # Refresh open render/scatter overlay windows so their channel lists
         # reflect the removal (indices have shifted after remove_dataset).
-        if group_id:
+        if touched_group:
             self._refresh_overlay_windows()
+
+    def duplicate_datasets(self, datasets) -> None:
+        """Plain-duplicate every dataset in *datasets* (Dataset Manager
+        multi-selection *Duplicate all*).
+
+        Whole-dataset copies: the ROI-crop duplicate is a single-dataset command
+        (``Shift+D``), since a crop is defined by one dataset's active ROI.
+        Datasets are passed by identity, not index — each ``add_dataset`` grows
+        the list, so an index captured before the loop would not survive it.
+        """
+        for ds in list(datasets):
+            self._plain_duplicate(ds)
+
+    def combine_datasets_as_overlay(self, indices) -> None:
+        """Open *Process › Channel… › Combine* restricted to *indices*."""
+        self._show_channel_combine(list(indices))
+
+    def reset_dataset(self, idx: int) -> None:
+        """Dataset Manager *Reset* — put the dataset back to its as-loaded state.
+
+        Filters, ROI selection masks, RIMF and the live view layer (LUT /
+        transform) all revert; overlay *membership* is kept, because a per-dataset
+        reset must not dissolve a group of channels.  See
+        ``core/dataset_reset.py`` for the rule.
+        """
+        if not (0 <= idx < len(self._state.datasets)):
+            return
+        from ..core.dataset_reset import reset_dataset as _reset
+
+        ds = self._state.datasets[idx]
+        try:
+            changes = _reset(ds)
+        except Exception as exc:
+            self._state.log(f"Reset '{ds.name}' failed: {exc}", "ERROR")
+            QMessageBox.critical(self, "Reset dataset", str(exc))
+            return
+
+        if not changes:
+            self._state.log(f"Reset '{ds.name}': already in its as-loaded state.",
+                            dataset_idx=idx)
+            return
+        self._state.log(f"Reset '{ds.name}': " + "; ".join(changes) + ".", dataset_idx=idx)
+        # Filters / ROI / RIMF each drive a different set of views.
+        self._state.notify_filter_changed(idx)
+        self._state.notify_calibration_changed(idx)
+        self._state.notify_roi_selection_changed(idx)
+        self._refresh_overlay_windows()
+
+    def view_dataset_mbm(self, idx: int) -> None:
+        """Dataset Manager *View mbm info…* — the dataset's beam-monitoring beads.
+
+        Opens the combined MBM window (drift traces + beads vs the data region).
+        The beads travel with the dataset (``ds.mbm`` / ``metadata["mbm_points"]``
+        from the MSR import or an ``.msr`` round trip), so no source file is
+        re-parsed.
+        """
+        if not (0 <= idx < len(self._state.datasets)):
+            return
+        from .mbm_info_window import open_mbm_info
+
+        ds = self._state.datasets[idx]
+        win, reason = open_mbm_info(self, ds)
+        if win is None:
+            self._state.log(f"View mbm info: {reason.splitlines()[0]}", "WARN")
+            QMessageBox.information(self, "MBM info", reason)
+            return
+        self._state.log(
+            f"MBM info for '{ds.name}': {len(win._beads)} bead(s).", dataset_idx=idx)
+
+    def view_dataset_image_series(self, idx: int) -> None:
+        """Dataset Manager *View image series* — open this dataset's source ``.msr``
+        images in the shared image viewer.
+
+        One viewer per file (every series is in its Series dropdown); the series
+        rendered *from this dataset* — matched on the OBF footer's ``source`` did
+        — is the one selected on open.
+        """
+        if not (0 <= idx < len(self._state.datasets)):
+            return
+        ds = self._state.datasets[idx]
+        source_path = Path(str(ds.metadata.get("msr_source_path", "") or ""))
+        if not source_path.is_file():
+            self._state.log(
+                f"View image series: no source .msr for '{ds.name}'.", "WARN")
+            QMessageBox.information(
+                self, "View image series",
+                f"'{ds.name}' has no available source .msr file, so it has no "
+                "image series.\n\nImage series come from the .msr the dataset was "
+                "imported from.",
+            )
+            return
+
+        from ..core.obf_image_source import ObfImageSource, list_obf_image_series
+
+        try:
+            series = list_obf_image_series(source_path)
+        except Exception as exc:
+            self._state.log(f"View image series failed for '{ds.name}': {exc}", "ERROR")
+            QMessageBox.critical(self, "View image series", str(exc))
+            return
+        if not series:
+            self._state.log(
+                f"View image series: '{source_path.name}' has no image series.", "WARN")
+            QMessageBox.information(
+                self, "View image series",
+                f"'{source_path.name}' contains no viewable image series.",
+            )
+            return
+
+        did = str(ds.metadata.get("msr_dataset_did", "") or "")
+        wanted = next(
+            (s for s in series if did and str(s.get("source_did") or "") == did),
+            series[0],
+        )
+        try:
+            src = ObfImageSource(source_path, raw_stack_index=int(wanted["raw_index"]))
+        except Exception as exc:
+            self._state.log(f"View image series failed for '{ds.name}': {exc}", "ERROR")
+            QMessageBox.critical(self, "View image series", str(exc))
+            return
+        self._open_image_viewer(
+            src,
+            f"{source_path.resolve()}#obf-images",
+            initial_series_index=int(src.metadata.series_index),
+        )
+        self._state.log(
+            f"Image series of '{source_path.name}': {len(series)} series, showing "
+            f"'{wanted.get('name')}'.", dataset_idx=idx)
+
+    # ------------------------------------------------------------------
+    # Files dropped ONTO a dataset (Dataset Manager row drop)
+    # ------------------------------------------------------------------
+
+    #: Extensions a Dataset-Manager row accepts, and what each does to that
+    #: dataset.  A ``.json`` is ambiguous on extension alone, so it is resolved
+    #: by content (ROI set / filter preset / metadata sidecar).
+    DROP_ON_DATASET_EXTS = (".json", ".roi", ".zip", ".tif", ".tiff")
+
+    def drop_file_on_dataset(self, idx: int, path: str) -> bool:
+        """Apply a dropped file to the dataset at *idx*.  Returns True if handled.
+
+        Dropping **onto a dataset** means "use this file on *that* dataset",
+        which is a different verb from dropping on the main window ("open this").
+        Four kinds are understood, all of them things that modify or annotate an
+        existing dataset rather than create one:
+
+        * a **filter preset** JSON → its rows are appended to that dataset's filter
+        * a **ROI set** (native JSON, ImageJ ``.roi`` or a RoiSet ``.zip``) → the
+          ROIs load into the ROI Manager retargeted to that dataset
+        * a **metadata sidecar** JSON → its processing recipe (RIMF / transform /
+          filters) is applied to that dataset
+        * a **TIFF** → mapped as a confocal signal, like *Map confocal signal…*
+
+        Anything else is refused here and reported, rather than silently falling
+        through to "open as a new dataset" — which would ignore the row the user
+        aimed at.
+        """
+        if not (0 <= idx < len(self._state.datasets)):
+            return False
+        p = Path(path)
+        ext = p.suffix.lower()
+        ds = self._state.datasets[idx]
+
+        if ext in (".tif", ".tiff"):
+            return self._drop_confocal_tiff(idx, p)
+        if ext in (".roi", ".zip"):
+            return self._drop_roi_file(idx, p)
+        if ext == ".json":
+            # Resolve by content — the three JSON kinds share an extension.
+            from ..core.filter_io import is_filter_json_file
+            from ..core.roi import is_roi_json_file
+            from ..core.save import is_metadata_json_file
+
+            try:
+                if is_roi_json_file(str(p)):
+                    return self._drop_roi_file(idx, p)
+                if is_filter_json_file(str(p)):
+                    return self._drop_filter_file(idx, p)
+                if is_metadata_json_file(str(p)):
+                    return self._drop_metadata_sidecar(idx, p)
+            except Exception as exc:
+                self._state.log(f"Drop on '{ds.name}': could not read '{p.name}': {exc}",
+                                "ERROR")
+                return False
+            self._state.log(
+                f"Drop on '{ds.name}': '{p.name}' is not a ROI set, filter preset "
+                "or metadata sidecar.", "WARN")
+            return False
+
+        self._state.log(
+            f"Drop on '{ds.name}': '{p.name}' cannot be applied to a dataset "
+            "(drop it on the main window to open it).", "WARN")
+        return False
+
+    def _drop_filter_file(self, idx: int, path: Path) -> bool:
+        """Append a dropped filter preset to the row's dataset."""
+        # The filter dialog is dataset-owned and keyed by the ACTIVE index, so
+        # the dropped-on dataset has to become active for its rows to land there.
+        self._state.set_active(idx)
+        self._load_filter_json(str(path))
+        self._state.log(
+            f"Filters from '{path.name}' added to "
+            f"'{self._state.datasets[idx].name}'.", dataset_idx=idx)
+        return True
+
+    def _drop_roi_file(self, idx: int, path: Path) -> bool:
+        """Load a dropped ROI set into the ROI Manager, targeting the row's dataset."""
+        self._state.set_active(idx)       # _load_roi_json retargets to the active one
+        self._load_roi_json(str(path))
+        return True
+
+    def _drop_metadata_sidecar(self, idx: int, path: Path) -> bool:
+        """Apply a dropped processing-recipe sidecar to the row's dataset."""
+        from ..core.loader import apply_metadata_sidecar_file
+
+        ds = self._state.datasets[idx]
+        try:
+            applied = apply_metadata_sidecar_file(ds, path)
+        except Exception as exc:
+            self._state.log(f"Metadata sidecar '{path.name}' on '{ds.name}': {exc}",
+                            "ERROR")
+            QMessageBox.critical(self, "Apply processing metadata", str(exc))
+            return False
+        if not applied:
+            self._state.log(
+                f"Metadata sidecar '{path.name}' on '{ds.name}': nothing to apply "
+                "(empty recipe).", "WARN")
+            return True
+        self._state.log(
+            f"Applied '{path.name}' to '{ds.name}': " + ", ".join(applied) + ".",
+            dataset_idx=idx)
+        self._state.notify_filter_changed(idx)
+        self._state.notify_calibration_changed(idx)
+        self._refresh_overlay_windows()
+        return True
+
+    def _drop_confocal_tiff(self, idx: int, path: Path) -> bool:
+        """Map a dropped TIFF onto the row's dataset as a confocal signal attribute."""
+        from ..core.confocal_mapping import candidates_from_tiff
+        from .confocal_mapping_dialog import (
+            ConfocalMappingOptionsDialog,
+            apply_confocal_mapping_options,
+        )
+
+        ds = self._state.datasets[idx]
+        try:
+            candidates = candidates_from_tiff(path, ds)
+        except Exception as exc:
+            self._state.log(f"Confocal TIFF '{path.name}' on '{ds.name}': {exc}", "ERROR")
+            QMessageBox.critical(self, "Map confocal signal", str(exc))
+            return False
+        if not candidates:
+            self._state.log(
+                f"Confocal TIFF '{path.name}': no plane overlaps '{ds.name}'.", "WARN")
+            QMessageBox.information(
+                self, "Map confocal signal",
+                f"'{path.name}' has no calibrated image plane overlapping "
+                f"'{ds.name}'.\n\nA TIFF must carry a pixel size (OME / ImageJ / "
+                "TIFF resolution tags) and cover the dataset's coordinates.",
+            )
+            return False
+
+        dialog = ConfocalMappingOptionsDialog(
+            candidates, self,
+            reserved_names=set(ds.attr.keys()) | set(ds.mfx_raw.keys()),
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return True                      # handled: the user cancelled
+        try:
+            results = apply_confocal_mapping_options(ds, path, dialog.options(), self)
+        except Exception as exc:
+            self._state.log(f"Confocal signal mapping failed for '{ds.name}': {exc}",
+                            "ERROR")
+            QMessageBox.warning(self, "Map confocal signal", str(exc))
+            return False
+        if results:
+            self._state.notify_attributes_changed(idx)
+            for result in results:
+                self._state.log(
+                    f"Mapped confocal signal '{result.attribute_name}' from "
+                    f"'{path.name}' onto '{ds.name}': {result.finite_count:,}/"
+                    f"{result.total_count:,} localizations in bounds.",
+                    dataset_idx=idx,
+                )
+        return True
 
     def _refresh_overlay_windows(self) -> None:
         """Rebuild channel lists and re-render open render/scatter overlay windows."""
@@ -4894,7 +5205,17 @@ class MainWindow(QMainWindow):
         dup.metadata["created_note"] = f"{timestamp}, duplicated for channel overlay."
         return self._state.add_dataset(dup)
 
-    def _show_channel_combine(self) -> None:
+    def _show_channel_combine(self, dataset_indices=None) -> None:
+        # QAction.triggered passes checked=False; only a real sequence restricts
+        # the dialog to a subset (the Dataset Manager's multi-selection).
+        restrict = (
+            list(dataset_indices)
+            if isinstance(dataset_indices, (list, tuple, set))
+            else None
+        )
+        if restrict is not None and len(restrict) < 2:
+            QMessageBox.information(self, "Combine datasets", "Select at least two datasets to combine.")
+            return
         if len(self._state.datasets) < 2:
             QMessageBox.information(self, "Combine datasets", "Load at least two datasets before combining channels.")
             return
@@ -4905,10 +5226,15 @@ class MainWindow(QMainWindow):
         dlg = ChannelCombineDialog(
             self._state,
             previous=self._last_channel_combine_settings,
+            dataset_indices=restrict,
             parent=self,
         )
         result = dlg.exec()
-        self._last_channel_combine_settings = dlg.session_state()
+        # A restricted run sees only part of the list, so its per-dataset
+        # order/LUT choices would be a partial memory — don't overwrite the
+        # settings the full dialog remembers.
+        if restrict is None:
+            self._last_channel_combine_settings = dlg.session_state()
         if result != QDialog.DialogCode.Accepted:
             return
         rows = dlg.selected_rows()

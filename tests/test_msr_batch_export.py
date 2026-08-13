@@ -496,6 +496,89 @@ def test_unselected_image_series_are_not_exported(_app, monkeypatch):
         dlg.close()
 
 
+def test_selected_obf_series_reuse_one_viewer_and_show_first(monkeypatch, _app, tmp_path):
+    """Several selected stacks share one viewer; its dropdown starts at the first."""
+    from types import SimpleNamespace
+
+    from minflux_viewer.core import obf_image_source
+
+    calls = []
+
+    class _Source:
+        def __init__(self, path, *, raw_stack_index):
+            self.path = Path(path)
+            self.metadata = SimpleNamespace(series_index=4, image_name="first")
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class _Owner:
+        def _open_image_viewer(self, source, key, *, initial_series_index=None):
+            calls.append((source, key, initial_series_index))
+
+    monkeypatch.setattr(obf_image_source, "ObfImageSource", _Source)
+    dlg = MsrReaderDialog(state=None)
+    try:
+        dlg.parsed = {"msr": str(tmp_path / "sample.msr")}
+        dlg._owner = _Owner()
+        dlg.log = lambda *_args, **_kwargs: None
+
+        assert dlg._open_obf_series_group([17, 23, 17]) is True
+        assert len(calls) == 1
+        source, key, initial = calls[0]
+        assert source.path.name == "sample.msr"
+        assert key.endswith("#obf-images")
+        assert initial == 4
+        assert source.closed is False
+    finally:
+        dlg.close()
+
+
+def test_image_viewer_registry_switches_existing_file_window(_app):
+    """A second selected series changes the existing window, not its count."""
+    from minflux_viewer.ui.main_window import MainWindow
+
+    class _Existing:
+        _source = object()
+
+        def __init__(self):
+            self.selected = None
+            self.shown = 0
+
+        def set_series_index(self, index):
+            self.selected = index
+
+        def show(self):
+            self.shown += 1
+
+        def raise_(self):
+            pass
+
+        def activateWindow(self):
+            pass
+
+    class _Replacement:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    key = "sample.msr#obf-images"
+    existing = _Existing()
+    replacement = _Replacement()
+    owner = MainWindow.__new__(MainWindow)
+    owner._tiff_windows = {key: existing}
+
+    owner._open_image_viewer(replacement, key, initial_series_index=3)
+
+    assert owner._tiff_windows[key] is existing
+    assert existing.selected == 3
+    assert existing.shown == 1
+    assert replacement.closed is True
+
+
 def test_image_export_uses_the_shared_ome_tiff_writer(tmp_path):
     """The image export must go through core/tiff_export, so its output carries
     the same OME calibration the render export writes and the viewer reads."""

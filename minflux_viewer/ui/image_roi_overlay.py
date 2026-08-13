@@ -48,6 +48,9 @@ class ImageRoiOverlay:
         self._name = ""
         self._tool: str | None = None
         self._drag_item = None
+        self._editable = True
+        self._visible = True
+        self._locked_roi: TiffRoi | None = None
         # A ROI whose shape we cannot draw (a composite, say): kept verbatim so
         # saving does not silently discard it.
         self._preserved: TiffRoi | None = None
@@ -77,15 +80,23 @@ class ImageRoiOverlay:
         self._sx = float(sx) or 1.0
         self._sy = float(sy) or 1.0
         if roi is not None:
-            self.set_roi(roi, notify=False)
+            self.set_roi(roi, notify=False, editable=self._editable)
 
     # -- tool ----------------------------------------------------------------
     @property
     def tool(self) -> str | None:
         return self._tool
 
+    @property
+    def editable(self) -> bool:
+        return self._editable
+
+    @property
+    def visible(self) -> bool:
+        return self._visible
+
     def set_tool(self, tool: str | None) -> None:
-        self._tool = tool if tool in DRAW_TOOLS else None
+        self._tool = tool if self._editable and tool in DRAW_TOOLS else None
 
     # -- content -------------------------------------------------------------
     def has_roi(self) -> bool:
@@ -101,27 +112,44 @@ class ImageRoiOverlay:
         self._roi_type = ""
         self._name = ""
         self._preserved = None
+        self._locked_roi = None
         if notify:
             self._notify()
 
-    def set_roi(self, roi: TiffRoi | None, *, notify: bool = True) -> None:
-        """Show *roi* (pixel coordinates) as the active ROI, replacing any other."""
+    def set_roi(
+        self,
+        roi: TiffRoi | None,
+        *,
+        notify: bool = True,
+        editable: bool = True,
+    ) -> None:
+        """Show *roi* (pixel coordinates) as the active ROI.
+
+        A non-editable ROI is a source-calibrated overlay: mouse input, drawing,
+        and handles are disabled, and :meth:`current_roi` returns the exact
+        source geometry rather than re-reading mutable graphics state.
+        """
         self.clear()
+        self._editable = bool(editable)
+        self._tool = None if not self._editable else self._tool
         if roi is None:
             if notify:
                 self._notify()
             return
+        if not self._editable:
+            self._locked_roi = roi
         self._roi_type = roi.roi_type
         self._name = roi.name
         if roi.roi_type in {"rectangle", "oval"}:
             x, y, w, h = roi.bounds
             self._item = self._make_box(roi.roi_type, x * self._sx, y * self._sy,
-                                        w * self._sx, h * self._sy)
+                                        w * self._sx, h * self._sy,
+                                        handles=self._editable)
         elif roi.points is not None and len(roi.points) >= 2:
             pts = [[float(p[0]) * self._sx, float(p[1]) * self._sy] for p in roi.points]
             closed = roi.roi_type in {"polygon", "freehand"}
             self._item = FilledPolyLineROI(pts, closed=closed, pen=self._pen(),
-                                           fill_color=_ROI_COLOR, movable=True)
+                                           fill_color=_ROI_COLOR, movable=self._editable)
             if not closed:
                 self._item.setFillColor(_ROI_COLOR, alpha=0)
         else:
@@ -129,13 +157,28 @@ class ImageRoiOverlay:
             if notify:
                 self._notify()
             return
+        if not self._editable:
+            self._item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            for handle in self._item.handles:
+                handle["item"].setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                handle["item"].hide()
         self._vb.addItem(self._item)
+        self._item.setVisible(self._visible)
         self._connect(self._item)
         if notify:
             self._notify()
 
+    def set_visible(self, visible: bool) -> None:
+        """Show or hide the ROI graphics without discarding its metadata."""
+        self._visible = bool(visible)
+        if self._item is not None:
+            self._item.setVisible(self._visible)
+        self._notify()
+
     def current_roi(self) -> TiffRoi | None:
         """The active ROI in pixel coordinates, or ``None`` when there is none."""
+        if self._locked_roi is not None:
+            return self._locked_roi
         if self._item is None:
             return self._preserved
         if self._roi_type in {"rectangle", "oval"}:
@@ -150,7 +193,7 @@ class ImageRoiOverlay:
 
     # -- drawing --------------------------------------------------------------
     def _on_drag(self, ev, axis=None):
-        if self._tool is None or ev.button() != Qt.MouseButton.LeftButton:
+        if not self._editable or self._tool is None or ev.button() != Qt.MouseButton.LeftButton:
             return self._original_drag(ev, axis=axis)
         ev.accept()
         start = self._vb.mapSceneToView(ev.buttonDownScenePos())

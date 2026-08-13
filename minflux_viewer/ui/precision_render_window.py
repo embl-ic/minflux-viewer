@@ -675,6 +675,9 @@ class PrecisionRenderWindow(RenderWindow):
         )
 
     def _compose_from_cache(self, *_args) -> None:
+        if self._overlay_alignment_panel is not None:
+            self._request_overlay_alignment_preview()
+            return
         if self._last_scalar_tile is None:
             self._schedule_render()
             return
@@ -690,6 +693,8 @@ class PrecisionRenderWindow(RenderWindow):
         ):
             return
         self._precision_cache.put(result.key, result.array)
+        if self._overlay_alignment_panel is not None:
+            return
         if self._all_active_tiles_cached():
             self._progressive_timer.stop()
             self._compose_precision_tiles("ready")

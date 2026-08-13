@@ -14,6 +14,7 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -23,6 +24,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -96,6 +98,7 @@ class TiffViewerWindow(QWidget):
         self._active_cmap = "gray"
         self._show_axes = False          # axes/ticks hidden by default (right-click › Axis)
         self._roi_overlay = None         # single active ROI (ImageJ-style)
+        self._acquisition_roi_visible = True
         self._z_range_values = (1, 1)
 
         self.setWindowTitle(self._title_text())
@@ -167,14 +170,35 @@ class TiffViewerWindow(QWidget):
         # Series picker (multi-series TIFF, or OBF stacks in a .msr) — switch
         # series in-place without reopening the file.
         self._series_label = QLabel("Series:")
+        # Keep this selector anchored at the left edge when the Z controls are
+        # hidden.  QLabel/QComboBox otherwise expand into the unused row width,
+        # which makes the combo appear on the right for a 2-D series.
+        self._series_label.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred
+        )
         self._series_combo = QComboBox()
         self._series_combo.setMinimumWidth(180)
+        self._series_combo.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
         for name in self._source.series_names():
             self._series_combo.addItem(str(name))
         self._series_combo.setCurrentIndex(int(self._source.metadata.series_index))
         self._series_combo.currentIndexChanged.connect(self._on_series_changed)
         control.addWidget(self._series_label)
         control.addWidget(self._series_combo)
+
+        self._acquisition_roi_check = QCheckBox(
+            str(getattr(self._source, "active_roi_label", "acquisition ROI"))
+        )
+        self._acquisition_roi_check.setChecked(True)
+        self._acquisition_roi_check.setToolTip(
+            "Show the read-only MINFLUX acquisition area from the MSR metadata"
+        )
+        self._acquisition_roi_check.toggled.connect(
+            self._on_acquisition_roi_toggled
+        )
+        control.addWidget(self._acquisition_roi_check)
 
         self._t_spin = self._make_axis_spin("T")
         self._c_spin = self._make_axis_spin("C")
@@ -186,7 +210,12 @@ class TiffViewerWindow(QWidget):
         control.addWidget(self._c_spin)
 
         # Z as an inclusive range; the selected planes are displayed as a sum
-        # projection. The slider handles and highlighted range provide all input.
+        # projection. Keep the slider and its readout in one widget so hiding
+        # Z for a 2-D series also removes its stretch space from the row.
+        self._z_controls = QWidget()
+        z_control = QHBoxLayout(self._z_controls)
+        z_control.setContentsMargins(0, 0, 0, 0)
+        z_control.setSpacing(8)
         self._z_label = QLabel("Z:")
         self._z_slider = DepthRangeSlider()
         self._z_slider.set_scroll_options(1.0, False)
@@ -195,9 +224,16 @@ class TiffViewerWindow(QWidget):
         )
         self._z_slider.rangeChanged.connect(self._on_z_slider_changed)
         self._z_value = QLabel("1-1 / 1")
-        control.addWidget(self._z_label)
-        control.addWidget(self._z_slider, 1)
-        control.addWidget(self._z_value)
+        z_control.addWidget(self._z_label)
+        z_control.addWidget(self._z_slider, 1)
+        z_control.addWidget(self._z_value)
+        control.addWidget(self._z_controls, 1)
+        # When Z is hidden, give the unused width to a trailing spacer so the
+        # fixed Series selector remains anchored at the left edge. When Z is
+        # visible, the spacer yields that width back to the range slider.
+        control.addStretch(0)
+        self._z_control_layout_index = control.indexOf(self._z_controls)
+        self._trailing_spacer_layout_index = control.count() - 1
         root.addWidget(self._control_row)
 
         self._info_label = QLabel("")
@@ -225,9 +261,10 @@ class TiffViewerWindow(QWidget):
     def _refresh_controls(self) -> None:
         axes = self._source.metadata.axes
         multi_series = int(self._source.metadata.series_count) > 1
-        self._series_label.setVisible(multi_series)
-        self._series_combo.setVisible(multi_series)
-        any_visible = multi_series
+        acquisition_roi = self._source_acquisition_roi()
+        has_acquisition_roi = acquisition_roi is not None
+        self._acquisition_roi_check.setVisible(has_acquisition_roi)
+        any_visible = multi_series or has_acquisition_roi
         for axis, spin, lbl in (("T", self._t_spin, self._t_label),
                                 ("C", self._c_spin, self._c_label)):
             size = self._source.axis_size(axis)
@@ -251,7 +288,20 @@ class TiffViewerWindow(QWidget):
         self._z_label.setVisible(z_visible)
         self._z_slider.setVisible(z_visible)
         self._z_value.setVisible(z_visible)
+        self._z_controls.setVisible(z_visible)
+        control = self._control_row.layout()
+        control.setStretch(self._z_control_layout_index, int(z_visible))
+        control.setStretch(self._trailing_spacer_layout_index, int(not z_visible))
         any_visible = any_visible or z_visible
+
+        # Keep the image selector in the fixed, left-most control position for
+        # every image that has navigable axes.  A single-series XYZ image still
+        # gets the same selector slot (disabled, with its one image name), so
+        # the Z/T/C controls do not jump left when the user changes images.
+        show_series_slot = any_visible
+        self._series_label.setVisible(show_series_slot)
+        self._series_combo.setVisible(show_series_slot)
+        self._series_combo.setEnabled(multi_series)
         self._control_row.setVisible(any_visible)
 
     def _set_axes_visible(self, show: bool) -> None:
@@ -296,8 +346,19 @@ class TiffViewerWindow(QWidget):
             meta = self._source.metadata
             self._roi_overlay.clear()
             self._roi_overlay.set_pixel_size(meta.pixel_size_x_nm, meta.pixel_size_y_nm)
-            self._roi_overlay.set_roi(self._source_roi(), notify=False)
-            self._update_roi_label()
+            self._set_source_roi_overlay()
+
+    def set_series_index(self, index: int) -> None:
+        """Select a series through the same path as the visible dropdown.
+
+        The MSR reader reuses one image window for several selected OBF stacks.
+        Keeping this small public entry point here lets the main-window registry
+        switch an already-open viewer without constructing a second window.
+        """
+        index = int(index)
+        if not 0 <= index < self._series_combo.count():
+            raise IndexError(f"Image series index {index} is out of range")
+        self._series_combo.setCurrentIndex(index)
 
     def _on_axis_changed(self, axis: str) -> None:
         self._bc_auto_threshold = 0
@@ -419,15 +480,21 @@ class TiffViewerWindow(QWidget):
         # written into / read from the TIFF itself. No ROI Manager here.
         roi_menu = menu.addMenu("ROI")
         armed = self._roi_overlay.tool if self._roi_overlay is not None else None
+        roi_editable = self._roi_overlay is not None and self._roi_overlay.editable
         for tool, label in (("rectangle", "Draw Rectangle"), ("oval", "Draw Oval")):
             action = roi_menu.addAction(label)
             action.setCheckable(True)
             action.setChecked(armed == tool)
+            action.setEnabled(roi_editable)
             action.setToolTip("Drag on the image to draw; pick again to stop drawing.")
             action.triggered.connect(lambda _c=False, t=tool: self._set_roi_tool(t))
         roi_menu.addSeparator()
         delete = roi_menu.addAction("Delete ROI")
-        delete.setEnabled(self._roi_overlay is not None and self._roi_overlay.has_roi())
+        delete.setEnabled(
+            roi_editable
+            and self._roi_overlay is not None
+            and self._roi_overlay.has_roi()
+        )
         delete.triggered.connect(self._delete_roi)
         roi_menu.setToolTipsVisible(True)
 
@@ -627,8 +694,7 @@ class TiffViewerWindow(QWidget):
             pixel_size=(meta.pixel_size_x_nm, meta.pixel_size_y_nm),
             on_changed=self._on_roi_changed,
         )
-        self._roi_overlay.set_roi(self._source_roi(), notify=False)
-        self._update_roi_label()
+        self._set_source_roi_overlay()
 
     def _source_roi(self):
         getter = getattr(self._source, "active_roi", None)
@@ -637,6 +703,33 @@ class TiffViewerWindow(QWidget):
         except Exception:
             return None
 
+    def _source_acquisition_roi(self):
+        if getattr(self._source, "active_roi_role", None) != "acquisition":
+            return None
+        return self._source_roi()
+
+    def _set_source_roi_overlay(self) -> None:
+        if self._roi_overlay is None:
+            return
+        roi = self._source_roi()
+        is_acquisition = (
+            roi is not None
+            and getattr(self._source, "active_roi_role", None) == "acquisition"
+        )
+        read_only = is_acquisition and bool(
+            getattr(self._source, "active_roi_read_only", False)
+        )
+        self._roi_overlay.set_roi(roi, notify=False, editable=not read_only)
+        self._roi_overlay.set_visible(
+            not is_acquisition or self._acquisition_roi_visible
+        )
+        self._update_roi_label()
+
+    def _on_acquisition_roi_toggled(self, checked: bool) -> None:
+        self._acquisition_roi_visible = bool(checked)
+        if self._roi_overlay is not None:
+            self._roi_overlay.set_visible(self._acquisition_roi_visible)
+
     def _on_roi_changed(self) -> None:
         self._update_roi_label()
 
@@ -644,18 +737,18 @@ class TiffViewerWindow(QWidget):
         """Append the ROI read-out to the info line (rebuilt by ``_show_plane``)."""
         if self._roi_overlay is None:
             return
-        roi = self._roi_overlay.current_roi()
+        roi = self._roi_overlay.current_roi() if self._roi_overlay.visible else None
         base = self._info_label.text().split("  |  ROI: ")[0]
         self._info_label.setText(base + (f"  |  ROI: {roi.summary()}" if roi else ""))
 
     def _set_roi_tool(self, tool: str | None) -> None:
-        if self._roi_overlay is None:
+        if self._roi_overlay is None or not self._roi_overlay.editable:
             return
         # Re-picking the armed tool disarms it, so a drag pans again.
         self._roi_overlay.set_tool(None if self._roi_overlay.tool == tool else tool)
 
     def _delete_roi(self) -> None:
-        if self._roi_overlay is not None:
+        if self._roi_overlay is not None and self._roi_overlay.editable:
             self._roi_overlay.clear(notify=True)
 
     def _save_as_tiff(self) -> None:

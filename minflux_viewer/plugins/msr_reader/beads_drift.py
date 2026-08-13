@@ -39,8 +39,20 @@ def extract_bead_drift(points, points_by_gri, used_rids, *, min_points: int = 1)
 
     ``xyz_nm`` is (n×3) in nm, re-zeroed to the bead's per-axis **median**
     (``pos_nm`` = that median, the bead's absolute position for a scatter);
-    ``tim_s`` is sorted ascending and zeroed to its start. When ``used_rids`` is
-    empty, all beads in ``points_by_gri`` are used as a fallback.
+    ``tim_s`` is sorted ascending and zeroed to its start.
+
+    Bead identity degrades gracefully through three sources, because only the
+    first is guaranteed to travel with a dataset:
+
+    1. ``used_rids`` — the R-IDs the acquisition marked as used;
+    2. every R-ID in ``points_by_gri`` when no "used" list is available;
+    3. **the distinct ``gri`` values in the points array itself** when neither
+       is available — the array always carries them, and the ``points_by_gri``
+       map only adds the human-readable R-ID name on top.  Such beads are named
+       by their gri.
+
+    Without (3) a dataset carrying a perfectly good points array but no
+    accompanying metadata yielded *no* bead traces at all.
     """
     if points is None or getattr(points, "dtype", None) is None:
         return []
@@ -48,14 +60,19 @@ def extract_bead_drift(points, points_by_gri, used_rids, *, min_points: int = 1)
     if not {"gri", "xyz", "tim"} <= set(names):
         return []
     name_to_gri = _name_to_gri(points_by_gri)
-    # Fallback: no explicit "used" list → show every known bead.
-    rids = list(used_rids) if used_rids else list(name_to_gri.keys())
 
     gri_arr = np.asarray(points["gri"]).ravel()
     xyz = np.asarray(points["xyz"], dtype=float)
     tim = np.asarray(points["tim"], dtype=float).ravel()
     if xyz.ndim != 2 or xyz.shape[1] < 3:
         return []
+
+    rids = list(used_rids) if used_rids else list(name_to_gri.keys())
+    if not rids:
+        # No name map at all — fall back to the ids in the data.
+        for gri in sorted({int(v) for v in gri_arr}):
+            name_to_gri.setdefault(str(gri), gri)
+        rids = list(name_to_gri.keys())
 
     beads: list[dict] = []
     for rid in rids:
@@ -78,6 +95,51 @@ def extract_bead_drift(points, points_by_gri, used_rids, *, min_points: int = 1)
                       "xyz_nm": xyz_nm, "pos_nm": pos_nm, "tim_s": tim_s, "n": n})
     beads.sort(key=lambda b: b["gri"])
     return beads
+
+
+def single_channel_bead_summary(name: str, beads: list[dict]) -> dict | None:
+    """The ``single_channel`` payload ``AlignmentPlotWindow`` draws for one channel.
+
+    ``pos_nm`` is each bead's absolute position and ``drift_nm`` its total
+    peak-to-peak excursion per axis over the acquisition — the "how far did this
+    fiducial wander" number, which is what the window's table reports when there
+    is no alignment to residual against.
+    """
+    if not beads:
+        return None
+    return {
+        "name": str(name),
+        "bead_ids": np.array([b["gri"] for b in beads], dtype=np.uint32),
+        "rids": [str(b.get("rid", b["gri"])) for b in beads],
+        "pos_nm": np.array([b["pos_nm"] for b in beads], dtype=float),
+        "drift_nm": np.array([
+            (np.ptp(np.asarray(b["xyz_nm"]), axis=0)
+             if np.asarray(b["xyz_nm"]).shape[0] else np.zeros(3))
+            for b in beads
+        ], dtype=float),
+    }
+
+
+def dataset_bead_drift(ds) -> list[dict]:
+    """Bead traces for a **loaded** dataset, from the arrays it carries itself.
+
+    ``ds.mbm`` / ``metadata["mbm_points"]`` travel with a dataset imported from
+    an ``.msr`` (or round-tripped through one), so this needs no reader state and
+    no re-parse of the source file.  ``mbm_points_by_gri`` / ``mbm_used`` refine
+    the naming when present; :func:`extract_bead_drift` falls back to the ids in
+    the array when they are not.
+    """
+    from ...core.overlay import mbm_points_array
+
+    points = mbm_points_array(ds)
+    if points is None or not getattr(points, "size", 0):
+        return []
+    meta = getattr(ds, "metadata", {}) or {}
+    return extract_bead_drift(
+        points,
+        meta.get("mbm_points_by_gri") or {},
+        meta.get("mbm_used") or [],
+    )
 
 
 def gather_msr_bead_drift(datasets, mbm_map, meta_map=None) -> list[dict]:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -117,6 +118,78 @@ def test_bc_edits_only_active_channel(_qt_app):
         assert win._bc_dialog._histogram._bar_rgb is not None  # single colour, not a LUT
     finally:
         _teardown(win, _qt_app)
+
+
+def test_render_overlay_rows_show_swatch_and_bold_active_channel(_qt_app):
+    from PyQt6.QtWidgets import QComboBox, QLabel, QScrollArea, QVBoxLayout, QWidget
+
+    from minflux_viewer.ui.render_window import RenderWindow
+
+    class ChannelRowHarness(QWidget):
+        _active_channel_index = RenderWindow._active_channel_index
+        _on_channel_lut = RenderWindow._on_channel_lut
+        _on_cmap_changed = RenderWindow._on_cmap_changed
+        _rebuild_channel_ui = RenderWindow._rebuild_channel_ui
+        _refresh_channel_highlight = RenderWindow._refresh_channel_highlight
+        _style_channel_swatch = RenderWindow._style_channel_swatch
+
+        def __init__(self):
+            super().__init__()
+            self._idx = 0
+            self._active_cmap = "hot"
+            self._channels = [
+                {"dataset_idx": 0, "name": "chA.mat", "visible": True, "lut": "Red"},
+                {"dataset_idx": 1, "name": "chB.mat", "visible": True, "lut": "Green"},
+            ]
+            self._state = SimpleNamespace(
+                datasets=[SimpleNamespace(state={}), SimpleNamespace(state={})]
+            )
+            self._channel_area = QScrollArea(self)
+            channel_widget = QWidget(self._channel_area)
+            self._channel_layout = QVBoxLayout(channel_widget)
+            self._channel_area.setWidget(channel_widget)
+            self._channel_rows = []
+
+        def _compose_from_cache(self):
+            pass
+
+        def _sync_volume_display_state(self):
+            pass
+
+        def _sync_bc_dialog(self):
+            pass
+
+        def sync_lut_dialog(self):
+            pass
+
+        def _on_channel_visible(self, ch_idx, visible):
+            self._channels[ch_idx]["visible"] = bool(visible)
+
+        def _on_channel_row_pressed(self, _row, _event, _ch_idx):
+            pass
+
+    win = ChannelRowHarness()
+    try:
+        win._rebuild_channel_ui()
+        assert len(win._channel_rows) == 2
+        assert not win._channel_area.findChildren(QComboBox)
+        assert all(isinstance(swatch, QLabel) for _name, swatch in win._channel_rows)
+        assert win._channel_rows[0][0].font().bold()
+        assert not win._channel_rows[1][0].font().bold()
+
+        win._idx = 1
+        win._refresh_channel_highlight()
+        assert not win._channel_rows[0][0].font().bold()
+        assert win._channel_rows[1][0].font().bold()
+
+        old_first_lut = win._channels[0]["lut"]
+        win._on_cmap_changed("Magenta")
+        assert win._channels[0]["lut"] == old_first_lut
+        assert win._channels[1]["lut"] == "Magenta"
+        assert "rgb(255,0,255)" in win._channel_rows[1][1].styleSheet()
+    finally:
+        win.close()
+        _qt_app.processEvents()
 
 
 def _lum(rgb) -> float:

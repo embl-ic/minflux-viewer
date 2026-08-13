@@ -14,11 +14,17 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-#: Pure colour name → RGB (dropdown order per the spec).
+from ..core.overlay import PURE_COLOR_NAMES
+
+#: Pure colour name → RGB, in the shared viewer dropdown order.
+_PURE_COLOR_RGB: dict[str, tuple[int, int, int]] = {
+    "Red": (255, 0, 0), "Green": (0, 200, 0), "Blue": (0, 0, 255),
+    "Cyan": (0, 255, 255), "Magenta": (255, 0, 255), "Yellow": (255, 255, 0),
+    "Orange": (255, 128, 0), "White": (255, 255, 255),
+    "Gray": (128, 128, 128), "Black": (0, 0, 0),
+}
 _PURE_COLORS: dict[str, tuple[int, int, int]] = {
-    "White": (255, 255, 255), "Black": (0, 0, 0), "Red": (255, 0, 0),
-    "Green": (0, 200, 0), "Blue": (0, 0, 255), "Cyan": (0, 255, 255),
-    "Magenta": (255, 0, 255), "Yellow": (255, 255, 0), "Gray": (128, 128, 128),
+    name: _PURE_COLOR_RGB[name] for name in PURE_COLOR_NAMES
 }
 
 LOCATIONS = ("Lower Right", "Lower Left", "Upper Right", "Upper Left", "At Selection")

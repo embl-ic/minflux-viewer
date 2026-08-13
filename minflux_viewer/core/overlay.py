@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import numpy as np
 
+PURE_COLOR_NAMES = (
+    "Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Orange",
+    "White", "Gray", "Black",
+)
 
 CHANNEL_LUTS = [
-    "Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray",
+    *PURE_COLOR_NAMES,
     "hot", "gray", "viridis", "plasma", "inferno", "magma", "turbo",
 ]
 
@@ -18,7 +22,10 @@ PURE_COLOR_RGB = {
     "Cyan": (0, 170, 190),
     "Magenta": (190, 50, 190),
     "Yellow": (210, 170, 20),
+    "Orange": (245, 130, 20),
+    "White": (255, 255, 255),
     "Gray": (120, 120, 120),
+    "Black": (0, 0, 0),
 }
 
 #: Default per-dataset overlay channel colours (1st..6th), cycled for overlays.
@@ -119,6 +126,34 @@ def matrix4_to_xy3(matrix_4x4: np.ndarray) -> np.ndarray:
 
 def identity_matrix4() -> np.ndarray:
     return np.eye(4, dtype=np.float64)
+
+
+def manual_alignment_matrix4(transform: dict | None, orientation: str = "XY") -> np.ndarray:
+    """Build a temporary translation/rotation matrix for an overlay layer."""
+    transform = transform if isinstance(transform, dict) else {}
+    axes = (0, 2) if orientation == "XZ" else (1, 2) if orientation == "YZ" else (0, 1)
+    dx_nm = float(transform.get("dx_nm", transform.get("dx", 0.0)))
+    dy_nm = float(transform.get("dy_nm", transform.get("dy", 0.0)))
+    angle = float(transform.get("angle", 0.0))
+    anchor = np.zeros(3, dtype=np.float64)
+    anchor[axes[0]] = float(transform.get("anchor_x_nm", 0.0))
+    anchor[axes[1]] = float(transform.get("anchor_y_nm", 0.0))
+    translation = np.zeros(3, dtype=np.float64)
+    translation[axes[0]] = dx_nm
+    translation[axes[1]] = dy_nm
+    rotation = identity_matrix4()
+    theta = np.deg2rad(angle)
+    c, s = float(np.cos(theta)), float(np.sin(theta))
+    a0, a1 = axes
+    rotation[a0, a0] = c
+    rotation[a0, a1] = -s
+    rotation[a1, a0] = s
+    rotation[a1, a1] = c
+    to_anchor = identity_matrix4()
+    to_anchor[:3, 3] = -anchor
+    from_anchor = identity_matrix4()
+    from_anchor[:3, 3] = anchor + translation
+    return from_anchor @ rotation @ to_anchor
 
 
 def display_transform_record(

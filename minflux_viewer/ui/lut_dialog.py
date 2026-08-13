@@ -8,8 +8,8 @@ Shows for the currently active render image:
 * a **mini histogram** of the currently rendered pixel values
   (log-y, simplified — just enough to pick sensible min/max)
 * a **colormap dropdown** including 8 matplotlib colormaps plus the
-  seven single-colour channels (Red, Green, Blue, Cyan, Magenta,
-  Yellow, Gray)
+  ten single-colour channels (Red, Green, Blue, Cyan, Magenta,
+  Yellow, Orange, White, Gray, Black)
 * four **sliders** — Minimum, Maximum, Brightness, Contrast — matching
   Fiji's B&C behaviour
 * **Auto** — ImageJ-style repeated-click cycle that progressively increases
@@ -55,13 +55,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..core.overlay import PURE_COLOR_NAMES
+
 
 # ---------------------------------------------------------------------------
-# Colormap options — 8 common mpl maps + 7 single-colour channels.
+# Colormap options — 8 common mpl maps + 10 single-colour channels.
 # The channel names correspond to pure colour ramps (black → colour).
 # ---------------------------------------------------------------------------
 
-_SINGLE_COLOURS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray"]
+_SINGLE_COLOURS = list(PURE_COLOR_NAMES)
 
 _MPL_CMAPS = [
     "glasbey", "jet", "HiLo", "parula",
@@ -89,7 +91,10 @@ _CHANNEL_RGB = {
     "Cyan":    (0.0, 1.0, 1.0),
     "Magenta": (1.0, 0.0, 1.0),
     "Yellow":  (1.0, 1.0, 0.0),
-    "Gray":    (1.0, 1.0, 1.0),
+    "Orange":  (1.0, 0.5, 0.0),
+    "White":   (1.0, 1.0, 1.0),
+    "Gray":    (0.65, 0.65, 0.65),
+    "Black":   (0.0, 0.0, 0.0),
 }
 
 

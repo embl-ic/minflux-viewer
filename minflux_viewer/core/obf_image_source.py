@@ -222,6 +222,17 @@ def _scan_stacks(path) -> list[dict]:
     return out
 
 
+def scan_obf_stacks(path) -> list[dict]:
+    """Return calibrated header/footer metadata for every OBF stack.
+
+    This is the public, pixel-free form of :func:`_scan_stacks`.  Consumers
+    such as confocal-channel discovery need the physical bounds of *all*
+    stacks before deciding which ones are image candidates; exposing the scan
+    here keeps those consumers out of ``ObfImageSource``'s private state.
+    """
+    return _scan_stacks(path)
+
+
 def _image_stacks(path) -> list[dict]:
     """Every scanned stack of *path* that is a viewable image series."""
     return [s for s in _scan_stacks(path) if is_image_stack(s)]
@@ -263,6 +274,13 @@ class ObfImageSource:
     the stacks :func:`is_image_stack` accepts — the same set
     :func:`list_obf_image_series` reports, so ``series_index`` addresses that one
     filtered list; ``raw_stack_index`` addresses the underlying OBF stack."""
+
+    # The ROI exposed by this live source is reconstructed from the MINFLUX
+    # acquisition metadata.  The image viewer uses these source capabilities
+    # to distinguish it from an ordinary ImageJ ROI read back from a TIFF.
+    active_roi_role = "acquisition"
+    active_roi_label = "acquisition ROI"
+    active_roi_read_only = True
 
     def __init__(self, path, *, series_index: int = 0, raw_stack_index: int | None = None) -> None:
         self.path = Path(path)
@@ -381,6 +399,15 @@ class ObfImageSource:
             raw = self._stacks[self.series_index]["raw_index"]
             self._array = np.asarray(self._obf.read_stack(raw))
         return self._array
+
+    def read_array(self) -> np.ndarray:
+        """Return the complete current scalar image stack.
+
+        Unlike :meth:`read_plane`, this preserves Z so numerical consumers can
+        perform a projection or calibrated 3-D interpolation.  The returned
+        array is cached by this source and must be treated as read-only.
+        """
+        return self._load_array()
 
     def read_plane(self, *, t: int = 0, c: int = 0, z: int = 0) -> np.ndarray:
         arr = self._load_array()

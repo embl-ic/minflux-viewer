@@ -47,8 +47,9 @@ def _method_payload(ds, cfg, result, *, n_localizations, has_time):
     sensitivity = [
         {key: row[key] for key in (
             "source", "site_merge_nm", "cell_link_nm", "null_stratum_sites",
-            "n_sites", "n_sites_used", "n_components", "band_ratio", "band_p",
-            "band_ratio_z", "peak_nm", "positive_excess_centroid_nm")}
+            "rod_width_scale", "n_sites", "n_sites_used", "n_components",
+            "band_ratio", "band_p", "band_ratio_z", "peak_nm",
+            "positive_excess_centroid_nm") if key in row}
         for row in (result.get("sensitivity") or [])
     ]
     return {
@@ -70,8 +71,20 @@ def _method_payload(ds, cfg, result, *, n_localizations, has_time):
             "min_loc_per_trace": int(cfg.min_loc_per_trace),
             "z_scaling_factor": float(cfg.z_scaling_factor),
             "site_merge_nm": float(cfg.site_merge_nm),
+            "component_mode": str(cfg.component_mode),
             "cell_link_nm": float(cfg.cell_link_nm),
             "min_sites_per_component": int(cfg.min_sites_per_component),
+            **({
+                "rod_min_width_nm": float(cfg.rod_min_width_nm),
+                "rod_max_width_nm": float(cfg.rod_max_width_nm),
+                "rod_min_length_nm": float(cfg.rod_min_length_nm),
+                "rod_max_length_nm": float(cfg.rod_max_length_nm),
+                "rod_pixel_size_nm": float(cfg.rod_pixel_size_nm),
+                "rod_smooth_nm": float(cfg.rod_smooth_nm),
+                "rod_close_nm": float(cfg.rod_close_nm),
+                "rod_split_touching": bool(cfg.rod_split_touching),
+                "rod_use_axis": bool(cfg.rod_use_axis),
+            } if cfg.component_mode == "rod" else {}),
             "r_max_nm": float(cfg.r_max_nm),
             "bin_nm": float(cfg.bin_nm),
             "short_range_lo_nm": float(cfg.short_range_lo_nm),
@@ -89,11 +102,13 @@ def _method_payload(ds, cfg, result, *, n_localizations, has_time):
                 result["median_within_site_rms_nm"]),
         },
         "components": {
+            "mode": str(result.get("component_mode", "link")),
             "n_retained": int(result["n_components"]),
             "n_all": int(result["n_components_all"]),
             "n_rod_like": int(result["n_rod_like_components"]),
             "n_excluded_sites": int(result["n_excluded_sites"]),
         },
+        "rod_segmentation": result.get("rod_segmentation"),
         "result": {
             key: float(summary[key]) for key in (
                 "band_observed_pairs", "band_null_mean_pairs",
@@ -135,11 +150,19 @@ def _log_line(ds, cfg, result) -> str:
                  f"excess centroid {min(centroids):.2f}–{max(centroids):.2f} nm")
     robust = result.get("robust_short_range_excess_calibrated")
     robustness = "PASS" if robust is True else "FAIL" if robust is False else "not run"
+    rods = result.get("rod_segmentation") or {}
+    if rods:
+        components = (
+            f"{result['n_components']} rod cell(s) detected "
+            f"[{rods.get('n_accepted', 0)}/{rods.get('n_regions', 0)} region(s) "
+            f"accepted at {cfg.rod_min_width_nm:g}–{cfg.rod_max_width_nm:g} nm wide]")
+    else:
+        components = f"{result['n_components']} component(s)"
     return (
         f"HlyB/D subunit pair analysis on '{ds.name}': "
         f"{result['n_traces_used']:,}/{result['n_traces_total']:,} trace(s) → "
         f"{result['n_sites']:,} inferred site(s) "
-        f"({result['n_sites_used']:,} in {result['n_components']} component(s)); "
+        f"({result['n_sites_used']:,} in {components}); "
         f"{cfg.short_range_lo_nm:g}–{cfg.short_range_hi_nm:g} nm observed/null "
         f"{summary['band_ratio']:.3f} ({summary['band_ratio_z']:.1f}σ vs null), "
         f"positive-excess centroid {summary['positive_excess_centroid_nm']:.2f} nm "

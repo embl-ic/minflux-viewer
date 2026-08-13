@@ -36,9 +36,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ..core.overlay import PURE_COLOR_NAMES
 from .distribution_fit import MixtureResult
 
-_DEFAULT_LUTS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray"]
+_DEFAULT_LUTS = list(PURE_COLOR_NAMES)
 
 
 @dataclass

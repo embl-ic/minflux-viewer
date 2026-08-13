@@ -765,6 +765,105 @@ _HLYB_DEFINITIONS = (
 )
 
 
+def _hlyb_audit_families(sensitivity: list) -> str:
+    """What the sensitivity audit actually varied, read off its own rows.
+
+    Derived rather than narrated from the defaults, so the sentence stays true
+    when the segmentation mode or the audited values differ.
+    """
+    def spread(source: str, key: str, digits: int) -> list[str]:
+        seen = sorted({float(row[key]) for row in sensitivity
+                       if row.get("source") == source and row.get(key) is not None})
+        return [_method_number(value, digits) for value in seen]
+
+    def joined(values: list[str]) -> str:
+        if len(values) < 2:
+            return "".join(values)
+        return ", ".join(values[:-1]) + " and " + values[-1]
+
+    families = []
+    for source, key, digits, tail in (
+            ("site radius", "site_merge_nm", 1, " nm"),
+            ("null stratum", "null_stratum_sites", 0, " sites"),
+            ("component link", "cell_link_nm", 0, " nm"),
+    ):
+        values = spread(source, key, digits)
+        if values:
+            label = {"site radius": "the same-site diameter",
+                     "null stratum": "the axial null stratum",
+                     "component link": "the spatial-component link"}[source]
+            families.append(f"{label} over {joined(values)}{tail}")
+    scales = sorted({float(row["rod_width_scale"]) for row in sensitivity
+                     if row.get("source") == "rod width window"
+                     and row.get("rod_width_scale") is not None})
+    if scales:
+        percents = joined([f"{value * 100:.0f} %" for value in scales])
+        families.append(
+            f"the accepted cell-width window over {percents} of its primary value")
+    if not families:
+        return "no parameter"
+    if len(families) < 2:
+        return families[0]
+    return ", ".join(families[:-1]) + " and " + families[-1]
+
+
+def _hlyb_segmentation_text(params: dict, components: dict, method: dict) -> str:
+    """How the field was separated into cells, in the mode actually used."""
+    if str(params.get("component_mode") or components.get("mode") or "link") != "rod":
+        return (
+            f"Sites were connected at "
+            f"{_method_number(params.get('cell_link_nm'), 0)} nm solely to separate "
+            f"coarse spatial/cell components; pairs were formed only within a "
+            f"component. ")
+    rods = method.get("rod_segmentation") or {}
+    split = rods.get("n_split") or 0
+    bridge = rods.get("smooth_nm")
+    if bridge is None:
+        bridge_text = ""
+    else:
+        origin = ("derived from the measured spacing of the inferred sites"
+                  if rods.get("smooth_is_auto") else "set by the operator")
+        bridge_text = (
+            f" Labelled positions within {_method_number(bridge, 0)} nm of one "
+            f"another were bridged into a single cell body, a length {origin}.")
+    split_text = (
+        f" {_method_count(split)} region(s) joined only by a thin bridge in the "
+        f"mask were separated before fitting."
+        if split else "")
+    return (
+        f"Cells were delineated in the XY projection of the localization cloud: "
+        f"the density image was rendered at "
+        f"{_method_number(params.get('rod_pixel_size_nm'), 0)} nm per pixel, "
+        f"smoothed, Otsu-thresholded and morphologically closed, and its Euclidean "
+        f"distance transform taken, whose ridge value is the local half-width."
+        f"{bridge_text}"
+        f"{split_text} Each region was fitted with its minimum-area oriented "
+        f"rectangle and accepted as a cell only if it measured "
+        f"{_method_number(params.get('rod_min_width_nm'), 0)}–"
+        f"{_method_number(params.get('rod_max_width_nm'), 0)} nm wide and "
+        f"{_method_number(params.get('rod_min_length_nm'), 0)}–"
+        f"{_method_number(params.get('rod_max_length_nm'), 0)} nm long, with the "
+        f"distance-transform width and the box width in agreement — the latter "
+        f"condition rejecting cells merged side by side in projection, which no "
+        f"two-dimensional method can separate. "
+        f"{_method_count(rods.get('n_accepted'))} of "
+        f"{_method_count(rods.get('n_regions'))} region(s) were accepted; the "
+        f"remainder took no part in the analysis. Pairs were formed only within a "
+        f"cell. ")
+
+
+def _hlyb_axis_text(params: dict) -> str:
+    """Where the null's local axial direction came from."""
+    rod_axis = (str(params.get("component_mode") or "link") == "rod"
+                and bool(params.get("rod_use_axis", True)))
+    if rod_axis:
+        return ("The local axial direction of each cell was taken from its fitted "
+                "long axis, with the two transverse directions spanning the "
+                "perpendicular in-plane and optical axes. ")
+    return ("For each retained component, principal-component coordinates supplied "
+            "a local rod axis. ")
+
+
 def _hlyb_parameter_block(params: dict) -> str:
     """Operator-set parameters of one run, with what each one controls."""
     rows = (
@@ -776,8 +875,23 @@ def _hlyb_parameter_block(params: dict) -> str:
         ("Same-site consolidation diameter (nm)", params.get("site_merge_nm"), 1,
          "hard maximum extent of one labelling site; chosen well below the "
          "distance range of interest so the test band is not eroded"),
-        ("Component link distance (nm)", params.get("cell_link_nm"), 0,
-         "separates cells/field objects; pairs never cross a component"),
+        # Only the knob the run actually used is reported; listing the other
+        # would imply it had an effect.
+        *((("Component link distance (nm)", params.get("cell_link_nm"), 0,
+            "separates cells/field objects; pairs never cross a component"),)
+          if str(params.get("component_mode") or "link") != "rod" else
+          (("Cell width window (nm), lower", params.get("rod_min_width_nm"), 0,
+            "detected cells narrower than this are rejected"),
+           ("Cell width window (nm), upper", params.get("rod_max_width_nm"), 0,
+            "detected cells wider than this are rejected, which is what excludes "
+            "cells merged side by side in projection"),
+           ("Cell length window (nm), lower", params.get("rod_min_length_nm"), 0,
+            "detected cells shorter than this are rejected"),
+           ("Cell length window (nm), upper", params.get("rod_max_length_nm"), 0,
+            "detected cells longer than this are rejected, which is what excludes "
+            "cells merged end to end"),
+           ("Detection pixel size (nm)", params.get("rod_pixel_size_nm"), 0,
+            "resolution of the density image the cells are delineated in"))),
         ("Minimum sites per component", params.get("min_sites_per_component"), 0,
          "components smaller than this are excluded outright"),
         ("Pair-distance range (nm)", params.get("r_max_nm"), 0,
@@ -908,9 +1022,8 @@ def _render_hlyb_staged_short_range(m, ev, state):
             "claim was classified as parameter-sensitive."
             if robust is False else "")
         sensitivity_text = (
-            f"The mandatory sensitivity audit varied the same-site diameter over "
-            f"3, 4 and 5 nm, the axial null stratum over 32, 64 and 128 sites, "
-            f"and the spatial-component link over ±25 % of its primary value. "
+            f"The mandatory sensitivity audit varied "
+            f"{_hlyb_audit_families(sensitivity)}. "
             f"Across those runs the observed/null ratio ranged from "
             f"{_method_number(min(finite_ratios), 2)} to "
             f"{_method_number(max(finite_ratios), 2)}, and the positive-excess "
@@ -946,17 +1059,15 @@ def _render_hlyb_staged_short_range(m, ev, state):
         f"maximum revisit gap, so spatially compatible visits throughout the recording "
         f"could consolidate; however, this implementation did not fit a complete "
         f"DDC/BaGoL temporal emitter model.\n\n"
-        f"Spatial null and observable. Sites were connected at "
-        f"{_method_number(params.get('cell_link_nm'), 0)} nm solely to separate "
-        f"coarse spatial/cell components; pairs were formed only within a component. "
+        f"Spatial null and observable. {_hlyb_segmentation_text(params, components, method)}"
         f"{_method_count(components.get('n_retained'))} component(s) with at least "
         f"{_method_count(params.get('min_sites_per_component'))} sites were retained, "
         f"containing {_method_count(sites.get('n_sites_used'))} sites; "
         f"{_method_count(components.get('n_excluded_sites'))} site(s) in smaller "
         f"components were explicitly excluded. Pair distances through "
         f"{_method_number(params.get('r_max_nm'), 0)} nm were histogrammed in "
-        f"{_method_number(params.get('bin_nm'), 2)} nm bins. For each retained "
-        f"component, principal-component coordinates supplied a local rod axis. "
+        f"{_method_number(params.get('bin_nm'), 2)} nm bins. "
+        f"{_hlyb_axis_text(params)}"
         f"The observed axial coordinate of every site was held fixed while complete "
         f"observed transverse membrane coordinates were permuted within adjacent "
         f"axial-rank strata of {_method_count(params.get('null_stratum_sites'))} sites. "

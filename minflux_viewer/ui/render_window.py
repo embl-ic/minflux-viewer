@@ -45,7 +45,6 @@ from PyQt6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -66,9 +65,11 @@ from scipy.ndimage import affine_transform, zoom
 from .. import resource_path
 from ..core.app_state import AppState
 from ..core.overlay import (
+    PURE_COLOR_NAMES,
     apply_display_transform_nm,
     dataset_group_id,
     identity_matrix4,
+    manual_alignment_matrix4,
     matrix4_to_xy3,
     transform_key,
 )
@@ -101,14 +102,15 @@ _DEBOUNCE_MS   = 25      # delay between view change and re-render
 _COLORMAPS     = ["hot", "inferno", "viridis", "magma", "plasma", "cividis", "gray"]
 _ORIENTATIONS  = ["XY", "XZ", "YZ", "3D"]
 _RENDER_ORIENTATIONS = {"XY", "XZ", "YZ"}
-_PURE_COLOR_LUTS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"]
-_CHANNEL_LUTS  = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Gray", *_COLORMAPS]
+_PURE_COLOR_LUTS = list(PURE_COLOR_NAMES)
 _IMAGEJ_AUTO_THRESHOLD = 5000
 _IMAGEJ_AUTO_RESET_THRESHOLD = 10
 _IMAGEJ_AUTO_HIST_BINS = 256
 _LOCALIZATION_AUTO_LOW_PERCENTILE = 1.0
 _LOCALIZATION_AUTO_HIGH_PERCENTILE = 95.0
 _SIGMA_SLIDER_STEP_NM = 0.1
+_ALIGNMENT_PREVIEW_MAX_DIM = 512
+_ALIGNMENT_PREVIEW_INTERVAL_MS = 16
 _CHANNEL_COLORS = {
     "Red": (1.0, 0.0, 0.0),
     "Green": (0.0, 1.0, 0.0),
@@ -116,7 +118,10 @@ _CHANNEL_COLORS = {
     "Cyan": (0.0, 1.0, 1.0),
     "Magenta": (1.0, 0.0, 1.0),
     "Yellow": (1.0, 1.0, 0.0),
-    "Gray": (1.0, 1.0, 1.0),
+    "Orange": (1.0, 0.5, 0.0),
+    "White": (1.0, 1.0, 1.0),
+    "Gray": (0.65, 0.65, 0.65),
+    "Black": (0.0, 0.0, 0.0),
 }
 
 
@@ -957,7 +962,20 @@ class RenderWindow(QWidget):
             getattr(self, "_sigma_nm_xyz", (5.0, 5.0, 5.0))
         )
         self._channels: list[dict] = []
-        self._channel_rows: list[tuple[QLabel, QComboBox]] = []
+        self._channel_rows: list[tuple[QLabel, QLabel]] = []
+        self._overlay_alignment_panel = None
+        self._overlay_alignment_original: list[dict] | None = None
+        self._overlay_alignment_original_visibility: list[bool] | None = None
+        self._overlay_alignment_auto_levels: dict[int, tuple[float, float] | None] = {}
+        self._overlay_alignment_preview_scalar: np.ndarray | None = None
+        self._overlay_alignment_preview_rgb: dict[int, np.ndarray] = {}
+        self._overlay_alignment_preview_dirty: set[int] = set()
+        self._overlay_alignment_preview_timer = QTimer(self)
+        self._overlay_alignment_preview_timer.setSingleShot(True)
+        self._overlay_alignment_preview_timer.setInterval(_ALIGNMENT_PREVIEW_INTERVAL_MS)
+        self._overlay_alignment_preview_timer.timeout.connect(
+            self._render_overlay_alignment_preview
+        )
         self._export_workers: list = []  # live TIFF-export QThreads (kept from GC)
 
         # Pyramid render pipeline state
@@ -1027,6 +1045,7 @@ class RenderWindow(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
+        self._root_layout = root
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
@@ -1091,6 +1110,7 @@ class RenderWindow(QWidget):
         self._channel_layout.setSpacing(2)
         self._channel_area.setWidget(self._channel_widget)
         root.addWidget(self._channel_area)
+        self._channel_area_layout_index = root.indexOf(self._channel_area)
 
         self._depth_row = QWidget()
         z_lay = QHBoxLayout(self._depth_row)
@@ -1129,6 +1149,8 @@ class RenderWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _refresh_from_dataset(self) -> None:
+        if self._overlay_alignment_panel is not None:
+            self._overlay_alignment_cancel()
         ds = self._state.datasets[self._idx] if self._idx is not None else None
         if ds is None:
             self._locs_nm = self._xy = self._depth = self._image_data = None
@@ -1217,10 +1239,173 @@ class RenderWindow(QWidget):
             })
 
     def _manual_align_channel(self, ch_idx: int) -> None:
+        if len(self._channels) < 2 or not (0 <= ch_idx < len(self._channels)):
+            return
+        if self._overlay_alignment_panel is not None:
+            self._overlay_alignment_panel._channel_combo.setCurrentIndex(ch_idx)
+            self._overlay_alignment_panel.setFocus()
+            return
+        self._overlay_alignment_original = [
+            dict(ch.get("transform") or {}) for ch in self._channels
+        ]
+        self._overlay_alignment_original_visibility = [
+            bool(ch.get("visible", True)) for ch in self._channels
+        ]
+        for ch in self._channels:
+            self._ensure_channel_world_transform(ch)
+        self._overlay_alignment_auto_levels = {}
+        if self._last_scalar_tile is not None:
+            for index, ch in enumerate(self._channels[: self._last_scalar_tile.shape[0]]):
+                if ch.get("levels") is None:
+                    self._overlay_alignment_auto_levels[id(ch)] = self._compute_render_auto_levels(
+                        self._last_scalar_tile[index]
+                    )
+        from .overlay_alignment import OverlayAlignmentPanel
+
+        self._channel_area.hide()
+        self._overlay_alignment_panel = OverlayAlignmentPanel(self, self._channels, ch_idx)
+        self._root_layout.insertWidget(self._channel_area_layout_index, self._overlay_alignment_panel)
+        self._redraw_timer.stop()
+        self._prepare_overlay_alignment_preview()
+        self._overlay_alignment_panel.show()
+        self._overlay_alignment_panel.setFocus()
+
+    def _overlay_alignment_control_config(self) -> dict:
+        plot = self._state.prefs.setdefault("plot", {})
+        return {
+            "translation_unit": "nm",
+            "translation_step": float(plot.get("render_alignment_translation_nm", 1.0)),
+            "translation_maximum": 100000.0,
+            "rotation_step": float(plot.get("render_alignment_rotation_deg", 0.1)),
+        }
+
+    def _overlay_alignment_steps_changed(
+        self, translation_step: float, rotation_step: float
+    ) -> None:
+        plot = self._state.prefs.setdefault("plot", {})
+        plot["render_alignment_translation_nm"] = float(translation_step)
+        plot["render_alignment_rotation_deg"] = float(rotation_step)
+        self._state.save_prefs()
+
+    def _overlay_alignment_drag_view(self):
+        return self._image_view.ui.graphicsView.viewport()
+
+    def _overlay_alignment_view_delta(self, start, end) -> tuple[float, float]:
+        graphics_view = self._image_view.ui.graphicsView
+        start_view = self._view_box.mapSceneToView(graphics_view.mapToScene(start.toPoint()))
+        end_view = self._view_box.mapSceneToView(graphics_view.mapToScene(end.toPoint()))
+        return float(end_view.x() - start_view.x()), float(end_view.y() - start_view.y())
+
+    def _overlay_alignment_rotation_sign(self) -> float:
+        """Stored-angle sign that appears counter-clockwise in the current view."""
+        return -1.0 if self._should_invert_y_axis() else 1.0
+
+    def _ensure_channel_world_transform(self, ch: dict) -> None:
+        transform = ch.setdefault("transform", {})
+        pixel_size_nm = self._current_render_pixel_size_nm()
+        if "dx_nm" not in transform:
+            transform["dx_nm"] = float(transform.get("dx", 0.0)) * pixel_size_nm
+        if "dy_nm" not in transform:
+            transform["dy_nm"] = float(transform.get("dy", 0.0)) * pixel_size_nm
+        transform.setdefault("angle", 0.0)
+        if "anchor_x_nm" not in transform or "anchor_y_nm" not in transform:
+            x_range, y_range = self._view_box.viewRange()
+            transform["anchor_x_nm"] = (x_range[0] + x_range[1]) / 2.0
+            transform["anchor_y_nm"] = (y_range[0] + y_range[1]) / 2.0
+
+    def _overlay_alignment_set_channel(self, _ch_idx: int) -> None:
+        # The preview already contains every channel. Selecting which channel
+        # future input edits does not change any pixels by itself.
+        pass
+
+    def _overlay_alignment_visibility(self, ch_idx: int, visible: bool) -> None:
+        if 0 <= ch_idx < len(self._channels):
+            self._channels[ch_idx]["visible"] = bool(visible)
+            self._request_overlay_alignment_preview(invalidate=False)
+
+    def _overlay_alignment_nudge(
+        self, ch_idx: int, dx_nm: float, dy_nm: float, rotation: float
+    ) -> None:
+        self._update_overlay_alignment_transform(ch_idx, dx_nm, dy_nm, rotation)
+
+    def _overlay_alignment_drag(self, ch_idx: int, dx_nm: float, dy_nm: float) -> None:
+        self._update_overlay_alignment_transform(ch_idx, dx_nm, dy_nm, 0.0)
+
+    def _update_overlay_alignment_transform(
+        self, ch_idx: int, dx_nm: float, dy_nm: float, rotation: float
+    ) -> None:
         if not (0 <= ch_idx < len(self._channels)):
             return
-        dialog = ManualAlignDialog(self, ch_idx)
-        dialog.exec()
+        ch = self._channels[ch_idx]
+        self._ensure_channel_world_transform(ch)
+        transform = ch["transform"]
+        transform["dx_nm"] = float(transform.get("dx_nm", 0.0)) + dx_nm
+        transform["dy_nm"] = float(transform.get("dy_nm", 0.0)) + dy_nm
+        transform["angle"] = float(transform.get("angle", 0.0)) + rotation
+        self._request_overlay_alignment_preview(ch_idx)
+
+    def _overlay_alignment_status(self, ch_idx: int) -> str:
+        if not (0 <= ch_idx < len(self._channels)):
+            return "X +0.0 nm | Y +0.0 nm | rotation +0.0°"
+        transform = self._channels[ch_idx].get("transform") or {}
+        dx = float(transform.get("dx_nm", 0.0))
+        dy = float(transform.get("dy_nm", 0.0))
+        return f"X {dx:+.1f} nm | Y {dy:+.1f} nm | rotation {float(transform.get('angle', 0.0)):+.1f}°"
+
+    def _overlay_alignment_reset(self) -> None:
+        panel = self._overlay_alignment_panel
+        if panel is None:
+            return
+        ch_idx = panel.selected_index
+        if 0 <= ch_idx < len(self._channels):
+            self._channels[ch_idx]["transform"] = dict(
+                self._overlay_alignment_original[ch_idx]
+                if self._overlay_alignment_original is not None
+                else {}
+            )
+        self._request_overlay_alignment_preview(ch_idx, immediate=True)
+        panel.refresh_status()
+        panel.setFocus()
+
+    def _overlay_alignment_apply(self) -> None:
+        if self._overlay_alignment_panel is None:
+            return
+        for ch_idx, ch in enumerate(self._channels):
+            transform = ch.get("transform") or {}
+            if not any(abs(float(transform.get(key, 0.0))) > 1e-12 for key in ("dx_nm", "dy_nm", "angle")):
+                continue
+            self._apply_manual_channel_transform(ch_idx)
+        self._end_overlay_alignment()
+        # Also covers Apply with no transform change (or visibility-only
+        # changes): replace the capped preview with the exact render.
+        self._schedule_render()
+
+    def _overlay_alignment_cancel(self) -> None:
+        if self._overlay_alignment_original is not None:
+            for ch, original in zip(self._channels, self._overlay_alignment_original, strict=True):
+                ch["transform"] = dict(original)
+        if self._overlay_alignment_original_visibility is not None:
+            for ch, visible in zip(self._channels, self._overlay_alignment_original_visibility, strict=True):
+                ch["visible"] = visible
+        self._end_overlay_alignment()
+        # Dispatch through the viewer-specific exact compositor now that the
+        # preview panel is gone (PrecisionRenderWindow has different raster
+        # geometry from the standard render path).
+        self._compose_from_cache()
+        self._schedule_render()
+
+    def _end_overlay_alignment(self) -> None:
+        panel = self._overlay_alignment_panel
+        self._overlay_alignment_panel = None
+        self._overlay_alignment_original = None
+        self._overlay_alignment_original_visibility = None
+        self._overlay_alignment_auto_levels = {}
+        self._clear_overlay_alignment_preview()
+        if panel is not None:
+            panel.detach()
+            self._root_layout.removeWidget(panel)
+            panel.deleteLater()
+        self._channel_area.show()
 
     def _apply_manual_channel_transform(self, ch_idx: int) -> None:
         if not (0 <= ch_idx < len(self._channels)):
@@ -1245,37 +1430,7 @@ class RenderWindow(QWidget):
         self._schedule_render()
 
     def _manual_transform_matrix(self, transform: dict) -> np.ndarray:
-        matrix = identity_matrix4()
-        orientation = self._orientation
-        axes = self._orientation_axes(orientation)
-        dx_nm = float(transform.get("dx_nm", 0.0))
-        dy_nm = float(transform.get("dy_nm", 0.0))
-        angle = float(transform.get("angle", 0.0))
-
-        translation = np.zeros(3, dtype=np.float64)
-        translation[axes[0]] = dx_nm
-        translation[axes[1]] = dy_nm
-
-        anchor = np.zeros(3, dtype=np.float64)
-        anchor[axes[0]] = float(transform.get("anchor_x_nm", 0.0))
-        anchor[axes[1]] = float(transform.get("anchor_y_nm", 0.0))
-
-        rot = identity_matrix4()
-        if abs(angle) > 1e-12:
-            theta = np.deg2rad(angle)
-            c, s = float(np.cos(theta)), float(np.sin(theta))
-            a0, a1 = axes
-            rot[a0, a0] = c
-            rot[a0, a1] = -s
-            rot[a1, a0] = s
-            rot[a1, a1] = c
-
-        to_anchor = identity_matrix4()
-        to_anchor[:3, 3] = -anchor
-        from_anchor = identity_matrix4()
-        from_anchor[:3, 3] = anchor + translation
-        matrix = from_anchor @ rot @ to_anchor
-        return matrix
+        return manual_alignment_matrix4(transform, self._orientation)
 
     def _transform_matrix4(self, transform: dict | None) -> np.ndarray:
         if isinstance(transform, dict):
@@ -1298,11 +1453,11 @@ class RenderWindow(QWidget):
         record = dict(previous or {})
         record["matrix_4x4"] = np.asarray(matrix, dtype=np.float64).tolist()
         record["matrix_3x3"] = matrix4_to_xy3(matrix).tolist()
-        record["alignment_mode"] = record.get("alignment_mode") or "manual"
+        record["alignment_mode"] = "manual"
         provenance = dict(record.get("provenance") or {})
         provenance["manual_alignment"] = {
             "orientation": self._orientation,
-            "method": "keyboard translation/rotation",
+            "method": "keyboard/drag translation and keyboard rotation",
         }
         record["provenance"] = provenance
         return record
@@ -1322,6 +1477,7 @@ class RenderWindow(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._channel_rows = []
+        active_idx = self._active_channel_index()
         for ch_idx, ch in enumerate(self._channels):
             row = QWidget()
             lay = QHBoxLayout(row)
@@ -1331,27 +1487,52 @@ class RenderWindow(QWidget):
             vis_cb.setChecked(bool(ch["visible"]))
             vis_cb.toggled.connect(lambda checked, i=ch_idx: self._on_channel_visible(i, checked))
             lay.addWidget(vis_cb)
+            swatch = QLabel()
+            swatch.setFixedSize(14, 14)
+            self._style_channel_swatch(swatch, str(ch["lut"]))
+            lay.addWidget(swatch)
             name_lbl = QLabel(f"{ch_idx + 1}: {ch['name']}")
+            font = name_lbl.font()
+            font.setBold(ch_idx == active_idx)
+            name_lbl.setFont(font)
             lay.addWidget(name_lbl, stretch=1)
-            lut = QComboBox()
-            lut.addItems(_CHANNEL_LUTS)
-            lut.setCurrentText(ch["lut"])
-            lut.currentTextChanged.connect(lambda text, i=ch_idx: self._on_channel_lut(i, text))
-            lay.addWidget(lut)
-            align_btn = QPushButton("manual align")
-            align_btn.clicked.connect(lambda _checked=False, i=ch_idx: self._manual_align_channel(i))
-            lay.addWidget(align_btn)
             self._channel_layout.addWidget(row)
-            self._channel_rows.append((name_lbl, lut))
+            self._channel_rows.append((name_lbl, swatch))
         self._channel_area.setVisible(len(self._channels) > 1)
 
+    def _style_channel_swatch(self, swatch: QLabel, lut: str) -> None:
+        if lut in _CHANNEL_COLORS:
+            rgb = _CHANNEL_COLORS[lut]
+        else:
+            table = self._channel_lut_rgb(lut)
+            rgb = table[min(int(round(0.72 * (len(table) - 1))), len(table) - 1)]
+        r, g, b = (int(round(float(np.clip(value, 0.0, 1.0)) * 255.0)) for value in rgb)
+        swatch.setStyleSheet(
+            f"background-color: rgb({r},{g},{b}); border: 1px solid #888;")
+
+    def _refresh_channel_highlight(self) -> None:
+        """Bold the channel targeted by the render view's context-menu actions."""
+        active_idx = self._active_channel_index()
+        for ch_idx, (name_lbl, _swatch) in enumerate(self._channel_rows):
+            font = name_lbl.font()
+            font.setBold(ch_idx == active_idx)
+            name_lbl.setFont(font)
+
     def _on_channel_row_pressed(self, row: QWidget, event, ch_idx: int) -> None:
+        if event.button() == Qt.MouseButton.RightButton:
+            menu = QMenu(row)
+            action = menu.addAction("Manual align")
+            action.setEnabled(len(self._channels) > 1)
+            action.triggered.connect(lambda _checked=False: self._manual_align_channel(ch_idx))
+            menu.exec(event.globalPosition().toPoint())
+            return
         if event.button() == Qt.MouseButton.LeftButton and 0 <= ch_idx < len(self._channels):
             ds_idx = self._channels[ch_idx].get("dataset_idx")
             if ds_idx is not None and 0 <= ds_idx < len(self._state.datasets):
                 self._idx = ds_idx
                 self._state.set_active(ds_idx)
                 self._update_overlay_title()
+                self._refresh_channel_highlight()
                 self._sync_bc_dialog()
         QWidget.mousePressEvent(row, event)
 
@@ -1379,6 +1560,8 @@ class RenderWindow(QWidget):
                 self._state.datasets[ds_idx].state["render_channel_lut"] = lut
             except Exception:
                 pass
+            if 0 <= ch_idx < len(self._channel_rows):
+                self._style_channel_swatch(self._channel_rows[ch_idx][1], lut)
             self._compose_from_cache()
             self._sync_volume_display_state()
             # Recolour the B/C histogram if this is the active channel.
@@ -2088,6 +2271,12 @@ class RenderWindow(QWidget):
         self._phys_tile_cache.put(key, array)
         self._pending_tile_keys.discard(key)
 
+        # Manual alignment owns the displayed image until Apply/Cancel. Keep
+        # accepting completed tiles into the cache, but do not let an async
+        # full-resolution recomposite replace its capped interactive preview.
+        if self._overlay_alignment_panel is not None:
+            return
+
         # Re-composite only if the tile is still relevant
         if (
             key.orientation == self._orientation
@@ -2368,7 +2557,14 @@ class RenderWindow(QWidget):
         dlg.set_auto_state(bool(is_auto))
 
     def _compose_from_cache(self, *_args) -> None:
-        """Recompose RGBA from the last scalar tile without re-rendering."""
+        """Recompose from scalar tiles, using the fast alignment preview in that mode."""
+        if self._overlay_alignment_panel is not None:
+            self._request_overlay_alignment_preview()
+            return
+        self._compose_from_cache_exact()
+
+    def _compose_from_cache_exact(self) -> None:
+        """Recompose full-resolution float RGBA from the last scalar tile."""
         if self._last_scalar_tile is None:
             self._schedule_render()
             return
@@ -2387,6 +2583,162 @@ class RenderWindow(QWidget):
             scale=[px_nm, px_nm],
         )
         self._redraw_roi_highlight()
+
+    @staticmethod
+    def _alignment_preview_scalar(scalar: np.ndarray) -> np.ndarray:
+        """Return a float32 scalar stack capped for interactive alignment.
+
+        The cap applies only to the transient display raster. Its world bounds
+        remain the exact full-resolution tile bounds, so translations and the
+        image-centre rotation anchor retain their physical meaning.
+        """
+        source = np.asarray(scalar, dtype=np.float32)
+        if source.ndim != 3 or source.shape[0] == 0:
+            return np.empty((0, 0, 0), dtype=np.float32)
+        height, width = source.shape[-2:]
+        longest = max(height, width)
+        if longest <= _ALIGNMENT_PREVIEW_MAX_DIM:
+            return source
+        factor = _ALIGNMENT_PREVIEW_MAX_DIM / float(longest)
+        target_h = max(1, int(round(height * factor)))
+        target_w = max(1, int(round(width * factor)))
+        resized = zoom(
+            source,
+            (1.0, target_h / max(height, 1), target_w / max(width, 1)),
+            order=1,
+            prefilter=False,
+        )
+        return np.asarray(resized[:, :target_h, :target_w], dtype=np.float32)
+
+    def _prepare_overlay_alignment_preview(self) -> None:
+        scalar = self._last_scalar_tile
+        self._overlay_alignment_preview_rgb = {}
+        self._overlay_alignment_preview_dirty = set()
+        if scalar is None:
+            self._overlay_alignment_preview_scalar = None
+            return
+        preview = self._alignment_preview_scalar(scalar)
+        self._overlay_alignment_preview_scalar = preview
+        self._overlay_alignment_preview_dirty = set(
+            range(min(preview.shape[0], len(self._channels)))
+        )
+
+    def _clear_overlay_alignment_preview(self) -> None:
+        timer = getattr(self, "_overlay_alignment_preview_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._overlay_alignment_preview_scalar = None
+        self._overlay_alignment_preview_rgb = {}
+        self._overlay_alignment_preview_dirty = set()
+
+    def _request_overlay_alignment_preview(
+        self,
+        ch_idx: int | None = None,
+        *,
+        invalidate: bool = True,
+        immediate: bool = False,
+    ) -> None:
+        if self._overlay_alignment_panel is None:
+            return
+        preview = self._overlay_alignment_preview_scalar
+        if preview is None and self._last_scalar_tile is not None:
+            self._prepare_overlay_alignment_preview()
+            preview = self._overlay_alignment_preview_scalar
+        if preview is None:
+            return
+        if invalidate:
+            if ch_idx is None:
+                self._overlay_alignment_preview_dirty.update(
+                    range(min(preview.shape[0], len(self._channels)))
+                )
+            elif 0 <= ch_idx < min(preview.shape[0], len(self._channels)):
+                self._overlay_alignment_preview_dirty.add(int(ch_idx))
+        if immediate:
+            self._overlay_alignment_preview_timer.stop()
+            self._render_overlay_alignment_preview()
+        elif not self._overlay_alignment_preview_timer.isActive():
+            self._overlay_alignment_preview_timer.start()
+
+    def _alignment_preview_channel_rgb(self, ch_idx: int) -> np.ndarray:
+        preview = self._overlay_alignment_preview_scalar
+        if preview is None or not (0 <= ch_idx < preview.shape[0]):
+            return np.zeros((1, 1, 3), dtype=np.uint8)
+        channel = self._channels[ch_idx]
+        tile = self._transformed_tile(preview[ch_idx], channel)
+        norm = self._normalized_tile(tile, channel)
+        if self._white_bg:
+            rgb = self._channel_rgb_white(norm, channel["lut"])
+        else:
+            rgb = self._map_norm_to_rgb(norm, channel["lut"])
+        return np.rint(np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+    @staticmethod
+    def _alignment_preview_rgba(
+        channel_rgb: list[np.ndarray], *, white_bg: bool
+    ) -> np.ndarray:
+        """Compose cached uint8 channel contributions without float RGBA allocation."""
+        if not channel_rgb:
+            value = 255 if white_bg else 0
+            rgba = np.full((1, 1, 4), value, dtype=np.uint8)
+            rgba[..., 3] = 255
+            return rgba
+        height, width = channel_rgb[0].shape[:2]
+        if white_bg:
+            composite = np.full((height, width, 3), 255, dtype=np.uint16)
+            for rgb in channel_rgb:
+                composite = (composite * rgb.astype(np.uint16) + 127) // 255
+        else:
+            composite = np.zeros((height, width, 3), dtype=np.uint16)
+            for rgb in channel_rgb:
+                composite += rgb.astype(np.uint16)
+                # Saturate per channel so an unusually large overlay cannot
+                # wrap uint16 before the final clamp.
+                np.minimum(composite, 255, out=composite)
+        rgba = np.empty((height, width, 4), dtype=np.uint8)
+        rgba[..., :3] = composite.astype(np.uint8)
+        rgba[..., 3] = 255
+        return rgba
+
+    def _render_overlay_alignment_preview(self) -> None:
+        preview = self._overlay_alignment_preview_scalar
+        if self._overlay_alignment_panel is None or preview is None or preview.size == 0:
+            return
+        count = min(preview.shape[0], len(self._channels))
+        dirty = set(self._overlay_alignment_preview_dirty)
+        self._overlay_alignment_preview_dirty.clear()
+        for ch_idx in dirty:
+            if 0 <= ch_idx < count:
+                self._overlay_alignment_preview_rgb[ch_idx] = (
+                    self._alignment_preview_channel_rgb(ch_idx)
+                )
+        visible_rgb: list[np.ndarray] = []
+        for ch_idx, channel in enumerate(self._channels[:count]):
+            if not channel.get("visible", True):
+                continue
+            if ch_idx not in self._overlay_alignment_preview_rgb:
+                self._overlay_alignment_preview_rgb[ch_idx] = (
+                    self._alignment_preview_channel_rgb(ch_idx)
+                )
+            visible_rgb.append(self._overlay_alignment_preview_rgb[ch_idx])
+        if visible_rgb:
+            rgba = self._alignment_preview_rgba(visible_rgb, white_bg=self._white_bg)
+        else:
+            height, width = preview.shape[-2:]
+            value = 255 if self._white_bg else 0
+            rgba = np.full((height, width, 4), value, dtype=np.uint8)
+            rgba[..., 3] = 255
+        if self._last_tile_geometry is None:
+            (x0, x1), (y0, y1) = self._view_box.viewRange()
+        else:
+            x0, x1, y0, y1 = self._last_tile_geometry
+        height, width = rgba.shape[:2]
+        self._image_view.setImage(
+            rgba,
+            autoRange=False,
+            autoLevels=False,
+            pos=[x0, y0],
+            scale=[(x1 - x0) / max(width, 1), (y1 - y0) / max(height, 1)],
+        )
 
     def _set_white_background(self, checked: bool) -> None:
         """Toggle a white render background (subtractive composite) vs black."""
@@ -2478,10 +2830,10 @@ class RenderWindow(QWidget):
             matrix,
             offset=offset,
             output_shape=tile.shape,
-            order=3,
+            order=1 if self._overlay_alignment_panel is not None else 3,
             mode="constant",
             cval=0.0,
-            prefilter=True,
+            prefilter=self._overlay_alignment_panel is None,
         ).astype(np.float32, copy=False)
         out[~np.isfinite(out)] = 0.0
         out[out < 0.0] = 0.0
@@ -2497,6 +2849,8 @@ class RenderWindow(QWidget):
         if not np.any(positive):
             return np.zeros(tile.shape, dtype=np.float32)
         levels = ch.get("levels")
+        if levels is None and self._overlay_alignment_panel is not None:
+            levels = self._overlay_alignment_auto_levels.get(id(ch))
         if levels is None:
             levels = (
                 self._manual_levels
@@ -2579,16 +2933,7 @@ class RenderWindow(QWidget):
     def _on_cmap_changed(self, name: str) -> None:
         self._active_cmap = name
         if self._channels:
-            target = next((i for i, ch in enumerate(self._channels) if ch["visible"]), 0)
-            self._channels[target]["lut"] = name
-            if 0 <= target < len(self._channel_rows):
-                combo = self._channel_rows[target][1]
-                if combo.findText(name) >= 0:
-                    combo.blockSignals(True)
-                    combo.setCurrentText(name)
-                    combo.blockSignals(False)
-            self._compose_from_cache()
-            self._sync_volume_display_state()
+            self._on_channel_lut(self._active_channel_index(), name)
             return
 
         try:
@@ -2855,15 +3200,7 @@ class RenderWindow(QWidget):
         self._lut_invert = invert
         self._active_cmap = name
         if self._channels:
-            target = next((i for i, ch in enumerate(self._channels) if ch["visible"]), 0)
-            self._channels[target]["lut"] = name
-            if 0 <= target < len(self._channel_rows) and self._channel_rows[target][1].findText(name) >= 0:
-                combo = self._channel_rows[target][1]
-                combo.blockSignals(True)
-                combo.setCurrentText(name)
-                combo.blockSignals(False)
-            self._compose_from_cache()
-            self._sync_volume_display_state()
+            self._on_channel_lut(self._active_channel_index(), name)
             return
         try:
             self._image_view.setColorMap(
@@ -2894,9 +3231,10 @@ class RenderWindow(QWidget):
                 print(f"LUT gamma change failed: {exc}")
 
     def _active_channel_lut(self) -> str:
-        for ch in self._channels:
-            if ch["visible"]:
-                return str(ch["lut"])
+        if self._channels:
+            ch_idx = self._active_channel_index()
+            if 0 <= ch_idx < len(self._channels):
+                return str(self._channels[ch_idx]["lut"])
         return self._active_cmap
 
     def _active_channel_gamma(self) -> float:
@@ -3794,6 +4132,7 @@ class RenderWindow(QWidget):
             pass
 
     def closeEvent(self, event) -> None:
+        self._clear_overlay_alignment_preview()
         if self._volume_window is not None:
             try:
                 self._volume_window.close()
@@ -3871,6 +4210,8 @@ class RenderWindow(QWidget):
         # and edits the dataset the user selected.
         if any(ch.get("dataset_idx") == idx for ch in self._channels):
             self._idx = idx
+            self._update_overlay_title()
+            self._refresh_channel_highlight()
             self._sync_bc_dialog()
             self.sync_lut_dialog()
 
