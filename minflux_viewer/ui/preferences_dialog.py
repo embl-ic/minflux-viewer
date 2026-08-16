@@ -75,16 +75,14 @@ from .precision_render import (
 _ITER_OPTIONS = ["last", "all"]
 
 _RENDER_CMAPS = [
-    "Hot", "Viridis", "Inferno", "Magma", "Plasma", "Cividis",
-    "Turbo", "Gray",
+    "Hot", "Jet", "HiLo", "Glasbey", "Viridis", "Inferno", "Gray",
 ]
 
 _ATTR_CMAPS = [
-    "single color", "Viridis", "Inferno", "Magma", "Plasma",
-    "Hot", "Gray",
+    "single color", "Viridis", "Inferno", "Hot", "Jet", "HiLo", "Gray",
 ]
 
-_SCATTER_CMAPS = ["glasbey", "jet", "HiLo", "parula", "turbo", "hot"]
+_SCATTER_CMAPS = ["glasbey", "jet", "HiLo", "hot", "viridis", "inferno", "gray"]
 
 _SCATTER_COLOR_BY_OPTIONS = ["tid", "efo", "cfr", "dcr", "den", "vld", "itr", "eco", "ecc"]
 
@@ -1174,7 +1172,7 @@ class PreferencesDialog(QDialog):
         self._min_z_spin.setValue(float(d.get("min_z_range_nm", 5.0)))
         self._min_z_spin.setEnabled(self._enforce_z.isChecked())
         compute_rimf = bool(d.get("compute_rimf", False))
-        use_fixed = bool(p.get("use_fixed_rimf", True))
+        use_fixed = bool(p.get("use_fixed_rimf", False))
         self._compute_rimf.setChecked(compute_rimf)
         self._use_fixed_rimf.setChecked(use_fixed)
         self._rimf_spin.setValue(float(p.get("rimf_value", 0.67)))

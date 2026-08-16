@@ -23,8 +23,9 @@ VERSION = re.search(
 PSUTIL_BACKEND = {"win32": "psutil._pswindows",
                   "darwin": "psutil._psosx"}.get(sys.platform, "psutil._pslinux")
 
-# Icons: a .png works for the Windows exe; a macOS .app wants .icns (optional).
-EXE_ICON = str(ROOT / "resources" / "icons" / "minflux_viewer_logo.png") \
+# Icons: use a native .ico on Windows so PyInstaller does not need Pillow for
+# build-time PNG conversion; a macOS .app wants .icns (optional).
+EXE_ICON = str(ROOT / "resources" / "icons" / "minflux_viewer_logo.ico") \
     if sys.platform == "win32" else None
 _ICNS = ROOT / "resources" / "icons" / "minflux_viewer_logo.icns"
 MAC_ICON = str(_ICNS) if _ICNS.exists() else None
@@ -60,9 +61,6 @@ hidden_imports = [
     "h5py.utils",
     "h5py.h5ac",
     "h5py._proxy",
-    # matplotlib (used for colormaps only — agg + svg backends)
-    "matplotlib.backends.backend_agg",
-    "matplotlib.backends.backend_svg",
     # zarr
     "zarr",
     "zarr.storage",
@@ -101,6 +99,20 @@ excludes = [
     "notebook",
     "jupyter",
     "cv2",
+    # Matplotlib is deliberately not part of the application.  PyQtGraph has
+    # optional discovery/import paths for it, so exclude it and its otherwise
+    # unused dependency chain to keep stale build environments from bundling it.
+    "matplotlib",
+    "mpl_toolkits",
+    "pylab",
+    "contourpy",
+    "cycler",
+    "fontTools",
+    "kiwisolver",
+    "PIL",
+    "pyparsing",
+    "dateutil",
+    "six",
     # NOTE: do NOT exclude stdlib modules (email, http, ipaddress, etc.).
     # Many are imported indirectly through the stdlib chain at boot time
     # (e.g. urllib.parse imports ipaddress; pathlib imports urllib.parse).
@@ -117,11 +129,7 @@ a = Analysis(
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],
-    hooksconfig={
-        "matplotlib": {
-            "backends": ["agg", "svg"],
-        },
-    },
+    hooksconfig={},
     runtime_hooks=[],
     excludes=excludes,
     noarchive=False,

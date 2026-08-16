@@ -7,9 +7,7 @@ Shows for the currently active render image:
 
 * a **mini histogram** of the currently rendered pixel values
   (log-y, simplified — just enough to pick sensible min/max)
-* a **colormap dropdown** including 8 matplotlib colormaps plus the
-  ten single-colour channels (Red, Green, Blue, Cyan, Magenta,
-  Yellow, Orange, White, Gray, Black)
+* an application-owned **colormap dropdown**, including persistent custom maps
 * four **sliders** — Minimum, Maximum, Brightness, Contrast — matching
   Fiji's B&C behaviour
 * **Auto** — ImageJ-style repeated-click cycle that progressively increases
@@ -36,7 +34,7 @@ This is exactly how Fiji's B&C dialog works.
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 import pyqtgraph as pg
@@ -48,163 +46,41 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMenu,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QSlider,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from ..core.overlay import PURE_COLOR_NAMES
+from ..colormaps import (
+    channel_colormap_names,
+    custom_colormap_stops,
+    delete_custom_colormap,
+    is_custom_colormap,
+    make_colormap,
+    store_custom_colormap,
+)
+
+if TYPE_CHECKING:
+    from ..core.app_state import AppState
 
 
 # ---------------------------------------------------------------------------
-# Colormap options — 8 common mpl maps + 10 single-colour channels.
-# The channel names correspond to pure colour ramps (black → colour).
+# Colormap options are resolved dynamically so newly saved custom maps appear
+# without restarting the application.
 # ---------------------------------------------------------------------------
 
-_SINGLE_COLOURS = list(PURE_COLOR_NAMES)
-
-_MPL_CMAPS = [
-    "glasbey", "jet", "HiLo", "parula",
-    "viridis", "inferno", "magma", "plasma", "cividis",
-    "hot", "gray", "turbo",
-]
-
-ALL_COLORMAPS: list[str] = _MPL_CMAPS + _SINGLE_COLOURS
+ALL_COLORMAPS: list[str] = channel_colormap_names()
 
 
 _SLIDER_RES = 1000
 _IMAGEJ_AUTO_THRESHOLD = 5000
 _IMAGEJ_AUTO_RESET_THRESHOLD = 10
 _IMAGEJ_AUTO_HIST_BINS = 256
-
-
-# ---------------------------------------------------------------------------
-# Colormap helpers
-# ---------------------------------------------------------------------------
-
-_CHANNEL_RGB = {
-    "Red":     (1.0, 0.0, 0.0),
-    "Green":   (0.0, 1.0, 0.0),
-    "Blue":    (0.0, 0.0, 1.0),
-    "Cyan":    (0.0, 1.0, 1.0),
-    "Magenta": (1.0, 0.0, 1.0),
-    "Yellow":  (1.0, 1.0, 0.0),
-    "Orange":  (1.0, 0.5, 0.0),
-    "White":   (1.0, 1.0, 1.0),
-    "Gray":    (0.65, 0.65, 0.65),
-    "Black":   (0.0, 0.0, 0.0),
-}
-
-
-def apply_gamma(cmap: pg.ColorMap, gamma: float) -> pg.ColorMap:
-    """Gamma-warp a colormap: the displayed colour at normalised value ``t`` is
-    the original colormap sampled at ``t**gamma``.
-
-    ``gamma < 1`` brightens the mid-tones (bows the transfer curve up),
-    ``gamma > 1`` darkens them. A no-op at ``gamma == 1``.
-    """
-    try:
-        g = float(gamma)
-    except (TypeError, ValueError):
-        return cmap
-    if not np.isfinite(g) or g <= 0.0 or abs(g - 1.0) < 1e-6:
-        return cmap
-    try:
-        lut = cmap.getLookupTable(0.0, 1.0, 256).astype(np.float64)
-        pts = np.linspace(0.0, 1.0, 256)
-        warped = pts ** g
-        out = np.empty_like(lut)
-        for c in range(lut.shape[1]):
-            out[:, c] = np.interp(warped, pts, lut[:, c])
-        return pg.ColorMap(pts.astype(np.float32), out.astype(np.uint8))
-    except Exception:
-        return cmap
-
-
-def make_colormap(name: str, *, invert: bool = False, gamma: float = 1.0) -> pg.ColorMap:
-    """
-    Build a ``pg.ColorMap`` by name.
-
-    Tries pyqtgraph built-ins first, falls back to matplotlib, then to
-    single-colour channel ramps, then to CET-L3 as a last resort. ``gamma``
-    gamma-warps the resulting LUT (see :func:`apply_gamma`).
-    """
-    pts = np.linspace(0.0, 1.0, 256, dtype=np.float32)
-    key = name.lower().replace(" ", "_")
-
-    # 1. Single-colour channels (black → channel colour)
-    if name in _CHANNEL_RGB:
-        r, g, b = _CHANNEL_RGB[name]
-        rgba = np.zeros((256, 4), dtype=np.uint8)
-        rgba[:, 0] = (pts * r * 255).astype(np.uint8)
-        rgba[:, 1] = (pts * g * 255).astype(np.uint8)
-        rgba[:, 2] = (pts * b * 255).astype(np.uint8)
-        rgba[:, 3] = 255
-        cmap = pg.ColorMap(pts, rgba)
-    elif key == "glasbey":
-        try:
-            import colorcet as cc
-            colors = cc.glasbey
-            rgba = np.array([
-                tuple(int(c.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)) + (255,)
-                for c in colors[:256]
-            ], dtype=np.ubyte)
-            cmap = pg.ColorMap(np.linspace(0.0, 1.0, len(rgba)), rgba)
-        except Exception:
-            rgba = np.array([
-                [230, 25, 75, 255], [60, 180, 75, 255], [255, 225, 25, 255],
-                [0, 130, 200, 255], [245, 130, 48, 255], [145, 30, 180, 255],
-                [70, 240, 240, 255], [240, 50, 230, 255], [210, 245, 60, 255],
-                [250, 190, 190, 255], [0, 128, 128, 255], [230, 190, 255, 255],
-            ], dtype=np.ubyte)
-            cmap = pg.ColorMap(np.linspace(0.0, 1.0, len(rgba)), rgba)
-    elif key == "hilo":
-        rgba = np.array([[0, 0, 255, 255], [35, 35, 35, 255], [255, 255, 255, 255], [255, 0, 0, 255]], dtype=np.ubyte)
-        cmap = pg.ColorMap(np.linspace(0.0, 1.0, len(rgba)), rgba)
-    elif key == "parula":
-        rgba = np.array([
-            [53, 42, 135, 255], [15, 92, 221, 255], [18, 125, 216, 255],
-            [7, 156, 207, 255], [21, 177, 180, 255], [89, 189, 140, 255],
-            [165, 190, 107, 255], [225, 185, 82, 255], [252, 206, 46, 255],
-            [249, 251, 14, 255],
-        ], dtype=np.ubyte)
-        cmap = pg.ColorMap(np.linspace(0.0, 1.0, len(rgba)), rgba)
-    else:
-        # 2. pyqtgraph built-ins
-        cmap = None
-        try:
-            cmap = pg.colormap.get(name)
-        except Exception:
-            cmap = None
-        # 3. matplotlib fallback
-        if cmap is None:
-            try:
-                import matplotlib as mpl
-                rgba = mpl.colormaps[name].resampled(256)(pts, bytes=True)
-                cmap = pg.ColorMap(pts, rgba)
-            except Exception:
-                cmap = None
-        # 4. last-resort
-        if cmap is None:
-            cmap = pg.colormap.get("CET-L3")
-
-    if invert:
-        cmap = _invert_cmap(cmap)
-    cmap = apply_gamma(cmap, gamma)
-    return cmap
-
-
-def _invert_cmap(cmap: pg.ColorMap) -> pg.ColorMap:
-    """Reverse a colormap's lookup table."""
-    try:
-        lut = cmap.getLookupTable(0.0, 1.0, 256)
-        lut = lut[::-1].copy()
-        pts = np.linspace(0.0, 1.0, lut.shape[0], dtype=np.float32)
-        return pg.ColorMap(pts, lut)
-    except Exception:
-        return cmap
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +136,7 @@ class LutDialog(QDialog):
         on_gamma_changed:  Callable[[float], None] | None = None,
         parent: QWidget | None = None,
         on_auto: Callable[[], tuple[float, float] | None] | None = None,
+        state: "AppState | None" = None,
     ) -> None:
         super().__init__(parent)
         self._cb_levels  = on_levels_changed
@@ -268,6 +145,7 @@ class LutDialog(QDialog):
         self._cb_reset   = on_reset
         self._cb_gamma   = on_gamma_changed
         self._cb_auto    = on_auto
+        self._state      = state
         self._gamma: float = 1.0
         self._auto_threshold: int = 0
 
@@ -349,9 +227,37 @@ class LutDialog(QDialog):
         row = QHBoxLayout()
         row.addWidget(QLabel("Colormap:"))
         self._cmap_combo = QComboBox()
-        self._cmap_combo.addItems(ALL_COLORMAPS)
+        self._cmap_combo.addItems(channel_colormap_names())
         self._cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
         row.addWidget(self._cmap_combo, stretch=1)
+        self._custom_cmap_button = QToolButton()
+        self._custom_cmap_button.setText("Custom")
+        self._custom_cmap_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        custom_menu = QMenu(self._custom_cmap_button)
+        self._create_custom_cmap_action = custom_menu.addAction(
+            "Create custom colormap…"
+        )
+        self._create_custom_cmap_action.triggered.connect(
+            self._create_custom_colormap
+        )
+        self._edit_custom_cmap_action = custom_menu.addAction(
+            "Edit current custom colormap…"
+        )
+        self._edit_custom_cmap_action.triggered.connect(
+            self._edit_custom_colormap
+        )
+        self._delete_custom_cmap_action = custom_menu.addAction(
+            "Delete current custom colormap…"
+        )
+        self._delete_custom_cmap_action.triggered.connect(
+            self._delete_custom_colormap
+        )
+        custom_menu.aboutToShow.connect(self._update_custom_colormap_actions)
+        self._custom_cmap_button.setMenu(custom_menu)
+        self._custom_cmap_button.setEnabled(self._state is not None)
+        row.addWidget(self._custom_cmap_button)
         root.addLayout(row)
 
         # ── Sliders ──────────────────────────────────────────────
@@ -793,6 +699,89 @@ class LutDialog(QDialog):
         self._emit_levels()
 
     # ------------------------------------------------------------------
+    # Persistent custom colormaps
+    # ------------------------------------------------------------------
+
+    def _update_custom_colormap_actions(self) -> None:
+        editable = is_custom_colormap(self._cmap_combo.currentText())
+        self._edit_custom_cmap_action.setEnabled(editable)
+        self._delete_custom_cmap_action.setEnabled(editable)
+
+    def _refresh_colormap_combo(self, select: str | None = None) -> None:
+        current = select or self._cmap_combo.currentText() or "hot"
+        names = channel_colormap_names()
+        # Hidden compatibility maps are not offered to new users, but an old
+        # saved selection must remain visible while it is active.
+        if current not in names:
+            try:
+                make_colormap(current)
+            except (KeyError, ValueError):
+                current = "hot"
+            else:
+                names.append(current)
+        self._cmap_combo.blockSignals(True)
+        self._cmap_combo.clear()
+        self._cmap_combo.addItems(names)
+        self._cmap_combo.setCurrentText(current)
+        self._cmap_combo.blockSignals(False)
+
+    def _save_custom_colormap_dialog(self, dialog) -> None:
+        if self._state is None:
+            return
+        try:
+            name = store_custom_colormap(
+                self._state.prefs,
+                dialog.result_name(),
+                dialog.result_stops(),
+                replacing=dialog.replacing_name,
+            )
+            self._state.save_prefs()
+        except (TypeError, ValueError) as exc:
+            QMessageBox.warning(self, dialog.windowTitle(), str(exc))
+            return
+        self._refresh_colormap_combo(name)
+        self._cb_cmap(name, self._invert)
+
+    def _create_custom_colormap(self) -> None:
+        if self._state is None:
+            return
+        from .custom_colormap_dialog import CustomColormapDialog
+
+        dialog = CustomColormapDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._save_custom_colormap_dialog(dialog)
+
+    def _edit_custom_colormap(self) -> None:
+        current = self._cmap_combo.currentText()
+        if self._state is None or not is_custom_colormap(current):
+            return
+        from .custom_colormap_dialog import CustomColormapDialog
+
+        dialog = CustomColormapDialog(
+            self, name=current, stops=custom_colormap_stops(current)
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._save_custom_colormap_dialog(dialog)
+
+    def _delete_custom_colormap(self) -> None:
+        current = self._cmap_combo.currentText()
+        if self._state is None or not is_custom_colormap(current):
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete custom colormap",
+            f"Delete the custom colormap ‘{current}’ from the application?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if delete_custom_colormap(self._state.prefs, current):
+            self._state.save_prefs()
+        self._refresh_colormap_combo("hot")
+        self._cb_cmap("hot", self._invert)
+
+    # ------------------------------------------------------------------
     # Misc helpers
     # ------------------------------------------------------------------
 
@@ -800,6 +789,8 @@ class LutDialog(QDialog):
         self._cb_cmap(name, self._invert)
 
     def _set_combo_silent(self, name: str) -> None:
+        if self._cmap_combo.findText(name, Qt.MatchFlag.MatchFixedString) < 0:
+            self._refresh_colormap_combo(name)
         self._cmap_combo.blockSignals(True)
         i = self._cmap_combo.findText(name, Qt.MatchFlag.MatchFixedString)
         if i >= 0:

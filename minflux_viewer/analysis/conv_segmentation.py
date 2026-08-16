@@ -1,8 +1,11 @@
 """
 minflux_viewer.analysis.conv_segmentation
 ==========================================
-General **convolution-based segmentation** — a geometry-model generalisation of
-:mod:`minflux_viewer.analysis.npc_segmentation`.
+General **convolution-based segmentation** — a geometry-model generalisation of the
+NPC ring-convolution detector, which it replaced outright: its ``ring`` model is the
+same donut kernel and the same peak finding, so the standalone
+``analysis/npc_segmentation`` module was removed and its one distinct acceptance
+criterion (:func:`ring_support_scores`) folded into the ring validation below.
 
 Pipeline (2-D):
     1. render the XY localizations into a ``pixel_size`` nm histogram image;
@@ -32,7 +35,10 @@ Optional refinements:
   structure scale (σ ≈ 0.7·R and 2·R), suppressing slow background — a two-scale
   generalisation of the single-scale ``zero_mean`` trick.
 * **ring validation** — for ring-like models, reject solid blobs by the
-  inside/outside-ring localization-count ratios.
+  inside/outside-ring localization-count ratios, and optionally require a minimum
+  **ring support score** (annulus angular coverage × radial fit), which is the one
+  criterion the radial count ratios cannot express: they see whether the hole and
+  the surround are empty, not whether the annulus is populated *all the way round*.
 
 Pure NumPy/SciPy — Qt-free and unit-testable. Distances are in nm.
 """
@@ -51,7 +57,9 @@ DEFAULT_DOG = False
 DEFAULT_SQRT = False
 DEFAULT_MAX_INSIDE = 0.5           # ring validation: max inside/ring loc-count ratio
 DEFAULT_MAX_OUTSIDE = 2.0          # ring validation: max outside/ring loc-count ratio
+DEFAULT_MIN_SUPPORT = 0.0          # ring validation: min ring support score (0 = off)
 _MIN_RING_LOCS = 6                 # ring band must hold at least this many locs
+_ANGULAR_BINS = 36                 # ring support: azimuthal bins of the annulus
 
 
 # --------------------------------------------------------------------------- #
@@ -382,17 +390,74 @@ def ring_inside_outside_ratios(xy, centers, radius_nm: float, rim_nm: float):
     return inside, outside, n_ring
 
 
+def ring_support_scores(xy, centers, radius_nm: float, rim_nm: float, *,
+                        angular_bins: int = _ANGULAR_BINS,
+                        min_ring_locs: int = _MIN_RING_LOCS) -> np.ndarray:
+    """Per-detection ring **support**: ``coverage · exp(-(spread/half)²) · exp(-(|bias|/half)²)``
+    over the localizations in the annulus ``[R - rim/2, R + rim/2]``.
+
+    ``coverage`` is the fraction of the ``angular_bins`` azimuthal bins that hold at
+    least one localization — a partial arc scores low even when it sits at exactly
+    the right radius, which is what :func:`ring_inside_outside_ratios` cannot see.
+    ``spread`` is the radial standard deviation and ``bias`` the offset of the median
+    radius from ``R``; both are penalised on the scale of ``half = rim/2``. NaN where
+    the annulus holds fewer than ``min_ring_locs`` localizations.
+    """
+    xy = np.asarray(xy, dtype=float)
+    xy = xy[np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])] if xy.size else xy.reshape(0, 2)
+    centers = np.asarray(centers, dtype=float).reshape(-1, 2)
+    scores = np.full(centers.shape[0], np.nan)
+    if centers.shape[0] == 0 or xy.shape[0] == 0:
+        return scores
+    R = float(radius_nm)
+    half = max(float(rim_nm) / 2.0, np.finfo(float).eps)
+    inner2 = max(0.0, R - half) ** 2
+    outer_r = R + half
+    outer2 = outer_r ** 2
+    ang_edges = np.linspace(-np.pi, np.pi, int(angular_bins) + 1)
+    x, y = xy[:, 0], xy[:, 1]
+    for k, (cx, cy) in enumerate(centers):
+        dx, dy = x - cx, y - cy
+        box = (np.abs(dx) <= outer_r) & (np.abs(dy) <= outer_r)
+        if not box.any():
+            continue
+        dxb, dyb = dx[box], dy[box]
+        r2 = dxb ** 2 + dyb ** 2
+        ann = (r2 <= outer2) & (r2 >= inner2)
+        if int(ann.sum()) < int(min_ring_locs):
+            continue
+        r_use = np.sqrt(r2[ann])
+        spread = float(np.std(r_use))                 # population std (ddof=0)
+        bias = float(np.median(r_use) - R)
+        counts, _ = np.histogram(np.arctan2(dyb[ann], dxb[ann]), bins=ang_edges)
+        coverage = float(np.mean(counts > 0))
+        scores[k] = (coverage
+                     * np.exp(-(spread / half) ** 2)
+                     * np.exp(-(abs(bias) / half) ** 2))
+    return scores
+
+
 def ring_validation_mask(xy, centers, radius_nm: float, rim_nm: float, *,
                          max_inside: float = DEFAULT_MAX_INSIDE,
                          max_outside: float | None = DEFAULT_MAX_OUTSIDE,
+                         min_support: float = DEFAULT_MIN_SUPPORT,
                          min_ring_locs: int = _MIN_RING_LOCS):
-    """Keep-mask for ring-like detections: enough ring locs and inside/outside
-    ratios within bounds. Returns ``(keep, inside_ratio, outside_ratio)``."""
+    """Keep-mask for ring-like detections: enough ring locs, inside/outside ratios
+    within bounds and — when ``min_support > 0`` — a ring support score above it.
+
+    Returns ``(keep, inside_ratio, outside_ratio, support)``; ``support`` is all-NaN
+    when the criterion is off, so it is only computed when asked for.
+    """
     inside, outside, n_ring = ring_inside_outside_ratios(xy, centers, radius_nm, rim_nm)
     keep = np.isfinite(inside) & (n_ring >= int(min_ring_locs)) & (inside <= float(max_inside))
     if max_outside is not None:
         keep &= np.isfinite(outside) & (outside <= float(max_outside))
-    return keep, inside, outside
+    support = np.full(np.asarray(centers, dtype=float).reshape(-1, 2).shape[0], np.nan)
+    if float(min_support) > 0.0:
+        support = ring_support_scores(xy, centers, radius_nm, rim_nm,
+                                      min_ring_locs=min_ring_locs)
+        keep &= np.isfinite(support) & (support >= float(min_support))
+    return keep, inside, outside, support
 
 
 def segment_by_convolution(xy_nm, *, model_key: str, params: dict | None = None,
@@ -422,12 +487,14 @@ def segment_by_convolution(xy_nm, *, model_key: str, params: dict | None = None,
         Apply a difference-of-Gaussians band-pass to the response at the
         structure scale.
     ring_validation :
-        For ring-like models, a dict ``{max_inside, max_outside, min_ring_locs}``
-        to reject solid blobs by the inside/outside-ring loc-count ratios.
+        For ring-like models, a dict ``{max_inside, max_outside, min_support,
+        min_ring_locs}`` to reject solid blobs by the inside/outside-ring loc-count
+        ratios and, with ``min_support > 0``, partial arcs by the ring support score.
 
     Returns a dict with ``response_map`` (rescaled to max 1), ``xedge``/``yedge``,
     ``kernel``, ``centers`` (nm, (K, 2)), ``peak_values`` (descending) and, when
-    ring validation runs, ``inside_ratio`` / ``outside_ratio`` per detection.
+    ring validation runs, ``inside_ratio`` / ``outside_ratio`` / ``support`` per
+    detection.
     """
     model = get_model(model_key)
     params = {**model.defaults(), **(params or {})}
@@ -442,6 +509,7 @@ def segment_by_convolution(xy_nm, *, model_key: str, params: dict | None = None,
     out = {"response_map": np.zeros((0, 0)), "xedge": np.zeros(0), "yedge": np.zeros(0),
            "kernel": kernel, "centers": np.empty((0, 2)), "peak_values": np.empty(0),
            "inside_ratio": np.empty(0), "outside_ratio": np.empty(0),
+           "support": np.empty(0),
            "model_key": model_key, "params": params, "pixel_size_nm": px}
     if xy.shape[0] < 3:
         return out
@@ -459,13 +527,15 @@ def segment_by_convolution(xy_nm, *, model_key: str, params: dict | None = None,
 
     if ring_validation is not None and model.ringlike and model.ring_geom and centers.shape[0]:
         radius_nm, rim_nm = model.ring_geom(params)
-        keep, inside, outside = ring_validation_mask(
+        keep, inside, outside, support = ring_validation_mask(
             xy, centers, radius_nm, rim_nm,
             max_inside=ring_validation.get("max_inside", DEFAULT_MAX_INSIDE),
             max_outside=ring_validation.get("max_outside", DEFAULT_MAX_OUTSIDE),
+            min_support=ring_validation.get("min_support", DEFAULT_MIN_SUPPORT),
             min_ring_locs=ring_validation.get("min_ring_locs", _MIN_RING_LOCS))
         centers, vals = centers[keep], vals[keep]
-        out.update(inside_ratio=inside[keep], outside_ratio=outside[keep])
+        out.update(inside_ratio=inside[keep], outside_ratio=outside[keep],
+                   support=support[keep])
 
     out.update(centers=centers, peak_values=vals)
     return out

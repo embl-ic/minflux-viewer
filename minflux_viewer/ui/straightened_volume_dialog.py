@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..colormaps import colormap_lut
 from ..analysis.straightened_volume import StraightenedVolumeResult, straightened_count_volume
 from ..core.roi import OPEN_LINE_TYPES, RoiRecord
 from .plot_format import plot_widget
@@ -173,7 +174,7 @@ class StraightenedVolumeAlongSkeletonWindow(QDialog):
         plot.setMenuEnabled(False)
         img = pg.ImageItem()
         try:
-            img.setLookupTable(pg.colormap.get("inferno").getLookupTable(0.0, 1.0, 256))
+            img.setLookupTable(colormap_lut("inferno", alpha=False))
         except Exception:
             pass
         plot.addItem(img)

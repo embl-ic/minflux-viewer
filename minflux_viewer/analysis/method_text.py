@@ -263,6 +263,9 @@ def _render_rimf(m, ev, state):
 
 
 def _render_npc(m, ev, state):
+    """Retired *Segmentation › NPC › 2D* command (folded into Convolution, whose
+    ring model is the same kernel). Kept so method text still generates from a
+    Log written before the removal."""
     return (
         f"Nuclear pore complex (NPC) structures in '{m.group('name')}' were segmented by 2-D "
         f"ring-kernel convolution: the XY localizations were histogrammed into {m.group('pixel')} nm "

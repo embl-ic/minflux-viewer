@@ -23,8 +23,20 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..core.overlay import CHANNEL_LUTS, PURE_COLOR_RGB
+from ..colormaps import channel_colormap_names, representative_rgb
+from ..core.overlay import PURE_COLOR_RGB
 from ..core.time_channels import TimeWindow, time_channel_selections
+
+
+def _lut_preview_rgb(lut: str) -> tuple[int, int, int]:
+    if lut in PURE_COLOR_RGB:
+        return PURE_COLOR_RGB[lut]
+    try:
+        return tuple(
+            int(round(channel * 255.0)) for channel in representative_rgb(lut)
+        )
+    except (KeyError, ValueError):
+        return 80, 120, 210
 
 
 class TimeChannelDialog(QDialog):
@@ -193,7 +205,7 @@ class TimeChannelDialog(QDialog):
         start_spin = self._spin(start_s / 60.0)
         end_spin = self._spin(end_s / 60.0)
         lut_combo = QComboBox()
-        lut_combo.addItems(CHANNEL_LUTS)
+        lut_combo.addItems(channel_colormap_names())
         if lut_combo.findText(lut) < 0:
             lut_combo.addItem(lut)
         lut_combo.setCurrentText(lut)
@@ -209,7 +221,7 @@ class TimeChannelDialog(QDialog):
         self._table.setCellWidget(table_row, 3, lut_combo)
         self._table.setItem(table_row, 4, count_item)
 
-        rgb = PURE_COLOR_RGB.get(lut, (80, 120, 210))
+        rgb = _lut_preview_rgb(lut)
         region = pg.LinearRegionItem(
             values=(start_s / 60.0, end_s / 60.0),
             orientation=pg.LinearRegionItem.Vertical,
@@ -259,7 +271,7 @@ class TimeChannelDialog(QDialog):
         self._refresh_counts()
 
     def _lut_changed(self, row: dict) -> None:
-        rgb = PURE_COLOR_RGB.get(row["lut"].currentText(), (80, 120, 210))
+        rgb = _lut_preview_rgb(row["lut"].currentText())
         row["region"].setBrush((*rgb, 35))
         row["region"].setPen(pg.mkPen(rgb, width=2))
         row["region"].setHoverPen(pg.mkPen(rgb, width=3))

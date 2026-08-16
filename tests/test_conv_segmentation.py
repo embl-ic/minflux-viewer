@@ -289,3 +289,84 @@ def test_ring_validation_ignored_for_non_ring_model():
         min_response=0.3, min_distance_nm=120.0,
         ring_validation={"max_inside": 0.1})    # must be a no-op for gaussian
     assert res["centers"].shape[0] == 2
+
+
+# --- ring support score (angular coverage × radial fit) -----------------------
+# Ported from the retired analysis/npc_segmentation.py: the one acceptance
+# criterion the inside/outside count ratios cannot express, because they see an
+# empty hole and an empty surround but not azimuthal completeness.
+def _arc(cx, cy, diameter, span, n=80, sigma=3.0, seed=0):
+    """Partial ring covering ``span`` radians — at the right radius, but incomplete."""
+    rng = np.random.default_rng(seed)
+    theta = rng.uniform(0, span, n)
+    r = diameter / 2.0 + rng.normal(0, sigma, n)
+    return np.column_stack([cx + r * np.cos(theta), cy + r * np.sin(theta)])
+
+
+def test_support_high_on_ring_low_on_blob():
+    centers = np.array([[0.0, 0.0]])
+    s_ring = cs.ring_support_scores(_ring(0, 0, 100.0, n=200, sigma=3.0, seed=3),
+                                    centers, 50.0, 25.0)[0]
+    blob = _blob(0, 0, 4.0, n=200, seed=4)      # dense centre, no annulus support
+    s_blob = cs.ring_support_scores(blob, centers, 50.0, 25.0)[0]
+    assert s_ring > 0.4
+    assert not np.isfinite(s_blob) or s_blob < s_ring
+
+
+def test_support_penalises_a_partial_arc():
+    """The distinguishing case: an arc sits at the correct radius with an empty
+    hole and empty surround, so the count ratios accept it — only the angular
+    coverage of the support score separates it from a full ring."""
+    centers = np.array([[0.0, 0.0]])
+    full = _ring(0, 0, 100.0, n=180, sigma=5.0, seed=5)
+    arc = _arc(0, 0, 100.0, 2 * np.pi / 3, n=90, sigma=5.0, seed=6)
+    s_full = cs.ring_support_scores(full, centers, 50.0, 20.0)[0]
+    s_arc = cs.ring_support_scores(arc, centers, 50.0, 20.0)[0]
+    assert s_full > 2 * s_arc
+
+    # the count ratios alone keep both; adding min_support drops the arc
+    for pts, keeps_without in ((full, True), (arc, True)):
+        keep, _, _, sup = cs.ring_validation_mask(pts, centers, 50.0, 20.0)
+        assert bool(keep[0]) is keeps_without
+        assert np.isnan(sup[0])            # not computed while the criterion is off
+    keep_full, _, _, _ = cs.ring_validation_mask(full, centers, 50.0, 20.0,
+                                                 min_support=0.5)
+    keep_arc, _, _, sup_arc = cs.ring_validation_mask(arc, centers, 50.0, 20.0,
+                                                      min_support=0.5)
+    assert bool(keep_full[0]) and not bool(keep_arc[0])
+    assert np.isfinite(sup_arc[0])
+
+
+def test_min_support_filters_detections_end_to_end():
+    rings = [(0.0, 0.0), (400.0, 0.0)]
+    pts = np.vstack([_ring(cx, cy, 100.0, n=180, sigma=4.0, seed=i)
+                     for i, (cx, cy) in enumerate(rings)])
+    pts = np.vstack([pts, _arc(0.0, 350.0, 100.0, 2 * np.pi / 3, n=110, seed=9)])
+    common = dict(model_key="ring", params={"diameter_nm": 100.0, "rim_nm": 22.0},
+                  pixel_size_nm=5.0, min_response=0.12)
+
+    def near(centers, pt, tol=35.0):
+        return (centers.shape[0] > 0
+                and np.min(np.hypot(centers[:, 0] - pt[0], centers[:, 1] - pt[1])) < tol)
+
+    ratios_only = cs.segment_by_convolution(
+        pts, **common, ring_validation={"max_inside": 0.5, "max_outside": 2.0})
+    with_support = cs.segment_by_convolution(
+        pts, **common,
+        ring_validation={"max_inside": 0.5, "max_outside": 2.0, "min_support": 0.5})
+    assert near(ratios_only["centers"], (0.0, 350.0))       # arc survives the ratios
+    assert not near(with_support["centers"], (0.0, 350.0))  # …but not the support score
+    for cx, cy in rings:
+        assert near(with_support["centers"], (cx, cy))
+    assert with_support["support"].shape[0] == with_support["centers"].shape[0]
+    assert np.all(with_support["support"] >= 0.5)
+
+
+def test_support_safe_on_empty_and_sparse_input():
+    assert cs.ring_support_scores(np.empty((0, 2)), np.array([[0.0, 0.0]]),
+                                  50.0, 20.0).shape == (1,)
+    assert cs.ring_support_scores(_ring(0, 0, 100.0, n=200), np.empty((0, 2)),
+                                  50.0, 20.0).shape == (0,)
+    # fewer than min_ring_locs in the annulus → NaN, not a spurious score
+    assert np.isnan(cs.ring_support_scores(np.zeros((3, 2)), np.array([[0.0, 0.0]]),
+                                           50.0, 20.0)[0])

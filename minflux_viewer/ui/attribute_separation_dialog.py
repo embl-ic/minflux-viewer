@@ -58,9 +58,10 @@ from ..analysis.distribution_fit import (
     auto_fit,
     fit_mixture,
 )
+from ..colormaps import channel_colormap_names, representative_rgb
 from ..core.iteration import FLATTEN_LABEL, iteration_labels, ordinal, parse_iteration_label
 from ..core.loader import attr_values_1d, is_value_pool_selector, mfx_get
-from ..core.overlay import CHANNEL_LUTS, PURE_COLOR_RGB
+from ..core.overlay import PURE_COLOR_RGB
 from ..utils.filters import raw_trace_aggregate
 
 _DISPLAY_AGG = ["per loc", "trace mean", "trace median"]
@@ -69,7 +70,14 @@ _CHANNEL_COUNTS = [str(n) for n in range(2, 8)]        # 2..7
 
 
 def _rgb_for_lut(lut: str) -> tuple[int, int, int]:
-    return PURE_COLOR_RGB.get(lut, (120, 120, 120))
+    if lut in PURE_COLOR_RGB:
+        return PURE_COLOR_RGB[lut]
+    try:
+        return tuple(
+            int(round(channel * 255.0)) for channel in representative_rgb(lut)
+        )
+    except (KeyError, ValueError):
+        return 120, 120, 120
 
 
 class AttributeSeparationDialog(QDialog):
@@ -622,7 +630,7 @@ class AttributeSeparationDialog(QDialog):
         start_spin = self._spin(ch.lo)
         end_spin = self._spin(ch.hi)
         lut_combo = QComboBox()
-        lut_combo.addItems(CHANNEL_LUTS)
+        lut_combo.addItems(channel_colormap_names())
         if lut_combo.findText(ch.lut) < 0:
             lut_combo.addItem(ch.lut)
         lut_combo.setCurrentText(ch.lut)
@@ -712,7 +720,7 @@ class AttributeSeparationDialog(QDialog):
         self._redraw()
 
     def _lut_cycle(self):
-        return CHANNEL_LUTS
+        return channel_colormap_names()
 
     def _seed_default_channels(self) -> None:
         """Place evenly (no fit) so the dialog opens with channels immediately."""
@@ -790,9 +798,10 @@ class AttributeSeparationDialog(QDialog):
         row["region"].setRegion((lo, mid))
         self._synchronizing = False
         new_i = len(self._rows)
+        luts = self._lut_cycle()
         self._append_row(Channel(
             name=f"{self._base_name()} [{self._attribute} {new_i + 1}]",
-            lo=float(mid), hi=float(hi), lut=CHANNEL_LUTS[new_i % len(CHANNEL_LUTS)]))
+            lo=float(mid), hi=float(hi), lut=luts[new_i % len(luts)]))
         self._fit_result = None
         self._refresh_counts()
 
@@ -835,9 +844,10 @@ class AttributeSeparationDialog(QDialog):
         except Exception as exc:
             self._state.log(f"Residual fit failed: {exc}", "WARN")
             return
+        luts = self._lut_cycle()
         extra = channels_from_fit(res, data_range=(float(res_vals.min()), float(res_vals.max())),
                                   base_name=self._base_name(), attribute=f"{self._attribute} residual",
-                                  luts=CHANNEL_LUTS[len(self._rows):] + CHANNEL_LUTS)
+                                  luts=luts[len(self._rows):] + luts)
         for ch in extra:
             self._append_row(ch)
         self._fit_result = None

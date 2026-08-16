@@ -45,6 +45,7 @@ from PyQt6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QColorDialog,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -63,6 +64,14 @@ from PyQt6.QtWidgets import (
 from scipy.ndimage import affine_transform, zoom
 
 from .. import resource_path
+from ..colormaps import (
+    BUILTIN_COLORMAP_NAMES,
+    PURE_COLORMAP_RGB,
+    canonical_colormap_name,
+    colormap_lut,
+    make_colormap,
+    named_colormap_names,
+)
 from ..core.app_state import AppState
 from ..core.overlay import (
     PURE_COLOR_NAMES,
@@ -99,7 +108,7 @@ from .precision_render import (
 
 _RENDER_SIZE   = 800     # fallback target image dimension for image-mode render
 _DEBOUNCE_MS   = 25      # delay between view change and re-render
-_COLORMAPS     = ["hot", "inferno", "viridis", "magma", "plasma", "cividis", "gray"]
+_COLORMAPS     = list(BUILTIN_COLORMAP_NAMES)
 _ORIENTATIONS  = ["XY", "XZ", "YZ", "3D"]
 _RENDER_ORIENTATIONS = {"XY", "XZ", "YZ"}
 _PURE_COLOR_LUTS = list(PURE_COLOR_NAMES)
@@ -112,17 +121,22 @@ _SIGMA_SLIDER_STEP_NM = 0.1
 _ALIGNMENT_PREVIEW_MAX_DIM = 512
 _ALIGNMENT_PREVIEW_INTERVAL_MS = 16
 _CHANNEL_COLORS = {
-    "Red": (1.0, 0.0, 0.0),
-    "Green": (0.0, 1.0, 0.0),
-    "Blue": (0.0, 0.0, 1.0),
-    "Cyan": (0.0, 1.0, 1.0),
-    "Magenta": (1.0, 0.0, 1.0),
-    "Yellow": (1.0, 1.0, 0.0),
-    "Orange": (1.0, 0.5, 0.0),
-    "White": (1.0, 1.0, 1.0),
-    "Gray": (0.65, 0.65, 0.65),
-    "Black": (0.0, 0.0, 0.0),
+    name: tuple(float(channel) / 255.0 for channel in PURE_COLORMAP_RGB[name])
+    for name in PURE_COLOR_NAMES
 }
+_CUSTOM_SOLID_PREFIX = "solid:custom:"
+
+
+def _render_solid_rgb(lut: str) -> tuple[float, float, float] | None:
+    """Resolve a solid-color choice to the hue used by the render ramp."""
+    if lut in _CHANNEL_COLORS:
+        return _CHANNEL_COLORS[lut]
+    if not lut.startswith(_CUSTOM_SOLID_PREFIX):
+        return None
+    color = QColor(lut[len(_CUSTOM_SOLID_PREFIX) :])
+    if not color.isValid():
+        return None
+    return color.redF(), color.greenF(), color.blueF()
 
 
 def fixed_gaussian_sigma_limits_nm(
@@ -955,9 +969,14 @@ class RenderWindow(QWidget):
         self._dataset_dim_label: str = "2D"
         # Default colormap from Preferences > Appearance > Render View (the combo
         # stores capitalized names like "Hot"; the render pipeline uses lowercase).
-        pref_cmap = str(state.prefs.get("plot", {}).get("render_cmap", "hot")).lower()
-        self._active_cmap: str = pref_cmap if pref_cmap in _COLORMAPS else "hot"
+        pref_cmap = str(state.prefs.get("plot", {}).get("render_cmap", "hot"))
+        try:
+            self._active_cmap = canonical_colormap_name(pref_cmap)
+        except (KeyError, ValueError):
+            self._active_cmap = "hot"
         self._axis_visible: bool = False
+        self._grid_visible: bool = False
+        self._grid_item = None
         self._sigma_nm_xyz: tuple[float, float, float] = tuple(
             getattr(self, "_sigma_nm_xyz", (5.0, 5.0, 5.0))
         )
@@ -1078,7 +1097,11 @@ class RenderWindow(QWidget):
         self._image_view.ui.graphicsView.customContextMenuRequested.connect(
             self._show_context_menu
         )
+        self._grid_item = pg.GridItem(textPen=None)
+        self._image_view.view.addItem(self._grid_item, ignoreBounds=True)
+        self._update_grid_pen()
         self._set_axes_visible(False)
+        self._set_grid_visible(False)
 
         root.addWidget(self._image_view, stretch=1)
         self._roi_highlight_item = pg.ScatterPlotItem(
@@ -1501,8 +1524,9 @@ class RenderWindow(QWidget):
         self._channel_area.setVisible(len(self._channels) > 1)
 
     def _style_channel_swatch(self, swatch: QLabel, lut: str) -> None:
-        if lut in _CHANNEL_COLORS:
-            rgb = _CHANNEL_COLORS[lut]
+        solid_rgb = _render_solid_rgb(lut)
+        if solid_rgb is not None:
+            rgb = solid_rgb
         else:
             table = self._channel_lut_rgb(lut)
             rgb = table[min(int(round(0.72 * (len(table) - 1))), len(table) - 1)]
@@ -2453,8 +2477,9 @@ class RenderWindow(QWidget):
         stays visible on the white histogram background (a per-bin gradient
         made bright bins vanish against white)."""
         name = self._active_channel_lut_name()
-        if name in _CHANNEL_COLORS:
-            rgb = _CHANNEL_COLORS[name]
+        solid_rgb = _render_solid_rgb(name)
+        if solid_rgb is not None:
+            rgb = solid_rgb
         else:
             lut = self._channel_lut_rgb(name)
             rgb = tuple(float(v) for v in lut[lut.shape[0] // 2])
@@ -2747,6 +2772,7 @@ class RenderWindow(QWidget):
             self._image_view.ui.graphicsView.setBackground("w" if self._white_bg else "k")
         except Exception:
             pass
+        self._update_grid_pen()
         # Recompose from the cached scalar tiles (falls back to a full re-render).
         self._compose_from_cache()
 
@@ -2792,8 +2818,9 @@ class RenderWindow(QWidget):
     def _channel_rgb_white(self, norm: np.ndarray, lut: str) -> np.ndarray:
         """Per-channel RGB for a **white** background: pure colours use the inverted
         ``white→colour→black`` ramp; named colormaps are inverted (low ≈ white)."""
-        if lut in _CHANNEL_COLORS:
-            return pure_color_ramp(norm, _CHANNEL_COLORS[lut], white_bg=True)
+        solid_rgb = _render_solid_rgb(lut)
+        if solid_rgb is not None:
+            return pure_color_ramp(norm, solid_rgb, white_bg=True)
         return np.clip(1.0 - self._map_norm_to_rgb(norm, lut), 0.0, 1.0).astype(np.float32)
 
     def _transformed_tile(self, tile: np.ndarray, ch: dict) -> np.ndarray:
@@ -2873,20 +2900,16 @@ class RenderWindow(QWidget):
         return norm
 
     def _map_norm_to_rgb(self, norm: np.ndarray, lut: str) -> np.ndarray:
-        if lut in _CHANNEL_COLORS:
+        solid_rgb = _render_solid_rgb(lut)
+        if solid_rgb is not None:
             # black → colour → white so a pure colour spans a grayscale-like tonal
             # (lightness) range; different pixel values stay appreciable.
-            return pure_color_ramp(norm, _CHANNEL_COLORS[lut])
+            return pure_color_ramp(norm, solid_rgb)
         try:
-            cmap = pg.colormap.get(lut)
-        except Exception:
-            cmap = None
-        if cmap is None:
-            try:
-                cmap = self._pg_colormap_from_matplotlib(lut)
-            except Exception:
-                cmap = self._pg_colormap_from_matplotlib("hot")
-        table = cmap.getLookupTable(0.0, 1.0, 256)
+            table = colormap_lut(lut, alpha=False)
+        except (KeyError, ValueError) as exc:
+            print(f"Unknown colormap '{lut}'; using hot: {exc}")
+            table = colormap_lut("hot", alpha=False)
         table = np.asarray(table, dtype=np.float32)
         if table.max() > 1.0:
             table /= 255.0
@@ -2920,15 +2943,8 @@ class RenderWindow(QWidget):
         return zoom(src, (zy, zx), order=1).astype(np.float32, copy=False)[:h, :w]
 
     # ------------------------------------------------------------------
-    # Colormap resolution with graceful fallback
+    # Colormap resolution
     # ------------------------------------------------------------------
-
-    def _pg_colormap_from_matplotlib(self, name: str, n: int = 256) -> pg.ColorMap:
-        import matplotlib as mpl
-        mpl_cmap = mpl.colormaps[name].resampled(n)
-        rgba = mpl_cmap(np.linspace(0.0, 1.0, n), bytes=True)
-        pos  = np.linspace(0.0, 1.0, n)
-        return pg.ColorMap(pos, rgba)
 
     def _on_cmap_changed(self, name: str) -> None:
         self._active_cmap = name
@@ -2937,32 +2953,16 @@ class RenderWindow(QWidget):
             return
 
         try:
-            cmap = pg.colormap.get(name)
-            if cmap is not None:
-                self._image_view.setColorMap(cmap)
-                return
-        except Exception:
-            pass
-
-        try:
-            cmap = self._pg_colormap_from_matplotlib(name)
+            cmap = make_colormap(name)
             self._image_view.setColorMap(cmap)
             return
-        except Exception as e:
-            print(f"Failed to load matplotlib colormap '{name}': {e!r}")
+        except (KeyError, ValueError) as exc:
+            print(f"Failed to load colormap '{name}': {exc}")
 
-        try:
-            cmap = pg.colormap.get(name, source="colorcet")
-            if cmap is not None:
-                self._image_view.setColorMap(cmap)
-                return
-        except Exception:
-            pass
-
-        try:
-            self._image_view.setColorMap(pg.colormap.get("CET-L3"))
-        except Exception:
-            pass
+    def _pick_solid_color(self) -> None:
+        color = QColorDialog.getColor(parent=self)
+        if color.isValid():
+            self._on_cmap_changed(f"{_CUSTOM_SOLID_PREFIX}{color.name()}")
 
     # ------------------------------------------------------------------
     # Brightness & Contrast
@@ -3148,6 +3148,7 @@ class RenderWindow(QWidget):
                 on_gamma_changed=self._on_lut_gamma_changed,
                 parent=self,
                 on_auto=self._on_bc_auto,
+                state=self._state,
             )
         if not self._refresh_lut_dialog(capture_baseline=True):
             self._lut_dialog.show(); self._lut_dialog.raise_()
@@ -3196,7 +3197,6 @@ class RenderWindow(QWidget):
         self._refresh_lut_dialog(capture_baseline=False)
 
     def _on_lut_cmap_changed(self, name: str, invert: bool) -> None:
-        from .lut_dialog import make_colormap
         self._lut_invert = invert
         self._active_cmap = name
         if self._channels:
@@ -3215,7 +3215,6 @@ class RenderWindow(QWidget):
     def _on_lut_gamma_changed(self, gamma: float) -> None:
         """LUT dialog gamma → the active channel (localization compositing) or the
         image LUT (TIFF path)."""
-        from .lut_dialog import make_colormap
         g = float(gamma)
         self._lut_gamma = g
         if self._channels:
@@ -3290,6 +3289,16 @@ class RenderWindow(QWidget):
         wb_action.setChecked(self._white_bg)
         wb_action.triggered.connect(self._set_white_background)
 
+        axis_action = view_menu.addAction("Axis")
+        axis_action.setCheckable(True)
+        axis_action.setChecked(self._axis_visible)
+        axis_action.triggered.connect(self._set_axis_visible_from_menu)
+
+        grid_action = view_menu.addAction("Grid lines")
+        grid_action.setCheckable(True)
+        grid_action.setChecked(self._grid_visible)
+        grid_action.triggered.connect(self._set_grid_visible)
+
         # Reconstruction methods are actions on the unified renderer. Put the
         # preferred method first so the menu communicates the active default.
         method_menu = view_menu.addMenu("Render Method")
@@ -3325,27 +3334,29 @@ class RenderWindow(QWidget):
             )
 
         cmap_menu = menu.addMenu("Colormap")
-        for name in _COLORMAPS:
+        current_cmap = self._active_channel_lut()
+        for name in named_colormap_names():
             action = cmap_menu.addAction(name)
             action.setCheckable(True)
-            action.setChecked(self._active_channel_lut() == name)
+            action.setChecked(current_cmap == name)
             action.triggered.connect(lambda _checked=False, value=name: self._on_cmap_changed(value))
-        pure_menu = cmap_menu.addMenu("Pure color")
+        cmap_menu.addSeparator()
+        solid_menu = cmap_menu.addMenu("Solid color")
         for name in _PURE_COLOR_LUTS:
-            action = pure_menu.addAction(name)
+            action = solid_menu.addAction(name)
             action.setCheckable(True)
-            action.setChecked(self._active_channel_lut() == name)
+            action.setChecked(current_cmap == name)
             action.triggered.connect(lambda _checked=False, value=name: self._on_cmap_changed(value))
+        solid_menu.addSeparator()
+        custom_action = solid_menu.addAction("Custom...")
+        custom_action.setCheckable(True)
+        custom_action.setChecked(current_cmap.startswith(_CUSTOM_SOLID_PREFIX))
+        custom_action.triggered.connect(self._pick_solid_color)
 
         # No setShortcut here: brightness_contrast is an application-wide shortcut
         # (main window) that already fires from this render window. A shortcut on
         # this context-menu action too would be an ambiguous overload.
         menu.addAction("Brightness/Contrast", self._show_brightness_contrast)
-
-        axis_action = menu.addAction("Axis")
-        axis_action.setCheckable(True)
-        axis_action.setChecked(self._axis_visible)
-        axis_action.triggered.connect(self._set_axis_visible_from_menu)
 
         if getattr(self, "_advanced_render_method", None) == RENDER_METHOD_FIXED_GAUSSIAN:
             menu.addAction(self.SIGMA_MENU_TEXT, self._show_sigma_dialog)
@@ -3729,6 +3740,17 @@ class RenderWindow(QWidget):
             plot_item.showAxis(axis_name, show=visible)
         if visible:
             self._update_axis_labels()
+
+    def _set_grid_visible(self, visible: bool) -> None:
+        self._grid_visible = bool(visible)
+        if self._grid_item is not None:
+            self._grid_item.setVisible(self._grid_visible)
+
+    def _update_grid_pen(self) -> None:
+        if self._grid_item is None:
+            return
+        color = (35, 35, 35) if self._white_bg else (225, 225, 225)
+        self._grid_item.setPen(pg.mkPen(color))
 
     def _axis_label_names(self) -> tuple[str, str]:
         """Bottom/left axis labels for the current orientation, so the user can

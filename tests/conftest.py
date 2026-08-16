@@ -25,7 +25,6 @@ redirected the same way.
 
 from __future__ import annotations
 
-import copy
 import json
 
 import pytest
@@ -48,10 +47,9 @@ def _isolate_preferences(tmp_path_factory):
                     _mod._merge(json.loads(prefs_file.read_text()), _mod.DEFAULT_PREFS))
             except Exception:
                 pass
-        # deepcopy, like the real AppState._load_prefs: a shallow dict() hands
-        # back the live DEFAULT_PREFS sub-dicts, so one test editing
-        # prefs["plot"][...] would rewrite the defaults for every later test.
-        return _mod._migrate_prefs(copy.deepcopy(_mod.DEFAULT_PREFS))
+        # Match the real fresh-install path, including pre-recording every
+        # one-shot migration so old migrations cannot rewrite current defaults.
+        return _mod.default_prefs()
 
     def _save(self):
         try:

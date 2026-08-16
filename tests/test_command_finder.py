@@ -176,9 +176,12 @@ def test_keyword_search_finds_nested_commands(_app):
         def hits(query):
             return {(e.text, e.path) for e in filter_commands(entries, query)}
 
-        # "nuclear pore" is only a keyword on the NPC leaves (name is just "2D").
+        # "nuclear pore" appears in no command name or menu path. Since the
+        # dedicated NPC leaves were removed (folded into Convolution's ring model),
+        # it must still reach the Convolution detectors via their keywords.
         npc = hits("nuclear pore")
-        assert any(t == "2D" and p.endswith("NPC") for t, p in npc)
+        assert any("Convolution" in t for t, _ in npc)
+        assert not any(p.endswith("NPC") for _, p in npc), "the NPC submenu is retired"
         # "matched filter" is a keyword on the Convolution detectors only.
         assert any("Convolution" in t for t, _ in hits("matched filter"))
         # "unmix" tags DCR channel separation (word absent from its name/path).

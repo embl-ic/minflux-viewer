@@ -31,13 +31,13 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import resource_path
-from .metadata_viewer import MetadataDocumentView
-from .render_window import (
-    _CHANNEL_COLORS,
-    _COLORMAPS,
-    _PURE_COLOR_LUTS,
-    DepthRangeSlider,
+from ..colormaps import (
+    make_colormap,
+    named_colormap_names,
 )
+from ..core.overlay import PURE_COLOR_NAMES
+from .metadata_viewer import MetadataDocumentView
+from .render_window import DepthRangeSlider
 
 if TYPE_CHECKING:
     from ..core.obf_image_source import ObfImageSource
@@ -463,13 +463,13 @@ class TiffViewerWindow(QWidget):
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
         cmap_menu = menu.addMenu("Colormap")
-        for name in _COLORMAPS:
+        for name in named_colormap_names():
             action = cmap_menu.addAction(name)
             action.setCheckable(True)
             action.setChecked(self._active_cmap == name)
             action.triggered.connect(lambda _checked=False, value=name: self._on_cmap_changed(value))
         pure_menu = cmap_menu.addMenu("Pure color")
-        for name in _PURE_COLOR_LUTS:
+        for name in PURE_COLOR_NAMES:
             action = pure_menu.addAction(name)
             action.setCheckable(True)
             action.setChecked(self._active_cmap == name)
@@ -515,32 +515,10 @@ class TiffViewerWindow(QWidget):
         if self._plane is None or self._is_color_plane(self._plane):
             return
         try:
-            cmap = pg.colormap.get(self._active_cmap)
-        except Exception:
-            cmap = None
-        if cmap is None and self._active_cmap in _CHANNEL_COLORS:
-            color = np.asarray(_CHANNEL_COLORS[self._active_cmap], dtype=float)
-            rgba = np.array(
-                [
-                    [0, 0, 0, 255],
-                    [
-                        int(round(color[0] * 255)),
-                        int(round(color[1] * 255)),
-                        int(round(color[2] * 255)),
-                        255,
-                    ],
-                ],
-                dtype=np.ubyte,
-            )
-            cmap = pg.ColorMap(np.array([0.0, 1.0]), rgba)
-        if cmap is None:
-            try:
-                import matplotlib as mpl
-                mpl_cmap = mpl.colormaps[self._active_cmap].resampled(256)
-                rgba = mpl_cmap(np.linspace(0.0, 1.0, 256), bytes=True)
-                cmap = pg.ColorMap(np.linspace(0.0, 1.0, 256), rgba)
-            except Exception:
-                cmap = pg.colormap.get("gray")
+            cmap = make_colormap(self._active_cmap)
+        except (KeyError, ValueError) as exc:
+            print(f"Unknown TIFF colormap '{self._active_cmap}'; using gray: {exc}")
+            cmap = make_colormap("gray")
         self._image_view.setColorMap(cmap)
 
     def _reset_view(self) -> None:

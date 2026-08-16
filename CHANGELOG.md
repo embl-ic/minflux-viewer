@@ -1,5 +1,63 @@
 # Changelog
 
+## v0.4.1
+
+This release makes colormaps an application-owned feature, removes Matplotlib and
+its packaging chain, and brings the Render and Localization Scatter context menus
+into the same Fiji-style layout.
+
+### Colormaps and LUTs
+
+- **Matplotlib is no longer a dependency.** Render, scatter, TIFF, volume,
+  density, segmentation, straightened-volume and plugin views all use one local
+  PyQtGraph colormap registry. The PyInstaller spec explicitly excludes
+  Matplotlib and its otherwise-unused support packages.
+- **Focused built-in map set:** `hot`, `jet`, `HiLo`, `glasbey`, `viridis`,
+  `inferno`, and `gray`, plus the solid channel colors. Previously exposed
+  `parula`, `turbo`, `magma`, `plasma`, and `cividis` remain resolvable for saved
+  views but are hidden from new menus.
+- **Persistent custom gradients** can be created, edited, and deleted from the
+  LUT dialog's new **Custom** menu. They are stored in application preferences
+  and become available to render, scatter, volume, and channel-LUT selectors.
+
+### Render and scatter views
+
+- **Localization Scatter gains Plot style** for marker shape, size,
+  transparency, and custom color; the settings persist per dataset and apply in
+  2-D and 3-D.
+- **View controls are organized consistently.** Scatter puts XY/XZ/YZ/3D,
+  background, axis, grid lines, and Plot style under **View**. Render puts axis
+  and grid lines between background and Render Method.
+- **Render's Colormap menu now mirrors Scatter's:** named maps, a separator, a
+  **Solid color** submenu, and a separated **Custom...** color picker. Custom
+  render colors keep the tonal intensity ramp instead of flattening the image.
+- **The experimental Matplotlib 3-D Attribute Plot is removed.** Localization
+  Scatter remains the supported spatial 3-D point viewer; Attribute Plot remains
+  the supported arbitrary-attribute plot.
+
+### Analysis and defaults
+
+- **NPC ring detection is consolidated into Convolution segmentation.** The
+  duplicate NPC 2-D command and unused 3-D placeholder are removed. The
+  convolution ring model now includes the former detector's optional angular
+  ring-support score, while legacy processing logs still generate method text.
+- **Fresh installs apply no RIMF correction by default.** Both estimate and
+  fixed-value modes start off, leaving Z as recorded until the user opts in.
+  Existing saved preferences remain unchanged. Fresh defaults are now protected
+  from accidentally running old one-shot migrations.
+
+### Packaging
+
+- The lock file no longer contains Matplotlib, contourpy, cycler, fonttools,
+  kiwisolver, Pillow, pyparsing, python-dateutil, or six through the former
+  plotting dependency.
+- Windows builds use a native `.ico`, avoiding a build-time Pillow dependency.
+
+See `RELEASE_NOTES_v0.4.1.md` for the user-facing release notes and compatibility
+details.
+
+---
+
 ## v0.4.0
 
 Fluorescent image channels can now be mapped onto localizations as an attribute,

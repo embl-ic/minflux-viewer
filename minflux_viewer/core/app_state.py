@@ -108,7 +108,7 @@ DEFAULT_PREFS: dict = {
     },
     "plot": {
         "rimf_value": 0.67,
-        "use_fixed_rimf": True,
+        "use_fixed_rimf": False,
         "render_pixel_size": 2,
         "render_cmap": "hot",
         "render_xy_origin": "top_left",     # "top_left" | "bottom_left"
@@ -116,6 +116,9 @@ DEFAULT_PREFS: dict = {
         "scatter_color_by": "tid",
         "scatter_cmap": "jet",
         "scatter_xy_origin": "top_left",    # "top_left" | "bottom_left"
+        # Application-owned named gradients created from the LUT dialog.
+        # Values are JSON-compatible ``{"stops": [[position, RGBA], ...]}``.
+        "custom_colormaps": {},
         "roi_color": "Yellow",
         "roi_transparency": 50,
         "roi_highlight_in_roi": True,   # highlight in-ROI data on the drawing view
@@ -233,8 +236,43 @@ def _merge(saved: dict, defaults: dict) -> dict:
     return result
 
 
+#: Every one-shot ``prefs["_migrations"]`` key, in application order.
+#:
+#: A **fresh** preference set starts with all of them recorded as applied (see
+#: :func:`default_prefs`). A migration exists to rewrite *saved* preferences that
+#: predate a layout change; ``DEFAULT_PREFS`` already **is** the current layout, so
+#: running one against it can only contradict it. That is not hypothetical: the
+#: fresh-install path is ``_migrate_prefs(deepcopy(DEFAULT_PREFS))``, and a fresh
+#: dict carries no ``_migrations`` key, so every block below used to fire at once
+#: and overwrite the declared defaults — ``v036`` forced ``use_fixed_rimf`` back to
+#: ``True`` no matter what ``DEFAULT_PREFS`` said, and ``v021`` sets ``compute_rimf``
+#: to ``True`` against a ``False`` default (saved only by ``v036`` running after it).
+#: Changing a default in ``DEFAULT_PREFS`` must be enough on its own.
+_MIGRATION_KEYS: tuple[str, ...] = (
+    "v021_compute_show_defaults",
+    "v035_update_check_optin",
+    "v036_fixed_rimf_default",
+    "v037_metric_overlay_alignment_steps",
+)
+
+
+def default_prefs() -> dict:
+    """A fresh preference set: ``DEFAULT_PREFS`` with every migration pre-recorded.
+
+    Used when nothing is saved yet, so a new install gets exactly the declared
+    defaults. See :data:`_MIGRATION_KEYS` for why the migrations are skipped.
+    """
+    prefs = copy.deepcopy(DEFAULT_PREFS)
+    prefs["_migrations"] = {key: True for key in _MIGRATION_KEYS}
+    return _migrate_prefs(prefs)
+
+
 def _migrate_prefs(prefs: dict) -> dict:
-    """Move older built-in defaults to the current shortcut layout."""
+    """Move older built-in defaults to the current shortcut layout.
+
+    Only the guarded ``_migrations`` blocks below rewrite values; everything before
+    them is ``setdefault``-style and is a no-op against a current preference set.
+    """
     shortcuts = prefs.setdefault("shortcuts", {})
     shortcuts.setdefault("focus_main_window", "Shift+V")
     if shortcuts.get("open_msr") == "Ctrl+Shift+O":
@@ -338,6 +376,10 @@ class AppState(QObject):
         self._datasets: list[MinfluxDataset] = []
         self._active_idx: int | None = None
         self.prefs: dict = self._load_prefs()
+        from ..colormaps import configure_custom_colormaps
+        configure_custom_colormaps(
+            self.prefs.get("plot", {}).get("custom_colormaps", {})
+        )
 
         # Processing-history journal — used by the Generate Method Text plugin.
         from .processing_journal import ProcessingJournal
@@ -627,9 +669,13 @@ class AppState(QObject):
                 return _migrate_prefs(_merge(json.loads(raw), DEFAULT_PREFS))
             except Exception:
                 pass
-        return _migrate_prefs(copy.deepcopy(DEFAULT_PREFS))
+        return default_prefs()
 
     def save_prefs(self) -> None:
+        from ..colormaps import configure_custom_colormaps
+        configure_custom_colormaps(
+            self.prefs.get("plot", {}).get("custom_colormaps", {})
+        )
         qs = QSettings("EMBL-IC", "MinfluxViewer")
         qs.setValue("prefs", json.dumps(self.prefs))
 

@@ -33,7 +33,7 @@ from scipy.ndimage import convolve, gaussian_filter
 from scipy.signal import fftconvolve
 from scipy.spatial import cKDTree
 
-from ..ui.lut_dialog import make_colormap
+from ..colormaps import BUILTIN_COLORMAP_NAMES, make_colormap, named_colormap_names
 
 #: Leaf size for the KD-tree. Larger than scipy's default (16): for radius
 #: counting on dense MINFLUX data, fewer/larger leaves cut tree-traversal
@@ -609,7 +609,7 @@ class LocalDensityImageWindow(QWidget):
     scatter of the localizations coloured by density, in the app's viewer style."""
 
     TAG = "local_density_image"
-    _CMAPS = ["hot", "inferno", "magma", "plasma", "viridis", "turbo", "jet", "gray"]
+    _CMAPS = list(BUILTIN_COLORMAP_NAMES)
     _MAX_3D_POINTS = 400_000
 
     def __init__(
@@ -658,7 +658,7 @@ class LocalDensityImageWindow(QWidget):
         top.addSpacing(12)
         top.addWidget(QLabel("Colormap:"))
         self._cmap_combo = QComboBox()
-        for name in self._CMAPS:
+        for name in named_colormap_names():
             self._cmap_combo.addItem(name)
         self._cmap_combo.setCurrentText(self._cmap)
         self._cmap_combo.currentTextChanged.connect(self._set_cmap)
@@ -787,7 +787,7 @@ class LocalDensityImageWindow(QWidget):
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
         cmap_menu = menu.addMenu("Colormap")
-        for name in self._CMAPS:
+        for name in named_colormap_names():
             act = cmap_menu.addAction(name)
             act.setCheckable(True)
             act.setChecked(self._cmap == name)

@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
 from scipy.ndimage import gaussian_filter
 
 from .. import resource_path
+from ..colormaps import map_to_rgba, named_colormap_names, representative_rgb
 from ..analysis.voronoi_density import (
     Voronoi3DField,
     build_voronoi_3d_field,
@@ -88,28 +89,11 @@ def _clip_region(locs, sigma, region):
     return locs[keep], (None if sigma is None else sigma[keep])
 
 
-def _matplotlib_rgba(
+def _colormap_rgba(
     name: str, values: np.ndarray, *, invert: bool = False
 ) -> np.ndarray:
-    """Map normalised values to uint8 RGBA through matplotlib."""
-    try:
-        import matplotlib as mpl
-        cmap = mpl.colormaps.get_cmap(name)
-        mapper = lambda v: np.asarray(cmap(v, bytes=True), dtype=np.uint8)
-    except Exception:
-        # The LUT dialog also exposes pyqtgraph/colorcet and pure-colour ramps
-        # that are not necessarily registered in matplotlib.
-        from .lut_dialog import make_colormap
-        cmap = make_colormap(name)
-        table = np.asarray(cmap.getLookupTable(0.0, 1.0, 256), dtype=np.uint8)
-        if table.ndim != 2 or table.shape[1] not in (3, 4):
-            table = np.tile(np.array([[255, 255, 255, 255]], dtype=np.uint8), (256, 1))
-        elif table.shape[1] == 3:
-            table = np.column_stack([table, np.full(256, 255, dtype=np.uint8)])
-        mapper = lambda v: table[np.clip(np.rint(v * 255.0), 0, 255).astype(np.int64)]
-    if invert:
-        values = 1.0 - np.asarray(values, dtype=float)
-    return mapper(np.asarray(values, dtype=float))
+    """Map normalised values through the application-owned registry."""
+    return map_to_rgba(name, values, invert=invert)
 
 
 def _normalize_volume(
@@ -161,7 +145,7 @@ def _compose_multichannel_rgba(
 def _surface_color(
     cmap_name: str, value: float, opacity: float, *, invert: bool = False
 ) -> tuple[float, float, float, float]:
-    rgba = _matplotlib_rgba(
+    rgba = _colormap_rgba(
         cmap_name,
         np.array([np.clip(value, 0.0, 1.0)], dtype=float),
         invert=invert,
@@ -367,7 +351,7 @@ def make_volume_payload(
 
     norm, vmax = _normalize_volume(volume, black_pct, white_pct)
 
-    rgba = _matplotlib_rgba(
+    rgba = _colormap_rgba(
         cmap_name, norm.ravel(), invert=invert
     ).reshape((*volume.shape, 4))
     alpha = (np.power(norm, 0.75) * np.clip(float(opacity), 0.0, 1.0) * 255.0).astype(np.uint8)
@@ -397,10 +381,9 @@ def lut_rgb(name: str) -> tuple[float, float, float]:
         r, g, b = PURE_COLOR_RGB[name]
         return (r / 255.0, g / 255.0, b / 255.0)
     try:
-        import matplotlib as mpl
-        rgba = mpl.colormaps.get_cmap(name)(0.85)
-        return (float(rgba[0]), float(rgba[1]), float(rgba[2]))
-    except Exception:
+        return representative_rgb(name, position=0.85)
+    except (KeyError, ValueError) as exc:
+        print(f"Unknown volume colormap '{name}'; using white: {exc}")
         return (1.0, 1.0, 1.0)
 
 
@@ -662,7 +645,7 @@ class VolumeRenderWindow(QWidget):
 
         bar.addWidget(QLabel("Colormap"))
         self._cmap_combo = QComboBox()
-        self._cmap_combo.addItems(["hot", "inferno", "viridis", "magma", "plasma", "cividis", "gray", "turbo"])
+        self._cmap_combo.addItems(named_colormap_names())
         self._cmap_combo.currentTextChanged.connect(self._schedule_rebuild)
         bar.addWidget(self._cmap_combo)
 
@@ -1009,7 +992,7 @@ class VolumeRenderWindow(QWidget):
         contrast = self._display_contrast(self._idx)
         black, white = contrast or (self._black_pct, self._white_pct)
         norm, vmax = _normalize_volume(payload.scalar, black, white)
-        rgba = _matplotlib_rgba(
+        rgba = _colormap_rgba(
             self._cmap_combo.currentText(), norm.ravel(), invert=self._lut_invert
         ).reshape((*norm.shape, 4))
         alpha = (
@@ -1164,6 +1147,7 @@ class VolumeRenderWindow(QWidget):
                 on_cmap_changed=self._on_lut_cmap_changed,
                 on_invert_changed=self._on_lut_invert_changed,
                 parent=self,
+                state=self._state,
             )
 
         data_lo = float(values.min())

@@ -51,6 +51,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..colormaps import colormap_lut
 from ..analysis import conv_segmentation_3d as cs3
 from .layer_brightness import LayerBrightness, percentile_levels
 
@@ -290,7 +291,7 @@ class ConvSegmentation3DWindow(QDialog):
         resp = pg.ImageItem()
         resp.setZValue(0)
         try:
-            resp.setLookupTable(pg.colormap.get(_RESPONSE_CMAP).getLookupTable(0.0, 1.0, 256))
+            resp.setLookupTable(colormap_lut(_RESPONSE_CMAP, alpha=False))
         except Exception:
             pass
         plot.addItem(resp)
