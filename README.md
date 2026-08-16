@@ -115,6 +115,17 @@ NumPy/SciPy (computation), zarr, h5py, and tifffile (I/O), and msr-reader
 (pure-Python OBF/`.msr` reading). The project is managed with Poetry
 (`poetry install`) and tested with `pytest`. Releases are built with `pyinstaller`.
 
+Build the Windows one-folder executable from the Poetry environment—not from a
+global Python installation:
+
+```powershell
+poetry sync
+.\.venv\Scripts\python.exe -m pip install pyinstaller==6.19.0
+.\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm minflux_viewer.spec
+```
+
+The executable is written to `dist\minflux_viewer\minflux_viewer.exe`.
+
 Layout:
 
 ```

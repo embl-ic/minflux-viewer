@@ -109,6 +109,9 @@ saved settings, not to a brand-new copy of the current defaults.
 
 - The direct Matplotlib dependency is removed from `pyproject.toml` and its
   transitive plotting packages are removed from `poetry.lock`.
+- The build spec now rejects an incomplete global Python environment before
+  creating a broken executable and tells the builder how to install and invoke
+  PyInstaller through the project `.venv` interpreter.
 - The Windows PyInstaller build uses a native application `.ico`, avoiding the
   former build-time Pillow requirement for converting a PNG icon.
 - The application and Poetry package versions are both **0.4.1**; the shared
@@ -133,3 +136,13 @@ From source (Python 3.10–3.12):
 poetry sync
 poetry run minflux-viewer
 ```
+
+Build the Windows one-folder executable from that same environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install pyinstaller==6.19.0
+.\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm minflux_viewer.spec
+```
+
+Do not use a bare global `pyinstaller` command; it cannot see packages installed
+only in the project environment.

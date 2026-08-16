@@ -5,8 +5,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-
 ENTRYPOINT = Path(__file__).resolve().parents[1] / "run_app.py"
+SPEC = Path(__file__).resolve().parents[1] / "minflux_viewer.spec"
 
 
 def test_freeze_support_precedes_application_import() -> None:
@@ -41,3 +41,14 @@ def test_freeze_support_precedes_application_import() -> None:
         and node.module == "minflux_viewer.__main__"
         for node in tree.body
     )
+
+
+def test_spec_guards_against_incomplete_build_environment() -> None:
+    """A global PyInstaller must not silently omit required app packages."""
+    source = SPEC.read_text(encoding="utf-8")
+
+    assert '"PyQt6": "PyQt6"' in source
+    assert "importlib.util.find_spec(module)" in source
+    assert "Build interpreter: {sys.executable}" in source
+    assert "python.exe -m pip install pyinstaller==6.19.0" in source
+    assert "python.exe -m PyInstaller --clean --noconfirm" in source
