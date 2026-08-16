@@ -52,6 +52,10 @@ into the same Fiji-style layout.
   kiwisolver, Pillow, pyparsing, python-dateutil, or six through the former
   plotting dependency.
 - Windows builds use a native `.ico`, avoiding a build-time Pillow dependency.
+- The PyInstaller spec stops immediately with the build interpreter and missing
+  package names if it is accidentally launched from an incomplete global Python
+  environment. Its build instructions explicitly install and invoke PyInstaller
+  through the project `.venv` interpreter.
 
 See `RELEASE_NOTES_v0.4.1.md` for the user-facing release notes and compatibility
 details.

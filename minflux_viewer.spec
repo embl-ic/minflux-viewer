@@ -3,15 +3,53 @@
 # PyInstaller spec for MINFLUX Viewer — Windows one-directory build.
 #
 # Build:
-#   .venv\Scripts\pyinstaller minflux_viewer.spec
+#   .\.venv\Scripts\python.exe -m pip install pyinstaller==6.19.0
+#   .\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm minflux_viewer.spec
+# Do not use a global ``pyinstaller`` command; it cannot see project packages.
 #
 # Output:  dist\minflux_viewer\minflux_viewer.exe
 
 from pathlib import Path
+import importlib.util
 import re
 import sys
 
 ROOT = Path(SPECPATH)   # repo root (where this .spec lives)
+
+# PyInstaller analyzes whichever Python environment launched it.  Building via
+# a global ``pyinstaller.exe`` can otherwise produce an apparently successful
+# bundle with all project-only dependencies missing.  Fail before Analysis with
+# an actionable message instead of shipping an executable that crashes at boot.
+REQUIRED_BUILD_MODULES = {
+    "PyQt6": "PyQt6",
+    "numpy": "numpy",
+    "scipy": "scipy",
+    "scikit-learn": "sklearn",
+    "pyqtgraph": "pyqtgraph",
+    "PyOpenGL": "OpenGL",
+    "h5py": "h5py",
+    "zarr": "zarr",
+    "tifffile": "tifffile",
+    "openpyxl": "openpyxl",
+    "psutil": "psutil",
+    "msr-reader": "msr_reader",
+    "roifile": "roifile",
+}
+missing_build_packages = [
+    package
+    for package, module in REQUIRED_BUILD_MODULES.items()
+    if importlib.util.find_spec(module) is None
+]
+if missing_build_packages:
+    raise SystemExit(
+        "Cannot build MINFLUX Viewer: the build interpreter is missing "
+        f"{', '.join(missing_build_packages)}.\n"
+        f"Build interpreter: {sys.executable}\n"
+        "Run `poetry sync`, then use the project interpreter: "
+        "`.\\.venv\\Scripts\\python.exe -m pip install pyinstaller==6.19.0` and "
+        "`.\\.venv\\Scripts\\python.exe -m PyInstaller --clean --noconfirm "
+        "minflux_viewer.spec`."
+    )
 
 # App version, parsed from the package without importing it.
 VERSION = re.search(
