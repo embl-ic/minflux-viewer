@@ -44,6 +44,66 @@ def _dialog(qtbot):
     return dlg, rec
 
 
+def test_custom_colormap_saved_from_lut_menu_is_selected(qtbot):
+    from minflux_viewer.colormaps import configure_custom_colormaps
+    from minflux_viewer.ui.lut_dialog import LutDialog
+
+    configure_custom_colormaps({})
+
+    class _State:
+        def __init__(self):
+            self.prefs = {"plot": {"custom_colormaps": {}}}
+            self.saved = 0
+
+        def save_prefs(self):
+            self.saved += 1
+
+    class _EditorResult:
+        replacing_name = None
+
+        @staticmethod
+        def result_name():
+            return "My LUT"
+
+        @staticmethod
+        def result_stops():
+            return [
+                [0.0, [0, 10, 30, 255]],
+                [1.0, [240, 180, 20, 255]],
+            ]
+
+        @staticmethod
+        def windowTitle():
+            return "Create custom colormap"
+
+    state = _State()
+    applied = []
+    dlg = LutDialog(
+        on_levels_changed=lambda _lo, _hi: None,
+        on_cmap_changed=lambda name, invert: applied.append((name, invert)),
+        state=state,
+    )
+    qtbot.addWidget(dlg)
+    dlg.load_image(
+        pixels=np.linspace(0.0, 1.0, 100),
+        data_lo=0.0,
+        data_hi=1.0,
+        lo=0.0,
+        hi=1.0,
+        cmap_name="hot",
+        invert=False,
+    )
+    try:
+        dlg._save_custom_colormap_dialog(_EditorResult())
+
+        assert state.saved == 1
+        assert "My LUT" in state.prefs["plot"]["custom_colormaps"]
+        assert dlg._cmap_combo.currentText() == "My LUT"
+        assert applied[-1] == ("My LUT", False)
+    finally:
+        configure_custom_colormaps({})
+
+
 def test_dragging_level_lines_sets_levels(qtbot):
     dlg, rec = _dialog(qtbot)
 

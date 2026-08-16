@@ -328,7 +328,6 @@ class MainWindow(QMainWindow):
         self._scatter_win   = None       # compatibility alias: most recently raised
         self._histogram_win = None       # compatibility alias: most recently raised
         self._attr_win      = None       # compatibility alias: most recently raised
-        self._attr_3d_mpl_win = None
         self._filter_dlg    = None
         self._filter_dlgs: dict[int | None, QWidget] = {}
         self._ds_manager    = None
@@ -516,8 +515,6 @@ class MainWindow(QMainWindow):
         u.actionScatter.triggered.connect(self._show_scatter)
         u.actionHistogram.triggered.connect(self._show_histogram)
         u.actionAttributePlot.triggered.connect(self._show_attr_plot)
-        self.actionAttributePlot3DMatplotlib = QAction("Attribute Plot 3D (Matplotlib)", self)
-        self.actionAttributePlot3DMatplotlib.triggered.connect(self._show_attr_plot_3d_matplotlib)
         u.actionRender.triggered.connect(self._show_render)        # was Process > Render image
         # The unified render view exposes methods from its right-click
         # View › Render Method menu.
@@ -574,17 +571,12 @@ class MainWindow(QMainWindow):
         self.menuAnalyzeTrace.addAction(self.actionTraceSize)
         self.menuAnalyzeTrace.addAction(self.actionTraceAnisotropy)
 
-        # Segmentation submenu — structure segmentation (NPC; more to come)
+        # Segmentation submenu — structure segmentation.
+        # The former NPC › 2D / 3D entries were removed: 2D was the same ring
+        # kernel + peak finding as Convolution's `ring` model (its one distinct
+        # criterion, the ring support score, now lives in that tool's ring
+        # validation), and 3D was never more than a placeholder.
         self.menuAnalyzeSegmentation = QMenu("Segmentation", self)
-        self.menuSegNPC = QMenu("NPC", self)
-        self.actionSegNpc2D = QAction("2D", self)
-        self.actionSegNpc2D.triggered.connect(self._segment_npc_2d)
-        self.actionSegNpc3D = QAction("3D", self)
-        self.actionSegNpc3D.triggered.connect(
-            lambda: self._placeholder("NPC segmentation (3D)", "a later implementation"))
-        self.menuSegNPC.addAction(self.actionSegNpc2D)
-        self.menuSegNPC.addAction(self.actionSegNpc3D)
-        self.menuAnalyzeSegmentation.addMenu(self.menuSegNPC)
         self.actionSegConvolution = QAction("Convolution…", self)
         self.actionSegConvolution.triggered.connect(self._show_conv_segmentation)
         self.menuAnalyzeSegmentation.addAction(self.actionSegConvolution)
@@ -831,7 +823,6 @@ class MainWindow(QMainWindow):
         u.actionHistogram.setText("Attribute Histogram")
         u.actionScatter.setText("Loc Scatter Plot")
         u.actionAttributePlot.setText("Attribute Plot")
-        self.actionAttributePlot3DMatplotlib.setText("Attribute Plot 3D (Matplotlib)")
         u.actionShowInfo.setText("Show Info...")
         u.actionRender.setText("Render")
         u.actionLog.setText("Log (Events)")
@@ -914,7 +905,6 @@ class MainWindow(QMainWindow):
         u.menuView.addAction(u.actionDatasetManager)
         u.menuView.addSeparator()
         u.menuView.addAction(u.actionAttributePlot)
-        u.menuView.addAction(self.actionAttributePlot3DMatplotlib)
         u.menuView.addAction(u.actionHistogram)
         u.menuView.addAction(u.actionScatter)
         u.menuView.addAction(u.actionRender)
@@ -1025,8 +1015,6 @@ class MainWindow(QMainWindow):
             self.actionDbscan,
             self.actionKNearestNeighbour,
             #self.menuAnalyzeSegmentation.menuAction(),
-            #self.actionSegNpc2D,
-            #self.actionSegNpc3D,
             #self.actionSegConvolution,
             #self.actionSegCurvilinear,
             #self.actionSegParticleAverage,
@@ -1034,7 +1022,6 @@ class MainWindow(QMainWindow):
             #u.actionParticleTracking,
             u.actionMsdAnalysis,
             u.actionMemoryMonitor,
-            self.actionAttributePlot3DMatplotlib,
         ]
         for action in actions:
             self._mark_action_ai_unapproved(action)
@@ -1121,7 +1108,7 @@ class MainWindow(QMainWindow):
                 self._install_window_shortcuts(widget, include_action_commands=False)
             elif getattr(widget, "TAG", None) in {
                 "render_window", "attribute_window", "histogram_window",
-                "scatter_window", "attribute_3d_matplotlib_window",
+                "scatter_window",
             }:
                 self._install_window_shortcuts(widget)
 
@@ -2030,17 +2017,6 @@ class MainWindow(QMainWindow):
         self._notify_view_state_changed()
         return win
 
-    def _show_attr_plot_3d_matplotlib(self) -> None:
-        if self._state.active_dataset is None:
-            self._no_data_warning(); return
-        from .attribute_3d_matplotlib_window import Attribute3DMatplotlibWindow
-        self._attr_3d_mpl_win = _raise_or_create(
-            self._attr_3d_mpl_win,
-            Attribute3DMatplotlibWindow,
-            self._state,
-        )
-        self._install_window_shortcuts(self._attr_3d_mpl_win)
-
     def _show_filter(self) -> None:
         from .filter_dialog import FilterDialog
         from .modeless import show_modeless
@@ -2906,63 +2882,6 @@ class MainWindow(QMainWindow):
             f"min loc/trace {cfg.min_loc_per_trace}, {extra}).",
             dataset_idx=idx,
             method_data=method_data)
-
-    def _segment_npc_2d(self) -> None:
-        """Analyze › Segmentation › NPC › 2D — detect NPC centres by ring-kernel
-        convolution and add a rectangle ROI around each into the ROI Manager."""
-        idx = self._state.active_idx
-        if idx is None or self._state.active_dataset is None:
-            self._no_data_warning()
-            return
-        ds = self._state.datasets[idx]
-        # Detect in display coordinates (loc_nm + overlay transform), the frame
-        # ROIs live in, so NPC ROIs land correctly on an overlay channel.
-        from ..core.roi_crop import display_xy_filtered
-        xy = display_xy_filtered(ds)
-        if xy.shape[0] < 3:
-            QMessageBox.information(self, "NPC Segmentation", "The active dataset has no localizations to segment.")
-            return
-
-        from .npc_segmentation_dialog import NpcSegmentationDialog
-        dlg = NpcSegmentationDialog(self, defaults=getattr(self, "_npc_seg_defaults", None))
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        p = dlg.params()
-        self._npc_seg_defaults = p
-
-        from ..analysis.npc_segmentation import segment_npc_2d
-        try:
-            res = segment_npc_2d(
-                xy, diameter_nm=p["diameter_nm"], rim_nm=p["rim_nm"],
-                pixel_size_nm=p["pixel_size_nm"], min_support=p["min_support"])
-        except Exception as exc:
-            QMessageBox.warning(self, "NPC Segmentation", f"Segmentation failed: {exc}")
-            return
-        centers = res["centers"]
-        if centers.shape[0] == 0:
-            QMessageBox.information(
-                self, "NPC Segmentation",
-                "No NPCs detected with these parameters. Try adjusting the diameter, "
-                "rim size, pixel size, or lowering the min support score.")
-            return
-
-        from ..core.roi import RoiRecord
-        side = float(p["diameter_nm"])
-        for i, (cx, cy) in enumerate(centers, start=1):
-            rec = RoiRecord.create(
-                "rectangle",
-                {"bounds": [float(cx) - side / 2.0, float(cy) - side / 2.0, side, side]},
-                name=f"NPC {i}", coordinate_space="plot", stroke_color=self._system_roi_color())
-            rec.context = {"dataset_idx": idx, "source": "npc_segmentation_2d"}
-            self._state.rois.add(rec)
-        self._state.rois.set_show_all(True)     # reveal every detected NPC at once
-        self._show_render(idx)
-        self._show_roi_manager()
-        self._state.log(
-            f"NPC segmentation (2D): detected {centers.shape[0]} NPC(s) on '{ds.name}' "
-            f"(diameter={p['diameter_nm']:.0f} nm, rim={p['rim_nm']:.0f} nm, "
-            f"pixel={p['pixel_size_nm']:.1f} nm, min support={p['min_support']:.2f}); "
-            f"added rectangle ROIs to the ROI Manager.")
 
     def _show_conv_segmentation(self) -> None:
         """Analyze › Segmentation › Convolution… — open the interactive
@@ -6272,7 +6191,7 @@ class MainWindow(QMainWindow):
         plot_prefs = self._state.prefs.get("plot", {})
         rimf_requested = (
             data_prefs.get("compute_rimf", False)
-            or plot_prefs.get("use_fixed_rimf", True)
+            or plot_prefs.get("use_fixed_rimf", False)
         )
         needs = (
             (rimf_requested and "rimf" not in ds.derived)
@@ -6304,7 +6223,7 @@ class MainWindow(QMainWindow):
         data_prefs = self._state.prefs.get("data", {})
         plot_prefs = self._state.prefs.get("plot", {})
         estimate_rimf = data_prefs.get("compute_rimf", False)
-        use_fixed_rimf = plot_prefs.get("use_fixed_rimf", True)
+        use_fixed_rimf = plot_prefs.get("use_fixed_rimf", False)
         if (estimate_rimf or use_fixed_rimf) and "rimf" not in ds.derived:
             import numpy as np
             if ds.prop.num_dim < 3:
@@ -7252,7 +7171,6 @@ class MainWindow(QMainWindow):
 
         # Singleton tool windows
         singletons = [
-            "_attr_3d_mpl_win",
             "_filter_dlg",  "_ds_manager",
             "_log_win",     "_console_win", "_memory_win", "_roi_manager_win",
             "_script_editor_win",

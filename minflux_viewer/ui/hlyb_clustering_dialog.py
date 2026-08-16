@@ -821,7 +821,7 @@ class HlyBResultWindow(QDialog):
         return self._pair_geometry_cache
 
     def _scatter_mapped_rgba(self, values: np.ndarray, *, alpha: float = 1.0) -> np.ndarray:
-        from .scatter_window import _load_cmap
+        from ..colormaps import make_colormap
 
         vals = np.asarray(values, dtype=float).ravel()
         if not vals.size:
@@ -834,7 +834,7 @@ class HlyBResultWindow(QDialog):
             norm = np.zeros(vals.size, dtype=float) if hi <= lo else np.clip(
                 (vals - lo) / (hi - lo), 0.0, 1.0)
             norm = np.nan_to_num(norm)
-        cmap = _load_cmap(self._scatter_colormap)
+        cmap = make_colormap(self._scatter_colormap)
         rgba = np.asarray(cmap.map(norm, mode=pg.ColorMap.FLOAT), dtype=np.float32)
         if rgba.ndim != 2 or rgba.shape[1] < 4:
             rgba = np.column_stack([rgba[:, :3], np.ones(rgba.shape[0])])
@@ -1059,7 +1059,8 @@ class HlyBResultWindow(QDialog):
 
     def _show_scatter_context_menu(self, pos, source: QWidget) -> None:
         """Loc-Scatter-style menu for the HlyB result scatter pane."""
-        from .scatter_window import _NAMED_CMAPS, _SOLID_COLOR_NAMES
+        from ..colormaps import named_colormap_names
+        from .scatter_window import _SOLID_COLOR_NAMES
 
         menu = QMenu(self)
         view_menu = menu.addMenu("View as")
@@ -1083,7 +1084,7 @@ class HlyBResultWindow(QDialog):
             unavailable.setEnabled(False)
 
         cmap_menu = menu.addMenu("Colormap")
-        for value in _NAMED_CMAPS:
+        for value in named_colormap_names():
             action = cmap_menu.addAction(value)
             action.setCheckable(True)
             action.setChecked(value == self._scatter_colormap)

@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..colormaps import colormap_lut
 from ..analysis import conv_segmentation as cs
 from .layer_brightness import LayerBrightness, percentile_levels
 from .roi_overlay import PointMarkerItem
@@ -76,6 +77,7 @@ class ConvSegmentationWindow(QDialog):
         self._centers = np.empty((0, 2))
         self._values = np.empty(0)
         self._inside = np.empty(0)        # inside-ring ratio per detection (ring validation)
+        self._support = np.empty(0)       # ring support score per detection (ring validation)
         self._labels: list[str] = []
         self._suspend = False
         self._fitted = False       # auto-range the response view only on first draw
@@ -205,6 +207,13 @@ class ConvSegmentationWindow(QDialog):
         self._max_outside.setToolTip("Max outside/ring localization-count ratio (background rejection).")
         self._max_outside.valueChanged.connect(lambda *_: self._rethreshold())
         rv.addRow("Max outside ratio:", self._max_outside)
+        self._min_support = self._spin(0.0, 1.0, cs.DEFAULT_MIN_SUPPORT, 2, 0.05, "")
+        self._min_support.setToolTip(
+            "Min ring support score: annulus angular coverage × radial fit. Unlike the "
+            "inside/outside ratios this sees whether the ring is populated all the way "
+            "round, so it rejects partial arcs. 0 = criterion off.")
+        self._min_support.valueChanged.connect(lambda *_: self._rethreshold())
+        rv.addRow("Min ring support:", self._min_support)
         left.addWidget(self._ring_group)
 
         self._status_label = QLabel("")
@@ -261,8 +270,7 @@ class ConvSegmentationWindow(QDialog):
         self._resp_img = pg.ImageItem()
         self._resp_img.setZValue(0)
         try:
-            self._resp_img.setLookupTable(
-                pg.colormap.get(_RESPONSE_CMAP).getLookupTable(0.0, 1.0, 256))
+            self._resp_img.setLookupTable(colormap_lut(_RESPONSE_CMAP, alpha=False))
         except Exception:
             pass
         self._plot.addItem(self._resp_img)
@@ -461,7 +469,8 @@ class ConvSegmentationWindow(QDialog):
                               (self._sep_spin, "min_separation"),
                               (self._box_size, "box_size"),
                               (self._max_inside, "max_inside"),
-                              (self._max_outside, "max_outside")):
+                              (self._max_outside, "max_outside"),
+                              (self._min_support, "min_support")):
                 if key in cfg:
                     spin.setValue(float(cfg[key]))
             if "max_detections" in cfg:
@@ -492,6 +501,7 @@ class ConvSegmentationWindow(QDialog):
             "ring_validate": self._ring_validate.isChecked(),
             "max_inside": self._max_inside.value(),
             "max_outside": self._max_outside.value(),
+            "min_support": self._min_support.value(),
             "box_size": self._box_size.value(),
             "model_params": self._model_params,
             "show_detection": self._show_detection.isChecked(),
@@ -560,6 +570,7 @@ class ConvSegmentationWindow(QDialog):
         self._centers = np.empty((0, 2))
         self._values = np.empty(0)
         self._inside = np.empty(0)
+        self._support = np.empty(0)
         self._labels = []
         self._populate_list()
         self._status_label.setText(status)
@@ -577,18 +588,22 @@ class ConvSegmentationWindow(QDialog):
             min_distance_px=float(self._sep_spin.value()) / px,
             max_detections=(self._max_spin.value() or None))
         inside = np.full(centers.shape[0], np.nan)
+        support = np.full(centers.shape[0], np.nan)
         model = cs.get_model(self._model_key())
         if (model.ringlike and model.ring_geom is not None
                 and self._ring_validate.isChecked() and centers.shape[0]):
             radius_nm, rim_nm = model.ring_geom(self._params())
-            keep, ins, _outs = cs.ring_validation_mask(
+            keep, ins, _outs, sup = cs.ring_validation_mask(
                 self._xy, centers, radius_nm, rim_nm,
                 max_inside=float(self._max_inside.value()),
-                max_outside=float(self._max_outside.value()))
-            centers, vals, inside = centers[keep], vals[keep], ins[keep]
+                max_outside=float(self._max_outside.value()),
+                min_support=float(self._min_support.value()))
+            centers, vals = centers[keep], vals[keep]
+            inside, support = ins[keep], sup[keep]
         self._centers = centers
         self._values = vals
         self._inside = inside
+        self._support = support
         prefix = self._name_prefix()
         self._labels = [f"{prefix} {i}" for i in range(1, centers.shape[0] + 1)]
         self._set_rings(centers)
@@ -633,6 +648,8 @@ class ConvSegmentationWindow(QDialog):
             text = f"{self._labels[i]}   ({cx:.0f}, {cy:.0f})   r={r:.2f}"
             if i < self._inside.size and np.isfinite(self._inside[i]):
                 text += f"   in={self._inside[i]:.2f}"
+            if i < self._support.size and np.isfinite(self._support[i]):
+                text += f"   sup={self._support[i]:.2f}"
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, i)
             self._list.addItem(item)
@@ -734,8 +751,11 @@ class ConvSegmentationWindow(QDialog):
         if self._dog.isChecked():
             opts.append("DoG band-pass")
         if model.ringlike and self._ring_validate.isChecked():
-            opts.append(f"ring validation (max inside={self._max_inside.value():.2f}, "
-                        f"max outside={self._max_outside.value():.2f})")
+            rv = (f"max inside={self._max_inside.value():.2f}, "
+                  f"max outside={self._max_outside.value():.2f}")
+            if self._min_support.value() > 0:
+                rv += f", min support={self._min_support.value():.2f}"
+            opts.append(f"ring validation ({rv})")
         opts_str = ", ".join(opts) if opts else "raw kernel"
         log = (
             f"Convolution segmentation: added {centers.shape[0]} of "

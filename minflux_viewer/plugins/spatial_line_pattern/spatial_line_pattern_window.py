@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ...colormaps import colormap_lut
 from ...analysis.plot_profile import band_polygon
 from ...analysis.spatial_line_pattern import (
     DEFAULT_BACKGROUND_SCALE_NM,
@@ -338,7 +339,7 @@ class SpatialLinePatternWindow(QDialog):
         self._map_plot = self._plot_widget("directed distance", "signed offset")
         self._map_image = pg.ImageItem(axisOrder="row-major")
         try:
-            lut = pg.colormap.get("viridis").getLookupTable(nPts=256)
+            lut = colormap_lut("viridis", alpha=False)
             self._map_image.setLookupTable(lut)
         except Exception:
             pass

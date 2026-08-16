@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "minflux-viewer"
-version = "0.4.0"
+version = "0.4.1"
 description = "MINFLUX nanoscopy data viewer — Fiji-style desktop application with .msr import"
 authors = ["Ziqiang Huang <ziqiang.huang@embl.de>"]
 readme = "README.md"
@@ -25,7 +25,6 @@ numpy     = ">=1.24"
 scipy     = ">=1.11"
 scikit-learn = ">=1.3"   # GaussianMixture (channel separation by attribute distribution)
 pyqtgraph = ">=0.13"
-matplotlib = ">=3.7"
 PyOpenGL  = ">=3.1"
 h5py      = ">=3.9"
 zarr      = ">=2.17,<3.0"

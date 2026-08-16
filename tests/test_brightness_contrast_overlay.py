@@ -42,7 +42,7 @@ def _make_ds(name: str, seed: int, n: int = 30, n_traces: int = 3) -> MinfluxDat
     return MinfluxDataset(file=FileInfo(name=name, folder="/tmp"), prop=prop, attr=attrs)
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def _qt_app():
     pytest.importorskip("PyQt6")
     if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
@@ -66,18 +66,26 @@ def _teardown(win, app) -> None:
         win._scheduler.cancel()
     except Exception:
         pass
+    dialog = getattr(win, "_bc_dialog", None)
+    if dialog is not None:
+        dialog.close()
+        dialog.deleteLater()
     win.close()
+    win.deleteLater()
     app.processEvents()
     QThreadPool.globalInstance().waitForDone(3000)
+    app.processEvents()
 
 
 def _overlay_state():
     from minflux_viewer.core.app_state import AppState
     state = AppState()
     a = _make_ds("chA.mat", 1)
-    a.state["overlay_id"] = "grp"; a.state["overlay_index"] = 1
+    a.state["overlay_id"] = "grp"
+    a.state["overlay_index"] = 1
     b = _make_ds("chB.mat", 2)
-    b.state["overlay_id"] = "grp"; b.state["overlay_index"] = 2
+    b.state["overlay_id"] = "grp"
+    b.state["overlay_index"] = 2
     state.add_dataset(a)
     state.add_dataset(b)
     return state

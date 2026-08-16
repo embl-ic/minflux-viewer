@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .npc_segmentation import _histogram2d
+from .conv_segmentation import render_histogram_2d as _histogram2d
 
 _MIN_LOC_PER_TRACE = 10
 

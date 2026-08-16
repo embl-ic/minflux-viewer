@@ -15,8 +15,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..colormaps import channel_colormap_names
 from ..core.app_state import AppState
-from ..core.overlay import CHANNEL_LUTS
 
 
 class ChannelCombineDialog(QDialog):
@@ -68,6 +68,7 @@ class ChannelCombineDialog(QDialog):
         selected = set(self._previous.get("selected", []))
         orders = self._previous.get("orders", {})
         luts = self._previous.get("luts", {})
+        channel_luts = channel_colormap_names()
         for row, idx in enumerate(self._rows):
             ds = state.datasets[idx]
             chk = QCheckBox()
@@ -94,11 +95,11 @@ class ChannelCombineDialog(QDialog):
             self._orders.append(order)
 
             lut = QComboBox()
-            lut.addItems(CHANNEL_LUTS)
-            default_lut = CHANNEL_LUTS[row % len(CHANNEL_LUTS)]
+            lut.addItems(channel_luts)
+            default_lut = channel_luts[row % len(channel_luts)]
             lut.setCurrentText(
                 default_lut if restricted
-                else str(luts.get(idx, CHANNEL_LUTS[idx % len(CHANNEL_LUTS)]))
+                else str(luts.get(idx, channel_luts[idx % len(channel_luts)]))
             )
             self._table.setCellWidget(row, 4, lut)
             self._luts.append(lut)

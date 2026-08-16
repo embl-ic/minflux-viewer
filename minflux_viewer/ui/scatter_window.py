@@ -25,6 +25,7 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -35,11 +36,16 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..colormaps import (
+    BUILTIN_COLORMAP_NAMES,
+    channel_colormap_names,
+    make_colormap,
+    named_colormap_names,
+)
 from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
 from ..core.loader import attr_values_1d
 from ..core.overlay import (
-    CHANNEL_LUTS,
     PURE_COLOR_NAMES,
     PURE_COLOR_RGB,
     apply_display_transform_nm,
@@ -57,82 +63,8 @@ from .plot_format import plot_widget
 # ---------------------------------------------------------------------------
 
 def _load_cmap(name: str) -> pg.ColorMap:
-    """Load a colormap, trying pyqtgraph → matplotlib → colorcet → CET-L3."""
-    if name.startswith("solid:"):
-        color_part = name[6:]  # e.g. "Red", "custom:#ff8800"
-        if color_part.startswith("custom:"):
-            hex_str = color_part[7:]
-            try:
-                r = int(hex_str[1:3], 16)
-                g = int(hex_str[3:5], 16)
-                b = int(hex_str[5:7], 16)
-            except (ValueError, IndexError):
-                r, g, b = 128, 128, 128
-        else:
-            r, g, b = _SOLID_COLOR_RGB.get(color_part, (128, 128, 128))
-        rgba = np.array([[r, g, b, 255], [r, g, b, 255]], dtype=np.ubyte)
-        return pg.ColorMap(np.array([0.0, 1.0]), rgba)
-    # Single-colour ramp names offered by the LUT dialog (black → colour), e.g.
-    # picking "Red" in the LUT editor. Delegate to the shared builder so the
-    # scatter renders them identically to the render's channel LUTs (without this
-    # they fell through to the CET-L3 fallback).
-    if name in _LUT_SINGLE_COLOURS:
-        from .lut_dialog import make_colormap
-        return make_colormap(name)
-    key = name.lower().replace(" ", "_")
-    if key == "glasbey":
-        try:
-            import colorcet as cc
-            colors = cc.glasbey
-            rgba = np.array([
-                tuple(int(c.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)) + (255,)
-                for c in colors[:256]
-            ], dtype=np.ubyte)
-            return pg.ColorMap(np.linspace(0.0, 1.0, len(rgba)), rgba)
-        except Exception:
-            base = np.array([
-                [230, 25, 75, 255], [60, 180, 75, 255], [255, 225, 25, 255],
-                [0, 130, 200, 255], [245, 130, 48, 255], [145, 30, 180, 255],
-                [70, 240, 240, 255], [240, 50, 230, 255], [210, 245, 60, 255],
-                [250, 190, 190, 255], [0, 128, 128, 255], [230, 190, 255, 255],
-            ], dtype=np.ubyte)
-            return pg.ColorMap(np.linspace(0.0, 1.0, len(base)), base)
-    if key == "hilo":
-        rgba = np.array([[0, 0, 255, 255], [35, 35, 35, 255], [255, 255, 255, 255], [255, 0, 0, 255]], dtype=np.ubyte)
-        return pg.ColorMap(np.linspace(0.0, 1.0, len(rgba)), rgba)
-    if key == "parula":
-        rgba = np.array([
-            [53, 42, 135, 255], [15, 92, 221, 255], [18, 125, 216, 255],
-            [7, 156, 207, 255], [21, 177, 180, 255], [89, 189, 140, 255],
-            [165, 190, 107, 255], [225, 185, 82, 255], [252, 206, 46, 255],
-            [249, 251, 14, 255],
-        ], dtype=np.ubyte)
-        return pg.ColorMap(np.linspace(0.0, 1.0, len(rgba)), rgba)
-    # 1. pyqtgraph built-ins
-    try:
-        c = pg.colormap.get(name)
-        if c is not None:
-            return c
-    except Exception:
-        pass
-    # 2. matplotlib
-    try:
-        import matplotlib as mpl
-        mpl_cmap = mpl.colormaps[name].resampled(256)
-        rgba = mpl_cmap(np.linspace(0.0, 1.0, 256), bytes=True)
-        pos  = np.linspace(0.0, 1.0, 256)
-        return pg.ColorMap(pos, rgba)
-    except Exception:
-        pass
-    # 3. colorcet
-    try:
-        c = pg.colormap.get(name, source="colorcet")
-        if c is not None:
-            return c
-    except Exception:
-        pass
-    # 4. final fallback
-    return pg.colormap.get("CET-L3")
+    """Compatibility wrapper around the application-owned registry."""
+    return make_colormap(name)
 
 
 # ---------------------------------------------------------------------------
@@ -156,10 +88,7 @@ _SOLID_COLOR_RGB: dict[str, tuple[int, int, int]] = {
     "White":   (255, 255, 255),
     "Gray":    (120, 120, 120),
 }
-_NAMED_CMAPS = ["glasbey", "jet", "HiLo", "parula", "turbo", "hot"]
-# Single-colour ramp names the LUT dialog offers (black → colour), matching the
-# render's channel LUTs. Distinct from the flat "solid:<Name>" scatter colours.
-_LUT_SINGLE_COLOURS = set(PURE_COLOR_NAMES)
+_NAMED_CMAPS = list(BUILTIN_COLORMAP_NAMES)
 
 
 class ScatterWindow(QWidget):
@@ -177,8 +106,14 @@ class ScatterWindow(QWidget):
         self._3d_axis = None
         self._3d_axis_items: list = []
         self._3d_box_items: list = []
+        self._show_2d_axis = True
         self._show_3d_axis = True
+        self._show_2d_grid = True
+        self._show_3d_grid = True
         self._show_3d_bounding_box = True
+        self._point_symbol = "o"
+        self._point_size = 2
+        self._point_alpha = 255
         self._manual_color_levels: tuple[float, float] | None = None
         self._last_color_values: np.ndarray = np.empty(0)
         self._lut_dialog = None
@@ -252,7 +187,7 @@ class ScatterWindow(QWidget):
 
         self._cmap_combo = QComboBox(self)
         self._cmap_combo.setEditable(True)
-        self._cmap_combo.addItems(_NAMED_CMAPS)
+        self._cmap_combo.addItems(named_colormap_names())
         self._cmap_combo.setCurrentText("jet")
         self._cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
         self._cmap_combo.hide()
@@ -281,9 +216,14 @@ class ScatterWindow(QWidget):
         self._plot_2d.getPlotItem().getViewBox().setMenuEnabled(False)
         self._plot_2d.setAspectLocked(True)
         self._apply_y_axis_direction()
-        self._plot_2d.showGrid(x=True, y=True, alpha=0.2)
+        self._plot_2d.showGrid(
+            x=self._show_2d_grid, y=self._show_2d_grid, alpha=0.2
+        )
         self._scatter_2d = pg.ScatterPlotItem(
-            size=2, pen=None, brush=pg.mkBrush(200, 200, 200, 180),
+            size=self._point_size,
+            symbol=self._point_symbol,
+            pen=None,
+            brush=pg.mkBrush(200, 200, 200, 180),
         )
         self._plot_2d.addItem(self._scatter_2d)
         self._roi_highlight_2d = pg.ScatterPlotItem(
@@ -357,6 +297,7 @@ class ScatterWindow(QWidget):
         grid = gl.GLGridItem()
         grid.setSize(1000, 1000)
         grid.setSpacing(100, 100)
+        grid.setVisible(self._show_3d_grid)
         view.addItem(grid)
 
         # Light XYZ axes
@@ -368,7 +309,7 @@ class ScatterWindow(QWidget):
         except Exception:
             pass
 
-        scatter = gl.GLScatterPlotItem(pxMode=True, size=2.0)
+        scatter = gl.GLScatterPlotItem(pxMode=True, size=self._point_size_3d())
         view.addItem(scatter)
         roi_scatter = gl.GLScatterPlotItem(pxMode=True, size=7.0)
         view.addItem(roi_scatter)
@@ -390,6 +331,63 @@ class ScatterWindow(QWidget):
 
     def _set_black_background(self, enabled: bool) -> None:
         self._black_bg_check.setChecked(bool(enabled))
+
+    def _point_size_3d(self) -> float:
+        """Keep tiny GL sprites visible while preserving the 2-D size control."""
+        compensation = 2 if not self._background_is_black() else 1
+        return float(self._point_size + compensation)
+
+    def _current_style_color(self) -> tuple[int, int, int]:
+        if len(self._channels) > 1:
+            lut = str(self._channels[self._active_channel_index()].get("lut", "Gray"))
+        else:
+            lut = self._cmap_combo.currentText()
+        r, g, b, _alpha = self._lut_color(lut, alpha=255)
+        return r, g, b
+
+    def _show_plot_style_dialog(self) -> None:
+        from .plot_style_dialog import PlotStyleDialog
+
+        dlg = PlotStyleDialog(
+            {
+                "label": self.windowTitle(),
+                "symbol": self._point_symbol,
+                "size": self._point_size,
+                "alpha": self._point_alpha,
+                "color": self._current_style_color(),
+            },
+            self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._apply_plot_style(
+                dlg.result_payload(), color_changed=dlg.color_changed
+            )
+
+    def _apply_plot_style(
+        self, payload: dict, *, color_changed: bool = False
+    ) -> None:
+        self._point_symbol = str(payload.get("symbol", self._point_symbol))
+        self._point_size = max(1, min(50, int(payload.get("size", self._point_size))))
+        self._point_alpha = max(
+            0, min(255, int(payload.get("alpha", self._point_alpha)))
+        )
+
+        if color_changed:
+            r, g, b = (
+                max(0, min(255, int(v)))
+                for v in payload.get("color", (128, 128, 128))
+            )
+            custom_lut = f"solid:custom:#{r:02x}{g:02x}{b:02x}"
+            if len(self._channels) > 1:
+                self._on_channel_lut(self._active_channel_index(), custom_lut)
+            else:
+                self._cmap_combo.setCurrentText(custom_lut)
+
+        # Marker alpha is part of the cached brushes/RGBA LUT.
+        self._brush_lut_key = None
+        self._brush_lut = None
+        self._rgba_lut = None
+        self._redraw_current(save_state=True)
 
     def _pick_solid_color(self) -> None:
         from PyQt6.QtWidgets import QColorDialog
@@ -437,12 +435,30 @@ class ScatterWindow(QWidget):
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
 
-        axis_menu = menu.addMenu("View")
+        view_menu = menu.addMenu("View")
         for axis in _AXIS_OPTIONS:
-            action = axis_menu.addAction(axis)
+            action = view_menu.addAction(axis)
             action.setCheckable(True)
             action.setChecked(axis == self._axis_combo.currentText())
             action.triggered.connect(lambda _checked=False, value=axis: self._axis_combo.setCurrentText(value))
+        view_menu.addSeparator()
+
+        bg_action = view_menu.addAction("Black background")
+        bg_action.setCheckable(True)
+        bg_action.setChecked(self._background_is_black())
+        bg_action.triggered.connect(self._set_black_background)
+
+        axis_action = view_menu.addAction("Axis")
+        axis_action.setCheckable(True)
+        axis_action.setChecked(self._current_axis_visible())
+        axis_action.triggered.connect(self._set_current_axis_visible)
+
+        grid_action = view_menu.addAction("Grid lines")
+        grid_action.setCheckable(True)
+        grid_action.setChecked(self._current_grid_visible())
+        grid_action.triggered.connect(self._set_current_grid_visible)
+
+        view_menu.addAction("Plot style", self._show_plot_style_dialog)
         menu.addSeparator()
 
         is_overlay = len(self._channels) > 1
@@ -473,7 +489,7 @@ class ScatterWindow(QWidget):
             # Solid colour of the active channel — same options as the render dropdown.
             current_lut = str(ch.get("lut", "Gray"))
             cmap_menu = menu.addMenu(f"Colormap  (active channel {active_ci + 1})")
-            for lut_name in CHANNEL_LUTS:
+            for lut_name in channel_colormap_names():
                 action = cmap_menu.addAction(lut_name)
                 action.setCheckable(True)
                 action.setChecked(not active_color_by and lut_name == current_lut)
@@ -490,7 +506,7 @@ class ScatterWindow(QWidget):
 
             cmap_menu = menu.addMenu("Colormap")
             current_cmap = self._cmap_combo.currentText()
-            for text in _NAMED_CMAPS:
+            for text in named_colormap_names():
                 action = cmap_menu.addAction(text)
                 action.setCheckable(True)
                 action.setChecked(text == current_cmap)
@@ -508,18 +524,8 @@ class ScatterWindow(QWidget):
             custom_action.setChecked(current_cmap.startswith("solid:custom:"))
             custom_action.triggered.connect(self._pick_solid_color)
 
-        bg_action = menu.addAction("Black Background")
-        bg_action.setCheckable(True)
-        bg_action.setChecked(self._background_is_black())
-        bg_action.triggered.connect(self._set_black_background)
-
         if self._axis_combo.currentText() == "3D":
             menu.addSeparator()
-            axis_action = menu.addAction("Axis")
-            axis_action.setCheckable(True)
-            axis_action.setChecked(self._show_3d_axis)
-            axis_action.triggered.connect(self._set_3d_axis_visible)
-
             box_action = menu.addAction("Bounding Box")
             box_action.setCheckable(True)
             box_action.setChecked(self._show_3d_bounding_box)
@@ -550,9 +556,12 @@ class ScatterWindow(QWidget):
             self._ensure_3d_built()
             self._apply_background(self._black_bg_check.isChecked())
             if self._3d_view is not None:
+                if self._3d_grid is not None:
+                    self._3d_grid.setVisible(self._show_3d_grid)
                 self._stack.setCurrentWidget(self._3d_view)
         else:
             self._stack.setCurrentWidget(self._plot_2d)
+            self._apply_2d_reference_visibility()
         self._apply_y_axis_direction()
         self._update_colorbar_visibility()
         self._last_axis_text = axis_text
@@ -614,6 +623,42 @@ class ScatterWindow(QWidget):
         else:
             self._apply_y_axis_direction()
             self._plot_2d.autoRange()
+
+    def _apply_2d_reference_visibility(self) -> None:
+        plot_item = self._plot_2d.getPlotItem()
+        for axis_name in ("left", "bottom"):
+            plot_item.showAxis(axis_name, show=self._show_2d_axis)
+        self._plot_2d.showGrid(
+            x=self._show_2d_grid, y=self._show_2d_grid, alpha=0.2
+        )
+
+    def _current_axis_visible(self) -> bool:
+        if self._axis_combo.currentText() == "3D":
+            return self._show_3d_axis
+        return self._show_2d_axis
+
+    def _set_current_axis_visible(self, checked: bool) -> None:
+        if self._axis_combo.currentText() == "3D":
+            self._set_3d_axis_visible(checked)
+            return
+        self._show_2d_axis = bool(checked)
+        self._apply_2d_reference_visibility()
+        self._save_view_state()
+
+    def _current_grid_visible(self) -> bool:
+        if self._axis_combo.currentText() == "3D":
+            return self._show_3d_grid
+        return self._show_2d_grid
+
+    def _set_current_grid_visible(self, checked: bool) -> None:
+        if self._axis_combo.currentText() == "3D":
+            self._show_3d_grid = bool(checked)
+            if self._3d_grid is not None:
+                self._3d_grid.setVisible(self._show_3d_grid)
+        else:
+            self._show_2d_grid = bool(checked)
+            self._apply_2d_reference_visibility()
+        self._save_view_state()
 
     def _reset_3d_camera(self, pos: np.ndarray | None = None) -> None:
         """Centre the 3D camera on the data."""
@@ -871,13 +916,14 @@ class ScatterWindow(QWidget):
         self._channels = []
         if self._dataset_idx is None:
             return
+        channel_luts = channel_colormap_names()
         for pos, (idx, ds) in enumerate(overlay_members(self._state, self._dataset_idx)):
             prev = previous.get(idx, {})
             self._channels.append({
                 "dataset_idx": idx,
                 "name": ds.name,
                 "visible": bool(prev.get("visible", True)),
-                "lut": prev.get("lut") or ds.state.get("overlay_lut") or ds.state.get("render_channel_lut") or CHANNEL_LUTS[pos % len(CHANNEL_LUTS)],
+                "lut": prev.get("lut") or ds.state.get("overlay_lut") or ds.state.get("render_channel_lut") or channel_luts[pos % len(channel_luts)],
                 "color_by": prev.get("color_by"),   # None = solid; else attribute
                 "loc_transform": ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"),
                 "transform": dict(prev.get("transform") or {}),
@@ -1199,6 +1245,16 @@ class ScatterWindow(QWidget):
         self._rebuild_channel_ui()
         self._update_overlay_title()
         saved = ds.state.get(self._view_state_key, {})
+        self._show_2d_axis = bool(saved.get("show_2d_axis", True))
+        self._show_3d_axis = bool(saved.get("show_3d_axis", True))
+        self._show_2d_grid = bool(saved.get("show_2d_grid", True))
+        self._show_3d_grid = bool(saved.get("show_3d_grid", True))
+        self._show_3d_bounding_box = bool(
+            saved.get("show_3d_bounding_box", True)
+        )
+        self._point_symbol = str(saved.get("point_symbol", "o"))
+        self._point_size = max(1, min(50, int(saved.get("point_size", 2))))
+        self._point_alpha = max(0, min(255, int(saved.get("point_alpha", 255))))
 
         self._axis_combo.blockSignals(True)
         axis_default = saved.get("axis", "XY")
@@ -1210,9 +1266,12 @@ class ScatterWindow(QWidget):
         if self._axis_combo.currentText() == "3D":
             self._ensure_3d_built()
             if self._3d_view is not None:
+                if self._3d_grid is not None:
+                    self._3d_grid.setVisible(self._show_3d_grid)
                 self._stack.setCurrentWidget(self._3d_view)
         else:
             self._stack.setCurrentWidget(self._plot_2d)
+        self._apply_2d_reference_visibility()
         self._update_colorbar_visibility()
 
         self._cmap_combo.blockSignals(True)
@@ -1227,8 +1286,6 @@ class ScatterWindow(QWidget):
         self._black_bg_check.setChecked(bool(saved.get("black_background", False)))
         self._black_bg_check.blockSignals(False)
         self._apply_background(self._black_bg_check.isChecked())
-        self._show_3d_axis = bool(saved.get("show_3d_axis", True))
-        self._show_3d_bounding_box = bool(saved.get("show_3d_bounding_box", True))
 
         # Populate colour-by combo (preserve selection if possible)
         old = self._cbar_combo.currentText()
@@ -1448,6 +1505,7 @@ class ScatterWindow(QWidget):
         self._roi_highlight_3d.setData(pos=pos, color=rgba, size=7.0, pxMode=True)
 
     def _lut_color(self, lut: str, alpha: int = 190) -> tuple[int, int, int, int]:
+        alpha = int(round(int(alpha) * self._point_alpha / 255.0))
         if lut in PURE_COLOR_RGB:
             r, g, b = PURE_COLOR_RGB[lut]
             return int(r), int(g), int(b), int(alpha)
@@ -1504,7 +1562,14 @@ class ScatterWindow(QWidget):
             self._scatter_2d.setData([], [])
             self._info_label.setText("No localisations pass the current filters.")
             return
-        self._scatter_2d.setData(x=np.concatenate(xs), y=np.concatenate(ys), brush=brushes, pen=None, size=2)
+        self._scatter_2d.setData(
+            x=np.concatenate(xs),
+            y=np.concatenate(ys),
+            brush=brushes,
+            pen=None,
+            size=self._point_size,
+            symbol=self._point_symbol,
+        )
         self._plot_2d.setLabel("bottom", "XYZ"[ci] + " (nm)")
         self._plot_2d.setLabel("left", "XYZ"[cj] + " (nm)")
         self._colorbar.setVisible(False)
@@ -1548,7 +1613,9 @@ class ScatterWindow(QWidget):
             return
         pos = np.vstack(pos_parts).astype(np.float32, copy=False)
         rgba = np.vstack(rgba_parts).astype(np.float32, copy=False)
-        self._3d_scatter.setData(pos=pos, color=rgba, size=3.0, pxMode=True)
+        self._3d_scatter.setData(
+            pos=pos, color=rgba, size=self._point_size_3d(), pxMode=True
+        )
         self._refresh_3d_reference_items()
         if not self._3d_camera_initialised:
             self._reset_3d_camera(pos)
@@ -1572,8 +1639,14 @@ class ScatterWindow(QWidget):
             "color_by": self._cbar_combo.currentText(),
             "colormap": self._cmap_combo.currentText(),
             "black_background": self._black_bg_check.isChecked(),
+            "show_2d_axis": bool(self._show_2d_axis),
             "show_3d_axis": bool(self._show_3d_axis),
+            "show_2d_grid": bool(self._show_2d_grid),
+            "show_3d_grid": bool(self._show_3d_grid),
             "show_3d_bounding_box": bool(self._show_3d_bounding_box),
+            "point_symbol": self._point_symbol,
+            "point_size": int(self._point_size),
+            "point_alpha": int(self._point_alpha),
             "axis": self._axis_combo.currentText(),
         }
 
@@ -1605,7 +1678,9 @@ class ScatterWindow(QWidget):
         self._scatter_2d.setData(
             x=x, y=y,
             brush=brushes,
-            pen=None, size=2,
+            pen=None,
+            size=self._point_size,
+            symbol=self._point_symbol,
         )
 
         self._colorbar.setLevels((vmin, vmax))
@@ -1661,8 +1736,9 @@ class ScatterWindow(QWidget):
         rgba = self._rgba_for_bins(color_bins, for_3d=True)
 
         pos = pos.astype(np.float32, copy=False)
-        point_size = 4.0 if not self._background_is_black() else 3.0
-        self._3d_scatter.setData(pos=pos, color=rgba, size=point_size, pxMode=True)
+        self._3d_scatter.setData(
+            pos=pos, color=rgba, size=self._point_size_3d(), pxMode=True
+        )
         self._refresh_3d_reference_items()
 
         # First-time camera setup
@@ -1770,15 +1846,25 @@ class ScatterWindow(QWidget):
         return bins, float(vmin), float(vmax)
 
     def _ensure_color_luts(self) -> None:
-        key = (self._cmap_combo.currentText(), self._lut_invert, id(self._cmap))
+        key = (
+            self._cmap_combo.currentText(),
+            self._lut_invert,
+            id(self._cmap),
+            self._point_alpha,
+        )
         if self._brush_lut_key == key and self._brush_lut is not None and self._rgba_lut is not None:
             return
-        qcolors = self._cmap.mapToQColor(np.linspace(0.0, 1.0, 256))
-        self._brush_lut = [pg.mkBrush(c) for c in qcolors]
-        self._rgba_lut = np.asarray(
-            [[c.redF(), c.greenF(), c.blueF(), c.alphaF()] for c in qcolors],
-            dtype=np.float32,
-        )
+        rgba = np.asarray(
+            self._cmap.getLookupTable(0.0, 1.0, 256, alpha=True),
+            dtype=np.uint8,
+        ).copy()
+        rgba[:, 3] = np.rint(
+            rgba[:, 3].astype(float) * self._point_alpha / 255.0
+        ).astype(np.uint8)
+        self._brush_lut = [
+            pg.mkBrush(*(int(channel) for channel in color)) for color in rgba
+        ]
+        self._rgba_lut = rgba.astype(np.float32) / 255.0
         self._brush_lut_key = key
 
     def _brushes_for_bins(self, bins: np.ndarray) -> list:
@@ -1808,9 +1894,9 @@ class ScatterWindow(QWidget):
                 if np.any(bright):
                     scale = np.clip(0.58 / luminance[bright], 0.55, 1.0)
                     rgb[bright] *= scale[:, None]
-                rgba[:, 3] = 1.0
+                rgba[:, 3] = self._point_alpha / 255.0
             else:
-                rgba[:, 3] = np.maximum(rgba[:, 3], 0.9)
+                rgba[:, 3] = self._point_alpha / 255.0
         return rgba
 
     def _invalidate_color_cache(self) -> None:
@@ -1827,6 +1913,7 @@ class ScatterWindow(QWidget):
                 on_invert_changed=self._on_lut_invert_changed,
                 on_gamma_changed=self._on_lut_gamma_changed,
                 parent=self,
+                state=self._state,
             )
         if not self._refresh_lut_dialog(capture_baseline=True):
             self._info_label.setText("LUT unavailable: no colour values to display.")
@@ -2003,7 +2090,6 @@ class ScatterWindow(QWidget):
         self._update_color()
 
     def _on_lut_cmap_changed(self, name: str, invert: bool) -> None:
-        from .lut_dialog import make_colormap
         self._lut_invert = bool(invert)
         self._cmap_combo.blockSignals(True)
         self._cmap_combo.setCurrentText(name)

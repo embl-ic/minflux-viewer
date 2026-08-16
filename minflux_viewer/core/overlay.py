@@ -12,7 +12,7 @@ PURE_COLOR_NAMES = (
 
 CHANNEL_LUTS = [
     *PURE_COLOR_NAMES,
-    "hot", "gray", "viridis", "plasma", "inferno", "magma", "turbo",
+    "hot", "jet", "HiLo", "glasbey", "viridis", "inferno", "gray",
 ]
 
 PURE_COLOR_RGB = {

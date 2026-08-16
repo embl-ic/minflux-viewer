@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..colormaps import colormap_lut
 from ..analysis import curvilinear_segmentation as cv
 
 _MAX_IMAGE_PX = 40_000_000
@@ -240,8 +241,7 @@ class CurvilinearSegmentationWindow(QDialog):
         self._ridge_img = pg.ImageItem()
         self._ridge_img.setZValue(0)
         try:
-            self._ridge_img.setLookupTable(
-                pg.colormap.get(_RIDGE_CMAP).getLookupTable(0.0, 1.0, 256))
+            self._ridge_img.setLookupTable(colormap_lut(_RIDGE_CMAP, alpha=False))
         except Exception:
             pass
         self._plot.addItem(self._ridge_img)

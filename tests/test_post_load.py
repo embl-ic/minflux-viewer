@@ -16,25 +16,59 @@ import pytest
 from minflux_viewer.core.dataset import AttrStore, DataProp, FileInfo, MinfluxDataset
 
 
-def test_fixed_rimf_is_default_and_migrates_existing_preferences():
-    from minflux_viewer.core.app_state import DEFAULT_PREFS, _migrate_prefs
+def test_no_rimf_correction_is_the_fresh_install_default():
+    """A new install applies **no** RIMF policy: neither *estimate RIMF from
+    anisotropy* nor *use fixed value* is on, so z is left as the file recorded it
+    until the user opts in."""
+    from minflux_viewer.core.app_state import DEFAULT_PREFS, default_prefs
 
     assert DEFAULT_PREFS["data"]["compute_rimf"] is False
-    assert DEFAULT_PREFS["plot"]["use_fixed_rimf"] is True
+    assert DEFAULT_PREFS["plot"]["use_fixed_rimf"] is False
     assert DEFAULT_PREFS["plot"]["rimf_value"] == pytest.approx(0.67)
+
+    fresh = default_prefs()
+    assert fresh["data"]["compute_rimf"] is False
+    assert fresh["plot"]["use_fixed_rimf"] is False
+    assert fresh["plot"]["rimf_value"] == pytest.approx(0.67)
+
+
+def test_fresh_prefs_are_exactly_the_declared_defaults():
+    """Regression: the fresh-install path is ``_migrate_prefs(deepcopy(DEFAULT_PREFS))``,
+    and a fresh dict has no ``_migrations`` key — so every one-shot migration used to
+    fire against the defaults and could silently overwrite them (``v036`` forced
+    ``use_fixed_rimf`` back to True, defeating any change to ``DEFAULT_PREFS``).
+    Changing a default must be enough on its own."""
+    from minflux_viewer.core.app_state import (
+        DEFAULT_PREFS, _MIGRATION_KEYS, default_prefs,
+    )
+
+    fresh = default_prefs()
+    assert set(fresh.pop("_migrations")) == set(_MIGRATION_KEYS)
+    assert fresh == DEFAULT_PREFS
+
+
+def test_migrations_still_rewrite_genuinely_old_saved_preferences():
+    """The one-shot blocks must keep working for preferences saved before them."""
+    from minflux_viewer.core.app_state import _migrate_prefs
 
     old = {
         "data": {"compute_rimf": True},
-        "plot": {"use_fixed_rimf": False, "rimf_value": 1.0},
+        "plot": {"use_fixed_rimf": False, "rimf_value": 1.0,
+                 "render_alignment_translation_px": 4.0,
+                 "render_alignment_rotation_deg": 0.5},
         "_migrations": {
             "v021_compute_show_defaults": True,
             "v035_update_check_optin": True,
         },
     }
     migrated = _migrate_prefs(old)
+    # v036 still applies to this saved set (it never ran here)
     assert migrated["data"]["compute_rimf"] is False
     assert migrated["plot"]["use_fixed_rimf"] is True
     assert migrated["plot"]["rimf_value"] == pytest.approx(0.67)
+    # …as does v037
+    assert "render_alignment_translation_px" not in migrated["plot"]
+    assert migrated["plot"]["render_alignment_rotation_deg"] == pytest.approx(0.1)
 
 
 def _make_3d_ds(n_traces: int = 40, per: int = 12) -> MinfluxDataset:
