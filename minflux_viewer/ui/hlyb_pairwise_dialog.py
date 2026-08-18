@@ -572,7 +572,7 @@ class HlyBPairwiseWindow(QDialog):
                 x=cent[:, ax] if (cent.shape[0] and self._centroid_check.isChecked()) else [],
                 y=cent[:, ay] if (cent.shape[0] and self._centroid_check.isChecked()) else [],
                 brush=pg.mkBrush(*cent_col), pen=None, size=5.0)
-            for key, idx, colour in (("links", pairs, link_col),
+            for key, idx, color in (("links", pairs, link_col),
                                      ("repeats", repeats, rep_col)):
                 if idx.shape[0]:
                     seg = self._segments(cent[:, [ax, ay]], idx)
@@ -580,7 +580,7 @@ class HlyBPairwiseWindow(QDialog):
                     # draws each pair as its own segment
                     connect = np.tile(np.array([1, 0], dtype=np.uint8), idx.shape[0])
                     page[key].setData(x=seg[:, 0], y=seg[:, 1], connect=connect,
-                                      pen=pg.mkPen(*colour, width=1))
+                                      pen=pg.mkPen(*color, width=1))
                 else:
                     page[key].setData(x=np.empty(0), y=np.empty(0))
         else:
@@ -592,10 +592,10 @@ class HlyBPairwiseWindow(QDialog):
             page["cent"].setData(
                 pos=(cent - anchor) if show_cent else np.empty((0, 3)),
                 color=tuple(c / 255 for c in cent_col), size=6.0)
-            for key, idx, colour in (("links", pairs, link_col),
+            for key, idx, color in (("links", pairs, link_col),
                                      ("repeats", repeats, rep_col)):
                 seg = self._segments(cent - anchor, idx) if idx.shape[0] else np.empty((0, 3))
-                page[key].setData(pos=seg, color=tuple(c / 255 for c in colour))
+                page[key].setData(pos=seg, color=tuple(c / 255 for c in color))
 
     # -- plot ---------------------------------------------------------
 

@@ -769,7 +769,7 @@ class ConvSegmentationWindow(QDialog):
         n = self._owner.add_segmentation_rois(
             self._idx, centers, side_nm=side,
             name_prefix=self._name_prefix(), source="conv_segmentation_2d",
-            names=names, log_message=log)   # stroke_color defaults to the system ROI colour
+            names=names, log_message=log)   # stroke_color defaults to the system ROI color
         if n:
             self._status_label.setText(f"Added {n} ROI(s) to the ROI Manager.")
 

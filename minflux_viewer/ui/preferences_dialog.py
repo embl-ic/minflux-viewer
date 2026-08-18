@@ -39,34 +39,39 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
+    QKeySequenceEdit,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QPushButton,
     QMessageBox,
-    QKeySequenceEdit,
+    QPushButton,
     QScrollArea,
     QSpinBox,
     QStackedWidget,
     QTableWidget,
-    QHeaderView,
     QVBoxLayout,
     QWidget,
 )
 
-from ..core.app_state import AppState, DEFAULT_PREFS
+from ..colors import DEFAULT_COLOR_PREFS, normalize_color_preferences
+from ..core.app_state import DEFAULT_PREFS, AppState
 from ..core.attributes import aggregation_description
 from ..core.iteration import POOL_KEYS
-from ..core.overlay import PURE_COLOR_NAMES
 from ..msr.descriptions import describe_path
+from .color_button import (
+    ColorSwatchButton,
+    choose_rgba,
+    custom_palette_rgba,
+    sync_custom_palette,
+)
 from .precision_render import (
     RENDER_METHOD_DEFAULT,
     RENDER_METHOD_LABELS,
     RENDER_METHOD_PREFERENCE_ORDER,
     RENDER_METHOD_TIPS,
 )
-
 
 # ---------------------------------------------------------------------------
 # Static option lists — match the Plot tab screenshot
@@ -78,19 +83,10 @@ _RENDER_CMAPS = [
     "Hot", "Jet", "HiLo", "Glasbey", "Viridis", "Inferno", "Gray",
 ]
 
-_ATTR_CMAPS = [
-    "single color", "Viridis", "Inferno", "Hot", "Jet", "HiLo", "Gray",
-]
-
 _SCATTER_CMAPS = ["glasbey", "jet", "HiLo", "hot", "viridis", "inferno", "gray"]
 
 _SCATTER_COLOR_BY_OPTIONS = ["tid", "efo", "cfr", "dcr", "den", "vld", "itr", "eco", "ecc"]
 
-_ROI_COLORS = list(PURE_COLOR_NAMES)
-
-# Overlay channel colour choices (Preferences > Appearance > Overlay).
-_OVERLAY_COLORS = list(PURE_COLOR_NAMES)
-_OVERLAY_DEFAULTS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"]
 _OVERLAY_ORDINALS = ["1st", "2nd", "3rd", "4th", "5th", "6th"]
 
 # Histogram Plot > "show trace value(s)": (stored aggregation mode, checkbox
@@ -112,7 +108,7 @@ _HIST_TRACE_VALUES = [
 # histogram's "Iter" dropdown (keys from core.iteration.POOL_KEYS).
 _HIST_ITER_TOOLTIPS = {
     "flatten": "all [flatten] — every iteration's rows pooled into one series.",
-    "stacked": "all [stacked] — one coloured series per iteration, with a legend.",
+    "stacked": "all [stacked] — one colored series per iteration, with a legend.",
     "sum": "all [sum] — each localization's iterations summed to one value.",
     "average": "all [average] — each localization's iterations averaged to one value.",
 }
@@ -266,6 +262,7 @@ class PreferencesDialog(QDialog):
         self._state = state
         # Work on a deep copy so Cancel really cancels
         self._draft: dict = copy.deepcopy(state.prefs)
+        sync_custom_palette(self._draft)
         self._page_keys: list[list[str]] = []
 
         self.setWindowTitle("Preferences")
@@ -334,7 +331,7 @@ class PreferencesDialog(QDialog):
 
         self._add_page("File", self._build_file_tab(), ["file"])
         self._add_page("Data", self._build_data_tab(), ["data"])
-        self._add_page("Appearance", self._build_plot_tab(), ["plot"])
+        self._add_page("Appearance", self._build_plot_tab(), ["plot", "colors"])
         self._add_page("Plugin", self._build_plugin_tab(), ["plugin", "file"])
         self._add_page("Shortcuts", self._build_shortcuts_tab(), ["shortcuts"])
         self._add_page("Attributes", self._build_attributes_tab(), ["attributes"])
@@ -656,6 +653,17 @@ class PreferencesDialog(QDialog):
 
     # -- Plot tab ----------------------------------------------------
 
+    def _color_button(self, initial, title: str) -> ColorSwatchButton:
+        button = ColorSwatchButton(initial)
+
+        def edit() -> None:
+            chosen = choose_rgba(self, button.rgba(), title)
+            if chosen is not None:
+                button.set_rgba(chosen)
+
+        button.clicked.connect(edit)
+        return button
+
     def _build_plot_tab(self) -> QWidget:
         w = QWidget()
         root = QVBoxLayout(w)
@@ -730,9 +738,21 @@ class PreferencesDialog(QDialog):
         form_attr.setHorizontalSpacing(12)
         form_attr.setVerticalSpacing(6)
 
-        self._plot_cmap_combo = QComboBox()
-        self._plot_cmap_combo.addItems(_ATTR_CMAPS)
-        form_attr.addRow("Colormap", self._plot_cmap_combo)
+        attr_colors = QHBoxLayout()
+        attr_colors.addWidget(QLabel("data"))
+        self._attribute_data_color = self._color_button(
+            DEFAULT_COLOR_PREFS["viewer"]["attribute_data"],
+            "Attribute Plot data color",
+        )
+        attr_colors.addWidget(self._attribute_data_color)
+        attr_colors.addWidget(QLabel("background"))
+        self._attribute_background_color = self._color_button(
+            DEFAULT_COLOR_PREFS["viewer"]["attribute_background"],
+            "Attribute Plot background color",
+        )
+        attr_colors.addWidget(self._attribute_background_color)
+        attr_colors.addStretch(1)
+        form_attr.addRow("Colors", attr_colors)
 
         root.addWidget(grp_attr)
 
@@ -740,6 +760,22 @@ class PreferencesDialog(QDialog):
         grp_hist = QGroupBox("Histogram Plot")
         hist_layout = QVBoxLayout(grp_hist)
         hist_layout.setSpacing(4)
+
+        hist_colors = QHBoxLayout()
+        hist_colors.addWidget(QLabel("data"))
+        self._histogram_data_color = self._color_button(
+            DEFAULT_COLOR_PREFS["viewer"]["histogram_data"],
+            "Histogram data color",
+        )
+        hist_colors.addWidget(self._histogram_data_color)
+        hist_colors.addWidget(QLabel("background"))
+        self._histogram_background_color = self._color_button(
+            DEFAULT_COLOR_PREFS["viewer"]["histogram_background"],
+            "Histogram background color",
+        )
+        hist_colors.addWidget(self._histogram_background_color)
+        hist_colors.addStretch(1)
+        hist_layout.addLayout(hist_colors)
 
         # Row 1 — trace read-outs offered in the histogram's "As" dropdown.
         hist_values = QHBoxLayout()
@@ -773,24 +809,16 @@ class PreferencesDialog(QDialog):
         form_filter.setHorizontalSpacing(12)
         form_filter.setVerticalSpacing(6)
 
-        range_row = QHBoxLayout()
-        self._filter_range_color_combo = QComboBox()
-        self._filter_range_color_combo.addItems(_ROI_COLORS)
-        range_row.addWidget(self._filter_range_color_combo)
-        range_row.addWidget(QLabel("transparency"))
-        self._filter_range_alpha = QSpinBox()
-        self._filter_range_alpha.setRange(0, 100)
-        self._filter_range_alpha.setToolTip("Filter fill opacity as percentage (0 = transparent, 100 = opaque).")
-        self._filter_range_alpha.setMinimumWidth(74)
-        self._filter_range_alpha.setSuffix(" %")
-        range_row.addWidget(self._filter_range_alpha)
-        range_row.addStretch()
-        form_filter.addRow("Range color", range_row)
+        self._filter_range_color = self._color_button(
+            DEFAULT_COLOR_PREFS["viewer"]["filter_range"], "Filter range color"
+        )
+        form_filter.addRow("Range color", self._filter_range_color)
 
         bounds_row = QHBoxLayout()
-        self._filter_bounds_color_combo = QComboBox()
-        self._filter_bounds_color_combo.addItems(_ROI_COLORS)
-        bounds_row.addWidget(self._filter_bounds_color_combo)
+        self._filter_bounds_color = self._color_button(
+            DEFAULT_COLOR_PREFS["viewer"]["filter_bounds"], "Filter bounds color"
+        )
+        bounds_row.addWidget(self._filter_bounds_color)
         bounds_row.addWidget(QLabel("size"))
         self._filter_bounds_size = QSpinBox()
         self._filter_bounds_size.setRange(1, 10)
@@ -800,6 +828,11 @@ class PreferencesDialog(QDialog):
         bounds_row.addStretch()
         form_filter.addRow("Bounds color", bounds_row)
 
+        self._filter_text_color = self._color_button(
+            DEFAULT_COLOR_PREFS["viewer"]["filter_text"], "Filter text color"
+        )
+        form_filter.addRow("Text color", self._filter_text_color)
+
         root.addWidget(grp_filter)
 
         # ── ROI ──────────────────────────────────────────────────────
@@ -808,18 +841,10 @@ class PreferencesDialog(QDialog):
         form_roi.setHorizontalSpacing(12)
         form_roi.setVerticalSpacing(6)
 
-        roi_color_row = QHBoxLayout()
-        self._roi_color_combo = QComboBox()
-        self._roi_color_combo.addItems(_ROI_COLORS)
-        roi_color_row.addWidget(self._roi_color_combo)
-        roi_color_row.addWidget(QLabel("transparency"))
-        self._roi_transparency = QSpinBox()
-        self._roi_transparency.setRange(0, 100)
-        self._roi_transparency.setMinimumWidth(74)
-        self._roi_transparency.setSuffix(" %")
-        roi_color_row.addWidget(self._roi_transparency)
-        roi_color_row.addStretch()
-        form_roi.addRow("Color", roi_color_row)
+        self._roi_color = self._color_button(
+            DEFAULT_COLOR_PREFS["viewer"]["roi_edge"], "ROI edge color"
+        )
+        form_roi.addRow("Color", self._roi_color)
 
         edge_row = QHBoxLayout()
         self._roi_edge_size = QSpinBox()
@@ -834,16 +859,25 @@ class PreferencesDialog(QDialog):
         self._roi_edit_widget_size = QSpinBox()
         self._roi_edit_widget_size.setRange(4, 32)
         self._roi_edit_widget_size.setMinimumWidth(62)
+        corner_tip = (
+            "Size of the ROI's corner handles — the mouse-interaction edit "
+            "widgets you drag to move, resize or rotate a ROI."
+        )
+        self._roi_edit_widget_size.setToolTip(corner_tip)
         widget_row.addWidget(self._roi_edit_widget_size)
         widget_row.addWidget(QLabel("px"))
         widget_row.addStretch()
-        form_roi.addRow("Edit widget size", widget_row)
+        corner_label = QLabel("Corner size")
+        corner_label.setToolTip(corner_tip)
+        form_roi.addRow(corner_label, widget_row)
 
+        # The highlight color is set in the COLOR dialog now, so the label no
+        # longer claims it follows the ROI color.
         self._roi_highlight_in_roi = QCheckBox(
-            "highlight data inside ROI region with ROI color")
+            "highlight data inside ROI region")
         self._roi_highlight_in_roi.setToolTip(
             "Highlight the in-ROI localizations on the view where the ROI is "
-            "drawn. Uncheck to draw the ROI without recolouring the data under it.")
+            "drawn. Uncheck to draw the ROI without recoloring the data under it.")
         form_roi.addRow("", self._roi_highlight_in_roi)
 
         self._roi_sync_highlight = QCheckBox(
@@ -864,13 +898,15 @@ class PreferencesDialog(QDialog):
         overlay_layout.addWidget(QLabel("dataset LUT/color setting"))
 
         overlay_row = QHBoxLayout()
-        self._overlay_color_combos: list[QComboBox] = []
+        self._overlay_color_buttons: list[ColorSwatchButton] = []
         for i in range(6):
             overlay_row.addWidget(QLabel(_OVERLAY_ORDINALS[i]))
-            combo = QComboBox()
-            combo.addItems(_OVERLAY_COLORS)
-            self._overlay_color_combos.append(combo)
-            overlay_row.addWidget(combo)
+            button = self._color_button(
+                DEFAULT_COLOR_PREFS["viewer"]["overlay"][i],
+                f"Overlay {_OVERLAY_ORDINALS[i]} channel color",
+            )
+            self._overlay_color_buttons.append(button)
+            overlay_row.addWidget(button)
             if i < 5:
                 overlay_row.addSpacing(14)
         overlay_row.addStretch()
@@ -1155,6 +1191,10 @@ class PreferencesDialog(QDialog):
         s = self._draft.get("shortcuts", {})
         a = self._draft.get("attributes", {})
         m = self._draft.get("mbm_handling", {})
+        colors = normalize_color_preferences(self._draft.get("colors", {}))
+        self._draft["colors"] = colors
+        viewer = colors["viewer"]
+        sync_custom_palette(self._draft)
 
         # File
         self._files_in_history.setValue(int(f.get("num_file_history", 5)))
@@ -1213,23 +1253,21 @@ class PreferencesDialog(QDialog):
                         _SCATTER_COLOR_BY_OPTIONS)
         self._set_combo(self._scatter_cmap_combo, p.get("scatter_cmap", "jet"), _SCATTER_CMAPS)
         self._set_combo_data(self._scatter_xy_origin_combo, p.get("scatter_xy_origin", "top_left"))
-        self._set_combo(self._plot_cmap_combo, p.get("attr_cmap", "single color"), _ATTR_CMAPS)
-        self._set_combo(self._roi_color_combo, p.get("roi_color", "Yellow"), _ROI_COLORS)
+        self._attribute_data_color.set_rgba(viewer["attribute_data"])
+        self._attribute_background_color.set_rgba(viewer["attribute_background"])
+        self._histogram_data_color.set_rgba(viewer["histogram_data"])
+        self._histogram_background_color.set_rgba(viewer["histogram_background"])
+        self._roi_color.set_rgba(viewer["roi_edge"])
         self._roi_highlight_in_roi.setChecked(bool(p.get("roi_highlight_in_roi", True)))
         self._roi_sync_highlight.setChecked(bool(p.get("roi_sync_highlight", True)))
-        self._roi_transparency.setValue(int(p.get("roi_transparency", 50)))
         self._roi_edge_size.setValue(int(p.get("roi_edge_size", 1)))
         self._roi_edit_widget_size.setValue(int(p.get("roi_edit_widget_size", 8)))
-        self._set_combo(self._filter_range_color_combo, p.get("filter_range_color", "Green"),
-                        _ROI_COLORS)
-        self._filter_range_alpha.setValue(int(p.get("filter_range_alpha", 45)))
-        self._set_combo(self._filter_bounds_color_combo, p.get("filter_bounds_color", "Green"),
-                        _ROI_COLORS)
+        self._filter_range_color.set_rgba(viewer["filter_range"])
+        self._filter_bounds_color.set_rgba(viewer["filter_bounds"])
+        self._filter_text_color.set_rgba(viewer["filter_text"])
         self._filter_bounds_size.setValue(int(p.get("filter_bounds_size", 1)))
-        overlay_colors = p.get("overlay_colors", _OVERLAY_DEFAULTS)
-        for i, combo in enumerate(self._overlay_color_combos):
-            default = overlay_colors[i] if i < len(overlay_colors) else _OVERLAY_DEFAULTS[i]
-            self._set_combo(combo, default, _OVERLAY_COLORS)
+        for button, color in zip(self._overlay_color_buttons, viewer["overlay"]):
+            button.set_rgba(color)
         hist_values = set(p.get("histogram_values", DEFAULT_PREFS["plot"]["histogram_values"]))
         for mode, cb in self._hist_trace_checks.items():
             cb.setChecked(mode in hist_values)
@@ -1272,6 +1310,10 @@ class PreferencesDialog(QDialog):
         s = self._draft.setdefault("shortcuts", {})
         a = self._draft.setdefault("attributes", {})
         m = self._draft.setdefault("mbm_handling", {})
+        colors = normalize_color_preferences(self._draft.get("colors", {}))
+        self._draft["colors"] = colors
+        viewer = colors["viewer"]
+        colors["custom_palette"] = custom_palette_rgba()
 
         # File
         f["num_file_history"] = int(self._files_in_history.value())
@@ -1325,18 +1367,20 @@ class PreferencesDialog(QDialog):
         p["scatter_color_by"] = self._scatter_color_by_combo.currentText()
         p["scatter_cmap"] = self._scatter_cmap_combo.currentText()
         p["scatter_xy_origin"] = str(self._scatter_xy_origin_combo.currentData() or "top_left")
-        p["attr_cmap"] = self._plot_cmap_combo.currentText()
-        p["roi_color"] = self._roi_color_combo.currentText()
+        viewer["attribute_data"] = list(self._attribute_data_color.rgba())
+        viewer["attribute_background"] = list(self._attribute_background_color.rgba())
+        viewer["histogram_data"] = list(self._histogram_data_color.rgba())
+        viewer["histogram_background"] = list(self._histogram_background_color.rgba())
+        viewer["roi_edge"] = list(self._roi_color.rgba())
         p["roi_highlight_in_roi"] = bool(self._roi_highlight_in_roi.isChecked())
         p["roi_sync_highlight"] = bool(self._roi_sync_highlight.isChecked())
-        p["roi_transparency"] = int(self._roi_transparency.value())
         p["roi_edge_size"] = int(self._roi_edge_size.value())
         p["roi_edit_widget_size"] = int(self._roi_edit_widget_size.value())
-        p["filter_range_color"] = self._filter_range_color_combo.currentText()
-        p["filter_range_alpha"] = int(self._filter_range_alpha.value())
-        p["filter_bounds_color"] = self._filter_bounds_color_combo.currentText()
+        viewer["filter_range"] = list(self._filter_range_color.rgba())
+        viewer["filter_bounds"] = list(self._filter_bounds_color.rgba())
+        viewer["filter_text"] = list(self._filter_text_color.rgba())
         p["filter_bounds_size"] = int(self._filter_bounds_size.value())
-        p["overlay_colors"] = [c.currentText() for c in self._overlay_color_combos]
+        viewer["overlay"] = [list(button.rgba()) for button in self._overlay_color_buttons]
         # Order follows _HIST_TRACE_VALUES / POOL_KEYS, which is the order the
         # histogram dropdowns use.
         hist_values = [
@@ -1409,9 +1453,11 @@ class PreferencesDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _accept(self) -> None:
+        previous_colors = copy.deepcopy(self._state.prefs.get("colors", {}))
         self._apply_widgets_to_draft()
         self._state.prefs = self._draft
         self._state.save_prefs()
+        self._state.notify_color_preferences_changed(previous_colors)
         self._state.log("Preferences saved.")
         self.accept()
 

@@ -210,7 +210,7 @@ def solve_channel_transform(src_xyz: np.ndarray, dst_xyz: np.ndarray, transform_
 
 
 #: Bead-fit XY RMSE (nm) above which the fiducial registration is flagged as poor.
-#: MINFLUX localization precision is ~1-5 nm and a good two-colour bead registration
+#: MINFLUX localization precision is ~1-5 nm and a good two-color bead registration
 #: is typically well under this; a larger residual means the beads disagree among
 #: themselves and a single transform cannot register the channels accurately.
 RMSE_WARN_NM = 20.0

@@ -139,6 +139,6 @@ def test_scale_bar_dialog_edit_prefill(_app):
     assert v["color"].getRgb()[:3] == (255, 0, 0)       # Red prefilled
     assert v["bg_color"] is None
     assert v["horizontal"] is False                     # Vertical prefilled
-    # custom (non-pure) colour round-trips through the Custom… entry
+    # custom (non-pure) color round-trips through the Custom… entry
     dlg2 = ScaleBarDialog(initial={**initial, "color": QColor(17, 34, 51)}, edit_mode=True)
     assert dlg2.values()["color"].getRgb()[:3] == (17, 34, 51)

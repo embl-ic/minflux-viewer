@@ -153,7 +153,7 @@ def test_dialog_attribute_picker_switches(qtbot):
 
 
 def test_stacked_iteration_differs_from_flatten(qtbot):
-    """'all [stacked]' draws one coloured series per iteration + a legend, while
+    """'all [stacked]' draws one colored series per iteration + a legend, while
     'all [flatten]' is a single pooled histogram — the fit basis (pooled values)
     is identical, only the display differs."""
     from minflux_viewer.core.app_state import AppState

@@ -12,7 +12,7 @@ so a pooled selection behaves like an ordinary per-localization attribute and
 can be filtered on.
 
 There is deliberately **no photon (``eco``) weighting** here. It was evaluated
-against a real 2-colour ratiometric ``.msr`` and removed: only ``dcr`` had any
+against a real 2-color ratiometric ``.msr`` and removed: only ``dcr`` had any
 statistical justification (variance ∝ 1/N), positions did not follow the CRLB
 scaling at all, and weighting a count by itself (``eco``) inflated it ~15 %.
 The remaining eco-weighted DCR pooling lives in

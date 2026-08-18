@@ -314,7 +314,7 @@ def _rimf_from_sizes(sx: float, sy: float, sz: float) -> float:
 _MODE_LABELS = ["Mean", "Median", "Max-bin", "Gaussian fit"]
 _DEFAULT_MODE = 3  # Gaussian fit (same default as MATLAB)
 
-# Per-axis plot colours (vivid on the dark plot background).
+# Per-axis plot colors (vivid on the dark plot background).
 _AXIS_COLORS = {"X": "#35d07f", "Y": "#4a90ff", "Z": "#ff5a5a"}  # green / blue / red
 _TRACE_SIZE_COLORS = {"XY": "#35d07f", "Z": "#ff5a5a", "XYZ": "#4a90ff"}  # green / red / blue
 
@@ -805,7 +805,7 @@ def _anisotropy_overlay_plot(fits: list[tuple[str, SizeFitResult, str]], mode: i
     pw.setTitle("Overlay, Z' = geomean( X , Y )")
     pw.setLabel("bottom", "log(distance in nm)")
     pw.setLabel("left", "count")
-    # No legend / values: the per-axis colours match the individual plots and
+    # No legend / values: the per-axis colors match the individual plots and
     # the markers are labelled X/Y/Z. The individual plots already show the
     # histograms; here we overlay only the smooth Gaussian curves (filled).
     peaks: list[dict] = []          # per-axis: position / height / width

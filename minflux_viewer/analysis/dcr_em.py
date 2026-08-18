@@ -4,7 +4,7 @@ minflux_viewer.analysis.dcr_em
 One-dimensional **two-component Gaussian mixture** fit by Expectation-Maximization,
 used to separate two fluorescent labels by their DCR (detector channel ratio).
 
-The DCR histogram of an early (m2205 / legacy) two-colour MINFLUX dataset is
+The DCR histogram of an early (m2205 / legacy) two-color MINFLUX dataset is
 bimodal: one label sits at a lower DCR, the other higher. EM recovers the two
 Gaussians (mean / sigma / weight); component **0 is always the lower-mean peak**
 (rendered red), component **1 the higher** (green).

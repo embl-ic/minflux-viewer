@@ -1,7 +1,7 @@
 """Application-owned colormaps for every MINFLUX Viewer display.
 
 The project deliberately does not delegate named maps to optional third-party
-map collections.  This module owns the colour stops and returns
+map collections.  This module owns the color stops and returns
 :class:`pyqtgraph.ColorMap` instances to the UI.
 
 Custom maps are application preferences.  Their JSON-compatible definitions
@@ -17,7 +17,12 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 import pyqtgraph as pg
 
-from .core.overlay import PURE_COLOR_NAMES, PURE_COLOR_RGB
+from .colors import (
+    canonical_solid_color_name,
+    is_solid_color,
+    solid_color_names,
+    solid_color_rgba,
+)
 
 # These are the intentionally small, user-facing set.  Each has a distinct job:
 # intensity/density, rainbow contrast, diverging residuals, categorical labels,
@@ -44,7 +49,7 @@ LEGACY_COLORMAP_NAMES: tuple[str, ...] = (
     "cividis",
 )
 
-# Black-to-colour LUT endpoints. These intentionally use saturated channel
+# Black-to-color LUT endpoints. These intentionally use saturated channel
 # primaries; ``PURE_COLOR_RGB`` remains the softer flat overlay/scatter palette.
 PURE_COLORMAP_RGB: dict[str, tuple[int, int, int]] = {
     "Red": (255, 0, 0),
@@ -153,21 +158,21 @@ def _normalise_stops(
         raise ValueError("Colormap stops must be a sequence.")
     if not 2 <= len(stops) <= _MAX_CUSTOM_STOPS:
         raise ValueError(
-            f"A custom colormap needs 2–{_MAX_CUSTOM_STOPS} colour stops."
+            f"A custom colormap needs 2–{_MAX_CUSTOM_STOPS} color stops."
         )
     parsed: list[tuple[float, tuple[int, int, int, int]]] = []
     for stop in stops:
         if not isinstance(stop, Sequence) or len(stop) != 2:
-            raise ValueError("Each colormap stop must contain a position and RGBA colour.")
+            raise ValueError("Each colormap stop must contain a position and RGBA color.")
         position = float(stop[0])
         rgba_raw = stop[1]
         if not np.isfinite(position) or not 0.0 <= position <= 1.0:
             raise ValueError("Colormap stop positions must be between 0 and 1.")
         if not isinstance(rgba_raw, Sequence) or len(rgba_raw) not in (3, 4):
-            raise ValueError("Colormap colours must have three or four channels.")
+            raise ValueError("Colormap colors must have three or four channels.")
         rgba = tuple(int(channel) for channel in rgba_raw)
         if any(channel < 0 or channel > 255 for channel in rgba):
-            raise ValueError("Colormap colour channels must be between 0 and 255.")
+            raise ValueError("Colormap color channels must be between 0 and 255.")
         if len(rgba) == 3:
             rgba = (*rgba, 255)
         parsed.append((position, rgba))
@@ -191,7 +196,7 @@ def validate_custom_colormap_name(name: str, *, replacing: str | None = None) ->
         raise ValueError("Custom colormap names may contain at most 64 characters.")
     key = clean.casefold()
     reserved = {
-        *(item.casefold() for item in PURE_COLOR_NAMES),
+        *(item.casefold() for item in solid_color_names()),
         *_CANONICAL_BY_KEY.keys(),
     }
     if key in reserved or key.startswith("solid:"):
@@ -294,7 +299,7 @@ def named_colormap_names(
 
 
 def channel_colormap_names(*, include_custom: bool = True) -> list[str]:
-    return [*PURE_COLOR_NAMES, *named_colormap_names(include_custom=include_custom)]
+    return [*solid_color_names(), *named_colormap_names(include_custom=include_custom)]
 
 
 def canonical_colormap_name(name: str) -> str:
@@ -305,8 +310,8 @@ def canonical_colormap_name(name: str) -> str:
         return text
     # Exact title case distinguishes the pure ``Gray`` ramp from the named
     # grayscale map ``gray``.
-    if text in PURE_COLOR_NAMES:
-        return text
+    if is_solid_color(text):
+        return canonical_solid_color_name(text)
     custom_name = _CUSTOM_NAME_BY_KEY.get(text.casefold())
     if custom_name is not None:
         return custom_name
@@ -320,27 +325,28 @@ def _solid_colormap(name: str) -> pg.ColorMap:
     color_part = name[6:]
     if color_part.startswith("custom:"):
         hex_value = color_part[7:].strip()
-        if len(hex_value) != 7 or not hex_value.startswith("#"):
-            raise ValueError(f"Invalid solid custom colour: {name}")
+        if len(hex_value) not in (7, 9) or not hex_value.startswith("#"):
+            raise ValueError(f"Invalid solid custom color: {name}")
         try:
-            rgb = tuple(int(hex_value[i : i + 2], 16) for i in (1, 3, 5))
+            raw = hex_value[1:]
+            values = tuple(int(raw[index:index + 2], 16) for index in range(0, len(raw), 2))
+            rgba = values + (255,) if len(values) == 3 else values
         except ValueError as exc:
-            raise ValueError(f"Invalid solid custom colour: {name}") from exc
+            raise ValueError(f"Invalid solid custom color: {name}") from exc
     else:
-        rgb = PURE_COLOR_RGB.get(color_part)
-        if rgb is None:
-            raise KeyError(f"Unknown solid colour: {color_part}")
-    rgba = np.asarray([[*rgb, 255], [*rgb, 255]], dtype=np.uint8)
-    return pg.ColorMap(np.asarray([0.0, 1.0]), rgba)
+        color_part = canonical_solid_color_name(color_part)
+        rgba = solid_color_rgba(color_part)
+    table = np.asarray([rgba, rgba], dtype=np.uint8)
+    return pg.ColorMap(np.asarray([0.0, 1.0]), table)
 
 
 def _base_colormap(name: str) -> pg.ColorMap:
     text = canonical_colormap_name(name)
     if text.startswith("solid:"):
         return _solid_colormap(text)
-    if text in PURE_COLOR_NAMES:
-        rgb = PURE_COLORMAP_RGB[text]
-        rgba = np.asarray([[0, 0, 0, 255], [*rgb, 255]], dtype=np.uint8)
+    if is_solid_color(text):
+        r, g, b, a = solid_color_rgba(text)
+        rgba = np.asarray([[0, 0, 0, a], [r, g, b, a]], dtype=np.uint8)
         return pg.ColorMap(np.asarray([0.0, 1.0]), rgba)
     if text in _CUSTOM_COLORMAPS:
         positions, rgba = _CUSTOM_COLORMAPS[text]

@@ -6,7 +6,7 @@ helpers that take a :class:`~minflux_viewer.core.roi.RoiRecord` and return a new
 record. Used by the render/scatter right-click *Convert to…* submenus, the ROI
 Manager *Convert* / *Property* dialogs and the **Process › ROI** menu.
 
-Conversions preserve ``context`` (dataset / view-plane / depth), colour and
+Conversions preserve ``context`` (dataset / view-plane / depth), color and
 coordinate space; geometry is computed in the source ROI's own 2-D view plane.
 Only ``QtGui`` geometry primitives are used (``QPainterPathStroker`` for the
 line→region buffer); SciPy supplies the convex hull.

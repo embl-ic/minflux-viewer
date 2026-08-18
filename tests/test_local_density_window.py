@@ -120,7 +120,7 @@ def test_3d_view_offered_for_3d_data_and_hidden_for_2d(_qt_app):
         win3d._view_combo.setCurrentIndex(1)                    # switch to 3-D
         _qt_app.processEvents()
         assert win3d._stack.count() == 2 and win3d._stack.currentIndex() == 1
-        win3d._set_cmap("viridis")                              # recolour must not raise
+        win3d._set_cmap("viridis")                              # recolor must not raise
     finally:
         win3d.close(); _qt_app.processEvents()
 

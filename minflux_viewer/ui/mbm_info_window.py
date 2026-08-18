@@ -4,7 +4,7 @@ Two views existed already, both inside the MSR reader and both reachable only
 while a ``.msr`` was parsed:
 
 * **Beads drift** (:class:`~minflux_viewer.plugins.msr_reader.beads_drift_dialog.BeadsDriftDialog`)
-  — per-bead drift traces over the acquisition, coloured by time;
+  — per-bead drift traces over the acquisition, colored by time;
 * **Beads and data region** (``AlignmentPlotWindow`` in its single-channel mode)
   — absolute bead positions against the localization extent, plus a per-bead
   table of total drift.

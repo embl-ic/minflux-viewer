@@ -2,8 +2,8 @@
 "Show Beads Drift" dialog for the MSR reader.
 
 One tab per dataset; each tab lists the MBM beads as rows of four plots
-(Y–X, X–t, Y–t, Z–t). Points are coloured by **time** (blue→red) so the drift
-trajectory's dynamics are visible; a horizontal colour bar shows the mapping.
+(Y–X, X–t, Y–t, Z–t). Points are colored by **time** (blue→red) so the drift
+trajectory's dynamics are visible; a horizontal color bar shows the mapping.
 
 Per-bead checkboxes mark beads for alignment, **linked across datasets by gri-ID**
 (the same physical bead) with logical-AND semantics. *Common* beads (present in
@@ -98,8 +98,8 @@ def _nice_time_ticks(lo: float, hi: float, target: int = 4) -> list[float]:
 
 
 class _TimeColorBar(QWidget):
-    """Horizontal begin→end colour legend for the time mapping, with a second
-    ruler underneath showing the actual acquisition time the colours map to."""
+    """Horizontal begin→end color legend for the time mapping, with a second
+    ruler underneath showing the actual acquisition time the colors map to."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -203,7 +203,7 @@ class BeadsDriftDialog(QDialog):
         root = QVBoxLayout(self)
         lines = (
             "Drift of each beam-monitoring (MBM) fiducial bead over the acquisition, "
-            "coloured by time (blue → red). Positions are re-zeroed to each bead's "
+            "colored by time (blue → red). Positions are re-zeroed to each bead's "
             "median, so the plots show excursion, not stage position.",
         ) if self._info_mode else (
             "Check bead drift and select beads for alignment; by default all common beads will be used.",
@@ -299,7 +299,7 @@ class BeadsDriftDialog(QDialog):
         self._update_colorbar_range(index)
 
     def _update_colorbar_range(self, index: int) -> None:
-        """Point the colour-bar's second ruler at the shown dataset's time span."""
+        """Point the color-bar's second ruler at the shown dataset's time span."""
         if not (0 <= index < len(self._datasets)):
             return
         beads = self._datasets[index]["beads"]

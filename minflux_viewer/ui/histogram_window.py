@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..colors import component_colors, viewer_color
 from ..core.app_state import AppState
 from ..core.attributes import (
     aggregation_description,
@@ -56,16 +57,10 @@ from ..utils.filters import TRACE_AGG_FUNCS, trace_agg_func
 from .filter_dialog import SmartBoundsSpinBox, _filter_spinner_values
 from .plot_format import plot_widget
 
-# Distinct per-iteration colours for the "all iterations" overlay.
-_ITER_COLORS = [
-    (31, 119, 180), (255, 127, 14), (44, 160, 44), (214, 39, 40),
-    (148, 103, 189), (140, 86, 75), (227, 119, 194), (127, 127, 127),
-    (188, 189, 34), (23, 190, 207),
-]
 
-
-def _iter_color(k: int) -> tuple[int, int, int]:
-    return _ITER_COLORS[k % len(_ITER_COLORS)]
+def _iter_color(k: int, prefs: dict | None = None) -> tuple[int, int, int, int]:
+    colors = list(component_colors(prefs, "functions", "Iteration series").values())
+    return colors[k % len(colors)] if colors else (70, 130, 180, 255)
 
 #: Trace read-outs offered in the "As" dropdown. Order and membership come from
 #: the shared registry so the histogram, the filter and the raw path can never
@@ -98,21 +93,6 @@ _ZOOM_TOOLTIPS = {
         "The height is re-fitted to the re-binned bars."
     ),
 }
-
-_COLOR_NAMES = {
-    "yellow": QColor(255, 221, 0),
-    "red": QColor(220, 40, 40),
-    "green": QColor(0, 160, 0),
-    "cyan": QColor(0, 180, 220),
-    "magenta": QColor(210, 60, 210),
-    "white": QColor(255, 255, 255),
-    "black": QColor(0, 0, 0),
-}
-
-
-def _named_color(name: str) -> QColor:
-    return QColor(_COLOR_NAMES.get(name.strip().lower(), QColor(0, 160, 0)))
-
 
 def _format_filter_report_number(value: float) -> str:
     if not np.isfinite(value):
@@ -270,8 +250,12 @@ class HistogramWindow(QWidget):
         view_box.sigRangeChanged.connect(lambda *_args: self._update_filter_edit_labels())
         self._original_mouse_drag_event = view_box.mouseDragEvent
         view_box.mouseDragEvent = self._zoom_mouse_drag_event
+        self._apply_plot_colors()
 
-        self._hist_item = pg.BarGraphItem(x=[], height=[], width=1, brush="steelblue")
+        self._hist_item = pg.BarGraphItem(
+            x=[], height=[], width=1,
+            brush=pg.mkBrush(*viewer_color(self._state.prefs, "histogram_data")),
+        )
         self._plot.addItem(self._hist_item)
         # Per-iteration overlay curves for the raw "all iterations" view.
         self._raw_items: list = []
@@ -407,6 +391,22 @@ class HistogramWindow(QWidget):
             # The plotted quantity changed because the old choice is gone.
             self._reset_for_new_data()
         self._remember_histogram_controls()
+        self.refresh_colors()
+
+    def _apply_plot_colors(self) -> None:
+        background = viewer_color(self._state.prefs, "histogram_background")
+        self._plot.setBackground(QColor(*background))
+        luminance = 0.2126 * background[0] + 0.7152 * background[1] + 0.0722 * background[2]
+        foreground = QColor(25, 25, 25) if luminance >= 145 else QColor(235, 235, 235)
+        for name in ("bottom", "left"):
+            axis = self._plot.getPlotItem().getAxis(name)
+            axis.setPen(foreground)
+            axis.setTextPen(foreground)
+
+    def refresh_colors(self) -> None:
+        self._apply_plot_colors()
+        self._draw()
+        self._restyle_filter_edit()
 
     def _populate_agg_modes(self) -> None:
         old = self._agg_combo.currentText()
@@ -725,7 +725,10 @@ class HistogramWindow(QWidget):
         counts, edges = np.histogram(vals, bins=edges)
         centers = 0.5 * (edges[:-1] + edges[1:])
         width = edges[1] - edges[0]
-        self._hist_item.setOpts(x=centers, height=counts, width=width * 0.95, brush="steelblue")
+        self._hist_item.setOpts(
+            x=centers, height=counts, width=width * 0.95,
+            brush=pg.mkBrush(*viewer_color(self._state.prefs, "histogram_data")),
+        )
         max_count = float(counts.max()) if counts.size else 1.0
         self._last_histogram_bounds = (float(edges[0]), float(edges[-1]), 0.0, max(max_count, 1.0))
 
@@ -771,11 +774,12 @@ class HistogramWindow(QWidget):
         for k, vals in series:
             counts, _ = np.histogram(vals, bins=edges)
             max_count = max(max_count, float(counts.max()) if counts.size else 1.0)
-            r, g, b = _iter_color(k)
+            r, g, b, color_alpha = _iter_color(k, self._state.prefs)
+            series_alpha = int(round(alpha * color_alpha / 255.0))
             # self._plot.plot(name=...) registers a legend sample reliably.
             item = self._plot.plot(
                 edges, counts, stepMode="center", fillLevel=0,
-                brush=(r, g, b, alpha), pen=pg.mkPen(r, g, b, width=1),
+                brush=(r, g, b, series_alpha), pen=pg.mkPen(r, g, b, color_alpha, width=1),
                 name=ordinal(k + 1),
             )
             self._raw_items.append(item)
@@ -1488,7 +1492,7 @@ class HistogramWindow(QWidget):
                 if fallback is not None:
                     region_lo, region_hi = fallback
 
-        range_color, range_alpha, bounds_color = self._filter_style()
+        range_color, range_alpha, bounds_color, text_color = self._filter_style()
         region = pg.LinearRegionItem(
             values=(region_lo, region_hi),
             orientation="vertical",
@@ -1501,7 +1505,7 @@ class HistogramWindow(QWidget):
         self._plot.addItem(region)
         report_label = pg.TextItem(
             "",
-            color=bounds_color,
+            color=text_color,
             anchor=(1.0, 0.0),
             fill=pg.mkBrush(255, 255, 255, 220),
             border=pg.mkPen(bounds_color, width=1),
@@ -1615,13 +1619,35 @@ class HistogramWindow(QWidget):
             selected = 0
         return f"{selected:,} / {ds.prop.num_loc:,}"
 
-    def _filter_style(self) -> tuple[QColor, int, QColor]:
-        prefs = self._state.prefs.get("plot", {})
-        range_color = _named_color(str(prefs.get("filter_range_color", "Green")))
-        bounds_color = _named_color(str(prefs.get("filter_bounds_color", "Green")))
-        alpha_pct = int(prefs.get("filter_range_alpha", 45))
-        alpha = round(alpha_pct * 255 / 100)
-        return range_color, max(0, min(alpha, 255)), bounds_color
+    def _filter_style(self) -> tuple[QColor, int, QColor, QColor]:
+        range_color = QColor(*viewer_color(self._state.prefs, "filter_range"))
+        bounds_color = QColor(*viewer_color(self._state.prefs, "filter_bounds"))
+        text_color = QColor(*viewer_color(self._state.prefs, "filter_text"))
+        return range_color, range_color.alpha(), bounds_color, text_color
+
+    def _restyle_filter_edit(self) -> None:
+        edit = self._filter_edit or {}
+        region = edit.get("region")
+        report = edit.get("report_label")
+        if region is None and report is None:
+            return
+        range_color, range_alpha, bounds_color, text_color = self._filter_style()
+        if region is not None:
+            region.setBrush(pg.mkBrush(
+                range_color.red(), range_color.green(), range_color.blue(), range_alpha
+            ))
+            for line in getattr(region, "lines", ()):
+                line.setPen(pg.mkPen(bounds_color, width=4))
+                try:
+                    line.setHoverPen(pg.mkPen(bounds_color, width=5))
+                except Exception:
+                    pass
+        if report is not None:
+            report.setColor(text_color)
+            try:
+                report.setBorder(pg.mkPen(bounds_color, width=1))
+            except Exception:
+                pass
 
     def _on_filter_scene_clicked(self, event) -> None:
         if not event.double():

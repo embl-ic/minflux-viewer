@@ -1,4 +1,4 @@
-"""Toned pure-colour LUT ramp (render view): black -> colour -> white so pixel
+"""Toned pure-color LUT ramp (render view): black -> color -> white so pixel
 values are perceptually distinguishable, gray stays plain black -> white."""
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from minflux_viewer.ui.render_window import pure_color_ramp
 _LUM = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
 
-def test_saturated_colour_spans_black_to_white():
+def test_saturated_color_spans_black_to_white():
     n = np.array([0.0, 0.5, 1.0], dtype=np.float32)
     r = pure_color_ramp(n, (1.0, 0.0, 0.0))
     assert np.allclose(r[0], [0, 0, 0])          # low  -> black
@@ -48,7 +48,7 @@ def test_shape_preserved_and_clamped():
 
 
 # -- white background (inverted / subtractive ramp) ---------------------------
-def test_white_bg_saturated_colour_white_to_colour_to_black():
+def test_white_bg_saturated_color_white_to_color_to_black():
     n = np.array([0.0, 0.5, 1.0], dtype=np.float32)
     r = pure_color_ramp(n, (1.0, 0.0, 0.0), white_bg=True)
     assert np.allclose(r[0], [1, 1, 1])          # no signal -> white (page)

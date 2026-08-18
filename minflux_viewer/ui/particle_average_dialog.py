@@ -1373,11 +1373,11 @@ class ParticleFitTableWindow(QWidget):
                 continue
             orig = int(it0.data(Qt.ItemDataRole.UserRole))
             is_grey = (orig not in self._passing) if active else (not self._accepted_by_index.get(orig, True))
-            colour = grey if is_grey else default
+            color = grey if is_grey else default
             for c in range(self._tbl.columnCount()):
                 it = self._tbl.item(tr, c)
                 if it is not None:
-                    it.setForeground(colour)
+                    it.setForeground(color)
 
     def _do_rebuild(self) -> None:
         if self._on_rebuild is None:

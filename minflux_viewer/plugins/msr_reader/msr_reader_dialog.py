@@ -5487,7 +5487,7 @@ class MsrReaderDialog(QWidget):
             self._state.suspend_auto_render = previous_suspend_auto_render
 
         # A single imported dataset is standalone, not an overlay channel — drop
-        # the provisional overlay assignment as well as the channel colour. The
+        # the provisional overlay assignment as well as the channel color. The
         # grouped path assigns these fields before all imports have succeeded;
         # a one-channel result must remain a standalone dataset.
         if len(imported_indices) == 1:

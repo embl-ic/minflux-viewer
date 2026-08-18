@@ -311,7 +311,7 @@ def fast_density_2d(x: np.ndarray, y: np.ndarray, bins: int = 256) -> np.ndarray
     Fast 2-D histogram-based density estimate.
 
     Assigns each point the bin count of the histogram cell it falls in.
-    Much faster than KD-tree range search; good enough for colour-coding
+    Much faster than KD-tree range search; good enough for color-coding
     scatter plots.
 
     Parameters
@@ -350,7 +350,7 @@ def fast_density_3d(
         1-D coordinate arrays in any units; all must be the same length.
     bins:
         Number of histogram bins per axis. ``64**3 = 262 144`` cells —
-        enough resolution for colour coding without using too much memory.
+        enough resolution for color coding without using too much memory.
 
     Returns
     -------

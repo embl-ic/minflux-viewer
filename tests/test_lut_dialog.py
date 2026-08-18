@@ -13,6 +13,8 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("pytestqt")
 
+from PyQt6.QtWidgets import QApplication
+
 from minflux_viewer.ui.lut_dialog import make_colormap
 
 
@@ -281,3 +283,253 @@ def test_owner_managed_auto_updates_lut_controls_without_double_emitting(qtbot):
     assert level_calls == []
     assert (dlg._lo, dlg._hi) == (12.5, 87.5)
     assert dlg._auto_btn.isChecked()
+
+
+# ------------------------------------------------- render LUT: alpha / invert
+def _render_window(qtbot):
+    from minflux_viewer.core.app_state import AppState, default_prefs
+    from minflux_viewer.core.dataset import build_localization_dataset
+    from minflux_viewer.ui.render_window import RenderWindow
+
+    state = AppState()
+    state.prefs = default_prefs()
+    state.save_prefs = lambda: None
+    state.add_dataset(build_localization_dataset(
+        name="lut-test",
+        x_nm=np.array([0.0, 10.0, 20.0]),
+        y_nm=np.array([0.0, 20.0, 10.0]),
+        z_nm=np.array([0.0, 5.0, 10.0]),
+    ))
+    win = RenderWindow(state, dataset_idx=0)
+    qtbot.addWidget(win)
+    return state, win
+
+
+def test_render_colormap_alpha_dims_the_channel(qtbot):
+    """Alpha was dropped entirely; it now scales intensity, as solid colors do."""
+    from minflux_viewer import colormaps as cm
+
+    state, win = _render_window(qtbot)
+    prefs: dict = {}
+    cm.store_custom_colormap(prefs, "lut_alpha_full", [[0.0, [0, 0, 0, 255]], [1.0, [255, 0, 0, 255]]])
+    cm.store_custom_colormap(prefs, "lut_alpha_faint", [[0.0, [0, 0, 0, 64]], [1.0, [255, 0, 0, 64]]])
+
+    ramp = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+    full = win._map_norm_to_rgb(ramp, "lut_alpha_full")
+    faint = win._map_norm_to_rgb(ramp, "lut_alpha_faint")
+
+    assert not np.allclose(full, faint)
+    assert faint[-1, 0] == pytest.approx(full[-1, 0] * 64 / 255, rel=0.02)
+
+
+def test_render_invert_flips_the_ramp_and_the_background(qtbot):
+    """Invert LUT was a no-op on the localization render."""
+    state, win = _render_window(qtbot)
+    ramp = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+
+    normal = win._map_norm_to_rgb(ramp, "hot", invert=False)
+    inverted = win._map_norm_to_rgb(ramp, "hot", invert=True)
+    assert not np.allclose(normal, inverted)
+    assert np.allclose(inverted[0], normal[-1], atol=0.02)
+
+    # Inverting also flips the page, so 'no signal' still matches the background.
+    assert win._white_bg is False
+    win._on_lut_invert_changed(True)
+    assert win._white_bg is True
+    assert win._channels[0]["lut_invert"] is True
+    win._on_lut_invert_changed(False)
+    assert win._white_bg is False
+    assert win._channels[0]["lut_invert"] is False
+
+
+def _close_stray_lut_dialogs():
+    """Hide LUT dialogs left visible by an earlier test in the same session."""
+    from minflux_viewer.ui.lut_dialog import LutDialog
+
+    for widget in QApplication.topLevelWidgets():
+        if isinstance(widget, LutDialog):
+            try:
+                widget.hide()
+            except RuntimeError:
+                continue
+    QApplication.processEvents()
+
+def test_only_one_lut_dialog_is_visible_app_wide(qtbot):
+    from minflux_viewer.ui.main_window import MainWindow
+
+    _close_stray_lut_dialogs()
+
+    state, render = _render_window(qtbot)
+    window = MainWindow(state)
+    qtbot.addWidget(window)
+    window.show()
+    window._show_render(0)
+    window._show_scatter(0)
+    rwin = window._render_windows[0]
+    swin = window._scatter_windows[0]
+    rwin.show()
+    swin.show()
+    for _ in range(8):
+        QApplication.processEvents()
+
+    def visible():
+        return [
+            name for name, view in (("render", rwin), ("scatter", swin))
+            if getattr(view, "_lut_dialog", None) is not None
+            and view._lut_dialog.isVisible()
+        ]
+
+    for view, expected in ((rwin, "render"), (swin, "scatter"), (rwin, "render")):
+        window._open_lut_on_view(view, 0)
+        QApplication.processEvents()
+        assert visible() == [expected]
+
+    # The render window no longer closes other views' dialogs on mere focus.
+    assert not hasattr(rwin, "_adopt_visible_lut_dialog")
+
+    # And it is literally one object, not one-visible-of-several.
+    from minflux_viewer.ui.lut_dialog import LutDialog
+    instances = [w for w in QApplication.topLevelWidgets() if isinstance(w, LutDialog)]
+    assert len(instances) == 1
+    assert instances[0] is state._shared_lut_dialog
+
+    window.close()
+    QApplication.processEvents()
+
+
+def test_shared_lut_dialog_is_closed_with_the_application(qtbot):
+    """It is parentless, so it would otherwise outlive the main window."""
+    from minflux_viewer.core.app_state import AppState, default_prefs
+    from minflux_viewer.core.dataset import build_localization_dataset
+    from minflux_viewer.ui.lut_dialog import LutDialog
+    from minflux_viewer.ui.main_window import MainWindow
+
+    _close_stray_lut_dialogs()
+
+    state = AppState()
+    state.prefs = default_prefs()
+    state.save_prefs = lambda: None
+    state.add_dataset(build_localization_dataset(
+        name="lut-shutdown",
+        x_nm=np.array([0.0, 10.0, 20.0]),
+        y_nm=np.array([0.0, 20.0, 10.0]),
+        z_nm=np.array([0.0, 5.0, 10.0]),
+    ))
+    window = MainWindow(state)
+    qtbot.addWidget(window)
+    window.show()
+    window._show_render(0)
+    rwin = window._render_windows[0]
+    rwin.show()
+    for _ in range(8):
+        QApplication.processEvents()
+
+    window._open_lut_on_view(rwin, 0)
+    for _ in range(4):
+        QApplication.processEvents()
+    assert state._shared_lut_dialog is not None
+    assert state._shared_lut_dialog.isVisible()
+
+    window.close()
+    for _ in range(10):
+        QApplication.processEvents()
+
+    assert state._shared_lut_dialog is None
+    survivors = [
+        w for w in QApplication.topLevelWidgets()
+        if isinstance(w, LutDialog) and w.isVisible()
+    ]
+    assert survivors == []
+
+    rwin.close()
+    QApplication.processEvents()
+
+
+def test_inverting_actually_repaints_the_background(qtbot):
+    """Invert set white_bg but the image still read black: the white composite
+    is itself an inversion, so applying the LUT flag again cancelled it out."""
+    state, win = _render_window(qtbot)
+    ramp = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+
+    # The white path must ignore the flag rather than double-invert.
+    plain = win._channel_rgb_white(ramp, "hot", invert=False)
+    flagged = win._channel_rgb_white(ramp, "hot", invert=True)
+    assert np.allclose(plain, flagged)
+
+    def zero_pixel():
+        channel = win._channels[0]
+        if win._white_bg:
+            return np.asarray(win._channel_rgb_white(ramp, channel["lut"]))[0]
+        return np.asarray(
+            win._map_norm_to_rgb(ramp, channel["lut"],
+                                 invert=channel.get("lut_invert", False))
+        )[0]
+
+    assert zero_pixel().mean() < 0.2                 # dark on the black page
+    win._on_lut_invert_changed(True)
+    assert win._white_bg is True
+    assert zero_pixel().mean() > 0.8                 # now light on the white page
+    win._on_lut_invert_changed(False)
+    assert zero_pixel().mean() < 0.2
+
+
+def test_lut_dialog_follows_focus_between_views(qtbot):
+    from minflux_viewer.ui.main_window import MainWindow
+
+    _close_stray_lut_dialogs()
+
+    from minflux_viewer.core.app_state import AppState, default_prefs
+    from minflux_viewer.core.dataset import build_localization_dataset
+
+    state = AppState()
+    state.prefs = default_prefs()
+    state.save_prefs = lambda: None
+    state.add_dataset(build_localization_dataset(
+        name="lut-focus",
+        x_nm=np.array([0.0, 10.0, 20.0]),
+        y_nm=np.array([0.0, 20.0, 10.0]),
+        z_nm=np.array([0.0, 5.0, 10.0]),
+    ))
+    window = MainWindow(state)
+    qtbot.addWidget(window)
+    window.show()
+    window._show_render(0)
+    window._show_scatter(0)
+    rwin = window._render_windows[0]
+    swin = window._scatter_windows[0]
+    rwin.show()
+    swin.show()
+    for _ in range(8):
+        QApplication.processEvents()
+
+    def owner():
+        return [
+            name for name, view in (("render", rwin), ("scatter", swin))
+            if getattr(view, "_lut_dialog", None) is not None
+            and view._lut_dialog.isVisible()
+        ]
+
+    window._open_lut_on_view(rwin, 0)
+    for _ in range(6):
+        QApplication.processEvents()
+    assert owner() == ["render"]
+    geometry = rwin._lut_dialog.geometry()
+
+    window._retarget_lut_dialog(swin)
+    for _ in range(6):
+        QApplication.processEvents()
+    assert owner() == ["scatter"]
+    assert swin._lut_dialog.geometry() == geometry, "should not jump"
+
+    window._retarget_lut_dialog(rwin)
+    for _ in range(6):
+        QApplication.processEvents()
+    assert owner() == ["render"]
+
+    # Focusing a view must never summon a dialog that was not open.
+    rwin._lut_dialog.close()
+    QApplication.processEvents()
+    window._retarget_lut_dialog(swin)
+    for _ in range(6):
+        QApplication.processEvents()
+    assert owner() == []

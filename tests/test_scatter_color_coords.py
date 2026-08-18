@@ -1,10 +1,10 @@
 """
-Regression test: colouring the scatter plot by a coordinate view (xnm/ynm/znm)
-must map values to a spread of LUT bins, not a single flat colour.
+Regression test: coloring the scatter plot by a coordinate view (xnm/ynm/znm)
+must map values to a spread of LUT bins, not a single flat color.
 
 xnm/ynm/znm are nm *views* of the loc_x/loc_y/loc_z store and are NOT keys in
-``ds.attr``; an early ``c_name in ds.attr`` guard used to reject them and colour
-every point with bin 0 (one colour regardless of colormap).
+``ds.attr``; an early ``c_name in ds.attr`` guard used to reject them and color
+every point with bin 0 (one color regardless of colormap).
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ def test_scatter_color_by_coordinate_varies(_qt_app, coord):
             None, None, None, ds, indices,
         )
         assert label == coord
-        # The coordinate values must actually drive the colour: more than one
+        # The coordinate values must actually drive the color: more than one
         # distinct LUT bin, spanning a real data range.
         assert np.unique(bins).size > 1
         assert vmax > vmin
@@ -81,10 +81,10 @@ def test_scatter_color_by_coordinate_varies(_qt_app, coord):
 
 
 def test_opening_lut_dialog_preserves_color_mapping(_qt_app):
-    """Opening the LUT dialog must REFLECT the current colour mapping, not change
+    """Opening the LUT dialog must REFLECT the current color mapping, not change
     it. Bug: setBounds() on the dialog's level lines re-clamped a line sitting
     outside the new range and emitted a stale level callback, which the scatter
-    recorded as manual levels and recoloured with (the plot 'turned one colour')."""
+    recorded as manual levels and recolored with (the plot 'turned one color')."""
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.ui.scatter_window import ScatterWindow
 
@@ -99,7 +99,7 @@ def test_opening_lut_dialog_preserves_color_mapping(_qt_app):
         idx = np.arange(ds.prop.num_loc)
         _, bins0, _, vmin0, vmax0 = win._color_bins_for_points(None, None, None, ds, idx)
         assert win._manual_color_levels is None
-        assert np.unique(bins0).size > 1                  # real spread of colours
+        assert np.unique(bins0).size > 1                  # real spread of colors
 
         win.open_lut_dialog()                             # must not alter the mapping
 
@@ -107,13 +107,13 @@ def test_opening_lut_dialog_preserves_color_mapping(_qt_app):
         win._invalidate_color_cache()
         _, bins1, _, vmin1, vmax1 = win._color_bins_for_points(None, None, None, ds, idx)
         assert (vmin1, vmax1) == (vmin0, vmax0)
-        assert np.array_equal(bins1, bins0)               # identical colours after open
+        assert np.array_equal(bins1, bins0)               # identical colors after open
     finally:
         win.close()
 
 
 def test_color_by_change_drops_manual_levels_and_autoscales(_qt_app):
-    """Changing the colour-by attribute must auto-scale to the NEW attribute's
+    """Changing the color-by attribute must auto-scale to the NEW attribute's
     range — a manual level range set for the old attribute must not linger."""
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.ui.scatter_window import ScatterWindow
@@ -140,7 +140,7 @@ def test_color_by_change_drops_manual_levels_and_autoscales(_qt_app):
 
 
 def test_lut_dialog_follows_color_by_range(_qt_app):
-    """With the LUT dialog open, switching colour-by refreshes the dialog's data
+    """With the LUT dialog open, switching color-by refreshes the dialog's data
     range (and UI) to the new attribute."""
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.ui.scatter_window import ScatterWindow

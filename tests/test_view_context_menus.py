@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 
@@ -14,7 +15,8 @@ pytest.importorskip("pyqtgraph")
 from PyQt6.QtCore import QPoint
 from PyQt6.QtWidgets import QApplication, QMenu
 
-from minflux_viewer.core.app_state import AppState
+from minflux_viewer.colors import configure_colors
+from minflux_viewer.core.app_state import AppState, default_prefs
 from minflux_viewer.core.dataset import build_localization_dataset
 
 
@@ -107,9 +109,6 @@ def test_render_view_menu_contains_axis_and_grid_in_order(monkeypatch, _qt_app):
 
 
 def test_render_colormap_menu_matches_scatter(monkeypatch, _qt_app):
-    from PyQt6.QtGui import QColor
-    from PyQt6.QtWidgets import QColorDialog
-
     from minflux_viewer.ui.render_window import RenderWindow
     from minflux_viewer.ui.scatter_window import ScatterWindow
 
@@ -122,22 +121,28 @@ def test_render_colormap_menu_matches_scatter(monkeypatch, _qt_app):
         scatter_cmap = _submenu(scatter_menu, "Colormap")
 
         assert _menu_texts(render_cmap) == _menu_texts(scatter_cmap)
-        assert _menu_texts(_submenu(render_cmap, "Solid color")) == _menu_texts(
+        render_solid = _submenu(render_cmap, "Solid color")
+        assert _menu_texts(render_solid) == _menu_texts(
             _submenu(scatter_cmap, "Solid color")
         )
+        # The one-off picker is gone: the list is the global COLOR registry.
+        assert "Custom..." not in _menu_texts(render_solid)
+        assert not hasattr(render, "_pick_solid_color")
+        assert not hasattr(scatter, "_pick_solid_color")
+    finally:
+        render.close()
+        scatter.close()
 
-        monkeypatch.setattr(
-            QColorDialog,
-            "getColor",
-            lambda *_args, **_kwargs: QColor("#123456"),
-        )
-        solid_menu = _submenu(render_cmap, "Solid color")
-        next(action for action in solid_menu.actions() if action.text() == "Custom...").trigger()
 
-        assert render._active_channel_lut() == "solid:custom:#123456"
+def test_saved_custom_solid_lut_still_renders(_qt_app):
+    """Removing the menu entry must not break views already saved with one."""
+    from minflux_viewer.ui.render_window import RenderWindow
+
+    render = RenderWindow(_state(), dataset_idx=0)
+    try:
         rgb = render._map_norm_to_rgb(
             np.asarray([0.0, 0.5, 1.0], dtype=np.float32),
-            render._active_channel_lut(),
+            "solid:custom:#123456",
         )
         np.testing.assert_allclose(rgb[0], 0.0)
         np.testing.assert_allclose(
@@ -147,7 +152,30 @@ def test_render_colormap_menu_matches_scatter(monkeypatch, _qt_app):
         np.testing.assert_allclose(rgb[2], 1.0)
     finally:
         render.close()
+
+
+def test_custom_solid_registry_reaches_render_and_scatter_menus(monkeypatch, _qt_app):
+    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.scatter_window import ScatterWindow
+
+    state = _state()
+    colors = copy.deepcopy(state.prefs["colors"])
+    colors["solid"].pop("Orange")
+    colors["solid"]["Ocean"] = [12, 34, 56, 78]
+    state.apply_color_preferences(colors)
+    expected = [*colors["solid"]]
+
+    render = RenderWindow(state, dataset_idx=0)
+    scatter = ScatterWindow(state, dataset_idx=0)
+    try:
+        render_menu = _capture_context_menu(monkeypatch, render._show_context_menu)
+        scatter_menu = _capture_context_menu(monkeypatch, scatter._show_context_menu)
+        assert _menu_texts(_submenu(_submenu(render_menu, "Colormap"), "Solid color")) == expected
+        assert _menu_texts(_submenu(_submenu(scatter_menu, "Colormap"), "Solid color")) == expected
+    finally:
+        render.close()
         scatter.close()
+        configure_colors(default_prefs())
 
 
 def test_scatter_plot_style_applies_and_persists(_qt_app):

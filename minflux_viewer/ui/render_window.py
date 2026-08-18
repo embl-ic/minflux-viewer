@@ -45,7 +45,6 @@ from PyQt6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QColorDialog,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -66,15 +65,21 @@ from scipy.ndimage import affine_transform, zoom
 from .. import resource_path
 from ..colormaps import (
     BUILTIN_COLORMAP_NAMES,
-    PURE_COLORMAP_RGB,
     canonical_colormap_name,
     colormap_lut,
     make_colormap,
     named_colormap_names,
 )
+from ..colors import (
+    is_solid_color,
+    normalize_rgba,
+    rgba_hex,
+    solid_color_names,
+    solid_color_rgba,
+    viewer_color,
+)
 from ..core.app_state import AppState
 from ..core.overlay import (
-    PURE_COLOR_NAMES,
     apply_display_transform_nm,
     dataset_group_id,
     identity_matrix4,
@@ -111,7 +116,6 @@ _DEBOUNCE_MS   = 25      # delay between view change and re-render
 _COLORMAPS     = list(BUILTIN_COLORMAP_NAMES)
 _ORIENTATIONS  = ["XY", "XZ", "YZ", "3D"]
 _RENDER_ORIENTATIONS = {"XY", "XZ", "YZ"}
-_PURE_COLOR_LUTS = list(PURE_COLOR_NAMES)
 _IMAGEJ_AUTO_THRESHOLD = 5000
 _IMAGEJ_AUTO_RESET_THRESHOLD = 10
 _IMAGEJ_AUTO_HIST_BINS = 256
@@ -120,23 +124,29 @@ _LOCALIZATION_AUTO_HIGH_PERCENTILE = 95.0
 _SIGMA_SLIDER_STEP_NM = 0.1
 _ALIGNMENT_PREVIEW_MAX_DIM = 512
 _ALIGNMENT_PREVIEW_INTERVAL_MS = 16
-_CHANNEL_COLORS = {
-    name: tuple(float(channel) / 255.0 for channel in PURE_COLORMAP_RGB[name])
-    for name in PURE_COLOR_NAMES
-}
 _CUSTOM_SOLID_PREFIX = "solid:custom:"
 
 
-def _render_solid_rgb(lut: str) -> tuple[float, float, float] | None:
-    """Resolve a solid-color choice to the hue used by the render ramp."""
-    if lut in _CHANNEL_COLORS:
-        return _CHANNEL_COLORS[lut]
+def _channel_invert(channel: dict) -> bool:
+    """Whether this channel's LUT is inverted (LUT dialog ▸ Invert LUT)."""
+    return bool(channel.get("lut_invert", False))
+
+
+def _render_solid_rgba(lut: str) -> tuple[float, float, float, float] | None:
+    """Resolve a solid-color LUT to normalized RGBA."""
+    solid_name = lut[6:] if lut.startswith("solid:") else lut
+    if is_solid_color(solid_name):
+        rgba = solid_color_rgba(solid_name)
+        return tuple(channel / 255.0 for channel in rgba)  # type: ignore[return-value]
     if not lut.startswith(_CUSTOM_SOLID_PREFIX):
         return None
-    color = QColor(lut[len(_CUSTOM_SOLID_PREFIX) :])
-    if not color.isValid():
-        return None
-    return color.redF(), color.greenF(), color.blueF()
+    rgba = normalize_rgba(lut[len(_CUSTOM_SOLID_PREFIX) :])
+    return tuple(channel / 255.0 for channel in rgba)  # type: ignore[return-value]
+
+
+def _render_solid_rgb(lut: str) -> tuple[float, float, float] | None:
+    rgba = _render_solid_rgba(lut)
+    return None if rgba is None else rgba[:3]
 
 
 def fixed_gaussian_sigma_limits_nm(
@@ -221,16 +231,16 @@ def localization_render_auto_levels(
 
 
 def pure_color_ramp(norm, color, *, white_bg: bool = False) -> np.ndarray:
-    """Map normalized intensity ``[0,1]`` to a **toned** RGB ramp for a pure colour.
+    """Map normalized intensity ``[0,1]`` to a **toned** RGB ramp for a pure color.
 
-    Black background (default): ``black → colour → white`` (two linear segments), so
+    Black background (default): ``black → color → white`` (two linear segments), so
     the perceived **lightness** spans the full range like an 8-bit grayscale —
     different pixel values stay distinguishable even for a saturated hue (a plain
-    ``norm·hue`` ramp keeps a saturated colour perceptually dark: e.g. full red is
+    ``norm·hue`` ramp keeps a saturated color perceptually dark: e.g. full red is
     only ~30 % as light as white). Gray/white (all components ≈1) degenerate to a
     plain ``black → white`` ramp.
 
-    White background (``white_bg=True``): the inverse, ``white → colour → black`` —
+    White background (``white_bg=True``): the inverse, ``white → color → black`` —
     no signal is white (the page), signal darkens toward the hue and then to black
     (gray → plain ``white → black``, the classic inverted publication render).
 
@@ -242,21 +252,21 @@ def pure_color_ramp(norm, color, *, white_bg: bool = False) -> np.ndarray:
     if not white_bg:
         if is_gray:                                     # gray → linear black → white
             return np.clip(n * col, 0.0, 1.0).astype(np.float32)
-        lo = np.minimum(2.0 * n, 1.0)                   # black → colour over [0, 0.5]
-        hi = np.clip(2.0 * n - 1.0, 0.0, 1.0)           # colour → white over [0.5, 1]
+        lo = np.minimum(2.0 * n, 1.0)                   # black → color over [0, 0.5]
+        hi = np.clip(2.0 * n - 1.0, 0.0, 1.0)           # color → white over [0.5, 1]
         return np.clip(col * lo + (1.0 - col) * hi, 0.0, 1.0).astype(np.float32)
     if is_gray:                                         # gray → linear white → black
         g = np.clip(1.0 - n, 0.0, 1.0)
         return np.broadcast_to(g, g.shape[:-1] + (3,)).astype(np.float32)
-    s = np.clip(2.0 * n, 0.0, 1.0)                      # white → colour over [0, 0.5]
-    t = np.clip(2.0 * n - 1.0, 0.0, 1.0)                # colour → black over [0.5, 1]
-    first = (1.0 - s) + s * col                         # white → colour
+    s = np.clip(2.0 * n, 0.0, 1.0)                      # white → color over [0, 0.5]
+    t = np.clip(2.0 * n - 1.0, 0.0, 1.0)                # color → black over [0.5, 1]
+    first = (1.0 - s) + s * col                         # white → color
     return np.clip(first * (1.0 - t), 0.0, 1.0).astype(np.float32)
 
 
 def _luminance_clamped(rgb, max_lum: float = 0.72) -> tuple[float, float, float]:
-    """Darken a colour (preserving hue) if it is too bright to read on a white
-    background. Colours at/under *max_lum* (Red, Green, Blue, Magenta, hot's
+    """Darken a color (preserving hue) if it is too bright to read on a white
+    background. Colors at/under *max_lum* (Red, Green, Blue, Magenta, hot's
     mid orange…) pass through; near-white ones (Yellow/Gray channels, the bright
     end of warm colormaps) are scaled down to *max_lum* luminance."""
     r, g, b = (float(rgb[0]), float(rgb[1]), float(rgb[2]))
@@ -1058,6 +1068,20 @@ class RenderWindow(QWidget):
         if getattr(self, "_roi_overlay", None) is not None:
             self._roi_overlay.refresh()
 
+    def refresh_global_colors(self, *, reset_overlay: bool = False) -> None:
+        """Refresh only color-derived UI and composition state."""
+        if reset_overlay:
+            self._refresh_from_dataset()
+            return
+        self._rebuild_channel_ui()
+        self._compose_from_cache()
+        volume = getattr(self, "_volume_window", None)
+        if volume is not None and hasattr(volume, "_refresh_from_render"):
+            try:
+                volume._refresh_from_render()
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     # UI
     # ------------------------------------------------------------------
@@ -1219,7 +1243,7 @@ class RenderWindow(QWidget):
         }
         self._channels = []
         from ..core.overlay import overlay_color_cycle
-        # Channel colours from Preferences > Appearance > Overlay (+ Gray fallback
+        # Channel colors from Preferences > Appearance > Overlay (+ Gray fallback
         # for a 7th channel beyond the configured cycle).
         color_cycle = list(overlay_color_cycle(self._state.prefs)) + ["Gray"]
         active_group = None
@@ -1588,7 +1612,7 @@ class RenderWindow(QWidget):
                 self._style_channel_swatch(self._channel_rows[ch_idx][1], lut)
             self._compose_from_cache()
             self._sync_volume_display_state()
-            # Recolour the B/C histogram if this is the active channel.
+            # Recolor the B/C histogram if this is the active channel.
             if ch_idx == self._active_channel_index():
                 self._sync_bc_dialog()
                 self.sync_lut_dialog()
@@ -2469,10 +2493,10 @@ class RenderWindow(QWidget):
         return np.clip(rgb.reshape(-1, 3), 0.0, 1.0)
 
     def _histogram_bar_color(self) -> tuple[float, float, float]:
-        """One representative colour for the active channel's B/C histogram.
+        """One representative color for the active channel's B/C histogram.
 
-        Solid-colour channels (Red/Green/…) use their pure colour; gradient
-        colormaps (hot/jet/…) use their mid (~127th) LUT colour as a stand-in
+        Solid-color channels (Red/Green/…) use their pure color; gradient
+        colormaps (hot/jet/…) use their mid (~127th) LUT color as a stand-in
         for the whole map. Either way the result is luminance-clamped so it
         stays visible on the white histogram background (a per-bin gradient
         made bright bins vanish against white)."""
@@ -2560,7 +2584,7 @@ class RenderWindow(QWidget):
 
     def _sync_bc_dialog(self) -> None:
         """Point the open B/C dialog at the active channel: its pixel histogram
-        (coloured with that channel's LUT) and its own contrast levels."""
+        (colored with that channel's LUT) and its own contrast levels."""
         dlg = self._bc_dialog
         if dlg is None or not dlg.isVisible():
             return
@@ -2692,9 +2716,9 @@ class RenderWindow(QWidget):
         tile = self._transformed_tile(preview[ch_idx], channel)
         norm = self._normalized_tile(tile, channel)
         if self._white_bg:
-            rgb = self._channel_rgb_white(norm, channel["lut"])
+            rgb = self._channel_rgb_white(norm, channel["lut"], invert=_channel_invert(channel))
         else:
-            rgb = self._map_norm_to_rgb(norm, channel["lut"])
+            rgb = self._map_norm_to_rgb(norm, channel["lut"], invert=_channel_invert(channel))
         return np.rint(np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
 
     @staticmethod
@@ -2795,33 +2819,43 @@ class RenderWindow(QWidget):
 
         if self._white_bg:
             # Subtractive: start from white, each channel *multiplies* it toward its
-            # own white→colour→black ramp — no signal stays white, signal darkens,
+            # own white→color→black ramp — no signal stays white, signal darkens,
             # overlaps darken further (ink-on-paper / inverted-LUT model).
             rgb = np.ones((h, w, 3), dtype=np.float32)
             for idx in visible:
                 tile = self._transformed_tile(scalar[idx], self._channels[idx])
                 norm = self._normalized_tile(tile, self._channels[idx])
-                rgb *= self._channel_rgb_white(norm, self._channels[idx]["lut"])
+                rgb *= self._channel_rgb_white(norm, self._channels[idx]["lut"], invert=_channel_invert(self._channels[idx]))
         else:
             # Additive: start from black, channels add light (bright-on-black).
             rgb = np.zeros((h, w, 3), dtype=np.float32)
             for idx in visible:
                 tile = self._transformed_tile(scalar[idx], self._channels[idx])
                 norm = self._normalized_tile(tile, self._channels[idx])
-                rgb += self._map_norm_to_rgb(norm, self._channels[idx]["lut"])
+                rgb += self._map_norm_to_rgb(norm, self._channels[idx]["lut"], invert=_channel_invert(self._channels[idx]))
         np.clip(rgb, 0.0, 1.0, out=rgb)
 
         rgba = np.ones((h, w, 4), dtype=np.float32)
         rgba[..., :3] = rgb
         return rgba
 
-    def _channel_rgb_white(self, norm: np.ndarray, lut: str) -> np.ndarray:
-        """Per-channel RGB for a **white** background: pure colours use the inverted
-        ``white→colour→black`` ramp; named colormaps are inverted (low ≈ white)."""
-        solid_rgb = _render_solid_rgb(lut)
-        if solid_rgb is not None:
-            return pure_color_ramp(norm, solid_rgb, white_bg=True)
-        return np.clip(1.0 - self._map_norm_to_rgb(norm, lut), 0.0, 1.0).astype(np.float32)
+    def _channel_rgb_white(self, norm: np.ndarray, lut: str, *, invert: bool = False) -> np.ndarray:
+        """Per-channel RGB for a **white** background: pure colors use the inverted
+        ``white→color→black`` ramp; named colormaps are inverted (low ≈ white).
+
+        ``invert`` is accepted for a uniform call signature but deliberately NOT
+        applied: this composite already *is* the inversion (``1 - rgb`` / the
+        white-background ramp).  Applying the LUT's invert flag on top cancels
+        it out — the page turned white while the image still read black.
+        """
+        del invert                       # see docstring
+        solid = _render_solid_rgba(lut)
+        if solid is not None:
+            ramp = pure_color_ramp(norm, solid[:3], white_bg=True)
+            return (1.0 - solid[3] * (1.0 - ramp)).astype(np.float32)
+        return np.clip(
+            1.0 - self._map_norm_to_rgb(norm, lut), 0.0, 1.0
+        ).astype(np.float32)
 
     def _transformed_tile(self, tile: np.ndarray, ch: dict) -> np.ndarray:
         transform = ch.get("transform") or {}
@@ -2893,28 +2927,35 @@ class RenderWindow(QWidget):
         safe = np.nan_to_num(tile.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
         norm = np.clip((safe - float(lo)) / max(float(hi) - float(lo), 1e-12), 0.0, 1.0)
         # Per-channel gamma (LUT dialog): warp the normalised value before the
-        # colour ramp. <1 brightens mid-tones, >1 darkens them.
+        # color ramp. <1 brightens mid-tones, >1 darkens them.
         gamma = float(ch.get("gamma", 1.0) or 1.0)
         if gamma > 0.0 and abs(gamma - 1.0) > 1e-6:
             norm = np.power(norm, gamma, dtype=np.float32)
         return norm
 
-    def _map_norm_to_rgb(self, norm: np.ndarray, lut: str) -> np.ndarray:
-        solid_rgb = _render_solid_rgb(lut)
-        if solid_rgb is not None:
-            # black → colour → white so a pure colour spans a grayscale-like tonal
+    def _map_norm_to_rgb(
+        self, norm: np.ndarray, lut: str, *, invert: bool = False
+    ) -> np.ndarray:
+        solid = _render_solid_rgba(lut)
+        if solid is not None:
+            # black → color → white so a pure color spans a grayscale-like tonal
             # (lightness) range; different pixel values stay appreciable.
-            return pure_color_ramp(norm, solid_rgb)
+            ramp = 1.0 - norm if invert else norm
+            return (pure_color_ramp(ramp, solid[:3]) * solid[3]).astype(np.float32)
         try:
-            table = colormap_lut(lut, alpha=False)
+            table = colormap_lut(lut, alpha=True, invert=invert)
         except (KeyError, ValueError) as exc:
             print(f"Unknown colormap '{lut}'; using hot: {exc}")
-            table = colormap_lut("hot", alpha=False)
+            table = colormap_lut("hot", alpha=True, invert=invert)
         table = np.asarray(table, dtype=np.float32)
         if table.max() > 1.0:
             table /= 255.0
         idx = np.clip((norm * 255).astype(np.int16), 0, 255)
-        return table[idx, :3]
+        picked = table[idx]
+        # Alpha scales intensity, exactly as it does for a solid color above.
+        # The render composite is opaque (channels are summed over the page), so
+        # there is nothing to blend against: a low alpha dims the channel.
+        return (picked[..., :3] * picked[..., 3:4]).astype(np.float32)
 
     # ------------------------------------------------------------------
     # Tile helpers
@@ -2958,11 +2999,6 @@ class RenderWindow(QWidget):
             return
         except (KeyError, ValueError) as exc:
             print(f"Failed to load colormap '{name}': {exc}")
-
-    def _pick_solid_color(self) -> None:
-        color = QColorDialog.getColor(parent=self)
-        if color.isValid():
-            self._on_cmap_changed(f"{_CUSTOM_SOLID_PREFIX}{color.name()}")
 
     # ------------------------------------------------------------------
     # Brightness & Contrast
@@ -3137,19 +3173,19 @@ class RenderWindow(QWidget):
 
     def open_lut_dialog(self) -> None:
         """Open the rich LUT editor for this render window."""
-        from .lut_dialog import LutDialog
+        from .lut_dialog import shared_lut_dialog
 
-        if getattr(self, "_lut_dialog", None) is None:
-            self._lut_dialog = LutDialog(
-                on_levels_changed=self._on_levels_changed,
-                on_cmap_changed=self._on_lut_cmap_changed,
-                on_invert_changed=self._on_lut_invert_changed,
-                on_reset=self._on_bc_reset,
-                on_gamma_changed=self._on_lut_gamma_changed,
-                parent=self,
-                on_auto=self._on_bc_auto,
-                state=self._state,
-            )
+        # One dialog application-wide, rebound to this view.
+        shared_lut_dialog(
+            self,
+            on_levels_changed=self._on_levels_changed,
+            on_cmap_changed=self._on_lut_cmap_changed,
+            on_invert_changed=self._on_lut_invert_changed,
+            on_reset=self._on_bc_reset,
+            on_gamma_changed=self._on_lut_gamma_changed,
+            on_auto=self._on_bc_auto,
+            state=self._state,
+        )
         if not self._refresh_lut_dialog(capture_baseline=True):
             self._lut_dialog.show(); self._lut_dialog.raise_()
             return
@@ -3172,6 +3208,12 @@ class RenderWindow(QWidget):
             lo, hi = self._manual_levels
         else:
             lo, hi = data_lo, data_hi
+        # Read the flag back off the active channel, so switching channel shows
+        # that channel's own invert state rather than the last one edited.
+        if self._channels:
+            i = self._active_channel_index()
+            if 0 <= i < len(self._channels):
+                self._lut_invert = _channel_invert(self._channels[i])
         self._lut_invert = bool(getattr(self, "_lut_invert", False))
         dlg.load_image(
             pixels=img, data_lo=data_lo, data_hi=data_hi,
@@ -3200,6 +3242,7 @@ class RenderWindow(QWidget):
         self._lut_invert = invert
         self._active_cmap = name
         if self._channels:
+            self._set_channel_invert(invert)
             self._on_channel_lut(self._active_channel_index(), name)
             return
         try:
@@ -3208,9 +3251,27 @@ class RenderWindow(QWidget):
         except Exception as exc:
             print(f"LUT cmap change failed: {exc}")
 
+    def _set_channel_invert(self, invert: bool) -> None:
+        """Store the inverted-LUT flag on the active channel."""
+        i = self._active_channel_index()
+        if 0 <= i < len(self._channels):
+            self._channels[i]["lut_invert"] = bool(invert)
+
     def _on_lut_invert_changed(self, invert: bool) -> None:
-        self._lut_invert = invert
-        self._on_lut_cmap_changed(self._active_channel_lut(), invert)
+        """Invert LUT: flip the ramp *and* the page it is drawn on.
+
+        An inverted ramp puts the colormap's low end at the bright end, so on a
+        black page the background stops matching zero.  Flipping to the white
+        background keeps 'no signal' looking like the background, and is exactly
+        the state View ▸ White background toggles — that menu item reads
+        ``self._white_bg`` when it is built, so it stays in step.
+        """
+        self._lut_invert = bool(invert)
+        if not self._channels:            # image / TIFF mode: LUT only
+            self._on_lut_cmap_changed(self._active_channel_lut(), invert)
+            return
+        self._set_channel_invert(invert)
+        self._set_white_background(self._lut_invert)   # recomposes
 
     def _on_lut_gamma_changed(self, gamma: float) -> None:
         """LUT dialog gamma → the active channel (localization compositing) or the
@@ -3342,16 +3403,15 @@ class RenderWindow(QWidget):
             action.triggered.connect(lambda _checked=False, value=name: self._on_cmap_changed(value))
         cmap_menu.addSeparator()
         solid_menu = cmap_menu.addMenu("Solid color")
-        for name in _PURE_COLOR_LUTS:
+        for name in solid_color_names():
             action = solid_menu.addAction(name)
             action.setCheckable(True)
             action.setChecked(current_cmap == name)
             action.triggered.connect(lambda _checked=False, value=name: self._on_cmap_changed(value))
-        solid_menu.addSeparator()
-        custom_action = solid_menu.addAction("Custom...")
-        custom_action.setCheckable(True)
-        custom_action.setChecked(current_cmap.startswith(_CUSTOM_SOLID_PREFIX))
-        custom_action.triggered.connect(self._pick_solid_color)
+        # No 'Custom...' entry: this list is the global COLOR registry, so a
+        # one-off color belongs there (add/rename it in the COLOR dialog)
+        # rather than in an unnamed per-view override.  Existing saved
+        # 'solid:custom:#rrggbb' values still resolve and render.
 
         # No setShortcut here: brightness_contrast is an application-wide shortcut
         # (main window) that already fires from this render window. A shortcut on
@@ -3879,10 +3939,11 @@ class RenderWindow(QWidget):
             out.append((record, mask))
         return out
 
-    @staticmethod
-    def _roi_highlight_brushes(record, count: int) -> list:
-        color = pg.mkColor(getattr(record, "stroke_color", "#ffff00") or "#ffff00")
-        fill = pg.mkColor(color)
+    def _roi_highlight_brushes(self, record, count: int) -> list:
+        # One configurable color (COLOR ▸ ROI ▸ highlight data in ROI) rather
+        # than each ROI's own stroke.  Trade-off: with several ROIs shown the
+        # highlighted points are no longer attributable to a particular one.
+        fill = pg.mkColor(rgba_hex(viewer_color(self._state.prefs, "roi_highlight")))
         fill.setAlpha(75)
         return [pg.mkBrush(fill)] * int(count)
 
@@ -4195,7 +4256,6 @@ class RenderWindow(QWidget):
             self._state.set_active(self._idx)
         if self._roi_overlay is not None:
             self._roi_overlay.activate()
-        self._adopt_visible_lut_dialog()
         super().focusInEvent(event)
 
     def changeEvent(self, event) -> None:
@@ -4205,23 +4265,12 @@ class RenderWindow(QWidget):
                 self._state.set_active(self._idx)
             if self._roi_overlay is not None:
                 self._roi_overlay.activate()
-            self._adopt_visible_lut_dialog()
         super().changeEvent(event)
 
-    def _adopt_visible_lut_dialog(self) -> None:
-        app = QApplication.instance()
-        if app is None:
-            return
-        for widget in app.topLevelWidgets():
-            if widget is self:
-                continue
-            if widget.__class__.__name__ == "LutDialog" and widget.isVisible():
-                if getattr(self, "_lut_dialog", None) is widget:
-                    self.open_lut_dialog()
-                else:
-                    widget.close()
-                    self.open_lut_dialog()
-                return
+    # NOTE: the render window used to adopt (and close) any other view's LUT
+    # dialog on focus, which is why a scatter LUT vanished when you clicked back
+    # on the render.  There is one LUT dialog app-wide now, and MainWindow is
+    # what enforces it — see MainWindow._close_other_lut_dialogs.
 
     # ------------------------------------------------------------------
     # State signals

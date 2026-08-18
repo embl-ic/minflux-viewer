@@ -60,7 +60,7 @@ _SEL_COLOR = (255, 235, 0)        # yellow ring on the selected detections
 _DET_COLOR = (0, 229, 255)        # cyan detection markers
 _ROI_STROKE = "#00e5ff"
 _CROSS_PEN = pg.mkPen((120, 220, 120), width=1, style=Qt.PenStyle.DashLine)
-_PLANE_COLORS = {                 # crosshair-plane wireframe colour in the 3-D pane
+_PLANE_COLORS = {                 # crosshair-plane wireframe color in the 3-D pane
     "xy": (0.4, 1.0, 0.4, 0.9),
     "yz": (1.0, 0.5, 0.4, 0.9),
     "xz": (0.5, 0.7, 1.0, 0.9),
@@ -995,7 +995,7 @@ class ConvSegmentation3DWindow(QDialog):
             f"added 3-D point ROIs.")
         n = self._owner.add_point_rois_3d(
             self._idx, centers, name_prefix=self._name_prefix(),
-            source="conv_segmentation_3d",   # stroke_color defaults to the system ROI colour
+            source="conv_segmentation_3d",   # stroke_color defaults to the system ROI color
             names=names, log_message=log)
         if n:
             self._status_label.setText(f"Added {n} point ROI(s) to the ROI Manager.")

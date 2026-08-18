@@ -3,8 +3,58 @@
 ## v0.4.1
 
 This release makes colormaps an application-owned feature, removes Matplotlib and
-its packaging chain, and brings the Render and Localization Scatter context menus
-into the same Fiji-style layout.
+its packaging chain, adds a single application-wide COLOR dialog, and brings the
+Render and Localization Scatter context menus into the same Fiji-style layout.
+
+### COLOR dialog
+
+- **New application-wide COLOR dialog** (toolbar Color button) owning every
+  configurable RGBA in `prefs["colors"]`, organized as four tabs — Solid Color
+  List, Viewer / Plots, Components, Plugins — each with its own Reset, over a
+  shared Custom Color Palette (basic/custom swatches, gradient, alpha bar, Pick
+  Screen Color, preview block, HSV / HEX / RGBA fields).
+- Fixed width set by the palette; a tab with more entries than fit scrolls
+  instead of squeezing its rows.
+- **Component and plugin color groups are wired, not decorative**: ROI Manager,
+  Iteration series, Localization precision, Spatial Line Pattern, Drift
+  Correction, Trace Viewer. `colors.runtime_component_colors()` lets a module
+  read its group without threading `prefs` through the call chain.
+- A group may nest one level (`{row: {item: color}}`) and is rendered as
+  labelled rows; ROI Manager uses this for *ROI entries* / *ROI selected*.
+
+### ROI colors
+
+- The single ROI color is split into **face, edge, corner and highlight**, plus
+  the ROI Manager group's per-state face/edge/corner/label.
+- **Fixed: ROIs and ROI Manager labels could be invisible and could not be
+  recolored.** Colors were serialized as Qt `#AARRGGBB` but read by PyQtGraph as
+  `#RRGGBBAA`, so the blue byte became alpha and an opaque color arrived fully
+  transparent. Writers now emit the PyQtGraph-compatible form, legacy values are
+  repaired on draw, and the recolor pass compares through the same parser.
+- Preferences ▸ Appearance ▸ ROI: *Edit widget size* renamed **Corner size**
+  with an explanatory tooltip; the highlight checkbox no longer claims to follow
+  the ROI color.
+
+### LUT dialog
+
+- **One LUT dialog application-wide**, rebound to the focused view and closed
+  with the application. Previously each view created its own, the render window
+  closed other views' dialogs on focus, and hidden instances outlived the main
+  window.
+- **Invert LUT now works on the localization render**, flipping the colormap and
+  the background together (and ticking View ▸ White background). It previously
+  applied only in TIFF/image mode.
+- A custom colormap's **alpha now dims its channel**, matching solid colors; the
+  render composite is opaque, so alpha scales intensity.
+- The one-off **Custom...** entry is gone from the render and scatter Solid color
+  menus — that list is the COLOR dialog's solid list. Saved `solid:custom:` LUTs
+  still render.
+
+### Spelling
+
+- `colour` → `color` across user-facing text, identifiers and comments (the
+  `v041_global_rgba_colours` migration key is deliberately unchanged, so the
+  migration does not re-run against preferences that already have it).
 
 ### Colormaps and LUTs
 
@@ -52,6 +102,10 @@ into the same Fiji-style layout.
   kiwisolver, Pillow, pyparsing, python-dateutil, or six through the former
   plotting dependency.
 - Windows builds use a native `.ico`, avoiding a build-time Pillow dependency.
+- **The Windows executable carries a version resource** (FileVersion,
+  ProductVersion, ProductName …), built from the same `__version__` the spec
+  already parses. It previously had none: the version was applied only to the
+  macOS bundle, so Explorer's Properties dialog showed nothing.
 - The PyInstaller spec stops immediately with the build interpreter and missing
   package names if it is accidentally launched from an incomplete global Python
   environment. Its build instructions explicitly install and invoke PyInstaller

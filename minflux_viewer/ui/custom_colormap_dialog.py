@@ -44,8 +44,8 @@ class CustomColormapDialog(QDialog):
         root.addLayout(form)
 
         help_label = QLabel(
-            "Right-click the gradient to add a colour stop. Drag stops to move "
-            "them; click a stop to change its colour. Right-click a stop to remove it."
+            "Right-click the gradient to add a color stop. Drag stops to move "
+            "them; click a stop to change its color. Right-click a stop to remove it."
         )
         help_label.setWordWrap(True)
         root.addWidget(help_label)
@@ -90,7 +90,7 @@ class CustomColormapDialog(QDialog):
             state = self._gradient.saveState()
             ticks = sorted(state.get("ticks", []), key=lambda item: float(item[0]))
             if not 2 <= len(ticks) <= 64:
-                raise ValueError("Use between 2 and 64 colour stops.")
+                raise ValueError("Use between 2 and 64 color stops.")
             stops = [
                 [float(position), [int(channel) for channel in rgba]]
                 for position, rgba in ticks

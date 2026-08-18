@@ -3,10 +3,46 @@
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
 
-ENTRYPOINT = Path(__file__).resolve().parents[1] / "run_app.py"
-SPEC = Path(__file__).resolve().parents[1] / "minflux_viewer.spec"
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+ENTRYPOINT = ROOT / "run_app.py"
+SPEC = ROOT / "minflux_viewer.spec"
+
+
+def _evaluate_spec():
+    """Run the spec with PyInstaller's heavy builders stubbed out.
+
+    Returns ``(namespace, calls)`` where ``calls`` maps a builder name to the
+    ``(args, kwargs)`` it was invoked with, so the packaging decisions the spec
+    makes can be asserted without running a real build.
+    """
+    calls: dict[str, list] = {}
+
+    def _stub(name):
+        class Stub:
+            def __init__(self, *args, **kwargs):
+                calls.setdefault(name, []).append((args, kwargs))
+                self.binaries = []
+                self.datas = []
+                self.pure = []
+                self.scripts = []
+
+        Stub.__name__ = name
+        return Stub
+
+    namespace = {
+        "__file__": str(SPEC),
+        "SPECPATH": str(ROOT),
+        "DISTPATH": str(ROOT / "dist"),
+        **{name: _stub(name) for name in ("Analysis", "PYZ", "EXE", "COLLECT", "BUNDLE")},
+    }
+    code = compile(SPEC.read_text(encoding="utf-8"), str(SPEC), "exec")
+    exec(code, namespace)  # noqa: S102 - the spec is first-party build config
+    return namespace, calls
 
 
 def test_freeze_support_precedes_application_import() -> None:
@@ -52,3 +88,25 @@ def test_spec_guards_against_incomplete_build_environment() -> None:
     assert "Build interpreter: {sys.executable}" in source
     assert "python.exe -m pip install pyinstaller==6.19.0" in source
     assert "python.exe -m PyInstaller --clean --noconfirm" in source
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows version resource")
+def test_windows_executable_carries_the_application_version() -> None:
+    """The shipped .exe must report its version to Explorer / inventory tools."""
+    from minflux_viewer import __version__
+
+    namespace, calls = _evaluate_spec()
+    assert namespace["VERSION"] == __version__
+
+    info = namespace["EXE_VERSION_INFO"]
+    assert info is not None, "no version resource was built for Windows"
+    # The EXE must actually receive it; building it and forgetting to pass it
+    # is exactly how the shipped 0.4.1 executable ended up with no version.
+    exe_kwargs = calls["EXE"][0][1]
+    assert exe_kwargs.get("version") is info
+
+    major, minor, patch = (int(part) for part in __version__.split(".")[:3])
+    rendered = str(info)
+    assert f"{major}, {minor}, {patch}, 0" in rendered
+    assert __version__ in rendered
+    assert info.toRaw(), "version resource did not serialise"

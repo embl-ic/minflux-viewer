@@ -130,7 +130,7 @@ COMMAND_META: dict[str, CommandMeta] = {
     "actionChannelSeparateDcr": CommandMeta(U + "attribute_separation_dialog.py",
                               ("dcr", "two color", "2 color", "spectral", "em", "gaussian mixture", "unmix",
                                "photon weighted", "majority vote", "channel"),
-                              "Separate colours by a mixture fit of the DCR distribution into "
+                              "Separate colors by a mixture fit of the DCR distribution into "
                               "value-window channels; each trace is assigned by mean/median/majority vote "
                               "(optionally photon-weighted DCR).", "process",
                               params=(ParamMeta("n_components", "int", 2, "", "mixture components"),),

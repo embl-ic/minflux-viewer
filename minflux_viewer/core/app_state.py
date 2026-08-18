@@ -24,6 +24,13 @@ from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QObject, QSettings, pyqtSignal
 
+from ..colors import (
+    DEFAULT_COLOR_PREFS,
+    changed_color_paths,
+    configure_colors,
+    normalize_color_preferences,
+    normalize_rgba,
+)
 from .dataset import MinfluxDataset
 
 if TYPE_CHECKING:
@@ -119,23 +126,16 @@ DEFAULT_PREFS: dict = {
         # Application-owned named gradients created from the LUT dialog.
         # Values are JSON-compatible ``{"stops": [[position, RGBA], ...]}``.
         "custom_colormaps": {},
-        "roi_color": "Yellow",
-        "roi_transparency": 50,
         "roi_highlight_in_roi": True,   # highlight in-ROI data on the drawing view
         "roi_sync_highlight": True,     # highlight in-ROI data on other views too
         "roi_edge_size": 1,
         "roi_edit_widget_size": 8,
-        "filter_range_color": "Green",
-        "filter_range_alpha": 45,
-        "filter_bounds_color": "Green",
         "filter_bounds_size": 1,
         # Histogram Plot: which trace read-outs appear in the "As" dropdown...
         "histogram_values": ["trace mean", "trace median"],
         # ...and which pooled modes appear in its "Iter" dropdown (see
         # core.iteration.POOL_KEYS). All four by default.
         "histogram_iterations": ["flatten", "stacked", "sum", "average"],
-        # Per-dataset overlay channel colours (1st..6th), cycled for overlays.
-        "overlay_colors": ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"],
         # Last-used manual overlay-alignment controls. Translation is physical nm.
         "render_alignment_translation_nm": 1.0,
         "render_alignment_rotation_deg": 0.1,
@@ -144,6 +144,7 @@ DEFAULT_PREFS: dict = {
         "confocal_alignment_translation_px": 0.5,
         "confocal_alignment_rotation_deg": 0.1,
     },
+    "colors": copy.deepcopy(DEFAULT_COLOR_PREFS),
     "plugin": {
         "msr_export_folder": "",
         "msr_last_open_folder": "",
@@ -219,7 +220,7 @@ DEFAULT_PREFS: dict = {
 }
 
 
-def _merge(saved: dict, defaults: dict) -> dict:
+def _merge(saved: dict, defaults: dict, _path: tuple[str, ...] = ()) -> dict:
     """Recursively fill missing keys from *defaults* into *saved*.
 
     *defaults* is deep-copied: a plain ``dict()`` is shallow, so every key the
@@ -229,8 +230,13 @@ def _merge(saved: dict, defaults: dict) -> dict:
     """
     result = copy.deepcopy(defaults)
     for k, v in saved.items():
-        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
-            result[k] = _merge(v, result[k])
+        path = (*_path, str(k))
+        if path == ("colors", "solid") and isinstance(v, dict):
+            # The ordered solid mapping is a user-managed collection. Missing
+            # keys mean deleted colors, not old settings needing new defaults.
+            result[k] = copy.deepcopy(v)
+        elif k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _merge(v, result[k], path)
         else:
             result[k] = v
     return result
@@ -253,6 +259,7 @@ _MIGRATION_KEYS: tuple[str, ...] = (
     "v035_update_check_optin",
     "v036_fixed_rimf_default",
     "v037_metric_overlay_alignment_steps",
+    "v041_global_rgba_colours",
 )
 
 
@@ -330,6 +337,44 @@ def _migrate_prefs(prefs: dict) -> dict:
             if float(plot.get(key, 0.5)) == 0.5:
                 plot[key] = 0.1
         migrations["v037_metric_overlay_alignment_steps"] = True
+    if not migrations.get("v041_global_rgba_colours"):
+        # Consolidate the old name + separate-alpha fields into the one RGBA
+        # registry.  The merge step has already supplied the new defaults, while
+        # saved legacy keys remain available here for a lossless one-time move.
+        plot = prefs.setdefault("plot", {})
+        colors = normalize_color_preferences(prefs.get("colors", {}))
+
+        def legacy_rgba(name_key: str, fallback, alpha: int = 255):
+            rgba = normalize_rgba(plot.get(name_key, fallback), fallback)
+            return [rgba[0], rgba[1], rgba[2], max(0, min(255, int(alpha)))]
+
+        if "roi_color" in plot or "roi_transparency" in plot:
+            transparency = max(0, min(100, int(plot.get("roi_transparency", 50))))
+            colors["viewer"]["roi"] = legacy_rgba(
+                "roi_color", "Yellow", round(255 * (100 - transparency) / 100)
+            )
+        if "filter_range_color" in plot or "filter_range_alpha" in plot:
+            opacity = max(0, min(100, int(plot.get("filter_range_alpha", 45))))
+            colors["viewer"]["filter_range"] = legacy_rgba(
+                "filter_range_color", "Green", round(255 * opacity / 100)
+            )
+        if "filter_bounds_color" in plot:
+            colors["viewer"]["filter_bounds"] = legacy_rgba(
+                "filter_bounds_color", "Green"
+            )
+            colors["viewer"]["filter_text"] = list(colors["viewer"]["filter_bounds"])
+        old_overlay = plot.get("overlay_colors")
+        if isinstance(old_overlay, (list, tuple)):
+            for index, value in enumerate(old_overlay[:6]):
+                colors["viewer"]["overlay"][index] = list(normalize_rgba(value))
+
+        prefs["colors"] = normalize_color_preferences(colors)
+        for key in (
+            "attr_cmap", "roi_color", "roi_transparency", "filter_range_color",
+            "filter_range_alpha", "filter_bounds_color", "overlay_colors",
+        ):
+            plot.pop(key, None)
+        migrations["v041_global_rgba_colours"] = True
     return prefs
 
 
@@ -366,6 +411,7 @@ class AppState(QObject):
     attributes_changed = pyqtSignal(int)
     calibration_changed = pyqtSignal(int)   # RIMF / z-scaling changed for a dataset
     roi_selection_changed = pyqtSignal(int)
+    colors_changed = pyqtSignal(object)  # {paths, previous, current}
     status_message  = pyqtSignal(str)
     log_message     = pyqtSignal(str, str)  # (message, level)
     progress_log    = pyqtSignal(str, bool)  # (bar text, final) — refreshing line
@@ -376,6 +422,7 @@ class AppState(QObject):
         self._datasets: list[MinfluxDataset] = []
         self._active_idx: int | None = None
         self.prefs: dict = self._load_prefs()
+        configure_colors(self.prefs)
         from ..colormaps import configure_custom_colormaps
         configure_custom_colormaps(
             self.prefs.get("plot", {}).get("custom_colormaps", {})
@@ -672,12 +719,42 @@ class AppState(QObject):
         return default_prefs()
 
     def save_prefs(self) -> None:
+        configure_colors(self.prefs)
         from ..colormaps import configure_custom_colormaps
         configure_custom_colormaps(
             self.prefs.get("plot", {}).get("custom_colormaps", {})
         )
         qs = QSettings("EMBL-IC", "MinfluxViewer")
         qs.setValue("prefs", json.dumps(self.prefs))
+
+    def notify_color_preferences_changed(
+        self, previous, *, solid_renames: dict[str, str] | None = None
+    ) -> set[str]:
+        """Normalize the current registry and emit one targeted-change payload."""
+        old = normalize_color_preferences(previous)
+        current = normalize_color_preferences(self.prefs.get("colors", {}))
+        self.prefs["colors"] = current
+        configure_colors(self.prefs)
+        paths = changed_color_paths(old, current)
+        if paths:
+            self.colors_changed.emit({
+                "paths": paths,
+                "previous": old,
+                "current": copy.deepcopy(current),
+                "solid_renames": dict(solid_renames or {}),
+            })
+        return paths
+
+    def apply_color_preferences(
+        self, colors, *, solid_renames: dict[str, str] | None = None
+    ) -> set[str]:
+        """Persist a complete color draft and notify only affected consumers."""
+        previous = normalize_color_preferences(self.prefs.get("colors", {}))
+        self.prefs["colors"] = normalize_color_preferences(colors)
+        self.save_prefs()
+        return self.notify_color_preferences_changed(
+            previous, solid_renames=solid_renames
+        )
 
     def _record_recent(self, path: str) -> None:
         try:

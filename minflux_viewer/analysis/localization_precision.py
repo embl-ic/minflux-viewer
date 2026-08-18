@@ -39,6 +39,7 @@ from functools import lru_cache
 
 import numpy as np
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -949,8 +950,12 @@ def run_stddev_per_trace(parent, state) -> None:
 # Result dialog
 # ---------------------------------------------------------------------------
 
-_R_COLOR = "#22d3d3"   # σ_r (combined lateral) — cyan
-_Z_COLOR = "#ff5a5a"   # σ_z (axial) — red
+def _precision_color(name: str) -> QColor:
+    """One plot color from COLOR ▸ Components ▸ Localization precision."""
+    from ..colors import runtime_component_colors
+
+    colors = runtime_component_colors("functions", "Localization precision")
+    return QColor(*colors[name])
 
 
 class StdDevResultDialog(QDialog):
@@ -1048,13 +1053,13 @@ class StdDevResultDialog(QDialog):
             row.setContentsMargins(8, 8, 8, 8)
             row.addWidget(_value_hist_plot(
                 "σ<sub>r</sub> per trace (lateral)",
-                result["per_trace_sigma_r"], _R_COLOR,
+                result["per_trace_sigma_r"], _precision_color("Lateral sigma"),
                 marker=float(med_r), marker_label=f"median = {med_r:.2f} nm",
                 x_label="σ<sub>r</sub> (nm)", y_label="traces",
             ))
             row.addWidget(_value_hist_plot(
                 "σ<sub>z</sub> per trace (axial)",
-                result["per_trace_sigma_xyz"][:, 2], _Z_COLOR,
+                result["per_trace_sigma_xyz"][:, 2], _precision_color("Axial sigma"),
                 marker=float(med[2]), marker_label=f"median = {med[2]:.2f} nm",
                 x_label="σ<sub>z</sub> (nm)", y_label="traces",
             ))
@@ -1098,8 +1103,6 @@ class StdDevResultDialog(QDialog):
 # FRC result dialog
 # ---------------------------------------------------------------------------
 
-_FRC_CURVE_COLOR = "#4a90ff"   # FRC curve — blue
-_FRC_RES_COLOR = "#35d07f"     # resolution crossing — green
 
 
 def _frc_curve_plot(result: "FRCResult"):
@@ -1128,7 +1131,7 @@ def _frc_curve_plot(result: "FRCResult"):
         band = pg.FillBetweenItem(hi, lo, brush=pg.mkBrush(74, 144, 255, 45))
         pw.addItem(band)
 
-    pw.plot(freq, frc, pen=pg.mkPen(_FRC_CURVE_COLOR, width=2.0))
+    pw.plot(freq, frc, pen=pg.mkPen(_precision_color("FRC curve"), width=2.0))
 
     # 1/7 threshold (horizontal).
     thr = pg.InfiniteLine(
@@ -1143,9 +1146,9 @@ def _frc_curve_plot(result: "FRCResult"):
     if np.isfinite(result.crossing_freq) and np.isfinite(result.resolution_nm):
         cl = pg.InfiniteLine(
             pos=result.crossing_freq, angle=90,
-            pen=pg.mkPen(_FRC_RES_COLOR, width=1.7, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen(_precision_color("FRC resolution"), width=1.7, style=Qt.PenStyle.DashLine),
             label=f"resolution = {result.resolution_nm:.2f} nm",
-            labelOpts={"position": 0.9, "color": _FRC_RES_COLOR, "fill": (20, 20, 20, 220)},
+            labelOpts={"position": 0.9, "color": _precision_color("FRC resolution"), "fill": (20, 20, 20, 220)},
         )
         pw.addItem(cl)
 
@@ -1343,9 +1346,6 @@ def _clear_layout(layout) -> None:
 # CRLB result dialog
 # ---------------------------------------------------------------------------
 
-_CRLB_COLOR = "#a78bfa"   # lateral σ_xy distribution — violet
-_CRLBZ_COLOR = "#ff5a5a"  # axial σ_z distribution — red
-_N_COLOR = "#f5a623"      # photon count distribution — amber
 
 
 class CRLBResultDialog(QDialog):
@@ -1472,7 +1472,7 @@ class CRLBResultDialog(QDialog):
             row.setContentsMargins(8, 8, 8, 8)
             sigma = result.per_loc_sigma_bg if result.has_background else result.per_loc_sigma_ideal
             row.addWidget(_value_hist_plot(
-                "σ<sub>xy</sub> per localization (lateral)", sigma, _CRLB_COLOR,
+                "σ<sub>xy</sub> per localization (lateral)", sigma, _precision_color("CRLB lateral"),
                 marker=float(primary), marker_label=f"median = {primary:.2f} nm",
                 x_label="σ<sub>xy</sub> (nm)", y_label="localizations",
             ))
@@ -1482,12 +1482,12 @@ class CRLBResultDialog(QDialog):
                 z_primary = (result.median_sigma_z_bg if result.has_background
                              else result.median_sigma_z_ideal)
                 row.addWidget(_value_hist_plot(
-                    "σ<sub>z</sub> per localization (axial)", sigma_z, _CRLBZ_COLOR,
+                    "σ<sub>z</sub> per localization (axial)", sigma_z, _precision_color("CRLB axial"),
                     marker=float(z_primary), marker_label=f"median = {z_primary:.2f} nm",
                     x_label="σ<sub>z</sub> (nm)", y_label="localizations",
                 ))
             row.addWidget(_value_hist_plot(
-                "photon count N per localization", result.per_loc_n_total, _N_COLOR,
+                "photon count N per localization", result.per_loc_n_total, _precision_color("Photon count"),
                 marker=float(result.median_n), marker_label=f"median = {result.median_n:.0f}",
                 x_label="N (photons)", y_label="localizations",
             ))
