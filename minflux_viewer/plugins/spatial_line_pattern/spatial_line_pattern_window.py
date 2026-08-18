@@ -31,7 +31,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ...colormaps import colormap_lut
 from ...analysis.plot_profile import band_polygon
 from ...analysis.spatial_line_pattern import (
     DEFAULT_BACKGROUND_SCALE_NM,
@@ -47,15 +46,12 @@ from ...analysis.spatial_line_pattern import (
     SpatialLinePatternResult,
     analyze_spatial_line_pattern,
 )
+from ...colormaps import colormap_lut
+from ...colors import component_colors
 from ...core.roi_crop import plane_localizations, plane_localizations_version
 
 _LINE_TYPES = {"line", "polyline", "freehand_line"}
 _POLL_MS = 150
-_TOTAL_COLOR = "#f2f2f2"
-_POSITIVE_COLOR = "#00b8d9"
-_NEGATIVE_COLOR = "#e754b7"
-_CENTROID_COLOR = "#ff9f43"
-_AUTOCORR_COLOR = "#8dd35f"
 
 
 def _finite_text(value: float, suffix: str = " nm") -> str:
@@ -87,12 +83,38 @@ class SpatialLinePatternWindow(QDialog):
         self.setWindowTitle("Spatial Pattern Analysis along Line Profile")
         self.resize(1180, 760)
         self._build_ui()
-
         self._timer = QTimer(self)
         self._timer.setInterval(_POLL_MS)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
         self._tick()
+
+    def _component_color(self, name: str):
+        return component_colors(
+            self._state.prefs, "plugins", "Spatial Line Pattern"
+        ).get(name, (128, 128, 128, 255))
+
+    def refresh_colors(self) -> None:
+        """Re-style existing plot items from the global color registry."""
+        styles = (
+            (self._total_curve, "Total", 2.0),
+            (self._positive_curve, "Positive", 1.5),
+            (self._negative_curve, "Negative", 1.5),
+            (self._centroid_curve, "Centroid", 2.0),
+            (self._density_power_curve, "Positive", 2.0),
+            (self._transverse_power_curve, "Centroid", 2.0),
+            (self._autocorr_curve, "Autocorrelation", 2.0),
+        )
+        for item, name, width in styles:
+            item.setPen(pg.mkPen(self._component_color(name), width=width))
+        for line, name in (
+            (self._density_period_line, "Positive"),
+            (self._transverse_period_line, "Centroid"),
+            (self._autocorr_period_line, "Autocorrelation"),
+        ):
+            line.setPen(pg.mkPen(
+                self._component_color(name), width=1, style=Qt.PenStyle.DashLine
+            ))
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
@@ -359,15 +381,15 @@ class SpatialLinePatternWindow(QDialog):
         self._profile_plot = self._plot_widget("directed distance", "localizations / bin")
         self._profile_plot.addLegend(offset=(8, 8))
         self._total_curve = self._profile_plot.plot(
-            pen=pg.mkPen(_TOTAL_COLOR, width=2.0),
+            pen=pg.mkPen(self._component_color("Total"), width=2.0),
             name="total (smoothed)",
         )
         self._positive_curve = self._profile_plot.plot(
-            pen=pg.mkPen(_POSITIVE_COLOR, width=1.5),
+            pen=pg.mkPen(self._component_color("Positive"), width=1.5),
             name="+ side",
         )
         self._negative_curve = self._profile_plot.plot(
-            pen=pg.mkPen(_NEGATIVE_COLOR, width=1.5),
+            pen=pg.mkPen(self._component_color("Negative"), width=1.5),
             name="- side",
         )
         self._peak_points = pg.ScatterPlotItem(
@@ -383,7 +405,7 @@ class SpatialLinePatternWindow(QDialog):
             "transverse centroid (nm)",
         )
         self._centroid_curve = self._centroid_plot.plot(
-            pen=pg.mkPen(_CENTROID_COLOR, width=2.0)
+            pen=pg.mkPen(self._component_color("Centroid"), width=2.0)
         )
         self._centroid_plot.addItem(
             pg.InfiniteLine(
@@ -401,22 +423,22 @@ class SpatialLinePatternWindow(QDialog):
         self._spectrum_plot = self._plot_widget("period", "normalized power")
         self._spectrum_plot.addLegend(offset=(8, 8))
         self._density_power_curve = self._spectrum_plot.plot(
-            pen=pg.mkPen(_POSITIVE_COLOR, width=2.0),
+            pen=pg.mkPen(self._component_color("Positive"), width=2.0),
             name="longitudinal density",
         )
         self._transverse_power_curve = self._spectrum_plot.plot(
-            pen=pg.mkPen(_CENTROID_COLOR, width=2.0),
+            pen=pg.mkPen(self._component_color("Centroid"), width=2.0),
             name="transverse centroid",
         )
         self._density_period_line = pg.InfiniteLine(
             angle=90,
             movable=False,
-            pen=pg.mkPen(_POSITIVE_COLOR, width=1, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen(self._component_color("Positive"), width=1, style=Qt.PenStyle.DashLine),
         )
         self._transverse_period_line = pg.InfiniteLine(
             angle=90,
             movable=False,
-            pen=pg.mkPen(_CENTROID_COLOR, width=1, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen(self._component_color("Centroid"), width=1, style=Qt.PenStyle.DashLine),
         )
         self._spectrum_plot.addItem(self._density_period_line)
         self._spectrum_plot.addItem(self._transverse_period_line)
@@ -424,12 +446,12 @@ class SpatialLinePatternWindow(QDialog):
 
         self._autocorr_plot = self._plot_widget("lag", "normalized autocorrelation")
         self._autocorr_curve = self._autocorr_plot.plot(
-            pen=pg.mkPen(_AUTOCORR_COLOR, width=2.0)
+            pen=pg.mkPen(self._component_color("Autocorrelation"), width=2.0)
         )
         self._autocorr_period_line = pg.InfiniteLine(
             angle=90,
             movable=False,
-            pen=pg.mkPen(_AUTOCORR_COLOR, width=1, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen(self._component_color("Autocorrelation"), width=1, style=Qt.PenStyle.DashLine),
         )
         self._autocorr_plot.addItem(self._autocorr_period_line)
         layout.addWidget(self._autocorr_plot, 1)

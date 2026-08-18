@@ -57,6 +57,41 @@ VERSION = re.search(
     (ROOT / "minflux_viewer" / "__init__.py").read_text(encoding="utf-8"),
 ).group(1)
 
+# Windows version resource, built from the same VERSION so the shipped .exe
+# reports its version in Explorer's Properties dialog (and to inventory tools).
+# PyInstaller only writes this on Windows; it is None elsewhere.
+def _windows_version_resource(version: str):
+    from PyInstaller.utils.win32 import versioninfo as vi
+
+    parts = [int(piece) for piece in version.split(".") if piece.isdigit()]
+    numeric = tuple((parts + [0, 0, 0, 0])[:4])
+    return vi.VSVersionInfo(
+        ffi=vi.FixedFileInfo(filevers=numeric, prodvers=numeric),
+        kids=[
+            vi.StringFileInfo([
+                vi.StringTable("040904B0", [
+                    vi.StringStruct("CompanyName", "EMBL Imaging Centre"),
+                    vi.StringStruct(
+                        "FileDescription", "MINFLUX Viewer — MINFLUX nanoscopy data viewer"
+                    ),
+                    vi.StringStruct("FileVersion", version),
+                    vi.StringStruct("InternalName", "minflux_viewer"),
+                    vi.StringStruct("LegalCopyright", "MIT License"),
+                    vi.StringStruct("OriginalFilename", "minflux_viewer.exe"),
+                    vi.StringStruct("ProductName", "MINFLUX Viewer"),
+                    vi.StringStruct("ProductVersion", version),
+                ]),
+            ]),
+            # 0x0409 = en-US, 1200 = Unicode; must match the 040904B0 table above.
+            vi.VarFileInfo([vi.VarStruct("Translation", [0x0409, 1200])]),
+        ],
+    )
+
+
+EXE_VERSION_INFO = (
+    _windows_version_resource(VERSION) if sys.platform == "win32" else None
+)
+
 # psutil ships a per-OS backend; name the right one so static analysis finds it.
 PSUTIL_BACKEND = {"win32": "psutil._pswindows",
                   "darwin": "psutil._psosx"}.get(sys.platform, "psutil._pslinux")
@@ -199,6 +234,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=EXE_ICON,
+    version=EXE_VERSION_INFO,
 )
 
 # ---------------------------------------------------------------------------

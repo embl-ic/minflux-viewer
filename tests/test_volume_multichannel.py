@@ -93,7 +93,7 @@ def test_lut_rgb_pure_colors():
     g = lut_rgb("Green")
     assert r[0] > 0.5 and r[1] < 0.3 and r[2] < 0.3
     assert g[1] > 0.5 and g[0] < 0.3 and g[2] < 0.3
-    # Unknown name -> a finite fallback colour.
+    # Unknown name -> a finite fallback color.
     assert all(0.0 <= c <= 1.0 for c in lut_rgb("definitely-not-a-cmap"))
 
 

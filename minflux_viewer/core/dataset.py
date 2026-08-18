@@ -9,7 +9,7 @@ Historically this mirrored the MATLAB ``app.data(idx)`` MINFLUX struct:
     .prop     — num_loc, num_itr, num_dim, num_traces, trace_idx, attr_names
     .attr     — all attribute arrays (loc_x/y/z, tid, efo, cfr, ftr, …)
     .cali     — calibration scalars (RIMF, pixel_size, loc_precision)
-    .channel  — DCR / colour channel info
+    .channel  — DCR / color channel info
 
 The same container can now also hold generic localisation coordinates
 already stored in nanometres, plus optional image payloads for rendering.
@@ -205,7 +205,7 @@ class Calibration:
 
 @dataclass
 class Channel:
-    """Colour-channel information (DCR-based 2-colour separation)."""
+    """Color-channel information (DCR-based 2-color separation)."""
     num_channels: int = 1
     cut1: float = 0.5
     cut2: float = 1.0

@@ -47,14 +47,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ...colors import component_colors
 from ...core.loader import attr_values_1d
 from ...ui.plot_format import plot_widget
 from . import trace_data as td
 
 _PLANE = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
-_HEAD_BRUSH = pg.mkBrush(255, 230, 40, 255)
-_TAIL_PEN = pg.mkPen(230, 40, 200, width=2)
-_REGION_BRUSH = (230, 40, 200, 60)
 _OVERLAY_COLORS = [
     (31, 119, 180), (255, 127, 14), (44, 160, 44), (214, 39, 40),
     (148, 103, 189), (140, 86, 75), (227, 119, 194), (23, 190, 207),
@@ -147,8 +145,12 @@ class TraceViewerWindow(QDialog):
         self._scatter_plot.setAspectLocked(True)
         self._scatter_plot.showGrid(x=True, y=True, alpha=0.15)
         self._scatter_item = pg.ScatterPlotItem(size=5, pen=None, brush=pg.mkBrush(70, 130, 200, 180))
-        self._tail_item = pg.PlotDataItem(pen=_TAIL_PEN)
-        self._head_item = pg.ScatterPlotItem(size=16, symbol="star", brush=_HEAD_BRUSH,
+        colors = self._component_colors()
+        self._tail_item = pg.PlotDataItem(
+            pen=pg.mkPen(*colors["Tail line"], width=2)
+        )
+        self._head_item = pg.ScatterPlotItem(size=16, symbol="star",
+                                              brush=pg.mkBrush(*colors["Head marker"]),
                                               pen=pg.mkPen(120, 90, 0, width=1))
         for it in (self._scatter_item, self._tail_item, self._head_item):
             self._scatter_plot.addItem(it)
@@ -189,8 +191,10 @@ class TraceViewerWindow(QDialog):
                 self._ts_curves[key].setPen(None)
             if has_rms:
                 self._ts_rms[key] = p.plot([], [], pen=pg.mkPen(220, 40, 40, width=2))
-            region = pg.LinearRegionItem(values=(0, 0), movable=False,
-                                         brush=pg.mkBrush(*_REGION_BRUSH))
+            region = pg.LinearRegionItem(
+                values=(0, 0), movable=False,
+                brush=pg.mkBrush(*self._component_colors()["Time region"]),
+            )
             region.setZValue(-10)
             region.setVisible(False)
             p.addItem(region)
@@ -253,6 +257,10 @@ class TraceViewerWindow(QDialog):
         self._table.itemSelectionChanged.connect(self._on_table_selection)
         lay.addWidget(self._table, 1)
         return w
+
+    def _component_colors(self) -> dict:
+        """This plugin's colors from the global COLOR registry."""
+        return component_colors(self._state.prefs, "plugins", "Trace Viewer")
 
     # ------------------------------------------------------------ data path
     def _dataset(self):

@@ -11,7 +11,7 @@ instance), lets you place **channel windows** on that axis three ways —
 * fit a mixture distribution (:mod:`analysis.distribution_fit`) and split at the
   Bayes boundaries (*Fit* / *Auto*),
 * *Place evenly*,
-* drag the LUT-coloured region on the histogram / edit start–end in the table,
+* drag the LUT-colored region on the histogram / edit start–end in the table,
 
 — and assigns each **trace** to a channel by mean / median / majority vote
 (optionally on photon-weighted DCR). *Apply* builds one dataset per channel plus
@@ -59,9 +59,9 @@ from ..analysis.distribution_fit import (
     fit_mixture,
 )
 from ..colormaps import channel_colormap_names, representative_rgb
+from ..colors import is_solid_color, solid_color_rgb
 from ..core.iteration import FLATTEN_LABEL, iteration_labels, ordinal, parse_iteration_label
 from ..core.loader import attr_values_1d, is_value_pool_selector, mfx_get
-from ..core.overlay import PURE_COLOR_RGB
 from ..utils.filters import raw_trace_aggregate
 
 _DISPLAY_AGG = ["per loc", "trace mean", "trace median"]
@@ -70,8 +70,8 @@ _CHANNEL_COUNTS = [str(n) for n in range(2, 8)]        # 2..7
 
 
 def _rgb_for_lut(lut: str) -> tuple[int, int, int]:
-    if lut in PURE_COLOR_RGB:
-        return PURE_COLOR_RGB[lut]
+    if is_solid_color(lut):
+        return solid_color_rgb(lut)
     try:
         return tuple(
             int(round(channel * 255.0)) for channel in representative_rgb(lut)
@@ -103,7 +103,7 @@ class AttributeSeparationDialog(QDialog):
         self._bin_width = 0.01
         self._rows: list[dict] = []                         # channel table rows
         self._fit_result = None                             # last MixtureResult (for overlay)
-        self._fit_channel_luts: list[str] = []              # LUT per fit component (overlay colour)
+        self._fit_channel_luts: list[str] = []              # LUT per fit component (overlay color)
         self._synchronizing = False
         self._suspend = False
 
@@ -517,8 +517,23 @@ class AttributeSeparationDialog(QDialog):
 
         self._readd_regions(plo, phi)
 
+    def refresh_colors(self) -> None:
+        choices = channel_colormap_names()
+        for row in self._rows:
+            combo = row["lut"]
+            current = combo.currentText()
+            blocked = combo.blockSignals(True)
+            try:
+                combo.clear()
+                combo.addItems(choices)
+                if current in choices:
+                    combo.setCurrentText(current)
+            finally:
+                combo.blockSignals(blocked)
+        self._redraw()
+
     def _draw_fit_overlay(self, lo: float, hi: float, bw: float) -> None:
-        """Fitted mixture overlay (per-component, coloured by its channel LUT)."""
+        """Fitted mixture overlay (per-component, colored by its channel LUT)."""
         xs = np.linspace(lo, hi, 512)
         comp = self._fit_result.component_pdfs(xs)
         scale = self._values.size * bw
@@ -531,7 +546,7 @@ class AttributeSeparationDialog(QDialog):
             pen=pg.mkPen((160, 160, 160), width=1, style=Qt.PenStyle.DashLine)))
 
     def _draw_stacked_series(self, edges: np.ndarray) -> None:
-        """One translucent step-histogram per iteration, coloured + with a legend."""
+        """One translucent step-histogram per iteration, colored + with a legend."""
         from .histogram_window import _iter_color
 
         series = []
@@ -545,10 +560,12 @@ class AttributeSeparationDialog(QDialog):
         self._plot.addLegend(offset=(-10, 10))
         for k, vals in series:
             counts, _ = np.histogram(vals, bins=edges)
-            r, g, b = _iter_color(k)
+            r, g, b, color_alpha = _iter_color(k, self._state.prefs)
+            series_alpha = int(round(alpha * color_alpha / 255.0))
             self._plot.plot(
                 edges, counts, stepMode="center", fillLevel=0,
-                brush=(r, g, b, alpha), pen=pg.mkPen(r, g, b, width=1),
+                brush=(r, g, b, series_alpha),
+                pen=pg.mkPen(r, g, b, color_alpha, width=1),
                 name=ordinal(k + 1))
         try:                                        # let the per-iteration series fit
             self._plot.getViewBox().enableAutoRange(y=True)

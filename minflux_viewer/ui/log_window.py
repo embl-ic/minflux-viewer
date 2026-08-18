@@ -13,7 +13,7 @@ and appends each entry.
 
 Features
 --------
-* Timestamped lines with severity colouring (INFO / WARN / ERROR)
+* Timestamped lines with severity coloring (INFO / WARN / ERROR)
 * Copy-to-clipboard button
 * Clear button
 * Auto-scroll that can be paused by scrolling up
@@ -48,8 +48,8 @@ class Level:
     DEBUG = "DEBUG"
 
 
-# Colours (compatible with both light and dark Qt palettes)
-_LEVEL_COLOUR: dict[str, str] = {
+# Colors (compatible with both light and dark Qt palettes)
+_LEVEL_COLOR: dict[str, str] = {
     Level.INFO:  "#000000",
     Level.WARN:  "#000000",
     Level.ERROR: "#000000",
@@ -169,7 +169,7 @@ class LogWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _append(self, message: str, level: str = Level.INFO) -> None:
-        """Append a timestamped, coloured log line."""
+        """Append a timestamped, colored log line."""
         # If a refreshing progress line is open, freeze it on its own line first
         # so this message doesn't get concatenated onto the bar.
         if self._progress_active:
@@ -180,13 +180,13 @@ class LogWindow(QWidget):
 
         ts    = datetime.now().strftime("%H:%M:%S")
         line  = f"[{ts}] [{level:5s}]  {message}"
-        colour = _LEVEL_COLOUR.get(level, "#000000")
+        color = _LEVEL_COLOR.get(level, "#000000")
 
         cursor = self._text.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
 
         fmt = QTextCharFormat()
-        fmt.setForeground(QColor(colour))
+        fmt.setForeground(QColor(color))
         cursor.setCharFormat(fmt)
         cursor.insertText(line + "\n")
 
@@ -212,7 +212,7 @@ class LogWindow(QWidget):
             cursor.removeSelectedText()
 
         fmt = QTextCharFormat()
-        fmt.setForeground(QColor(_LEVEL_COLOUR.get(Level.INFO, "#000000")))
+        fmt.setForeground(QColor(_LEVEL_COLOR.get(Level.INFO, "#000000")))
         cursor.setCharFormat(fmt)
         cursor.insertText(text)
 

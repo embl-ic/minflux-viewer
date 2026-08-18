@@ -171,6 +171,31 @@ class LutDialog(QDialog):
 
         self._build_ui()
 
+    def rebind(
+        self,
+        on_levels_changed: Callable[[float, float], None],
+        on_cmap_changed:   Callable[[str, bool], None],
+        on_invert_changed: Callable[[bool], None] | None = None,
+        on_reset:          Callable[[], None] | None = None,
+        on_gamma_changed:  Callable[[float], None] | None = None,
+        on_auto: Callable[[], tuple[float, float] | None] | None = None,
+        state: "AppState | None" = None,
+    ) -> None:
+        """Point this dialog at a different view without rebuilding it.
+
+        There is one LUT dialog application-wide (see :func:`shared_lut_dialog`)
+        and it follows the focused view, so only the callbacks change — the
+        widgets, and the window's position on screen, are kept.
+        """
+        self._cb_levels = on_levels_changed
+        self._cb_cmap   = on_cmap_changed
+        self._cb_invert = on_invert_changed
+        self._cb_reset  = on_reset
+        self._cb_gamma  = on_gamma_changed
+        self._cb_auto   = on_auto
+        if state is not None:
+            self._state = state
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -388,7 +413,7 @@ class LutDialog(QDialog):
         # Block their signals: setBounds() re-clamps a line sitting outside the new
         # range and would emit sigPositionChanged with a STALE level, firing the
         # owner's level callback and corrupting its manual levels (opening the LUT
-        # dialog then visibly re-scaled the plot — the "everything turns one colour"
+        # dialog then visibly re-scaled the plot — the "everything turns one color"
         # bug). Levels are applied silently just below via _set_levels_silent.
         for _line in (self._lo_line, self._hi_line):
             _line.blockSignals(True)
@@ -818,3 +843,67 @@ class LutDialog(QDialog):
         self._hist_ymax = max(1.0, float(ys.max()) * 1.05)
         self._hist_plot.setYRange(0, self._hist_ymax)
         self._redraw_transfer_curve()                 # gamma tilt line follows the histogram
+
+
+# ---------------------------------------------------------------------------
+# One LUT dialog, application-wide
+# ---------------------------------------------------------------------------
+
+def shared_lut_dialog(owner, **callbacks) -> "LutDialog":
+    """The single application-wide LUT dialog, rebound to *owner*.
+
+    One instance rather than one per view: the previous design left a hidden
+    dialog behind for every view that had ever opened one (they outlived the
+    main window), and keeping only one visible meant hiding the rest — which
+    could not guarantee the invariant, because ``close()`` may be refused.
+
+    The dialog is deliberately **parentless**, matching the project's modeless
+    convention, so it is not destroyed with whichever view happened to create
+    it.  ``MainWindow`` closes it on shutdown.
+    """
+    state = getattr(owner, "_state", None)
+    dialog = getattr(state, "_shared_lut_dialog", None)
+    try:
+        alive = dialog is not None and dialog.objectName() is not None
+    except RuntimeError:                      # C++ side already gone
+        alive = False
+        dialog = None
+
+    if not alive:
+        dialog = LutDialog(**callbacks)
+        if state is not None:
+            state._shared_lut_dialog = dialog
+    else:
+        dialog.rebind(**callbacks)
+
+    # Only the current owner may hold the reference the sync helpers read.
+    previous = getattr(state, "_shared_lut_owner", None)
+    if previous is not None and previous is not owner:
+        try:
+            previous._lut_dialog = None
+        except (AttributeError, RuntimeError):
+            pass
+    if state is not None:
+        state._shared_lut_owner = owner
+    owner._lut_dialog = dialog
+    return dialog
+
+
+def close_shared_lut_dialog(state) -> None:
+    """Shut the one LUT dialog down (application exit)."""
+    dialog = getattr(state, "_shared_lut_dialog", None)
+    if dialog is None:
+        return
+    try:
+        dialog.close()
+        dialog.deleteLater()
+    except RuntimeError:
+        pass
+    state._shared_lut_dialog = None
+    owner = getattr(state, "_shared_lut_owner", None)
+    if owner is not None:
+        try:
+            owner._lut_dialog = None
+        except (AttributeError, RuntimeError):
+            pass
+    state._shared_lut_owner = None

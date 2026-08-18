@@ -14,31 +14,20 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..core.overlay import PURE_COLOR_NAMES
-
-#: Pure colour name → RGB, in the shared viewer dropdown order.
-_PURE_COLOR_RGB: dict[str, tuple[int, int, int]] = {
-    "Red": (255, 0, 0), "Green": (0, 200, 0), "Blue": (0, 0, 255),
-    "Cyan": (0, 255, 255), "Magenta": (255, 0, 255), "Yellow": (255, 255, 0),
-    "Orange": (255, 128, 0), "White": (255, 255, 255),
-    "Gray": (128, 128, 128), "Black": (0, 0, 0),
-}
-_PURE_COLORS: dict[str, tuple[int, int, int]] = {
-    name: _PURE_COLOR_RGB[name] for name in PURE_COLOR_NAMES
-}
+from ..colors import solid_color_names, solid_color_rgba
 
 LOCATIONS = ("Lower Right", "Lower Left", "Upper Right", "Upper Left", "At Selection")
 
 
 class _ColorCombo(QComboBox):
-    """A pure-colour dropdown (+ optional 'None' first, + 'Custom…' last)."""
+    """A pure-color dropdown (+ optional 'None' first, + 'Custom…' last)."""
 
     def __init__(self, *, default: str, allow_none: bool = False, parent=None) -> None:
         super().__init__(parent)
         self._custom: QColor | None = None
         if allow_none:
             self.addItem("None")
-        for name in _PURE_COLORS:
+        for name in solid_color_names():
             self.addItem(name)
         self.addItem("Custom…")
         i = self.findText(default)
@@ -49,7 +38,7 @@ class _ColorCombo(QComboBox):
     def _on_activated(self, _index: int) -> None:
         if self.currentText() == "Custom…":
             initial = self._custom or QColor(255, 255, 255)
-            color = QColorDialog.getColor(initial, self, "Choose colour")
+            color = QColorDialog.getColor(initial, self, "Choose color")
             if color.isValid():
                 self._custom = color
 
@@ -60,8 +49,7 @@ class _ColorCombo(QComboBox):
             return None
         if text == "Custom…":
             return self._custom or QColor(255, 255, 255)
-        r, g, b = _PURE_COLORS.get(text, (255, 255, 255))
-        return QColor(r, g, b)
+        return QColor(*solid_color_rgba(text))
 
     def set_color(self, value: QColor | None) -> None:
         """Select the dropdown entry matching *value* (None / pure name / Custom)."""
@@ -70,9 +58,9 @@ class _ColorCombo(QComboBox):
             if i >= 0:
                 self.setCurrentIndex(i)
             return
-        rgb = (value.red(), value.green(), value.blue())
-        for name, pure in _PURE_COLORS.items():
-            if pure == rgb:
+        rgba = (value.red(), value.green(), value.blue(), value.alpha())
+        for name in solid_color_names():
+            if solid_color_rgba(name) == rgba:
                 i = self.findText(name)
                 if i >= 0:
                     self.setCurrentIndex(i)
@@ -84,7 +72,7 @@ class _ColorCombo(QComboBox):
 
 
 class ScaleBarDialog(QDialog):
-    """Collect scale-bar parameters (width/height/font/colour/location/orientation)."""
+    """Collect scale-bar parameters (width/height/font/color/location/orientation)."""
 
     def __init__(self, parent=None, *, default_width_nm: float = 100.0,
                  default_height_nm: float = 10.0, has_selection: bool = False,

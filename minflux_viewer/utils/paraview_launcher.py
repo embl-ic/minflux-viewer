@@ -21,7 +21,7 @@ Flow
 
 3. We write a tiny startup Python script next to the .vtp. ParaView's
    ``--script`` option runs it automatically on launch, so the user lands
-   in a view already showing the localisations as points, coloured by z.
+   in a view already showing the localisations as points, colored by z.
 4. We spawn ParaView as a detached subprocess so closing the viewer does
    NOT close ParaView.
 """
@@ -196,7 +196,7 @@ display = Show(reader, view)
 display.Representation = "Points"
 display.PointSize = 2.0
 
-# Colour by z if available
+# Color by z if available
 arrays = list(reader.PointData.keys())
 if "loc_z" in arrays:
     ColorBy(display, ("POINTS", "loc_z"))

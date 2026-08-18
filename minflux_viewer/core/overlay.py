@@ -5,46 +5,30 @@ from dataclasses import dataclass
 
 import numpy as np
 
-PURE_COLOR_NAMES = (
-    "Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Orange",
-    "White", "Gray", "Black",
+from ..colors import (
+    DEFAULT_SOLID_COLORS,
+    SOLID_COLOR_NAMES,
+    overlay_colors,
+    rgba_hex,
 )
+
+PURE_COLOR_NAMES = SOLID_COLOR_NAMES
 
 CHANNEL_LUTS = [
     *PURE_COLOR_NAMES,
     "hot", "jet", "HiLo", "glasbey", "viridis", "inferno", "gray",
 ]
 
-PURE_COLOR_RGB = {
-    "Red": (220, 40, 40),
-    "Green": (20, 170, 70),
-    "Blue": (50, 90, 230),
-    "Cyan": (0, 170, 190),
-    "Magenta": (190, 50, 190),
-    "Yellow": (210, 170, 20),
-    "Orange": (245, 130, 20),
-    "White": (255, 255, 255),
-    "Gray": (120, 120, 120),
-    "Black": (0, 0, 0),
-}
+PURE_COLOR_RGB = {name: tuple(value[:3]) for name, value in DEFAULT_SOLID_COLORS.items()}
 
-#: Default per-dataset overlay channel colours (1st..6th), cycled for overlays.
+#: Default per-dataset overlay channel colors (1st..6th), cycled for overlays.
 DEFAULT_OVERLAY_COLORS = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"]
 
 
 def overlay_color_cycle(prefs: dict | None) -> list[str]:
-    """The configured overlay channel-colour cycle (Preferences > Appearance >
-    Overlay), or the built-in default. Always returns a non-empty list."""
-    colors = None
-    try:
-        colors = (prefs or {}).get("plot", {}).get("overlay_colors")
-    except Exception:
-        colors = None
-    if isinstance(colors, (list, tuple)):
-        out = [str(c) for c in colors if str(c).strip()]
-        if out:
-            return out
-    return list(DEFAULT_OVERLAY_COLORS)
+    """Configured RGBA overlay cycle encoded as solid-color LUT values."""
+    colors = overlay_colors(prefs)
+    return [f"solid:custom:{rgba_hex(color)}" for color in colors] or list(DEFAULT_OVERLAY_COLORS)
 
 
 @dataclass

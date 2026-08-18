@@ -250,9 +250,9 @@ def _adaptive_toolbar_pixmap(path: str) -> "QPixmap | None":
 
     The small ROI/LUT PNGs are opaque black-on-white images. Treating the white
     pixels as an alpha mask removes the visible white square on dark palettes.
-    Monochrome artwork is recoloured with the current button-text colour so the
-    same source remains legible in both light and dark modes; the coloured
-    LUT-picker icon keeps its original colours.
+    Monochrome artwork is recolored with the current button-text color so the
+    same source remains legible in both light and dark modes; the colored
+    LUT-picker icon keeps its original colors.
     """
     image = QImage(path)
     if image.isNull():
@@ -296,8 +296,8 @@ def _adaptive_toolbar_pixmap(path: str) -> "QPixmap | None":
                     QColor(foreground.red(), foreground.green(), foreground.blue(), alpha),
                 )
             else:
-                # For coloured artwork, only remove the white matte while
-                # preserving the original wheel colours and antialiasing.
+                # For colored artwork, only remove the white matte while
+                # preserving the original wheel colors and antialiasing.
                 coverage = max(0, min(255, 255 - min(red, green, blue)))
                 alpha = round(color.alpha() * coverage / 255)
                 image.setPixelColor(x, y, QColor(red, green, blue, alpha))
@@ -336,6 +336,7 @@ class MainWindow(QMainWindow):
         self._memory_win    = None
         self._roi_manager_win = None
         self._script_editor_win = None
+        self._color_dialog = None
         self._shortcut_actions: dict[str, QAction] = {}
         self._roi_tool_actions: dict[str, QAction] = {}
         self._window_cycle_index = -1
@@ -430,6 +431,7 @@ class MainWindow(QMainWindow):
         state.active_changed.connect(self._on_active_changed)
         state.status_message.connect(self._status_label.setText)
         state.log_message.connect(self._on_log_message)
+        state.colors_changed.connect(self._on_colors_changed)
 
         # Remembered ROI duplicate/crop options, per dataset (session-only,
         # keyed by dataset identity — "use the same setup and stop asking").
@@ -2990,12 +2992,16 @@ class MainWindow(QMainWindow):
         show_modeless(win, self)
 
     def _system_roi_color(self) -> str:
-        """The user's configured default ROI colour (Preferences ▸ Appearance ▸ ROI,
+        """The user's configured default ROI color (Preferences ▸ Appearance ▸ ROI,
         default ``Yellow``). Auto-generated ROIs (segmentation / detection) use this
         as their base stroke so they match manually drawn ROIs; the bright cyan
         ``RoiOverlayController.MANAGER_SELECT_COLOR`` is reserved for the ROI-Manager
         selection highlight only (so a selected ROI stays distinguishable)."""
-        return self._state.prefs.get("plot", {}).get("roi_color", "Yellow") or "Yellow"
+        # rgba_hex (#RRGGBBAA), not rgba_qt_hex: this string is handed to
+        # pyqtgraph, which reads Qt's #AARRGGBB as RGBA and turns an opaque
+        # color into a fully transparent one.
+        from ..colors import pg_safe_hex, viewer_color
+        return pg_safe_hex(viewer_color(self._state.prefs, "roi_edge"))
 
     def add_segmentation_rois(self, idx: int, centers, *, side_nm: float,
                               name_prefix: str, source: str, stroke_color: str | None = None,
@@ -3006,7 +3012,7 @@ class MainWindow(QMainWindow):
 
         ``names`` (if given, one per centre) sets each ROI's name; otherwise they
         are auto-numbered ``"<name_prefix> <i>"``. ``stroke_color`` defaults to the
-        system ROI colour. Shared by the convolution segmentation tool; returns the
+        system ROI color. Shared by the convolution segmentation tool; returns the
         count added."""
         import numpy as np
 
@@ -3038,7 +3044,7 @@ class MainWindow(QMainWindow):
                           log_message: str | None = None) -> int:
         """Add a 3-D point ROI (full ``[x, y, z]`` nm geometry) for each centre in
         *centers* ``(K, 3)`` to the ROI Manager, reveal them, and show render +
-        manager. ``stroke_color`` defaults to the system ROI colour. Used by the 3-D
+        manager. ``stroke_color`` defaults to the system ROI color. Used by the 3-D
         convolution segmentation tool; returns the count added."""
         import numpy as np
 
@@ -3069,7 +3075,7 @@ class MainWindow(QMainWindow):
         """Add an open poly-line (``freehand_line``) ROI tracing each path in
         *paths* (each an ``(M, 2)`` array of ``(x, y)`` nm vertices) to the ROI
         Manager, reveal them, and show render + manager. ``stroke_color`` defaults to
-        the system ROI colour. Returns the count added.
+        the system ROI color. Returns the count added.
 
         Used by the curvilinear segmentation tool for traced centre lines."""
         import numpy as np
@@ -3679,6 +3685,161 @@ class MainWindow(QMainWindow):
             if callable(refresh):
                 refresh()
 
+    def _on_colors_changed(self, payload) -> None:
+        """Repaint only consumers touched by a global color change."""
+        from ..colors import normalize_rgba, pg_safe_hex, rgba_hex
+        from ..core.overlay import dataset_group_id, overlay_color_cycle
+
+        payload = payload if isinstance(payload, dict) else {}
+        paths = set(payload.get("paths", ()))
+        if not paths:
+            return
+
+        solid_changed = any(path.startswith("solid.") for path in paths)
+        overlay_changed = any(path.startswith("viewer.overlay.") for path in paths)
+        roi_changed = any(p.startswith("viewer.roi") for p in paths)
+        attribute_changed = (
+            any(path.startswith("viewer.attribute_") for path in paths)
+            or any(path.startswith("functions.Iteration series.") for path in paths)
+        )
+        histogram_changed = (
+            any(path.startswith("viewer.histogram_") for path in paths)
+            or any(path.startswith("viewer.filter_") for path in paths)
+            or any(path.startswith("functions.Iteration series.") for path in paths)
+        )
+
+        def migrate_solid_lut(value):
+            if not solid_changed or not isinstance(value, str):
+                return value
+            text = value.strip()
+            if text.startswith("solid:custom:"):
+                return value
+            prefixed = text.startswith("solid:")
+            name = text[6:] if prefixed else text
+            renames = payload.get("solid_renames", {})
+            if isinstance(renames, dict) and name in renames:
+                renamed = str(renames[name])
+                return f"solid:{renamed}" if prefixed else renamed
+            previous_solid = payload.get("previous", {}).get("solid", {})
+            current_solid = payload.get("current", {}).get("solid", {})
+            if (
+                isinstance(previous_solid, dict)
+                and isinstance(current_solid, dict)
+                and name in previous_solid
+                and name not in current_solid
+            ):
+                return f"solid:custom:{rgba_hex(previous_solid[name])}"
+            return value
+
+        if solid_changed:
+            for ds in self._state.datasets:
+                for key in ("overlay_lut", "render_channel_lut"):
+                    if key in ds.state:
+                        ds.state[key] = migrate_solid_lut(ds.state[key])
+            for win in (*self._render_windows.values(), *self._scatter_windows.values()):
+                for channel in getattr(win, "_channels", ()):
+                    if isinstance(channel, dict) and "lut" in channel:
+                        channel["lut"] = migrate_solid_lut(channel["lut"])
+                combo = getattr(win, "_cmap_combo", None)
+                if combo is not None:
+                    current_lut = combo.currentText()
+                    migrated_lut = migrate_solid_lut(current_lut)
+                    if migrated_lut != current_lut:
+                        blocked = combo.blockSignals(True)
+                        try:
+                            combo.setCurrentText(migrated_lut)
+                        finally:
+                            combo.blockSignals(blocked)
+
+        if overlay_changed:
+            cycle = overlay_color_cycle(self._state.prefs)
+            for ds in self._state.datasets:
+                if not dataset_group_id(ds):
+                    continue
+                try:
+                    position = max(0, int(ds.state.get("overlay_order", 1)) - 1)
+                except (TypeError, ValueError):
+                    position = 0
+                lut = cycle[position % len(cycle)]
+                ds.state["overlay_lut"] = lut
+                ds.state["render_channel_lut"] = lut
+
+        if roi_changed:
+            previous = payload.get("previous", {}).get("viewer", {}).get("roi_edge")
+            current = payload.get("current", {}).get("viewer", {}).get("roi_edge")
+            old_rgba = normalize_rgba(previous)
+            new_color = pg_safe_hex(current)
+
+            def _tracks_system_color(stroke) -> bool:
+                """Whether this ROI still carries the outgoing system color.
+
+                Compared through ``pg_safe_hex`` so a record written before the
+                #AARRGGBB/#RRGGBBAA mix-up was fixed is still recognised — those
+                would otherwise never match and could never be recolored back.
+                """
+                return normalize_rgba(pg_safe_hex(stroke)) == old_rgba
+
+            records_changed = False
+            for record in self._state.rois.records:
+                if _tracks_system_color(record.stroke_color):
+                    record.stroke_color = new_color
+                    records_changed = True
+            adapters = []
+            for win in (
+                *self._render_windows.values(),
+                *self._scatter_windows.values(),
+                *self._histogram_windows.values(),
+                *self._attr_windows.values(),
+            ):
+                adapter = getattr(win, "_roi_overlay", None)
+                if adapter is not None and adapter not in adapters:
+                    adapters.append(adapter)
+            for adapter in adapters:
+                draft = getattr(adapter, "draft", None)
+                if draft is not None and _tracks_system_color(draft.stroke_color):
+                    draft.stroke_color = new_color
+                for record in getattr(adapter, "_session_points", ()):
+                    if _tracks_system_color(record.stroke_color):
+                        record.stroke_color = new_color
+                try:
+                    adapter.refresh()
+                except Exception:
+                    pass
+            if records_changed:
+                self._state.rois.changed.emit()
+
+        if attribute_changed:
+            for win in self._attr_windows.values():
+                refresh = getattr(win, "refresh_colors", None)
+                if callable(refresh):
+                    refresh()
+        if histogram_changed:
+            for win in self._histogram_windows.values():
+                refresh = getattr(win, "refresh_colors", None)
+                if callable(refresh):
+                    refresh()
+
+        if solid_changed or overlay_changed:
+            for win in self._render_windows.values():
+                refresh = getattr(win, "refresh_global_colors", None)
+                if callable(refresh):
+                    refresh(reset_overlay=overlay_changed)
+            for win in self._scatter_windows.values():
+                refresh = getattr(win, "refresh_global_colors", None)
+                if callable(refresh):
+                    refresh(reset_overlay=overlay_changed)
+
+        if solid_changed or any(
+            path.startswith(("functions.", "plugins.")) for path in paths
+        ):
+            for win in list(getattr(self, "_modeless_windows", ())):
+                refresh = getattr(win, "refresh_colors", None)
+                if callable(refresh):
+                    try:
+                        refresh()
+                    except RuntimeError:
+                        pass
+
     def _show_set_measurements(self) -> None:
         from .set_measurements_dialog import SetMeasurementsDialog
         SetMeasurementsDialog(self._state, parent=self).exec()
@@ -3930,9 +4091,9 @@ class MainWindow(QMainWindow):
             return
 
         lut_by_idx = self._current_group_luts(group_indices)
-        from ..core.overlay import PURE_COLOR_NAMES
+        from ..colors import solid_color_names
 
-        fallback_luts = list(PURE_COLOR_NAMES)
+        fallback_luts = list(solid_color_names())
         for pos, idx in enumerate(group_indices):
             ds = self._state.datasets[idx]
             ds.state["render_channel_lut"] = lut_by_idx.get(idx, fallback_luts[pos % len(fallback_luts)])
@@ -5249,7 +5410,7 @@ class MainWindow(QMainWindow):
         return wanted_scatter
 
     def _show_channel_separation(self) -> None:
-        """Process › Channel… › Separate Channel by DCR — open the DCR two-colour
+        """Process › Channel… › Separate Channel by DCR — open the DCR two-color
         separation tool for the active dataset."""
         idx = self._state.active_idx
         if idx is None or not (0 <= idx < len(self._state.datasets)):
@@ -6535,6 +6696,7 @@ class MainWindow(QMainWindow):
                 sync = getattr(win, "sync_lut_dialog", None)
                 if callable(sync):
                     sync()
+                self._retarget_lut_dialog(win)
         except (RuntimeError, AttributeError):
             pass
 
@@ -6558,6 +6720,68 @@ class MainWindow(QMainWindow):
         except (RuntimeError, TypeError, AttributeError):
             return False
 
+    def _retarget_lut_dialog(self, view) -> None:
+        """Move the one open LUT dialog onto the newly focused *view*.
+
+        The dialog is per-view, so 'following focus' means closing the other
+        view's and opening this one's; the geometry is carried over so it stays
+        put instead of jumping.  Does nothing when no LUT dialog is open — this
+        must never *summon* one just because the user clicked a plot.
+        """
+        own = getattr(view, "_lut_dialog", None)
+        try:
+            if own is not None and own.isVisible():
+                return                      # already showing this view's
+        except RuntimeError:
+            own = None
+
+        dialog = getattr(self._state, "_shared_lut_dialog", None)
+        try:
+            if dialog is None or not dialog.isVisible():
+                return                      # nothing open; never summon one
+            geometry = dialog.geometry()
+        except RuntimeError:
+            return
+
+        # Rebinding keeps the same window, so it neither blinks nor moves; the
+        # geometry is restored anyway in case the view re-lays it out.
+        try:
+            view.open_lut_dialog()
+        except Exception as exc:
+            self._state.log(f"LUT retarget failed: {exc}", "ERROR")
+            return
+        try:
+            dialog.setGeometry(geometry)
+        except RuntimeError:
+            pass
+
+    def _lut_capable_views(self) -> list:
+        """Every view that can own a LUT dialog: renders, scatters, volumes."""
+        views: list = []
+        registries = [self._render_windows, self._scatter_windows]
+        # Present only when the advanced renderer has been opened.
+        advanced = getattr(self, "_advanced_render_windows", None)
+        if isinstance(advanced, dict):
+            registries.insert(1, advanced)
+        for registry in registries:
+            for view in registry.values():
+                views.append(view)
+                volume = getattr(view, "_volume_window", None)
+                if volume is not None:
+                    views.append(volume)
+        return views
+
+    def _close_other_lut_dialogs(self, keep) -> None:
+        """No-op kept for callers: there is only ever one LUT dialog now.
+
+        ``ui/lut_dialog.py::shared_lut_dialog`` hands every view the same
+        instance and rebinds its callbacks, so nothing else can be on screen to
+        close.  This used to hide the other views' dialogs, which could not
+        actually guarantee the invariant — ``close()`` may be refused, and every
+        view that had ever opened one left a hidden instance behind.
+        """
+        del keep
+
     def _open_lut_on_view(self, view, idx: "int | None") -> bool:
         """Open *view*'s LUT dialog if it is a live, visible LUT-capable view of
         dataset *idx*. Returns True once handled (or on failure, to stop trying)."""
@@ -6577,7 +6801,11 @@ class MainWindow(QMainWindow):
         if not self._lut_view_shows_dataset(view, idx):
             return False
         try:
+            # Open first, then retire the others: a view whose data is not ready
+            # declines to show (scatter does), and closing first would leave the
+            # user with no LUT dialog at all.
             opener()
+            self._close_other_lut_dialogs(view)
             self._last_active_plot_window = view
             return True
         except Exception as exc:
@@ -6626,18 +6854,23 @@ class MainWindow(QMainWindow):
         )
 
     def _show_color_picker(self) -> None:
-        """Toolbar Color button — pick a single colour for ROIs/render."""
-        from PyQt6.QtGui import QColor
-        from PyQt6.QtWidgets import QColorDialog
-        current = self._state.prefs.get("plot", {}).get("roi_color", "Yellow")
-        # Accept either a name like "Yellow" or a hex string
-        c0 = QColor(current) if QColor(current).isValid() else QColor("yellow")
-        c = QColorDialog.getColor(c0, self, "Choose colour")
-        if not c.isValid():
-            return
-        self._state.prefs.setdefault("plot", {})["roi_color"] = c.name()
-        self._state.save_prefs()
-        self._state.log(f"ROI / single colour set to {c.name()}.")
+        """Open or raise the one modeless application-wide COLOR editor."""
+        from .global_color_dialog import GlobalColorDialog
+        from .modeless import show_modeless
+
+        dialog = self._color_dialog
+        if dialog is not None:
+            try:
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+                return
+            except RuntimeError:
+                self._color_dialog = None
+        dialog = GlobalColorDialog(self._state)
+        dialog.destroyed.connect(lambda _=None: setattr(self, "_color_dialog", None))
+        self._color_dialog = dialog
+        show_modeless(dialog, self)
 
     def _show_info_for_active(self) -> None:
         """View → Show Info — open data-info window(s) for the active dataset."""
@@ -6726,7 +6959,7 @@ class MainWindow(QMainWindow):
         """Attach PNG icons to the toolbar QActions (item #5).
 
         Icons are normalized (white matte stripped, monochrome linework tinted to
-        the button-text colour) so the same source PNGs read correctly on both
+        the button-text color) so the same source PNGs read correctly on both
         light and dark palettes."""
         from .. import resource_path
         icon_dir = resource_path("icons")
@@ -7144,9 +7377,16 @@ class MainWindow(QMainWindow):
         each child runs its own ``closeEvent`` (saves its settings, etc.)
         before being torn down by Qt on the main window's destruction.
 
+        The shared LUT dialog is parentless (so it survives the view that
+        opened it) and is therefore closed here explicitly — otherwise it
+        outlives the main window.
+
         With ``keep_log_console=True`` the Log and Console windows are left open
         (used by the *Close All Windows* command, which clears everything else).
         """
+        from .lut_dialog import close_shared_lut_dialog
+        close_shared_lut_dialog(self._state)
+
         # Per-dataset windows
         for win in list(self._data_windows.values()):
             try: win.close()

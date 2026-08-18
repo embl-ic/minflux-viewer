@@ -1,9 +1,11 @@
 # MINFLUX Viewer v0.4.1
 
-v0.4.1 focuses on the plotting and LUT experience: colormaps now belong to the
-application instead of an external plotting library, custom gradients can be
-created from the LUT dialog, and the Render and Localization Scatter menus now
-follow the same layout.
+v0.4.1 focuses on color. Colormaps now belong to the application rather than an
+external plotting library, a new application-wide **COLOR** dialog owns every
+configurable color in the program, ROI colors are split into the parts that are
+actually drawn, and the LUT editor is a single window that follows the view you
+are working in. Two long-standing color bugs are fixed along the way: ROIs that
+rendered invisible, and Invert LUT doing nothing on the render view.
 
 ---
 
@@ -35,6 +37,81 @@ dropdown:
   Volume, Local Density, and channel-LUT selectors.
 - Existing custom maps can be edited or deleted from the same menu.
 - Custom maps are stored in the application's preferences and survive restarts.
+
+## The COLOR dialog
+
+The toolbar **Color** button opens a single, application-wide **COLOR** dialog
+that owns every configurable color in the program. Colors are stored as RGBA in
+`prefs["colors"]` and every view reads them through one registry, so a color
+changed here takes effect everywhere at once.
+
+The dialog is organized as four tabs, each with its own **Reset**:
+
+- **Solid Color List** — the named solid colors (Red … Black) offered by the
+  render, scatter and channel color menus. Entries can be renamed, added and
+  deleted; the list is what those menus show.
+- **Viewer / Plots** — Attribute Plot, Histogram, Filter, Overlay channel
+  colors, and ROI.
+- **Components** — built-in features that own a set of colors: ROI Manager,
+  Iteration series, Localization precision.
+- **Plugins** — Spatial Line Pattern, Drift Correction, Trace Viewer.
+
+Below the tabs, the **Custom Color Palette** provides Qt's basic/custom swatch
+grids, the gradient and alpha bar, *Pick Screen Color*, a live preview block,
+and HSV / HEX / RGBA fields. **Update Selected Feature Color** applies the
+picked color to whichever entry is selected above.
+
+The dialog opens at a fixed width (the palette decides it) and a compact height;
+a tab holding more entries than fit scrolls rather than squeezing its rows.
+
+### ROI colors
+
+The single ROI color is now four, so the parts that are drawn separately can be
+set separately:
+
+```
+ROI:  face   edge   corner   highlight data in ROI
+```
+
+Stored ROIs are styled by the **ROI Manager** component group, which
+distinguishes listed entries from the selected one:
+
+```
+ROI entries:   face  edge  corner  label
+ROI selected:  face  edge  corner  label
+```
+
+A ROI that carries its own color — segmentation output, or one set in ROI
+Properties — keeps it; only ROIs still on the system color follow the palette.
+An existing single `roi` preference is carried over into the new keys rather
+than reverting to the default.
+
+**Fixed: ROIs and their labels could become invisible.** ROI colors were being
+written in Qt's `#AARRGGBB` form, which PyQtGraph reads as `#RRGGBBAA` — taking
+the blue byte as alpha, so an opaque yellow arrived fully transparent. Edges,
+fills and ROI Manager labels disappeared, and changing the color could not
+restore them because the recolor pass compared with the wrong parser. Colors are
+now written in the form PyQtGraph reads, and an ROI still holding a legacy value
+is repaired when it is drawn.
+
+## LUT dialog
+
+- **One LUT dialog, application-wide.** Opening a LUT from a second view used to
+  create a second dialog, and focusing a render view closed whichever dialog
+  another view had open. There is now a single instance that is rebound to the
+  view you focus, keeping its position; it is closed with the application.
+- **Invert LUT works on the render view.** It previously applied only in
+  TIFF/image mode. Inverting now flips the colormap and the page together, which
+  also ticks **View ▸ White background**, so zero-signal still matches the
+  background.
+- **A custom colormap's alpha now dims its channel**, the same treatment solid
+  colors already had. The render composite is opaque, so alpha scales intensity
+  rather than making pixels see-through.
+
+## Consistent spelling
+
+User-facing text, identifiers and comments now use **color** throughout, rather
+than mixing `color` and `colour`. Section and tab names use Title Case.
 
 ## Render and Localization Scatter menus
 
@@ -116,10 +193,19 @@ saved settings, not to a brand-new copy of the current defaults.
   former build-time Pillow requirement for converting a PNG icon.
 - The application and Poetry package versions are both **0.4.1**; the shared
   PyInstaller spec reads that application version for packaged metadata.
+- **The Windows executable now carries a version resource.** Explorer's
+  Properties dialog and inventory tools previously showed nothing at all: the
+  spec parsed the version but only applied it to the macOS bundle. It is built
+  from the same `__version__`, so there is still one place to bump.
 
 ## Compatibility notes
 
 - Existing saved views using legacy colormap names remain supported.
+- A saved single ROI color is migrated into the new face/edge/highlight keys;
+  ROIs stored with the old, unreadable color string are repaired on display.
+- Solid-color menus no longer offer a one-off **Custom...** entry — the solid
+  list in the COLOR dialog is that list now. Views already saved with a custom
+  solid color still render it.
 - Custom gradients are application preferences, not embedded into exported
   localization datasets. Installations that need the same custom map must create
   it in their own preferences.

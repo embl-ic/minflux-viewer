@@ -4,7 +4,7 @@ minflux_viewer.ui.attribute_window
 Attribute plot window — port of ``plot_attribute.m``.
 
 Plots two numeric attributes against each other (X vs Y), with optional
-colouring by a third attribute.  The most common usage is plotting one
+coloring by a third attribute.  The most common usage is plotting one
 attribute over time (X = ``tim``) or index (X = ``idx``).
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -25,6 +26,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..colors import component_colors, viewer_color
 from ..core.app_state import AppState
 from ..core.attributes import attribute_description, plot_attribute_names
 from ..core.iteration import (
@@ -44,13 +46,6 @@ from ..core.loader import (
 from ..core.roi_selection import rectangle_mask
 from .plot_format import plot_widget
 
-# Distinct per-iteration colours for the "all iterations" overlay.
-_ITER_COLORS = [
-    (31, 119, 180), (255, 127, 14), (44, 160, 44), (214, 39, 40),
-    (148, 103, 189), (140, 86, 75), (227, 119, 194), (127, 127, 127),
-    (188, 189, 34), (23, 190, 207),
-]
-
 
 def _row_selector(sel):
     """The row-identity selector for *sel*.
@@ -63,8 +58,9 @@ def _row_selector(sel):
     return "last" if is_value_pool_selector(sel) else sel
 
 
-def _iter_color(k: int) -> tuple[int, int, int]:
-    return _ITER_COLORS[k % len(_ITER_COLORS)]
+def _iter_color(prefs: dict, k: int) -> tuple[int, int, int, int]:
+    colors = list(component_colors(prefs, "functions", "Iteration series").values())
+    return colors[k % len(colors)] if colors else (70, 130, 180, 255)
 
 
 class AttributeWindow(QWidget):
@@ -190,9 +186,10 @@ class AttributeWindow(QWidget):
             pass
         self._original_mouse_drag_event = self._view_box.mouseDragEvent
         self._view_box.mouseDragEvent = self._zoom_mouse_drag_event
+        self._apply_plot_colors()
 
         # Series items are (curve, scatter) pairs, created on demand so the
-        # "all iterations" overlay can show one coloured series per iteration.
+        # "all iterations" overlay can show one colored series per iteration.
         self._series_items: list[tuple] = []
         self._legend = None
         from .roi_overlay import RoiOverlayController
@@ -276,6 +273,20 @@ class AttributeWindow(QWidget):
         self._x_combo.setToolTip(attribute_description(self._x_combo.currentText()))
         self._y_combo.setToolTip(attribute_description(self._y_combo.currentText()))
 
+        self._draw()
+
+    def _apply_plot_colors(self) -> None:
+        background = viewer_color(self._state.prefs, "attribute_background")
+        self._plot.setBackground(QColor(*background))
+        luminance = 0.2126 * background[0] + 0.7152 * background[1] + 0.0722 * background[2]
+        foreground = QColor(25, 25, 25) if luminance >= 145 else QColor(235, 235, 235)
+        for name in ("bottom", "left"):
+            axis = self._plot.getPlotItem().getAxis(name)
+            axis.setPen(foreground)
+            axis.setTextPen(foreground)
+
+    def refresh_colors(self) -> None:
+        self._apply_plot_colors()
         self._draw()
 
     @staticmethod
@@ -571,14 +582,20 @@ class AttributeWindow(QWidget):
                 missing = miss or missing
                 total += n
                 if n:
-                    self._add_series(x, y, _iter_color(k), use_lines=use_lines, name=ordinal(k + 1))
+                    self._add_series(
+                        x, y, _iter_color(self._state.prefs, k),
+                        use_lines=use_lines, name=ordinal(k + 1),
+                    )
             note = f"{total:,} points across {n_itr} iterations  |  all [stacked]"
         else:
             # "single" (last / k-th) and "flatten" are one blue series.
             sel = "all" if render == "flatten" else itr_sel
             x, y, n, missing = self._series_data(ds, x_name, y_name, sel, vld_only, filtered_only)
             if n:
-                self._add_series(x, y, (70, 130, 180), use_lines=use_lines)
+                self._add_series(
+                    x, y, viewer_color(self._state.prefs, "attribute_data"),
+                    use_lines=use_lines,
+                )
             sel_label = self._iter_combo.currentText() or "last"
             note = f"{n:,} points  |  {sel_label}"
 

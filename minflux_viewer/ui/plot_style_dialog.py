@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 
 
 class PlotStyleDialog(QDialog):
-    """Edit the marker shape, size, transparency, and colour of a plot layer."""
+    """Edit the marker shape, size, transparency, and color of a plot layer."""
 
     def __init__(self, layer: dict[str, Any], parent=None):
         super().__init__(parent)
@@ -81,7 +81,7 @@ class PlotStyleDialog(QDialog):
 
     @property
     def color_changed(self) -> bool:
-        """Whether the user explicitly selected a new colour."""
+        """Whether the user explicitly selected a new color."""
         return self._color_changed
 
     def _color_label(self) -> str:

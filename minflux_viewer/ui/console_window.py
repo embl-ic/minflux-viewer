@@ -176,17 +176,17 @@ class ConsoleWindow(QWidget):
         root.addLayout(bar)
 
     # ------------------------------------------------------------------
-    # Append with colouring
+    # Append with coloring
     # ------------------------------------------------------------------
 
     def _append(self, text: str, *, is_err: bool) -> None:
         if not text:
             return
-        colour = "#ff7b72" if is_err else "#d4d4d4"
+        color = "#ff7b72" if is_err else "#d4d4d4"
         cursor = self._text.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         fmt = QTextCharFormat()
-        fmt.setForeground(QColor(colour))
+        fmt.setForeground(QColor(color))
         cursor.setCharFormat(fmt)
         cursor.insertText(text)
         if self._autoscroll:

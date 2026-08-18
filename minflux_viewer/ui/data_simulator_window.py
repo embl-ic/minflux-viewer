@@ -59,7 +59,7 @@ class SimulateConfigWidget(QWidget):
         self._locs = QDoubleSpinBox(); self._locs.setRange(1.0, 100.0); self._locs.setValue(4.0); self._locs.setDecimals(1)
         self._prec = QDoubleSpinBox(); self._prec.setRange(0.0, 100.0); self._prec.setValue(5.0); self._prec.setSuffix(" nm")
         self._channels = QSpinBox(); self._channels.setRange(1, 6); self._channels.setValue(1)
-        self._channels.setToolTip("Number of overlaid colour channels; >1 makes a multi-channel overlay.")
+        self._channels.setToolTip("Number of overlaid color channels; >1 makes a multi-channel overlay.")
         self._is_3d = QCheckBox("3-D (uncheck for planar / 2-D)"); self._is_3d.setChecked(True)
         self._beads = QCheckBox("Include MBM fiducial beads")
         self._beads.setToolTip(

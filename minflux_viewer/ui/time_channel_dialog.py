@@ -24,13 +24,13 @@ from PyQt6.QtWidgets import (
 )
 
 from ..colormaps import channel_colormap_names, representative_rgb
-from ..core.overlay import PURE_COLOR_RGB
+from ..colors import is_solid_color, solid_color_rgb
 from ..core.time_channels import TimeWindow, time_channel_selections
 
 
 def _lut_preview_rgb(lut: str) -> tuple[int, int, int]:
-    if lut in PURE_COLOR_RGB:
-        return PURE_COLOR_RGB[lut]
+    if is_solid_color(lut):
+        return solid_color_rgb(lut)
     try:
         return tuple(
             int(round(channel * 255.0)) for channel in representative_rgb(lut)
@@ -275,6 +275,21 @@ class TimeChannelDialog(QDialog):
         row["region"].setBrush((*rgb, 35))
         row["region"].setPen(pg.mkPen(rgb, width=2))
         row["region"].setHoverPen(pg.mkPen(rgb, width=3))
+
+    def refresh_colors(self) -> None:
+        choices = channel_colormap_names()
+        for row in self._rows:
+            combo = row["lut"]
+            current = combo.currentText()
+            blocked = combo.blockSignals(True)
+            try:
+                combo.clear()
+                combo.addItems(choices)
+                if current in choices:
+                    combo.setCurrentText(current)
+            finally:
+                combo.blockSignals(blocked)
+            self._lut_changed(row)
 
     def _add_by_splitting(self) -> None:
         if not self._rows:

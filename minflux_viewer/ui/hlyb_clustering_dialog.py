@@ -666,7 +666,7 @@ class HlyBResultWindow(QDialog):
         self._subunit_detection_checkbox.setToolTip(
             "Show or hide detected subunit centres.")
         self._template_match_checkbox.setToolTip(
-            "Colour accepted subunits by template membership; uncheck to render "
+            "Color accepted subunits by template membership; uncheck to render "
             "every detected subunit in gray.")
         self._pair_link_checkbox.setToolTip(
             "Show or hide accepted pair links and their distance labels together.")
@@ -1060,7 +1060,7 @@ class HlyBResultWindow(QDialog):
     def _show_scatter_context_menu(self, pos, source: QWidget) -> None:
         """Loc-Scatter-style menu for the HlyB result scatter pane."""
         from ..colormaps import named_colormap_names
-        from .scatter_window import _SOLID_COLOR_NAMES
+        from ..colors import solid_color_names
 
         menu = QMenu(self)
         view_menu = menu.addMenu("View as")
@@ -1092,7 +1092,7 @@ class HlyBResultWindow(QDialog):
                 lambda _checked=False, selected=value: self._set_scatter_colormap(selected))
         cmap_menu.addSeparator()
         solid_menu = cmap_menu.addMenu("Solid color")
-        for color_name in _SOLID_COLOR_NAMES:
+        for color_name in solid_color_names():
             value = f"solid:{color_name}"
             action = solid_menu.addAction(color_name)
             action.setCheckable(True)

@@ -130,7 +130,7 @@ def concave_hull(points, *, alpha_factor: float = 2.5) -> list[list[float]]:
 
 def data_fit(source: RoiRecord, points, target: str) -> RoiRecord:
     """Fit a *target* shape to *points* (the localizations the source ROI
-    highlights) and return a new RoiRecord deriving the source's context/colour."""
+    highlights) and return a new RoiRecord deriving the source's context/color."""
     P = np.asarray(points, dtype=float)
     if P.ndim != 2 or P.shape[1] < 2 or P.shape[0] < 3:
         raise ValueError("need at least 3 highlighted localizations to fit")

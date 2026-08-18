@@ -4,7 +4,7 @@ Tests for the Brightness/Contrast dialog over overlay (multi-channel) renders:
 * B/C reads and edits only the **active** channel's contrast levels — switching
   the active channel re-targets it, and editing one channel never disturbs
   another.
-* The histogram is coloured with the active channel's viewer LUT.
+* The histogram is colored with the active channel's viewer LUT.
 """
 
 from __future__ import annotations
@@ -114,16 +114,16 @@ def test_bc_edits_only_active_channel(_qt_app):
         assert win._channels[0]["levels"] == (5.0, 50.0)   # chA still unchanged
         assert win._channels[1]["levels"] == (7.0, 77.0)
 
-        # Representative histogram colour (same window, no extra RenderWindow):
-        # solid channel → its pure colour; gradient colormap → one clamped mid
-        # colour (never a per-bin gradient).
+        # Representative histogram color (same window, no extra RenderWindow):
+        # solid channel → its pure color; gradient colormap → one clamped mid
+        # color (never a per-bin gradient).
         win._channels[1]["lut"] = "Red"
         assert win._histogram_bar_color() == (1.0, 0.0, 0.0)
         win._channels[1]["lut"] = "hot"
         rgb = win._histogram_bar_color()
         assert _lum(rgb) <= 0.72 + 1e-6          # readable on white
         assert rgb[0] > rgb[2]                   # warm: red over blue
-        assert win._bc_dialog._histogram._bar_rgb is not None  # single colour, not a LUT
+        assert win._bc_dialog._histogram._bar_rgb is not None  # single color, not a LUT
     finally:
         _teardown(win, _qt_app)
 
@@ -205,7 +205,7 @@ def _lum(rgb) -> float:
 
 
 def test_luminance_clamp_keeps_dark_darkens_bright():
-    """Pure logic (no Qt): readable colours pass through, near-white ones darken."""
+    """Pure logic (no Qt): readable colors pass through, near-white ones darken."""
     from minflux_viewer.ui.render_window import _luminance_clamped
 
     assert _luminance_clamped((1.0, 0.0, 0.0)) == (1.0, 0.0, 0.0)   # red unchanged

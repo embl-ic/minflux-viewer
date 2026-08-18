@@ -55,7 +55,7 @@ def test_overlay_compose_is_per_channel(_qt_app):
         rgba1 = win._compose_rgba(scalar)
         red_before = rgba1[0, 0, :3].copy()
         green_before = rgba1[3, 3, :3].copy()
-        assert red_before[0] > 0 and green_before[1] > 0     # sanity: colours present
+        assert red_before[0] > 0 and green_before[1] > 0     # sanity: colors present
 
         # Brighten ONLY the green channel's contrast.
         win._channels[1]["levels"] = (0.0, 2.0)

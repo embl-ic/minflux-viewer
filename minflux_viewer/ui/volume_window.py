@@ -128,9 +128,9 @@ def _compose_multichannel_rgba(
     alpha_accum = np.zeros(shape, dtype=np.float32)
     for norm_uint8, rgb in zip(channel_norms, channel_rgb):
         norm = np.asarray(norm_uint8, dtype=np.float32) / 255.0
-        colour = np.asarray(rgb, dtype=np.float32).ravel()[:3]
+        color = np.asarray(rgb, dtype=np.float32).ravel()[:3]
         for k in range(3):
-            rgb_accum[..., k] += float(colour[k]) * norm
+            rgb_accum[..., k] += float(color[k]) * norm
         alpha_accum = np.maximum(alpha_accum, np.power(norm, 0.75))
     rgba = np.zeros((*shape, 4), dtype=np.uint8)
     rgba[..., :3] = (np.clip(rgb_accum, 0.0, 1.0) * 255.0).astype(np.uint8)
@@ -372,13 +372,13 @@ def make_volume_payload(
 def lut_rgb(name: str) -> tuple[float, float, float]:
     """Representative 0..1 RGB for an overlay channel LUT name.
 
-    Pure-colour LUTs (Red/Green/…) map to their colour; a named colormap is
-    sampled near its bright end. Used to colour each overlay channel in the
+    Pure-color LUTs (Red/Green/…) map to their color; a named colormap is
+    sampled near its bright end. Used to color each overlay channel in the
     multi-channel volume composite.
     """
-    from ..core.overlay import PURE_COLOR_RGB
-    if name in PURE_COLOR_RGB:
-        r, g, b = PURE_COLOR_RGB[name]
+    from ..colors import is_solid_color, solid_color_rgb
+    if is_solid_color(name):
+        r, g, b = solid_color_rgb(name)
         return (r / 255.0, g / 255.0, b / 255.0)
     try:
         return representative_rgb(name, position=0.85)
@@ -438,8 +438,8 @@ def make_multichannel_volume_payload(
     """Composite several overlay channels into one RGBA volume.
 
     Each channel's ``(N, 3)`` nm localisations are voxelised on a **shared** grid,
-    normalised to its own percentile, and **additively coloured** by its LUT
-    colour (so e.g. red + green overlap → yellow). Per-voxel alpha is the maximum
+    normalised to its own percentile, and **additively colored** by its LUT
+    color (so e.g. red + green overlap → yellow). Per-voxel alpha is the maximum
     channel response, so a voxel visible in any channel shows.
     """
     valid = []
@@ -1139,16 +1139,15 @@ class VolumeRenderWindow(QWidget):
             self._info_label.setText("LUT unavailable: no volume values to display.")
             return
 
-        from .lut_dialog import LutDialog
+        from .lut_dialog import shared_lut_dialog
 
-        if self._lut_dialog is None:
-            self._lut_dialog = LutDialog(
-                on_levels_changed=self._on_lut_levels_changed,
-                on_cmap_changed=self._on_lut_cmap_changed,
-                on_invert_changed=self._on_lut_invert_changed,
-                parent=self,
-                state=self._state,
-            )
+        shared_lut_dialog(
+            self,
+            on_levels_changed=self._on_lut_levels_changed,
+            on_cmap_changed=self._on_lut_cmap_changed,
+            on_invert_changed=self._on_lut_invert_changed,
+            state=self._state,
+        )
 
         data_lo = float(values.min())
         data_hi = float(values.max())

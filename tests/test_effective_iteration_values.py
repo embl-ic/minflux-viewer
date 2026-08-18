@@ -5,7 +5,7 @@ histogram window's auto-switch to the effective iteration.
 cfr/efc are only measured at one loop iteration; their materialized
 last-iteration value is zero/NaN. The viewer treats the value at that
 *effective* iteration as the canonical per-localization value (so histograms,
-filters and scatter colour see real numbers), while still allowing per-iteration
+filters and scatter color see real numbers), while still allowing per-iteration
 browsing.
 """
 

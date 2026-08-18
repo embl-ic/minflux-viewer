@@ -9,7 +9,7 @@ overlaid on top — the two-ring model (NPC Wanlu), the geometry template
 (template-provided) or the pooled reference (template-free). Four checkboxes
 toggle, independently: the **point cloud**, the **template/model**, the **axis**
 and the **bounding box**. The axis + bounding box mirror the 3-D scatter view's
-reference items (coloured X/Y/Z axes with numeric ticks + a data-extent
+reference items (colored X/Y/Z axes with numeric ticks + a data-extent
 wireframe box in 3-D; the plot axes + an extent rectangle in 2-D).
 
 Modeless / non-owned per the project window convention (shown via
@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 
 _CLOUD_RGBA = (0.35, 0.72, 1.0, 0.9)      # localizations — light blue
 _MODEL_RGBA = (1.0, 0.55, 0.15, 1.0)      # fitted model — orange
-# Reference-item colours (match the 3-D scatter view on a black background).
+# Reference-item colors (match the 3-D scatter view on a black background).
 _AXIS_COLORS = ((0.9, 0.15, 0.15, 0.95), (0.15, 0.7, 0.25, 0.95), (0.15, 0.35, 0.95, 0.95))
 _REF_RGBA = (0.72, 0.72, 0.72, 0.72)
 _TEXT_RGBA = (230, 230, 230, 230)

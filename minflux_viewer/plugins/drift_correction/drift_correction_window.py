@@ -21,7 +21,7 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtGui import QColor, QGuiApplication
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -37,10 +37,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ...analysis import drift_correction as dc
-
-_X_COLOR = "#ff5a5a"
-_Y_COLOR = "#4caf50"
-_Z_COLOR = "#5a9bff"
+from ...colors import component_colors
 
 
 class DriftCorrectionWindow(QDialog):
@@ -300,10 +297,13 @@ class DriftCorrectionWindow(QDialog):
                             symbol="o", symbolSize=6, symbolBrush=color,
                             name=name)
 
-        _series(result.dxt, _X_COLOR, "x drift")
-        _series(result.dyt, _Y_COLOR, "y drift")
+        colors = component_colors(
+            self._state.prefs, "plugins", "Drift Correction"
+        )
+        _series(result.dxt, QColor(*colors["X drift"]), "x drift")
+        _series(result.dyt, QColor(*colors["Y drift"]), "y drift")
         if result.dims == 3 and result.dzt is not None:
-            _series(result.dzt, _Z_COLOR, "z drift")
+            _series(result.dzt, QColor(*colors["Z drift"]), "z drift")
         self._plot.enableAutoRange()
         self._plot.autoRange()
 

@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..colors import solid_color_names, solid_color_rgba
 from ..core.confocal_mapping import (
     ConfocalCandidate,
     ConfocalMappingTransform,
@@ -34,7 +35,6 @@ from ..core.confocal_mapping import (
     localization_pixel_coordinates,
     mapping_image,
 )
-from ..core.overlay import PURE_COLOR_NAMES
 from .overlay_alignment import alignment_help_label
 
 
@@ -246,19 +246,6 @@ class ConfocalMappingOptionsDialog(QDialog):
 class ConfocalManualAlignmentDialog(QDialog):
     """Shared image/localization overlay adjusted with keyboard shortcuts."""
 
-    _COLOR_RGB = {
-        "Red": (1.0, 0.0, 0.0),
-        "Green": (0.0, 1.0, 0.0),
-        "Blue": (0.0, 0.0, 1.0),
-        "Cyan": (0.0, 1.0, 1.0),
-        "Magenta": (1.0, 0.0, 1.0),
-        "Yellow": (1.0, 1.0, 0.0),
-        "Orange": (1.0, 0.5, 0.0),
-        "White": (1.0, 1.0, 1.0),
-        "Gray": (0.65, 0.65, 0.65),
-        "Black": (0.0, 0.0, 0.0),
-    }
-    _COLOR_NAMES = PURE_COLOR_NAMES
     _DEFAULT_IMAGE_COLORS = ("Green", "Magenta", "Yellow", "Orange", "Red", "Blue")
     _DEFAULT_LOCALIZATION_COLOR = "Cyan"
     _DEFAULT_TRANSLATION_STEP = 0.5
@@ -448,7 +435,7 @@ class ConfocalManualAlignmentDialog(QDialog):
 
     def _make_color_combo(self, color: str) -> QComboBox:
         combo = QComboBox(self)
-        combo.addItems(self._COLOR_NAMES)
+        combo.addItems(solid_color_names())
         combo.setCurrentText(color)
         combo.setFixedWidth(101)
         return combo
@@ -546,10 +533,9 @@ class ConfocalManualAlignmentDialog(QDialog):
         ]
         preview = np.zeros((*self._image.shape, 3), dtype=np.float64)
         for index in selected:
-            color = np.asarray(
-                self._COLOR_RGB[self._image_color_combos[index].currentText()],
-                dtype=np.float64,
-            )
+            rgba = solid_color_rgba(self._image_color_combos[index].currentText())
+            color = np.asarray(rgba[:3], dtype=np.float64) / 255.0
+            color *= rgba[3] / 255.0
             preview += self._normalized_images[index][..., None] * color
         preview = np.clip(preview, 0.0, 1.0)
         self._image_item.setImage(
@@ -560,13 +546,15 @@ class ConfocalManualAlignmentDialog(QDialog):
         )
 
     def _refresh_localization_overlay(self, *_args) -> None:
-        color = np.asarray(
-            self._COLOR_RGB[self._localization_color_combo.currentText()],
-            dtype=np.float64,
+        red, green, blue, alpha = solid_color_rgba(
+            self._localization_color_combo.currentText()
         )
-        red, green, blue = np.rint(color * 255.0).astype(int)
-        self._scatter.setPen(self._pg.mkPen(red, green, blue, 220, width=1))
-        self._scatter.setBrush(self._pg.mkBrush(red, green, blue, 80))
+        self._scatter.setPen(self._pg.mkPen(
+            red, green, blue, round(220 * alpha / 255), width=1
+        ))
+        self._scatter.setBrush(self._pg.mkBrush(
+            red, green, blue, round(80 * alpha / 255)
+        ))
         self._scatter.setVisible(self._localization_check.isChecked())
 
     def _redraw(self) -> None:

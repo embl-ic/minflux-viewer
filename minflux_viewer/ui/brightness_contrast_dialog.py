@@ -39,11 +39,11 @@ class HistogramPreview(QWidget):
         self._data_max = 1.0
         self._lo = 0.0
         self._hi = 1.0
-        self._bar_rgb: tuple[float, float, float] | None = None  # single bar colour
+        self._bar_rgb: tuple[float, float, float] | None = None  # single bar color
         self.setMinimumSize(150, 70)
 
     def set_bar_color(self, rgb: "tuple[float, float, float] | None") -> None:
-        """Single representative fill colour for the bars (None → red default)."""
+        """Single representative fill color for the bars (None → red default)."""
         if rgb is None:
             self._bar_rgb = None
         else:
@@ -257,7 +257,7 @@ class BrightnessContrastDialog(QDialog):
         self._update_controls_from_levels()
 
     def set_bar_color(self, rgb: "tuple[float, float, float] | None") -> None:
-        """Colour the histogram bars with a single representative LUT colour."""
+        """Color the histogram bars with a single representative LUT color."""
         self._histogram.set_bar_color(rgb)
 
     def set_levels(self, lo: float, hi: float) -> None:

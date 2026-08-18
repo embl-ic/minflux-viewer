@@ -118,7 +118,7 @@ def parse_iteration_label(label: str) -> tuple["str | int", str]:
     ``itr_selector`` is what to pass to ``mfx_get``: ``"last"``, ``"all"``,
     ``"sum"``, ``"average"``, or a 0-based iteration index. ``render_mode`` is
     ``"single"`` (one series, drawn like the default view), ``"flatten"`` (one
-    pooled series over all iterations), or ``"stacked"`` (one coloured series
+    pooled series over all iterations), or ``"stacked"`` (one colored series
     per iteration). The value-pooling selectors render as ``"single"`` — they
     yield one value per localization, exactly like the default view.
     """

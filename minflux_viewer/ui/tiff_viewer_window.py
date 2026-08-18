@@ -35,7 +35,7 @@ from ..colormaps import (
     make_colormap,
     named_colormap_names,
 )
-from ..core.overlay import PURE_COLOR_NAMES
+from ..colors import solid_color_names
 from .metadata_viewer import MetadataDocumentView
 from .render_window import DepthRangeSlider
 
@@ -468,8 +468,8 @@ class TiffViewerWindow(QWidget):
             action.setCheckable(True)
             action.setChecked(self._active_cmap == name)
             action.triggered.connect(lambda _checked=False, value=name: self._on_cmap_changed(value))
-        pure_menu = cmap_menu.addMenu("Pure color")
-        for name in PURE_COLOR_NAMES:
+        pure_menu = cmap_menu.addMenu("Solid color")
+        for name in solid_color_names():
             action = pure_menu.addAction(name)
             action.setCheckable(True)
             action.setChecked(self._active_cmap == name)

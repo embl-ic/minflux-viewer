@@ -600,13 +600,13 @@ class LocalDensityOptionsDialog(QDialog):
             "radius. KD-tree is exact + parallelised (recommended); voxel ball is a "
             "fast spherical approximation; voxel histogram is fastest but uses a "
             "cubic voxel (coarser). The result window shows the XY density heatmap "
-            "(plus a 3-D scatter coloured by density for 3-D data)."
+            "(plus a 3-D scatter colored by density for 3-D data)."
         )
 
 
 class LocalDensityImageWindow(QWidget):
     """Local-density result viewer: a 2-D XY heatmap and (for 3-D data) a 3-D
-    scatter of the localizations coloured by density, in the app's viewer style."""
+    scatter of the localizations colored by density, in the app's viewer style."""
 
     TAG = "local_density_image"
     _CMAPS = list(BUILTIN_COLORMAP_NAMES)
@@ -652,7 +652,7 @@ class LocalDensityImageWindow(QWidget):
         self._view_combo = QComboBox()
         self._view_combo.addItem("2D heatmap", "2d")
         if self._pts3d is not None:
-            self._view_combo.addItem("3D scatter (coloured by density)", "3d")
+            self._view_combo.addItem("3D scatter (colored by density)", "3d")
         self._view_combo.currentIndexChanged.connect(self._on_view_changed)
         top.addWidget(self._view_combo)
         top.addSpacing(12)
@@ -802,7 +802,7 @@ class LocalDensityImageWindow(QWidget):
             self._cmap_combo.setCurrentText(name)
             self._cmap_combo.blockSignals(False)
         self._view.setColorMap(make_colormap(name))
-        if self._gl_scatter is not None:                       # recolour the 3-D scatter
+        if self._gl_scatter is not None:                       # recolor the 3-D scatter
             try:
                 self._gl_scatter.setData(color=self._scatter_colors())
             except Exception:

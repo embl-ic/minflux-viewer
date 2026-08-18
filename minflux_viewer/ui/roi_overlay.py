@@ -7,11 +7,19 @@ from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.graphicsItems.ROI import Handle
 from PyQt6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
 from PyQt6.QtGui import QPainter, QPainterPath
 from PyQt6.QtWidgets import QApplication
+from pyqtgraph.graphicsItems.ROI import Handle
 
+from ..colors import (
+    DEFAULT_COLOR_PREFS,
+    component_colors,
+    normalize_rgba,
+    pg_safe_hex,
+    rgba_hex,
+    viewer_color,
+)
 from ..core.roi import RoiRecord, RoiStore
 from ..core.roi_selection import ROI_MASKS_STATE_KEY, store_roi_mask
 
@@ -121,7 +129,7 @@ class SquareHandle(Handle):
 
 
 class SolidSquareHandle(SquareHandle):
-    """Square handle with a **filled** face in the ROI colour — marks the drawing
+    """Square handle with a **filled** face in the ROI color — marks the drawing
     origin / rotation-anchor corner of a rotated rectangle / ellipse."""
 
     def paint(self, p, opt, widget) -> None:
@@ -1335,7 +1343,8 @@ class RoiOverlayController(QObject):
             self.store.set_tool(None)
 
     def _record_kwargs(self) -> dict[str, Any]:
-        color = self.owner._state.prefs.get("plot", {}).get("roi_color", "Yellow")
+        # pg_safe_hex, not rgba_qt_hex: this color is drawn by pyqtgraph.
+        color = pg_safe_hex(viewer_color(self.owner._state.prefs, "roi_edge"))
         return {
             "coordinate_space": self.coordinate_space,
             "target_hint": self.owner.windowTitle(),
@@ -1703,29 +1712,83 @@ class RoiOverlayController(QObject):
             fill_color=record.stroke_color, movable=True,
         )
 
-    #: Distinct outline/fill colour for a ROI **selected in the ROI Manager**, so it
-    #: stands out from the other displayed (Show-all) ROIs drawn in their own colour.
+    #: Fallback for the ROI-Manager selection when no palette is reachable.
     MANAGER_SELECT_COLOR = "#00e5ff"          # bright cyan — reads on black & white bg
+
+    def _roi_palette(self, record: RoiRecord, *, manager_highlight: bool) -> dict:
+        """face / edge / corner / label for this ROI in its current state.
+
+        A ROI being drawn takes the COLOR dialog's **ROI** row; one shown from
+        the ROI Manager takes that group's **ROI entries** / **ROI selected**
+        row.  A record carrying its own color (segmentation output, or set in
+        ROI Properties) keeps that edge — only ROIs still on the system color
+        follow the palette, which is what makes the setting safe to change.
+        """
+        try:
+            prefs = self.owner._state.prefs
+        except AttributeError:                      # pragma: no cover - defensive
+            return {}
+        draft = self.draft
+        if draft is not None and record.id == draft.id:
+            return {
+                "face": viewer_color(prefs, "roi_face"),
+                "edge": viewer_color(prefs, "roi_edge"),
+                "corner": viewer_color(prefs, "roi_corner"),
+                "label": viewer_color(prefs, "roi_edge"),
+            }
+        row_name = "ROI selected" if manager_highlight else "ROI entries"
+        row = component_colors(prefs, "functions", "ROI Manager").get(row_name, {})
+        fallback = DEFAULT_COLOR_PREFS["functions"]["ROI Manager"][row_name]
+        palette = {
+            key: normalize_rgba(row.get(key, fallback[key]))
+            for key in ("face", "edge", "corner", "label")
+        }
+        if not manager_highlight:
+            stroke = normalize_rgba(pg_safe_hex(record.stroke_color or "#ffff00"))
+            if stroke != tuple(viewer_color(prefs, "roi_edge")):
+                palette["edge"] = stroke      # a per-ROI color, not the system one
+                palette["label"] = stroke
+        return palette
 
     def _style_item(self, item, record: RoiRecord, selected: bool,
                     *, manager_highlight: bool = False) -> None:
-        color = self.MANAGER_SELECT_COLOR if manager_highlight else (record.stroke_color or "#ffff00")
+        palette = self._roi_palette(record, manager_highlight=manager_highlight)
+        if palette:
+            edge = rgba_hex(palette["edge"])
+            face = pg.mkColor(rgba_hex(palette["face"]))
+            corner = rgba_hex(palette["corner"])
+        else:                                       # pragma: no cover - defensive
+            edge = self.MANAGER_SELECT_COLOR if manager_highlight else "#ffff00"
+            face = pg.mkColor(edge)
+            face.setAlpha(32 if selected else 22)
+            corner = edge
         width = record.line_width + (1.5 if selected else 0.0)
-        pen = pg.mkPen(color, width=width)
         try:
-            item.setPen(pen)
+            item.setPen(pg.mkPen(edge, width=width))
         except Exception:
             pass
         if record.type in {"rectangle", "oval", "polygon", "freehand"}:
             try:
-                fill = pg.mkColor(color)
-                fill.setAlpha(32 if selected else 22)
                 if hasattr(item, "setFillColor"):
-                    item.setFillColor(fill, alpha=fill.alpha())
+                    item.setFillColor(face, alpha=face.alpha())
                 elif hasattr(item, "setBrush"):
-                    item.setBrush(pg.mkBrush(fill))
+                    item.setBrush(pg.mkBrush(face))
             except Exception:
                 pass
+        self._style_handles(item, corner)
+
+    @staticmethod
+    def _style_handles(item, color: str) -> None:
+        """Recolor a ROI's corner handles (the mouse edit widgets)."""
+        try:
+            pen = pg.mkPen(color)
+            item.handlePen = pen
+            for handle in item.getHandles():
+                handle.pen = pen
+                handle.currentPen = pen
+                handle.update()
+        except Exception:
+            pass
 
     def _connect_edit(self, item, record: RoiRecord) -> None:
         # A stored ROI displayed in the view is a live *editable copy*: moving or
@@ -2076,7 +2139,7 @@ class RoiOverlayController(QObject):
 
     def _commit_vertex_edit(self, kind: str, record: RoiRecord,
                             new_points: list[list[float]]) -> None:
-        """Apply an edited vertex list. Same type/name/colour as the source — a
+        """Apply an edited vertex list. Same type/name/color as the source — a
         *stored* ROI is updated in place (like Convert/Resize); a *draft* stays an
         editable draft in the view."""
         from dataclasses import replace
@@ -2307,12 +2370,22 @@ class RoiOverlayController(QObject):
             return
         text = self._label_text(record)
         label = self.labels.get(record.id)
+        # From the palette (ROI Manager entries/selected), not the raw stroke: a
+        # label drawn straight from a legacy #AARRGGBB stroke came out fully
+        # transparent, which is why ROI names went missing.
+        selected_ids = getattr(self.store, "selected_ids", None)
+        highlight = bool(selected_ids and record.id in selected_ids)
+        palette = self._roi_palette(record, manager_highlight=highlight)
+        label_color = (
+            rgba_hex(palette["label"]) if palette
+            else pg_safe_hex(record.stroke_color or "#ffff00")
+        )
         if label is None:
-            label = pg.TextItem(text, color=record.stroke_color, anchor=(0, 1))
+            label = pg.TextItem(text, color=label_color, anchor=(0, 1))
             self.labels[record.id] = label
             self.plot_item.addItem(label)
         label.setText(text)
-        label.setColor(record.stroke_color)
+        label.setColor(label_color)
         if record.type == "point":
             x, y = self._project_point(record)   # label at the projected marker
             label.setPos(x, y)

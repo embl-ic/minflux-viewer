@@ -1,7 +1,7 @@
 """ROI Manager list behaviour:
 1. arrow keys navigate the list and switch the active/selected ROI (previously a
    selection-triggered `changed` signal rebuilt the whole list mid-navigation);
-2. a ROI selected in the Manager is drawn in a distinct colour in the views so it
+2. a ROI selected in the Manager is drawn in a distinct color in the views so it
    stands out from the other (Show-all) ROIs.
 """
 
@@ -84,7 +84,7 @@ def test_arrow_keys_navigate_and_switch_active_roi(_app):
     w.close()
 
 
-# ------------------------------------------------------------- selection colour
+# ------------------------------------------------------------- selection color
 
 def _ctrl(_app):
     class _Owner(QWidget):
@@ -105,7 +105,7 @@ def _ctrl(_app):
     return RoiOverlayController(RoiStore(), _Owner(), plot, plot.getPlotItem())
 
 
-def test_selected_stored_roi_uses_manager_highlight_colour(_app):
+def test_selected_stored_roi_uses_manager_highlight_color(_app):
     ctrl = _ctrl(_app)
     store = ctrl.store
     rec = _rect("r", stroke="#ffff00")
@@ -118,7 +118,7 @@ def test_selected_stored_roi_uses_manager_highlight_colour(_app):
 
     store.deselect()                             # still shown (Show-all) but not selected
     item = ctrl.items[rec.id]
-    assert item.pen.color().name().lower() == "#ffff00"   # back to its own colour
+    assert item.pen.color().name().lower() == "#ffff00"   # back to its own color
 
 
 # --------------------------------------------- convert rebuilds the displayed item

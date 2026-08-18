@@ -9,7 +9,7 @@ model drives *by DCR*, *by time window*, *by any attribute* in the future generi
 "Convert Dataset to Multi-Channel Overlay" tool.
 
 A **channel** is an independent carrier: a named ``[lo, hi]`` value window with a
-LUT/colour. Channels are produced three ways —
+LUT/color. Channels are produced three ways —
 
 * :func:`place_evenly` — equal-width windows across the value range,
 * :func:`channels_from_fit` — one window per fitted mixture component, split at
@@ -36,15 +36,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..core.overlay import PURE_COLOR_NAMES
+from ..colors import solid_color_names
 from .distribution_fit import MixtureResult
-
-_DEFAULT_LUTS = list(PURE_COLOR_NAMES)
-
 
 @dataclass
 class Channel:
-    """One channel carrier: a named ``[lo, hi]`` attribute window + LUT colour."""
+    """One channel carrier: a named ``[lo, hi]`` attribute window + LUT color."""
     name: str
     lo: float
     hi: float
@@ -59,7 +56,7 @@ class Channel:
 # Channel construction
 # ---------------------------------------------------------------------------
 def _lut_for(index: int, luts) -> str:
-    seq = list(luts) if luts else _DEFAULT_LUTS
+    seq = list(luts) if luts else list(solid_color_names()) or ["glasbey"]
     return seq[index % len(seq)]
 
 

@@ -10,7 +10,7 @@ arrays so the file is human-readable and requires no VTK library.
 
 Each localisation becomes one 3-D point. All numeric per-localisation
 attributes (``efo``, ``cfr``, ``dcr``, ``tid``, ``tim``, …) are attached
-as point scalar fields so ParaView can colour points by any of them.
+as point scalar fields so ParaView can color points by any of them.
 
 Only the currently active filter mask is exported by default — what the
 user sees in the viewer is what lands in ParaView.  The same mask is also
@@ -125,7 +125,7 @@ def _write_vtp_ascii(
     # ── Per-point scalar data ─────────────────────────────────────────
     if scalars:
         # Expose the first scalar as the default active scalar so
-        # ParaView shows a coloured point cloud on load
+        # ParaView shows a colored point cloud on load
         active_name = next(iter(scalars.keys()))
         lines.append(f'      <PointData Scalars="{active_name}">')
         for name, values in scalars.items():

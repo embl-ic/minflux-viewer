@@ -36,7 +36,7 @@ def test_monochrome_toolbar_icon_drops_white_matte_and_tints_linework():
     assert not all(color.red() == color.green() == color.blue() == 255 for color in visible)
 
 
-def test_coloured_toolbar_icon_keeps_artwork_but_drops_white_matte():
+def test_colored_toolbar_icon_keeps_artwork_but_drops_white_matte():
     _app()
     pixmap = _adaptive_toolbar_pixmap(str(resource_path("icons", "color.png")))
     assert pixmap is not None
