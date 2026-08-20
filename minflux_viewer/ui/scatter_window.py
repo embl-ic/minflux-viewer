@@ -61,6 +61,7 @@ from ..core.overlay import (
     transform_to_matrix4,
 )
 from ..core.roi_selection import active_roi_mask, roi_region_mask
+from .gl_3d_reference import nice_step, three_plane_grid_positions, tick_values
 from .plot_format import plot_widget
 
 # ---------------------------------------------------------------------------
@@ -103,6 +104,11 @@ class ScatterWindow(QWidget):
         self._show_2d_grid = True
         self._show_3d_grid = True
         self._show_3d_bounding_box = True
+        self._show_colorbar = True
+        self._colorbar_show_values = True
+        self._colorbar_orientation = "vertical"
+        self._colorbar_geometry: list[int] | None = None
+        self._colorbar = None
         self._point_symbol = "o"
         self._point_size = 2
         self._point_alpha = 255
@@ -163,7 +169,6 @@ class ScatterWindow(QWidget):
                     self._state.datasets[ds_idx].state["render_channel_lut"] = lut
         try:
             self._cmap = _load_cmap(self._cmap_combo.currentText())
-            self._colorbar.setColorMap(self._cmap)
         except Exception:
             pass
         self._rebuild_channel_ui()
@@ -247,12 +252,6 @@ class ScatterWindow(QWidget):
         self._plot_2d.addItem(self._roi_highlight_2d)
 
         self._cmap = _load_cmap("jet")
-        self._colorbar = pg.ColorBarItem(
-            colorMap=self._cmap, label="", interactive=False,
-        )
-        plot_item = self._plot_2d.getPlotItem()
-        plot_item.layout.addItem(self._colorbar, 2, 5)
-
         self._stack.addWidget(self._plot_2d)
         from .roi_overlay import RoiOverlayController
         self._roi_overlay = RoiOverlayController(
@@ -266,6 +265,19 @@ class ScatterWindow(QWidget):
         # inner graphics view), so ROI keyboard editing works regardless of focus.
         self._roi_overlay.add_key_event_source(self)
         # 3D view added lazily by _ensure_3d_built()
+
+        from .floating_colorbar import FloatingColorBar
+
+        self._colorbar = FloatingColorBar(
+            self._stack,
+            on_visibility_changed=self._set_colorbar_visible,
+            on_customize=self.open_lut_dialog,
+            on_state_changed=self._on_colorbar_state_changed,
+            attribute_names=self._colorbar_attribute_names,
+            current_attribute=self._current_colorbar_attribute,
+            on_attribute_changed=self._set_colorbar_attribute,
+        )
+        self._colorbar.set_bar_visible(False)
 
         self._channel_area = QScrollArea()
         self._channel_area.setWidgetResizable(True)
@@ -288,6 +300,13 @@ class ScatterWindow(QWidget):
         self._stack.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._stack.customContextMenuRequested.connect(self._show_context_menu)
 
+    def _set_info_text(self, text: str, ds=None) -> None:
+        """Prefix Scatter status with the source dataset dimensionality."""
+        if ds is None:
+            ds = self._dataset()
+        prefix = f"{ds.prop.num_dim}D  |  " if ds is not None else ""
+        self._info_label.setText(f"{prefix}{text}")
+
     def _ensure_3d_built(self) -> None:
         """Construct the OpenGL widget on first 3D request."""
         if self._3d_view is not None:
@@ -295,7 +314,7 @@ class ScatterWindow(QWidget):
         try:
             import pyqtgraph.opengl as gl
         except ImportError as e:
-            self._info_label.setText(
+            self._set_info_text(
                 f"3D view unavailable: PyOpenGL is not installed ({e}). "
                 "Run: poetry install"
             )
@@ -306,10 +325,15 @@ class ScatterWindow(QWidget):
         view.customContextMenuRequested.connect(self._show_context_menu)
         view.setBackgroundColor("k" if self._black_bg_check.isChecked() else "w")
 
-        # Reference grid in the XY plane
-        grid = gl.GLGridItem()
-        grid.setSize(1000, 1000)
-        grid.setSpacing(100, 100)
+        # Camera-rotating three-plane reference grid (XY + XZ + YZ).
+        grid = gl.GLLinePlotItem(
+            pos=np.empty((0, 3), dtype=np.float32),
+            color=self._reference_color(),
+            width=1.0,
+            mode="lines",
+            antialias=True,
+        )
+        grid.setGLOptions("translucent")
         grid.setVisible(self._show_3d_grid)
         view.addItem(grid)
 
@@ -530,6 +554,11 @@ class ScatterWindow(QWidget):
             # rather than in an unnamed per-view override.  Existing saved
             # 'solid:custom:#rrggbb' values still resolve and render.
 
+        colorbar_action = menu.addAction("Colorbar")
+        colorbar_action.setCheckable(True)
+        colorbar_action.setChecked(self._show_colorbar)
+        colorbar_action.triggered.connect(self._set_colorbar_visible)
+
         if self._axis_combo.currentText() == "3D":
             menu.addSeparator()
             box_action = menu.addAction("Bounding Box")
@@ -579,7 +608,6 @@ class ScatterWindow(QWidget):
 
     def _on_cmap_changed(self, name: str) -> None:
         self._cmap = _load_cmap(name)
-        self._colorbar.setColorMap(self._cmap)
         self._update_colorbar_visibility()
         self._invalidate_color_cache()
         self._update_color()
@@ -594,11 +622,91 @@ class ScatterWindow(QWidget):
         self._update_color()
         self.sync_lut_dialog()
 
+    def _colorbar_attribute_names(self) -> list[str]:
+        return [
+            self._cbar_combo.itemText(index)
+            for index in range(self._cbar_combo.count())
+        ]
+
+    def _current_colorbar_attribute(self) -> str:
+        if len(self._channels) > 1:
+            active = self._active_channel_index()
+            if 0 <= active < len(self._channels):
+                return str(self._channels[active].get("color_by") or "")
+            return ""
+        return self._cbar_combo.currentText()
+
+    def _set_colorbar_attribute(self, name: str) -> None:
+        if name not in self._colorbar_attribute_names():
+            return
+        if len(self._channels) > 1:
+            self._set_channel_color_by(self._active_channel_index(), name)
+        else:
+            self._cbar_combo.setCurrentText(name)
+
+    def _set_colorbar_visible(self, visible: bool) -> None:
+        self._show_colorbar = bool(visible)
+        self._update_colorbar_visibility()
+        self._save_view_state()
+
+    def _on_colorbar_state_changed(self) -> None:
+        if self._colorbar is None:
+            return
+        self._colorbar_show_values = self._colorbar.show_values
+        self._colorbar_orientation = self._colorbar.orientation
+        self._colorbar_geometry = self._colorbar.serialized_geometry()
+        self._save_view_state()
+
     def _update_colorbar_visibility(self) -> None:
-        is_3d = self._axis_combo.currentText() == "3D"
-        is_solid = self._cmap_combo.currentText().startswith("solid:")
-        is_overlay = len(self._channels) > 1
-        self._colorbar.setVisible(not is_3d and not is_solid and not is_overlay)
+        if self._colorbar is None or not self._show_colorbar:
+            if self._colorbar is not None:
+                self._colorbar.set_bar_visible(False)
+            return
+        if self._cmap_combo.currentText().startswith("solid:"):
+            self._colorbar.set_bar_visible(False)
+            return
+
+        dataset = self._dataset()
+        attribute = self._cbar_combo.currentText()
+        if len(self._channels) > 1:
+            active = self._active_channel_index()
+            if not (0 <= active < len(self._channels)):
+                self._colorbar.set_bar_visible(False)
+                return
+            channel = self._channels[active]
+            attribute = str(channel.get("color_by") or "")
+            dataset_idx = channel.get("dataset_idx")
+            if not attribute or dataset_idx is None or not (
+                0 <= dataset_idx < len(self._state.datasets)
+            ):
+                self._colorbar.set_bar_visible(False)
+                return
+            dataset = self._state.datasets[dataset_idx]
+        if dataset is None or not attribute:
+            self._colorbar.set_bar_visible(False)
+            return
+
+        cache = self._color_cache_for_dataset(dataset, attribute)
+        if cache is None:
+            self._colorbar.set_bar_visible(False)
+            return
+        values = np.asarray(cache["values"], dtype=float)
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            self._colorbar.set_bar_visible(False)
+            return
+        self._last_color_values = values
+        lut = np.asarray(
+            self._cmap.getLookupTable(0.0, 1.0, 256, alpha=True),
+            dtype=np.uint8,
+        )
+        self._colorbar.set_color_data(
+            lut,
+            float(cache["vmin"]),
+            float(cache["vmax"]),
+            attribute,
+        )
+        self._colorbar.set_bar_visible(True)
 
     def _update_color(self) -> None:
         self._redraw_current(save_state=True)
@@ -700,26 +808,11 @@ class ScatterWindow(QWidget):
 
     @staticmethod
     def _nice_3d_step(span: float, target: int = 6) -> float:
-        raw = float(span) / max(int(target), 1)
-        if not np.isfinite(raw) or raw <= 0:
-            return 1.0
-        mag = 10.0 ** np.floor(np.log10(raw))
-        norm = raw / mag
-        step = (1 if norm < 1.5 else 2 if norm < 3 else 5 if norm < 7 else 10) * mag
-        return float(max(step, 1e-9))
+        return nice_step(span, target=target)
 
     @staticmethod
     def _tick_values(lo: float, hi: float, *, max_ticks: int = 5) -> list[float]:
-        if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
-            return []
-        step = ScatterWindow._nice_3d_step(hi - lo, target=max_ticks)
-        start = np.ceil(lo / step) * step
-        vals: list[float] = []
-        value = start
-        while value <= hi + step * 1e-9 and len(vals) < max_ticks + 2:
-            vals.append(float(value))
-            value += step
-        return vals[:max_ticks]
+        return tick_values(lo, hi, max_ticks=max_ticks)
 
     @staticmethod
     def _fmt_tick(value: float) -> str:
@@ -842,15 +935,17 @@ class ScatterWindow(QWidget):
     def _configure_3d_grid(self, mins: np.ndarray, maxs: np.ndarray, spans: np.ndarray) -> None:
         if self._3d_grid is None:
             return
-        centre = (mins + maxs) / 2.0
-        xy_size = max(float(np.max(spans[:2])) * 1.15, 1.0)
-        spacing = self._nice_3d_step(xy_size, target=8)
-        z_floor = float(min(mins[2], 0.0))
         try:
-            self._3d_grid.setSize(xy_size, xy_size)
-            self._3d_grid.setSpacing(spacing, spacing)
-            self._3d_grid.resetTransform()
-            self._3d_grid.translate(float(centre[0]), float(centre[1]), z_floor)
+            padding = np.maximum(spans * 0.04, max(float(np.max(spans)), 1.0) * 0.01)
+            grid_mins = mins - padding
+            grid_maxs = maxs + padding
+            self._3d_grid.setData(
+                pos=three_plane_grid_positions(grid_mins, grid_maxs, target=8),
+                color=self._reference_color(),
+                width=1.0,
+                mode="lines",
+            )
+            self._3d_grid.setVisible(self._show_3d_grid)
         except Exception:
             pass
 
@@ -1192,6 +1287,7 @@ class ScatterWindow(QWidget):
                 self._state.set_active(ds_idx)
                 self._update_overlay_title()
                 self._refresh_channel_highlight()
+                self._update_colorbar_visibility()
         QWidget.mousePressEvent(row, event)
 
     def _on_channel_visible(self, ch_idx: int, visible: bool) -> None:
@@ -1258,6 +1354,29 @@ class ScatterWindow(QWidget):
         self._show_3d_bounding_box = bool(
             saved.get("show_3d_bounding_box", True)
         )
+        self._show_colorbar = bool(saved.get("show_colorbar", True))
+        self._colorbar_show_values = bool(
+            saved.get("colorbar_show_values", True)
+        )
+        self._colorbar_orientation = (
+            "horizontal"
+            if saved.get("colorbar_orientation") == "horizontal"
+            else "vertical"
+        )
+        stored_geometry = saved.get("colorbar_geometry")
+        self._colorbar_geometry = (
+            list(stored_geometry)
+            if isinstance(stored_geometry, (list, tuple))
+            else None
+        )
+        if self._colorbar is not None:
+            self._colorbar.set_orientation(
+                self._colorbar_orientation, notify=False
+            )
+            self._colorbar.set_show_values(
+                self._colorbar_show_values, notify=False
+            )
+            self._colorbar.restore_geometry(self._colorbar_geometry)
         self._point_symbol = str(saved.get("point_symbol", "o"))
         self._point_size = max(1, min(50, int(saved.get("point_size", 2))))
         self._point_alpha = max(0, min(255, int(saved.get("point_alpha", 255))))
@@ -1286,7 +1405,6 @@ class ScatterWindow(QWidget):
         self._cmap_combo.setCurrentText(cmap_default)
         self._cmap_combo.blockSignals(False)
         self._cmap = _load_cmap(self._cmap_combo.currentText())
-        self._colorbar.setColorMap(self._cmap)
 
         self._black_bg_check.blockSignals(True)
         self._black_bg_check.setChecked(bool(saved.get("black_background", False)))
@@ -1297,7 +1415,7 @@ class ScatterWindow(QWidget):
         old = self._cbar_combo.currentText()
         self._cbar_combo.blockSignals(True)
         self._cbar_combo.clear()
-        numeric_attrs = plot_attribute_names(ds, self._state.prefs, exclude=("ftr", "idx"))
+        numeric_attrs = plot_attribute_names(ds, self._state.prefs, exclude=("ftr",))
         self._cbar_combo.addItems(numeric_attrs)
         prefs_color_by = self._state.prefs.get("plot", {}).get("scatter_color_by", "tid")
         color_default = saved.get("color_by") or old or prefs_color_by
@@ -1570,7 +1688,9 @@ class ScatterWindow(QWidget):
             total += int(np.count_nonzero(mask))
         if not xs:
             self._scatter_2d.setData([], [])
-            self._info_label.setText("No localisations pass the current filters.")
+            self._last_color_values = np.empty(0, dtype=float)
+            self._update_colorbar_visibility()
+            self._set_info_text("No localisations pass the current filters.")
             return
         self._scatter_2d.setData(
             x=np.concatenate(xs),
@@ -1582,8 +1702,8 @@ class ScatterWindow(QWidget):
         )
         self._plot_2d.setLabel("bottom", "XYZ"[ci] + " (nm)")
         self._plot_2d.setLabel("left", "XYZ"[cj] + " (nm)")
-        self._colorbar.setVisible(False)
-        self._info_label.setText(f"{total:,} filtered localisations across {len([c for c in self._channels if c.get('visible', True)])} channel(s)")
+        self._update_colorbar_visibility()
+        self._set_info_text(f"{total:,} filtered localisations across {len([c for c in self._channels if c.get('visible', True)])} channel(s)")
 
     def _draw_overlay_3d(self) -> None:
         self._ensure_3d_built()
@@ -1619,7 +1739,9 @@ class ScatterWindow(QWidget):
         if not pos_parts:
             self._3d_scatter.setData(pos=np.empty((0, 3)))
             self._refresh_3d_reference_items()
-            self._info_label.setText("No finite XYZ localisations pass the current filters for 3D display.")
+            self._last_color_values = np.empty(0, dtype=float)
+            self._update_colorbar_visibility()
+            self._set_info_text("No finite XYZ localisations pass the current filters for 3D display.")
             return
         pos = np.vstack(pos_parts).astype(np.float32, copy=False)
         rgba = np.vstack(rgba_parts).astype(np.float32, copy=False)
@@ -1630,7 +1752,8 @@ class ScatterWindow(QWidget):
         if not self._3d_camera_initialised:
             self._reset_3d_camera(pos)
             self._3d_camera_initialised = True
-        self._info_label.setText(f"{total:,} filtered localisations across {len([c for c in self._channels if c.get('visible', True)])} channel(s)")
+        self._update_colorbar_visibility()
+        self._set_info_text(f"{total:,} filtered localisations across {len([c for c in self._channels if c.get('visible', True)])} channel(s)")
 
     def _draw(self, locs: np.ndarray, ftr: np.ndarray, ds, *, save_state: bool = True) -> None:
         if save_state:
@@ -1654,6 +1777,10 @@ class ScatterWindow(QWidget):
             "show_2d_grid": bool(self._show_2d_grid),
             "show_3d_grid": bool(self._show_3d_grid),
             "show_3d_bounding_box": bool(self._show_3d_bounding_box),
+            "show_colorbar": bool(self._show_colorbar),
+            "colorbar_show_values": bool(self._colorbar_show_values),
+            "colorbar_orientation": self._colorbar_orientation,
+            "colorbar_geometry": self._colorbar_geometry,
             "point_symbol": self._point_symbol,
             "point_size": int(self._point_size),
             "point_alpha": int(self._point_alpha),
@@ -1676,7 +1803,9 @@ class ScatterWindow(QWidget):
         n_display = indices.size
         if n_display == 0:
             self._scatter_2d.setData([], [])
-            self._info_label.setText("No localisations pass the current filter.")
+            self._last_color_values = np.empty(0, dtype=float)
+            self._update_colorbar_visibility()
+            self._set_info_text("No localisations pass the current filter.", ds)
             return
 
         x = locs[indices, ci]
@@ -1693,8 +1822,7 @@ class ScatterWindow(QWidget):
             symbol=self._point_symbol,
         )
 
-        self._colorbar.setLevels((vmin, vmax))
-        self._colorbar.getAxis("right").setLabel(c_label)
+        self._update_colorbar_visibility()
 
         ax_x, ax_y = ax_text[axis]
         self._plot_2d.setLabel("bottom", ax_x)
@@ -1705,10 +1833,11 @@ class ScatterWindow(QWidget):
             if n_display < n_visible
             else f"{n_visible:,}"
         )
-        self._info_label.setText(
+        self._set_info_text(
             f"{display_note} / {ds.prop.num_loc:,} localisations  "
             f"({100*n_visible/ds.prop.num_loc:.1f} %)  |  axis: {axis}  |  "
-            f"color: {c_label}"
+            f"color: {c_label}",
+            ds,
         )
 
     # -- 3D path -----------------------------------------------------
@@ -1723,7 +1852,9 @@ class ScatterWindow(QWidget):
         if raw_display == 0:
             self._3d_scatter.setData(pos=np.empty((0, 3)))
             self._refresh_3d_reference_items()
-            self._info_label.setText("No localisations pass the current filter.")
+            self._last_color_values = np.empty(0, dtype=float)
+            self._update_colorbar_visibility()
+            self._set_info_text("No localisations pass the current filter.", ds)
             return
 
         pos = np.asarray(locs[indices, :3], dtype=float)
@@ -1735,8 +1866,11 @@ class ScatterWindow(QWidget):
         if n_display == 0:
             self._3d_scatter.setData(pos=np.empty((0, 3)))
             self._refresh_3d_reference_items()
-            self._info_label.setText(
-                "No finite XYZ localisations pass the current filter for 3D display."
+            self._last_color_values = np.empty(0, dtype=float)
+            self._update_colorbar_visibility()
+            self._set_info_text(
+                "No finite XYZ localisations pass the current filter for 3D display.",
+                ds,
             )
             return
 
@@ -1755,16 +1889,18 @@ class ScatterWindow(QWidget):
         if not self._3d_camera_initialised:
             self._reset_3d_camera(pos)
             self._3d_camera_initialised = True
+        self._update_colorbar_visibility()
 
         display_note = (
             f"showing {n_display:,} / {n_visible:,} passing"
             if n_display < n_visible
             else f"{n_visible:,}"
         )
-        self._info_label.setText(
+        self._set_info_text(
             f"{display_note} / {ds.prop.num_loc:,} localisations  "
             f"({100*n_visible/ds.prop.num_loc:.1f} %)  |  axis: 3D  |  "
-            f"color: {c_label} ∈ [{vmin:.3g}, {vmax:.3g}]"
+            f"color: {c_label} ∈ [{vmin:.3g}, {vmax:.3g}]",
+            ds,
         )
 
     @staticmethod
@@ -1808,7 +1944,7 @@ class ScatterWindow(QWidget):
 
     def _color_cache_for_dataset(self, ds, c_name: str) -> dict | None:
         key = (
-            self._dataset_idx,
+            id(ds),
             c_name,
             self._cmap_combo.currentText(),
             self._lut_invert,
@@ -1925,7 +2061,7 @@ class ScatterWindow(QWidget):
             state=self._state,
         )
         if not self._refresh_lut_dialog(capture_baseline=True):
-            self._info_label.setText("LUT unavailable: no color values to display.")
+            self._set_info_text("LUT unavailable: no color values to display.")
             return
         self._lut_dialog.show()
         self._lut_dialog.raise_()
@@ -2104,7 +2240,6 @@ class ScatterWindow(QWidget):
         self._cmap_combo.setCurrentText(name)
         self._cmap_combo.blockSignals(False)
         self._cmap = make_colormap(name, invert=self._lut_invert, gamma=self._lut_gamma)
-        self._colorbar.setColorMap(self._cmap)
         self._update_colorbar_visibility()
         self._invalidate_color_cache()
         self._update_color()

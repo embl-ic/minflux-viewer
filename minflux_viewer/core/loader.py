@@ -1531,6 +1531,8 @@ def _mfx_get_rows(
 
     raw = getattr(ds, "mfx_raw", None)
     if raw is None or len(raw) == 0:
+        if attr == "idx":
+            return np.arange(1, int(getattr(ds.prop, "num_loc", 0)) + 1, dtype=np.uint32)
         val = ds.attr.get(attr)
         return np.asarray(val) if val is not None else None
 
@@ -1964,6 +1966,11 @@ def attr_values_1d(ds: "MinfluxDataset", attr: str) -> "np.ndarray | None":
     when no aligned 1-D representation exists.
     """
     n_loc = int(getattr(ds.prop, "num_loc", 0))
+
+    # ``idx`` is application-owned and always available, including for generic
+    # imported datasets that do not persist a physical index column.
+    if attr == "idx":
+        return np.arange(1, n_loc + 1, dtype=np.uint32)
 
     # xnm/ynm/znm: nm views of the metres loc_x/loc_y/loc_z store.
     if attr in _COORD_NM_BASE:

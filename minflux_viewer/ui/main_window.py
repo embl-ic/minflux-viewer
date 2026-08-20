@@ -6756,9 +6756,13 @@ class MainWindow(QMainWindow):
             pass
 
     def _lut_capable_views(self) -> list:
-        """Every view that can own a LUT dialog: renders, scatters, volumes."""
+        """Every view that can own a LUT dialog."""
         views: list = []
-        registries = [self._render_windows, self._scatter_windows]
+        registries = [
+            self._render_windows,
+            self._scatter_windows,
+            self._attr_windows,
+        ]
         # Present only when the advanced renderer has been opened.
         advanced = getattr(self, "_advanced_render_windows", None)
         if isinstance(advanced, dict):
@@ -6814,20 +6818,23 @@ class MainWindow(QMainWindow):
 
     def _show_lut(self) -> None:
         """Toolbar LUT button — open the LUT / colormap editor for the active
-        view: render, scatter, or the 3-D volume (the 3-D
-        scatter uses the scatter window's own LUT).
+        view: render, scatter, Attribute Plot C dimension, or 3-D volume.
 
         Clicking the toolbar activates the main window, so ``activeWindow()`` no
         longer identifies the plot window; try the focused view and the last-used
-        view, then scan the render/scatter registries (and each render's
-        3-D volume window) for one showing the active dataset.
+        view, then scan the plot registries (and each render's 3-D volume
+        window) for one showing the active dataset.
         """
         active = QApplication.activeWindow()
         if self._state.active_dataset is None:
             self._no_data_warning(); return
         idx = self._state.active_idx
         candidates = [active, getattr(self, "_last_active_plot_window", None)]
-        for registry in (self._render_windows, self._scatter_windows):
+        for registry in (
+            self._render_windows,
+            self._scatter_windows,
+            self._attr_windows,
+        ):
             candidates.extend(registry.values())
             for view in registry.values():
                 volume = getattr(view, "_volume_window", None)
@@ -6850,7 +6857,8 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.information(
             self, "LUT",
-            "Open a render or scatter view first, then use the LUT button.",
+            "Open a render, scatter, or four-dimensional Attribute Plot first, "
+            "then use the LUT button.",
         )
 
     def _show_color_picker(self) -> None:

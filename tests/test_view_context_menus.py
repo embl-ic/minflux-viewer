@@ -13,6 +13,7 @@ pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
 from PyQt6.QtCore import QPoint
+from PyQt6.QtGui import QContextMenuEvent
 from PyQt6.QtWidgets import QApplication, QMenu
 
 from minflux_viewer.colors import configure_colors
@@ -64,6 +65,7 @@ def test_scatter_view_menu_order(monkeypatch, _qt_app):
 
     win = ScatterWindow(_state(), dataset_idx=0)
     try:
+        assert win._info_label.text().startswith("3D  |  ")
         menu = _capture_context_menu(monkeypatch, win._show_context_menu)
         assert _menu_texts(_submenu(menu, "View")) == [
             "XY",
@@ -86,6 +88,104 @@ def test_scatter_view_menu_order(monkeypatch, _qt_app):
         assert win._plot_2d.getPlotItem().getAxis("bottom").grid
     finally:
         win.close()
+
+
+def test_scatter_color_by_starts_with_idx(monkeypatch, _qt_app):
+    from minflux_viewer.ui.scatter_window import ScatterWindow
+
+    state = _state()
+    win = ScatterWindow(state, dataset_idx=0)
+    try:
+        assert win._cbar_combo.itemText(0) == "idx"
+
+        menu = _capture_context_menu(monkeypatch, win._show_context_menu)
+        assert _menu_texts(_submenu(menu, "Color by"))[0] == "idx"
+
+        win._cbar_combo.setCurrentText("idx")
+        dataset = state.datasets[0]
+        values, bins, label, _vmin, _vmax = win._color_bins_for_points(
+            None, None, None, dataset, np.arange(dataset.prop.num_loc),
+        )
+        np.testing.assert_array_equal(values, [1.0, 2.0, 3.0])
+        assert np.unique(bins).size > 1
+        assert label == "idx"
+    finally:
+        win.close()
+
+
+def test_scatter_colorbar_is_linked_floating_and_persistent(
+    monkeypatch, _qt_app,
+):
+    from minflux_viewer.ui.scatter_window import ScatterWindow
+
+    state = _state()
+    win = ScatterWindow(state, dataset_idx=0)
+    try:
+        win.show()
+        _qt_app.processEvents()
+        colorbar = win._colorbar
+        assert not colorbar.isHidden()
+        assert colorbar.uses_default_placement
+        assert win.width() == 720 + colorbar.width()
+        assert win._stack.contentsMargins().right() == colorbar.width()
+        assert colorbar.x() + colorbar.width() == win._stack.width()
+        assert colorbar.height() == win._stack.height()
+
+        root_menu = _capture_context_menu(monkeypatch, win._show_context_menu)
+        root_texts = _menu_texts(root_menu)
+        assert root_texts.index("Color by") < root_texts.index("Colormap")
+        assert root_texts.index("Colormap") < root_texts.index("Colorbar")
+        colorbar_action = next(
+            action for action in root_menu.actions()
+            if action.text() == "Colorbar"
+        )
+        assert colorbar_action.isCheckable() and colorbar_action.isChecked()
+
+        captured: list[QMenu] = []
+        monkeypatch.setattr(QMenu, "exec", lambda menu, *_args: captured.append(menu))
+        event = QContextMenuEvent(
+            QContextMenuEvent.Reason.Mouse,
+            QPoint(4, 4),
+            colorbar.mapToGlobal(QPoint(4, 4)),
+        )
+        colorbar.contextMenuEvent(event)
+        assert _menu_texts(captured[0]) == [
+            "Hide colorbar",
+            "Attribute:",
+            "Show values",
+            "Placement",
+            "---",
+            "Customize",
+        ]
+        attribute_menu = _submenu(captured[0], "Attribute:")
+        assert _menu_texts(attribute_menu)[0] == "idx"
+        next(
+            action for action in attribute_menu.actions()
+            if action.text() == "idx"
+        ).trigger()
+        assert win._cbar_combo.currentText() == "idx"
+        assert colorbar._label == "idx"
+
+        win._axis_combo.setCurrentText("3D")
+        _qt_app.processEvents()
+        assert win._3d_view is not None
+        assert win._stack.currentWidget() is win._3d_view
+        assert not colorbar.isHidden()
+        win._axis_combo.setCurrentText("XY")
+
+        win._set_colorbar_visible(False)
+        assert colorbar.isHidden()
+        assert win._stack.contentsMargins().right() == 0
+    finally:
+        win.close()
+
+    restored = ScatterWindow(state, dataset_idx=0)
+    try:
+        assert restored._show_colorbar is False
+        assert restored._colorbar.isHidden()
+        assert restored._cbar_combo.currentText() == "idx"
+    finally:
+        restored.close()
 
 
 def test_render_view_menu_contains_axis_and_grid_in_order(monkeypatch, _qt_app):
