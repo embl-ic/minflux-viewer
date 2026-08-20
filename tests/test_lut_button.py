@@ -1,7 +1,8 @@
 """
-The toolbar LUT button targets the plot window the user is working in — render
-**or scatter**. Clicking the toolbar activates the main window, so the button
-relies on the last-*focused* plot window (tracked via QApplication.focusChanged).
+The toolbar LUT button targets the plot window the user is working in — render,
+scatter, or Attribute Plot. Clicking the toolbar activates the main window, so
+the button relies on the last-*focused* plot window (tracked via
+QApplication.focusChanged).
 
 Kept to a single MainWindow to limit pyqtgraph teardown churn on Windows.
 """
@@ -67,6 +68,16 @@ def test_lut_button_targets_focused_plot_window(qtbot):
     calls.clear()
     mw._show_lut()
     assert calls == ["scatter"]
+
+    # (4) a focused Attribute Plot is also a first-class LUT owner (its real
+    #     implementation applies the editor to the fourth/C dimension).
+    aw = mw._show_attr_plot(0)
+    assert aw is not None
+    aw.open_lut_dialog = lambda: calls.append("attribute")
+    mw._on_focus_changed(None, aw)
+    calls.clear()
+    mw._show_lut()
+    assert calls == ["attribute"]
 
 # NB: global-shortcut behaviour (Preferences shortcuts firing from any focused
 # window, via the app-wide event filter) is covered by tests/test_global_shortcuts.py.

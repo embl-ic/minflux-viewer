@@ -69,7 +69,7 @@ _AGG_MODES = list(AGG_MODES)
 _VALUE_PRESERVING_MODES = frozenset(
     {"per loc"} | (set(AGG_MODES) - set(FLOAT_RESULT_MODES) - {"per loc"})
 )
-_FILTER_ATTR_PRIORITY = ("efo", "cfr", "siz", "tim", "tid", "sta", "itr")
+_FILTER_ATTR_PRIORITY = ("idx", "efo", "cfr", "siz", "tim", "tid", "sta", "itr")
 
 _ITER_TOOLTIP = (
     "Which loop iteration the bound applies to.\n"
@@ -464,13 +464,6 @@ class FilterDialog(QDialog):
 
         self._ds_label.setText(f"Dataset: {ds.name}")
         self._numeric_attrs = plot_attribute_names(ds, self._state.prefs, exclude=("ftr",))
-        if not self._numeric_attrs:
-            self._numeric_attrs = [
-                key for key in ds.attr.keys()
-                if key != "ftr"
-                and np.asarray(ds.attr[key]).ndim == 1
-                and np.issubdtype(np.asarray(ds.attr[key]).dtype, np.number)
-            ]
         self._numeric_attrs = _prioritize_filter_attrs(self._numeric_attrs)
         # Refresh combos in existing rows
         for row in range(self._table.rowCount()):

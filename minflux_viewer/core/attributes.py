@@ -130,13 +130,22 @@ def plot_attribute_names(
     numeric_only: bool = True,
     one_dimensional_only: bool = True,
 ) -> list[str]:
-    """Return attributes that should appear in plot dropdowns."""
+    """Return the canonical, preference-filtered plot attribute list.
+
+    ``idx`` is the universal row index exposed by the application rather than
+    a source-file column.  Keep it first even when a dataset did not persist a
+    physical ``idx`` array; value accessors synthesize it on demand.
+    """
     enabled = enabled_attribute_names(prefs)
     enabled_computed = enabled_computed_attribute_names(prefs)
     exclude_set = set(exclude)
-    names: list[str] = []
+    names: list[str] = (
+        ["idx"] if include_derived and "idx" not in exclude_set else []
+    )
 
     for name in _dataset_attribute_keys(dataset):
+        if name == "idx":
+            continue
         base = _base_attribute_name(name)
         meta = getattr(getattr(dataset, "mfx", None), "meta", {}).get(name, {})
         user_visible = bool(meta.get("user_visible", False))
@@ -165,7 +174,7 @@ COORD_DISPLAY_NAME = {"loc_x": "xnm", "loc_y": "ynm", "loc_z": "znm"}
 def _raw_store_serves_1d(dataset, name: str) -> bool:
     """True when the raw iteration store can serve *name* as a 1-D column.
 
-    m2205-style ``iter_load="all"`` materializations keep per-iteration
+    m2205-style all-iteration materializations keep per-iteration
     fields 2-D in ``ds.attr``; the plot windows read those through
     ``mfx_get``/``attr_values_1d``, so they stay valid dropdown entries.
     """

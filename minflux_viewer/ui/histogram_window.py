@@ -304,13 +304,6 @@ class HistogramWindow(QWidget):
         self._attr_combo.blockSignals(True)
         self._attr_combo.clear()
         numeric = plot_attribute_names(ds, self._state.prefs, exclude=("ftr",))
-        if not numeric:
-            numeric = [
-                key for key in ds.attr.keys()
-                if key != "ftr"
-                and np.asarray(ds.attr[key]).ndim == 1
-                and np.issubdtype(np.asarray(ds.attr[key]).dtype, np.number)
-            ]
         self._attr_combo.addItems(numeric)
         self._apply_attribute_combo_tooltips(self._attr_combo)
         attr_default = saved.get("attribute", old)
