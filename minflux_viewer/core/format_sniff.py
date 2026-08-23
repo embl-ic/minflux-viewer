@@ -8,7 +8,7 @@ no extension at all.
 
 ``sniff_format(path)`` returns one of:
 
-    "npy" | "mat" | "xlsx" | "tiff"      — binary, identified by magic bytes
+    "npy" | "npz" | "mat" | "xlsx" | "tiff"  — binary, identified by magic bytes
     "zarr"                                  — canonical Zarr directory
     "json" | "delimited"                 — text, identified by structure
     None                                 — unrecognised
@@ -23,11 +23,11 @@ from __future__ import annotations
 from pathlib import Path
 
 #: Formats identified by an unambiguous binary magic number.
-MAGIC_FORMATS = frozenset({"npy", "mat", "xlsx", "tiff"})
+MAGIC_FORMATS = frozenset({"npy", "npz", "mat", "xlsx", "tiff"})
 
 #: File extension → canonical loader format.
 EXT_TO_FMT: dict[str, str] = {
-    ".mat": "mat", ".npy": "npy",
+    ".mat": "mat", ".npy": "npy", ".npz": "npz",
     ".csv": "spreadsheet", ".tsv": "spreadsheet", ".txt": "spreadsheet",
     ".xlsx": "spreadsheet", ".xlsm": "spreadsheet",
     ".msr": "msr", ".tif": "tiff", ".tiff": "tiff", ".json": "json",
@@ -71,6 +71,12 @@ def sniff_format(path: str | Path) -> str | None:
     if head[:6] == b"MATLAB":
         return "mat"                       # classic "MATLAB 5.0 MAT-file" header
     if head[:4] == b"PK\x03\x04":
+        # Both .npz and .xlsx are zip containers. An .npz stores one ".npy"
+        # member per array, so its first local file header names a .npy; an
+        # .xlsx names "[Content_Types].xml". Without this an .npz was sniffed
+        # as a spreadsheet and routed to the column-mapping importer.
+        if b".npy" in head[:512]:
+            return "npz"
         return "xlsx"                      # zip container (xlsx/xlsm)
     if head[:4] in (b"II*\x00", b"MM\x00*"):
         return "tiff"
