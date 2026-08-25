@@ -336,11 +336,24 @@ every image.
 
 ## Remaining work
 
-1. Add save progress/cancellation for multi-hundred-megabyte datasets; the current UI
-   call is synchronous, and a 14 s write blocks the UI.
-2. Add a project-level image browser for unassigned image series. Dataset-linked
-   images already reopen from Dataset Manager; unassigned images remain accessible
-   as files inside `images/unassigned`.
+1. **Save cancellation.** Load and save now run off the UI thread
+   (`_ZarrIoTask`), so neither freezes the window, but an in-flight write cannot
+   be cancelled and reports stages rather than a percentage.
+2. **A project-level image browser for unassigned image series.** Dataset-linked
+   images reopen from the Dataset Manager and every embedded image is listed in
+   one Series dropdown, but there is no view of `images/unassigned` as a set.
+3. **Extraction cache lifecycle.** `materialize_image` extracts package members
+   to a temp cache that is never pruned — roughly 32 MiB per opened 33-image
+   package, kept until the OS clears its temp directory.
+4. **The `columns_to_mfx_array` round trip.** A load builds a ~2 GiB structured
+   array which `load_from_mfx_array` immediately splits back into columns; the
+   columns were already in the right shape. It costs ~3 s of a 10 s load, and
+   the same waste exists on the save side via `dataset_to_mfx_array`.
+5. **Unconditional ZIP64.** `pack_minflux_zarr` passes `allowZip64=True`, which
+   means "use ZIP64 when a limit is crossed", so a 264 MiB / 2,077-member
+   package carries classic EOCD records. There is no size ceiling, but this is
+   not the "ZIP64 unconditionally" the earlier plan specified — decide whether
+   to force it or to let the behaviour stand as the spec.
 
 ## Application-specific formats
 
