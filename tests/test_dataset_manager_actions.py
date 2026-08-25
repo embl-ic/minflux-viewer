@@ -57,10 +57,10 @@ def manager(_app):
 
 # --- reset (pure core) ----------------------------------------------------
 
-def test_reset_clears_filters_and_roi_masks_and_restores_rimf(_app):
+def test_reset_clears_filters_and_roi_masks_and_restores_z_scaling_factor(_app):
     ds = _dataset()
-    ds.set_rimf(0.72, source="auto (estimate anisotropy)")     # the as-loaded value
-    ds.set_rimf(0.90, source="manual (anisotropy plugin)")     # a later user edit
+    ds.set_z_scaling_factor(0.72, source="auto (estimate anisotropy)")     # the as-loaded value
+    ds.set_z_scaling_factor(0.90, source="manual (anisotropy plugin)")     # a later user edit
 
     ds.state["filter_specs"] = [{"attribute": "efo", "mode": "per loc",
                                  "lo": 0.0, "hi": 1.0}]
@@ -76,7 +76,7 @@ def test_reset_clears_filters_and_roi_masks_and_restores_rimf(_app):
     assert ds.filter_mask.all()
     assert "roi_masks" not in ds.state and "active_roi_draft_id" not in ds.state
     assert ds.derived.get("roi_abc") is None
-    assert ds.cali.RIMF == pytest.approx(0.72)
+    assert ds.cali.z_scaling_factor == pytest.approx(0.72)
     assert "render_channel_lut" not in ds.state
     assert len(changes) == 4
 
@@ -133,7 +133,8 @@ def test_single_row_menu_has_the_four_sections(manager, monkeypatch):
     mgr._table.selectRow(0)
 
     assert _menu_entries(mgr, monkeypatch, 0) == [
-        "Reset", "Save as…", "Close", "Duplicate",
+        "Open file location",
+        "---", "Reset", "Save as…", "Close", "Duplicate",
         "---", "View mbm info…", "View image series",
         "---", "Map confocal signal…",
     ]
@@ -153,7 +154,51 @@ def test_source_dependent_entries_are_disabled_not_hidden(manager, monkeypatch):
     pos = mgr._table.visualRect(mgr._table.model().index(0, 1)).center()
     mgr._show_context_menu(pos)
 
-    assert disabled == ["View mbm info…", "View image series", "Map confocal signal…"]
+    # A simulated dataset has no file behind it either.
+    assert disabled == [
+        "Open file location",
+        "View mbm info…", "View image series", "Map confocal signal…",
+    ]
+
+
+def test_open_file_location_is_offered_only_with_a_file_on_disk(
+    manager, monkeypatch, tmp_path
+):
+    """The first entry reveals the dataset's file, and greys out without one."""
+    from minflux_viewer.core.dataset import dataset_source_file
+
+    mgr, win = manager
+    dataset = win._state.datasets[0]
+    assert dataset_source_file(dataset) is None      # simulated: nothing on disk
+
+    source = tmp_path / "run_1.mat"
+    source.write_bytes(b"not really a .mat, but it exists")
+    dataset.file.folder = str(tmp_path)
+    dataset.file.name = source.name
+    assert dataset_source_file(dataset) == source
+
+    revealed: list[str] = []
+    monkeypatch.setattr(
+        type(win), "open_file_location", lambda _self, path: revealed.append(path)
+    )
+    captured: list[QMenu] = []
+
+    def _choose(menu, *_a, **_k):
+        captured.append(menu)
+        return next(a for a in menu.actions() if a.text() == "Open file location")
+
+    monkeypatch.setattr(QMenu, "exec", _choose)
+    pos = mgr._table.visualRect(mgr._table.model().index(0, 1)).center()
+    mgr._show_context_menu(pos)
+
+    entry = captured[0].actions()[0]
+    assert entry.text() == "Open file location"      # the top item
+    assert entry.isEnabled() and entry.toolTip() == str(source)
+    assert revealed == [str(source)]
+
+    # A moved-away source is treated as absent.
+    source.unlink()
+    assert dataset_source_file(dataset) is None
 
 
 def test_mbm_entry_enables_once_the_dataset_carries_beads(manager, monkeypatch):
@@ -273,7 +318,7 @@ def test_dropping_a_metadata_sidecar_applies_its_recipe(manager, tmp_path):
     side.write_text(json.dumps({
         METADATA_JSON_MARKER: 1,
         "content": "raw",
-        "calibration": {"rimf": 0.67},
+        "calibration": {"z_scaling_factor": 0.67},
         "filters": [{"attribute": "efo", "mode": "per loc",
                      "lo": 0.0, "hi": 1e9, "itr": "last"}],
     }), encoding="utf-8")
@@ -281,7 +326,7 @@ def test_dropping_a_metadata_sidecar_applies_its_recipe(manager, tmp_path):
     _drop(mgr, 1, [side])
 
     ds = win._state.datasets[1]
-    assert ds.cali.RIMF == pytest.approx(0.67)
+    assert ds.cali.z_scaling_factor == pytest.approx(0.67)
     assert len(ds.state["filter_specs"]) == 1
 
 

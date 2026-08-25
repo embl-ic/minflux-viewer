@@ -194,6 +194,58 @@ def test_keyword_search_finds_nested_commands(_app):
         _app.processEvents()
 
 
+def test_view_menu_switches_the_attribute_plot_renderer(_app):
+    """View ▸ GPU rendering opens the Attribute Plot and switches its renderer.
+
+    The plot's own right-click menu carries the same switch; this is the app-menu
+    entry, so the two renderers can be compared without hunting for it.
+    """
+    import numpy as np
+
+    from minflux_viewer.core.dataset import build_localization_dataset
+
+    win = _real_window(_app)
+    try:
+        action = win.actionAttributeGpu
+        assert action.isCheckable()
+        assert action in win._ui.menuView.actions()
+        # It is the only home of that command.
+        assert sum(
+            action in menu.actions()
+            for menu in win.menuBar().findChildren(type(win._ui.menuView))
+        ) == 1
+
+        # No dataset: nothing to switch, and the entry says so.
+        win._sync_attribute_gpu_action()
+        assert not action.isEnabled()
+
+        win._state.add_dataset(
+            build_localization_dataset(
+                name="gpu-menu",
+                x_nm=np.arange(6, dtype=float),
+                y_nm=np.arange(6, dtype=float),
+                z_nm=np.zeros(6),
+            )
+        )
+        _app.processEvents()
+        win._sync_attribute_gpu_action()
+        assert action.isEnabled() and not action.isChecked()
+
+        action.trigger()          # a menu click toggles, then emits triggered
+        plot = win._attr_windows.get(win._state.active_idx)
+        assert plot is not None and plot.gpu_2d is True
+
+        # Reopening the menu reflects the window, not the last click.
+        win._sync_attribute_gpu_action()
+        assert action.isChecked()
+        plot.set_gpu_2d(False)
+        win._sync_attribute_gpu_action()
+        assert not action.isChecked()
+    finally:
+        win.close()
+        _app.processEvents()
+
+
 def test_every_menu_command_is_traceable_to_a_source(_app):
     """Every indexed menu command (recent-files etc. are excluded from the index)
     resolves to an implementing module — the user's 'no untraceable command' rule."""
@@ -205,6 +257,32 @@ def test_every_menu_command_is_traceable_to_a_source(_app):
             if not e.source and e.enabled and e.text != "(no plugins registered)"
         ]
         assert blank == [], f"commands with no Source: {[(e.text, e.path) for e in blank]}"
+    finally:
+        win.close()
+        _app.processEvents()
+
+
+def test_no_command_sits_in_two_menus(_app):
+    """One command, one home.
+
+    The Dataset Manager used to be in both Edit and View — the same QAction, so
+    it shared its Ctrl+D shortcut and showed up twice in the Command Finder with
+    different menu paths. It was the only such duplicate, which is what marked it
+    as an artefact of a menu rebuild rather than a deliberate placement.
+    """
+    win = _real_window(_app)
+    try:
+        seen: dict = {}
+        for menu_action in win.menuBar().actions():
+            menu = menu_action.menu()
+            if menu is None:
+                continue
+            for act in menu.actions():
+                if act.isSeparator() or act.menu() is not None:
+                    continue
+                seen.setdefault(act, []).append(menu_action.text())
+        dupes = {a.text(): m for a, m in seen.items() if len(m) > 1}
+        assert dupes == {}, f"commands placed in more than one menu: {dupes}"
     finally:
         win.close()
         _app.processEvents()

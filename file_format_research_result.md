@@ -591,3 +591,70 @@ Start with the envelope and validator, not the complete dataset serializer:
 This sequence tests the architectural risk—ZIP64 packaging, source preservation,
 version separation, and safe reopen—before committing to the full processing/state
 schema.
+
+## 18. Empirical export-size model and text-format performance (2026-08-25)
+
+The reference acquisition
+`4_BD_MRED_75pM_MINFLUX_3D.msr` is 380,215,735 bytes (362.60 MiB), but its parsed
+MFX component contains 20,627,153 all-iteration rows with a 101-byte structured
+dtype: 2,083,342,453 bytes (1.94 GiB) of uncompressed numeric payload. Therefore
+the MSR size is not the baseline for predicting an export. MSR is a compressed OBF
+container and also carries metadata/images; export estimates must start from parsed
+array shapes, dtypes and values.
+
+Measured exports were:
+
+| component | MAT | NumPy | JSON | CSV |
+|---|---:|---:|---:|---:|
+| MFX | 216,921,615 B | 2,083,342,901 B | 5,444,912,421 B | 2,507,171,687 B |
+| MBM | 1,344,819 B | 1,977,960 B | 7,056,689 B | 5,643,804 B |
+
+For MFX, NumPy is essentially the exact uncompressed binary payload; MAT compresses
+to 10.4% of that payload, CSV decimal text expands to 120.3%, and JSON record text
+expands to 261.3%. The MSR-reader Zarr was 296,052,936 bytes (282.34 MiB), including
+images and ancillary content. These ratios are dataset-dependent, especially MAT and
+Zarr compression, but the direction and order are structural.
+
+The implemented estimator (`core/export_size.py`) therefore uses:
+
+- exact dtype payload + NumPy header for `.npy`;
+- actual compact-JSON and CSV serialization of 8,192 stratified rows, extrapolated
+  to the complete row count;
+- real MATLAB compression over eight distributed contiguous blocks;
+- the actual Zarr v2 Blosc/LZ4 codec over distributed blocks, explicitly labelling
+  images/search/viewer metadata as additional content.
+
+On the reference MFX+MBM exports, one 1.6-second estimation pass predicted NumPy
+exactly, JSON within -0.16%, CSV within -0.34%, and MAT within +3.8%. This is precise
+enough for a pre-export UI estimate while remaining far cheaper than performing the
+export.
+
+### Performance conclusion
+
+The large text files and their basic conversion cost are inherent: hundreds of
+millions of numeric values must be formatted as decimal/JSON tokens and parsed back.
+Streaming avoids a giant Python record list but cannot remove that CPU and I/O work.
+JSON also repeats every field name for every row, explaining why it is about twice the
+CSV size here. CSV and JSON should remain interoperability/inspection formats, not the
+recommended working formats for complete all-iteration acquisitions.
+
+Application unresponsiveness was partly avoidable and is handled separately:
+
+- single-file MSR export now runs off the Qt UI thread;
+- the spreadsheet mapping dialog samples at most 100 displayed rows from the start,
+  distributed byte offsets and the tail instead of parsing the entire CSV first;
+- its row count is explicitly approximate (estimated from 512 byte-offset samples);
+- a canonical MINFLUX CSV accepted with its default mapping uses the dedicated raw
+  loader, preserving every iteration field rather than reducing the table to generic
+  x/y/z roles;
+- canonical CSV parsing now constructs its structured dtype directly, avoiding the
+  previous multi-gigabyte all-float matrix before canonical recomposition;
+- top-level JSON arrays are rejected as ROI files from a 4 KiB prefix, avoiding a
+  complete 5.07 GiB classification parse before the streaming data loader;
+- large text export/load warnings recommend Zarr, MAT or NumPy and state that the full
+  conversion can still take minutes.
+
+The remaining limit is fundamental full import time. After the user confirms the CSV
+mapping—or confirms a large JSON warning—the complete text file still has to be read
+and converted. Binary Zarr/MAT/NumPy should be used when fast repeated reopening is a
+requirement.

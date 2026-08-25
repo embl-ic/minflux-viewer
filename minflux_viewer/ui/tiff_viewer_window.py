@@ -320,11 +320,21 @@ class TiffViewerWindow(QWidget):
             except Exception:
                 pass
 
+    def _source_name(self) -> str:
+        """What to call the open image.
+
+        A source may read from somewhere the user never chose — a package member
+        extracted to a temp file — so it can publish its own name.
+        """
+        return str(getattr(self._source, "display_name", None)
+                   or self._source.path.name)
+
     def _title_text(self) -> str:
         meta = self._source.metadata
+        name = self._source_name()
         if int(meta.series_count) > 1:
-            return f"{self._source.path.name} — {meta.image_name}"
-        return self._source.path.name
+            return f"{name} — {meta.image_name}"
+        return name
 
     def _on_series_changed(self, index: int) -> None:
         try:
@@ -733,7 +743,8 @@ class TiffViewerWindow(QWidget):
         """Write the current series — with its active ROI — as an OME-TIFF."""
         from ..core.tiff_export import export_image_series_to_tiff
 
-        suggested = f"{self._source.metadata.image_name or self._source.path.stem}.tif"
+        stem = self._source.metadata.image_name or Path(self._source_name()).stem
+        suggested = f"{stem}.tif"
         path, _filter = QFileDialog.getSaveFileName(
             self, "Save image as OME-TIFF", suggested, "TIFF image (*.tif *.tiff)")
         if not path:

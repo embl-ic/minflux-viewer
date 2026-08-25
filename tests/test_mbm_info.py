@@ -72,6 +72,7 @@ def test_beads_are_reconstructed_without_a_name_map():
     assert [b["rid"] for b in beads] == ["100", "101", "102"]     # named by id
     assert beads[0]["xyz_nm"].shape == (40, 3)
     assert beads[0]["tim_s"][0] == 0.0                            # zeroed to start
+    assert beads[0]["pmt_signal"] is None                          # legacy/no-str data
 
 
 def test_a_name_map_still_wins_over_the_id_fallback():

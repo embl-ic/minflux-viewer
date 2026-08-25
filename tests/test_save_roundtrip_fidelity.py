@@ -15,9 +15,10 @@ from minflux_viewer.core.save import dataset_to_mfx_array, save_processed
 
 # formats that can be written and read back within the app
 ROUNDTRIP = [
-    ("mat", L.load_dataset), ("npy", L.load_npy), ("npz", L.load_npz),
+    ("mat", L.load_dataset), ("npy", L.load_npy),
     ("json", L.load_json), ("csv", L.load_csv), ("zarr", L.load_zarr),
 ]
+SNAPSHOT_ROUNDTRIP = [(fmt, loader) for fmt, loader in ROUNDTRIP if fmt != "zarr"]
 
 
 def _raw_mfx(n_loc=50, n_itr=4, seed=0):
@@ -43,9 +44,9 @@ def _raw_mfx(n_loc=50, n_itr=4, seed=0):
 
 
 def _processed(tmp_path, dx=100.0, dy=-50.0):
-    """A dataset carrying RIMF, a channel transform and an active filter."""
+    """A dataset carrying Z scaling factor, a channel transform and an active filter."""
     ds = L.load_from_mfx_array(_raw_mfx(), name="p.mat", folder=str(tmp_path))
-    ds.set_rimf(0.67, source="manual (test)")
+    ds.set_z_scaling_factor(0.67, source="manual (test)")
     matrix = np.eye(4)
     matrix[0, 3] = dx
     matrix[1, 3] = dy
@@ -104,13 +105,13 @@ def test_raw_roundtrip_preserves_structure_and_calibration(tmp_path, fmt, loader
     assert back.prop.num_loc == ds.prop.num_loc, f"{fmt}: localization count changed"
     assert len(back.mfx_raw["itr"]) == len(ds.mfx_raw["itr"]), f"{fmt}: raw rows lost"
     assert back.metadata.get("raw_num_itr") == ds.metadata.get("raw_num_itr")
-    assert float(back.cali.RIMF) == pytest.approx(0.67), f"{fmt}: RIMF lost"
+    assert float(back.cali.z_scaling_factor) == pytest.approx(0.67), f"{fmt}: Z scaling factor lost"
     assert len(back.state.get("filter_specs") or []) == 1, f"{fmt}: filter lost"
     assert int(np.asarray(back.filter_mask).sum()) == int(np.asarray(ds.filter_mask).sum())
 
 
 # --- F3: every offered format must be reopenable ----------------------------
-@pytest.mark.parametrize("fmt,loader", ROUNDTRIP)
+@pytest.mark.parametrize("fmt,loader", SNAPSHOT_ROUNDTRIP)
 @pytest.mark.parametrize("content", ["raw", "snapshot"])
 def test_every_written_format_can_be_reopened(tmp_path, fmt, loader, content):
     """Writing a file the application cannot read back is a silent dead end."""
@@ -140,7 +141,7 @@ def test_npz_content_sniff_distinguishes_it_from_xlsx(tmp_path):
 
 
 # --- F8: the flagged filter state must come back ----------------------------
-@pytest.mark.parametrize("fmt,loader", ROUNDTRIP)
+@pytest.mark.parametrize("fmt,loader", SNAPSHOT_ROUNDTRIP)
 def test_snapshot_flag_mode_restores_the_filter(tmp_path, fmt, loader):
     """``filter_mode="flag"`` keeps every row and records an ``ftr`` column.
 

@@ -24,7 +24,7 @@ def _particle(seed, m=40, attrs=("efo", "cfr"), with_loc=True, source="ds", name
         attrs={a: rng.normal(0, 1, m) for a in attrs},
         source=source,
         roi_name=name,
-        meta={"rezero_offset": [1.0, 2.0, 3.0], "rimf": 0.67, "z_scale": 1.0,
+        meta={"rezero_offset": [1.0, 2.0, 3.0], "z_scaling_factor": 0.67, "z_scale": 1.0,
               "source_version": "m2410"},
     )
 
@@ -46,7 +46,7 @@ def test_roundtrip_all(tmp_path):
         for k in a.attrs:
             np.testing.assert_allclose(a.attrs[k], b.attrs[k])
         assert b.source == a.source and b.roi_name == a.roi_name
-        assert b.meta["rimf"] == pytest.approx(0.67)
+        assert b.meta["z_scaling_factor"] == pytest.approx(0.67)
         assert b.meta["source_version"] == "m2410"
 
 

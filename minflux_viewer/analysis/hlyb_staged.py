@@ -21,7 +21,7 @@ The stages are:
    stratification scale.
 
 Coordinates supplied to :func:`analyze_hlyb_staged_3d` are raw metres.  The
-configured RIMF is applied exactly once here.  Pure NumPy/SciPy; no Qt.
+configured Z scaling factor is applied exactly once here.  Pure NumPy/SciPy; no Qt.
 """
 
 from __future__ import annotations
@@ -862,6 +862,27 @@ def _analyze_sites(
             sites["centers_nm"], link_nm=cell_link_nm,
             min_sites=cfg.min_sites_per_component,
         )
+    return _profile_and_null(
+        sites, components, cfg, stratum_sites=stratum_sites,
+        null_replicates=null_replicates, rng_seed=rng_seed)
+
+
+def _profile_and_null(
+    sites: dict,
+    components: dict,
+    cfg: Staged3DConfig,
+    *,
+    stratum_sites: int,
+    null_replicates: int,
+    rng_seed: int,
+) -> dict:
+    """Within-component pair profile, conditional surface null and excess summary.
+
+    Shared by the single-dataset and pooled entry points: everything below the
+    component stage is indifferent to *how* the components were formed, which is
+    what lets ROI-delimited cells from several acquisitions be pooled without
+    touching the statistics.
+    """
     observed, observed_by_component, edges = _profile_components(
         sites["centers_nm"], components["labels"],
         r_max_nm=cfg.r_max_nm, bin_nm=cfg.bin_nm,
@@ -1143,3 +1164,358 @@ def _limitations(cfg: Staged3DConfig, components: dict) -> list[str]:
 def config_with(cfg: Staged3DConfig, **changes) -> Staged3DConfig:
     """Small public helper used by batch/sensitivity scripts."""
     return replace(cfg, **changes)
+
+
+# --------------------------------------------------------------------------- #
+# Pooled multi-acquisition analysis
+# --------------------------------------------------------------------------- #
+def components_from_cells(
+    site_centers_nm: np.ndarray,
+    cell_index: np.ndarray,
+    *,
+    min_sites: int = 20,
+) -> dict:
+    """Components taken from the caller's cell assignment, not inferred.
+
+    Returns the same structure as :func:`segment_spatial_components`, so the
+    rest of the workflow is indifferent to where the components came from. Used
+    when the operator has delineated each cell with an ROI: the segmentation is
+    then a stated input rather than something the analysis has to guess, and it
+    is also what makes pooling across acquisitions safe — cells from different
+    files can never be linked into one component by proximity, because
+    proximity is not what forms them here.
+    """
+    pts = np.asarray(site_centers_nm, dtype=float)
+    index = np.asarray(cell_index, dtype=np.int64).ravel()
+    n = pts.shape[0]
+    if n == 0 or index.size != n:
+        return {"labels": np.empty(0, dtype=np.int64), "components": [],
+                "n_excluded_sites": 0, "n_all_components": 0, "detection": None}
+    ids = np.unique(index)
+    labels = np.full(n, -1, dtype=np.int64)
+    components: list[dict] = []
+    for cell in ids:
+        members = np.flatnonzero(index == cell)
+        if members.size < int(min_sites):
+            continue
+        new_id = len(components)
+        labels[members] = new_id
+        components.append(_component_record(new_id, members, pts, None))
+    return {
+        "labels": labels,
+        "components": components,
+        "n_excluded_sites": int(np.sum(labels < 0)),
+        "n_all_components": int(ids.size),
+        "detection": None,
+    }
+
+
+def trace_centroids_for_cell(cell: dict, cfg: Staged3DConfig) -> dict:
+    """Trace centroids of one collected cell (``loc_m`` / ``tid`` / ``tim``)."""
+    tim = cell.get("tim")
+    return trace_centroids(
+        np.asarray(cell["loc_m"], dtype=float),
+        np.asarray(cell["tid"]),
+        None if tim is None else np.asarray(tim, dtype=float),
+        z_scale=cfg.z_scaling_factor,
+        min_loc_per_trace=cfg.min_loc_per_trace,
+    )
+
+
+def _pool_cell_sites(cells, cfg: Staged3DConfig, *, merge_nm: float) -> dict:
+    """Trace centroids and label-site inference, run **per cell** and pooled.
+
+    Site consolidation is deliberately confined to one cell at a time. Pooled
+    acquisitions share a coordinate frame only by accident, so two cells from
+    different files can sit on top of each other; merging globally would fuse
+    unrelated traces into a single "site". Running per cell makes that
+    impossible and gives every site the cell index its component is built from.
+    """
+    centers, sems, n_traces, n_locs = [], [], [], []
+    t_starts, t_ends, within_rms, cell_index = [], [], [], []
+    trace_centres, trace_cell_index, points = [], [], []
+    n_traces_total = 0
+    n_traces_used = 0
+    per_cell = []
+    have_time = True
+
+    for position, cell in enumerate(cells):
+        traces = trace_centroids_for_cell(cell, cfg)
+        n_traces_total += int(traces["n_traces_total"])
+        used = int(traces["centroids_nm"].shape[0])
+        n_traces_used += used
+        if used == 0:
+            per_cell.append({"cell": position, "n_traces": 0, "n_sites": 0})
+            continue
+        sites = infer_label_sites(
+            traces["centroids_nm"], traces["sem_nm"], traces["n_locs"],
+            traces["t_start"], traces["t_end"], merge_nm=merge_nm,
+            sigma_factor=cfg.site_sigma_factor,
+            precision_floor_nm=cfg.site_precision_floor_nm,
+        )
+        count = int(sites["centers_nm"].shape[0])
+        centers.append(np.asarray(sites["centers_nm"], dtype=float))
+        sems.append(np.asarray(sites["sem_nm"], dtype=float))
+        n_traces.append(np.asarray(sites["n_traces"]))
+        n_locs.append(np.asarray(sites["n_locs"]))
+        within_rms.append(np.asarray(sites["within_site_rms_nm"], dtype=float))
+        if sites["t_start"] is None or sites["t_end"] is None:
+            have_time = False
+            t_starts.append(np.full(count, np.nan))
+            t_ends.append(np.full(count, np.nan))
+        else:
+            t_starts.append(np.asarray(sites["t_start"], dtype=float))
+            t_ends.append(np.asarray(sites["t_end"], dtype=float))
+        cell_index.append(np.full(count, position, dtype=np.int64))
+        trace_centres.append(np.asarray(traces["centroids_nm"], dtype=float))
+        trace_cell_index.append(np.full(used, position, dtype=np.int64))
+        block = traces.get("points_nm")
+        if block is not None and np.asarray(block).size:
+            points.append(np.asarray(block, dtype=float))
+        per_cell.append({"cell": position, "n_traces": used, "n_sites": count})
+
+    def stack(parts, width=0):
+        if not parts:
+            return (np.empty((0, width), dtype=float) if width
+                    else np.empty(0, dtype=float))
+        return np.concatenate(parts, axis=0)
+
+    pooled_sites = {
+        "centers_nm": stack(centers, 3),
+        "sem_nm": stack(sems, 3),
+        "n_traces": stack(n_traces).astype(np.int64),
+        "n_locs": stack(n_locs).astype(np.int64),
+        "t_start": stack(t_starts) if have_time else None,
+        "t_end": stack(t_ends) if have_time else None,
+        "within_site_rms_nm": stack(within_rms),
+        # A pooled trace->site map would need a global trace numbering that does
+        # not exist across files; the per-site trace counts carry what the
+        # reporting actually uses.
+        "trace_to_site": None,
+        "n_candidate_edges": 0,
+        "n_accepted_merges": 0,
+    }
+    return {
+        "sites": pooled_sites,
+        "cell_index": stack(cell_index).astype(np.int64),
+        "trace_centroids_nm": stack(trace_centres, 3),
+        "trace_cell_index": stack(trace_cell_index).astype(np.int64),
+        "points_nm": stack(points, 3),
+        "n_traces_total": int(n_traces_total),
+        "n_traces_used": int(n_traces_used),
+        "per_cell": per_cell,
+        "has_time": bool(have_time),
+    }
+
+
+def analyze_hlyb_staged_pooled(cells, cfg: Staged3DConfig | None = None) -> dict:
+    """Staged short-range analysis over cells pooled from several acquisitions.
+
+    Each entry of *cells* is one ROI-delimited cell: ``loc_m`` ``(N, 3)`` raw
+    metres, ``tid``, optional ``tim``, plus ``label`` / ``dataset`` / ``roi``
+    for reporting. Each becomes one spatial component, so pairs are formed only
+    within a cell and never between cells or between acquisitions — the same
+    rule the single-dataset workflow enforces, with the segmentation supplied
+    rather than inferred.
+
+    The result mirrors :func:`analyze_hlyb_staged_3d` so the same result window
+    and method-text generator consume it.
+    """
+    cfg = cfg or Staged3DConfig()
+    _validate_config(cfg)
+    entries = [dict(cell) for cell in cells]
+    if not entries:
+        raise ValueError(
+            "No cells were collected; add at least one ROI-delimited cell.")
+    for position, cell in enumerate(entries):
+        loc = np.asarray(cell.get("loc_m"), dtype=float)
+        if loc.ndim != 2 or loc.shape[1] < 3:
+            raise ValueError(
+                f"cell {position + 1} ({cell.get('label', '?')}): "
+                f"loc_m must have shape (N, 3)")
+        cell["loc_m"] = loc
+
+    stacked = np.concatenate([cell["loc_m"] for cell in entries], axis=0)
+    finite_z = stacked[np.isfinite(stacked).all(axis=1), 2]
+    if finite_z.size < 3 or float(np.ptp(finite_z)) * 1e9 * cfg.z_scaling_factor < 5.0:
+        raise ValueError("The staged workflow requires genuinely 3-D localizations")
+
+    def build(merge_nm, stratum_sites, replicates, rng_seed):
+        pooled = _pool_cell_sites(entries, cfg, merge_nm=merge_nm)
+        components = components_from_cells(
+            pooled["sites"]["centers_nm"], pooled["cell_index"],
+            min_sites=cfg.min_sites_per_component)
+        return pooled, _profile_and_null(
+            pooled["sites"], components, cfg, stratum_sites=stratum_sites,
+            null_replicates=replicates, rng_seed=rng_seed)
+
+    pooled, base = build(cfg.site_merge_nm, cfg.null_stratum_sites,
+                         cfg.null_replicates, cfg.rng_seed)
+    components = base["components"]
+    if not components["components"]:
+        raise ValueError(
+            f"No collected cell holds the configured minimum of "
+            f"{cfg.min_sites_per_component} inferred site(s). Collect more "
+            f"cells, or lower 'Min sites per component'.")
+
+    sites = base["sites"]
+    summary = base["summary"]
+    bootstrap = _component_bootstrap(
+        base["observed_by_component"], base["null"]["component_mean"],
+        base["edges_nm"], cfg)
+
+    # Sensitivity varies only what the analysis itself chose. The cells are
+    # drawn by the operator here, so there is no component knob to audit; that
+    # is stated in the limitations rather than faked with a proxy.
+    sensitivity = []
+    if cfg.run_sensitivity:
+        variants = [(float(v), int(cfg.null_stratum_sites), "site radius")
+                    for v in cfg.sensitivity_site_merge_nm]
+        variants += [(float(cfg.site_merge_nm), int(v), "null stratum")
+                     for v in cfg.sensitivity_stratum_sites]
+        seen = set()
+        for vi, (merge_nm, stratum, source) in enumerate(variants):
+            key = (round(merge_nm, 6), int(stratum))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                _variant_pooled, variant = build(
+                    merge_nm, stratum, cfg.sensitivity_replicates,
+                    cfg.rng_seed + 977 * (vi + 1))
+            except Exception:                                     # noqa: BLE001
+                continue
+            if not variant["components"]["components"]:
+                continue
+            row = {
+                "source": source,
+                "site_merge_nm": float(merge_nm),
+                "cell_link_nm": float(cfg.cell_link_nm),
+                "null_stratum_sites": int(stratum),
+                "rod_width_scale": 1.0,
+                "n_sites": int(variant["sites"]["centers_nm"].shape[0]),
+                "n_sites_used": int(np.sum(variant["components"]["labels"] >= 0)),
+                "n_components": int(len(variant["components"]["components"])),
+            }
+            row.update({key: float(value)
+                        for key, value in variant["summary"].items()
+                        if isinstance(value, (int, float, np.floating))})
+            sensitivity.append(row)
+
+    finite_sensitivity = [row for row in sensitivity
+                          if np.isfinite(row.get("band_ratio", np.nan))
+                          and np.isfinite(row.get("band_p", np.nan))]
+    sensitivity_passes = sum(row["band_ratio"] > 1.0 and row["band_p"] <= 0.05
+                             for row in finite_sensitivity)
+    calibrated_rows = [row for row in finite_sensitivity
+                       if np.isfinite(row.get("band_ratio_z", np.nan))]
+    calibrated_passes = sum(
+        row["band_ratio"] > 1.0 and row["band_ratio_z"] >= cfg.calibrated_ratio_z
+        for row in calibrated_rows)
+    centroid_spread = np.asarray(
+        [row["positive_excess_centroid_nm"] for row in finite_sensitivity
+         if np.isfinite(row.get("positive_excess_centroid_nm", np.nan))],
+        dtype=float)
+    ratio_spread = np.asarray([row["band_ratio"] for row in finite_sensitivity],
+                              dtype=float)
+    ratio_spread = ratio_spread[np.isfinite(ratio_spread)]
+
+    site_trace_counts = np.asarray(sites["n_traces"], dtype=np.int64)
+    repeated = site_trace_counts > 1
+    labels = components["labels"]
+    per_cell = []
+    for position, cell in enumerate(entries):
+        used = int(np.sum((pooled["cell_index"] == position) & (labels >= 0)))
+        stats = pooled["per_cell"][position]
+        per_cell.append({
+            "label": str(cell.get("label", f"cell {position + 1}")),
+            "dataset": str(cell.get("dataset", "")),
+            "roi": str(cell.get("roi", "")),
+            "n_localizations": int(cell["loc_m"].shape[0]),
+            "n_traces": int(stats["n_traces"]),
+            "n_sites": int(stats["n_sites"]),
+            "n_sites_used": used,
+            "analysed": bool(used > 0),
+        })
+    datasets = sorted({row["dataset"] for row in per_cell if row["dataset"]})
+
+    limitations = _limitations(cfg, components)
+    limitations.insert(2, (
+        "Cells were delineated by hand-drawn ROIs, so the component "
+        "segmentation is an operator input: it is reproducible from the saved "
+        "ROI set, but it is not audited by the sensitivity scan, which here "
+        "varies only the same-site radius and the null stratification."))
+    limitations.append(
+        f"Pairs are formed only within a cell, so pooling {len(per_cell)} "
+        f"cell(s) from {max(len(datasets), 1)} acquisition(s) adds pair counts "
+        f"without creating cross-cell or cross-acquisition pairs; biological "
+        f"replication should still be judged across acquisitions.")
+
+    return {
+        "schema": "hlyb_staged_short_range_3d/v1",
+        "pooled": True,
+        "config": cfg,
+        "n_cells": len(per_cell),
+        "n_cells_analysed": int(sum(row["analysed"] for row in per_cell)),
+        "n_datasets": len(datasets),
+        "datasets": datasets,
+        "per_cell": per_cell,
+        "n_localizations": int(stacked.shape[0]),
+        "n_traces_total": int(pooled["n_traces_total"]),
+        "n_traces_used": int(pooled["n_traces_used"]),
+        "n_sites": int(sites["centers_nm"].shape[0]),
+        "n_sites_used": int(np.sum(labels >= 0)),
+        "n_components": int(len(components["components"])),
+        "n_components_all": int(components["n_all_components"]),
+        "n_rod_like_components": int(
+            sum(bool(item["rod_like"]) for item in components["components"])),
+        "n_excluded_sites": int(components["n_excluded_sites"]),
+        "component_mode": "given",
+        "rod_detection": None,
+        "rod_segmentation": None,
+        "n_repeated_sites": int(np.sum(repeated)),
+        "n_traces_consolidated": int(np.sum(np.clip(site_trace_counts - 1, 0, None))),
+        "median_within_site_rms_nm": (
+            float(np.median(np.asarray(sites["within_site_rms_nm"])[repeated]))
+            if repeated.any() else float("nan")),
+        "median_repeat_time_span_s": float("nan"),
+        "centroid_sem_nm": np.asarray(sites["sem_nm"], dtype=float),
+        "points_nm": pooled["points_nm"],
+        "trace_centroids_nm": pooled["trace_centroids_nm"],
+        "site_centers_nm": sites["centers_nm"],
+        "site_sem_nm": sites["sem_nm"],
+        "trace_to_site": None,
+        "component_labels": labels,
+        "components": components["components"],
+        "edges_nm": base["edges_nm"],
+        "centers_nm": 0.5 * (base["edges_nm"][:-1] + base["edges_nm"][1:]),
+        "observed": base["observed"],
+        "observed_by_component": base["observed_by_component"],
+        "null_mean": base["null"]["mean"],
+        "null_sd": base["null"]["sd"],
+        "null_lo": base["null"]["lo"],
+        "null_hi": base["null"]["hi"],
+        "null_profiles": base["null"]["profiles"],
+        "null_preview_sites_nm": base["null"]["preview_sites_nm"],
+        "excess_counts": base["observed"] - base["null"]["mean"],
+        "summary": summary,
+        "bootstrap": bootstrap,
+        "sensitivity": sensitivity,
+        "sensitivity_passes": int(sensitivity_passes),
+        "sensitivity_calibrated_passes": int(calibrated_passes),
+        "sensitivity_valid_variants": int(len(finite_sensitivity)),
+        "robust_short_range_excess": (
+            bool(finite_sensitivity)
+            and sensitivity_passes == len(finite_sensitivity)),
+        "robust_short_range_excess_calibrated": (
+            bool(calibrated_rows) and calibrated_passes == len(calibrated_rows)),
+        "centroid_sensitivity_range_nm": (
+            [float(centroid_spread.min()), float(centroid_spread.max())]
+            if centroid_spread.size else [float("nan"), float("nan")]),
+        "band_ratio_sensitivity_range": (
+            [float(ratio_spread.min()), float(ratio_spread.max())]
+            if ratio_spread.size else [float("nan"), float("nan")]),
+        "stratum_profile": (_stratum_profile(base, cfg)
+                            if cfg.run_stratum_profile else None),
+        "limitations": limitations,
+    }

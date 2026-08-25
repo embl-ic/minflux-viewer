@@ -63,6 +63,7 @@ from ..colors import is_solid_color, solid_color_rgb
 from ..core.iteration import FLATTEN_LABEL, iteration_labels, ordinal, parse_iteration_label
 from ..core.loader import attr_values_1d, is_value_pool_selector, mfx_get
 from ..utils.filters import raw_trace_aggregate
+from .attribute_help import apply_attribute_tooltips
 
 _DISPLAY_AGG = ["per loc", "trace mean", "trace median"]
 _DECISION_MODES = ["trace mean", "trace median", "trace majority vote"]
@@ -133,6 +134,7 @@ class AttributeSeparationDialog(QDialog):
             arow.addWidget(QLabel("Separate by attribute:"))
             self._attr_combo = QComboBox()
             self._attr_combo.addItems(self._attribute_candidates())
+            apply_attribute_tooltips(self._attr_combo)
             if self._attr_combo.findText(self._attribute) >= 0:
                 self._attr_combo.setCurrentText(self._attribute)
             elif self._attr_combo.count():

@@ -1,4 +1,11 @@
-# MINFLUX Viewer project format — decision and implementation plan
+# MINFLUX Viewer project format — superseded ZIP64 proposal
+
+> **Superseded on 2026-08-24.** The later decision is to implement a new,
+> self-contained MINFLUX Viewer Zarr v2 dataset directly, because there is no saved
+> application data requiring migration and the normalized MFX + enriched MBM/search
+> metadata can replace the duplicate `mfxdta.zarr` export. See
+> `file_format_zarr_v2_schema.md`. The ZIP64/`.mfv` material below is retained as
+> research history, not the active implementation plan.
 
 **Status:** decided; ready to implement
 **Date:** 2026-08-23
@@ -112,7 +119,7 @@ in the vendor's own encoding. `project.zarr` holds only what the viewer added.
 | `identity/` | `source_row_id` (int64) mapping each materialized row to its `mfx_raw` row | ~0.05 MB / 180k locs (highly compressible; a strided sequence) |
 | `derived/` | expensive or externally-dependent values: `den` (radius, method), `loc_precision_*`, mapped `confocal_signal_*` | ~4 bytes/loc each |
 | `state/` | `ftr` filter mask, `roi_<id>_mask` selection masks | ~1 byte/loc each |
-| attrs (JSON) | RIMF + provenance, `filter_specs`, `transform_4x4`, overlay id/order/LUT, view state, lineage | KB |
+| attrs (JSON) | Z scaling factor + provenance, `filter_specs`, `transform_4x4`, overlay id/order/LUT, view state, lineage | KB |
 
 **Never stored — read from the MSR:** `loc_x/y/z`, `tid`, `tim`, `itr`, `vld`, `efo`,
 `cfr`, `dcr`, `eco`, `ecc`, `efc`, `fbg`, `lnc`, `gri`, `sta`, `thi`, `sqi`, `fnl`,
@@ -122,11 +129,12 @@ in the vendor's own encoding. `project.zarr` holds only what the viewer added.
 `len`. These are O(n) from `tid`/`tim`/`loc` and are already recomputed on every load
 today.
 
-**Never stored — a computed view:** `xnm`, `ynm`, `znm`. `Dataset.loc_nm` is
-`loc_x/y/z x 1e9`, with `z x RIMF`, then the display transform. The viewer keeps
+**Never stored — a computed view:** `xnm`, `ynm`, `znm`. `Dataset.loc_nm` converts
+`loc_x/y/z` to nanometres, applies `z_calibrated = z_raw × z_scaling_factor`,
+then applies the display transform. The viewer keeps
 exposing nm coordinates; the archive keeps `mfx.loc` in metres. Storing both would be
 the exact duplication this rule forbids, and would reintroduce the
-"RIMF applied twice" hazard that `loc_nm` exists to prevent.
+"Z scaling factor applied twice" hazard that `loc_nm` exists to prevent.
 
 **Measured cost of each policy** (real files, project.zarr size / package overhead):
 
@@ -149,7 +157,7 @@ relying on a rule staying expressible.
 
 | Dataset kind | Coordinates |
 |---|---|
-| Source-backed (any amount of processing) | **never stored** - re-read from the MSR, view recomputed from RIMF + transform |
+| Source-backed (any amount of processing) | **never stored** - re-read from the MSR, view recomputed from Z scaling factor + transform |
 | Derived: crop, aggregate, drift-correct, flatten, DCR/time separation | **materialized** - genuinely new data, with a lineage edge to the parent |
 | Simulated / imported non-MSR | **materialized** - no source to reference |
 | Archival snapshot that must survive without the MSR | **materialized** - explicit `full_materialization: true` |

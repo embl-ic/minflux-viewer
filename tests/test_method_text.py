@@ -271,7 +271,7 @@ def test_hlyb_template_structured_provenance_documents_full_run():
 
     assert "50,000 valid localization record(s)" in txt
     assert "itr='last' (the global final iteration)" in txt
-    assert "raw Z was multiplied by 0.67 (RIMF, the refractive-index mismatch factor)" in txt
+    assert "raw Z was multiplied by 0.67 (the Z scaling factor)" in txt
     assert "basic-unit diameter was automatic (effective value 14.8 nm)" in txt
     assert "A- and B-rings with side lengths 11 and 19 nm" in txt
     assert "automatic (effective value 5 nm)" in txt
@@ -359,7 +359,7 @@ def _pair_fit_method_data(**overrides):
             "source_version": "m2410", "n_localizations": 192_334,
             "n_traces_total": 6882, "n_traces_used": 3923,
             "time_column_available": True,
-            "z_scaling_source": "the dataset's recorded RIMF",
+            "z_scaling_source": "the dataset's recorded Z scaling factor",
         },
         "parameters": {
             "min_loc_per_trace": 10, "z_scaling_factor": 0.67, "r_max_nm": 60.0,
@@ -584,12 +584,20 @@ def test_unmatched_event_kept_verbatim():
     assert "Some unmapped operation happened" in txt
 
 
-def test_rimf_anisotropy_note_no_url():
-    msg = "RIMF for 'ds1': 0.6375 (auto (estimate anisotropy))"
+def test_z_scaling_factor_anisotropy_note_no_url():
+    msg = "Z scaling factor for 'ds1': 0.6375 (estimated from trace anisotropy)"
     txt = mt.generate_method_text(_state(), [_ev(msg)])
-    assert "anisotropy of 'ds1' was estimated" in txt
+    assert "Z scaling factor of approximately 0.6375 was estimated for 'ds1'" in txt
+    assert "from trace anisotropy" in txt
     # custom method → inline note, no DOI
     assert "custom, MINFLUX Data Viewer" in txt
+
+
+def test_manual_z_scaling_factor_is_not_described_as_an_anisotropy_estimate():
+    msg = "Z scaling factor for 'ds1': 0.73 (manual, Dataset Information)."
+    txt = mt.generate_method_text(_state(), [_ev(msg)])
+    assert "Z scaling factor of 0.73 was set manually for 'ds1'" in txt
+    assert "estimated from trace anisotropy" not in txt
 
 
 def _fake_ds(state_dict, meta, *, ndim=3, ntraces=0, num_loc=0, name="ds"):

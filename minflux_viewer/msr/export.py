@@ -70,26 +70,28 @@ def _validate_mbm_source(mbm: np.ndarray) -> None:
         raise ValueError("MSR export requires MBM data to be a one-dimensional structured array.")
 
 
-def _canonical_dataset(
+def canonical_dataset(
     mfx: np.ndarray,
     *,
     name: str,
     folder: str,
     mbm: np.ndarray | None,
     mbm_meta: dict | None,
+    source_zarr=None,
 ):
     """Normalize source mfx once, then expose it to ``save_processed``."""
     _validate_mfx_source(mfx)
     from ..core.loader import load_from_mfx_array
 
-    # Export is raw and must not depend on the user's last/all-iteration or
-    # valid-only display preference.  mfx_raw is always built from all source
-    # rows; these preferences only control temporary materialization.
+    # Export is raw and must not depend on the user's valid-only display
+    # preference.  mfx_raw is always built from all source rows, and that is
+    # what the writers read; the preference only controls the temporary
+    # materialization, so it is pinned here rather than inherited.
     ds = load_from_mfx_array(
         np.asarray(mfx),
         name=name,
         folder=folder,
-        prefs={"data": {"iter_load": "all", "only_valid_locs": False}},
+        prefs={"data": {"only_valid_locs": False}},
     )
     if mbm is not None and np.asarray(mbm).size:
         _validate_mbm_source(mbm)
@@ -103,6 +105,10 @@ def _canonical_dataset(
             ds.metadata["mbm_points_by_gri"] = meta["points_by_gri"]
         if meta.get("used"):
             ds.metadata["mbm_used"] = meta["used"]
+    if source_zarr is not None:
+        from ..core.minflux_zarr import capture_native_zarr_metadata
+
+        capture_native_zarr_metadata(ds, source_zarr)
     return ds
 
 
@@ -119,7 +125,7 @@ def _planned_paths(
     paths: list[Path] = []
     for fmt in formats:
         suffix = _EXT[fmt]
-        if fmt == "msr":
+        if fmt in {"msr", "zarr"}:
             if has_mfx:
                 paths.append(out_dir / f"{base_name}{suffix}")
             continue
@@ -140,6 +146,7 @@ def export_arrays(
     json_chunk_rows: int = 100_000,
     *,
     mbm_meta: dict | None = None,
+    source_zarr=None,
     overwrite: bool = False,
 ) -> List[str]:
     """Export parsed MSR components through the canonical File > Save writers.
@@ -172,8 +179,11 @@ def export_arrays(
     has_mbm = mbm_arr is not None and mbm_arr.size > 0
     if not has_mfx and not has_mbm:
         raise ValueError("MSR export has no selected mfx or MBM data.")
-    if "msr" in normalized_formats and not has_mfx:
-        raise ValueError("The .msr export requires mfx localizations; MBM-only output is ambiguous.")
+    if ({"msr", "zarr"} & set(normalized_formats)) and not has_mfx:
+        raise ValueError(
+            "The .msr and MINFLUX Viewer .zarr exports require mfx localizations; "
+            "MBM-only output is ambiguous."
+        )
 
     out_root = Path(out_dir)
     ensure_dir(out_root)
@@ -197,16 +207,28 @@ def export_arrays(
 
     ds = None
     if has_mfx:
-        ds = _canonical_dataset(
+        ds = canonical_dataset(
             mfx_arr,
             name=f"{base_name}.msr",
             folder=str(out_root),
             mbm=mbm_arr if has_mbm else None,
             mbm_meta=mbm_meta,
+            source_zarr=source_zarr,
         )
 
     written: list[str] = []
     for fmt in normalized_formats:
+        if fmt == "zarr":
+            paths = save_processed(
+                ds,
+                data_path=out_root / str(base_name),
+                fmt="zarr",
+                content="raw",
+                include={"attrs": True, "derived": True, "recipe": True},
+            )
+            written.extend(str(path) for path in paths)
+            log(f"[zarr] wrote {paths[0]} (self-contained MINFLUX Viewer store)")
+            continue
         if fmt == "msr":
             paths = save_processed(
                 ds,

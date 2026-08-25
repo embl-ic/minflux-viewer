@@ -75,12 +75,17 @@ DEFAULT_COLOR_PREFS: dict = {
                 "label": [0, 229, 255, 255],
             },
         },
+        # A sequential ramp (viridis, sampled evenly), not a categorical set:
+        # iterations are ordered, so the colour should read as ordered too, and
+        # a perceptually uniform ramp keeps overlapping series legible where a
+        # rainbow turns to mud. Consumers spread these across the iterations
+        # actually present, so a 3-iteration plot still uses the whole range.
         "Iteration series": {
-            "1st": [31, 119, 180, 255], "2nd": [255, 127, 14, 255],
-            "3rd": [44, 160, 44, 255], "4th": [214, 39, 40, 255],
-            "5th": [148, 103, 189, 255], "6th": [140, 86, 75, 255],
-            "7th": [227, 119, 194, 255], "8th": [127, 127, 127, 255],
-            "9th": [188, 189, 34, 255], "10th": [23, 190, 207, 255],
+            "1st": [68, 1, 84, 255], "2nd": [71, 39, 119, 255],
+            "3rd": [62, 74, 136, 255], "4th": [49, 104, 142, 255],
+            "5th": [37, 130, 142, 255], "6th": [32, 157, 136, 255],
+            "7th": [53, 183, 121, 255], "8th": [108, 204, 89, 255],
+            "9th": [180, 221, 44, 255], "10th": [253, 231, 37, 255],
         },
         "Localization precision": {
             "Lateral sigma": [34, 211, 211, 255],

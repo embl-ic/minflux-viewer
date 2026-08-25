@@ -43,6 +43,25 @@ def test_msr_forces_raw_content(_app):
     assert dlg._content_combo.isEnabled()
 
 
+def test_zarr_save_dialog_describes_self_contained_store(_app):
+    prefs = {"data": {"export_formats": ["mat", "zarr"],
+                      "export_content": ["raw", "snapshot"],
+                      "export_include_recipe": False,
+                      "export_include_derived": False}, "file": {}}
+    dlg = SaveProcessedDataDialog("ds1", prefs=prefs)
+    dlg._content_combo.setCurrentIndex(dlg._content_combo.findData("snapshot"))
+    dlg._format.setCurrentIndex(dlg._format.findData("zarr"))
+
+    opts = dlg.options()
+    assert opts["fmt"] == "zarr" and opts["content"] == "raw"
+    assert not dlg._content_combo.isEnabled()
+    assert dlg._inc_recipe.isChecked() and not dlg._inc_recipe.isEnabled()
+    assert dlg._inc_derived.isChecked() and not dlg._inc_derived.isEnabled()
+    assert "inside the Zarr dataset" in dlg._inc_recipe.text()
+    assert "inside the Zarr dataset" in dlg._inc_derived.text()
+    assert "Self-contained MINFLUX Viewer Zarr v2" in dlg._msr_note.text()
+
+
 def test_dataset_manager_save_as_delegates(_app):
     saved = []
     state = AppState()

@@ -1,8 +1,8 @@
 from typing import Any, Dict
 
 import numpy as np
-import zarr
 
+from . import zarr2
 from .state import reset as reset_state, set_mfx_for, set_mbm_for, set_mbm_meta_for
 
 
@@ -190,14 +190,14 @@ class GeneralMSRParser:
         """Decode one MFXDTA blob to an in-memory zarr store, register its
         ``mfx`` (and any ``grd/mbm/points`` beads), and return a modern-style
         dataset dict — or ``None`` on error. ``zroot`` holds the in-memory store
-        (a ``{key: bytes}`` dict that ``zarr.open`` reads directly). Channel name
+        (a ``{key: bytes}`` dict that ``zarr2.open`` reads directly). Channel name
         = the file's did→label, else the stack description, else a synthetic name.
         """
         from .mfxdta import SOURCE_FORMAT, container_version, extract_zarr_store
 
         try:
             store = extract_zarr_store(blob)            # {key: bytes} — no disk
-            arch = zarr.open(store, mode="r")
+            arch = zarr2.open(store, mode="r")
         except Exception as e:
             log(f"  [warn] stack {stack_idx}: failed to decode MFXDTA store: {e}")
             return None

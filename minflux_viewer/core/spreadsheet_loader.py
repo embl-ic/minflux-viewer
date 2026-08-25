@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import csv
 import re
+from array import array
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -86,6 +87,9 @@ class SpreadsheetTable:
     delimiter: str | None
     source_format: str       # "csv" | "tsv" | "txt" | "xlsx" | ...
     detected_tool: str = "generic"   # "thunderstorm" | "smap" | "picasso" | "generic"
+    sample_row_indices: np.ndarray | None = None
+    n_rows_is_estimate: bool = False
+    preview_only: bool = False
 
     def numeric_columns(self) -> list[SpreadsheetColumn]:
         return [c for c in self.columns if c.numeric]
@@ -231,8 +235,7 @@ def _headers_and_data(rows: list[list], to_str) -> tuple[list[str], list[list]]:
     return headers, data
 
 
-def _read_delimited(path: Path) -> tuple[list[str], list[list[str]], str]:
-    """Read a delimited text file → (headers, column-major cells, delimiter)."""
+def _delimited_dialect(path: Path):
     with open(path, newline="", encoding="utf-8-sig") as fh:
         sample = fh.read(8192)
     if not sample.strip():
@@ -242,18 +245,178 @@ def _read_delimited(path: Path) -> tuple[list[str], list[list[str]], str]:
         delimiter = dialect.delimiter
     except csv.Error:
         delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
+    return delimiter, sample
+
+
+def _columns_from_rows(
+    headers: list[str], rows,
+) -> tuple[list[SpreadsheetColumn], int]:
+    """Parse rows directly into compact numeric column buffers."""
+    n_cols = len(headers)
+    buffers = [array("d") for _ in range(n_cols)]
+    nonempty = [0] * n_cols
+    numeric = [0] * n_cols
+    n_rows = 0
+    for row in rows:
+        if not any(str(cell).strip() for cell in row):
+            continue
+        n_rows += 1
+        for col in range(n_cols):
+            cell = row[col] if col < len(row) else ""
+            text = str(cell).strip()
+            if not text:
+                buffers[col].append(np.nan)
+                continue
+            nonempty[col] += 1
+            try:
+                buffers[col].append(float(text))
+                numeric[col] += 1
+            except (TypeError, ValueError):
+                buffers[col].append(np.nan)
+    columns = []
+    for index, name in enumerate(headers):
+        values = np.frombuffer(buffers[index], dtype=np.float64)
+        columns.append(SpreadsheetColumn(
+            name=name,
+            key=_normalise_key(name),
+            unit=parse_unit(name),
+            values=values,
+            numeric=nonempty[index] > 0 and numeric[index] >= 0.5 * nonempty[index],
+        ))
+    return columns, n_rows
+
+
+def _read_delimited(path: Path) -> tuple[list[str], list[SpreadsheetColumn], str, int]:
+    """Read a delimited file without retaining every cell as a Python string."""
+    delimiter, _sample = _delimited_dialect(path)
     with open(path, newline="", encoding="utf-8-sig") as fh:
         reader = csv.reader(fh, delimiter=delimiter)
-        rows = [r for r in reader if any(str(c).strip() for c in r)]
-    if not rows:
+        first = next((row for row in reader if any(str(c).strip() for c in row)), None)
+        if first is None:
+            raise ValueError(f"'{path.name}' has no rows.")
+        if _is_header_row(first):
+            headers = [str(value).strip() for value in first]
+            rows = reader
+        else:
+            headers = [f"{_ordinal(i + 1)} column" for i in range(len(first))]
+            rows = ([first], reader)
+            rows = (row for group in rows for row in group)
+        columns, n_rows = _columns_from_rows(headers, rows)
+    return headers, columns, delimiter, n_rows
+
+
+def _parse_sample_line(raw: bytes, delimiter: str) -> list[str] | None:
+    try:
+        text = raw.decode("utf-8-sig").strip("\r\n")
+        if not text.strip():
+            return None
+        return next(csv.reader([text], delimiter=delimiter))
+    except (UnicodeDecodeError, csv.Error, StopIteration):
+        return None
+
+
+def _read_delimited_preview(
+    path: Path, *, max_rows: int = 100,
+) -> tuple[list[str], list[SpreadsheetColumn], str, int, np.ndarray]:
+    """Sample a large line-oriented table without scanning its full contents."""
+    delimiter, _sample = _delimited_dialect(path)
+    file_size = path.stat().st_size
+    max_rows = max(10, int(max_rows))
+    head_count = min(12, max_rows // 3)
+    tail_count = min(12, max_rows // 3)
+
+    with path.open("rb") as handle:
+        first_lines = [handle.readline() for _ in range(head_count + 1)]
+    parsed_head = [
+        row for raw in first_lines
+        if (row := _parse_sample_line(raw, delimiter)) is not None
+    ]
+    if not parsed_head:
         raise ValueError(f"'{path.name}' has no rows.")
-    headers, data = _headers_and_data(rows, lambda h: str(h).strip())
-    n_cols = len(headers)
-    cols: list[list[str]] = [[] for _ in range(n_cols)]
-    for row in data:
-        for c in range(n_cols):
-            cols[c].append(row[c] if c < len(row) else "")
-    return headers, cols, delimiter
+    if _is_header_row(parsed_head[0]):
+        headers = [str(value).strip() for value in parsed_head[0]]
+        head_rows = parsed_head[1:]
+        header_bytes = len(first_lines[0]) if first_lines else 0
+    else:
+        headers = [f"{_ordinal(i + 1)} column" for i in range(len(parsed_head[0]))]
+        head_rows = parsed_head
+        header_bytes = 0
+
+    random_count = max(0, max_rows - len(head_rows) - tail_count)
+    samples: list[tuple[float, list[str], int]] = []
+    random_lengths: list[int] = []
+    for index, row in enumerate(head_rows):
+        raw_len = len(first_lines[index + (1 if header_bytes else 0)])
+        samples.append((0.0, row, raw_len))
+
+    if random_count and file_size > header_bytes + 1:
+        estimate_count = max(512, random_count)
+        display_slots = set(
+            int(value)
+            for value in np.linspace(0, estimate_count - 1, random_count, dtype=np.int64)
+        )
+        with path.open("rb") as handle:
+            for sample_index, fraction in enumerate(
+                np.linspace(0.002, 0.998, estimate_count)
+            ):
+                position = int(header_bytes + fraction * (file_size - header_bytes))
+                handle.seek(max(header_bytes, position))
+                if position > header_bytes:
+                    handle.readline()  # discard the partial physical line
+                raw = handle.readline()
+                row = _parse_sample_line(raw, delimiter)
+                if row is not None:
+                    if raw:
+                        random_lengths.append(len(raw))
+                    if sample_index in display_slots:
+                        samples.append((float(fraction), row, len(raw)))
+
+    tail_rows: list[tuple[list[str], int]] = []
+    tail_bytes = min(file_size, 4 * 1024 * 1024)
+    with path.open("rb") as handle:
+        handle.seek(max(0, file_size - tail_bytes))
+        if file_size > tail_bytes:
+            handle.readline()
+        raw_lines = handle.readlines()
+    for raw in raw_lines[-tail_count:]:
+        row = _parse_sample_line(raw, delimiter)
+        if row is not None:
+            tail_rows.append((row, len(raw)))
+
+    lengths = random_lengths or [
+        length for _fraction, _row, length in samples if length > 0
+    ]
+    if not random_lengths:
+        lengths.extend(length for _row, length in tail_rows if length > 0)
+    # Uniform byte-offset sampling is length-biased (a long row is more likely
+    # to be hit than a short one).  Its harmonic mean estimates the ordinary
+    # mean row length; an arithmetic mean systematically under-counted rows by
+    # about 6% on the 2.5 GB canonical reference CSV.
+    mean_row_bytes = (
+        float(1.0 / np.mean(1.0 / np.asarray(lengths, dtype=float)))
+        if lengths else 1.0
+    )
+    n_rows = max(
+        len(head_rows) + len(tail_rows),
+        int(round(max(0, file_size - header_bytes) / max(1.0, mean_row_bytes))),
+    )
+    for index in range(len(head_rows)):
+        _fraction, row, length = samples[index]
+        samples[index] = (
+            index / max(1, n_rows - 1), row, length
+        )
+    for offset, (row, length) in enumerate(tail_rows):
+        fraction = (n_rows - len(tail_rows) + offset) / max(1, n_rows - 1)
+        samples.append((float(fraction), row, length))
+
+    samples.sort(key=lambda item: item[0])
+    rows = [row for _fraction, row, _length in samples[:max_rows]]
+    indices = np.asarray([
+        min(n_rows - 1, max(0, int(round(fraction * max(0, n_rows - 1)))))
+        for fraction, _row, _length in samples[:max_rows]
+    ], dtype=np.int64)
+    columns, _sample_count = _columns_from_rows(headers, rows)
+    return headers, columns, delimiter, n_rows, indices
 
 
 def _read_excel(path: Path) -> tuple[list[str], list[list[str]]]:
@@ -289,11 +452,13 @@ def read_table(path: str | Path) -> SpreadsheetTable:
     path = Path(path)
     ext = path.suffix.lower()
     if ext in {".csv", ".tsv", ".txt"}:
-        headers, cells, delimiter = _read_delimited(path)
+        headers, columns, delimiter, n_rows = _read_delimited(path)
         fmt = ext.lstrip(".")
     elif ext in {".xlsx", ".xlsm"}:
         headers, cells = _read_excel(path)
         delimiter, fmt = None, ext.lstrip(".")
+        columns = [_column_from_cells(h, cells[i]) for i, h in enumerate(headers)]
+        n_rows = max((c.values.size for c in columns), default=0)
     else:
         raise ValueError(
             f"Unsupported spreadsheet format '{ext}'. "
@@ -301,14 +466,54 @@ def read_table(path: str | Path) -> SpreadsheetTable:
 
     if not headers:
         raise ValueError(f"'{path.name}' has no header row.")
-    columns = [_column_from_cells(h, cells[i]) for i, h in enumerate(headers)]
-    n_rows = max((c.values.size for c in columns), default=0)
     keys = {c.key for c in columns}
     return SpreadsheetTable(
         path=str(path), headers=headers, columns=columns, n_rows=n_rows,
         delimiter=delimiter, source_format=fmt,
         detected_tool=_detect_tool(keys, headers),
     )
+
+
+def read_table_preview(
+    path: str | Path,
+    *,
+    max_rows: int = 100,
+    full_read_limit: int = 16 * 1024 * 1024,
+) -> SpreadsheetTable:
+    """Read only representative rows for a fast column-mapping dialog.
+
+    Small files and Excel workbooks keep the ordinary full read.  Large
+    delimited files are sampled at the beginning, across byte offsets and at
+    the end; the displayed row count is therefore an estimate until Import is
+    confirmed and the complete table is parsed.
+    """
+    source = Path(path)
+    if source.suffix.lower() not in {".csv", ".tsv", ".txt"}:
+        return read_table(source)
+    if source.stat().st_size <= int(full_read_limit):
+        return read_table(source)
+    headers, columns, delimiter, n_rows, indices = _read_delimited_preview(
+        source, max_rows=max_rows
+    )
+    keys = {column.key for column in columns}
+    return SpreadsheetTable(
+        path=str(source),
+        headers=headers,
+        columns=columns,
+        n_rows=n_rows,
+        delimiter=delimiter,
+        source_format=source.suffix.lower().lstrip("."),
+        detected_tool=_detect_tool(keys, headers),
+        sample_row_indices=indices,
+        n_rows_is_estimate=True,
+        preview_only=True,
+    )
+
+
+def is_canonical_minflux_table(table: SpreadsheetTable) -> bool:
+    """Whether headers identify the canonical raw MINFLUX CSV representation."""
+    names = {str(header).strip().lower() for header in table.headers}
+    return {"loc_x", "loc_y", "loc_z", "itr", "vld"} <= names
 
 
 # ---------------------------------------------------------------------------

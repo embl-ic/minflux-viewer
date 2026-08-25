@@ -1,4 +1,4 @@
-"""Save/Export redesign: processed snapshot, flat columns, CSV/npz/zarr formats.
+"""Save/Export redesign: processed snapshot, flat columns, CSV/zarr formats.
 
 Complements tests/test_save.py (which covers the raw-canonical + recipe path).
 """
@@ -85,10 +85,10 @@ def test_flat_canonical_columns_recompose_vectors():
     np.testing.assert_allclose(rebuilt["dcr"], source["dcr"])
 
 
-# --- snapshot: RIMF/transform baking + filter ---------------------------------
-def test_snapshot_bakes_rimf_into_znm():
+# --- snapshot: Z scaling factor/transform baking + filter ---------------------------------
+def test_snapshot_bakes_z_scaling_factor_into_znm():
     ds = _dataset()
-    ds.set_rimf(0.8, source="manual (anisotropy plugin)")
+    ds.set_z_scaling_factor(0.8, source="manual (anisotropy plugin)")
     cols, dropped = build_snapshot_table(ds)
     raw_z_nm = np.asarray(L.mfx_get(ds, "loc_z", itr="last", vld_only=True), float) * 1e9
     np.testing.assert_allclose(cols["znm"], raw_z_nm * 0.8, atol=1e-6)
@@ -123,7 +123,7 @@ def test_snapshot_include_derived_optional():
 
 
 # --- format writers ------------------------------------------------------------
-@pytest.mark.parametrize("fmt", ["csv", "npz", "zarr", "mat", "npy", "json"])
+@pytest.mark.parametrize("fmt", ["csv", "mat", "npy", "json"])
 def test_snapshot_writes_each_format(tmp_path, fmt):
     ds = _dataset()
     written = save_processed(ds, data_path=tmp_path / "snap", fmt=fmt,
@@ -138,7 +138,11 @@ def test_snapshot_writes_each_format(tmp_path, fmt):
     ("mat", L.load_dataset, "m2410"),
     ("npy", L.load_npy, "m2410"),
     ("json", L.load_json, "json"),
-    ("csv", L.load_csv, "csv"),
+    # A canonical raw CSV reassembles into the m2410 structured mfx, so its
+    # *structural* version is m2410; "csv" is the container and is recorded in
+    # `source_format`. (Before the raw-CSV reassembly fix this read "csv",
+    # because every raw row was treated as a separate localization.)
+    ("csv", L.load_csv, "m2410"),
 ])
 def test_simulated_dataset_saves_all_formats(tmp_path, fmt, loader, expect_ver):
     """A coordinate-built (e.g. simulated) dataset saves to .mat/.npy/.json/.csv;
@@ -214,27 +218,27 @@ def test_spreadsheet_csv_accepts_tab_escape_and_applies_filter(tmp_path):
 
 
 # --- snapshot recipe + round-trip ---------------------------------------------
-def test_snapshot_recipe_pins_rimf_one(tmp_path):
+def test_snapshot_recipe_pins_z_scaling_factor_one(tmp_path):
     ds = _dataset()
-    ds.set_rimf(0.78, source="manual (anisotropy plugin)")
+    ds.set_z_scaling_factor(0.78, source="manual (anisotropy plugin)")
     _, meta_path = save_processed(ds, data_path=tmp_path / "s", fmt="csv",
                                   content="snapshot")
     meta = json.loads(meta_path.read_text())
     assert meta[METADATA_JSON_MARKER] == 1
     assert meta["content"] == "snapshot"
-    assert meta["calibration"]["rimf"] == 1.0          # baked → not re-applied
-    assert meta["calibration"]["baked_rimf"] == pytest.approx(0.78)
+    assert meta["calibration"]["z_scaling_factor"] == 1.0          # baked → not re-applied
+    assert meta["calibration"]["baked_z_scaling_factor"] == pytest.approx(0.78)
     assert meta["filters"] == []
 
 
-def test_snapshot_csv_roundtrips_without_double_rimf(tmp_path):
+def test_snapshot_csv_roundtrips_without_double_z_scaling_factor(tmp_path):
     ds = _dataset()
-    ds.set_rimf(0.8, source="manual (anisotropy plugin)")
+    ds.set_z_scaling_factor(0.8, source="manual (anisotropy plugin)")
     cols, _ = build_snapshot_table(ds)
     data_path, _ = save_processed(ds, data_path=tmp_path / "rt", fmt="csv",
                                   content="snapshot")
     re = L.load_csv(str(data_path))
-    assert re.cali.RIMF == pytest.approx(1.0)          # baked snapshot not re-scaled
+    assert re.cali.z_scaling_factor == pytest.approx(1.0)          # baked snapshot not re-scaled
     assert re.prop.num_loc == cols["xnm"].size
     np.testing.assert_allclose(
         np.sort(np.asarray(re.loc_nm)[:, 0]), np.sort(cols["xnm"]), atol=1e-2)

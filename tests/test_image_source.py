@@ -354,3 +354,72 @@ def test_overlay_channels_have_per_image_ome_and_imspector_metadata():
         finally:
             source.close()
     assert seen_names == {"Ch1 {12}", "Ch2 {12}"}
+
+
+def _tiny_tiff(path, value, *, shape=(4, 5)):
+    import numpy as np
+    import tifffile
+
+    tifffile.imwrite(str(path), np.full(shape, value, dtype="uint16"))
+    return path
+
+
+def test_embedded_images_appear_as_one_series_list(tmp_path):
+    """A store keeps each image as its own file; the viewer must still show one list.
+
+    ``.msr`` images are stacks inside a single file, so one source object with a
+    Series dropdown covers them. A ``.zarr`` store writes each series as its own
+    OME-TIFF, and opening a bare ``TiffImageSource`` on the first file showed
+    only that image -- named after the temp file it had been extracted to.
+    """
+    from minflux_viewer.core.tiff_source import EmbeddedImageSource
+
+    paths = [_tiny_tiff(tmp_path / f"img{i}.tif", i) for i in range(3)]
+    names = ["Ch1 {1}", "Ch2 {1}", "MF(run)_trace_tid"]
+
+    source = EmbeddedImageSource(paths, names)
+    try:
+        assert source.series_count == 3
+        assert source.series_names() == names
+        assert source.metadata.series_count == 3
+
+        summaries = source.series_summaries()
+        assert [row["name"] for row in summaries] == names
+        assert summaries[0]["shape_str"] == "4 x 5"
+
+        source.set_series(2)
+        assert source.series_index == 2
+        assert source.metadata.series_index == 2
+        assert source.path == paths[2]
+        assert int(source.read_plane()[0, 0]) == 2
+    finally:
+        source.close()
+
+
+def test_embedded_source_opens_the_requested_series_first(tmp_path):
+    """The series rendered from this dataset is the one shown, as for a .msr."""
+    from minflux_viewer.core.tiff_source import EmbeddedImageSource
+
+    paths = [_tiny_tiff(tmp_path / f"i{i}.tif", i) for i in range(4)]
+    source = EmbeddedImageSource(paths, None, series_index=2)
+    try:
+        assert source.series_index == 2
+        assert int(source.read_plane()[0, 0]) == 2
+    finally:
+        source.close()
+
+
+def test_one_unreadable_image_does_not_hide_the_others(tmp_path):
+    """A single bad file must not make the whole list unopenable."""
+    from minflux_viewer.core.tiff_source import EmbeddedImageSource
+
+    good = [_tiny_tiff(tmp_path / "a.tif", 1), _tiny_tiff(tmp_path / "b.tif", 2)]
+    broken = tmp_path / "broken.tif"
+    broken.write_bytes(b"not a tiff at all")
+
+    source = EmbeddedImageSource([good[0], broken, good[1]],
+                                 ["a", "broken", "b"])
+    try:
+        assert source.series_names() == ["a", "b"]
+    finally:
+        source.close()

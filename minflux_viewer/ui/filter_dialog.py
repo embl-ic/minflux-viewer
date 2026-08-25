@@ -14,8 +14,8 @@ Filters can be saved to / loaded from JSON (same format as the MATLAB app).
 
 from __future__ import annotations
 
-from pathlib import Path
 import math
+from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer
@@ -25,10 +25,8 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
-    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -36,13 +34,17 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from ..core.app_state import AppState
 from ..core.attributes import is_trace_wise_attribute, plot_attribute_names
+from ..core.filter_io import (
+    is_filter_json_file,
+    load_filter_json as load_filter_json_file,
+    save_filter_json as save_filter_json_file,
+)
 from ..core.iteration import (
     filter_iteration_labels,
     iteration_selector_label,
@@ -54,12 +56,7 @@ from ..core.loader import (
     effective_iteration_for_attr,
 )
 from ..utils.filters import AGG_MODES, FLOAT_RESULT_MODES, trace_agg_func
-from ..core.filter_io import (
-    is_filter_json_file,
-    is_filter_json_payload,
-    load_filter_json as load_filter_json_file,
-    save_filter_json as save_filter_json_file,
-)
+from .attribute_help import apply_attribute_tooltips
 
 #: Same set, same order as the histogram's "As" dropdown — a view the user can
 #: author in the histogram must be expressible as a filter.
@@ -233,6 +230,7 @@ class FilterDialog(QDialog):
 
         self._build_ui()
         self._populate_attr_lists()
+        self._restore_saved_filter_specs()
         # View-opening shortcuts (Ctrl+1/2/3, Ctrl+R, Ctrl+D) are now handled
         # application-wide by the main window (ApplicationShortcut) and fire from
         # this dialog too. A per-dialog QShortcut for the same keys would be an
@@ -476,8 +474,54 @@ class FilterDialog(QDialog):
                 if old in self._numeric_attrs:
                     combo.setCurrentText(old)
                 combo.blockSignals(False)
+                apply_attribute_tooltips(combo)
                 self._enforce_trace_mode(row)
             self._repopulate_iter_combo(row)
+
+    def _restore_saved_filter_specs(self) -> None:
+        """Rebuild active table rows from the dataset's persisted filter state."""
+        ds = self._dataset()
+        if ds is None:
+            return
+        specs = ds.state.get("filter_specs") or []
+        if not isinstance(specs, (list, tuple)):
+            return
+        restored = 0
+        missing: list[str] = []
+        for spec in specs:
+            if not isinstance(spec, dict):
+                continue
+            attr = str(spec.get("attribute") or "")
+            if not attr or attr not in self._numeric_attrs:
+                if attr and attr not in missing:
+                    missing.append(attr)
+                continue
+            try:
+                lo = float(spec.get("lo", 0.0))
+                hi = float(spec.get("hi", 1.0))
+            except (TypeError, ValueError):
+                continue
+            self._add_row(
+                attr=attr,
+                mode=str(spec.get("mode") or "per loc"),
+                lo=lo,
+                hi=hi,
+                enabled=True,
+                min_inclusive=bool(spec.get("lo_inc", True)),
+                max_inclusive=bool(spec.get("hi_inc", True)),
+                auto_range=False,
+                itr=spec.get("itr"),
+            )
+            restored += 1
+        self._update_info()
+        if missing:
+            warning = (
+                "Saved filter rows unavailable: " + ", ".join(missing) + "."
+            )
+            self._info.setText(f"{self._info.text()}  {warning}")
+            self._info.setToolTip(warning)
+        elif restored:
+            self._info.setToolTip(f"Restored {restored} saved filter row(s).")
 
     # ------------------------------------------------------------------
     # Iteration column helpers
@@ -524,7 +568,7 @@ class FilterDialog(QDialog):
             combo.setCurrentText(self._default_iter_label(attr))
         combo.blockSignals(False)
 
-    def _row_iteration(self, row: int) -> "str | int":
+    def _row_iteration(self, row: int) -> str | int:
         """The iteration selector to persist for *row*.
 
         The dropdown shows concrete iterations, but a cfr/efc row sitting on its
@@ -544,7 +588,7 @@ class FilterDialog(QDialog):
             return "effective"
         return sel
 
-    def _set_row_iteration(self, row: int, itr: "str | int | None", attr: str) -> None:
+    def _set_row_iteration(self, row: int, itr: str | int | None, attr: str) -> None:
         """Select the label matching a stored/loaded selector; fall back to the
         attribute's default when it is absent or does not apply here."""
         combo = self._table.cellWidget(row, _COL_ITER)
@@ -573,7 +617,7 @@ class FilterDialog(QDialog):
     def _add_row(self, attr: str = "efo", mode: str = "per loc",
                  lo: float = 0.0, hi: float = 1.0, enabled: bool = False,
                  min_inclusive: bool = True, max_inclusive: bool = True,
-                 auto_range: bool = True, itr: "str | int | None" = None) -> None:
+                 auto_range: bool = True, itr: str | int | None = None) -> None:
         row = self._table.rowCount()
         self._table.insertRow(row)
 
@@ -590,6 +634,7 @@ class FilterDialog(QDialog):
         attr_combo = QComboBox()
         attr_combo.blockSignals(True)
         attr_combo.addItems(self._numeric_attrs)
+        apply_attribute_tooltips(attr_combo)
         if attr in self._numeric_attrs:
             attr_combo.setCurrentText(attr)
         elif self._numeric_attrs:
@@ -1098,7 +1143,7 @@ def _filter_spinner_values(
     attr: str,
     mode: str,
     *,
-    itr: "str | int | None" = "auto",
+    itr: str | int | None = "auto",
 ) -> tuple[np.ndarray, np.ndarray]:
     """``(per-loc values, values the Min/Max range is derived from)``.
 

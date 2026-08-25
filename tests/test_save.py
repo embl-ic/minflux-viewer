@@ -112,11 +112,11 @@ def test_metadata_only_when_file_backed(tmp_path):
 # metadata recipe content
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("fmt", ["mat", "npy", "json"])
-def test_reload_restores_rimf_and_filters(tmp_path, fmt):
-    """Re-opening a processed file consumes the sidecar: RIMF is restored and
+def test_reload_restores_z_scaling_factor_and_filters(tmp_path, fmt):
+    """Re-opening a processed file consumes the sidecar: Z scaling factor is restored and
     the saved filter re-applies (mask + specs visible to the filter dialog)."""
     ds = _dataset(40)
-    ds.set_rimf(0.78, source="manual (anisotropy plugin)")
+    ds.set_z_scaling_factor(0.78, source="manual (anisotropy plugin)")
     xn = np.asarray(ds.attr["loc_x"]).ravel() * 1e9
     lo, hi = float(np.percentile(xn, 25)), float(np.percentile(xn, 75))
     ds.state["filter_specs"] = [
@@ -127,13 +127,13 @@ def test_reload_restores_rimf_and_filters(tmp_path, fmt):
 
     data_path, _ = save_processed(ds, data_path=tmp_path / "p", fmt=fmt)
     re = _LOAD[fmt](str(data_path))
-    assert re.cali.RIMF == pytest.approx(0.78)
+    assert re.cali.z_scaling_factor == pytest.approx(0.78)
     assert re.state.get("filter_specs") == ds.state["filter_specs"]
     assert int(np.asarray(re.filter_mask, bool).sum()) == expect
 
 
 def test_no_sidecar_leaves_dataset_unrestored(tmp_path):
-    """A data file without a metadata sidecar must not pin RIMF or filters."""
+    """A data file without a metadata sidecar must not pin Z scaling factor or filters."""
     ds = _dataset(40)
     data_path, meta_path = save_processed(ds, data_path=tmp_path / "p", fmt="npy")
     meta_path.unlink()                       # remove the sidecar
@@ -143,11 +143,11 @@ def test_no_sidecar_leaves_dataset_unrestored(tmp_path):
 
 def test_metadata_records_recipe(tmp_path):
     ds = _dataset()
-    ds.set_rimf(0.85, source="manual (anisotropy plugin)")
+    ds.set_z_scaling_factor(0.85, source="manual (anisotropy plugin)")
     _, meta_path = save_processed(ds, data_path=tmp_path / "m", fmt="npy")
     meta = json.loads(meta_path.read_text())
     assert is_metadata_json_payload(meta) and meta[METADATA_JSON_MARKER] == 1
-    assert meta["calibration"]["rimf"] == pytest.approx(0.85)
+    assert meta["calibration"]["z_scaling_factor"] == pytest.approx(0.85)
     assert "iteration_load_mode" in meta["gating"]
     assert "filters" in meta and isinstance(meta["filters"], list)
     # sidecar is a dict — distinct from filter/data JSON, which are lists

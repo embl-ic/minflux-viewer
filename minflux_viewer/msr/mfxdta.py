@@ -188,10 +188,10 @@ def unpack_zarr_store_to_dir(store, dest_dir) -> Path:
 
 def read_mfxdta_mfx(blob: bytes) -> np.ndarray:
     """Decode an MFXDTA blob straight to the structured ``mfx`` numpy array."""
-    import zarr
+    from . import zarr2
 
     store = extract_zarr_store(blob)
-    return zarr.open(zarr.storage.KVStore(store), mode="r")["mfx"][:]
+    return np.asarray(zarr2.open(store, mode="r")["mfx"])
 
 
 #: Matches the embedded ``{"did":"<uuid>","label":"<…>"}`` dataset descriptors.

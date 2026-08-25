@@ -27,7 +27,7 @@ def test_main_window_creates_filtered_time_channel_overlay(_app, tmp_path):
         "show_attr_plot": False,
         "show_histogram": False,
         "show_scatter": False,
-        "compute_rimf": False,
+        "estimate_z_scaling_factor": False,
         "compute_loc_prec": False,
         "compute_local_density": False,
     })

@@ -14,11 +14,11 @@ by a ``particle_id`` column; per-particle metadata lives under ``/particles``.
 Two coordinate frames are stored (design rule 5 — raw / view kept separate):
 
 * ``xnm / ynm / znm`` — the **authoritative** coordinates the averaging consumes:
-  re-zeroed *display* nm (RIMF + overlay/alignment transform + unit change + ROI
+  re-zeroed *display* nm (Z scaling factor + overlay/alignment transform + unit change + ROI
   re-zero all baked in). The loader uses these directly and never re-applies
   anything.
 * ``loc_x / loc_y / loc_z`` — the **raw** canonical localization (float64, metres,
-  Z *not* RIMF-baked), untouched; **provenance only**, never auto-corrected
+  Z *not* Z-scaling-baked), untouched; **provenance only**, never auto-corrected
   (avoids the baked-plus-recipe double-correction footgun).
 
 Per-localization attributes (``efo``, ``cfr``, ``dcr``, ``eco``, …) are an open
@@ -60,7 +60,7 @@ class ParticleData:
     attrs: dict[str, np.ndarray] = field(default_factory=dict)
     source: str = ""                        # source dataset name
     roi_name: str = ""                      # source ROI name
-    meta: dict = field(default_factory=dict)  # rezero_offset, rimf, z_scale, …
+    meta: dict = field(default_factory=dict)  # rezero_offset, z_scaling_factor, z_scale, …
 
     @property
     def n_locs(self) -> int:
@@ -173,7 +173,7 @@ def save_particle_set(
         part_g.create_dataset("source_version",
                               data=np.array([str(p.meta.get("source_version", "")) for p in particles], dtype=object),
                               dtype=str_dt)
-        part_g.create_dataset("rimf", data=_meta_col("rimf", 1.0))
+        part_g.create_dataset("z_scaling_factor", data=_meta_col("z_scaling_factor", 1.0))
         part_g.create_dataset("z_scale", data=_meta_col("z_scale", 1.0))
         rezero = np.full((K, 3), np.nan, dtype=np.float64)
         tform = np.tile(np.eye(4, dtype=np.float64), (max(K, 1), 1, 1))[:K]
@@ -213,7 +213,7 @@ def load_particle_set(path: str | Path) -> list[ParticleData]:
         sources = _str_list(part["source"][:]) if "source" in part else [""] * K
         roi_names = _str_list(part["roi_name"][:]) if "roi_name" in part else [""] * K
         src_ver = _str_list(part["source_version"][:]) if "source_version" in part else [""] * K
-        rimf = np.asarray(part["rimf"][:]) if "rimf" in part else np.ones(K)
+        z_scaling_factor = np.asarray(part["z_scaling_factor"][:]) if "z_scaling_factor" in part else np.ones(K)
         z_scale = np.asarray(part["z_scale"][:]) if "z_scale" in part else np.ones(K)
         rezero = np.asarray(part["rezero_offset"][:]) if "rezero_offset" in part else None
         tform = np.asarray(part["transform_4x4"][:]) if "transform_4x4" in part else None
@@ -226,7 +226,7 @@ def load_particle_set(path: str | Path) -> list[ParticleData]:
             seg = tid[m]
             p_tid = None if seg.size and np.all(np.isnan(seg)) else seg
         meta = {
-            "rimf": float(rimf[i]) if i < len(rimf) else 1.0,
+            "z_scaling_factor": float(z_scaling_factor[i]) if i < len(z_scaling_factor) else 1.0,
             "z_scale": float(z_scale[i]) if i < len(z_scale) else 1.0,
             "source_version": src_ver[i] if i < len(src_ver) else "",
         }

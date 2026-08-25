@@ -14,13 +14,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-
 from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
+    QDialog,
     QFrame,
     QGridLayout,
+    QInputDialog,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QWidget,
@@ -36,17 +38,18 @@ class DataWindow(QWidget):
 
     ::
 
-        ┌─────────────────────────────────┐
-        │  filename.mat                   │
-        ├─────────────────────────────────┤
-        │  Folder   …/experiment/day1/    │
-        │  Created  2025-Apr-16, 09:31:02 │
-        │  Locs     45,231                │
-        │  Traces   1,204                 │
-        │  Dims     3D  |  5 iterations   │
-        │                                 │
-        │  [ Set as active ]              │
-        └─────────────────────────────────┘
+        ┌──────────────────────────────────────────────────────────────┐
+        │  filename.mat                                                │
+        ├──────────────────────────────────────────────────────────────┤
+        │  Folder        …/experiment/day1/                            │
+        │  Acquisition   2025-Apr-16,09:31:02 ~ 10:25:11 (span 54 min) │
+        │  File created  2025-Apr-16, 11:02:44                         │
+        │  Locs          45,231                                        │
+        │  Traces        1,204                                         │
+        │  Dims          3D  |  5 iterations                           │
+        │                                                              │
+        │  [ Set as active ]                                           │
+        └──────────────────────────────────────────────────────────────┘
     """
 
     def __init__(
@@ -70,8 +73,9 @@ class DataWindow(QWidget):
 
         # Track active-dataset changes so we can update the title / button
         state.active_changed.connect(self._refresh)
-        # Refresh info values (e.g. RIMF) when this dataset's calibration changes
+        # Refresh info values (e.g. Z scaling factor) when this dataset's calibration changes
         state.calibration_changed.connect(self._on_calibration_changed)
+        state.overlay_transform_changed.connect(self._on_overlay_transform_changed)
 
     # ------------------------------------------------------------------
     # UI
@@ -106,6 +110,8 @@ class DataWindow(QWidget):
 
         # ── Info rows ───────────────────────────────────────────────
         self._value_labels: dict[str, QLabel] = {}
+        self._z_scaling_widgets: list[QLabel] = []
+        self._transform_widgets: list[QLabel] = []
         info_rows = _info_rows(ds)
         for label, value in info_rows:
             key_lbl = QLabel(label)
@@ -117,7 +123,20 @@ class DataWindow(QWidget):
             layout.addWidget(key_lbl, row, 0)
             layout.addWidget(val_lbl, row, 1)
             self._value_labels[label] = val_lbl
+            if label == "Dims" and int(ds.prop.num_dim) >= 3:
+                tip = "Double-click to set this dataset's Z scaling factor manually."
+                for widget in (key_lbl, val_lbl):
+                    widget.setCursor(Qt.CursorShape.PointingHandCursor)
+                    widget.setToolTip(tip)
+                    widget.installEventFilter(self)
+                    self._z_scaling_widgets.append(widget)
+            if label == "Transformed":
+                for widget in (key_lbl, val_lbl):
+                    widget.installEventFilter(self)
+                    self._transform_widgets.append(widget)
             row += 1
+
+        self._update_transform_row_interactivity(ds)
 
         # ── Spacer ──────────────────────────────────────────────────
         layout.setRowMinimumHeight(row, 6)
@@ -140,6 +159,106 @@ class DataWindow(QWidget):
     def _activate(self) -> None:
         self._state.set_active(self._idx)
 
+    def eventFilter(self, watched, event) -> bool:
+        """Handle the editable Dataset Information rows."""
+        if (
+            watched in self._z_scaling_widgets
+            and event.type() == QEvent.Type.MouseButtonDblClick
+        ):
+            self._edit_z_scaling_factor()
+            event.accept()
+            return True
+        if (
+            watched in self._transform_widgets
+            and event.type() == QEvent.Type.MouseButtonDblClick
+            and 0 <= self._idx < len(self._state.datasets)
+            and _is_transformed(self._state.datasets[self._idx])
+        ):
+            self._edit_transform()
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _edit_z_scaling_factor(self) -> None:
+        """Prompt for and apply a manual Z scaling factor to this 3-D dataset."""
+        if not (0 <= self._idx < len(self._state.datasets)):
+            return
+        ds = self._state.datasets[self._idx]
+        if int(ds.prop.num_dim) < 3:
+            return
+
+        self._state.set_active(self._idx)
+        current = float(getattr(ds.cali, "z_scaling_factor", 1.0) or 1.0)
+        value, accepted = QInputDialog.getDouble(
+            self,
+            "Set Z Scaling Factor",
+            "Dimensionless multiplier in\n"
+            "z_calibrated = z_raw × z_scaling_factor:",
+            current,
+            0.0001,
+            100.0,
+            4,
+        )
+        if not accepted or np.isclose(value, current, rtol=0.0, atol=1e-12):
+            return
+
+        ds.set_z_scaling_factor(value, source="manual (Dataset Information)")
+        self._state.log(
+            f"Z scaling factor for '{ds.name}': {value:.4g} "
+            "(manual, Dataset Information).",
+            dataset_idx=self._idx,
+        )
+        self._state.notify_calibration_changed(self._idx)
+
+    def _edit_transform(self) -> None:
+        """Inspect/edit this dataset's canonical overlay transform."""
+        if not (0 <= self._idx < len(self._state.datasets)):
+            return
+        ds = self._state.datasets[self._idx]
+        transform = _dataset_transform(ds)
+        if transform is None:
+            QMessageBox.information(
+                self,
+                "Dataset Transform",
+                "This dataset is marked as transformed, but no editable transform matrix is available.",
+            )
+            return
+
+        from ..core.overlay import is_multichannel_overlay
+        from .transform_dialog import TransformDialog
+
+        self._state.set_active(self._idx)
+        plot_prefs = self._state.prefs.get("plot", {})
+        xy_origin_top_left = str(
+            plot_prefs.get("render_xy_origin", "top_left")
+        ).lower() == "top_left"
+        dialog = TransformDialog(
+            transform,
+            dataset_name=ds.name,
+            xy_origin_top_left=xy_origin_top_left,
+            manual_align_enabled=is_multichannel_overlay(self._state, self._idx),
+            parent=self,
+        )
+        result = dialog.exec()
+        if dialog.manual_alignment_requested:
+            self._state.request_overlay_manual_alignment(self._idx)
+            return
+        if result != QDialog.DialogCode.Accepted:
+            return
+
+        record = dialog.updated_record()
+        ds.state["overlay_transform"] = record
+        ds.state["render_transform_2d"] = record
+        matrix = np.asarray(record["matrix_4x4"], dtype=float)
+        translation = matrix[:3, 3]
+        self._state.log(
+            f"Transform matrix for '{ds.name}' edited in Dataset Information "
+            f"(translation X {translation[0]:+.4g}, Y {translation[1]:+.4g}, "
+            f"Z {translation[2]:+.4g} nm).",
+            dataset_idx=self._idx,
+        )
+        self._state.notify_overlay_transform_changed(self._idx)
+
     # ------------------------------------------------------------------
     # Fiji-style active-dataset-follows-focus (requirement #2)
     # ------------------------------------------------------------------
@@ -157,14 +276,40 @@ class DataWindow(QWidget):
         super().changeEvent(event)
 
     def _on_calibration_changed(self, idx: int) -> None:
-        """Refresh info values (e.g. the RIMF row) for this dataset."""
+        """Refresh info values (e.g. the Z scaling factor row) for this dataset."""
         if idx != self._idx or not (0 <= self._idx < len(self._state.datasets)):
             return
+        self._refresh_info_values()
+
+    def _on_overlay_transform_changed(self, idx: int) -> None:
+        """Refresh the transformed value after matrix or interactive alignment edits."""
+        if idx != self._idx or not (0 <= self._idx < len(self._state.datasets)):
+            return
+        self._refresh_info_values()
+
+    def _refresh_info_values(self) -> None:
         ds = self._state.datasets[self._idx]
         for label, value in _info_rows(ds):
             lbl = self._value_labels.get(label)
             if lbl is not None:
                 lbl.setText(value)
+        self._update_transform_row_interactivity(ds)
+
+    def _update_transform_row_interactivity(self, ds: MinfluxDataset) -> None:
+        transformed = _is_transformed(ds)
+        tip = (
+            "Double-click to inspect or edit this dataset's transform matrix."
+            if transformed
+            else "No coordinate-changing transform is currently applied."
+        )
+        cursor = (
+            Qt.CursorShape.PointingHandCursor
+            if transformed
+            else Qt.CursorShape.ArrowCursor
+        )
+        for widget in self._transform_widgets:
+            widget.setCursor(cursor)
+            widget.setToolTip(tip)
 
     def _refresh(self, active_idx: int | None) -> None:
         """Update the window title and button state."""
@@ -194,7 +339,8 @@ def _info_rows(ds: MinfluxDataset) -> list[tuple[str, str]]:
     locs_label, locs_value = _locs_row(ds)
     return [
         ("Folder", _folder_text(ds)),
-        ("Created", _created_text(ds)),
+        ("Acquisition", _acquisition_text(ds)),
+        ("File created", _created_text(ds)),
         (locs_label, locs_value),
         ("Iterations", _iterations_text(ds)),
         ("Traces", f"{int(ds.prop.num_traces):,}"),
@@ -212,6 +358,17 @@ def _folder_text(ds: MinfluxDataset) -> str:
         except Exception:
             pass
     return str(Path(ds.file.folder).resolve()) if ds.file.folder else "—"
+
+
+def _acquisition_text(ds: MinfluxDataset) -> str:
+    """When the instrument recorded this dataset — start, end and duration.
+
+    Distinct from ``File created``: the file may be written, converted or copied
+    long after (or, for a multi-run ``.msr``, hours after the first run).
+    """
+    from ..core.acquisition_time import dataset_acquisition_text
+
+    return dataset_acquisition_text(ds)
 
 
 def _created_text(ds: MinfluxDataset) -> str:
@@ -267,17 +424,17 @@ def _iterations_text(ds: MinfluxDataset) -> str:
     return "  |  ".join(parts)
 
 
-def _rimf_source_label(source: str) -> tuple[str, bool]:
-    """Map a RIMF provenance source to (display label, is_calculated)."""
+def _z_scaling_factor_source_label(source: str) -> tuple[str, bool]:
+    """Map a Z scaling factor provenance source to (display label, is_calculated)."""
     s = (source or "").lower()
-    if s.startswith("auto (estimate"):
-        return "calculated, anisotropy plugin", True
-    if s.startswith("auto (out of range"):
-        return "calculated out of range, reset to 1", False
+    if s.startswith("estimated (trace anisotropy") or s.startswith("auto (estimate"):
+        return "estimated from trace anisotropy", True
+    if s.startswith("estimate out of range") or s.startswith("auto (out of range"):
+        return "estimate out of range; reset to 1", False
     if s.startswith("manual"):
-        return "manual, anisotropy plugin", False
+        return "manual", False
     if s.startswith("fixed"):
-        return "fixed, Preference/Data", False
+        return "fixed preference", False
     return "", False
 
 
@@ -285,14 +442,14 @@ def _dims_text(ds: MinfluxDataset) -> str:
     dims = f"{int(ds.prop.num_dim)}D"
     if int(ds.prop.num_dim) < 3:
         return dims
-    rimf = float(getattr(ds.cali, "RIMF", 1.0) or 1.0)
-    source = str((ds.metadata.get("rimf_provenance") or {}).get("source", "") or "")
-    label, calculated = _rimf_source_label(source)
+    z_scaling_factor = float(getattr(ds.cali, "z_scaling_factor", 1.0) or 1.0)
+    source = str((ds.metadata.get("z_scaling_factor_provenance") or {}).get("source", "") or "")
+    label, calculated = _z_scaling_factor_source_label(source)
     # A calculated in-range value keeps 4 decimals; manual / fixed / any 1.0
     # use 2 decimals (e.g. "1.00").
-    value_txt = f"{rimf:.4f}" if (calculated and rimf != 1.0) else f"{rimf:.2f}"
+    value_txt = f"{z_scaling_factor:.4f}" if (calculated and z_scaling_factor != 1.0) else f"{z_scaling_factor:.2f}"
     suffix = f" ({label})" if label else ""
-    return f"{dims}  |  RIMF = {value_txt}{suffix}"
+    return f"{dims}  |  Z scaling factor = {value_txt}{suffix}"
 
 
 def _version_text(ds: MinfluxDataset) -> str:
@@ -318,32 +475,45 @@ def _version_text(ds: MinfluxDataset) -> str:
 
 
 def _is_transformed(ds: MinfluxDataset) -> bool:
-    if ds.metadata.get("transformed") is False:
-        return False
-    if ds.metadata.get("transformed") is True:
-        return True
-
     for transform in (
-        ds.metadata.get("render_transform_2d"),
-        ds.metadata.get("channel_transform"),
+        ds.state.get("overlay_transform"),
         ds.state.get("render_transform_2d"),
         ds.state.get("channel_transform"),
+        ds.metadata.get("overlay_transform"),
+        ds.metadata.get("render_transform_2d"),
+        ds.metadata.get("channel_transform"),
     ):
         if _transform_changes_coordinates(transform):
             return True
-    return False
+    return ds.metadata.get("transformed") is True
+
+
+def _dataset_transform(ds: MinfluxDataset):
+    """Resolve the editable transform, preferring current live view state."""
+    from ..core.overlay import transform_to_matrix4
+
+    for transform in (
+        ds.state.get("overlay_transform"),
+        ds.state.get("render_transform_2d"),
+        ds.state.get("channel_transform"),
+        ds.metadata.get("overlay_transform"),
+        ds.metadata.get("render_transform_2d"),
+        ds.metadata.get("channel_transform"),
+    ):
+        if transform_to_matrix4(transform) is not None:
+            return transform
+    return None
 
 
 def _transform_changes_coordinates(transform) -> bool:
     if not transform:
         return False
-    try:
-        matrix = np.asarray(transform.get("matrix_3x3"), dtype=float)
-    except Exception:
+    from ..core.overlay import transform_to_matrix4
+
+    matrix = transform_to_matrix4(transform)
+    if matrix is None:
         return True
-    if matrix.shape != (3, 3):
-        return True
-    return not np.allclose(matrix, np.eye(3), rtol=0.0, atol=1e-9)
+    return not np.allclose(matrix, np.eye(4), rtol=0.0, atol=1e-9)
 
 
 def _ordinal(value) -> str:

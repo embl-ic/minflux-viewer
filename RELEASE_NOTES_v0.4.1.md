@@ -172,11 +172,11 @@ look acceptable. A value of `0` keeps this criterion off. Command Finder keeps
 the **NPC** and **nuclear pore** keywords on the Convolution tools, and older Log
 entries can still be turned into method text.
 
-## RIMF default for new installations
+## Z scaling factor default for new installations
 
-A fresh installation now starts with both **estimate RIMF from anisotropy** and
-**use fixed RIMF value** switched off. Z coordinates are therefore left exactly
-as recorded until the user chooses a correction policy.
+A fresh installation now starts with both **estimate Z scaling factor from trace
+anisotropy** and **use fixed Z scaling factor** switched off. Z coordinates are
+therefore left exactly as recorded until the user chooses a calibration policy.
 
 This does **not** overwrite an existing user's saved preference. The preference
 migration path was also corrected so one-shot migrations apply to genuinely old
@@ -209,7 +209,7 @@ saved settings, not to a brand-new copy of the current defaults.
 - Custom gradients are application preferences, not embedded into exported
   localization datasets. Installations that need the same custom map must create
   it in their own preferences.
-- Existing saved RIMF choices are preserved; the both-off behavior is the fresh
+- Existing saved Z scaling factor choices are preserved; the both-off behavior is the fresh
   install default.
 
 ## Install

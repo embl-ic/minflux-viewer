@@ -68,7 +68,13 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "Save raw canonical MINFLUX data as an experimental .msr file.", "file"),
     "actionSaveAsSpreadsheet": CommandMeta(C + "save.py",
                               ("save as", "spreadsheet", "csv", "delimiter", "columns"),
-                              "Export selected processed attributes to a configurable CSV table.", "file"),
+                              "Export chosen attributes as a custom CSV table for another tool "
+                              "(the canonical round-tripping table is File > Save).", "file"),
+    "actionSaveAsZarrZip": CommandMeta(C + "minflux_zarr.py",
+                              ("save as", "zarr", "zip", "single file", "sealed",
+                               "package", "archive", "portable"),
+                              "Save the self-contained Zarr v2 store sealed into one "
+                              ".zarr.zip file (no in-place processing updates).", "file"),
     "actionSaveAsZarr": CommandMeta(C + "save.py", ("save as", "zarr", "v2"),
                               "Save raw canonical MINFLUX data as a Zarr v2 directory.", "file"),
     "actionSaveAsHdf5": CommandMeta(C + "save.py", ("save as", "hdf5", "picasso", "render"),
@@ -104,6 +110,10 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "Show the Dataset Information window.", "view"),
     "actionAttributePlot": CommandMeta(U + "attribute_window.py", ("scatter", "attribute", "color"),
                               "Attribute plot (color localizations by an attribute).", "view"),
+    "actionAttributeCpu": CommandMeta(U + "attribute_cpu.py",
+                              ("cpu", "bulk", "painter", "aggregation", "density", "large data", "lod"),
+                              "Non-GPU Attribute Plot using exact bulk painting for sparse views and "
+                              "complete screen-space count/mean aggregation for dense views.", "view"),
     "actionHistogram": CommandMeta(U + "histogram_window.py", ("distribution", "attribute", "bins"),
                               "Attribute histogram.", "view"),
     "actionScatter": CommandMeta(U + "scatter_window.py", ("points", "localizations", "xy", "xz", "yz", "3d"),
@@ -112,6 +122,12 @@ COMMAND_META: dict[str, CommandMeta] = {
                               ("image", "reconstruction", "histogram", "gaussian", "advanced", "precision", "bilinear"),
                               "Rendered localization image (right-click › View › Render Method "
                               "selects the reconstruction method).", "view"),
+    "actionAttributeGpu": CommandMeta(U + "attribute_window.py",
+                              ("opengl", "gpu", "graphics card", "fast", "millions", "performance",
+                               "renderer", "experimental"),
+                              "Draw the Attribute Plot's 2-D projection on the GPU: every point of a "
+                              "multi-million-row selection at interactive speed, without thinning "
+                              "(no ROI selection or Lines in this mode).", "view"),
     "actionLog": CommandMeta(U + "log_window.py", ("events", "messages"), "Event log window.", "view"),
 
     # ---- Process › Channel ----------------------------------------------------
@@ -259,10 +275,10 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "Estimate the average per-trace size (log-distance Gaussian fit).", "analysis",
                               inputs=("active dataset (raw loc, tid)",), outputs=("trace size (nm)",)),
     "actionTraceAnisotropy": CommandMeta(A + "trace_analysis.py",
-                              ("anisotropy", "rimf", "z scaling", "refractive index", "aspect ratio"),
-                              "Estimate anisotropy / RIMF (z-scaling) from raw last-valid trace sizes.",
+                              ("z scaling factor", "axial calibration", "anisotropy", "aspect ratio"),
+                              "Estimate the Z scaling factor from raw last-valid trace sizes.",
                               "analysis", inputs=("active dataset (raw loc, tid)",),
-                              outputs=("anisotropy factor / RIMF",)),
+                              outputs=("Z scaling factor",)),
 
     # ---- Analyze › Segmentation ----------------------------------------------
     # The former actionSegNpc2D / actionSegNpc3D entries were removed with their
@@ -284,6 +300,30 @@ COMMAND_META: dict[str, CommandMeta] = {
                                "segmentation", "npc", "nuclear pore"),
                               "Genuinely-3-D matched-filter detection (shell/ball/gaussian/LoG) → 3-D point ROIs.",
                               "analysis", inputs=("active dataset (loc, 3-D)",), outputs=("3-D point ROIs",)),
+    "actionSegShapeModel": CommandMeta(U + "shape_segmentation_dialog.py",
+                              ("shape model", "shape prior", "known geometry", "capsule",
+                               "obround", "stadium", "rod", "bacteria", "bacterium",
+                               "ecoli", "e. coli", "cell", "outline", "contour",
+                               "polygon", "instance segmentation", "touching", "clipped"),
+                              "Fit objects of a known geometry (capsule/curved capsule/"
+                              "ellipse/rectangle/disk) to the XY density → editable "
+                              "polygon contour ROIs; separates touching objects and "
+                              "flags ones clipped by the acquisition frame.",
+                              "analysis",
+                              params=(ParamMeta("shape", "choice", "capsule", "",
+                                                "capsule|arc_capsule|ellipse|rectangle|disk"),
+                                      ParamMeta("length_nm", "range", (1400.0, 4000.0), "nm",
+                                                "expected object length"),
+                                      ParamMeta("width_nm", "range", (600.0, 1200.0), "nm",
+                                                "expected object width"),
+                                      ParamMeta("pixel_nm", "nm", 20.0, "nm", "detection pixel"),
+                                      ParamMeta("instance_cost", "float", 0.25, "",
+                                                "price of one extra object, in object areas"),
+                                      ParamMeta("vertices", "int", 48, "",
+                                                "polygon contour vertices")),
+                              inputs=("active dataset (loc)",
+                                      "acquisition ROI from the source .msr (optional)"),
+                              outputs=("polygon contour ROIs",)),
     "actionSegCurvilinear": CommandMeta(U + "curvilinear_segmentation_dialog.py",
                               ("curvilinear", "filament", "fiber", "skeleton", "ridge", "structure"),
                               "Detect curvilinear structures.", "analysis"),

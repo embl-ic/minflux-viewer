@@ -65,16 +65,18 @@ from .data_window import DataWindow
 # Supported file extensions for drag-and-drop and open dialogs
 # ---------------------------------------------------------------------------
 
-_SUPPORTED_EXTS: tuple[str, ...] = (
-    ".mat", ".npy", ".csv", ".tsv", ".txt", ".xlsx", ".xlsm", ".msr",
-    ".tif", ".tiff", ".json", ".zarr", ".roi", ".zip",
-)
+from ..core import formats as _formats
+
+#: Everything the application will attempt to open, from the one format
+#: registry (:mod:`minflux_viewer.core.formats`).
+_SUPPORTED_EXTS: tuple[str, ...] = _formats.supported_extensions()
 #: ROI-set files (loaded into the ROI Manager, not as datasets).
-_ROI_FILE_EXTS: frozenset[str] = frozenset({".roi", ".zip"})
+_ROI_FILE_EXTS: frozenset[str] = _formats.roi_extensions()
 
 #: Canonical loader format (see core.format_sniff.resolve_format) → method name.
 _FMT_LOADERS: dict[str, str] = {
-    "mat": "_load_mat", "npy": "_load_npy", "spreadsheet": "_load_spreadsheet",
+    "mat": "_load_mat", "npy": "_load_npy", "npz": "_load_npz",
+    "spreadsheet": "_load_spreadsheet",
     "msr": "_open_msr_dialog", "tiff": "_load_tiff", "json": "_load_json",
     "zarr": "_load_zarr",
 }
@@ -178,6 +180,40 @@ class _UpdateCheckTask(QRunnable):
         except Exception as exc:  # never let a worker exception escape
             result = UpdateCheckResult("error", self._current, None, str(exc))
         if not self._cancelled:
+            self.signals.done.emit(result)
+
+
+class _ZarrIoSignals(QObject):
+    """Progress/result signals for a Zarr load or save running off the UI thread."""
+
+    stage = pyqtSignal(str)
+    done = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+
+class _ZarrIoTask(QRunnable):
+    """Run one Zarr load or save on a worker thread.
+
+    Reading and writing a MINFLUX Zarr store is **CPU**-bound, not I/O-bound:
+    on a 20.6 M-row acquisition a load spends 2.0 s decompressing but 8.2 s
+    building the structured array and normalizing it, and a save spends 9.6 s
+    compressing plus 2.8 s hashing. A thread therefore does not make it faster
+    -- it stops it freezing the window, which it can do because numpy, blosc
+    and hashlib all release the GIL for the length of those operations.
+    """
+
+    def __init__(self, fn, *, description: str) -> None:
+        super().__init__()
+        self._fn = fn
+        self.description = str(description)
+        self.signals = _ZarrIoSignals()
+
+    def run(self) -> None:  # noqa: N802 - Qt API
+        try:
+            result = self._fn(self.signals.stage.emit)
+        except Exception as exc:                                # noqa: BLE001
+            self.signals.failed.emit(str(exc))
+        else:
             self.signals.done.emit(result)
 
 
@@ -325,9 +361,11 @@ class MainWindow(QMainWindow):
         self._scatter_windows: dict[int, QWidget] = {}
         self._histogram_windows: dict[int, QWidget] = {}
         self._attr_windows: dict[int, QWidget] = {}
+        self._attr_cpu_windows: dict[int, QWidget] = {}
         self._scatter_win   = None       # compatibility alias: most recently raised
         self._histogram_win = None       # compatibility alias: most recently raised
         self._attr_win      = None       # compatibility alias: most recently raised
+        self._attr_cpu_win  = None
         self._filter_dlg    = None
         self._filter_dlgs: dict[int | None, QWidget] = {}
         self._ds_manager    = None
@@ -432,6 +470,10 @@ class MainWindow(QMainWindow):
         state.status_message.connect(self._status_label.setText)
         state.log_message.connect(self._on_log_message)
         state.colors_changed.connect(self._on_colors_changed)
+        state.overlay_manual_alignment_requested.connect(
+            self._on_overlay_manual_alignment_requested
+        )
+        self._sync_attribute_gpu_action()
 
         # Remembered ROI duplicate/crop options, per dataset (session-only,
         # keyed by dataset identity — "use the same setup and stop asking").
@@ -478,12 +520,33 @@ class MainWindow(QMainWindow):
         self.actionSaveAsMsr.triggered.connect(
             lambda _checked=False: self._save_as_format("msr", "MINFLUX .msr file")
         )
-        self.actionSaveAsSpreadsheet = QAction("Spreadsheet (.csv)", self)
+        self.actionSaveAsSpreadsheet = QAction("Custom table (.csv)...", self)
         self.actionSaveAsSpreadsheet.triggered.connect(self._save_as_spreadsheet)
         self.actionSaveAsZarr = QAction("Zarr (.zarr v2) format", self)
+        self.actionSaveAsZarr.setToolTip(
+            "Save a self-contained MINFLUX Viewer Zarr v2 dataset. If the active "
+            "dataset is an overlay, every channel, transform and LUT is bundled; "
+            "viewer ROIs and linked MSR images are included."
+        )
         self.actionSaveAsZarr.triggered.connect(
             lambda _checked=False: self._save_as_format("zarr", "Zarr v2")
         )
+        self.actionSaveAsZarrZip = QAction("Zarr (.zarr.zip v2) single file", self)
+        self.actionSaveAsZarrZip.setToolTip(
+            "The same self-contained Zarr v2 content sealed into ONE file: raw "
+            "data plus processing state, ROIs, overlay channels and linked "
+            "images. It opens directly, without unpacking.\n\n"
+            "Unlike the .zarr directory it cannot be updated in place — a zip "
+            "cannot replace a member — so saving over a package rewrites it. "
+            "Use the .zarr directory while a dataset is still being worked on."
+        )
+        self.actionSaveAsZarrZip.triggered.connect(
+            lambda _checked=False: self._save_as_format("zarr_zip", "Zarr v2 single file")
+        )
+        # Picasso HDF5 is application-specific export. The writer and this
+        # action are kept (scripting, and it works), but it is deliberately NOT
+        # added to File > Save As: the offered set is this application's own
+        # format plus the MINFLUX defaults. See BACKLOG.md > Nice to have.
         self.actionSaveAsHdf5 = QAction("HDF5...", self)
         self.actionSaveAsHdf5.triggered.connect(self._save_as_picasso_hdf5)
         self.actionSaveAsOmeTiff = QAction("OME-TIFF...", self)
@@ -568,7 +631,7 @@ class MainWindow(QMainWindow):
         self.menuAnalyzeTrace = QMenu("Trace", self)
         self.actionTraceSize = QAction("Estimate Average Trace Size", self)
         self.actionTraceSize.triggered.connect(self._run_trace_size)
-        self.actionTraceAnisotropy = QAction("Estimate Anisotropy", self)
+        self.actionTraceAnisotropy = QAction("Estimate Z Scaling Factor", self)
         self.actionTraceAnisotropy.triggered.connect(self._run_trace_anisotropy)
         self.menuAnalyzeTrace.addAction(self.actionTraceSize)
         self.menuAnalyzeTrace.addAction(self.actionTraceAnisotropy)
@@ -585,6 +648,12 @@ class MainWindow(QMainWindow):
         self.actionSegConvolution3D = QAction("Convolution (3D)…", self)
         self.actionSegConvolution3D.triggered.connect(self._show_conv_segmentation_3d)
         self.menuAnalyzeSegmentation.addAction(self.actionSegConvolution3D)
+        # Named for the method (a known shape model is fitted), not for one
+        # geometry, so new geometries arrive as entries in the tool's Shape
+        # dropdown rather than as new menu items.
+        self.actionSegShapeModel = QAction("Shape Model…", self)
+        self.actionSegShapeModel.triggered.connect(self._show_shape_segmentation)
+        self.menuAnalyzeSegmentation.addAction(self.actionSegShapeModel)
         self.actionSegCurvilinear = QAction("Curvilinear Structures…", self)
         self.actionSegCurvilinear.triggered.connect(self._show_curvilinear_segmentation)
         self.menuAnalyzeSegmentation.addAction(self.actionSegCurvilinear)
@@ -724,6 +793,28 @@ class MainWindow(QMainWindow):
         self.actionAggregate = QAction("Aggregate Localizations…", self)
         self.actionAggregate.triggered.connect(self._aggregate_active_dataset)
 
+        # Attribute Plot renderer switch. Lives in the app View menu as well as
+        # the plot's own right-click menu, so the two renderers can be compared
+        # without hunting for the context menu.
+        self.actionAttributeGpu = QAction(
+            "Attribute Plot: GPU rendering (OpenGL, experimental)", self
+        )
+        self.actionAttributeGpu.setCheckable(True)
+        self.actionAttributeGpu.setToolTip(
+            "Draw exact Attribute Plot markers with OpenGL when startup probing\n"
+            "and the current memory-derived upload budget permit it. Axes, ROI,\n"
+            "zoom and connecting lines remain in the pyqtgraph overlay."
+        )
+        self.actionAttributeGpu.triggered.connect(self._toggle_attribute_gpu)
+        self.actionAttributeCpu = QAction("Attribute Plot (CPU fix)", self)
+        self.actionAttributeCpu.setObjectName("actionAttributeCpu")
+        self.actionAttributeCpu.setToolTip(
+            "Open a separate, non-OpenGL Attribute Plot. Sparse views use Qt "
+            "bulk point painting; dense views aggregate every visible row into "
+            "a display-sized count grid (and mean C per cell)."
+        )
+        self.actionAttributeCpu.triggered.connect(self._show_attr_plot_cpu)
+
         # Help menu
         u.actionAbout.triggered.connect(self._show_about)
         u.actionMemoryMonitor.triggered.connect(self._show_memory_monitor)
@@ -860,8 +951,9 @@ class MainWindow(QMainWindow):
         self.menuSaveAs.setTitle("Save As")
         self.actionSaveAsMinflux.setText("MINFLUX data formats (.mat; .npy; .json)")
         self.actionSaveAsMsr.setText("MINFLUX .msr file (experimental)")
-        self.actionSaveAsSpreadsheet.setText("Spreadsheet (.csv)")
+        self.actionSaveAsSpreadsheet.setText("Custom table (.csv)...")
         self.actionSaveAsZarr.setText("Zarr (.zarr v2) format")
+        self.actionSaveAsZarrZip.setText("Zarr (.zarr.zip v2) single file")
         self.actionSaveAsHdf5.setText("HDF5...")
         self.actionSaveAsOmeTiff.setText("OME-TIFF...")
         self.actionSaveAsOmeZarr.setText("OME-NGFF 0.5 / Zarr v3...")
@@ -886,7 +978,7 @@ class MainWindow(QMainWindow):
         self.menuSaveAs.addAction(self.actionSaveAsMsr)
         self.menuSaveAs.addAction(self.actionSaveAsSpreadsheet)
         self.menuSaveAs.addAction(self.actionSaveAsZarr)
-        self.menuSaveAs.addAction(self.actionSaveAsHdf5)
+        self.menuSaveAs.addAction(self.actionSaveAsZarrZip)
         self.menuSaveAs.addAction(self.actionSaveAsOmeTiff)
         self.menuSaveAs.addAction(self.actionSaveAsOmeZarr)
         u.menuFile.addAction(self.menuSaveAs.menuAction())
@@ -904,14 +996,18 @@ class MainWindow(QMainWindow):
 
         u.menuView.clear()
         u.menuView.addAction(u.actionShowInfo)
-        u.menuView.addAction(u.actionDatasetManager)
         u.menuView.addSeparator()
         u.menuView.addAction(u.actionAttributePlot)
+        u.menuView.addAction(self.actionAttributeCpu)
         u.menuView.addAction(u.actionHistogram)
         u.menuView.addAction(u.actionScatter)
         u.menuView.addAction(u.actionRender)
         u.menuView.addSeparator()
+        u.menuView.addAction(self.actionAttributeGpu)
+        u.menuView.addSeparator()
         u.menuView.addAction(u.actionLog)
+        u.menuView.setToolTipsVisible(True)
+        u.menuView.aboutToShow.connect(self._sync_attribute_gpu_action)
 
         u.menuProcess.clear()
         u.menuProcess.addAction(self.menuProcessChannel.menuAction())
@@ -1413,20 +1509,23 @@ class MainWindow(QMainWindow):
         show_modeless(DataSimulatorWindow(self._state, owner=self), self)
 
     def _finalize_sim_dataset(self, name, coords, tid, attrs):
-        """Build one simulated dataset from arrays (version = 'simulation', RIMF pinned)."""
+        """Build one simulated dataset from arrays (version = 'simulation', Z scaling factor pinned)."""
         import uuid
 
         from ..core.dataset import build_localization_dataset
+        attrs = dict(attrs or {})
+        tim = attrs.pop("tim", None)
         ds = build_localization_dataset(
             name=name, x_nm=coords[:, 0], y_nm=coords[:, 1], z_nm=coords[:, 2],
-            tid=tid, attrs=attrs, source_version="simulation", prefs=self._state.prefs)
+            tid=tid, tim=tim, attrs=attrs, source_version="simulation",
+            prefs=self._state.prefs)
         ds.file.folder = f"<simulated>/{uuid.uuid4().hex}"
         ds.metadata["simulated"] = True
-        # Coordinates are the true simulated nm — pin RIMF to 1.0 and suppress the
+        # Coordinates are the true simulated nm — pin Z scaling factor to 1.0 and suppress the
         # post-load auto-anisotropy estimate.
         try:
-            ds.set_rimf(1.0, source="simulated (true z)")
-            ds.derived["rimf"] = 1.0
+            ds.set_z_scaling_factor(1.0, source="simulated (true z)")
+            ds.derived["z_scaling_factor"] = 1.0
         except Exception:
             pass
         # Attach the acquisition's shared fiducial beads (one set per Generate
@@ -1473,6 +1572,8 @@ class MainWindow(QMainWindow):
                 self._generate_sim_overlay(p)
             elif kind == "dcr":
                 self._generate_sim_dcr(p)
+            elif kind == "ecoli":
+                self._generate_sim_ecoli(p)
             else:
                 self._generate_sim_single(p)
         finally:
@@ -1540,6 +1641,37 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Data Simulator", str(exc))
             self._status_label.setText("Sample data failed.")
 
+    def _generate_sim_ecoli(self, p: dict) -> None:
+        """One rod cell of labelled HlyB dimers — a known-distance control."""
+        from ..core.simulate import simulate_ecoli_hlyb
+        label = p["name"]
+        self._status_label.setText(f"Simulating {label}…")
+        try:
+            params = p["params"]
+            coords, tid, attrs = simulate_ecoli_hlyb(
+                params, locs_per_trace=p["locs_per_trace"],
+                precision_nm=p["precision_nm"], seed=p["seed"])
+            ds, nloc, ntr = self._finalize_sim_dataset(
+                f"Sample: {label}", coords, tid, attrs)
+            self._state.log(
+                f"Generated sample data '{label}': {nloc:,} localization(s), "
+                f"{ntr:,} trace(s); HlyB dimers planted at "
+                f"{float(params['dimer_distance_nm']):g} +/- "
+                f"{float(params['dimer_distance_sd_nm']):g} nm on a "
+                f"{float(params['cell_length_nm']):g} x "
+                f"{2 * float(params['cell_radius_nm']):g} nm rod "
+                f"({float(params['dimer_fraction']) * 100:.0f}% of subunits "
+                f"paired, {float(params['detection_probability']) * 100:.0f}% "
+                f"detected). Every trace is one subunit seen once, so there are "
+                f"no repeat visits and no drift — run Plugins > HlyB/D subunit "
+                f"pair analysis on it to check the workflow recovers the "
+                f"planted distance.")
+            self._state.add_dataset(ds)
+        except Exception as exc:
+            self._state.log(f"Sample data generation failed: {exc}", "ERROR")
+            QMessageBox.critical(self, "Data Simulator", str(exc))
+            self._status_label.setText("Sample data failed.")
+
     def _generate_sim_single(self, p: dict) -> None:
         """Generate a single-structure sample (``channels > 1`` = independent overlay)."""
         import uuid
@@ -1599,11 +1731,39 @@ class MainWindow(QMainWindow):
         p   = Path(path)
         ext = p.suffix.lower()
 
-        # ImageJ ROI / RoiSet files load into the ROI Manager, not as datasets.
-        if ext in _ROI_FILE_EXTS:
-            self._load_roi_json(path)
-            return
+        # Opening a file is not always "load a dataset": the registry says what
+        # this one should DO. A .msr opens the MSR reader, a ROI set goes to the
+        # ROI Manager, a filter preset to the Filter dialog. The .json fork is
+        # decided by positive content markers, in a declared order -- the old
+        # code tried to load data first and only looked for a filter preset if
+        # that raised, so a malformed data file was indistinguishable from one.
+        spec = _formats.resolve_open(path)
+        if spec is not None:
+            action = spec.action
+            if action is _formats.OpenAction.ROI_MANAGER:
+                self._load_roi_json(path)
+                return
+            if action is _formats.OpenAction.FILTER_DIALOG:
+                self._load_filter_json(path)
+                return
+            if action is _formats.OpenAction.METADATA_RECIPE:
+                # A recipe needs a dataset to act on; dropped on the main window
+                # there is no target. Dropping it on a dataset row applies it.
+                self._state.log(
+                    f"'{p.name}' is a processing metadata sidecar, not loadable "
+                    f"data — drop it on a dataset row to apply it.", "WARN")
+                self._status_label.setText(f"Skipped: {p.name} (metadata sidecar)")
+                return
+            if action is _formats.OpenAction.MSR_READER:
+                self._open_msr_dialog(path)
+                return
+            if action is _formats.OpenAction.IMAGE_VIEWER:
+                self._load_tiff(path)
+                return
 
+        # Dataset and spreadsheet paths still go through content sniffing, which
+        # resolves an extension that disagrees with the bytes (a .npz that is
+        # really an .xlsx, and so on) and reports the mismatch.
         from ..core.format_sniff import resolve_format
         fmt, note = resolve_format(path)
         if note:
@@ -1681,17 +1841,126 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load error", str(exc))
             self._status_label.setText("Load failed.")
 
-    def _load_zarr(self, path: str) -> None:
+    def _load_npz(self, path: str) -> None:
         self._status_label.setText(f"Loading {Path(path).name}…")
-        self._state.log(f"Opening .zarr: {path}", "INFO")
+        self._state.log(f"Opening .npz: {path}", "INFO")
         try:
-            from ..core.loader import load_zarr
-            dataset = load_zarr(path, prefs=self._state.prefs)
+            from ..core.loader import load_npz
+            dataset = load_npz(path, prefs=self._state.prefs)
             self._state.add_dataset(dataset)
         except Exception as exc:
             self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
             QMessageBox.critical(self, "Load error", str(exc))
             self._status_label.setText("Load failed.")
+
+    def _load_zarr(self, path: str) -> None:
+        """Open a ``.zarr`` store off the UI thread.
+
+        Reading one is CPU-bound (decompress, rebuild the structured array,
+        normalize), which on a large acquisition is ~10 s. Doing that inline
+        froze the whole window; the dataset is still ADDED on the UI thread,
+        because everything downstream of ``add_dataset`` touches widgets.
+        """
+        name = Path(path).name
+        self._state.log(f"Opening .zarr: {path}", "INFO")
+        prefs = self._state.prefs
+
+        def work(report):
+            from ..core.minflux_zarr import load_minflux_zarr_project
+
+            report(f"Reading {name}")
+            project = load_minflux_zarr_project(path, prefs=prefs)
+            report(f"Read {name}: {len(project.datasets)} dataset(s)")
+            return project
+
+        task = _ZarrIoTask(work, description=f"Opening {name}")
+        task.signals.stage.connect(
+            lambda text: self._state.status_progress(text))
+        task.signals.done.connect(
+            lambda project: self._on_zarr_loaded(project, name))
+        task.signals.failed.connect(
+            lambda message: self._on_zarr_io_failed(name, message, "Load error"))
+        self._begin_zarr_io(task)
+
+    def _begin_zarr_io(self, task) -> None:
+        """Start a Zarr load/save task and keep it alive until it finishes."""
+        from PyQt6.QtCore import QThreadPool
+
+        self._status_label.setText(f"{task.description}…")
+        self._state.status_progress(task.description)
+        tasks = getattr(self, "_zarr_io_tasks", None)
+        if tasks is None:
+            tasks = self._zarr_io_tasks = []
+        tasks.append(task)
+        for signal in (task.signals.done, task.signals.failed):
+            signal.connect(lambda *_a, _t=task: self._finish_zarr_io(_t))
+        QThreadPool.globalInstance().start(task)
+
+    def _finish_zarr_io(self, task) -> None:
+        try:
+            getattr(self, "_zarr_io_tasks", []).remove(task)
+        except ValueError:
+            pass
+
+    def _on_zarr_io_failed(self, name: str, message: str, title: str) -> None:
+        self._state.log(f"Failed: '{name}': {message}", "ERROR")
+        if not self._is_shutting_down:
+            QMessageBox.critical(self, title, message)
+        self._status_label.setText(f"{title}.")
+
+    def _on_zarr_loaded(self, project, name: str) -> None:
+        """Install a loaded project — on the UI thread, where widgets live."""
+        if self._is_shutting_down:
+            return
+        try:
+            grouped = bool(project.manifest.get("is_overlay")) and len(project.datasets) > 1
+            previous = self._state.suspend_auto_render
+            if grouped:
+                self._state.suspend_auto_render = True
+            indices = []
+            try:
+                for dataset in project.datasets:
+                    indices.append(self._state.add_dataset(dataset))
+            finally:
+                self._state.suspend_auto_render = previous
+            self._restore_zarr_rois(project.roi_records, project.manifest, indices)
+            if grouped and indices and self._state.prefs.get("data", {}).get("show_render", True):
+                self._show_render(indices[0])
+        except Exception as exc:                                # noqa: BLE001
+            self._on_zarr_io_failed(name, str(exc), "Load error")
+            return
+        self._state.log(
+            f"Opened '{name}': {len(project.datasets)} dataset(s).")
+        self._status_label.setText(f"Opened {name}.")
+
+    def _restore_zarr_rois(self, records, manifest: dict, dataset_indices) -> None:
+        """Restore portable project ROI records into the session-level store."""
+        if not records:
+            return
+        from ..core.roi import RoiRecord
+
+        members = list(manifest.get("datasets") or [])
+        id_to_idx = {
+            str(spec.get("id")): int(idx)
+            for spec, idx in zip(members, dataset_indices)
+        }
+        existing = {record.id for record in self._state.rois.records}
+        for payload in records:
+            if not isinstance(payload, dict):
+                continue
+            values = dict(payload)
+            dataset_id = str(values.pop("dataset_id", "") or "")
+            context = dict(values.get("context") or {})
+            if dataset_id in id_to_idx:
+                context["dataset_idx"] = id_to_idx[dataset_id]
+            values["context"] = context
+            try:
+                record = RoiRecord(**values)
+            except (TypeError, ValueError):
+                continue
+            if record.id not in existing:
+                self._state.rois.add(record)
+                existing.add(record.id)
 
     def _load_csv(self, path: str) -> None:
         # CSV/TSV/TXT all go through the smart spreadsheet importer.
@@ -1748,7 +2017,9 @@ class MainWindow(QMainWindow):
         win.activateWindow()
         meta = source.metadata
         self._state.log(
-            f"Opened image viewer: {Path(source.path).name} [{meta.image_name}]  |  "
+            f"Opened image viewer: "
+            f"{getattr(source, 'display_name', None) or Path(source.path).name} "
+            f"[{meta.image_name}]  |  "
             f"axes={meta.axes}  |  shape={meta.shape}  |  dtype={meta.dtype}",
             "INFO",
         )
@@ -1785,6 +2056,24 @@ class MainWindow(QMainWindow):
                 return
         except Exception:
             pass
+        source = Path(path)
+        if source.stat().st_size >= 1 << 30:
+            from ..core.export_size import format_file_size
+
+            choice = QMessageBox.warning(
+                self,
+                "Very large JSON dataset",
+                f"{source.name} is {format_file_size(source.stat().st_size)}.\n\n"
+                "JSON must decode every textual field before the numeric arrays "
+                "can be reconstructed. Loading can take minutes and the viewer "
+                "may be temporarily unresponsive. Zarr, MAT or NumPy is normally "
+                "a better working format.\n\nOpen it anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if choice != QMessageBox.StandardButton.Yes:
+                self._status_label.setText("JSON load cancelled.")
+                return
         try:
             from ..core.loader import load_json
             dataset = load_json(path, prefs=self._state.prefs)
@@ -1807,7 +2096,7 @@ class MainWindow(QMainWindow):
                     )
                     QMessageBox.information(
                         self, "Metadata file",
-                        "This is a MINFLUX-viewer metadata sidecar (RIMF, transform, "
+                        "This is a MINFLUX-viewer metadata sidecar (Z scaling factor, transform, "
                         "filter specs). It documents an exported dataset and is not "
                         "itself loadable as data.",
                     )
@@ -1853,7 +2142,10 @@ class MainWindow(QMainWindow):
         shown: list[str] = []
         for path in recent:
             try:
-                if Path(path).is_file():
+                candidate = Path(path)
+                if candidate.is_file() or (
+                    candidate.is_dir() and candidate.suffix.lower() == ".zarr"
+                ):
                     shown.append(path)
             except (TypeError, ValueError):
                 continue
@@ -1866,7 +2158,7 @@ class MainWindow(QMainWindow):
         for path in shown:
             act = QAction(path, self)
             act.setData(path)                        # for the right-click location menu
-            act.triggered.connect(lambda checked, p=path: self._route_file(p))
+            act.triggered.connect(lambda checked, p=path: self._route_path(p))
             self._recent_menu.addAction(act)
 
     def _show_recent_file_menu(self, path: str, global_pos) -> None:
@@ -1878,9 +2170,9 @@ class MainWindow(QMainWindow):
         if chosen is act_open:
             self._route_file(path)
         elif chosen is act_loc:
-            self._open_file_location(path)
+            self.open_file_location(path)
 
-    def _open_file_location(self, path: str) -> None:
+    def open_file_location(self, path: str) -> None:
         """Reveal a file in the OS file manager (falls back to opening its
         containing folder). Cross-platform."""
         import subprocess
@@ -1893,7 +2185,11 @@ class MainWindow(QMainWindow):
         folder = p.parent
         try:
             if sys.platform.startswith("win"):
-                subprocess.Popen(["explorer", f"/select,{p}"])   # str(Path) is native
+                # Keep the switch separate from the path.  If they are one
+                # argument, subprocess quotes the whole string when the path
+                # contains spaces ("/select,C:\\some path\\file"), and
+                # Explorer treats it as a location instead of as /select.
+                subprocess.Popen(["explorer.exe", "/select,", str(p)])
                 return
             if sys.platform == "darwin":
                 subprocess.Popen(["open", "-R", str(p)])
@@ -1955,6 +2251,69 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Tool windows  — open once, raise if already open
     # ------------------------------------------------------------------
+
+    def _on_overlay_manual_alignment_requested(self, dataset_idx: int) -> None:
+        """Enter the existing channel-row Manual align mode for a dataset."""
+        from ..core.overlay import is_multichannel_overlay
+
+        if not (0 <= dataset_idx < len(self._state.datasets)):
+            return
+        if not is_multichannel_overlay(self._state, dataset_idx):
+            self._state.log(
+                "Manual alignment requires at least two datasets in the same overlay.",
+                "WARN",
+                dataset_idx=dataset_idx,
+            )
+            return
+
+        self._state.set_active(dataset_idx)
+
+        def contains_dataset(window) -> bool:
+            return any(
+                channel.get("dataset_idx") == dataset_idx
+                for channel in getattr(window, "_channels", [])
+            )
+
+        candidates = []
+        focused = getattr(self, "_last_active_plot_window", None)
+        if focused is not None and contains_dataset(focused):
+            candidates.append(focused)
+        candidates.extend(
+            window
+            for window in self._render_windows.values()
+            if contains_dataset(window)
+        )
+        candidates.extend(
+            window
+            for window in self._scatter_windows.values()
+            if contains_dataset(window)
+        )
+
+        seen: set[int] = set()
+        for window in candidates:
+            if id(window) in seen:
+                continue
+            seen.add(id(window))
+            start = getattr(window, "start_manual_alignment_for_dataset", None)
+            if callable(start) and start(dataset_idx):
+                window.show()
+                window.raise_()
+                window.activateWindow()
+                return
+
+        # No overlay coordinate view is open. Open the standard render view,
+        # then enter the same handler used by channel-row right-click.
+        window = self._show_render(dataset_idx)
+        start = getattr(window, "start_manual_alignment_for_dataset", None)
+        if callable(start) and start(dataset_idx):
+            window.raise_()
+            window.activateWindow()
+            return
+        self._state.log(
+            "Could not start manual alignment for this overlay.",
+            "WARN",
+            dataset_idx=dataset_idx,
+        )
 
     def _show_script_editor(self) -> None:
         from .script_editor_window import ScriptEditorWindow
@@ -2018,6 +2377,106 @@ class MainWindow(QMainWindow):
         win.show(); win.raise_(); win.activateWindow()
         self._notify_view_state_changed()
         return win
+
+    def _show_attr_plot_cpu(self, dataset_idx: int | None = None):
+        """Open the independent CPU bulk/aggregation attribute plot."""
+
+        if self._state.active_dataset is None:
+            self._no_data_warning()
+            return None
+        from .attribute_window import AttributeWindow
+
+        idx = dataset_idx if type(dataset_idx) is int else self._state.active_idx
+        if idx is None:
+            return None
+        win = self._attr_cpu_windows.get(idx)
+        if win is None:
+            win = AttributeWindow(self._state, dataset_idx=idx, cpu_fix=True)
+            win.destroyed.connect(
+                lambda _=None, i=idx: self._attr_cpu_windows.pop(i, None)
+            )
+            self._attr_cpu_windows[idx] = win
+        self._attr_cpu_win = win
+        self._install_window_shortcuts(win)
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        self._notify_view_state_changed()
+        return win
+
+    def _attribute_gpu_state(self) -> bool:
+        """Whether the active dataset's Attribute Plot uses the GPU renderer.
+
+        Falls back to the dataset's saved view state, so the menu is right even
+        before the plot has been opened.
+        """
+        idx = self._state.active_idx
+        if idx is None:
+            return False
+        win = self._attr_windows.get(idx)
+        if win is not None:
+            return bool(getattr(win, "gpu_2d", False))
+        if 0 <= idx < len(self._state.datasets):
+            saved = self._state.datasets[idx].state.get("attribute_plot_state")
+            if isinstance(saved, dict):
+                return bool(saved.get("gl_2d", False))
+        return False
+
+    def _sync_attribute_gpu_action(self) -> None:
+        action = getattr(self, "actionAttributeGpu", None)
+        if action is None:
+            return
+        capabilities = getattr(self._state, "gpu_capabilities", None)
+        gpu_available = (
+            capabilities is None
+            or bool(getattr(capabilities, "available", False))
+        )
+        action.setEnabled(self._state.active_idx is not None and gpu_available)
+        if capabilities is not None:
+            if gpu_available:
+                action.setToolTip(
+                    "Draw exact 2-D markers with OpenGL when they fit the current "
+                    f"memory budget ({int(capabilities.point_limit):,} points).\n"
+                    f"Renderer: {capabilities.renderer or 'unknown'}; "
+                    f"{capabilities.memory_summary}."
+                )
+            else:
+                action.setToolTip(
+                    "GPU rendering is unavailable on this display: "
+                    f"{capabilities.reason}"
+                )
+        action.blockSignals(True)
+        action.setChecked(gpu_available and self._attribute_gpu_state())
+        action.blockSignals(False)
+
+    def _toggle_attribute_gpu(self, enabled: bool) -> None:
+        """Switch the Attribute Plot renderer, opening the plot if needed."""
+        capabilities = getattr(self._state, "gpu_capabilities", None)
+        if (
+            enabled and capabilities is not None
+            and not bool(getattr(capabilities, "available", False))
+        ):
+            self._state.log(
+                f"Attribute Plot GPU unavailable: {capabilities.reason}",
+                level="WARN",
+            )
+            self._sync_attribute_gpu_action()
+            return
+        win = self._show_attr_plot()
+        if win is None:
+            self._sync_attribute_gpu_action()
+            return
+        win.set_gpu_2d(bool(enabled))
+        # The switch is a property of the 2-D projections; say so rather than
+        # letting a click on a 3-D plot look like it did nothing.
+        pending = (
+            "  Applies to XY/XZ/YZ; this plot is showing 3D."
+            if getattr(win, "view_mode", "") == "3D" else ""
+        )
+        self._state.log(
+            "Attribute Plot renderer: "
+            f"{'GPU (OpenGL)' if enabled else 'pyqtgraph'}.{pending}"
+        )
 
     def _show_filter(self) -> None:
         from .filter_dialog import FilterDialog
@@ -2449,9 +2908,9 @@ class MainWindow(QMainWindow):
         from ..analysis.hlyb_pairwise import PairFitConfig, analyze_hlyb_pairwise
         from .hlyb_pairwise_dialog import HlyBPairwiseDialog, HlyBPairwiseWindow
 
-        current_rimf = float(getattr(ds.cali, "RIMF", 0.67) or 0.67)
+        current_z_scaling_factor = float(getattr(ds.cali, "z_scaling_factor", 0.67) or 0.67)
         defaults = getattr(self, "_hlyb_pair_cfg", None)
-        overrides = {"z_scaling_factor": current_rimf, "dimensions": dimensions}
+        overrides = {"z_scaling_factor": current_z_scaling_factor, "dimensions": dimensions}
         if defaults is None:
             defaults = PairFitConfig(**overrides)
         else:
@@ -2490,14 +2949,14 @@ class MainWindow(QMainWindow):
         kernel = result.get("repeat_kernel", {})
         best_fit = result.get("best_fit", {})
 
-        provenance = ds.rimf_provenance or {}
+        provenance = ds.z_scaling_factor_provenance or {}
         z_source = str(provenance.get("source") or "").strip()
-        if abs(float(cfg.z_scaling_factor) - float(getattr(ds.cali, "RIMF", 0) or 0)) > 1e-9:
+        if abs(float(cfg.z_scaling_factor) - float(getattr(ds.cali, "z_scaling_factor", 0) or 0)) > 1e-9:
             z_source = "a value entered in the analysis dialog"
         elif not z_source:
-            z_source = "the dataset's recorded RIMF"
+            z_source = "the dataset's recorded Z scaling factor"
         else:
-            z_source = f"the dataset's recorded RIMF, provenance '{z_source}'"
+            z_source = f"the dataset's recorded Z scaling factor, provenance '{z_source}'"
 
         def _fit_summary(store):
             return {
@@ -2663,16 +3122,16 @@ class MainWindow(QMainWindow):
             analyze_hlyb_template3d,
         )
 
-        # The analysis reads RAW z (never RIMF-baked) and applies this z-scaling
+        # The analysis reads RAW z (never Z-scaling-baked) and applies this z-scaling
         # factor itself, so the dialog default must track the dataset's CURRENT
-        # RIMF — otherwise re-running after changing RIMF reused a stale cached
+        # Z scaling factor — otherwise re-running after changing Z scaling factor reused a stale cached
         # z-scale and left the result unchanged. Other tweaked parameters persist.
-        current_rimf = float(getattr(ds.cali, "RIMF", 0.67) or 0.67)
+        current_z_scaling_factor = float(getattr(ds.cali, "z_scaling_factor", 0.67) or 0.67)
         defaults = getattr(self, "_hlyb_cfg", None)
         if defaults is None:
-            defaults = HlyBConfig(z_scaling_factor=current_rimf)
+            defaults = HlyBConfig(z_scaling_factor=current_z_scaling_factor)
         else:
-            defaults = HlyBConfig(**{**vars(defaults), "z_scaling_factor": current_rimf})
+            defaults = HlyBConfig(**{**vars(defaults), "z_scaling_factor": current_z_scaling_factor})
         dlg = HlyBClusteringDialog(self, defaults=defaults, mode=mode)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -2768,14 +3227,14 @@ class MainWindow(QMainWindow):
             # Where the z scale came from matters scientifically: a value of 1.0
             # can mean "2-D data", "user-fixed" or "the anisotropy estimate was
             # rejected", and those are not the same claim.
-            provenance = ds.rimf_provenance or {}
+            provenance = ds.z_scaling_factor_provenance or {}
             z_source = str(provenance.get("source") or "").strip()
-            if abs(float(cfg.z_scaling_factor) - float(getattr(ds.cali, "RIMF", 0) or 0)) > 1e-9:
+            if abs(float(cfg.z_scaling_factor) - float(getattr(ds.cali, "z_scaling_factor", 0) or 0)) > 1e-9:
                 z_source = "a value entered in the analysis dialog"
             elif not z_source:
-                z_source = "the dataset's recorded RIMF"
+                z_source = "the dataset's recorded Z scaling factor"
             else:
-                z_source = f"the dataset's recorded RIMF, provenance '{z_source}'"
+                z_source = f"the dataset's recorded Z scaling factor, provenance '{z_source}'"
             method_data = {
                 "schema": "hlyb_template_matching_3d/v1",
                 "input": {
@@ -2895,6 +3354,18 @@ class MainWindow(QMainWindow):
         from .conv_segmentation_dialog import ConvSegmentationWindow
         from .modeless import show_modeless
         win = ConvSegmentationWindow(self._state, idx, owner=self)
+        show_modeless(win, self)
+
+    def _show_shape_segmentation(self) -> None:
+        """Analyze › Segmentation › Shape Model… — open the known-geometry
+        (shape-model) segmentation tool for the active dataset."""
+        idx = self._state.active_idx
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        from .modeless import show_modeless
+        from .shape_segmentation_dialog import ShapeSegmentationWindow
+        win = ShapeSegmentationWindow(self._state, idx, owner=self)
         show_modeless(win, self)
 
     def _show_conv_segmentation_3d(self) -> None:
@@ -3112,6 +3583,51 @@ class MainWindow(QMainWindow):
                 self._state.log(log_message)
         return added
 
+    def add_polygon_rois(self, idx: int, polygons, *, name_prefix: str, source: str,
+                         stroke_color: str | None = None,
+                         names: list[str] | None = None,
+                         log_message: str | None = None) -> int:
+        """Add a closed ``polygon`` ROI tracing each contour in *polygons* (each an
+        ``(M, 2)`` array of ``(x, y)`` nm vertices) to the ROI Manager, reveal them,
+        and show render + manager. ``stroke_color`` defaults to the system ROI
+        color. Returns the count added.
+
+        Used by the shape-model segmentation tool for fitted object contours. A
+        ``polygon`` is deliberately the output type rather than the parametric
+        shape: it is both a region (so masks/crop/highlighting work) and a
+        vertex-editable ROI, so the fitted contour can be corrected by hand and
+        then behaves like any hand-drawn ROI."""
+        import numpy as np
+
+        from ..core.roi import RoiRecord
+
+        if not (0 <= idx < len(self._state.datasets)):
+            return 0
+        stroke = stroke_color or self._system_roi_color()
+        added = 0
+        for i, polygon in enumerate(polygons, start=1):
+            pts = np.asarray(polygon, dtype=float).reshape(-1, 2)
+            # A closed polygon repeats its first vertex for drawing; the record
+            # stores the ring once and is marked closed.
+            if pts.shape[0] > 2 and np.allclose(pts[0], pts[-1]):
+                pts = pts[:-1]
+            if pts.shape[0] < 3:
+                continue
+            name = names[i - 1] if names is not None and i - 1 < len(names) else f"{name_prefix} {i}"
+            rec = RoiRecord.create(
+                "polygon", {"points": pts.tolist(), "closed": True},
+                name=name, coordinate_space="plot", stroke_color=stroke)
+            rec.context = {"dataset_idx": idx, "source": source}
+            self._state.rois.add(rec)
+            added += 1
+        if added:
+            self._state.rois.set_show_all(True)
+            self._show_render(idx)
+            self._show_roi_manager()
+            if log_message:
+                self._state.log(log_message)
+        return added
+
     def add_particle_average_dataset(self, points_xyz_nm, *, name: str,
                                      log_message: str | None = None) -> int | None:
         """Build a dataset from an averaged particle's pooled localizations
@@ -3139,10 +3655,10 @@ class MainWindow(QMainWindow):
         # Unique synthetic path so repeated averages don't dedup onto each other.
         ds.file.folder = f"<particle-average>/{uuid.uuid4().hex}"
         ds.metadata["particle_average"] = True
-        # Coordinates are final/aligned — pin RIMF to 1.0 and suppress auto-z.
+        # Coordinates are final/aligned — pin Z scaling factor to 1.0 and suppress auto-z.
         try:
-            ds.set_rimf(1.0, source="2D (no z correction)")
-            ds.derived["rimf"] = 1.0
+            ds.set_z_scaling_factor(1.0, source="2D (no z correction)")
+            ds.derived["z_scaling_factor"] = 1.0
         except Exception:
             pass
         idx = self._state.add_dataset(ds)
@@ -3201,8 +3717,8 @@ class MainWindow(QMainWindow):
                 ds.file.folder = f"<particle-average>/{uuid.uuid4().hex}"
                 ds.metadata["particle_average"] = True
                 try:
-                    ds.set_rimf(1.0, source="2D (no z correction)")
-                    ds.derived["rimf"] = 1.0
+                    ds.set_z_scaling_factor(1.0, source="2D (no z correction)")
+                    ds.derived["z_scaling_factor"] = 1.0
                 except Exception:
                     pass
                 lut = (luts or {}).get(cname) or cycle[(order - 1) % len(cycle)]
@@ -3270,6 +3786,7 @@ class MainWindow(QMainWindow):
             self._scatter_windows,
             self._histogram_windows,
             self._attr_windows,
+            self._attr_cpu_windows,
             self._filter_dlgs,
         )
         for mapping in own_maps:
@@ -3679,6 +4196,8 @@ class MainWindow(QMainWindow):
             list(self._render_windows.values())
             + list(self._scatter_windows.values())
             + list(self._histogram_windows.values())
+            + list(self._attr_windows.values())
+            + list(self._attr_cpu_windows.values())
         )
         for win in windows:
             refresh = getattr(win, "refresh_preferences", None)
@@ -3790,6 +4309,7 @@ class MainWindow(QMainWindow):
                 *self._scatter_windows.values(),
                 *self._histogram_windows.values(),
                 *self._attr_windows.values(),
+                *self._attr_cpu_windows.values(),
             ):
                 adapter = getattr(win, "_roi_overlay", None)
                 if adapter is not None and adapter not in adapters:
@@ -3809,7 +4329,10 @@ class MainWindow(QMainWindow):
                 self._state.rois.changed.emit()
 
         if attribute_changed:
-            for win in self._attr_windows.values():
+            for win in (
+                *self._attr_windows.values(),
+                *self._attr_cpu_windows.values(),
+            ):
                 refresh = getattr(win, "refresh_colors", None)
                 if callable(refresh):
                     refresh()
@@ -4170,11 +4693,11 @@ class MainWindow(QMainWindow):
         ds.metadata["flattened_overlay"] = True
         ds.metadata["flattened_channels"] = [getattr(d, "name", "") for d in datasets]
         ds.state["render_channel_lut"] = "hot"     # single-channel render LUT
-        # Coordinates are final display nm (each channel's RIMF already baked) —
-        # pin RIMF to 1.0 and suppress the post-load auto-z estimate.
+        # Coordinates are final display nm (each channel's Z scaling factor already baked) —
+        # pin Z scaling factor to 1.0 and suppress the post-load auto-z estimate.
         try:
-            ds.set_rimf(1.0, source="flattened (z baked)")
-            ds.derived["rimf"] = 1.0
+            ds.set_z_scaling_factor(1.0, source="flattened (z baked)")
+            ds.derived["z_scaling_factor"] = 1.0
         except Exception:
             pass
 
@@ -4263,8 +4786,8 @@ class MainWindow(QMainWindow):
                 tid=rec["tid"], attrs=rec["attrs"], source_version="reverted",
                 prefs=self._state.prefs)
             try:
-                reconstructed.set_rimf(1.0, source="reverted (z baked)")
-                reconstructed.derived["rimf"] = 1.0
+                reconstructed.set_z_scaling_factor(1.0, source="reverted (z baked)")
+                reconstructed.derived["z_scaling_factor"] = 1.0
             except Exception:
                 pass
             reconstructed.metadata["reverted_from_overlay"] = group_id
@@ -4427,7 +4950,7 @@ class MainWindow(QMainWindow):
 
     def _build_aggregated_dataset(self, ds, thr):
         """Build (not add) an aggregated dataset from *ds* at photon threshold
-        *thr*, with the RIMF + aggregation provenance but no overlay state.
+        *thr*, with the Z scaling factor + aggregation provenance but no overlay state.
         Returns the new dataset, or ``None`` when nothing aggregates."""
         import uuid
 
@@ -4445,13 +4968,13 @@ class MainWindow(QMainWindow):
         if res is None or res["tid"].size == 0:
             return None
 
-        loc = res["loc"]                       # metres, (M, 3) — raw (un-RIMF) z
+        loc = res["loc"]                       # metres, (M, 3) — raw (un-Z scaling factor) z
         n_contributing = int(np.asarray(res["n"], dtype=np.int64).sum())
         attrs = {"eco": res["eco"], "n_agg": res["n"].astype(float)}
         for key in ("ecc", "efo", "efc", "fbg", "dcr"):
             if key in res:
                 attrs[key] = res[key]
-        source_rimf = float(getattr(ds.cali, "RIMF", 1.0) or 1.0)
+        source_z_scaling_factor = float(getattr(ds.cali, "z_scaling_factor", 1.0) or 1.0)
 
         new = build_localization_dataset(
             name=f"{ds.name} (aggregated {int(thr)})",
@@ -4459,8 +4982,8 @@ class MainWindow(QMainWindow):
             tid=res["tid"], tim=res["tim"], attrs=attrs,
             source_version="aggregated", prefs=self._state.prefs)
         try:
-            new.set_rimf(source_rimf, source="aggregated (from raw z)")
-            new.derived["rimf"] = np.asarray([source_rimf], dtype=float)
+            new.set_z_scaling_factor(source_z_scaling_factor, source="aggregated (from raw z)")
+            new.derived["z_scaling_factor"] = np.asarray([source_z_scaling_factor], dtype=float)
         except Exception:
             pass
         new.file.folder = f"<aggregated>/{uuid.uuid4().hex}"
@@ -4672,7 +5195,7 @@ class MainWindow(QMainWindow):
     def reset_dataset(self, idx: int) -> None:
         """Dataset Manager *Reset* — put the dataset back to its as-loaded state.
 
-        Filters, ROI selection masks, RIMF and the live view layer (LUT /
+        Filters, ROI selection masks, Z scaling factor and the live view layer (LUT /
         transform) all revert; overlay *membership* is kept, because a per-dataset
         reset must not dissolve a group of channels.  See
         ``core/dataset_reset.py`` for the rule.
@@ -4694,7 +5217,7 @@ class MainWindow(QMainWindow):
                             dataset_idx=idx)
             return
         self._state.log(f"Reset '{ds.name}': " + "; ".join(changes) + ".", dataset_idx=idx)
-        # Filters / ROI / RIMF each drive a different set of views.
+        # Filters / ROI / Z scaling factor each drive a different set of views.
         self._state.notify_filter_changed(idx)
         self._state.notify_calibration_changed(idx)
         self._state.notify_roi_selection_changed(idx)
@@ -4732,6 +5255,77 @@ class MainWindow(QMainWindow):
         if not (0 <= idx < len(self._state.datasets)):
             return
         ds = self._state.datasets[idx]
+        # A sealed .zarr.zip holds its images inside the archive, so the record's
+        # absolute_path does not exist on disk; materialize_image extracts the
+        # member on demand. Without it the empty list fell through to reopening
+        # the source .msr, which looked like it worked while that file was still
+        # where it was imported from -- and showed nothing once it moved.
+        from ..core.minflux_zarr import materialize_image
+
+        embedded: list[Path] = []
+        labels: list[str] = []
+        did = str(ds.metadata.get("msr_dataset_did") or "")
+        selected = 0
+        for item in (ds.metadata.get("minflux_viewer_images") or []):
+            if not isinstance(item, dict):
+                continue
+            resolved = materialize_image(item)
+            if resolved is None:
+                continue
+            # Prefer the series rendered from THIS dataset, exactly as the .msr
+            # path does; it becomes the entry shown when the viewer opens.
+            if did and str(item.get("source_did") or "") == did:
+                selected = len(embedded)
+            embedded.append(resolved)
+            labels.append(str(item.get("name") or resolved.stem))
+        if embedded:
+            from ..core.tiff_source import EmbeddedImageSource
+
+            # ONE viewer listing every embedded image in its Series dropdown --
+            # the same shape as the .msr path. Opening a bare TiffImageSource on
+            # embedded[0] showed only the first image, and named it by the temp
+            # file it had been extracted to.
+            try:
+                source = EmbeddedImageSource(embedded, labels, series_index=selected)
+                store = str(ds.metadata.get("minflux_viewer_zarr_path")
+                            or ds.metadata.get("minflux_viewer_project_path")
+                            or embedded[0].parent)
+                self._open_image_viewer(
+                    source, f"{store}#embedded-images",
+                    initial_series_index=selected,
+                )
+            except Exception as exc:
+                self._state.log(f"View embedded image failed for '{ds.name}': {exc}", "ERROR")
+                QMessageBox.critical(self, "View image series", str(exc))
+                return
+            self._state.log(
+                f"Embedded images of '{ds.name}': {len(embedded)} image(s), "
+                f"showing '{labels[selected]}'.", dataset_idx=idx,
+            )
+            return
+        # A dataset restored from a .zarr store carries its own images as
+        # OME-TIFFs inside that store. It must NOT reach for the source .msr:
+        # the store is meant to stand alone, and the .msr may have moved, been
+        # renamed, or never travelled with it. Reporting the empty store is
+        # honest; borrowing images from a neighbouring file is not.
+        store_path = str(ds.metadata.get("minflux_viewer_zarr_path")
+                         or ds.metadata.get("minflux_viewer_project_path") or "")
+        if store_path:
+            missing = len(ds.metadata.get("minflux_viewer_images") or [])
+            detail = (
+                f"Its {missing} image record(s) could not be read from the store."
+                if missing else "It contains no image series."
+            )
+            self._state.log(
+                f"View image series: '{ds.name}' came from {Path(store_path).name}; "
+                f"{detail.lower()}", "WARN", dataset_idx=idx)
+            QMessageBox.information(
+                self, "View image series",
+                f"'{ds.name}' was opened from\n{store_path}\n\n{detail}\n\n"
+                "A MINFLUX Viewer Zarr store carries its own images, so no "
+                "source .msr is consulted.",
+            )
+            return
         source_path = Path(str(ds.metadata.get("msr_source_path", "") or ""))
         if not source_path.is_file():
             self._state.log(
@@ -4788,7 +5382,7 @@ class MainWindow(QMainWindow):
     #: Extensions a Dataset-Manager row accepts, and what each does to that
     #: dataset.  A ``.json`` is ambiguous on extension alone, so it is resolved
     #: by content (ROI set / filter preset / metadata sidecar).
-    DROP_ON_DATASET_EXTS = (".json", ".roi", ".zip", ".tif", ".tiff")
+    DROP_ON_DATASET_EXTS = _formats.drop_on_dataset_extensions()
 
     def drop_file_on_dataset(self, idx: int, path: str) -> bool:
         """Apply a dropped file to the dataset at *idx*.  Returns True if handled.
@@ -4801,7 +5395,7 @@ class MainWindow(QMainWindow):
         * a **filter preset** JSON → its rows are appended to that dataset's filter
         * a **ROI set** (native JSON, ImageJ ``.roi`` or a RoiSet ``.zip``) → the
           ROIs load into the ROI Manager retargeted to that dataset
-        * a **metadata sidecar** JSON → its processing recipe (RIMF / transform /
+        * a **metadata sidecar** JSON → its processing recipe (Z scaling factor / transform /
           filters) is applied to that dataset
         * a **TIFF** → mapped as a confocal signal, like *Map confocal signal…*
 
@@ -5825,43 +6419,201 @@ class MainWindow(QMainWindow):
                 fmt = "mat"
         self._save_as_format(fmt, "MINFLUX data", path=path)
 
+    def _zarr_overwrite_mode(self, path: str | Path) -> str | None:
+        """Ask how an existing application Zarr store should be updated."""
+        target = Path(path)
+        if target.suffix.lower() != ".zarr":
+            target = target.with_suffix(".zarr")
+        if not target.exists():
+            return "replace"
+
+        message = QMessageBox(self)
+        message.setIcon(QMessageBox.Icon.Question)
+        message.setWindowTitle("Update existing Zarr dataset?")
+        message.setText(f"{target}\nalready exists.")
+        message.setInformativeText(
+            "Update processing only verifies that every canonical raw dataset "
+            "is identical, then replaces only MINFLUX Viewer state, derived data, "
+            "ROIs, overlay settings, and the project manifest. Embedded images and "
+            "raw MFX/MBM/search data are left untouched.\n\n"
+            "Replace complete store rewrites everything in the .zarr directory."
+        )
+        update_button = message.addButton(
+            "Update processing only", QMessageBox.ButtonRole.AcceptRole
+        )
+        replace_button = message.addButton(
+            "Replace complete store", QMessageBox.ButtonRole.DestructiveRole
+        )
+        cancel_button = message.addButton(QMessageBox.StandardButton.Cancel)
+        message.setDefaultButton(update_button)
+        message.setEscapeButton(cancel_button)
+        message.exec()
+        clicked = message.clickedButton()
+        if clicked is update_button:
+            return "viewer"
+        if clicked is replace_button:
+            return "replace"
+        return None
+
     def _save_as_format(self, fmt: str, title: str, *, path: str | None = None) -> None:
         ds = self._active_dataset_for_save()
         if ds is None:
             return
-        ext = {"mat": ".mat", "npy": ".npy", "json": ".json", "zarr": ".zarr", "msr": ".msr"}[fmt]
+        ext = _formats.extension_for(fmt)
         if path is None:
-            filters = {
-                "mat": "MATLAB (*.mat)",
-                "npy": "NumPy (*.npy)",
-                "json": "JSON (*.json)",
-                "zarr": "Zarr v2 (*.zarr)",
-                "msr": "MINFLUX (*.msr)",
-            }
-            path, _ = QFileDialog.getSaveFileName(
-                self, f"Save {title}", str(self._default_save_path(ds, ext)), filters[fmt]
-            )
-            if not path:
-                return
+            suggested = self._default_save_path(ds, ext)
+            if fmt == "zarr":
+                # A .zarr store is a DIRECTORY; the ordinary save dialog would
+                # enter an existing one instead of selecting it. A .zarr.zip is
+                # an ordinary file and needs no such treatment.
+                from .zarr_save_dialog import choose_zarr_save_path
+
+                selected_path = choose_zarr_save_path(
+                    self, f"Save {title}", suggested
+                )
+                if selected_path is None:
+                    return
+                path = str(selected_path)
+            else:
+                name_filter = _formats.label_for(fmt).replace("(.", "(*.")
+                path, _ = QFileDialog.getSaveFileName(
+                    self, f"Save {title}", str(suggested), name_filter
+                )
+                if not path:
+                    return
         from ..core.save import save_processed
 
+        zarr_context = (self._zarr_save_context(ds)
+                        if fmt in {"zarr", "zarr_zip"} else {})
+        # Only the directory store can be updated in place; a sealed package is
+        # always rewritten, and QFileDialog already confirmed the overwrite.
+        zarr_overwrite = self._zarr_overwrite_mode(path) if fmt == "zarr" else "replace"
+        if zarr_overwrite is None:
+            return
+        kwargs = dict(
+            data_path=path, fmt=fmt, content="raw",
+            include={"attrs": True, "derived": False, "recipe": True},
+            filter_mode="flag", zarr_overwrite=zarr_overwrite, **zarr_context,
+        )
+        action = "Updated processing in " if zarr_overwrite == "viewer" else "Saved "
+        if fmt in {"zarr", "zarr_zip"}:
+            # Writing a store is CPU-bound (compress + hash), ~15 s on a large
+            # acquisition. Off the UI thread so the window stays usable; the
+            # dataset is only read here, so nothing touches widgets.
+            name = Path(path).name
+
+            def work(report, _ds=ds, _kwargs=kwargs, _name=name):
+                report(f"Writing {_name}")
+                written = save_processed(_ds, **_kwargs)
+                report(f"Wrote {_name}")
+                return written
+
+            task = _ZarrIoTask(work, description=f"Saving {name}")
+            task.signals.stage.connect(lambda text: self._state.status_progress(text))
+            task.signals.done.connect(
+                lambda written, _a=action, _n=name: self._on_zarr_saved(written, _a, _n))
+            task.signals.failed.connect(
+                lambda message, _n=name: self._on_zarr_io_failed(
+                    _n, message, "Save failed"))
+            self._begin_zarr_io(task)
+            return
         try:
-            written = save_processed(
-                ds,
-                data_path=path,
-                fmt=fmt,
-                content="raw",
-                include={"attrs": True, "derived": False, "recipe": True},
-                filter_mode="flag",
-            )
+            written = save_processed(ds, **kwargs)
         except Exception as exc:
-            QMessageBox.critical(self, "Save failed", f"Could not save {title}:\n{exc}")
+            QMessageBox.critical(
+                self, "Save failed", f"Could not save {title}:\n{exc}")
             return
         self._state.log(
-            "Saved "
-            + ", ".join(str(p) for p in written),
+            action + ", ".join(str(p) for p in written),
             dataset_idx=self._state.active_idx,
         )
+
+    def _on_zarr_saved(self, written, action: str, name: str) -> None:
+        if self._is_shutting_down:
+            return
+        self._state.log(
+            action + ", ".join(str(path) for path in written),
+            dataset_idx=self._state.active_idx,
+        )
+        self._status_label.setText(f"{action.strip()} {name}.")
+
+    def _zarr_save_context(self, ds) -> dict:
+        """Overlay members, portable ROI geometry and linked MSR images."""
+        from dataclasses import asdict
+
+        from ..core.overlay import overlay_members
+        from ..core.roi_selection import ROI_MASKS_STATE_KEY
+
+        try:
+            anchor_idx = next(i for i, item in enumerate(self._state.datasets) if item is ds)
+        except StopIteration:
+            return {}
+        pairs = overlay_members(self._state, anchor_idx)
+        if len(pairs) < 2:
+            pairs = [(anchor_idx, ds)]
+        member_indices = {idx for idx, _member in pairs}
+        index_to_id = {idx: f"d{position:06d}" for position, (idx, _ds) in enumerate(pairs)}
+        mask_owner = {
+            roi_id: idx
+            for idx, member in pairs
+            for roi_id in dict(member.state.get(ROI_MASKS_STATE_KEY) or {})
+        }
+
+        candidates = list(self._state.rois.records)
+        adapter = self._state.rois.active_adapter
+        if adapter is not None:
+            try:
+                draft = adapter.current_record()
+            except Exception:
+                draft = None
+            if draft is not None and all(record.id != draft.id for record in candidates):
+                candidates.append(draft)
+        roi_records = []
+        for record in candidates:
+            context = dict(getattr(record, "context", {}) or {})
+            owner = context.get("dataset_idx")
+            if owner not in member_indices:
+                owner = mask_owner.get(record.id)
+            if owner not in member_indices:
+                continue
+            payload = asdict(record)
+            payload["dataset_id"] = index_to_id[int(owner)]
+            payload["context"] = {
+                key: value for key, value in context.items() if key != "dataset_idx"
+            }
+            roi_records.append(payload)
+
+        image_specs = []
+        seen_images: set[tuple[str, int]] = set()
+        sources: dict[str, set[str]] = {}
+        for _idx, member in pairs:
+            source = str(member.metadata.get("msr_source_path") or "")
+            did = str(member.metadata.get("msr_dataset_did") or "")
+            if source and did and Path(source).is_file():
+                sources.setdefault(source, set()).add(did)
+        if sources:
+            # Every image series of the source .msr travels with the store, not
+            # only the DID-linked ones. At save time the dataset can already
+            # show them all (View image series falls back to reopening the
+            # .msr), so leaving them out made the store depend on that external
+            # file: the confocal channels and overviews carry no source_did and
+            # were silently dropped. Ones with no matching dataset are written
+            # under images/unassigned by _export_embedded_images.
+            from ..core.obf_image_source import list_obf_image_series
+            for source, _dids in sources.items():
+                for entry in list_obf_image_series(source):
+                    key = (source, int(entry["raw_index"]))
+                    if key in seen_images:
+                        continue
+                    seen_images.add(key)
+                    image_specs.append({**entry, "msr_path": source})
+        members = [member for _idx, member in pairs]
+        return {
+            "related_datasets": members,
+            "roi_records": roi_records,
+            "image_specs": image_specs,
+            "project_name": Path(next(iter(sources), ds.name)).stem,
+        }
 
     def _save_as_spreadsheet(self) -> None:
         ds = self._active_dataset_for_save()
@@ -6267,6 +7019,17 @@ class MainWindow(QMainWindow):
         opts = dlg.options()
         from ..core.save import save_processed
 
+        # Overlay members, ROI geometry and linked images travel with BOTH Zarr
+        # forms; only the directory store can be updated in place.
+        zarr_context = (self._zarr_save_context(ds)
+                        if opts.get("fmt") in {"zarr", "zarr_zip"} else {})
+        zarr_overwrite = (
+            self._zarr_overwrite_mode(opts["data_path"])
+            if opts.get("fmt") == "zarr"
+            else "replace"
+        )
+        if zarr_overwrite is None:
+            return
         try:
             written = save_processed(
                 ds,
@@ -6276,18 +7039,22 @@ class MainWindow(QMainWindow):
                 content=opts.get("content", "raw"),
                 include=opts.get("include"),
                 filter_mode=opts.get("filter_mode", "flag"),
+                zarr_overwrite=zarr_overwrite,
+                **zarr_context,
             )
         except Exception as exc:
             QMessageBox.critical(
                 self, "Save failed", f"Could not save processed data:\n{exc}"
             )
             return
-        self._state.log(
-            f"Saved processed data: {', '.join(p.name for p in written)}", "INFO"
+        action = (
+            "Updated processing in" if zarr_overwrite == "viewer"
+            else "Saved processed data"
         )
+        self._state.log(f"{action}: {', '.join(p.name for p in written)}", "INFO")
         QMessageBox.information(
             self, "Save processed data",
-            "Saved:\n" + "\n".join(str(p) for p in written),
+            f"{action}:\n" + "\n".join(str(p) for p in written),
         )
 
     # ------------------------------------------------------------------
@@ -6336,7 +7103,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(delay_ms, lambda i=idx: self._run_post_load_computations(i))
 
     def _run_post_load_computations(self, idx: int) -> None:
-        """Kick off the one-time computed attributes (RIMF, localization
+        """Kick off the one-time computed attributes (Z scaling factor, localization
         precision, local density) as a chain of single-shot steps.
 
         Each step returns to the event loop before the next runs, so the Log
@@ -6350,21 +7117,21 @@ class MainWindow(QMainWindow):
         ds = self._state.datasets[idx]
         data_prefs = self._state.prefs.get("data", {})
         plot_prefs = self._state.prefs.get("plot", {})
-        rimf_requested = (
-            data_prefs.get("compute_rimf", False)
-            or plot_prefs.get("use_fixed_rimf", False)
+        z_scaling_factor_requested = (
+            data_prefs.get("estimate_z_scaling_factor", False)
+            or plot_prefs.get("use_fixed_z_scaling_factor", False)
         )
         needs = (
-            (rimf_requested and "rimf" not in ds.derived)
+            (z_scaling_factor_requested and "z_scaling_factor" not in ds.derived)
             or (data_prefs.get("compute_loc_prec", True) and "sigma_per_trace_nm" not in ds.derived)
             or (data_prefs.get("compute_local_density", True) and "den" not in ds.attr)
             or bool(ds.state.get("filter_specs"))
         )
         if needs:
-            self._state.log(f"Post-load processing of '{ds.name}' (RIMF, precision, density)…")
+            self._state.log(f"Post-load processing of '{ds.name}' (Z scaling factor, precision, density)…")
             self._state.status_progress(f"Processing '{ds.name}'")
         # Schedule (don't call) the first step so the line above paints first.
-        self._post_load_next(ds, self._post_load_rimf)
+        self._post_load_next(ds, self._post_load_z_scaling_factor)
 
     def _post_load_index(self, ds) -> "int | None":
         """Current index of *ds* by identity, or None if it was removed."""
@@ -6377,38 +7144,42 @@ class MainWindow(QMainWindow):
         """Run the next post-load step from the event loop (keeps the UI live)."""
         QTimer.singleShot(0, lambda: step(ds))
 
-    def _post_load_rimf(self, ds) -> None:
+    def _post_load_z_scaling_factor(self, ds) -> None:
         idx = self._post_load_index(ds)
         if idx is None:
             return
         data_prefs = self._state.prefs.get("data", {})
         plot_prefs = self._state.prefs.get("plot", {})
-        estimate_rimf = data_prefs.get("compute_rimf", False)
-        use_fixed_rimf = plot_prefs.get("use_fixed_rimf", False)
-        if (estimate_rimf or use_fixed_rimf) and "rimf" not in ds.derived:
+        estimate_z_scaling_factor = data_prefs.get("estimate_z_scaling_factor", False)
+        use_fixed_z_scaling_factor = plot_prefs.get("use_fixed_z_scaling_factor", False)
+        if (estimate_z_scaling_factor or use_fixed_z_scaling_factor) and "z_scaling_factor" not in ds.derived:
             import numpy as np
             if ds.prop.num_dim < 3:
                 # 2D data: Z is all zero, so anisotropy estimation is moot.
-                ds.set_rimf(1.0, source="2D (no z correction)")
-                ds.derived["rimf"] = np.asarray([1.0], dtype=float)
-                self._state.log(f"RIMF for '{ds.name}': 1.0 (2D dataset, computation skipped).")
+                ds.set_z_scaling_factor(1.0, source="2D (no z correction)")
+                ds.derived["z_scaling_factor"] = np.asarray([1.0], dtype=float)
+                self._state.log(f"Z scaling factor for '{ds.name}': 1.0 (2D dataset, computation skipped).")
                 self._state.notify_calibration_changed(idx)
-            elif use_fixed_rimf:
-                fixed = float(plot_prefs.get("rimf_value", 0.67))
-                ds.set_rimf(fixed, source="fixed (preference)")
-                ds.derived["rimf"] = np.asarray([fixed], dtype=float)
-                self._state.log(f"RIMF for '{ds.name}': {fixed:.4g} (fixed preference value).")
+            elif use_fixed_z_scaling_factor:
+                fixed = float(plot_prefs.get("z_scaling_factor", 0.67))
+                ds.set_z_scaling_factor(fixed, source="fixed (preference)")
+                ds.derived["z_scaling_factor"] = np.asarray([fixed], dtype=float)
+                self._state.log(f"Z scaling factor for '{ds.name}': {fixed:.4g} (fixed preference value).")
                 self._state.notify_calibration_changed(idx)
-            elif estimate_rimf:
+            elif estimate_z_scaling_factor:
                 # Heavy estimate: announce now and run it on the next event-loop
                 # turn so this line is painted before the (sub-second) compute.
-                self._state.log(f"Estimating anisotropy / RIMF of '{ds.name}'…")
-                self._state.status_progress(f"Estimating anisotropy of '{ds.name}'")
-                self._post_load_next(ds, self._post_load_rimf_estimate)
+                self._state.log(
+                    f"Estimating Z scaling factor from trace anisotropy for '{ds.name}'…"
+                )
+                self._state.status_progress(
+                    f"Estimating Z scaling factor for '{ds.name}'"
+                )
+                self._post_load_next(ds, self._post_load_z_scaling_factor_estimate)
                 return
         self._post_load_next(ds, self._post_load_loc_prec)
 
-    def _post_load_rimf_estimate(self, ds) -> None:
+    def _post_load_z_scaling_factor_estimate(self, ds) -> None:
         idx = self._post_load_index(ds)
         if idx is None:
             return
@@ -6421,25 +7192,30 @@ class MainWindow(QMainWindow):
             from ..analysis.trace_analysis import estimate_anisotropy_for_dataset
             res = estimate_anisotropy_for_dataset(ds)
             dt = time.perf_counter() - t0
-            if res is not None and np.isfinite(res["rimf"]):
-                value = float(res["rimf"])
+            if res is not None and np.isfinite(res["z_scaling_factor"]):
+                value = float(res["z_scaling_factor"])
                 if 0.5 <= value <= 1.0:
-                    ds.set_rimf(value, source="auto (estimate anisotropy)")
-                    ds.derived["rimf"] = np.asarray([value], dtype=float)
-                    ds.derived["rimf_sizes_x"] = res["x"].sizes
-                    ds.derived["rimf_sizes_y"] = res["y"].sizes
-                    ds.derived["rimf_sizes_z"] = res["z"].sizes
+                    ds.set_z_scaling_factor(
+                        value, source="estimated (trace anisotropy)"
+                    )
+                    ds.derived["z_scaling_factor"] = np.asarray([value], dtype=float)
+                    ds.derived["z_scaling_factor_sizes_x"] = res["x"].sizes
+                    ds.derived["z_scaling_factor_sizes_y"] = res["y"].sizes
+                    ds.derived["z_scaling_factor_sizes_z"] = res["z"].sizes
                     self._state.log(
-                        f"Computed RIMF for '{ds.name}': {value:.4g} (raw last-valid z, {dt:.1f}s)"
+                        f"Estimated Z scaling factor for '{ds.name}': {value:.4g} "
+                        f"(trace anisotropy, raw last-valid z, {dt:.1f}s)"
                     )
         except Exception as exc:
-            self._state.log(f"RIMF estimation failed for '{ds.name}': {exc}", "WARN")
-        if "rimf" not in ds.derived:
-            ds.set_rimf(1.0, source="auto (out of range → 1.0)")
-            ds.derived["rimf"] = np.asarray([1.0], dtype=float)
+            self._state.log(f"Z scaling factor estimation failed for '{ds.name}': {exc}", "WARN")
+        if "z_scaling_factor" not in ds.derived:
+            ds.set_z_scaling_factor(
+                1.0, source="estimate out of range (reset to 1.0)"
+            )
+            ds.derived["z_scaling_factor"] = np.asarray([1.0], dtype=float)
             shown = f"{value:.4g}" if value is not None else "failed"
             self._state.log(
-                f"RIMF for '{ds.name}': estimate {shown} outside [0.5, 1.0] — reset to 1.0.",
+                f"Z scaling factor for '{ds.name}': estimate {shown} outside [0.5, 1.0] — reset to 1.0.",
                 "WARN",
             )
         self._state.notify_calibration_changed(idx)
@@ -6529,7 +7305,7 @@ class MainWindow(QMainWindow):
 
         # For all-iteration loads ds.attr is not the last-valid materialization;
         # compute density at the last-valid selection too so mfx_get can
-        # broadcast `den` across iteration views (matches an iter_load="last"
+        # broadcast `den` across iteration views (matches a last-valid
         # load of the same file).
         if (
             data_prefs.get("compute_local_density", True)
@@ -6550,7 +7326,7 @@ class MainWindow(QMainWindow):
                     points_nm = np.column_stack([
                         np.asarray(x, dtype=float) * 1e9,
                         np.asarray(y, dtype=float) * 1e9,
-                        np.asarray(z, dtype=float) * 1e9 * ds.cali.RIMF,
+                        np.asarray(z, dtype=float) * 1e9 * ds.cali.z_scaling_factor,
                     ])
                     dims = 3 if ds.prop.num_dim == 3 else 2
                     density, method, detail = compute_local_density_for_points(
@@ -6576,9 +7352,9 @@ class MainWindow(QMainWindow):
         idx = self._post_load_index(ds)
         if idx is None:
             return
-        # Restored-from-metadata filters re-evaluate now that derived attributes
-        # (den, …) exist, so a re-opened processed dataset shows its saved filter
-        # state. (filter_specs is only populated here via a metadata sidecar.)
+        # Restored filters (metadata sidecar or Zarr viewer/state) re-evaluate
+        # now that derived attributes (den, …) exist, so a re-opened processed
+        # dataset shows its saved filter state.
         if ds.state.get("filter_specs"):
             try:
                 from ..core.loader import apply_saved_filters
@@ -6595,6 +7371,7 @@ class MainWindow(QMainWindow):
             self._scatter_windows,
             self._histogram_windows,
             self._attr_windows,
+            self._attr_cpu_windows,
             self._filter_dlgs,
         ):
             win = mapping.pop(idx, None)
@@ -6635,6 +7412,7 @@ class MainWindow(QMainWindow):
         mapping.update(moved)
 
     def _on_active_changed(self, idx: int) -> None:
+        self._sync_attribute_gpu_action()
         if not (0 <= idx < len(self._state.datasets)):
             return
         ds = self._state.datasets[idx]
@@ -6762,6 +7540,7 @@ class MainWindow(QMainWindow):
             self._render_windows,
             self._scatter_windows,
             self._attr_windows,
+            self._attr_cpu_windows,
         ]
         # Present only when the advanced renderer has been opened.
         advanced = getattr(self, "_advanced_render_windows", None)
@@ -6834,6 +7613,7 @@ class MainWindow(QMainWindow):
             self._render_windows,
             self._scatter_windows,
             self._attr_windows,
+            self._attr_cpu_windows,
         ):
             candidates.extend(registry.values())
             for view in registry.values():
@@ -7369,6 +8149,15 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
         self._ome_zarr_tasks.clear()
+        # A Zarr load/save in flight must not deliver into a closing window.
+        for task in list(getattr(self, "_zarr_io_tasks", [])):
+            for signal_name in ("stage", "done", "failed"):
+                try:
+                    getattr(task.signals, signal_name).disconnect()
+                except Exception:
+                    pass
+        if hasattr(self, "_zarr_io_tasks"):
+            self._zarr_io_tasks.clear()
 
         try:
             pool = QThreadPool.globalInstance()
@@ -7405,7 +8194,12 @@ class MainWindow(QMainWindow):
         for win in list(self._tiff_windows.values()):
             try: win.close()
             except Exception: pass
-        for mapping in (self._scatter_windows, self._histogram_windows, self._attr_windows):
+        for mapping in (
+            self._scatter_windows,
+            self._histogram_windows,
+            self._attr_windows,
+            self._attr_cpu_windows,
+        ):
             for win in list(mapping.values()):
                 try: win.close()
                 except Exception: pass

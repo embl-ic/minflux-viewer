@@ -58,15 +58,19 @@ def test_file_menu_save_as_layout(_app):
     assert texts[6:8] == ["Save...", "Save As"]
 
     save_as = w.menuSaveAs
+    # This application's own format plus the MINFLUX defaults. Picasso HDF5 is
+    # deliberately absent: the writer is kept and callable, but application-
+    # specific formats are not offered here (BACKLOG.md > Nice to have).
     assert [a.text() for a in save_as.actions()] == [
         "MINFLUX data formats (.mat; .npy; .json)",
         "MINFLUX .msr file (experimental)",
-        "Spreadsheet (.csv)",
+        "Custom table (.csv)...",
         "Zarr (.zarr v2) format",
-        "HDF5...",
+        "Zarr (.zarr.zip v2) single file",
         "OME-TIFF...",
         "OME-NGFF 0.5 / Zarr v3...",
     ]
+    assert hasattr(w, "actionSaveAsHdf5"), "the Picasso writer stays reachable"
     w.close()
 
 

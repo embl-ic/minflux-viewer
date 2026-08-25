@@ -77,8 +77,6 @@ from .precision_render import (
 # Static option lists — match the Plot tab screenshot
 # ---------------------------------------------------------------------------
 
-_ITER_OPTIONS = ["last", "all"]
-
 _RENDER_CMAPS = [
     "Hot", "Jet", "HiLo", "Glasbey", "Viridis", "Inferno", "Gray",
 ]
@@ -118,12 +116,16 @@ _XY_ORIGIN_OPTIONS = [
     ("origin at bottom left (Y increase upward)", "bottom_left"),
 ]
 
+from ..core import formats as _formats
+
 # Save/Export — file formats offered (Preferences > Data, and the Save dialog).
-_EXPORT_FORMATS = [
-    (".mat", "mat"), (".npy", "npy"), (".npz", "npz"),
-    (".json", "json"), (".csv", "csv"), (".zarr", "zarr"),
-]
-_EXPORT_FORMAT_DEFAULTS = ["mat", "npy", "npz", "json", "csv", "zarr", "msr"]
+# From the one registry; ``.msr`` gets its own row below with a disclaimer, so
+# it is excluded from the inline checkbox row here.
+_EXPORT_FORMATS = [(spec.extensions[0], spec.key)
+                   for spec in _formats.save_formats() if spec.key != "msr"]
+#: A fresh installation's ticked set. ``msr`` is absent: the writer is
+#: reverse-engineered, so it is opt-in.
+_EXPORT_FORMAT_DEFAULTS = _formats.default_save_formats()
 
 _MBM_TRANSFORM_TYPES = [
     "rigid XY + translational Z",
@@ -178,6 +180,36 @@ _SHORTCUT_LABELS = {
     "console": "Console",
     "preferences": "Preferences",
 }
+
+
+# Hover help for the Attribute Plot thinning preference. States the mechanism,
+# why it exists (measured), and what it costs the reader in accuracy.
+ATTRIBUTE_THINNING_TOOLTIP = (
+    "When a view holds more points than the display budget, the Attribute Plot\n"
+    "keeps spatial representatives from the points currently in view — never\n"
+    "a density-weighted or averaged summary, so no value is altered.\n"
+    "\n"
+    "Why: pyqtgraph draws one marker per point. Measured on a 246,437-\n"
+    "localization MINFLUX dataset, drawing every point costs ~0.2 s, and\n"
+    "browsing its 20.6 M raw iteration rows costs ~19 s for each redraw —\n"
+    "a cost repeated on every pan and zoom.\n"
+    "\n"
+    "Limitation: in a dense region the marker density no longer reflects the\n"
+    "data density. One row from every occupied spatial cell is retained before\n"
+    "remaining capacity is filled, so isolated features are protected. It is\n"
+    "recomputed for the visible range, so zooming in restores the omitted\n"
+    "points, and the plot's status line always reports how many of how many\n"
+    "points are drawn.\n"
+    "\n"
+    "Applies to the legacy pyqtgraph CPU renderer. GPU mode draws exact markers\n"
+    "up to its startup memory-derived limit. The separate View > Attribute Plot\n"
+    "(CPU fix) instead bulk-paints sparse views and screen-aggregates every\n"
+    "visible row in dense views.\n"
+    "\n"
+    "Turn off for a faithful plot of every point; expect seconds-long redraws\n"
+    "on multi-million-row selections. Each Attribute Plot can also switch it\n"
+    "from its right-click View menu, starting from this preference."
+)
 
 
 class _NoWheelComboBox(QComboBox):
@@ -453,24 +485,14 @@ class PreferencesDialog(QDialog):
         # "When opening data file:" section
         root.addWidget(self._section_label("When opening data file:"))
 
-        load_row = QHBoxLayout()
-        load_row.addWidget(QLabel("Load"))
-        self._iter_load = QComboBox()
-        self._iter_load.addItems(_ITER_OPTIONS)
-        self._iter_load.setMinimumWidth(190)
-        load_row.addWidget(self._iter_load)
-        load_row.addWidget(QLabel("iteration"))
-        load_row.addStretch()
-        root.addLayout(load_row)
-
         self._only_valid = QCheckBox("only valid localizations (vld check)")
+        self._only_valid.setToolTip(
+            "Keep only localizations flagged valid (vld).\n\n"
+            "Unchecking also shows the invalid ones, which is only visible for m2205 "
+            "data — there invalid localizations carry real coordinates. In m2410 "
+            "data they carry NaN coordinates, so they cannot be drawn and this "
+            "setting has no effect.")
         root.addLayout(self._indent(self._only_valid))
-
-        self._load_efc_cfr = QCheckBox("effective CFR and EFC iteration")
-        self._load_all_dcr = QCheckBox("all DCR iteration for channel separation")
-        # The screenshot shows the two EFC/DCR checkboxes indented under Load
-        root.addLayout(self._indent(self._load_efc_cfr))
-        root.addLayout(self._indent(self._load_all_dcr))
 
         # NEW 2D/3D threshold row
         z_row = QHBoxLayout()
@@ -485,6 +507,13 @@ class PreferencesDialog(QDialog):
         z_row.addWidget(QLabel("nm"))
         z_row.addStretch()
         root.addLayout(z_row)
+        z_tip = (
+            "Decides whether a dataset is 2D or 3D.\n\n"
+            "Even in a 2D acquisition Z is rarely exactly zero — it fluctuates in the "
+            "picometre range, which would otherwise read as 3D. Below this range Z is "
+            "flattened to zero and the dataset is treated as 2D.")
+        self._enforce_z.setToolTip(z_tip)
+        self._min_z_spin.setToolTip(z_tip)
         # Enable the spin box only when the checkbox is on
         self._enforce_z.toggled.connect(self._min_z_spin.setEnabled)
 
@@ -493,27 +522,30 @@ class PreferencesDialog(QDialog):
         # Compute section
         root.addWidget(self._section_label("Compute:"))
 
-        rimf_row = QHBoxLayout()
-        rimf_row.addSpacing(18)
-        self._compute_rimf = QCheckBox("estimate RIMF from anisotropy")
-        self._compute_rimf.setToolTip(
-            "Explicitly estimate the RIMF z-scaling factor on load from raw last-valid z. "
-            "Normal MINFLUX loads use the fixed 0.67 value instead."
+        z_scaling_factor_row = QHBoxLayout()
+        z_scaling_factor_row.addSpacing(18)
+        self._estimate_z_scaling_factor = QCheckBox(
+            "estimate Z scaling factor from trace anisotropy"
         )
-        rimf_row.addWidget(self._compute_rimf)
-        self._use_fixed_rimf = QCheckBox("use fixed value")
-        rimf_row.addWidget(self._use_fixed_rimf)
-        self._rimf_spin = QDoubleSpinBox()
-        self._rimf_spin.setRange(0.0, 10.0)
-        self._rimf_spin.setDecimals(4)
-        self._rimf_spin.setSingleStep(0.01)
-        self._rimf_spin.setMaximumWidth(90)
-        rimf_row.addWidget(self._rimf_spin)
-        rimf_row.addStretch()
-        root.addLayout(rimf_row)
+        self._estimate_z_scaling_factor.setToolTip(
+            "Estimate the dimensionless multiplier in z_calibrated = z_raw × factor "
+            "from raw last-valid trace dimensions. This empirical method does not "
+            "calculate the factor from refractive indices."
+        )
+        z_scaling_factor_row.addWidget(self._estimate_z_scaling_factor)
+        self._use_fixed_z_scaling_factor = QCheckBox("use fixed Z scaling factor")
+        z_scaling_factor_row.addWidget(self._use_fixed_z_scaling_factor)
+        self._z_scaling_factor_spin = QDoubleSpinBox()
+        self._z_scaling_factor_spin.setRange(0.0, 10.0)
+        self._z_scaling_factor_spin.setDecimals(4)
+        self._z_scaling_factor_spin.setSingleStep(0.01)
+        self._z_scaling_factor_spin.setMaximumWidth(90)
+        z_scaling_factor_row.addWidget(self._z_scaling_factor_spin)
+        z_scaling_factor_row.addStretch()
+        root.addLayout(z_scaling_factor_row)
 
-        self._compute_rimf.toggled.connect(self._on_compute_rimf_toggled)
-        self._use_fixed_rimf.toggled.connect(self._on_use_fixed_rimf_toggled)
+        self._estimate_z_scaling_factor.toggled.connect(self._on_estimate_z_scaling_factor_toggled)
+        self._use_fixed_z_scaling_factor.toggled.connect(self._on_use_fixed_z_scaling_factor_toggled)
 
         loc_prec_row = QHBoxLayout()
         loc_prec_row.addSpacing(18)
@@ -599,8 +631,9 @@ class PreferencesDialog(QDialog):
         self._export_format_checks["msr"] = msr_cb
         msr_row.addWidget(msr_cb)
         msr_note = QLabel(
-            "(with custom .msr writer — reopens in this viewer; may not open in "
-            "Abberior Imspector)")
+            "(off by default: our .msr writer is reverse-engineered, so the "
+            "container details are not authoritative. It reopens in this viewer "
+            "but may not open in Abberior Imspector.)")
         msr_note.setStyleSheet("color: gray; font-size: 11px;")
         msr_note.setWordWrap(True)
         msr_row.addWidget(msr_note, 1)
@@ -614,7 +647,7 @@ class PreferencesDialog(QDialog):
         self._export_content_raw.setToolTip(
             "The untouched all-iteration data; reloads and re-applies the recipe.")
         self._export_content_snapshot.setToolTip(
-            "The current view with RIMF/transform/filter baked in; self-contained.")
+            "The current view with Z scaling factor/transform/filter baked in; self-contained.")
         content_row.addWidget(self._export_content_raw)
         content_row.addSpacing(20)
         content_row.addWidget(self._export_content_snapshot)
@@ -753,6 +786,13 @@ class PreferencesDialog(QDialog):
         attr_colors.addWidget(self._attribute_background_color)
         attr_colors.addStretch(1)
         form_attr.addRow("Colors", attr_colors)
+
+        self._attribute_thinning = QCheckBox(
+            "Thin dense views to keep drawing responsive "
+            "(zoom in to see every point)"
+        )
+        self._attribute_thinning.setToolTip(ATTRIBUTE_THINNING_TOOLTIP)
+        form_attr.addRow(self._attribute_thinning)
 
         root.addWidget(grp_attr)
 
@@ -1165,19 +1205,19 @@ class PreferencesDialog(QDialog):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._draft.setdefault("file", {})["recent_files"] = dlg.result_paths()
 
-    def _on_compute_rimf_toggled(self, checked: bool) -> None:
+    def _on_estimate_z_scaling_factor_toggled(self, checked: bool) -> None:
         if checked:
-            self._use_fixed_rimf.blockSignals(True)
-            self._use_fixed_rimf.setChecked(False)
-            self._use_fixed_rimf.blockSignals(False)
-            self._rimf_spin.setEnabled(False)
+            self._use_fixed_z_scaling_factor.blockSignals(True)
+            self._use_fixed_z_scaling_factor.setChecked(False)
+            self._use_fixed_z_scaling_factor.blockSignals(False)
+            self._z_scaling_factor_spin.setEnabled(False)
 
-    def _on_use_fixed_rimf_toggled(self, checked: bool) -> None:
+    def _on_use_fixed_z_scaling_factor_toggled(self, checked: bool) -> None:
         if checked:
-            self._compute_rimf.blockSignals(True)
-            self._compute_rimf.setChecked(False)
-            self._compute_rimf.blockSignals(False)
-        self._rimf_spin.setEnabled(checked)
+            self._estimate_z_scaling_factor.blockSignals(True)
+            self._estimate_z_scaling_factor.setChecked(False)
+            self._estimate_z_scaling_factor.blockSignals(False)
+        self._z_scaling_factor_spin.setEnabled(checked)
 
     # ------------------------------------------------------------------
     # Data flow — draft ↔ widgets ↔ prefs
@@ -1204,19 +1244,16 @@ class PreferencesDialog(QDialog):
         self._check_updates.setChecked(bool(f.get("check_updates_on_startup", False)))
 
         # Data
-        self._iter_load.setCurrentText(str(d.get("iter_load", "last")))
         self._only_valid.setChecked(bool(d.get("only_valid_locs", True)))
-        self._load_efc_cfr.setChecked(bool(d.get("load_efc_cfr", True)))
-        self._load_all_dcr.setChecked(bool(d.get("load_all_dcr", False)))
         self._enforce_z.setChecked(bool(d.get("enforce_min_z_range", True)))
         self._min_z_spin.setValue(float(d.get("min_z_range_nm", 5.0)))
         self._min_z_spin.setEnabled(self._enforce_z.isChecked())
-        compute_rimf = bool(d.get("compute_rimf", False))
-        use_fixed = bool(p.get("use_fixed_rimf", False))
-        self._compute_rimf.setChecked(compute_rimf)
-        self._use_fixed_rimf.setChecked(use_fixed)
-        self._rimf_spin.setValue(float(p.get("rimf_value", 0.67)))
-        self._rimf_spin.setEnabled(use_fixed)
+        estimate_z_scaling_factor = bool(d.get("estimate_z_scaling_factor", False))
+        use_fixed = bool(p.get("use_fixed_z_scaling_factor", False))
+        self._estimate_z_scaling_factor.setChecked(estimate_z_scaling_factor)
+        self._use_fixed_z_scaling_factor.setChecked(use_fixed)
+        self._z_scaling_factor_spin.setValue(float(p.get("z_scaling_factor", 0.67)))
+        self._z_scaling_factor_spin.setEnabled(use_fixed)
         self._compute_loc_prec.setChecked(bool(d.get("compute_loc_prec", False)))
         self._set_combo_data(self._loc_prec_method, d.get("loc_precision_method", "stddev"))
         self._loc_prec_method.setEnabled(self._compute_loc_prec.isChecked())
@@ -1253,6 +1290,7 @@ class PreferencesDialog(QDialog):
                         _SCATTER_COLOR_BY_OPTIONS)
         self._set_combo(self._scatter_cmap_combo, p.get("scatter_cmap", "jet"), _SCATTER_CMAPS)
         self._set_combo_data(self._scatter_xy_origin_combo, p.get("scatter_xy_origin", "top_left"))
+        self._attribute_thinning.setChecked(bool(p.get("attribute_thinning", True)))
         self._attribute_data_color.set_rgba(viewer["attribute_data"])
         self._attribute_background_color.set_rgba(viewer["attribute_background"])
         self._histogram_data_color.set_rgba(viewer["histogram_data"])
@@ -1323,15 +1361,12 @@ class PreferencesDialog(QDialog):
         f["check_updates_on_startup"] = bool(self._check_updates.isChecked())
 
         # Data
-        d["iter_load"] = self._iter_load.currentText()
         d["only_valid_locs"] = bool(self._only_valid.isChecked())
-        d["load_efc_cfr"] = bool(self._load_efc_cfr.isChecked())
-        d["load_all_dcr"] = bool(self._load_all_dcr.isChecked())
         d["enforce_min_z_range"] = bool(self._enforce_z.isChecked())
         d["min_z_range_nm"] = float(self._min_z_spin.value())
-        d["compute_rimf"] = bool(self._compute_rimf.isChecked())
-        p["use_fixed_rimf"] = bool(self._use_fixed_rimf.isChecked())
-        p["rimf_value"] = float(self._rimf_spin.value())
+        d["estimate_z_scaling_factor"] = bool(self._estimate_z_scaling_factor.isChecked())
+        p["use_fixed_z_scaling_factor"] = bool(self._use_fixed_z_scaling_factor.isChecked())
+        p["z_scaling_factor"] = float(self._z_scaling_factor_spin.value())
         d["compute_loc_prec"] = bool(self._compute_loc_prec.isChecked())
         d["loc_precision_method"] = str(self._loc_prec_method.currentData() or "stddev")
         d["compute_local_density"] = bool(self._compute_density.isChecked())
@@ -1367,6 +1402,7 @@ class PreferencesDialog(QDialog):
         p["scatter_color_by"] = self._scatter_color_by_combo.currentText()
         p["scatter_cmap"] = self._scatter_cmap_combo.currentText()
         p["scatter_xy_origin"] = str(self._scatter_xy_origin_combo.currentData() or "top_left")
+        p["attribute_thinning"] = bool(self._attribute_thinning.isChecked())
         viewer["attribute_data"] = list(self._attribute_data_color.rgba())
         viewer["attribute_background"] = list(self._attribute_background_color.rgba())
         viewer["histogram_data"] = list(self._histogram_data_color.rgba())

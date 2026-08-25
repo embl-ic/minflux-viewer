@@ -180,6 +180,78 @@ def test_overlay_rotation_sign_tracks_displayed_y_direction():
     assert ScatterWindow._overlay_alignment_rotation_sign(scatter) == 1.0
 
 
+def test_dataset_information_manual_align_routes_to_existing_overlay_view():
+    from minflux_viewer.ui.main_window import MainWindow
+
+    started = []
+
+    class View:
+        _channels = [{"dataset_idx": 0}, {"dataset_idx": 1}]
+
+        @staticmethod
+        def start_manual_alignment_for_dataset(dataset_idx):
+            started.append(dataset_idx)
+            return True
+
+        @staticmethod
+        def show():
+            pass
+
+        @staticmethod
+        def raise_():
+            pass
+
+        @staticmethod
+        def activateWindow():
+            pass
+
+    class State:
+        datasets = [
+            SimpleNamespace(state={"overlay_id": "overlay-1"}),
+            SimpleNamespace(state={"overlay_id": "overlay-1"}),
+        ]
+
+        def __init__(self):
+            self.active = None
+            self.messages = []
+
+        def set_active(self, dataset_idx):
+            self.active = dataset_idx
+
+        def log(self, message, level="INFO", **_kwargs):
+            self.messages.append((message, level))
+
+    view = View()
+    owner = SimpleNamespace(
+        _state=State(),
+        _last_active_plot_window=view,
+        _render_windows={0: view},
+        _scatter_windows={},
+        _show_render=lambda _idx: None,
+    )
+
+    MainWindow._on_overlay_manual_alignment_requested(owner, 1)
+
+    assert owner._state.active == 1
+    assert started == [1]
+    assert owner._state.messages == []
+
+
+def test_render_and_scatter_public_manual_align_entry_uses_channel_handler():
+    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.scatter_window import ScatterWindow
+
+    for window_class in (RenderWindow, ScatterWindow):
+        calls = []
+        owner = SimpleNamespace(
+            _channels=[{"dataset_idx": 3}, {"dataset_idx": 8}],
+            _manual_align_channel=calls.append,
+        )
+        assert window_class.start_manual_alignment_for_dataset(owner, 8) is True
+        assert calls == [1]
+        assert window_class.start_manual_alignment_for_dataset(owner, 99) is False
+
+
 def test_scatter_alignment_nudge_is_physical_nm_and_steps_persist():
     from minflux_viewer.ui.scatter_window import ScatterWindow
 

@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..core.export_size import format_file_size
 from ..core.spreadsheet_loader import (
     COORD_ROLES,
     DEFAULT_PIXEL_SIZE_NM,
@@ -38,7 +39,9 @@ from ..core.spreadsheet_loader import (
     guess_mapping,
     guess_time_unit,
     guess_units,
+    is_canonical_minflux_table,
     read_table,
+    read_table_preview,
     representative_row_indices,
     table_stats,
 )
@@ -98,10 +101,27 @@ class SpreadsheetMappingDialog(QDialog):
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
+        count_prefix = "approximately " if self._table.n_rows_is_estimate else ""
         root.addWidget(QLabel(
-            f"<b>{self._table.n_rows:,}</b> rows · detected tool: "
+            f"<b>{count_prefix}{self._table.n_rows:,}</b> rows · detected tool: "
             f"<b>{self._table.detected_tool}</b>. Assign columns to roles "
             "(<b>x</b> and <b>y</b> are required); coordinate units are pre-filled."))
+        if self._table.preview_only:
+            size = format_file_size(Path(self._table.path).stat().st_size)
+            warning = QLabel(
+                f"<b>Large text table ({size}).</b> This dialog sampled only "
+                f"{max((column.values.size for column in self._table.columns), default=0):,} "
+                "rows from the beginning, middle and end; it did not parse the "
+                "complete file. The complete table is read only after you click OK. "
+                "CSV import can still take minutes; Zarr, MAT or NumPy is preferable "
+                "for routine MINFLUX work."
+            )
+            warning.setWordWrap(True)
+            warning.setStyleSheet(
+                "QLabel { background: #fff4cc; border: 1px solid #d6b84b; "
+                "padding: 6px; color: #4b3b00; }"
+            )
+            root.addWidget(warning)
 
         col_names = [c.name for c in self._table.numeric_columns()]
         grp = QGroupBox("Column mapping")
@@ -172,13 +192,20 @@ class SpreadsheetMappingDialog(QDialog):
 
     def _build_preview(self) -> QTableWidget:
         headers = self._table.headers
-        rows = representative_row_indices(self._table.n_rows)
+        sampled = self._table.sample_row_indices
+        if sampled is not None:
+            rows = list(range(len(sampled)))
+            displayed_rows = [int(value) for value in sampled]
+        else:
+            rows = representative_row_indices(self._table.n_rows)
+            displayed_rows = rows
         table = QTableWidget(len(rows), len(headers) + 1)
         table.setHorizontalHeaderLabels(["row"] + headers)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         col_by_name = {c.name: c for c in self._table.columns}
-        for vr, ri in enumerate(rows):
-            item = QTableWidgetItem(str(ri + 1))            # 1-based row number
+        for vr, (ri, displayed_row) in enumerate(zip(rows, displayed_rows)):
+            prefix = "≈" if self._table.n_rows_is_estimate and vr >= 12 else ""
+            item = QTableWidgetItem(f"{prefix}{displayed_row + 1}")
             item.setForeground(Qt.GlobalColor.gray)
             table.setItem(vr, 0, item)
             for c, h in enumerate(headers, start=1):
@@ -229,8 +256,22 @@ class SpreadsheetMappingDialog(QDialog):
         units = {role: cb.currentData() for role, cb in self._unit_combos.items()}
         pixel = float(self._px_spin.value()) if self._px_spin.isEnabled() else None
         time_unit = self._time_combo.currentData() if self._time_combo is not None else None
+        # The canonical MSR-reader table has richer semantics than a generic
+        # spreadsheet: one row is an iteration event, and every raw field must
+        # survive.  When the user accepted the untouched canonical mapping, use
+        # its dedicated loader instead of reducing it to x/y/z/tid/tim.
+        if (
+            is_canonical_minflux_table(self._table)
+            and mapping == self._mapping0
+            and units == self._units0
+            and time_unit == self._time_unit0
+        ):
+            from ..core.loader import load_csv
+
+            return load_csv(self._table.path, prefs=self._prefs)
+        table = read_table(self._table.path) if self._table.preview_only else self._table
         return build_dataset_from_mapping(
-            self._table, mapping, units=units, pixel_size_nm=pixel,
+            table, mapping, units=units, pixel_size_nm=pixel,
             time_unit=time_unit, prefs=self._prefs)
 
 
@@ -238,14 +279,14 @@ def import_spreadsheet(path, *, prefs: dict | None = None, parent=None):
     """Read *path*, pre-fill the mapping dialog from the value-based best guess,
     and build the dataset on OK. Always shows the dialog for confirmation (never a
     silent import); returns the dataset, or ``None`` if cancelled."""
-    table = read_table(path)
+    table = read_table_preview(path)
     dlg = SpreadsheetMappingDialog(table, prefs=prefs, parent=parent)
     if dlg.exec() != QDialog.DialogCode.Accepted:
         return None
     return dlg.build_dataset()
 
 
-def open_mapping_dialog(ambiguity: "AutoImportAmbiguity", parent=None):
+def open_mapping_dialog(ambiguity: AutoImportAmbiguity, parent=None):
     """Show the mapping dialog for an :class:`AutoImportAmbiguity` (from the
     headless :func:`auto_import`); return a dataset or ``None`` if cancelled."""
     dlg = SpreadsheetMappingDialog(

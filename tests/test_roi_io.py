@@ -29,7 +29,7 @@ def test_is_roi_json_file(tmp_path):
     # a plain list (filter preset) or non-roi dict is not a ROI set
     (tmp_path / "list.json").write_text(json.dumps([{"attribute": "efo"}]))
     assert is_roi_json_file(tmp_path / "list.json") is False
-    (tmp_path / "meta.json").write_text(json.dumps({"rimf": 0.67}))
+    (tmp_path / "meta.json").write_text(json.dumps({"z_scaling_factor": 0.67}))
     assert is_roi_json_file(tmp_path / "meta.json") is False
     assert is_roi_json_file(tmp_path / "missing.json") is False
 

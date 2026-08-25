@@ -107,8 +107,8 @@ class HlyBPairwiseDialog(QDialog):
         self._zscale = self._dspin(0.1, 2.0, d.z_scaling_factor, 4, 0.01, "")
         self._zscale.setToolTip(
             "Factor applied to raw z before analysis (z_nm = raw_z × this). "
-            "Defaults to the dataset's current RIMF.")
-        form.addRow("Z scaling (RIMF):", self._zscale)
+            "Defaults to the dataset's current Z scaling factor.")
+        form.addRow("Z scaling (Z scaling factor):", self._zscale)
 
         self._r_max = self._dspin(10.0, 500.0, d.r_max_nm, 0, 5.0, " nm")
         self._r_max.setToolTip("Largest pair distance included in the profile.")

@@ -8,6 +8,8 @@ localization datasets.
 
 from __future__ import annotations
 
+import dataclasses
+
 import json
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -615,3 +617,123 @@ def _local_name(tag: str) -> str:
 
 def _strip_ns(element) -> dict[str, str]:
     return {str(k).rsplit("}", 1)[-1]: str(v) for k, v in element.attrib.items()}
+
+
+class EmbeddedImageSource:
+    """Several TIFF files presented as ONE series list.
+
+    A ``.zarr`` store keeps each image series as its own OME-TIFF, so a dataset
+    restored from a store has *N files* where a ``.msr`` has *N stacks inside one
+    file*. :class:`TiffImageSource` switches series within a single file and
+    :class:`~minflux_viewer.core.obf_image_source.ObfImageSource` switches stacks
+    within a single ``.msr``; this does the same across a list of files, so the
+    viewer's Series dropdown behaves identically whichever the dataset came from.
+
+    Each entry is a ``(file, series-within-that-file)`` pair, so a multi-series
+    TIFF still contributes all of its series.
+    """
+
+    def __init__(self, paths, names=None, *, series_index: int = 0) -> None:
+        import tifffile
+
+        files = [Path(p) for p in paths]
+        if not files:
+            raise ValueError("No embedded images to open")
+        labels = list(names or [])
+
+        self._entries: list[tuple[Path, int, str]] = []
+        for position, path in enumerate(files):
+            label = str(labels[position]) if position < len(labels) else path.stem
+            try:
+                with tifffile.TiffFile(str(path)) as handle:
+                    count = max(len(handle.series), 1)
+            except Exception:
+                # A file that cannot be read is skipped rather than aborting the
+                # whole list: one bad image must not hide the others.
+                continue
+            for inner in range(count):
+                name = label if count == 1 else f"{label} [{inner + 1}]"
+                self._entries.append((path, inner, name))
+        if not self._entries:
+            raise ValueError("None of the embedded images could be read")
+
+        self._active: TiffImageSource | None = None
+        self.series_index = 0
+        self.set_series(series_index if 0 <= series_index < len(self._entries) else 0)
+
+    # -- series ---------------------------------------------------------------
+    @property
+    def series_count(self) -> int:
+        return len(self._entries)
+
+    def series_names(self) -> list[str]:
+        return [name for _path, _inner, name in self._entries]
+
+    def series_summaries(self) -> list[dict]:
+        import tifffile
+
+        out: list[dict] = []
+        for index, (path, inner, name) in enumerate(self._entries):
+            shape: tuple[int, ...] = ()
+            dtype = ""
+            try:
+                with tifffile.TiffFile(str(path)) as handle:
+                    series = handle.series[inner]
+                    shape = tuple(int(v) for v in getattr(series, "shape", ()) or ())
+                    dtype = str(getattr(series, "dtype", ""))
+            except Exception:
+                pass
+            out.append({
+                "index": index,
+                "name": name,
+                "shape_str": " x ".join(str(v) for v in shape),
+                "dtype": dtype,
+            })
+        return out
+
+    def set_series(self, index: int) -> None:
+        index = int(index)
+        if not (0 <= index < len(self._entries)):
+            raise IndexError(f"Embedded image index {index} is out of range")
+        path, inner, _name = self._entries[index]
+        if self._active is not None:
+            self._active.close()
+        self._active = TiffImageSource(path, series_index=inner)
+        self.series_index = index
+        # The dropdown lists every embedded image, not the series of one file.
+        # TiffMetadata is frozen, so present a copy with the list-wide counts.
+        self.metadata = dataclasses.replace(
+            self._active.metadata,
+            series_count=len(self._entries),
+            series_index=index,
+        )
+
+    # -- delegation -----------------------------------------------------------
+    @property
+    def path(self) -> Path:
+        """The file the active series is read from.
+
+        For a sealed package this is the temp file the member was extracted to,
+        whose name carries a cache hash — use :attr:`display_name` for anything
+        the user sees.
+        """
+        return self._entries[self.series_index][0]
+
+    @property
+    def display_name(self) -> str:
+        """The image's own name, never the temp file it was extracted to."""
+        return self._entries[self.series_index][2]
+
+    def axis_size(self, axis: str) -> int:
+        return self._active.axis_size(axis)
+
+    def active_roi(self):
+        return self._active.active_roi()
+
+    def read_plane(self, *, t: int = 0, c: int = 0, z: int = 0) -> np.ndarray:
+        return self._active.read_plane(t=t, c=c, z=z)
+
+    def close(self) -> None:
+        if self._active is not None:
+            self._active.close()
+            self._active = None

@@ -13,6 +13,7 @@ def _points():
     p["xyz"] = [[1e-9, 2e-9, 3e-9], [2e-9, 4e-9, 6e-9], [3e-9, 6e-9, 9e-9],
                 [0.0, 0.0, 0.0], [1e-9, 0.0, 0.0]]
     p["tim"] = [10.0, 5.0, 0.0, 0.0, 1.0]      # bead 10 out of time order
+    p["str"] = [110.0, 105.0, 100.0, 200.0, 220.0]
     return p
 
 
@@ -35,6 +36,8 @@ def test_nm_median_rezero_and_time_zeroing():
     # xyz in nm, re-zeroed to per-axis median, reordered by time
     np.testing.assert_allclose(b["xyz_nm"], [[1, 2, 3], [0, 0, 0], [-1, -2, -3]])
     np.testing.assert_allclose(np.median(b["xyz_nm"], axis=0), [0, 0, 0], atol=1e-9)
+    # PMT signal comes from the raw ``str`` field and follows the same time sort.
+    np.testing.assert_allclose(b["pmt_signal"], [100.0, 105.0, 110.0])
 
 
 def test_unused_bead_with_no_points_skipped():
@@ -66,7 +69,7 @@ def test_nice_time_ticks():
     assert _nice_time_ticks(5.0, 5.0) == [5.0]
 
 
-def test_hover_tip_shows_the_two_unplotted_axes():
+def test_hover_tip_shows_unplotted_axes():
     import pytest
     pytest.importorskip("PyQt6")
     from minflux_viewer.plugins.msr_reader.beads_drift_dialog import (
@@ -77,13 +80,44 @@ def test_hover_tip_shows_the_two_unplotted_axes():
     # one point: X=33.7, Y=20.5, Z=-50.3, T=1137; idx 0
     idxs = np.array([0])
     axis_vals = {0: np.array([33.7]), 1: np.array([20.5]),
-                 2: np.array([-50.3]), "t": np.array([1137.0])}
-    # _PLOT_KEYS order: Y-X, X-T, Y-T, Z-T → datatip shows the two unplotted axes
+                 2: np.array([-50.3]), "t": np.array([1137.0]),
+                 "str": np.array([123456.0])}
+    # Positional plots show the two unplotted spatial/time axes. PMT-time shows XYZ.
     expected = [
         "0: Z (nm): -50.3; time (sec): 1137",   # Y vs X → Z, time
         "0: Y (nm): 20.5; Z (nm): -50.3",        # X vs T → Y, Z
         "0: X (nm): 33.7; Z (nm): -50.3",        # Y vs T → X, Z
         "0: X (nm): 33.7; Y (nm): 20.5",         # Z vs T → X, Y
+        "0: X (nm): 33.7; Y (nm): 20.5; Z (nm): -50.3",
     ]
     for (xi, yi), want in zip(_PLOT_KEYS, expected):
         assert _build_point_tips(idxs, axis_vals, xi, yi) == [want]
+
+
+def test_dialog_adds_shared_pmt_panels_on_white_background(qtbot):
+    import pytest
+    pytest.importorskip("PyQt6")
+    from PyQt6.QtGui import QColor
+
+    from minflux_viewer.plugins.msr_reader.beads_drift_dialog import BeadsDriftDialog
+
+    beads = extract_bead_drift(_points(), _PBG, ["R1", "R2"])
+    dialog = BeadsDriftDialog([{"name": "dataset", "beads": beads}], info_mode=True)
+    qtbot.addWidget(dialog)
+
+    assert len(dialog._plots) == 10                         # five plots × two beads
+    assert all(plot.backgroundBrush().color() == QColor("white")
+               for plot, _x_range, _y_range in dialog._plots)
+
+    # Every PMT panel uses the complete dataset's str range, not a per-bead range.
+    assert dialog._plots[4][2] == (100.0, 220.0)
+    assert dialog._plots[9][2] == (100.0, 220.0)
+    assert (
+        dialog._plots[9][0].getViewBox().linkedView(1)
+        is dialog._plots[4][0].getViewBox()
+    )
+
+    # X/Y/Z/PMT time plots in every bead row share one interactive time axis.
+    time_master = dialog._plots[1][0].getViewBox()
+    for index in (2, 3, 4, 6, 7, 8, 9):
+        assert dialog._plots[index][0].getViewBox().linkedView(0) is time_master

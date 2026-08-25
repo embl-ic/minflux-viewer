@@ -175,7 +175,9 @@ def test_right_click_outside_the_selection_keeps_the_single_row_menu(manager, mo
 
     entries = _menu_entries(mgr, monkeypatch, 3)
     assert not _BATCH_ENTRIES & set(entries)
-    assert entries[:4] == ["Reset", "Save as…", "Close", "Duplicate"]
+    assert entries[:6] == [
+        "Open file location", "", "Reset", "Save as…", "Close", "Duplicate",
+    ]
 
 
 def test_a_single_selection_keeps_the_single_row_menu(manager, monkeypatch):
@@ -184,7 +186,9 @@ def test_a_single_selection_keeps_the_single_row_menu(manager, monkeypatch):
 
     entries = _menu_entries(mgr, monkeypatch, 2)
     assert not _BATCH_ENTRIES & set(entries)
-    assert entries[:4] == ["Reset", "Save as…", "Close", "Duplicate"]
+    assert entries[:6] == [
+        "Open file location", "", "Reset", "Save as…", "Close", "Duplicate",
+    ]
 
 
 # --- batch actions --------------------------------------------------------

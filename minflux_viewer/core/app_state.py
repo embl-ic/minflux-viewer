@@ -49,7 +49,7 @@ def format_progress_bar(fraction: float, *, width: int = 10, done: bool = False)
 class _TaskProgress:
     """Handle yielded by :meth:`AppState.task` — call ``update(fraction)``."""
 
-    def __init__(self, state: "AppState", header: str = "") -> None:
+    def __init__(self, state: AppState, header: str = "") -> None:
         self._state = state
         self._header = header
         self._last_pct = -1
@@ -71,6 +71,8 @@ class _TaskProgress:
 #: ``num_file_history`` of these). ~0.1-0.27 MB of paths — negligible.
 MAX_RECENT_REMEMBERED: int = 1000
 
+from . import formats as _formats
+
 DEFAULT_PREFS: dict = {
     "file": {
         "num_file_history": 5,
@@ -84,12 +86,9 @@ DEFAULT_PREFS: dict = {
         "temp_folder": "",           # app-wide temp dir; empty = use system temp
     },
     "data": {
-        "iter_load": "last",            # "last" | "all"
-        "load_efc_cfr": True,
-        "load_all_dcr": False,
-        # Fixed 0.67 is the normal MINFLUX z correction.  Anisotropy-based
-        # estimation is an explicit opt-in in Preferences.
-        "compute_rimf": False,
+        # Optional empirical Z scaling; estimation and a fixed factor are both
+        # explicit opt-ins in Preferences.
+        "estimate_z_scaling_factor": False,
         "compute_loc_prec": True,
         "loc_precision_method": "stddev",  # "stddev" | "crlb" | "frc"
         "compute_local_density": True,
@@ -106,7 +105,10 @@ DEFAULT_PREFS: dict = {
         "show_histogram": False,
         "show_render": True,
         # When saving/exporting a data file (defaults that shrink the Save dialog):
-        "export_formats": ["mat", "npy", "npz", "json", "csv", "zarr", "msr"],  # offered in the dialog
+        # Offered in the save dialog, from the one format registry. ``msr`` is
+        # opt-in there: the writer is reverse-engineered, so it is available
+        # but not ticked by default.
+        "export_formats": _formats.default_save_formats(),
         "export_content": ["raw", "snapshot"],   # raw canonical / processed snapshot
         "export_include_attrs": True,            # original properties & attributes
         "export_include_derived": False,         # freeze derived attributes (snapshot)
@@ -114,8 +116,8 @@ DEFAULT_PREFS: dict = {
         "export_filter_mode": "flag",            # "apply" (drop rows) | "flag" (ftr col)
     },
     "plot": {
-        "rimf_value": 0.67,
-        "use_fixed_rimf": False,
+        "z_scaling_factor": 0.67,
+        "use_fixed_z_scaling_factor": False,
         "render_pixel_size": 2,
         "render_cmap": "hot",
         "render_xy_origin": "top_left",     # "top_left" | "bottom_left"
@@ -123,6 +125,10 @@ DEFAULT_PREFS: dict = {
         "scatter_color_by": "tid",
         "scatter_cmap": "jet",
         "scatter_xy_origin": "top_left",    # "top_left" | "bottom_left"
+        # Attribute Plot: draw a uniform subsample when the view holds more
+        # points than the display budget (ui/attribute_window.py). Off draws
+        # every point, which costs ~19 s per redraw at 20 M raw rows.
+        "attribute_thinning": True,
         # Application-owned named gradients created from the LUT dialog.
         # Values are JSON-compatible ``{"stops": [[position, RGBA], ...]}``.
         "custom_colormaps": {},
@@ -250,16 +256,19 @@ def _merge(saved: dict, defaults: dict, _path: tuple[str, ...] = ()) -> dict:
 #: running one against it can only contradict it. That is not hypothetical: the
 #: fresh-install path is ``_migrate_prefs(deepcopy(DEFAULT_PREFS))``, and a fresh
 #: dict carries no ``_migrations`` key, so every block below used to fire at once
-#: and overwrite the declared defaults — ``v036`` forced ``use_fixed_rimf`` back to
-#: ``True`` no matter what ``DEFAULT_PREFS`` said, and ``v021`` sets ``compute_rimf``
-#: to ``True`` against a ``False`` default (saved only by ``v036`` running after it).
+#: and overwrite the declared defaults — ``v036`` forced
+#: ``use_fixed_z_scaling_factor`` back to ``True`` no matter what
+#: ``DEFAULT_PREFS`` said, and ``v021`` sets ``estimate_z_scaling_factor`` to
+#: ``True`` against a ``False`` default (saved only by ``v036`` running after it).
 #: Changing a default in ``DEFAULT_PREFS`` must be enough on its own.
 _MIGRATION_KEYS: tuple[str, ...] = (
     "v021_compute_show_defaults",
     "v035_update_check_optin",
-    "v036_fixed_rimf_default",
+    "v036_fixed_z_scaling_factor_default",
     "v037_metric_overlay_alignment_steps",
     "v041_global_rgba_colours",
+    "v042_linear_iteration_colours",
+    "v043_msr_export_opt_in",
 )
 
 
@@ -306,9 +315,28 @@ def _migrate_prefs(prefs: dict) -> dict:
     attrs["computed"] = computed
 
     migrations = prefs.setdefault("_migrations", {})
+
+    # Preferences are the one established persisted representation of this
+    # setting. Preserve choices saved by releases that used the old terminology,
+    # then remove those keys so all live state uses the canonical names. Recipe
+    # and dataset metadata are intentionally not aliased: those formats are not
+    # yet stable and should start with the correct schema.
+    legacy_v036 = migrations.pop("v036_fixed_rimf_default", None)
+    if legacy_v036 is not None:
+        migrations.setdefault(
+            "v036_fixed_z_scaling_factor_default", bool(legacy_v036)
+        )
+    data = prefs.setdefault("data", {})
+    plot = prefs.setdefault("plot", {})
+    if "compute_rimf" in data:
+        data["estimate_z_scaling_factor"] = bool(data.pop("compute_rimf"))
+    if "use_fixed_rimf" in plot:
+        plot["use_fixed_z_scaling_factor"] = bool(plot.pop("use_fixed_rimf"))
+    if "rimf_value" in plot:
+        plot["z_scaling_factor"] = float(plot.pop("rimf_value"))
     if not migrations.get("v021_compute_show_defaults"):
         data = prefs.setdefault("data", {})
-        data["compute_rimf"] = True
+        data["estimate_z_scaling_factor"] = True
         data["compute_loc_prec"] = True
         data["compute_local_density"] = True
         data["show_data_info"] = True
@@ -321,14 +349,14 @@ def _migrate_prefs(prefs: dict) -> dict:
     if not migrations.get("v035_update_check_optin"):
         prefs.setdefault("file", {})["check_updates_on_startup"] = False
         migrations["v035_update_check_optin"] = True
-    # Project-wide RIMF policy: ordinary real MINFLUX loads use the established
-    # 0.67 z factor.  Estimation remains available as an explicit opt-in.
-    if not migrations.get("v036_fixed_rimf_default"):
-        prefs.setdefault("data", {})["compute_rimf"] = False
+    # Project-wide Z scaling policy: ordinary real MINFLUX loads use the
+    # established factor 0.67. Estimation remains an explicit opt-in.
+    if not migrations.get("v036_fixed_z_scaling_factor_default"):
+        prefs.setdefault("data", {})["estimate_z_scaling_factor"] = False
         plot = prefs.setdefault("plot", {})
-        plot["use_fixed_rimf"] = True
-        plot["rimf_value"] = 0.67
-        migrations["v036_fixed_rimf_default"] = True
+        plot["use_fixed_z_scaling_factor"] = True
+        plot["z_scaling_factor"] = 0.67
+        migrations["v036_fixed_z_scaling_factor_default"] = True
     if not migrations.get("v037_metric_overlay_alignment_steps"):
         plot = prefs.setdefault("plot", {})
         plot.pop("render_alignment_translation_px", None)
@@ -337,6 +365,43 @@ def _migrate_prefs(prefs: dict) -> dict:
             if float(plot.get(key, 0.5)) == 0.5:
                 plot[key] = 0.1
         migrations["v037_metric_overlay_alignment_steps"] = True
+    if not migrations.get("v043_msr_export_opt_in"):
+        # The .msr writer is reverse-engineered from the container, so it is now
+        # opt-in rather than on by default. An existing installation has "msr"
+        # in its saved list only because it was the old default, not because the
+        # user chose it -- so retire it. Anyone who wants it re-ticks one box,
+        # and .npz goes at the same time (retired as a save format).
+        data = prefs.setdefault("data", {})
+        formats = data.get("export_formats")
+        if isinstance(formats, list):
+            data["export_formats"] = [f for f in formats if f not in {"msr", "npz"}]
+        migrations["v043_msr_export_opt_in"] = True
+    if not migrations.get("v042_linear_iteration_colours"):
+        # The stacked-iteration palette became a sequential ramp. Saved colours
+        # win over defaults, so an existing installation would keep the old
+        # categorical set forever — but only replace it when it is still that
+        # set, so a deliberately customised palette survives.
+        from ..colors import DEFAULT_COLOR_PREFS
+
+        legacy = {
+            "1st": [31, 119, 180, 255], "2nd": [255, 127, 14, 255],
+            "3rd": [44, 160, 44, 255], "4th": [214, 39, 40, 255],
+            "5th": [148, 103, 189, 255], "6th": [140, 86, 75, 255],
+            "7th": [227, 119, 194, 255], "8th": [127, 127, 127, 255],
+            "9th": [188, 189, 34, 255], "10th": [23, 190, 207, 255],
+        }
+        series = (
+            prefs.setdefault("colors", {})
+            .setdefault("functions", {})
+            .get("Iteration series")
+        )
+        if isinstance(series, dict) and all(
+            list(series.get(key, [])) == value for key, value in legacy.items()
+        ):
+            prefs["colors"]["functions"]["Iteration series"] = copy.deepcopy(
+                DEFAULT_COLOR_PREFS["functions"]["Iteration series"]
+            )
+        migrations["v042_linear_iteration_colours"] = True
     if not migrations.get("v041_global_rgba_colours"):
         # Consolidate the old name + separate-alpha fields into the one RGBA
         # registry.  The merge step has already supplied the new defaults, while
@@ -398,6 +463,10 @@ class AppState(QObject):
         Emitted when ``dataset[idx].filter_mask`` is modified.
     attributes_changed(int)
         Emitted when user-visible columns are added to an existing dataset.
+    overlay_transform_changed(int)
+        Emitted when a dataset's live overlay/display transform changes.
+    overlay_manual_alignment_requested(int)
+        Requests the existing interactive Manual align mode for a dataset.
     roi_selection_changed(int)
         Emitted when a dataset's cached ROI selection mask is modified.
     status_message(str)
@@ -409,7 +478,9 @@ class AppState(QObject):
     active_changed  = pyqtSignal(int)
     filter_changed  = pyqtSignal(int)
     attributes_changed = pyqtSignal(int)
-    calibration_changed = pyqtSignal(int)   # RIMF / z-scaling changed for a dataset
+    calibration_changed = pyqtSignal(int)   # Z scaling factor changed for a dataset
+    overlay_transform_changed = pyqtSignal(int)
+    overlay_manual_alignment_requested = pyqtSignal(int)
     roi_selection_changed = pyqtSignal(int)
     colors_changed = pyqtSignal(object)  # {paths, previous, current}
     status_message  = pyqtSignal(str)
@@ -440,6 +511,10 @@ class AppState(QObject):
         self.rois = RoiStore(self)
         from ..scripting import create_facade
         self.mfv = create_facade(self)
+        # Runtime-only startup probe populated by ``minflux_viewer.__main__``.
+        # Tests and embedders that construct AppState without a QApplication
+        # leave it as None; viewers then retain their existing lazy checks.
+        self.gpu_capabilities = None
         # Batch importers can flip this while adding multiple datasets, then
         # open one grouped render view after the batch is complete.
         self.suspend_auto_render: bool = False
@@ -601,12 +676,26 @@ class AppState(QObject):
             self.roi_selection_changed.emit(idx)
 
     def notify_calibration_changed(self, idx: int | None = None) -> None:
-        """Notify views that a dataset's calibration (RIMF / z-scaling) changed
-        so geometry-dependent displays re-pull the RIMF-corrected coordinates."""
+        """Notify views that a dataset's Z scaling factor changed so
+        geometry-dependent displays re-pull the calibrated coordinates."""
         if idx is None:
             idx = self._active_idx
         if idx is not None:
             self.calibration_changed.emit(idx)
+
+    def notify_overlay_transform_changed(self, idx: int | None = None) -> None:
+        """Notify coordinate views that a dataset's live overlay transform changed."""
+        if idx is None:
+            idx = self._active_idx
+        if idx is not None:
+            self.overlay_transform_changed.emit(idx)
+
+    def request_overlay_manual_alignment(self, idx: int | None = None) -> None:
+        """Ask the UI to enter interactive overlay alignment for a dataset."""
+        if idx is None:
+            idx = self._active_idx
+        if idx is not None:
+            self.overlay_manual_alignment_requested.emit(idx)
 
     def log(
         self,
@@ -761,7 +850,10 @@ class AppState(QObject):
             path_obj = Path(path)
         except (TypeError, ValueError):
             return
-        if not path_obj.is_file():
+        if not (
+            path_obj.is_file()
+            or (path_obj.is_dir() and path_obj.suffix.lower() == ".zarr")
+        ):
             return
         recent = self.prefs["file"].setdefault("recent_files", [])
         if path in recent:

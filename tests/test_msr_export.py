@@ -47,7 +47,7 @@ def _mbm():
     return arr
 
 
-@pytest.mark.parametrize("fmt", ["mat", "npy", "npz", "json", "csv", "zarr"])
+@pytest.mark.parametrize("fmt", ["mat", "npy", "json", "csv", "zarr"])
 def test_legacy_mfx_is_flat_and_all_fields_survive_each_export(tmp_path, fmt):
     written = export_arrays(
         str(tmp_path), "channel", [fmt], _legacy_mfx(), _mbm(),
@@ -55,8 +55,12 @@ def test_legacy_mfx_is_flat_and_all_fields_survive_each_export(tmp_path, fmt):
     )
     mfx_path = tmp_path / f"channel_mfx.{fmt}"
     mbm_path = tmp_path / f"channel_mbm.{fmt}"
-    assert str(mfx_path) in written
-    assert str(mbm_path) in written
+    if fmt == "zarr":
+        zarr_path = tmp_path / "channel.zarr"
+        assert written == [str(zarr_path)]
+    else:
+        assert str(mfx_path) in written
+        assert str(mbm_path) in written
 
     if fmt == "mat":
         from scipy.io import loadmat
@@ -80,7 +84,13 @@ def test_legacy_mfx_is_flat_and_all_fields_survive_each_export(tmp_path, fmt):
         header = mfx_path.read_text(encoding="utf-8").splitlines()[0].split(",")
         assert {"loc_x", "loc_y", "loc_z", "itr", "efo", "cfr", "tid"} <= set(header)
         loaded = L.load_csv(str(mfx_path))
-        assert loaded.prop.num_loc == 9
+        # A canonical raw CSV is one row per (localization x iteration). It must
+        # reassemble exactly like the .zarr branch below - 9 raw rows become 3
+        # localizations with 3 iterations - not 9 separate localizations.
+        assert len(loaded.mfx_raw["itr"]) == 9
+        assert loaded.prop.num_loc == 3
+        assert loaded.prop.num_itr == 3
+        assert {"efo", "cfr", "tid"} <= set(loaded.attr.keys())
     elif fmt == "npz":
         with np.load(mfx_path, allow_pickle=False) as payload:
             assert {"loc_x", "loc_y", "loc_z", "itr", "efo", "cfr", "tid"} <= set(payload.files)
@@ -88,14 +98,17 @@ def test_legacy_mfx_is_flat_and_all_fields_survive_each_export(tmp_path, fmt):
     elif fmt == "zarr":
         import zarr
 
-        root = zarr.open(str(mfx_path), mode="r")
-        assert {"loc_x", "loc_y", "loc_z", "itr", "efo", "cfr", "tid"} <= set(root.array_keys())
-        assert "itr_itr" not in set(root.array_keys())
-        loaded = L.load_zarr(str(mfx_path))
+        root = zarr.open(str(zarr_path), mode="r")
+        assert {"loc_x", "loc_y", "loc_z", "itr", "efo", "cfr", "tid"} <= set(
+            root["mfx"].array_keys()
+        )
+        assert "itr_itr" not in set(root["mfx"].array_keys())
+        assert "grd/mbm/points" in root
+        loaded = L.load_zarr(str(zarr_path))
         assert len(loaded.mfx_raw["itr"]) == 9
         assert {"efo", "cfr", "tid"} <= set(loaded.attr.keys())
-        with pytest.raises(ValueError, match="canonical MINFLUX Zarr export"):
-            L.load_zarr(str(mbm_path))
+        np.testing.assert_array_equal(loaded.metadata["mbm_points"], _mbm())
+        assert loaded.metadata["mbm_used"] == ["R1"]
 
 
 def test_msr_export_roundtrips_canonical_mfx_and_mbm(tmp_path):
@@ -126,3 +139,39 @@ def test_export_refuses_to_overwrite_existing_output(tmp_path):
     export_arrays(str(tmp_path), "channel", ["npy"], _legacy_mfx(), None)
     with pytest.raises(FileExistsError, match="Refusing to overwrite"):
         export_arrays(str(tmp_path), "channel", ["npy"], _legacy_mfx(), None)
+
+
+def test_msr_reader_zarr_export_bundles_sequential_datasets(tmp_path, monkeypatch):
+    from minflux_viewer.core.minflux_zarr import load_minflux_zarr_project
+    from minflux_viewer.plugins.msr_reader import msr_reader_dialog as dialog_mod
+
+    parsed = {
+        "mode": "modern",
+        "msr": str(tmp_path / "sample.msr"),
+        "datasets": [
+            {"display_name": "channel one", "did": "did-one",
+             "_mfx": _legacy_mfx(), "_mbm": _mbm(), "zroot": None},
+            {"display_name": "channel two", "did": "did-two",
+             "_mfx": _legacy_mfx(), "_mbm": _mbm(), "zroot": None},
+        ],
+    }
+    monkeypatch.setattr(dialog_mod, "image_series_of", lambda *_a, **_k: [])
+    dialog_mod.export_parsed_result(
+        parsed, dialog_mod.state_namespace_for(parsed), str(tmp_path), ["zarr"]
+    )
+
+    project = load_minflux_zarr_project(tmp_path / "sample.zarr")
+    assert len(project.datasets) == 2
+    assert project.manifest["is_overlay"] is True
+    assert [ds.metadata["msr_dataset_did"] for ds in project.datasets] \
+        == ["did-one", "did-two"]
+    assert project.datasets[0].state["overlay_id"] == project.datasets[1].state["overlay_id"]
+    for dataset in project.datasets:
+        transform = dataset.state["overlay_transform"]
+        assert transform["method"] == "unregistered identity (MSR export)"
+        assert transform["matrix_4x4"] == [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]

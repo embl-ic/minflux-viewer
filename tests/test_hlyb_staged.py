@@ -309,11 +309,14 @@ def test_batch_summary_treats_acquisitions_not_pair_counts_as_replicates():
 
 
 def test_analysis_is_a_plugin_not_an_analyze_clustering_submenu(qtbot):
-    """The workflow moved to Plugins as a single entry.
+    """The workflow lives in Plugins, and only in its current form.
 
     It is one project-specific analysis, not a family of general clustering
-    tools, and the retired variants (2D/3D, pair-distance fit, template
-    matching) are no longer exposed -- though their modules are kept.
+    tools: the retired variants (2D/3D, pair-distance fit, template matching)
+    stay unexposed though their modules are kept. The two entries that do exist
+    are the same staged analysis over different input scopes -- the active
+    dataset, or a pool of ROI-delimited cells gathered across acquisitions --
+    and both sit directly under Plugins with no submenu.
     """
     from minflux_viewer import plugins
     from minflux_viewer.core.app_state import AppState
@@ -329,10 +332,21 @@ def test_analysis_is_a_plugin_not_an_analyze_clustering_submenu(qtbot):
     commands = collect_commands(window.menuBar())
 
     hlyb = [c for c in commands if "hlyb" in c.text.lower()]
-    assert len(hlyb) == 1, [c.text for c in hlyb]
-    assert hlyb[0].path == "Plugins"
-    # Plugin entries carry their implementing file for the Command Finder.
-    assert hlyb[0].source.endswith("__init__.py")
+    assert sorted(c.text for c in hlyb) == sorted([
+        "HlyB/D subunit pair analysis",
+        "HlyB/D pooled pair analysis (multi-dataset)",
+    ]), [c.text for c in hlyb]
+    # Directly under Plugins -- no submenu -- and each carries its implementing
+    # file for the Command Finder.
+    assert {c.path for c in hlyb} == {"Plugins"}
+    assert all(c.source.endswith("__init__.py") for c in hlyb)
+
+    # The retired workflows stay out of the menus.
+    retired = [c.text for c in commands
+               if any(word in c.text.lower()
+                      for word in ("template match", "pair-distance model",
+                                   "pairwise"))]
+    assert retired == []
 
     clustering = [c.text for c in commands if c.path.endswith("Clustering")]
     assert clustering == ["DBSCAN", "K Nearest Neighbour"]

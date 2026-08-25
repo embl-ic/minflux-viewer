@@ -11,7 +11,7 @@ Precision* menu, all fully implemented:
   times). Ostersehlt et al., *Nat. Methods* 19:1072, 2022 (see also Schmidt
   et al., *Nat. Methods* 19:1246, 2022). Groups localizations by trace ID
   (``tid``), computes σx / σy / σz per trace, then summarises across all traces
-  with at least :data:`MIN_LOCS_PER_TRACE` repeats (nm; raw z, no RIMF). Also
+  with at least :data:`MIN_LOCS_PER_TRACE` repeats (nm; raw z, no Z scaling factor). Also
   written to ``dataset.attr`` for follow-up work.
 
 * **CRLB** — the *theoretical* MINFLUX Cramér-Rao bound for the targeted-donut
@@ -90,7 +90,7 @@ def stddev_per_trace(
     ----------
     loc_xyz : (N, 3) float ndarray
         Localizations in *metres* (raw MINFLUX storage convention) — the **raw**
-        coordinates (no RIMF applied to z). Output is reported in nm.
+        coordinates (no Z scaling factor applied to z). Output is reported in nm.
     tid : (N,) int ndarray
         Trace ID per localization.
     min_locs : int
@@ -910,7 +910,7 @@ def run_stddev_per_trace(parent, state) -> None:
     from ..core.loader import attr_values_1d
     loc_x = np.asarray(attr_values_1d(ds, "loc_x"))
     loc_y = np.asarray(attr_values_1d(ds, "loc_y"))
-    # Raw z — no RIMF applied. The precision is a property of the measurement,
+    # Raw z — no Z scaling factor applied. The precision is a property of the measurement,
     # so it follows Ostersehlt et al. and uses the uncorrected coordinate.
     _z = attr_values_1d(ds, "loc_z")
     loc_z = np.zeros_like(loc_x) if _z is None else np.asarray(_z)
@@ -1081,7 +1081,7 @@ class StdDevResultDialog(QDialog):
             "averaged over the M traces:<br>"
             "&nbsp;&nbsp;σ<sub>r</sub> = ⟨ σ<sub>r</sub> ∕ √n ⟩ , &nbsp; "
             "σ<sub>z</sub> = ⟨ σ<sub>z</sub> ∕ √n ⟩ &nbsp; ( ⟨·⟩ = mean over traces )<br>"
-            "z uses the raw coordinate (no RIMF applied)."
+            "z uses the raw coordinate (no Z scaling factor applied)."
             + _references_html(
                 "<a href='https://www.nature.com/articles/s41592-022-01577-1'>"
                 "Ostersehlt <i>et al.</i>, <i>Nat. Methods</i> 19:1072 (2022)</a>",

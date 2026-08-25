@@ -23,7 +23,7 @@ Pipeline
    then measure every within-structure sub-unit **pair distance**.
 
 Pure NumPy/SciPy — Qt-free and unit-testable. Coordinates: ``loc`` is in metres
-(raw, z **not** RIMF-baked); the analysis applies ``z_scaling_factor`` to z and
+(raw, z **not** Z-scaling-baked); the analysis applies ``z_scaling_factor`` to z and
 works in nm throughout.
 """
 

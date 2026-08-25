@@ -5,7 +5,7 @@ this well defined is the existing separation between the two dicts a dataset
 carries:
 
 * ``metadata`` records what the **import** decided — the transform the MSR
-  channel alignment produced, the LUT the overlay import assigned, the RIMF
+  channel alignment produced, the LUT the overlay import assigned, the Z scaling factor
   history.  It is provenance and is never edited by the viewer.
 * ``state`` holds **live, user-edited** view/filter preferences layered on top.
 
@@ -52,14 +52,14 @@ _MEMBERSHIP_KEYS = (
 )
 
 
-def loaded_rimf(ds) -> float | None:
-    """The RIMF the dataset had when it was opened, or ``None`` if unknown.
+def loaded_z_scaling_factor(ds) -> float | None:
+    """The Z scaling factor the dataset had when it was opened, or ``None`` if unknown.
 
-    ``set_rimf`` appends to ``metadata["rimf_provenance"]["history"]``, so the
+    ``set_z_scaling_factor`` appends to ``metadata["z_scaling_factor_provenance"]["history"]``, so the
     **first** entry is the value the post-load chain established (auto estimate,
     fixed preference, or 1.0 for 2-D).  Everything after it is a later edit.
     """
-    prov = (getattr(ds, "metadata", {}) or {}).get("rimf_provenance") or {}
+    prov = (getattr(ds, "metadata", {}) or {}).get("z_scaling_factor_provenance") or {}
     history = prov.get("history") or []
     if not history:
         return None
@@ -141,11 +141,11 @@ def reset_dataset(ds) -> list[str]:
     if n_rois:
         changes.append(f"{n_rois} ROI selection mask(s) dropped")
 
-    rimf = loaded_rimf(ds)
-    current = float(getattr(ds.cali, "RIMF", 1.0) or 1.0)
-    if rimf is not None and abs(rimf - current) > 1e-12:
-        ds.set_rimf(rimf, source="reset (as loaded)")
-        changes.append(f"RIMF restored to {rimf:.4g}")
+    z_scaling_factor = loaded_z_scaling_factor(ds)
+    current = float(getattr(ds.cali, "z_scaling_factor", 1.0) or 1.0)
+    if z_scaling_factor is not None and abs(z_scaling_factor - current) > 1e-12:
+        ds.set_z_scaling_factor(z_scaling_factor, source="reset (as loaded)")
+        changes.append(f"Z scaling factor restored to {z_scaling_factor:.4g}")
 
     if reset_view_state(ds):
         changes.append("view state (LUT / transform) restored")

@@ -66,11 +66,12 @@ CITE_FRC_NIEUWENHUIZEN = (
 )
 
 ANISOTROPY_NOTE = (
-    "Anisotropy / RIMF estimation (custom, MINFLUX Data Viewer): the refractive-index-"
-    "mismatch factor is estimated from single-molecule traces by Gaussian fits to "
+    "Z scaling factor estimation from trace anisotropy (custom, MINFLUX Data "
+    "Viewer): the factor is estimated from single-molecule traces by Gaussian fits to "
     "log-distance histograms of each localization's offset from its trace centroid "
-    "(lateral vs. axial extent); it is applied as a Z-scaling view, never baked into "
-    "the raw coordinates."
+    "(lateral vs. axial extent). It is applied as a Z-scaling view and never baked "
+    "into raw coordinates. This empirical method does not calculate the factor "
+    "from refractive indices."
 )
 NPC_NOTE = (
     "NPC ring-convolution segmentation (custom, MINFLUX Data Viewer): NPC centres are "
@@ -247,18 +248,22 @@ def _render_msr_overlay(m, ev, state):
     return " ".join(sentences), []
 
 
-def _render_rimf(m, ev, state):
+def _render_z_scaling_factor(m, ev, state):
     name, val = m.group("name"), m.group("value")
     note = (m.group("note") or "").lower()
     if "2d" in note or "2-d" in note:
-        return f"'{name}' is two-dimensional, so no Z (RIMF) correction was applied (RIMF = {val}).", []
+        return (f"'{name}' is two-dimensional, so no axial scaling was needed "
+                f"(Z scaling factor = {val})."), []
     if "fixed" in note:
-        return (f"A fixed refractive-index-mismatch factor (RIMF) of {val} was applied to '{name}' "
-                f"as a Z-scaling correction."), []
+        return (f"A fixed Z scaling factor of {val} was applied to the raw z "
+                f"coordinates of '{name}'."), []
+    if "manual" in note:
+        return (f"A Z scaling factor of {val} was set manually for '{name}' "
+                f"and applied to its raw z coordinates."), []
     return (
-        f"The anisotropy of '{name}' was estimated to be approximately {val} using a custom "
-        f"log-distance Gaussian-fit method (see method note); the resulting refractive-index-"
-        f"mismatch factor (RIMF) was applied as a Z-scaling correction."
+        f"A Z scaling factor of approximately {val} was estimated for '{name}' "
+        f"from trace anisotropy using a custom log-distance Gaussian-fit method "
+        f"(see method note) and applied to its raw z coordinates."
     ), [CITE_ANISOTROPY]
 
 
@@ -603,8 +608,8 @@ def _render_hlyb_template3d(m, ev, state):
         f"itr='last' (the global "
         f"final iteration) with vld_only=True. Viewer filter masks and ROI selections were "
         f"not applied. Coordinates were converted from metres to nanometres, and raw Z was "
-        f"multiplied by {_method_number(params.get('z_scaling_factor'), 4)} (RIMF, the "
-        f"refractive-index mismatch factor).{z_source_text} {z_note}"
+        f"multiplied by {_method_number(params.get('z_scaling_factor'), 4)} "
+        f"(the Z scaling factor).{z_source_text} {z_note}"
         f"{template_projection_text}\n\n"
         f"User-defined parameters. The minimum localization support was "
         f"{_method_count(params.get('min_loc_per_trace'))} localization(s) per trace; the XY "
@@ -872,7 +877,7 @@ def _hlyb_parameter_block(params: dict) -> str:
     rows = (
         ("Minimum localizations per trace", params.get("min_loc_per_trace"), 0,
          "traces below this are discarded before anything else"),
-        ("Refractive-index mismatch factor (z scaling)",
+        ("Z scaling factor",
          params.get("z_scaling_factor"), 4,
          "applied once to raw z; no other z correction is applied"),
         ("Same-site consolidation diameter (nm)", params.get("site_merge_nm"), 1,
@@ -1046,7 +1051,7 @@ def _render_hlyb_staged_short_range(m, ev, state):
         f"{_method_count(inp.get('n_traces_used'))} trace(s) containing at least "
         f"{_method_count(params.get('min_loc_per_trace'))} localizations entered the "
         f"analysis. Coordinates were converted to nanometres and raw z multiplied "
-        f"once by the fixed RIMF {_method_number(params.get('z_scaling_factor'), 4)}. "
+        f"once by the fixed Z scaling factor {_method_number(params.get('z_scaling_factor'), 4)}. "
         f"Viewer filters and ROIs were not applied.\n\n"
         f"Site inference. Each trace was represented by its mean localization and "
         f"coordinate-wise standard error. Repeated traces were consolidated without "
@@ -1340,8 +1345,8 @@ def _render_hlyb_pair_fit(m, ev, state):
         f"{_method_count(params.get('min_loc_per_trace'))} localizations and entered the "
         f"analysis{format_text}. Coordinates were converted to nanometres and the axial "
         f"coordinate multiplied by "
-        f"{_method_number(params.get('z_scaling_factor'), 4)} (RIMF, the "
-        f"refractive-index mismatch factor), taken from "
+        f"{_method_number(params.get('z_scaling_factor'), 4)} "
+        f"(the Z scaling factor), taken from "
         f"{inp.get('z_scaling_source') or 'the dataset'}. Viewer filter masks and ROI "
         f"selections were not applied.\n\n"
         f"Observable. Each trace was reduced to the mean of its localizations, whose "
@@ -1452,8 +1457,8 @@ RULES = [
         r"tested (?P<tested>[\d,]+) candidate\(s\), passed (?P<passed>[\d,]+), "
         r"overlap-rejected (?P<overlap>[\d,]+)\)"),
      "analysis", _render_hlyb_template3d),
-    (re.compile(r"RIMF for '(?P<name>.+?)': (?P<value>[\d.]+)\s*(?:\((?P<note>[^)]*)\))?"),
-     "analysis", _render_rimf),
+    (re.compile(r"Z scaling factor for '(?P<name>.+?)': (?P<value>[\d.]+)\s*(?:\((?P<note>[^)]*)\))?"),
+     "analysis", _render_z_scaling_factor),
     (re.compile(
         r"^Aggregated '(?P<source>.+?)' into '(?P<result>.+?)': "
         r"(?P<nin>[\d,]+) -> (?P<nout>[\d,]+) localizations; "
@@ -1480,7 +1485,7 @@ def _guess_stage(message: str) -> str:
         return "filter"
     if "saved" in low or "export" in low:
         return "export"
-    if "rimf" in low or "anisotropy" in low or "precision" in low:
+    if "z scaling factor" in low or "anisotropy" in low or "precision" in low:
         return "analysis"
     if "crop" in low or "duplicat" in low or "overlay" in low:
         return "transform"

@@ -8,7 +8,7 @@ Historically this mirrored the MATLAB ``app.data(idx)`` MINFLUX struct:
     .file     — path, name, load datetime
     .prop     — num_loc, num_itr, num_dim, num_traces, trace_idx, attr_names
     .attr     — all attribute arrays (loc_x/y/z, tid, efo, cfr, ftr, …)
-    .cali     — calibration scalars (RIMF, pixel_size, loc_precision)
+    .cali     — calibration scalars (Z scaling factor, pixel_size, loc_precision)
     .channel  — DCR / color channel info
 
 The same container can now also hold generic localisation coordinates
@@ -154,7 +154,7 @@ class DatasetComponents:
     # Derived attributes (dt, dst, spd, siz, dur, len, tim_trace, den, …)
     # computed at the last-valid selection of mfx_raw, aligned to
     # mfx_row_mask(itr="last", vld_only=True) rows. Populated when ds.attr is
-    # NOT the last-valid materialization (iter_load="all"), so mfx_get can
+    # NOT the last-valid materialization (an all-iteration store), so mfx_get can
     # broadcast them onto any iteration selection.
     derived_last: AttrStore = field(default_factory=AttrStore)
 
@@ -177,6 +177,34 @@ class FileInfo:
         return os.path.join(self.folder, self.name)
 
 
+def dataset_source_file(ds) -> Path | None:
+    """The file this dataset was loaded from, when it is still on disk.
+
+    Follows the same order the Data window reports: the ``.msr`` an import came
+    from, then the recorded recent path, then ``folder``/``name``. Returns None
+    for anything without a file behind it — a simulation, or a dataset derived
+    in the app (those are built with an empty ``folder``, which also stops a
+    bare ``name`` from resolving against the working directory).
+    """
+    candidates = [
+        ds.metadata.get("msr_source_path"),
+        ds.file.recent_path,
+    ]
+    if ds.file.folder and ds.file.name:
+        candidates.append(ds.file.path)
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            path = Path(str(candidate))
+            # A .zarr store is a directory; revealing it is still right.
+            if path.exists():
+                return path
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 @dataclass
 class DataProp:
     """Dataset-level properties computed once on load."""
@@ -196,7 +224,8 @@ class DataProp:
 @dataclass
 class Calibration:
     """Physical calibration parameters."""
-    RIMF: float = 1.0               # refractive-index mismatch factor
+    # Dimensionless multiplier in z_calibrated = z_raw * z_scaling_factor.
+    z_scaling_factor: float = 1.0
     pixel_size: float = 4.0         # nm per pixel for rendering
     loc_precision: np.ndarray = field(
         default_factory=lambda: np.zeros(3)
@@ -328,18 +357,18 @@ class MinfluxDataset:
     @property
     def loc_nm(self) -> np.ndarray:
         """
-        (N, 3) array of localizations in **nanometres**, RIMF-corrected on Z.
+        (N, 3) array of localizations in **nanometres**, with calibrated Z.
 
-        RIMF is applied here as a **view only**: the stored raw ``loc_z`` is
-        never modified, so this property can be read any number of times — and
-        RIMF re-set freely via :meth:`set_rimf` — without ever double-applying
-        the correction. Code that needs the **raw, uncorrected** z (e.g.
-        anisotropy / RIMF estimation) must NOT read this property; read
-        ``loc_z`` (or ``mfx_get(ds, "loc_z", ...)``) and scale by ``1e9``.
+        The Z scaling factor is applied here as a **view only**: the stored raw
+        ``loc_z`` is never modified, so this property can be read any number of
+        times and the factor can be reset via :meth:`set_z_scaling_factor`
+        without double-applying it. Code that needs the **raw, unscaled** z
+        (for example, trace-anisotropy estimation) must read ``loc_z`` (or
+        ``mfx_get(ds, "loc_z", ...)``) and convert it to nanometres directly.
         """
         x = np.asarray(self.attr.get("loc_x", np.empty(0)), dtype=float) * 1e9
         y = np.asarray(self.attr.get("loc_y", np.empty(0)), dtype=float) * 1e9
-        z = np.asarray(self.attr.get("loc_z", np.empty(0)), dtype=float) * 1e9 * self.cali.RIMF
+        z = np.asarray(self.attr.get("loc_z", np.empty(0)), dtype=float) * 1e9 * self.cali.z_scaling_factor
         return np.column_stack([x, y, z])
 
     @property
@@ -354,45 +383,44 @@ class MinfluxDataset:
 
     @property
     def znm(self) -> np.ndarray:
-        """Localization z in **nanometres**, RIMF-corrected (view only)."""
+        """Localization z in **nanometres**, Z-scaled (view only)."""
         return (np.asarray(self.attr.get("loc_z", np.empty(0)), dtype=float)
-                * 1e9 * self.cali.RIMF)
+                * 1e9 * self.cali.z_scaling_factor)
 
     @property
-    def rimf_provenance(self) -> dict[str, Any]:
-        """How the current RIMF value was set: ``{value, source, history}``.
+    def z_scaling_factor_provenance(self) -> dict[str, Any]:
+        """How the current Z scaling factor value was set: ``{value, source, history}``.
 
-        ``applied_as_view`` is always True — RIMF only re-scales the z *view*
-        (:attr:`loc_nm`); the raw ``loc_z`` is never RIMF-baked.
+        ``applied_as_view`` is always True: the factor only rescales the z view
+        (:attr:`loc_nm`); it is never baked into raw ``loc_z``.
         """
-        return self.metadata.get("rimf_provenance", {
-            "value": float(getattr(self.cali, "RIMF", 1.0) or 1.0),
+        return self.metadata.get("z_scaling_factor_provenance", {
+            "value": float(getattr(self.cali, "z_scaling_factor", 1.0) or 1.0),
             "source": "default",
             "applied_as_view": True,
             "history": [],
         })
 
-    def set_rimf(self, value: float, *, source: str = "manual") -> float:
-        """Set the RIMF z-scaling factor and record its provenance.
+    def set_z_scaling_factor(self, value: float, *, source: str = "manual") -> float:
+        """Set the Z scaling factor and record its provenance.
 
-        RIMF is applied to z only as a display view (see :attr:`loc_nm`); the
-        raw ``loc_z`` in ``attr``/``mfx_raw`` is never modified, so RIMF can be
-        re-set any number of times without ever double-correcting the raw data
-        — the latest value simply re-scales the view. ``source`` (e.g.
+        The factor is applied to z only as a display view (see :attr:`loc_nm`);
+        raw ``loc_z`` in ``attr``/``mfx_raw`` is never modified, so it can be
+        reset without double-scaling the raw data. ``source`` (e.g.
         ``"auto"``, ``"manual"``, ``"fixed"``, ``"2D"``) is appended to the
-        change history in ``metadata["rimf_provenance"]``.
+        change history in ``metadata["z_scaling_factor_provenance"]``.
         """
         value = float(value)
-        prov = self.metadata.get("rimf_provenance")
+        prov = self.metadata.get("z_scaling_factor_provenance")
         if prov is None:
             prov = {
-                "value": float(getattr(self.cali, "RIMF", 1.0) or 1.0),
+                "value": float(getattr(self.cali, "z_scaling_factor", 1.0) or 1.0),
                 "source": "default",
                 "applied_as_view": True,
                 "history": [],
             }
-            self.metadata["rimf_provenance"] = prov
-        self.cali.RIMF = value
+            self.metadata["z_scaling_factor_provenance"] = prov
+        self.cali.z_scaling_factor = value
         prov["value"] = value
         prov["source"] = str(source)
         prov["applied_as_view"] = True

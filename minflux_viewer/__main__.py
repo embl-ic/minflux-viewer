@@ -16,11 +16,13 @@ import sys
 def main() -> int:
     # Install stdout/stderr redirection ASAP so even early prints get captured
     from .ui.console_window import install_redirection
+
     install_redirection()
 
     from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QIcon
     from PyQt6.QtWidgets import QApplication
+
     from . import __version__, resource_path
 
     # pyqtgraph caches compiled GL shader programs globally, but GL program
@@ -41,9 +43,14 @@ def main() -> int:
     app.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
 
     from .core.app_state import AppState
+    from .ui.gpu_capabilities import probe_gpu_capabilities
     from .ui.main_window import MainWindow, startup_paths_from_argv
 
-    state  = AppState()
+    state = AppState()
+    # Probe once after QApplication exists and before any GL-backed window is
+    # offered. Attribute views consult this result instead of discovering a
+    # missing driver only after the user has requested a multi-million-row draw.
+    state.gpu_capabilities = probe_gpu_capabilities()
     window = MainWindow(state)
     window.show()
 

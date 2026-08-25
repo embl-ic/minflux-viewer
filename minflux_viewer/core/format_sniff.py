@@ -32,6 +32,10 @@ EXT_TO_FMT: dict[str, str] = {
     ".xlsx": "spreadsheet", ".xlsm": "spreadsheet",
     ".msr": "msr", ".tif": "tiff", ".tiff": "tiff", ".json": "json",
     ".zarr": "zarr",
+    # A sealed Zarr store is a zip, and so is an .xlsx — the magic bytes cannot
+    # tell them apart. The compound extension is the discriminator, so it is
+    # matched (longest-first, see resolve_format) before the plain suffix.
+    ".zarr.zip": "zarr",
 }
 #: Content-sniff result → canonical loader format (xlsx/delimited → spreadsheet).
 _SNIFF_TO_FMT: dict[str, str] = {"xlsx": "spreadsheet", "delimited": "spreadsheet"}
@@ -103,11 +107,26 @@ def resolve_format(path: str | Path) -> tuple[str | None, str]:
     content. ``note`` is a human-readable explanation when the extension was
     overridden or absent, else ``""``. ``fmt`` is ``None`` when unidentifiable.
     """
-    ext = Path(path).suffix.lower()
-    ext_fmt = EXT_TO_FMT.get(ext)
+    # Longest-first so a compound extension wins: ".zarr.zip" is a sealed Zarr
+    # store, not the ".zip" that a zip magic number would suggest.
+    suffixes = [s.lower() for s in Path(path).suffixes]
+    ext = suffixes[-1] if suffixes else ""
+    ext_fmt = None
+    compound = False
+    for count in range(len(suffixes), 0, -1):
+        tail = "".join(suffixes[-count:])
+        if tail in EXT_TO_FMT:
+            ext, ext_fmt, compound = tail, EXT_TO_FMT[tail], count > 1
+            break
     raw = sniff_format(path)
     sniffed = _SNIFF_TO_FMT.get(raw, raw)
 
+    # A compound extension is an explicit declaration and outranks the magic
+    # number, because several unrelated formats share one container: .xlsx,
+    # .zarr.zip and a RoiSet .zip are all zips, so "the content is xlsx" really
+    # only means "this is a zip" and must not override ".zarr.zip".
+    if compound:
+        return ext_fmt, ""
     if raw in MAGIC_FORMATS and sniffed != ext_fmt:
         return sniffed, (f"extension '{ext or '(none)'}' but the content is "
                          f"{raw} — loading as {sniffed}")

@@ -319,6 +319,88 @@ _SCAFFOLD_PARAMS = [
 #: Multi-channel / spectral simulations (key → (generator-kind, label, ParamSpec list)).
 #: ``kind`` = "overlay" (co-registered channels → a multi-dataset overlay) or
 #: "dcr" (one dataset, two reporters distinguished only by a bimodal ``dcr``).
+_ECOLI_PARAMS = [
+    # --- Measured from the 2026 reference set (19 hand-drawn E. coli, 10
+    # 3-D MINFLUX acquisitions, 1.0 M localizations). Each default is the
+    # per-cell median; the tooltip carries the observed p10-p90 spread, and
+    # the parameters are listed most-variable first within each group.
+    ParamSpec("acquisition_s", "Acquisition duration", 28800, 1, 200000,
+              False, " s",
+              desc="Total acquisition time. MEASURED median 28,800 s (8 h); "
+                   "range 700-43,000 s. This is the most variable quantity in "
+                   "the reference set (CV 54%) and the one that most affects "
+                   "real data quality — long runs accumulate drift."),
+    ParamSpec("subunit_density_per_um2", "Subunit density", 375, 1, 20000,
+              False, " /um2",
+              desc="Labelled subunits per um2 of cell surface, one trace each. "
+                   "MEASURED median 373; range 155-537 (CV 45%), extremes 51 "
+                   "and 706. Sets how far apart unrelated molecules sit, so it "
+                   "governs how easily a planted pair distance stands out."),
+    ParamSpec("cell_length_nm", "Cell length", 1900, 500, 20000, False, " nm",
+              desc="Tip-to-tip length of the capsule. MEASURED median 1924 nm; "
+                   "range 1594-2882 nm (CV 26%), extremes 1535 and 3252."),
+    ParamSpec("cell_radius_nm", "Cell radius", 370, 50, 3000, False, " nm",
+              desc="Capsule radius; the cell is 2x this wide. MEASURED median "
+                   "369 nm; range 344-390 nm. The most tightly constrained "
+                   "quantity in the set (CV 8%) — E. coli width is regulated."),
+    ParamSpec("locs_per_trace_tail", "Locs/trace tail (lognormal sigma)", 1.24,
+              0.0, 3.0, False, "",
+              desc="Shape of the localizations-per-trace distribution, which is "
+                   "strongly heavy-tailed. FITTED to the reference quantiles "
+                   "(median 14, mean 29, p90 71); suggested range 1.1-1.4. The "
+                   "dialog's 'Locs per trace' sets the median. Note the real "
+                   "lower tail is fatter than lognormal — 10% of traces carry a "
+                   "single localization — so this value is fitted to the mean "
+                   "and p90 rather than to the 16-84 spread."),
+    ParamSpec("precision_z_nm", "Per-loc precision Z", 3.3, 0.1, 100, False, " nm",
+              desc="Per-localization scatter about the true subunit position "
+                   "along z. MEASURED median 3.30 nm; range 2.92-3.77 (CV 11%). "
+                   "The dialog's 'Precision' sets x and y, measured 5.96 nm per "
+                   "axis. Both are debiased for the finite localization count "
+                   "per trace, so they are per-localization sigmas."),
+    ParamSpec("trace_burst_s", "Trace burst duration", 0.15, 0.0, 3600, False, " s",
+              desc="How long one trace's localizations span. MEASURED median "
+                   "0.147 s; range 0.133-0.172 s. Short relative to the run, "
+                   "which is why a trace is a point in time rather than a "
+                   "trajectory."),
+    # --- NOT inferable from the data: these are the hypothesis being tested.
+    # The reference measurements cannot constrain them, which is exactly why the
+    # simulation is needed — it supplies the ground truth the analysis is
+    # checked against.
+    ParamSpec("dimer_distance_nm", "Dimer subunit distance", 14.0, 0.5, 200,
+              False, " nm",
+              desc="HYPOTHESIS, not measured: mean centre-to-centre distance "
+                   "between the two subunits of a dimer — the quantity the pair "
+                   "analysis should recover. The real data does not constrain "
+                   "it; that is the open question."),
+    ParamSpec("dimer_distance_sd_nm", "Dimer distance spread", 3.0, 0.0, 100,
+              False, " nm",
+              desc="HYPOTHESIS, not measured: standard deviation of that "
+                   "distance, so the planted population is a distribution "
+                   "rather than a single value."),
+    ParamSpec("dimer_fraction", "Fraction of subunits in dimers", 1.0, 0.0, 1.0,
+              False, "",
+              desc="HYPOTHESIS, not measured. 1.0 = every subunit belongs to a "
+                   "dimer; 0.0 = all subunits are isolated monomers (the "
+                   "negative control). Lower values dilute the planted signal "
+                   "with unpaired background."),
+    ParamSpec("detection_probability", "Detection probability", 1.0, 0.05, 1.0,
+              False, "",
+              desc="HYPOTHESIS, not measured: probability that a subunit is "
+                   "labelled and detected. Below 1 it breaks dimers into single "
+                   "observed sites, which is the dominant way a real labelling "
+                   "efficiency weakens the signal. Sweep it to find the "
+                   "efficiency at which a planted distance stops being "
+                   "detectable."),
+    ParamSpec("pair_in_membrane", "Pair axis in membrane plane", 1.0, 0.0, 1.0,
+              False, "",
+              desc="Structural assumption, not measured. 1 = the two subunits "
+                   "lie in the local membrane plane (tangential, the physical "
+                   "case for a membrane complex); 0 = the pair axis is "
+                   "isotropic."),
+]
+
+
 MULTI_SIMS: dict[str, tuple] = {
     "npc_overlay_3ch": ("overlay", "NPC 3-channel overlay (shared scaffold)",
                         _SCAFFOLD_PARAMS + [
@@ -334,6 +416,8 @@ MULTI_SIMS: dict[str, tuple] = {
                                        "reporters' DCR distributions should be separable."),
                         ParamSpec("dcr_high", "Reporter B mean DCR", 0.7, 0.0, 1.0, False, "",
                                   desc="Mean DCR of reporter B (inner ring).")]),
+    "ecoli_hlyb_dimer": ("ecoli", "E. coli HlyB dimers (rod cell, known distance)",
+                         _ECOLI_PARAMS),
 }
 
 
@@ -607,3 +691,145 @@ def simulate_beads(n_beads: int = 4, *, n_time: int = 60, field_nm: float = 5000
     points_by_gri = {str(b + 1): {"name": f"R{b + 1}", "gri": b + 1} for b in range(n_beads)}
     used = [f"R{b + 1}" for b in range(n_beads)]
     return points, points_by_gri, used
+
+
+# --------------------------------------------------------------------------- #
+# E. coli HlyB dimer simulation — a known-distance control for the staged
+# subunit pair analysis, matched to the measured statistics of real 3-D MINFLUX
+# acquisitions (see ``_ECOLI_PARAMS`` for where each default comes from).
+# --------------------------------------------------------------------------- #
+def capsule_surface_points(n: int, length_nm: float, radius_nm: float, rng):
+    """*n* points sampled uniformly **by area** on a capsule surface.
+
+    Returns ``(points (n,3), normals (n,3))`` with the long axis along x. Uniform
+    by area — not by angle — so the caps are not over-sampled relative to the
+    cylinder, which would put a spurious density gradient along the cell.
+    """
+    n = max(int(n), 0)
+    if n == 0:
+        return np.empty((0, 3)), np.empty((0, 3))
+    radius = max(float(radius_nm), 1e-6)
+    barrel = max(float(length_nm) - 2.0 * radius, 0.0)
+    area_barrel = 2.0 * np.pi * radius * barrel
+    area_caps = 4.0 * np.pi * radius * radius
+    total = area_barrel + area_caps
+    on_barrel = ((rng.random(n) < (area_barrel / total)) if total > 0
+                 else np.ones(n, bool))
+
+    phi = rng.uniform(0.0, 2.0 * np.pi, n)
+    along = rng.uniform(-0.5 * barrel, 0.5 * barrel, n)
+    barrel_pts = np.column_stack([along, radius * np.cos(phi), radius * np.sin(phi)])
+    barrel_nrm = np.column_stack([np.zeros(n), np.cos(phi), np.sin(phi)])
+
+    sphere = rng.normal(size=(n, 3))
+    sphere /= np.linalg.norm(sphere, axis=1, keepdims=True)
+    cap_shift = np.where(sphere[:, 0] >= 0.0, 0.5 * barrel, -0.5 * barrel)
+    cap_pts = sphere * radius + np.column_stack([cap_shift, np.zeros(n), np.zeros(n)])
+
+    points = np.where(on_barrel[:, None], barrel_pts, cap_pts)
+    normals = np.where(on_barrel[:, None], barrel_nrm, sphere)
+    return points, normals
+
+
+def _tangent_frame(normals: np.ndarray):
+    """Two orthonormal vectors spanning the tangent plane of each normal."""
+    reference = np.tile(np.array([0.0, 0.0, 1.0]), (normals.shape[0], 1))
+    parallel = np.abs(normals[:, 2]) > 0.9
+    reference[parallel] = np.array([1.0, 0.0, 0.0])
+    t1 = np.cross(normals, reference)
+    t1 /= np.maximum(np.linalg.norm(t1, axis=1, keepdims=True), 1e-12)
+    t2 = np.cross(normals, t1)
+    t2 /= np.maximum(np.linalg.norm(t2, axis=1, keepdims=True), 1e-12)
+    return t1, t2
+
+
+
+
+def simulate_ecoli_hlyb(params: dict, *, locs_per_trace: float = 14.0,
+                        precision_nm: float = 5.7,
+                        seed: int | None = None):
+    """One rod-shaped cell carrying labelled HlyB **dimers**, as a control.
+
+    Every trace is one labelled subunit observed exactly once, so a trace is
+    never a repeat visit to a molecule already seen. That is deliberate: it is
+    the idealisation the staged pair analysis assumes, and it makes the
+    simulation a clean test of whether the workflow recovers a planted
+    inter-subunit distance when that assumption actually holds.
+
+    Trimers are not modelled — pairs only.
+
+    Returns ``(coords_nm (N,3), tid (N,), attrs)``; ``attrs`` carries ``tim``.
+    """
+    rng = np.random.default_rng(seed)
+    p = {**default_params("ecoli_hlyb_dimer"), **(params or {})}
+    length = float(p["cell_length_nm"])
+    radius = float(p["cell_radius_nm"])
+    if length < 2.0 * radius:
+        raise ValueError(
+            f"cell_length_nm ({length:g}) must be at least twice "
+            f"cell_radius_nm ({radius:g}) — a capsule cannot be shorter than "
+            f"its own end caps")
+
+    barrel = max(length - 2.0 * radius, 0.0)
+    area_nm2 = 2.0 * np.pi * radius * barrel + 4.0 * np.pi * radius * radius
+    n_subunits = max(int(round(float(p["subunit_density_per_um2"])
+                               * area_nm2 / 1e6)), 2)
+
+    fraction = float(np.clip(p["dimer_fraction"], 0.0, 1.0))
+    n_dimers = int(round(0.5 * n_subunits * fraction))
+    n_monomers = max(n_subunits - 2 * n_dimers, 0)
+
+    sites = []
+    if n_dimers:
+        centres, normals = capsule_surface_points(n_dimers, length, radius, rng)
+        # Distances are drawn per dimer, so the planted population is a
+        # distribution; the fold guards the rare negative draw of a wide SD.
+        separation = np.abs(rng.normal(float(p["dimer_distance_nm"]),
+                                       float(p["dimer_distance_sd_nm"]), n_dimers))
+        t1, t2 = _tangent_frame(normals)
+        angle = rng.uniform(0.0, 2.0 * np.pi, n_dimers)
+        tangential = (np.cos(angle)[:, None] * t1 + np.sin(angle)[:, None] * t2)
+        if float(p["pair_in_membrane"]) >= 0.5:
+            axis = tangential
+        else:
+            axis = rng.normal(size=(n_dimers, 3))
+            axis /= np.maximum(np.linalg.norm(axis, axis=1, keepdims=True), 1e-12)
+        half = 0.5 * separation[:, None] * axis
+        sites.append(centres + half)
+        sites.append(centres - half)
+    if n_monomers:
+        sites.append(capsule_surface_points(n_monomers, length, radius, rng)[0])
+    subunits = np.vstack(sites) if sites else np.empty((0, 3))
+
+    detected = rng.random(subunits.shape[0]) < float(p["detection_probability"])
+    subunits = subunits[detected]
+    if subunits.shape[0] == 0:
+        raise ValueError("no subunit was detected — raise the density or the "
+                         "detection probability")
+
+    # Heavy-tailed localizations per trace: the dialog's value is the median.
+    median = max(float(locs_per_trace), 1.0)
+    counts = np.maximum(np.round(rng.lognormal(
+        np.log(median), max(float(p["locs_per_trace_tail"]), 0.0),
+        subunits.shape[0])).astype(np.int64), 1)
+    tid = np.repeat(np.arange(1, subunits.shape[0] + 1, dtype=np.int64), counts)
+    total = int(counts.sum())
+
+    sigma_xy = max(float(precision_nm), 0.0)
+    sigma_z = max(float(p["precision_z_nm"]), 0.0)
+    jitter = np.column_stack([rng.normal(0.0, sigma_xy, total),
+                              rng.normal(0.0, sigma_xy, total),
+                              rng.normal(0.0, sigma_z, total)])
+    coords = np.repeat(subunits, counts, axis=0) + jitter
+
+    # One short observation per trace at a random time — no revisits.
+    duration = float(p["acquisition_s"])
+    starts = rng.uniform(0.0, duration, subunits.shape[0])
+    span = max(float(p["trace_burst_s"]), 0.0)
+    burst = np.concatenate([np.sort(rng.uniform(0.0, span, int(c)))
+                            for c in counts])
+    tim = np.repeat(starts, counts) + burst
+
+    attrs = simulate_attributes(total, rng)
+    attrs["tim"] = tim
+    return coords, tid, attrs

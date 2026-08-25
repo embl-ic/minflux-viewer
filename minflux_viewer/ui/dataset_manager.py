@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.app_state import AppState
+from ..core.dataset import dataset_source_file
 
 # Column indices
 _COL_ACTIVE  = 0
@@ -194,7 +195,9 @@ class DatasetManager(QDialog):
                 font.setBold(True)
                 item.setFont(font)
             if col == _COL_DIMS and is_3d:
-                item.setToolTip("Double-click to estimate anisotropy / set RIMF")
+                item.setToolTip(
+                    "Double-click to estimate the Z scaling factor from trace anisotropy"
+                )
             self._table.setItem(row, col, item)
 
     def _refresh_row(self, row: int, idx: int) -> None:
@@ -328,8 +331,20 @@ class DatasetManager(QDialog):
 
         ds = self._state.datasets[row]
         menu = QMenu(self)
+        source_file = dataset_source_file(ds)
+        locate_action = menu.addAction("Open file location")
+        locate_action.setEnabled(source_file is not None)
+        if source_file is None:
+            locate_action.setToolTip(
+                "This dataset has no file on disk behind it "
+                "(simulated, derived, or its source has moved)"
+            )
+        else:
+            locate_action.setToolTip(str(source_file))
+        menu.addSeparator()
+
         reset_action = menu.addAction("Reset")
-        reset_action.setToolTip("Restore filters, ROI masks, RIMF and view state to as-loaded")
+        reset_action.setToolTip("Restore filters, ROI masks, Z scaling factor and view state to as-loaded")
         save_action = menu.addAction("Save as…")
         close_action = menu.addAction("Close")
         dup_action = menu.addAction("Duplicate")
@@ -340,9 +355,9 @@ class DatasetManager(QDialog):
         if not mbm_action.isEnabled():
             mbm_action.setToolTip("This dataset carries no beam-monitoring (MBM) bead data")
         images_action = menu.addAction("View image series")
-        images_action.setEnabled(self._has_msr_source(ds))
+        images_action.setEnabled(self._has_image_source(ds))
         if not images_action.isEnabled():
-            images_action.setToolTip("Available for datasets imported from an MSR file")
+            images_action.setToolTip("No source or embedded image series is available")
 
         menu.addSeparator()
         map_action = menu.addAction("Map confocal signal…")
@@ -351,7 +366,9 @@ class DatasetManager(QDialog):
             map_action.setToolTip("Available for datasets imported from an MSR file")
 
         chosen = menu.exec(self._table.viewport().mapToGlobal(pos))
-        if chosen is reset_action:
+        if chosen is locate_action:
+            self._open_file_location(source_file)
+        elif chosen is reset_action:
             self._reset_row(row)
         elif chosen is save_action:
             self._save_dataset(row)
@@ -366,11 +383,33 @@ class DatasetManager(QDialog):
         elif chosen is map_action:
             self._map_confocal_signal(row)
 
+    def _open_file_location(self, source_file) -> None:
+        """Show the dataset's file in the OS file manager."""
+        if source_file is None:
+            return
+        opener = getattr(self._owner, "open_file_location", None)
+        if callable(opener):
+            opener(str(source_file))
+        else:
+            self._state.log(
+                "Open file location: no handler is available.", "WARN"
+            )
+
     @staticmethod
     def _has_msr_source(ds) -> bool:
         """True when the dataset's source ``.msr`` is still on disk."""
         source_path = str(ds.metadata.get("msr_source_path", "") or "")
         return bool(source_path) and Path(source_path).suffix.lower() == ".msr"
+
+    @classmethod
+    def _has_image_source(cls, ds) -> bool:
+        if cls._has_msr_source(ds):
+            return True
+        return any(
+            Path(str(item.get("absolute_path") or "")).is_file()
+            for item in (ds.metadata.get("minflux_viewer_images") or [])
+            if isinstance(item, dict)
+        )
 
     @staticmethod
     def _has_mbm(ds) -> bool:
@@ -601,16 +640,15 @@ class DatasetManager(QDialog):
             return
         ds = self._state.datasets[row]
         self._state.set_active(row)
-        # Double-clicking the "Dims" cell of a 3-D dataset opens the Estimate
-        # Anisotropy Factor (RIMF) dialog — same as Analyze > Trace > Estimate
-        # Anisotropy — so the user can review / manually set and apply RIMF.
+        # Double-clicking the Dims cell of a 3-D dataset opens the Z scaling
+        # factor dialog, where the user can review, edit, and apply the estimate.
         if index.column() == _COL_DIMS and int(getattr(ds.prop, "num_dim", 2)) >= 3:
             try:
                 from ..analysis.trace_analysis import show_anisotropy_dialog
                 owner = self._owner if isinstance(self._owner, QWidget) else self
                 show_anisotropy_dialog(owner, ds, self._state)
             except Exception as exc:
-                self._state.log(f"Estimate anisotropy failed: {exc}", "ERROR")
+                self._state.log(f"Z scaling factor estimation failed: {exc}", "ERROR")
 
     def _on_dataset_added(self, idx: int) -> None:
         ds = self._state.datasets[idx]

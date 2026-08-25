@@ -9,6 +9,8 @@ from PyQt6.QtCore import QEvent, QPoint, QRect, Qt
 from PyQt6.QtGui import QColor, QLinearGradient, QMouseEvent, QPainter, QPen
 from PyQt6.QtWidgets import QMenu, QWidget
 
+from .attribute_help import apply_attribute_menu_tooltips
+
 
 class FloatingColorBar(QWidget):
     """A camera-independent colorbar that can be dragged and edge-resized."""
@@ -29,6 +31,8 @@ class FloatingColorBar(QWidget):
         attribute_names: Callable[[], Sequence[str]],
         current_attribute: Callable[[], str],
         on_attribute_changed: Callable[[str], None],
+        plot_area: Callable[[], QRect | None] | None = None,
+        background_color: Callable[[], QColor | None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._on_visibility_changed = on_visibility_changed
@@ -37,6 +41,8 @@ class FloatingColorBar(QWidget):
         self._attribute_names = attribute_names
         self._current_attribute = current_attribute
         self._on_attribute_changed = on_attribute_changed
+        self._plot_area = plot_area
+        self._background_color = background_color
         self._orientation = "vertical"
         self._show_values = True
         self._lut = np.column_stack(
@@ -46,6 +52,7 @@ class FloatingColorBar(QWidget):
         self._hi = 1.0
         self._label = "C"
         self._manual_geometry = False
+        self._float_geometry: QRect | None = None
         self._drag_start = QPoint()
         self._start_geometry = QRect()
         self._resize_edges: set[str] = set()
@@ -76,6 +83,39 @@ class FloatingColorBar(QWidget):
     @property
     def uses_default_placement(self) -> bool:
         return not self._manual_geometry
+
+    @property
+    def docked(self) -> bool:
+        """True while the bar is pinned to the plot border (not floating)."""
+        return not self._manual_geometry
+
+    def set_docked(self, docked: bool, *, notify: bool = True) -> None:
+        """Pin the bar to the plot border, or lift it into a floating panel.
+
+        A docked bar reserves its own gutter, cannot be moved or resized, and
+        is painted flush with the plot (no panel outline).  Undocking keeps it
+        exactly where it is; the next dock/undock round trip restores that
+        floating rectangle.
+        """
+        docked = bool(docked)
+        if docked == self.docked:
+            return
+        if docked:
+            self._float_geometry = QRect(self.geometry())
+            self._manual_geometry = False
+            if not self.isHidden():
+                self._reserve_owner_space()
+            self._sync_parent_margins()
+            self._place_default()
+        else:
+            target = self._float_geometry or QRect(self.geometry())
+            self._release_owner_space()
+            self._manual_geometry = True
+            self._sync_parent_margins()
+            self.setGeometry(self._clamped_rect(target))
+        self.update()
+        if notify:
+            self._on_state_changed()
 
     def set_bar_visible(self, visible: bool) -> None:
         """Show/hide the bar and reserve plot space for its default placement."""
@@ -125,6 +165,7 @@ class FloatingColorBar(QWidget):
         self._manual_geometry = True
         self._sync_parent_margins()
         self.setGeometry(self._clamped_rect(QRect(x, y, width, height)))
+        self._float_geometry = QRect(self.geometry())
 
     def set_orientation(self, orientation: str, *, notify: bool = True) -> None:
         orientation = "horizontal" if orientation == "horizontal" else "vertical"
@@ -132,6 +173,9 @@ class FloatingColorBar(QWidget):
             return
         self._release_owner_space()
         self._manual_geometry = False
+        # The remembered floating rect belongs to the old orientation, so the
+        # next undock should lift the bar in place instead of restoring it.
+        self._float_geometry = None
         self._orientation = orientation
         if not self.isHidden():
             self._reserve_owner_space()
@@ -270,7 +314,7 @@ class FloatingColorBar(QWidget):
         self.setCursor(cursor)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() != Qt.MouseButton.LeftButton:
+        if event.button() != Qt.MouseButton.LeftButton or self.docked:
             super().mousePressEvent(event)
             return
         self._drag_start = event.globalPosition().toPoint()
@@ -280,6 +324,10 @@ class FloatingColorBar(QWidget):
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self.docked:
+            self.unsetCursor()
+            super().mouseMoveEvent(event)
+            return
         edges = self._edges_at(event.position().toPoint())
         if not self._dragging:
             self._update_cursor(edges)
@@ -317,6 +365,7 @@ class FloatingColorBar(QWidget):
             self._release_owner_space()
             self._manual_geometry = True
             self._sync_parent_margins()
+            self._float_geometry = QRect(self.geometry())
             self._on_state_changed()
             event.accept()
             return
@@ -335,13 +384,15 @@ class FloatingColorBar(QWidget):
 
         attribute_menu = menu.addMenu("Attribute:")
         current_attribute = self._current_attribute()
-        for name in self._attribute_names():
+        names = list(self._attribute_names())
+        for name in names:
             action = attribute_menu.addAction(name)
             action.setCheckable(True)
             action.setChecked(name == current_attribute)
             action.triggered.connect(
                 lambda _checked=False, value=name: self._on_attribute_changed(value)
             )
+        apply_attribute_menu_tooltips(attribute_menu, names)
 
         values_action = menu.addAction("Show values")
         values_action.setCheckable(True)
@@ -359,6 +410,10 @@ class FloatingColorBar(QWidget):
             action.triggered.connect(
                 lambda _checked=False, value=orientation: self.set_orientation(value)
             )
+        menu.addAction(
+            "Dock" if self._manual_geometry else "Undock",
+            lambda: self.set_docked(self._manual_geometry),
+        )
         menu.addSeparator()
         menu.addAction("Customize", self._on_customize)
         menu.exec(event.globalPos())
@@ -513,13 +568,130 @@ class FloatingColorBar(QWidget):
             return f"{label} (×10{self._superscript(exponent)})"
         return label
 
+
+    # ------------------------------------------------------------------
+    # Painting
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _with_alpha(color: QColor, alpha: int) -> QColor:
+        faded = QColor(color)
+        faded.setAlpha(int(alpha))
+        return faded
+
+    def _panel_color(self) -> QColor:
+        """Backing colour: the floating panel, or the plot's own background."""
+        if not self.docked:
+            return QColor(250, 250, 250, 225)
+        if self._background_color is not None:
+            try:
+                color = self._background_color()
+            except Exception:
+                color = None
+            if color is not None:
+                return QColor(color)
+        return QColor(255, 255, 255)
+
+    def _ink_colors(self) -> tuple[QColor, QColor]:
+        """(ink, halo) - text/tick colour and its contrasting backing."""
+        background = self._panel_color()
+        luminance = (
+            0.2126 * background.red()
+            + 0.7152 * background.green()
+            + 0.0722 * background.blue()
+        )
+        if luminance >= 145:
+            return QColor(25, 25, 25), QColor(255, 255, 255)
+        return QColor(235, 235, 235), QColor(15, 15, 15)
+
+    def _docked_plot_span(self) -> tuple[int, int] | None:
+        """The plot data area's extent along the bar axis, in local pixels.
+
+        A docked bar reproduces the in-plot colorbar it replaced: the gradient
+        starts and ends exactly where the plot's own axes do.
+        """
+        if not self.docked or self._plot_area is None:
+            return None
+        try:
+            area = self._plot_area()
+        except Exception:
+            return None
+        if area is None or not area.isValid():
+            return None
+        area = area.translated(-self.x(), -self.y())
+        if self._orientation == "vertical":
+            lo, hi, limit = area.top(), area.bottom(), self.height()
+        else:
+            lo, hi, limit = area.left(), area.right(), self.width()
+        lo = max(0, min(int(lo), limit))
+        hi = max(0, min(int(hi), limit))
+        if hi - lo < 10:
+            return None
+        return lo, hi
+
+    def _draw_tick(
+        self,
+        painter: QPainter,
+        bar: QRect,
+        position: int,
+        length: int,
+        ink: QColor,
+        halo: QColor,
+        docked: bool,
+    ) -> None:
+        """One ruler tick: outside the gradient when docked, inside when not.
+
+        Docked reproduces the plot axis it replaced (an unbroken gradient with
+        the ticks out in the label margin); a floating panel has no margin to
+        spare, so its ticks bite into the gradient over a contrast halo.
+        """
+        vertical = self._orientation == "vertical"
+        if docked:
+            near, far = 1, length
+        else:
+            near, far = -1, -length
+            painter.setPen(QPen(self._with_alpha(halo, 200), 2.0))
+            if vertical:
+                painter.drawLine(
+                    bar.right() + far, position, bar.right() + near, position
+                )
+            else:
+                painter.drawLine(
+                    position, bar.bottom() + far, position, bar.bottom() + near
+                )
+        painter.setPen(QPen(ink, 1.0))
+        if vertical:
+            painter.drawLine(
+                bar.right() + far, position, bar.right() + near, position
+            )
+        else:
+            painter.drawLine(
+                position, bar.bottom() + far, position, bar.bottom() + near
+            )
+
+    def _value_label_rect(
+        self, left: int, centre: int, width: int, height: int
+    ) -> QRect:
+        """A vertical value label, kept inside the widget at both endpoints."""
+        top = max(0, min(centre - height // 2, max(0, self.height() - height)))
+        return QRect(left, top, width, height)
+
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        panel = self.rect().adjusted(1, 1, -2, -2)
-        painter.setPen(QPen(QColor(70, 70, 70, 190), 1.0))
-        painter.setBrush(QColor(250, 250, 250, 225))
-        painter.drawRoundedRect(panel, 5.0, 5.0)
+        docked = self.docked
+        panel_color = self._panel_color()
+        ink, halo = self._ink_colors()
+        if docked:
+            # Flush with the plot: the reserved gutter is painted in the plot's
+            # own background and carries no panel outline, so the bar reads as
+            # part of the plot exactly like the in-plot colorbar it replaced.
+            painter.fillRect(self.rect(), panel_color)
+        else:
+            panel = self.rect().adjusted(1, 1, -2, -2)
+            painter.setPen(QPen(QColor(70, 70, 70, 190), 1.0))
+            painter.setBrush(panel_color)
+            painter.drawRoundedRect(panel, 5.0, 5.0)
 
         metrics = painter.fontMetrics()
         draw_ruler = (
@@ -543,20 +715,34 @@ class FloatingColorBar(QWidget):
 
         if self._orientation == "vertical":
             label_height = metrics.height() + 8
-            bar_width = max(16, min(24, self.width() // 3))
             endpoint_padding = metrics.height() // 2
-            bar = QRect(
-                7,
-                7 + endpoint_padding,
-                bar_width,
-                max(
-                    10,
-                    self.height()
-                    - label_height
-                    - 12
-                    - 2 * endpoint_padding,
-                ),
-            )
+            if docked:
+                # Rotated attribute name in an outer column, where the plot's
+                # own right-axis label used to sit.
+                label_width = metrics.height() + 4
+                bar_width = max(14, min(20, self.width() // 4))
+                span = self._docked_plot_span()
+                if span is None:
+                    top = 4 + endpoint_padding
+                    bottom = self.height() - 4 - endpoint_padding
+                else:
+                    top, bottom = span
+                bar = QRect(1, top, bar_width, max(10, bottom - top))
+            else:
+                label_width = 0
+                bar_width = max(16, min(24, self.width() // 3))
+                bar = QRect(
+                    7,
+                    7 + endpoint_padding,
+                    bar_width,
+                    max(
+                        10,
+                        self.height()
+                        - label_height
+                        - 12
+                        - 2 * endpoint_padding,
+                    ),
+                )
             gradient = QLinearGradient(
                 float(bar.left()),
                 float(bar.bottom()),
@@ -569,12 +755,23 @@ class FloatingColorBar(QWidget):
                 max(38, self.width() // 3),
             )
             bar_height = max(16, min(22, self.height() // 3))
-            bar = QRect(
-                attribute_width + 6,
-                7,
-                max(10, self.width() - attribute_width - 14),
-                bar_height,
-            )
+            if docked:
+                span = self._docked_plot_span()
+                left = attribute_width + 6
+                right = self.width() - 8
+                if span is not None:
+                    left = max(left, span[0])
+                    right = max(left + 10, span[1])
+                bar = QRect(left, 6, max(10, right - left), bar_height)
+                attribute_rect = QRect(2, 2, max(0, left - 6), self.height() - 4)
+            else:
+                bar = QRect(
+                    attribute_width + 6,
+                    7,
+                    max(10, self.width() - attribute_width - 14),
+                    bar_height,
+                )
+                attribute_rect = QRect(4, 2, attribute_width, self.height() - 4)
             gradient = QLinearGradient(
                 float(bar.left()),
                 float(bar.top()),
@@ -587,44 +784,35 @@ class FloatingColorBar(QWidget):
                 index / max(1, count - 1),
                 QColor(*(int(channel) for channel in rgba)),
             )
-        painter.setPen(QPen(QColor(45, 45, 45), 1.0))
+        painter.setPen(QPen(self._with_alpha(ink, 220), 1.0))
         painter.setBrush(gradient)
         painter.drawRect(bar)
 
         if self._orientation == "vertical":
             if draw_ruler:
-                label_left = bar.right() + 6
-                label_rect_width = max(0, self.width() - label_left - 4)
+                label_left = bar.right() + (13 if docked else 6)
+                label_rect_width = max(
+                    0, self.width() - label_left - 4 - label_width
+                )
                 for value in minor_ticks:
                     fraction = (value - self._lo) / (self._hi - self._lo)
                     y = int(round(bar.bottom() - fraction * bar.height()))
-                    painter.setPen(QPen(QColor(255, 255, 255, 190), 2.0))
-                    painter.drawLine(bar.right() - 4, y, bar.right() - 1, y)
-                    painter.setPen(QPen(QColor(35, 35, 35), 1.0))
-                    painter.drawLine(bar.right() - 4, y, bar.right() - 1, y)
+                    self._draw_tick(painter, bar, y, 4, ink, halo, docked)
                 for value in ticks:
                     fraction = (value - self._lo) / (self._hi - self._lo)
                     y = int(round(bar.bottom() - fraction * bar.height()))
-                    painter.setPen(QPen(QColor(255, 255, 255, 210), 2.0))
-                    painter.drawLine(bar.right() - 7, y, bar.right() - 1, y)
-                    painter.setPen(QPen(QColor(25, 25, 25), 1.0))
-                    painter.drawLine(bar.right() - 7, y, bar.right() - 1, y)
+                    self._draw_tick(painter, bar, y, 7, ink, halo, docked)
 
                 endpoint_values = [self._lo, self._hi]
                 label_positions: list[int] = []
                 for value in endpoint_values:
                     fraction = (value - self._lo) / (self._hi - self._lo)
                     y = int(round(bar.bottom() - fraction * bar.height()))
-                    painter.setPen(QPen(QColor(255, 255, 255, 210), 2.0))
-                    painter.drawLine(bar.right() - 9, y, bar.right() - 1, y)
-                    painter.setPen(QPen(QColor(25, 25, 25), 1.0))
-                    painter.drawLine(bar.right() - 9, y, bar.right() - 1, y)
+                    self._draw_tick(painter, bar, y, 9, ink, halo, docked)
+                    painter.setPen(ink)
                     painter.drawText(
-                        QRect(
-                            label_left,
-                            y - metrics.height() // 2,
-                            label_rect_width,
-                            metrics.height(),
+                        self._value_label_rect(
+                            label_left, y, label_rect_width, metrics.height()
                         ),
                         Qt.AlignmentFlag.AlignLeft
                         | Qt.AlignmentFlag.AlignVCenter,
@@ -651,69 +839,77 @@ class FloatingColorBar(QWidget):
                     ):
                         continue
                     painter.drawText(
-                        QRect(
-                            label_left,
-                            y - metrics.height() // 2,
-                            label_rect_width,
-                            metrics.height(),
+                        self._value_label_rect(
+                            label_left, y, label_rect_width, metrics.height()
                         ),
                         Qt.AlignmentFlag.AlignLeft
                         | Qt.AlignmentFlag.AlignVCenter,
                         self._format_tick(value, exponent),
                     )
                     label_positions.append(y)
-            painter.setPen(QColor(25, 25, 25))
-            painter.drawText(
-                QRect(
-                    4,
-                    self.height() - label_height,
-                    self.width() - 8,
-                    label_height - 2,
-                ),
-                Qt.AlignmentFlag.AlignCenter,
-                metrics.elidedText(
-                    attribute_label,
-                    Qt.TextElideMode.ElideRight,
-                    self.width() - 10,
-                ),
-            )
+            painter.setPen(ink)
+            if docked:
+                text_span = max(10, bar.height())
+                painter.save()
+                painter.translate(
+                    self.width() - 2,
+                    (bar.top() + bar.bottom()) / 2.0,
+                )
+                painter.rotate(-90.0)
+                painter.drawText(
+                    QRect(-text_span // 2, -label_width, text_span, label_width),
+                    Qt.AlignmentFlag.AlignCenter,
+                    metrics.elidedText(
+                        attribute_label,
+                        Qt.TextElideMode.ElideRight,
+                        text_span,
+                    ),
+                )
+                painter.restore()
+            else:
+                painter.drawText(
+                    QRect(
+                        4,
+                        self.height() - label_height,
+                        self.width() - 8,
+                        label_height - 2,
+                    ),
+                    Qt.AlignmentFlag.AlignCenter,
+                    metrics.elidedText(
+                        attribute_label,
+                        Qt.TextElideMode.ElideRight,
+                        self.width() - 10,
+                    ),
+                )
         else:
-            painter.setPen(QColor(25, 25, 25))
+            painter.setPen(ink)
             painter.drawText(
-                QRect(4, 2, attribute_width, self.height() - 4),
+                attribute_rect,
                 Qt.AlignmentFlag.AlignCenter,
                 metrics.elidedText(
                     attribute_label,
                     Qt.TextElideMode.ElideRight,
-                    attribute_width - 6,
+                    max(0, attribute_rect.width() - 6),
                 ),
             )
             if draw_ruler:
-                text_y = bar.bottom() + 4
+                text_y = bar.bottom() + (12 if docked else 4)
                 for value in minor_ticks:
                     fraction = (value - self._lo) / (self._hi - self._lo)
                     x = int(round(bar.left() + fraction * bar.width()))
-                    painter.setPen(QPen(QColor(255, 255, 255, 190), 2.0))
-                    painter.drawLine(x, bar.bottom() - 4, x, bar.bottom() - 1)
-                    painter.setPen(QPen(QColor(35, 35, 35), 1.0))
-                    painter.drawLine(x, bar.bottom() - 4, x, bar.bottom() - 1)
+                    self._draw_tick(painter, bar, x, 4, ink, halo, docked)
                 for value in ticks:
                     fraction = (value - self._lo) / (self._hi - self._lo)
                     x = int(round(bar.left() + fraction * bar.width()))
-                    painter.setPen(QPen(QColor(255, 255, 255, 210), 2.0))
-                    painter.drawLine(x, bar.bottom() - 7, x, bar.bottom() - 1)
-                    painter.setPen(QPen(QColor(25, 25, 25), 1.0))
-                    painter.drawLine(x, bar.bottom() - 7, x, bar.bottom() - 1)
+                    self._draw_tick(painter, bar, x, 7, ink, halo, docked)
 
                 label_rects: list[QRect] = []
                 endpoint_values = [self._lo, self._hi]
                 for value in endpoint_values:
                     fraction = (value - self._lo) / (self._hi - self._lo)
                     x = int(round(bar.left() + fraction * bar.width()))
-                    painter.setPen(QPen(QColor(255, 255, 255, 210), 2.0))
-                    painter.drawLine(x, bar.bottom() - 9, x, bar.bottom() - 1)
-                    painter.setPen(QPen(QColor(25, 25, 25), 1.0))
-                    painter.drawLine(x, bar.bottom() - 9, x, bar.bottom() - 1)
+                    self._draw_tick(painter, bar, x, 9, ink, halo, docked)
+                    painter.setPen(ink)
                     text = self._format_endpoint(value, exponent, major_step)
                     text_width = metrics.horizontalAdvance(text) + 6
                     text_x = max(

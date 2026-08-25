@@ -266,6 +266,66 @@ def test_apply_all_persists_iteration_selector():
         dlg.close()
 
 
+def test_dialog_restores_persisted_filter_rows():
+    try:
+        from PyQt6.QtWidgets import QApplication, QCheckBox
+    except Exception:
+        pytest.skip("PyQt6 not available")
+    app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
+
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.filter_dialog import (
+        _COL_ATTR,
+        _COL_ENABLED,
+        _COL_MAX,
+        _COL_MIN,
+        _COL_MODE,
+        FilterDialog,
+        SmartBoundsSpinBox,
+    )
+
+    mfx, _ = _make_m2410_per_iter_efo()
+    ds = loader.load_from_mfx_array(mfx, "restored-filter")
+    saved = [
+        _spec("efo", 1000.0, 1004.0, mode="trace mean", itr=1),
+        _spec("cfr", 0.45, 0.65, itr="effective"),
+    ]
+    saved[1]["lo_inc"] = False
+    saved[1]["hi_inc"] = False
+    ds.state["filter_specs"] = saved
+    assert loader.apply_saved_filters(ds)
+    state = AppState()
+    state.add_dataset(ds)
+    dialog = FilterDialog(state, dataset_idx=0)
+    try:
+        assert dialog._table.rowCount() == 2
+        for row in range(2):
+            enabled = dialog._table.cellWidget(row, _COL_ENABLED)
+            assert isinstance(enabled, QCheckBox) and enabled.isChecked()
+        assert dialog._table.cellWidget(0, _COL_ATTR).currentText() == "efo"
+        assert dialog._table.cellWidget(0, _COL_MODE).currentText() == "trace mean"
+        assert dialog._row_iteration(0) == 1
+        assert dialog._table.cellWidget(1, _COL_ATTR).currentText() == "cfr"
+        assert dialog._row_iteration(1) == "effective"
+        for row, (lo, hi) in enumerate(((1000.0, 1004.0), (0.45, 0.65))):
+            lo_spin = dialog._table.cellWidget(row, _COL_MIN)
+            hi_spin = dialog._table.cellWidget(row, _COL_MAX)
+            assert isinstance(lo_spin, SmartBoundsSpinBox)
+            assert isinstance(hi_spin, SmartBoundsSpinBox)
+            assert lo_spin.value() == pytest.approx(lo)
+            assert hi_spin.value() == pytest.approx(hi)
+            assert lo_spin.property("inclusive") is saved[row]["lo_inc"]
+            assert hi_spin.property("inclusive") is saved[row]["hi_inc"]
+
+        # A no-edit Apply round-trip reproduces the same persistent recipe and mask.
+        before = ds.filter_mask.copy()
+        dialog._apply_all()
+        assert ds.state["filter_specs"] == saved
+        np.testing.assert_array_equal(ds.filter_mask, before)
+    finally:
+        dialog.close()
+
+
 def test_loaded_iteration_survives_reapply(tmp_path):
     try:
         from PyQt6.QtWidgets import QApplication

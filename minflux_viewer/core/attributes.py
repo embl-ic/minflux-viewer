@@ -94,7 +94,7 @@ def is_trace_wise_attribute(name: str) -> bool:
 _COORD_NM_DESCRIPTIONS = {
     "xnm": "Localization X coordinate in nanometres.",
     "ynm": "Localization Y coordinate in nanometres.",
-    "znm": "Localization Z coordinate in nanometres (RIMF-corrected view).",
+    "znm": "Localization Z coordinate in nanometres (Z-scaled view).",
 }
 
 
