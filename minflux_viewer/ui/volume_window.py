@@ -852,7 +852,7 @@ class VolumeRenderWindow(QWidget):
             return locs, None
         try:
             from .precision_render import resolve_precision_xyz_nm
-            sigma, _src = resolve_precision_xyz_nm(ds, n)   # (n,3) native nm, RIMF on z
+            sigma, _src = resolve_precision_xyz_nm(ds, n)   # (n,3) native nm, Z scaling factor on z
             return locs, np.ascontiguousarray(sigma[mask], dtype=np.float64)
         except Exception:
             return locs, None

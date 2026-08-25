@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QPoint, QTimer, Qt
+from PyQt6.QtCore import QPoint, Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..analysis.hlyb_clustering import HlyBConfig
+from .attribute_help import apply_attribute_menu_tooltips
 
 # Cap distance labels so a busy 2-D or 3-D field of view stays legible.
 _MAX_DISTANCE_LABELS = 100
@@ -244,9 +245,9 @@ class HlyBClusteringDialog(QDialog):
             self._zscale = self._dspin(0.1, 2.0, d.z_scaling_factor, 4, 0.01, "")
             self._zscale.setToolTip(
                 "Factor applied to the raw z coordinate before analysis "
-                "(z_nm = raw_z × this). Defaults to the dataset's current RIMF; "
+                "(z_nm = raw_z × this). Defaults to the dataset's current Z scaling factor; "
                 "edit it here to override for this run.")
-            form.addRow("Z scaling (RIMF):", self._zscale)
+            form.addRow("Z scaling (Z scaling factor):", self._zscale)
         else:
             self._border_mode = QComboBox()
             self._border_mode.addItem("absolute (nm)", "absolute")
@@ -1079,6 +1080,7 @@ class HlyBResultWindow(QDialog):
                 action.setChecked(value == self._scatter_color_by)
                 action.triggered.connect(
                     lambda _checked=False, selected=value: self._set_scatter_color_by(selected))
+            apply_attribute_menu_tooltips(color_menu, self._raw_color_attributes)
         else:
             unavailable = color_menu.addAction("No aligned attributes available")
             unavailable.setEnabled(False)

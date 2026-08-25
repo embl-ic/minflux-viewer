@@ -30,6 +30,16 @@ def _launch(state, parent=None) -> None:
     run_hlyb_pair_analysis(state, parent)
 
 
+def _launch_pooled(state, parent=None) -> None:
+    from .runner import run_hlyb_pooled_analysis
+
+    run_hlyb_pooled_analysis(state, parent)
+
+
+# Two entries, one workflow: they differ only in what the analysis is run over
+# — the whole active dataset, with cells inferred, or a pool of ROI-delimited
+# cells gathered across acquisitions. The single-dataset entry is left exactly
+# as it was; its published reference numbers were measured through it.
 register(PluginEntry(
     name="HlyB/D subunit pair analysis",
     tooltip="Test a 3-D dataset for a short-range population of labelling "
@@ -40,4 +50,17 @@ register(PluginEntry(
               "short range", "excess", "surface null", "conditional "
               "randomization", "ecoli", "e. coli", "membrane", "transporter",
               "site consolidation", "sensitivity audit"),
+))
+
+register(PluginEntry(
+    name="HlyB/D pooled pair analysis (multi-dataset)",
+    tooltip="Pool ROI-delimited cells from several datasets and run the same "
+            "staged short-range analysis over all of them. Pairs are formed "
+            "within a cell only, so pooling adds counts without creating "
+            "cross-cell or cross-acquisition pairs.",
+    launch=_launch_pooled,
+    keywords=("hlyb", "hlyd", "pooled", "pool", "combine", "accumulate",
+              "collect", "multiple datasets", "multi dataset", "concatenate",
+              "batch", "inter-pair", "pair distance", "histogram", "ecoli",
+              "e. coli", "roi", "cell", "replicate", "aggregate"),
 ))

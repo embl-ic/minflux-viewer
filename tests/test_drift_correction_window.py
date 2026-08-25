@@ -71,8 +71,8 @@ def test_estimate_and_apply_creates_corrected_dataset(_qt_app):
     new = state.datasets[-1]
     assert new.metadata.get("drift_corrected") is True
     assert new.metadata["drift_correction"]["dims"] == 2
-    # Corrected coordinates are final -> RIMF pinned to 1.0.
-    assert float(getattr(new.cali, "RIMF", 1.0)) == 1.0
+    # Corrected coordinates are final -> Z scaling factor pinned to 1.0.
+    assert float(getattr(new.cali, "z_scaling_factor", 1.0)) == 1.0
     # Same number of localizations carried over.
     assert new.prop.num_loc == state.datasets[0].prop.num_loc
 

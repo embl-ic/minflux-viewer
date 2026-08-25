@@ -68,3 +68,34 @@ def test_auto_show_leaves_visible_manager_untouched():
     MainWindow._ensure_dataset_manager_visible(window)
 
     assert manager.show_calls == 0
+
+
+def test_load_option_tooltips_explain_themselves():
+    """Both "When opening data file:" controls carry their rationale as hover help.
+
+    Neither is self-evident: the vld checkbox is a structural no-op on m2410 data,
+    and the min-Z threshold exists because Z fluctuates in the picometre range even
+    in a 2D acquisition.
+    """
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.preferences_dialog import PreferencesDialog
+
+    app = QApplication.instance() or QApplication([])
+    dlg = PreferencesDialog(AppState())
+    try:
+        vld = dlg._only_valid.toolTip()
+        assert "m2205" in vld and "m2410" in vld and "no effect" in vld
+
+        z_tip = dlg._enforce_z.toolTip()
+        assert "2D or 3D" in z_tip
+        assert "picometre" in z_tip                 # the reason, in one word
+        # the spin box repeats it, so hovering either half explains the row
+        assert dlg._min_z_spin.toolTip() == z_tip
+    finally:
+        dlg.deleteLater()
+        app.processEvents()

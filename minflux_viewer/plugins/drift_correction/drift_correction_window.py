@@ -398,11 +398,11 @@ class DriftCorrectionWindow(QDialog):
             source_version=str(ds.metadata.get("source_version", "imported")),
             prefs=self._state.prefs)
 
-        # Coordinates are final (drift baked, RIMF already applied in znm) — pin
-        # RIMF to 1.0 and suppress the post-load auto-anisotropy estimate.
+        # Coordinates are final (drift baked, Z scaling factor already applied in znm) — pin
+        # Z scaling factor to 1.0 and suppress the post-load auto-anisotropy estimate.
         try:
-            new.set_rimf(1.0, source="processed (drift corrected, coordinates final)")
-            new.derived["rimf"] = np.asarray([1.0], dtype=float)
+            new.set_z_scaling_factor(1.0, source="processed (drift corrected, coordinates final)")
+            new.derived["z_scaling_factor"] = np.asarray([1.0], dtype=float)
         except Exception:
             pass
         import uuid

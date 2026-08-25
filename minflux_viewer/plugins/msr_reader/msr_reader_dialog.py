@@ -2338,41 +2338,63 @@ def export_image_series(out_dir: str, msr_path: str, series: list[dict],
                 source.close()
 
 
-def export_source_store(out_dir: str, stem: str, formats: list[str], zroot,
-                        log=None) -> None:
-    """Unpack the dataset's embedded MFXDTA store beside its ``.zarr`` export.
+#: What to do when an export target already exists.
+EXPORT_CONFLICT_MODES = ("error", "overwrite", "skip")
 
-    The container holds more than the localization table the data formats
-    write: the acquisition ROIs (root ``.zattrs``), the search grid
-    (``grd/search_0``), which beads were used, and the acquisition date,
-    MINFLUX sequence and scan geometry (``mfx/.zattrs``).  Unpacking it costs
-    one decode layer and yields a plain **zarr v2 store any tool can open**, so
-    none of that is lost.
 
-    Only for ``.zarr`` — the one export format that is already a directory
-    store, so this rides along naturally.  Every other format ignores it; the
-    raw container has no meaningful representation as a ``.mat``/``.csv`` table.
-    Written as ``<stem>_mfxdta.zarr``, beside the canonical ``<stem>_mfx.zarr``.
+def _export_entries(parsed, msr_state):
+    """The (display name, entry) pairs one export will write, in order."""
+    if (parsed or {}).get("mode") == "modern":
+        return [((ds.get("display_name") or ds.get("did") or "dataset"), ds)
+                for ds in (parsed or {}).get("datasets") or []]
+    keys = (getattr(msr_state, "mfx_map", {}).keys()
+            | getattr(msr_state, "mbm_map", {}).keys())
+    return [(key, None) for key in sorted(keys)] or [("legacy", None)]
+
+
+def existing_export_targets(parsed, msr_state, out_dir: str, formats: list[str], *,
+                            field_selection=None) -> list[Path]:
+    """Planned outputs of this export that already exist on disk.
+
+    Used to ask before writing. The writers refuse to clobber regardless, so
+    this only decides whether the question is worth asking -- it never decides
+    whether the data is safe.
     """
-    if "zarr" not in formats or not zroot:
-        return
-    from ...msr.mfxdta import unpack_zarr_store_to_dir
+    from ...msr.export import _planned_paths
 
-    target = Path(out_dir) / f"{stem}_mfxdta.zarr"
-    try:
-        unpack_zarr_store_to_dir(zroot, target)
-    except Exception as exc:                                       # noqa: BLE001
-        if log is not None:
-            log(f"[warn] could not unpack the source store for '{stem}': {exc}")
-        return
-    if log is not None:
-        log(f"[zarr] wrote {target} (source MFXDTA store, unpacked)")
+    out = Path(out_dir)
+    formats_lower = {str(fmt).lower().lstrip(".") for fmt in formats}
+    other = [fmt for fmt in formats if str(fmt).lower().lstrip(".") != "zarr"]
+    selection = field_selection or {}
+    found: list[Path] = []
+
+    if "zarr" in formats_lower:
+        stem = safe_export_stem(Path(str((parsed or {}).get("msr") or "acquisition")).stem)
+        target = out / f"{stem}.zarr"
+        if target.exists():
+            found.append(target)
+
+    if other:
+        used: set[str] = set()
+        for key, entry in _export_entries(parsed, msr_state):
+            if not selection.get(key, {"checked": True}).get("checked", True):
+                continue
+            has_mfx = ((entry or {}).get("_mfx") is not None
+                       or getattr(msr_state, "mfx_map", {}).get(key) is not None)
+            has_mbm = ((entry or {}).get("_mbm") is not None
+                       or getattr(msr_state, "mbm_map", {}).get(key) is not None)
+            stem = unique_export_stem(key, used, lambda _m: None)
+            found.extend(path for path in _planned_paths(
+                out, stem, other, has_mfx=has_mfx, has_mbm=has_mbm)
+                if path.exists())
+    return found
 
 
 def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
                          mfx_sel_global=None, mbm_sel_global=None,
                          image_names=None, image_indices=None,
-                         field_selection=None, log=None, progress=None) -> None:
+                         field_selection=None, log=None, progress=None,
+                         on_conflict: str = "error") -> None:
     """Write every selected dataset and image series of one parsed ``.msr``.
 
     Free of Qt and of dialog state so the batch runner can call it from a
@@ -2384,7 +2406,7 @@ def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
     os.makedirs(out_dir, exist_ok=True)
     _log = log if log is not None else (lambda _m: None)
 
-    from ...msr.export import export_arrays
+    from ...msr.export import canonical_dataset, export_arrays
 
     # Pair each dataset with its own arrays.  A .msr can carry two entries under
     # one display name (same did, different data — seen in the wild with a large
@@ -2392,13 +2414,11 @@ def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
     # name, so the map alone silently keeps only one of them.  The per-entry
     # ``_mfx``/``_mbm`` captured at parse time are authoritative; the map is the
     # fallback for the legacy path.
-    if (parsed or {}).get("mode") == "modern":
-        entries = [((ds.get("display_name") or ds.get("did") or "dataset"), ds)
-                   for ds in (parsed or {}).get("datasets") or []]
-    else:
-        keys = (getattr(msr_state, "mfx_map", {}).keys()
-                | getattr(msr_state, "mbm_map", {}).keys())
-        entries = [(key, None) for key in sorted(keys)] or [("legacy", None)]
+    if str(on_conflict) not in EXPORT_CONFLICT_MODES:
+        raise ValueError(f"Unsupported export conflict mode: {on_conflict!r}")
+    overwrite_existing = on_conflict == "overwrite"
+    skip_existing = on_conflict == "skip"
+    entries = _export_entries(parsed, msr_state)
 
     images = select_image_series(image_series_of(parsed, _log),
                                  names=image_names, indices=image_indices)
@@ -2412,6 +2432,9 @@ def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
             progress(done, total)
 
     used_names: set[str] = set()
+    zarr_requested = "zarr" in {str(fmt).lower().lstrip(".") for fmt in formats}
+    other_formats = [fmt for fmt in formats if str(fmt).lower().lstrip(".") != "zarr"]
+    zarr_members = []
     selection = field_selection or {}
     for key, entry in entries:
         mfx_arr = (entry or {}).get("_mfx")
@@ -2442,14 +2465,109 @@ def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
                 if mfx_sel is not None else "all")
         _log(f"[export] '{key}': mfx fields = "
              f"{', '.join(kept) if isinstance(kept, list) else kept}")
-        export_arrays(
-            out_dir, stem, formats, mfx_sub, mbm_sub, log=_log,
-            mbm_meta=getattr(msr_state, "mbm_meta_map", {}).get(key),
-        )
-        export_source_store(out_dir, stem, formats, (entry or {}).get("zroot"), _log)
+        export_kwargs = {
+            "log": _log,
+            "mbm_meta": getattr(msr_state, "mbm_meta_map", {}).get(key),
+            "overwrite": overwrite_existing,
+        }
+        source_zarr = (entry or {}).get("zroot")
+        if zarr_requested:
+            if mfx_sub is None:
+                raise ValueError(
+                    f"Dataset '{key}' has no selected MFX data for the Zarr project."
+                )
+            member = canonical_dataset(
+                mfx_sub,
+                name=key,
+                folder=str(out_dir),
+                mbm=mbm_sub,
+                mbm_meta=export_kwargs["mbm_meta"],
+                source_zarr=source_zarr,
+            )
+            member.metadata["msr_source_path"] = str(parsed.get("msr") or "")
+            member.metadata["msr_dataset_key"] = key
+            member.metadata["msr_dataset_name"] = key
+            member.metadata["msr_dataset_did"] = str((entry or {}).get("did") or "")
+            zarr_members.append(member)
+        if other_formats:
+            if skip_existing:
+                from ...msr.export import _planned_paths
+
+                planned = _planned_paths(
+                    Path(out_dir), stem, other_formats,
+                    has_mfx=mfx_sub is not None, has_mbm=mbm_sub is not None)
+                if planned and all(path.exists() for path in planned):
+                    _log(f"[export] skip '{key}': outputs already exist.")
+                    _tick()
+                    continue
+            export_arrays(out_dir, stem, other_formats, mfx_sub, mbm_sub, **export_kwargs)
         _tick()
 
-    if images:
+    if zarr_requested and zarr_members:
+        from ...core.minflux_zarr import (
+            write_minflux_zarr, write_minflux_zarr_project,
+        )
+        from ...core.overlay import overlay_color_cycle
+
+        if len(zarr_members) > 1:
+            group_id = f"msr-export:{Path(str(parsed.get('msr') or '')).resolve()}"
+            colors = overlay_color_cycle(None)
+            reference = zarr_members[0].name
+            for position, member in enumerate(zarr_members):
+                transform = {
+                    "method": "unregistered identity (MSR export)",
+                    "reference_channel": reference,
+                    "moving_channel": member.name,
+                    "matrix_4x4": [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ],
+                    "matrix_3x3": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                    "translation_nm": [0.0, 0.0],
+                    "z_translation_nm": 0.0,
+                    "matched_bead_count": 0,
+                }
+                member.state.update({
+                    "overlay_id": group_id,
+                    "render_group_id": group_id,
+                    "overlay_index": 1,
+                    "overlay_order": position + 1,
+                    "overlay_lut": colors[position % len(colors)],
+                    "render_channel_lut": colors[position % len(colors)],
+                    "overlay_transform": transform,
+                    "render_transform_2d": transform,
+                })
+                member.metadata["overlay_id"] = group_id
+                member.metadata["overlay_transform"] = transform
+                member.metadata["render_transform_2d"] = transform
+        source_path = Path(str(parsed.get("msr") or "MINFLUX_acquisition.msr"))
+        target = Path(out_dir) / f"{safe_export_stem(source_path.stem)}.zarr"
+        image_specs = [{**entry, "msr_path": str(source_path)} for entry in images]
+        if skip_existing and target.exists():
+            _log(f"[zarr] skip {target}: already exists.")
+        elif len(zarr_members) > 1:
+            write_minflux_zarr_project(
+                zarr_members, target, overwrite=overwrite_existing,
+                image_specs=image_specs, name=source_path.stem,
+            )
+        else:
+            write_minflux_zarr(
+                zarr_members[0], target, overwrite=overwrite_existing,
+                image_specs=image_specs,
+            )
+        _log(
+            f"[zarr] wrote {target} ({len(zarr_members)} dataset(s), "
+            f"{len(images)} embedded image(s))"
+        )
+        for _entry in images:
+            _tick()
+    elif images:
         # ASCII only: the dialog's log() falls back to print(), which raises on
         # a cp1252 console.
         _log(f"[export] {len(images)} image series -> OME-TIFF")
@@ -2475,8 +2593,10 @@ class _BatchExportTask(QRunnable):
     """
 
     def __init__(self, files, targets, formats, tmp_dir, *, mfx_sel, mbm_sel,
-                 image_names, field_selection, image_indices=frozenset()):
+                 image_names, field_selection, image_indices=frozenset(),
+                 on_conflict="error"):
         super().__init__()
+        self._on_conflict = str(on_conflict or "error")
         self.signals = _BatchExportSignals()
         self._files = list(files)
         self._targets = dict(targets)
@@ -2522,6 +2642,7 @@ class _BatchExportTask(QRunnable):
                     log=log,
                     progress=lambda d, t, _b=base: self.signals.progress.emit(
                         _b + (d / max(t, 1)) / total, msr_path.name),
+                    on_conflict=self._on_conflict,
                 )
                 exported += 1
             except Exception as exc:                           # noqa: BLE001
@@ -2529,6 +2650,87 @@ class _BatchExportTask(QRunnable):
                 log(f"[batch error] {msr_path}: {exc}")
         self.signals.progress.emit(1.0, "")
         self.signals.finished.emit(exported, failures, self._cancelled)
+
+
+class _ParsedExportTask(QRunnable):
+    """Export the already-parsed single file without blocking the Qt thread."""
+
+    def __init__(
+        self, parsed, msr_state, out_dir, formats, *, field_selection,
+        image_indices, on_conflict="error",
+    ) -> None:
+        super().__init__()
+        self._on_conflict = str(on_conflict or "error")
+        self.signals = _BatchExportSignals()
+        self._parsed = parsed
+        self._msr_state = msr_state
+        self._out_dir = str(out_dir)
+        self._formats = list(formats)
+        self._field_selection = dict(field_selection or {})
+        self._image_indices = image_indices
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:  # noqa: N802 - Qt API
+        source = Path(str((self._parsed or {}).get("msr") or "MINFLUX data"))
+        failures = []
+
+        def progress(done: int, total: int) -> None:
+            self.signals.progress.emit(
+                done / max(total, 1), source.name
+            )
+
+        try:
+            self.signals.message.emit(
+                f"[export] writing {source.name} as {', '.join(self._formats)} "
+                f"to {self._out_dir}"
+            )
+            export_parsed_result(
+                self._parsed,
+                self._msr_state,
+                self._out_dir,
+                self._formats,
+                image_indices=self._image_indices,
+                field_selection=self._field_selection,
+                log=self.signals.message.emit,
+                progress=progress,
+                on_conflict=self._on_conflict,
+            )
+        except Exception as exc:  # noqa: BLE001
+            failures.append((source, str(exc)))
+            self.signals.message.emit(f"[export error] {source}: {exc}")
+        self.signals.progress.emit(1.0, "")
+        self.signals.finished.emit(0 if failures else 1, failures, self._cancelled)
+
+
+class _ExportEstimateSignals(QObject):
+    done = pyqtSignal(int, object)
+
+
+class _ExportEstimateTask(QRunnable):
+    """Sample parsed arrays off-thread so the size hint never stalls the dialog."""
+
+    def __init__(self, generation: int, components) -> None:
+        super().__init__()
+        self.signals = _ExportEstimateSignals()
+        self._generation = int(generation)
+        self._components = list(components)
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:  # noqa: N802 - Qt API
+        try:
+            from ...core.export_size import estimate_export_sizes
+
+            result = estimate_export_sizes(self._components)
+        except Exception as exc:  # the estimate must never block a real export
+            result = {"error": str(exc)}
+        if not self._cancelled:
+            self.signals.done.emit(self._generation, result)
 
 
 class PathDropLineEdit(QLineEdit):
@@ -2655,6 +2857,9 @@ class MsrReaderDialog(QWidget):
         self._batch_task = None
         self._batch_context: dict | None = None
         self._last_batch_pct = -1
+        self._estimate_generation = 0
+        self._estimate_task: _ExportEstimateTask | None = None
+        self._export_estimates: dict = {}
         self.resize(980, 860)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._positioned = False
@@ -2774,10 +2979,10 @@ class MsrReaderDialog(QWidget):
             "plot_new_window": bool(self.plot_new_window_check.isChecked()),
             "recursive": bool(self.recursive_check.isChecked()),
             "reproduce_tree": bool(self.reproduce_tree_check.isChecked()),
+            "batch_conflict": str(self.conflict_combo.currentData() or "skip"),
             "formats": {
                 "mat": bool(self.fmt_mat.isChecked()),
                 "npy": bool(self.fmt_npy.isChecked()),
-                "npz": bool(self.fmt_npz.isChecked()),
                 "json": bool(self.fmt_json.isChecked()),
                 "csv": bool(self.fmt_csv.isChecked()),
                 "zarr": bool(self.fmt_zarr.isChecked()),
@@ -2840,6 +3045,13 @@ class MsrReaderDialog(QWidget):
                     pass
             self._batch_task = None
             self._batch_context = None
+        if self._estimate_task is not None:
+            self._estimate_task.cancel()
+            try:
+                self._estimate_task.signals.done.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            self._estimate_task = None
         for win in list(self._plot_windows):
             try:
                 win.close()
@@ -2939,9 +3151,27 @@ class MsrReaderDialog(QWidget):
             "Off: every file exports into its own <name> sub-folder directly "
             "under the output folder.")
         self.reproduce_tree_check.toggled.connect(lambda _checked: self._save_settings())
+        self.conflict_label = QLabel("when file exists:")
+        self.conflict_combo = QComboBox()
+        # Skip first, and the default: a batch that re-runs over a folder should
+        # fill in what is missing rather than rewrite hours of finished output.
+        self.conflict_combo.addItem("skip", "skip")
+        self.conflict_combo.addItem("overwrite", "overwrite")
+        saved_conflict = str(settings.get("batch_conflict", "skip"))
+        self.conflict_combo.setCurrentIndex(
+            max(0, self.conflict_combo.findData(saved_conflict)))
+        self.conflict_combo.setToolTip(
+            "What a batch export does when an output file already exists.\n\n"
+            "skip - keep the existing file and write only what is missing, "
+            "so a re-run completes an interrupted batch.\n"
+            "overwrite - replace it.\n\n"
+            "A single-file export asks instead, and can also be cancelled.")
+        self.conflict_combo.currentIndexChanged.connect(
+            lambda _index: self._save_settings())
         root.addLayout(self._browse_row(
             "Output folder:", self.out_dir_edit, self.browse_out,
-            extra=self.reproduce_tree_check))
+            extra=(self.reproduce_tree_check, self.conflict_label,
+                   self.conflict_combo)))
 
         export_row = QHBoxLayout()
         field_button = QPushButton("Datasets / Fields included…")
@@ -2950,40 +3180,65 @@ class MsrReaderDialog(QWidget):
         export_row.addWidget(QLabel("Formats:"))
         self.fmt_mat = QCheckBox("MATLAB (.mat)")
         self.fmt_npy = QCheckBox("NumPy (.npy)")
-        self.fmt_npz = QCheckBox("NumPy zip (.npz)")
         self.fmt_json = QCheckBox("JSON (.json)")
-        self.fmt_csv = QCheckBox("(.csv)")
+        self.fmt_csv = QCheckBox("Canonical table (.csv)")
         self.fmt_zarr = QCheckBox("Zarr (.zarr)")
-        self.fmt_zarr.setToolTip(
-            "Write canonical flat m2410 columns to a .zarr directory. "
-            "MBM is written as a separate companion when present. "
-            "Re-opens in the viewer (drag the .zarr directory onto the window).\n\n"
-            "Also writes <name>_mfxdta.zarr: the measurement's embedded source "
-            "store, unpacked. It carries what the flat table cannot — the "
-            "acquisition ROIs, the search grid, which beads were used, and the "
-            "acquisition date, MINFLUX sequence and scan geometry."
+        self.fmt_mat.setToolTip(
+            "Compressed MATLAB data. Size depends on the values; the estimate "
+            "samples MATLAB's real compressor."
         )
-        self.fmt_npz.setToolTip(
-            "Zipped NumPy archive of the canonical flat m2410 columns — compact, "
-            "dtype-preserving, and read anywhere with numpy.load().\n\n"
-            "Write-only: the viewer cannot re-open a .npz. Use .mat, .npy, "
-            ".json, .csv or .zarr for a round trip."
+        self.fmt_npy.setToolTip(
+            "Uncompressed binary structured array. Its size is predictable and "
+            "loading is normally much faster than text."
+        )
+        self.fmt_json.setToolTip(
+            "Plain-text record objects. Large MINFLUX acquisitions can expand to "
+            "several GiB; formatting and parsing every number remains slow even "
+            "though the writer/reader stream the file."
+        )
+        self.fmt_csv.setToolTip(
+            "Plain-text decimal table. More compact than JSON but commonly much "
+            "larger and slower than binary formats for all-iteration MINFLUX data."
+        )
+        self.fmt_zarr.setToolTip(
+            "Write one self-contained MINFLUX Viewer Zarr v2 project for this "
+            "MSR file. Every selected dataset becomes an overlay member with "
+            "canonical raw MFX columns (including both "
+            "DCR columns), MBM points and naming/used metadata, the search grid, "
+            "native acquisition attributes and processing state. Selected images "
+            "are embedded; DID-linked images are stored below their dataset. Re-open it by "
+            "dragging the .zarr directory onto the viewer.\n\n"
+            "The former per-dataset and _mfxdta.zarr companion exports are retired."
         )
         formats = settings.get("formats") or {}
         self.fmt_mat.setChecked(bool(formats.get("mat", True)))
         self.fmt_npy.setChecked(bool(formats.get("npy", False)))
-        self.fmt_npz.setChecked(bool(formats.get("npz", False)))
         self.fmt_json.setChecked(bool(formats.get("json", False)))
         self.fmt_csv.setChecked(bool(formats.get("csv", False)))
         self.fmt_zarr.setChecked(bool(formats.get("zarr", False)))
         export_row.addWidget(self.fmt_mat)
         export_row.addWidget(self.fmt_npy)
-        export_row.addWidget(self.fmt_npz)
         export_row.addWidget(self.fmt_json)
         export_row.addWidget(self.fmt_csv)
         export_row.addWidget(self.fmt_zarr)
         export_row.addStretch(1)
         root.addLayout(export_row)
+        self._export_size_label = QLabel(
+            "Estimated output: parse a file to calculate from its actual rows and fields."
+        )
+        self._export_size_label.setWordWrap(True)
+        self._export_size_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._export_size_label.setToolTip(
+            "NumPy is calculated from the exact dtype. CSV/JSON are sampled from "
+            "the actual decimal serialization; MAT/Zarr use sampled compression."
+        )
+        root.addWidget(self._export_size_label)
+        for checkbox in (
+            self.fmt_mat, self.fmt_npy, self.fmt_json, self.fmt_csv, self.fmt_zarr,
+        ):
+            checkbox.toggled.connect(self._update_export_estimate_label)
 
         self.logbox = None
         self.field_selection = settings.get("field_selection") or {}
@@ -3042,15 +3297,15 @@ class MsrReaderDialog(QWidget):
     def _browse_row(self, label: str, lineedit: QLineEdit, callback, *, extra=None):
         row = QHBoxLayout()
         row.addWidget(QLabel(label))
-        # The field is the only stretching item, so a trailing checkbox takes
-        # its width out of the field rather than widening the dialog.
-        lineedit.setMinimumWidth(180)
+        # The field is the only stretching item, so trailing widgets take their
+        # width out of the field rather than widening the dialog.
+        lineedit.setMinimumWidth(120)
         row.addWidget(lineedit, 1)
         button = QPushButton("Browse…")
         button.clicked.connect(callback)
         row.addWidget(button)
-        if extra is not None:
-            row.addWidget(extra)
+        for widget in ((extra,) if isinstance(extra, QWidget) else tuple(extra or ())):
+            row.addWidget(widget)
         return row
 
     # ------------------------------------------------------------------
@@ -3156,6 +3411,13 @@ class MsrReaderDialog(QWidget):
         self.nodeinfo.clear()
         self.fullpath_by_item.clear()
         self.datasetnode_info.clear()
+        self._export_estimates = {}
+        self._estimate_generation += 1
+        if self._estimate_task is not None:
+            self._estimate_task.cancel()
+            self._estimate_task = None
+        if hasattr(self, "_export_size_label"):
+            self._update_export_estimate_label()
 
     def _parse_specific_file(self, msr: str) -> None:
         """Reset + parse one specific ``.msr`` file (async)."""
@@ -3234,6 +3496,10 @@ class MsrReaderDialog(QWidget):
             self.recursive_check.setEnabled(folder)
         if hasattr(self, "reproduce_tree_check"):
             self.reproduce_tree_check.setEnabled(folder)
+        # A single file asks instead, so the fixed choice is batch-only.
+        for name in ("conflict_label", "conflict_combo"):
+            if hasattr(self, name):
+                getattr(self, name).setEnabled(folder)
         self._parse_button.setToolTip(
             "Pick which .msr file in the folder to parse and preview."
             if folder else
@@ -3300,6 +3566,7 @@ class MsrReaderDialog(QWidget):
                 self.log(f"          - {key}: shape={arr.shape}, dtype={arr.dtype}")
         else:
             self.log("[parsed] mbm is empty")
+        self._start_export_estimate()
 
     def _on_parse_failed(self, error: str):
         self.log(f"[ERROR] {error}")
@@ -3538,8 +3805,8 @@ class MsrReaderDialog(QWidget):
         return (info or {}).get("zroot"), (info or {}).get("did")
 
     def _load_array_for_path(self, zroot: str, path: str):
-        import zarr
-        arch = zarr.open(zroot, mode="r")
+        from ...msr import zarr2
+        arch = zarr2.open(zroot, mode="r")
         if path in arch:
             return np.asarray(arch[path])
 
@@ -3974,6 +4241,154 @@ class MsrReaderDialog(QWidget):
             })
         return datasets
 
+    def _selected_export_components(self) -> list[tuple[str, np.ndarray]]:
+        """Current field selection as the structured arrays writers will see."""
+        mfstate = self._msr_state()
+        if self.parsed.get("mode") == "modern":
+            entries = [
+                ((entry.get("display_name") or entry.get("did") or "dataset"), entry)
+                for entry in (self.parsed.get("datasets") or [])
+            ]
+        else:
+            keys = mfstate.mfx_map.keys() | mfstate.mbm_map.keys()
+            entries = [(key, None) for key in sorted(keys)] or [("legacy", None)]
+
+        selection = self.field_selection or {}
+        components: list[tuple[str, np.ndarray]] = []
+        for key, entry in entries:
+            selected = selection.get(
+                key, {"checked": True, "mfx": None, "mbm": None}
+            )
+            if not selected.get("checked", True):
+                continue
+            mfx = (entry or {}).get("_mfx")
+            mbm = (entry or {}).get("_mbm")
+            if mfx is None:
+                mfx = mfstate.mfx_map.get(key)
+            if mbm is None:
+                mbm = mfstate.mbm_map.get(key)
+            mfx = subset_struct_fields(mfx, selected.get("mfx"))
+            mbm = subset_struct_fields(mbm, selected.get("mbm"))
+            if mfx is not None and np.asarray(mfx).size:
+                components.append(("mfx", np.asarray(mfx)))
+            if mbm is not None and np.asarray(mbm).size:
+                components.append(("mbm", np.asarray(mbm)))
+        return components
+
+    def _start_export_estimate(self) -> None:
+        self._estimate_generation += 1
+        generation = self._estimate_generation
+        if self._estimate_task is not None:
+            self._estimate_task.cancel()
+        components = self._selected_export_components()
+        self._export_estimates = {}
+        self._update_export_estimate_label(calculating=bool(components))
+        if not components:
+            self._estimate_task = None
+            return
+        task = _ExportEstimateTask(generation, components)
+        task.signals.done.connect(self._on_export_estimate_ready)
+        self._estimate_task = task
+        QThreadPool.globalInstance().start(task)
+
+    def _on_export_estimate_ready(self, generation: int, result: object) -> None:
+        if generation != self._estimate_generation:
+            return
+        self._estimate_task = None
+        self._export_estimates = result if isinstance(result, dict) else {}
+        self._update_export_estimate_label()
+
+    def _selected_format_names(self) -> list[str]:
+        return [
+            name
+            for name, checkbox in (
+                ("mat", self.fmt_mat),
+                ("npy", self.fmt_npy),
+                ("json", self.fmt_json),
+                ("csv", self.fmt_csv),
+                ("zarr", self.fmt_zarr),
+            )
+            if checkbox.isChecked()
+        ]
+
+    def _selected_image_uncompressed_bytes(self) -> tuple[int, int]:
+        """Selected image count and raw pixel bytes (a conservative size bound)."""
+        import re
+
+        series = select_image_series(
+            self._gather_image_series_for_dialog(),
+            indices=getattr(self, "image_field_selection", set()),
+        )
+        total = 0
+        for entry in series:
+            dims = [int(value) for value in re.findall(r"\d+", str(entry.get("shape_str", "")))]
+            try:
+                itemsize = np.dtype(str(entry.get("dtype") or "uint8")).itemsize
+            except (TypeError, ValueError):
+                itemsize = 1
+            total += int(np.prod(dims, dtype=np.int64)) * itemsize if dims else 0
+        return len(series), total
+
+    def _update_export_estimate_label(
+        self, _checked: bool = False, *, calculating: bool = False,
+    ) -> None:
+        if not hasattr(self, "_export_size_label"):
+            return
+        selected = self._selected_format_names()
+        if not self.parsed:
+            self._export_size_label.setText(
+                "Estimated output: parse a file to calculate from its actual rows and fields."
+            )
+            return
+        if not selected:
+            self._export_size_label.setText("Estimated output: select a format.")
+            return
+        if calculating or not self._export_estimates:
+            self._export_size_label.setText(
+                "Estimated output: calculating from sampled values…"
+            )
+            return
+        if "error" in self._export_estimates:
+            self._export_size_label.setText(
+                "Estimated output unavailable; export is still available."
+            )
+            self._export_size_label.setToolTip(str(self._export_estimates["error"]))
+            return
+        from ...core.export_size import format_file_size
+
+        labels = {
+            "mat": "MAT",
+            "npy": "NumPy",
+            "json": "JSON",
+            "csv": "CSV",
+            "zarr": "Zarr",
+        }
+        parts = []
+        image_count, image_bytes = (
+            self._selected_image_uncompressed_bytes()
+            if "zarr" in selected else (0, 0)
+        )
+        for fmt in selected:
+            estimate = self._export_estimates.get(fmt)
+            if estimate is None:
+                continue
+            prefix = "" if estimate.confidence == "exact" else "≈"
+            suffix = ""
+            if fmt == "zarr":
+                if image_count:
+                    suffix = (
+                        f" numeric data + up to {format_file_size(image_bytes)} "
+                        f"from {image_count} selected image series + search/viewer state"
+                    )
+                else:
+                    suffix = " numeric data + search/viewer state"
+            parts.append(
+                f"{labels[fmt]} {prefix}{format_file_size(estimate.bytes)}{suffix}"
+            )
+        self._export_size_label.setText(
+            "Estimated output (selected datasets/fields): " + " · ".join(parts)
+        )
+
     def on_fields_dialog(self):
         # Drop empty placeholder datasets (e.g. the "legacy" entry of an image-only
         # file has no mfx/mbm fields) so only real datasets + image series show.
@@ -3991,6 +4406,7 @@ class MsrReaderDialog(QWidget):
             self.image_field_selection = dlg.image_payload()
             self._save_settings()
             self.log("[select] updated datasets/fields selection.")
+            self._start_export_estimate()
 
     def _selected_image_names(self) -> set[str] | None:
         """Names of the image series the user ticked, or ``None`` when names
@@ -4116,6 +4532,7 @@ class MsrReaderDialog(QWidget):
             image_indices=self.image_field_selection,
             field_selection=self.field_selection,
             log=self.log,
+            on_conflict=getattr(self, "_export_conflict", "error") or "error",
         )
 
     @staticmethod
@@ -4461,7 +4878,7 @@ class MsrReaderDialog(QWidget):
             data_prefs = (self._state.prefs if self._state is not None else {}).get("data", {}) or {}
             attrs, num_raw, _num_itr, _version, _detail = _normalize_mfx_attrs(
                 mfx,
-                load_all_itr=data_prefs.get("iter_load", "last") == "all",
+                load_all_itr=False,   # always last-valid; browse via mfx_raw
             )
             loc_z = np.asarray(attrs.get("loc_z", np.zeros(num_raw)), dtype=np.float64)
             finite = np.isfinite(loc_z)
@@ -4647,7 +5064,7 @@ class MsrReaderDialog(QWidget):
             data_prefs = (self._state.prefs if self._state is not None else {}).get("data", {}) or {}
             attrs, num_raw, _num_itr, _version, _detail = _normalize_mfx_attrs(
                 mfx,
-                load_all_itr=data_prefs.get("iter_load", "last") == "all",
+                load_all_itr=False,   # always last-valid; browse via mfx_raw
             )
             loc_x = np.asarray(attrs.get("loc_x", np.full(num_raw, np.nan)), dtype=np.float64).ravel()
             loc_y = np.asarray(attrs.get("loc_y", np.full(num_raw, np.nan)), dtype=np.float64).ravel()
@@ -5116,19 +5533,49 @@ class MsrReaderDialog(QWidget):
 
         # Off the UI thread: a batch is minutes of parsing and writing, and
         # running it inline froze both this dialog and the main window.
-        self._batch_context = {"out_dir": out_dir, "total": len(files)}
+        self._batch_context = {
+            "out_dir": out_dir,
+            "total": len(files),
+            "kind": "batch",
+            "status_header": _BATCH_STATUS_HEADER,
+        }
         task = _BatchExportTask(
             files, targets, formats, tmp,
             mfx_sel=mfx_sel_global, mbm_sel=mbm_sel_global,
             image_names=image_names_global,
             image_indices=self.image_field_selection,
             field_selection=self.field_selection,
+            on_conflict=getattr(self, "_export_conflict", "error") or "error",
         )
         task.signals.message.connect(self.log)
         task.signals.progress.connect(self._on_batch_progress)
         task.signals.finished.connect(self._on_batch_finished)
         self._batch_task = task
         self._set_batch_running(True, len(files))
+        QThreadPool.globalInstance().start(task)
+
+    def _run_single_export(self, out_dir: str, formats: list[str]) -> None:
+        """Start a single parsed export off-thread, like the existing batch path."""
+        task = _ParsedExportTask(
+            self.parsed,
+            self._msr_state(),
+            out_dir,
+            formats,
+            field_selection=self.field_selection,
+            image_indices=self.image_field_selection,
+            on_conflict=getattr(self, "_export_conflict", "error") or "error",
+        )
+        task.signals.message.connect(self.log)
+        task.signals.progress.connect(self._on_batch_progress)
+        task.signals.finished.connect(self._on_batch_finished)
+        self._batch_context = {
+            "out_dir": out_dir,
+            "total": 1,
+            "kind": "single",
+            "status_header": "MSR export",
+        }
+        self._batch_task = task
+        self._set_batch_running(True, 1)
         QThreadPool.globalInstance().start(task)
 
     # -- batch progress -------------------------------------------------
@@ -5144,7 +5591,12 @@ class MsrReaderDialog(QWidget):
             if self._state is not None:
                 from ...core.app_state import format_progress_bar
                 self._state.log_progress(format_progress_bar(0.0))
-                self._state.status_progress(_BATCH_STATUS_HEADER, 0.0)
+                header = str(
+                    (self._batch_context or {}).get(
+                        "status_header", _BATCH_STATUS_HEADER
+                    )
+                )
+                self._state.status_progress(header, 0.0)
         else:
             self.setWindowTitle(_READER_TITLE)
 
@@ -5157,24 +5609,36 @@ class MsrReaderDialog(QWidget):
             f"{done} / {total}" + (f"  ·  {current}" if current else ""))
         # The title carries the percentage so it is legible even when the
         # dialog is behind another window, as requested.
-        self.setWindowTitle(f"{_READER_TITLE} (batch export {fraction * 100:.1f}%…)")
+        kind = str((self._batch_context or {}).get("kind", "batch"))
+        operation = "batch export" if kind == "batch" else "export"
+        self.setWindowTitle(
+            f"{_READER_TITLE} ({operation} {fraction * 100:.1f}%…)"
+        )
         pct = int(fraction * 1000)                    # throttle at 0.1 %
         if self._state is not None and pct != self._last_batch_pct:
             self._last_batch_pct = pct
             from ...core.app_state import format_progress_bar
             self._state.log_progress(format_progress_bar(fraction))
-            self._state.status_progress(_BATCH_STATUS_HEADER, fraction)
+            header = str(
+                (self._batch_context or {}).get(
+                    "status_header", _BATCH_STATUS_HEADER
+                )
+            )
+            self._state.status_progress(header, fraction)
 
     def _cancel_batch_export(self) -> None:
         if self._batch_task is not None:
             self._batch_task.cancel()
             self._cancel_batch_btn.setEnabled(False)
-            self.log("[batch] stopping after the current file…")
+            kind = str((self._batch_context or {}).get("kind", "batch"))
+            unit = "file" if kind == "batch" else "dataset"
+            self.log(f"[{kind}] stopping after the current {unit}…")
 
     def _on_batch_finished(self, exported: int, failures: list, cancelled: bool) -> None:
         context = self._batch_context or {}
         out_dir = str(context.get("out_dir", ""))
         total = int(context.get("total", 0))
+        kind = str(context.get("kind", "batch"))
         self._batch_task = None
         self._batch_context = None
         self._cancel_batch_btn.setEnabled(True)
@@ -5183,9 +5647,21 @@ class MsrReaderDialog(QWidget):
         if state is not None:
             from ...core.app_state import format_progress_bar
             state.log_progress(format_progress_bar(1.0, done=True), final=True)
+            label = "MSR batch export" if kind == "batch" else "MSR export"
+            unit = "file(s)" if kind == "batch" else "dataset(s)"
             state.status_message.emit(
-                f"MSR batch export: {'stopped' if cancelled else 'done'} "
-                f"({exported}/{total} file(s)).")
+                f"{label}: {'stopped' if cancelled else 'done'} "
+                f"({exported}/{total} {unit}).")
+        if kind == "single":
+            if failures:
+                reason = failures[0][1]
+                self.log(f"[error] export failed: {reason}")
+                QMessageBox.critical(self, "Export failed", reason)
+            elif cancelled:
+                self.log(f"[done] Export stopped; output is in {out_dir}.")
+            else:
+                self.log(f"[done] Export complete: {out_dir}")
+            return
         verb = "stopped after" if cancelled else "complete:"
         self.log(f"[done] Batch export {verb} {exported}/{total} file(s) "
                  f"exported to {out_dir}"
@@ -5216,8 +5692,6 @@ class MsrReaderDialog(QWidget):
             formats.append("mat")
         if self.fmt_npy.isChecked():
             formats.append("npy")
-        if self.fmt_npz.isChecked():
-            formats.append("npz")
         if self.fmt_json.isChecked():
             formats.append("json")
         if self.fmt_csv.isChecked():
@@ -5227,6 +5701,21 @@ class MsrReaderDialog(QWidget):
         if not formats:
             QMessageBox.critical(self, "No formats", "Pick at least one export format.")
             return
+        if self._export_estimates:
+            from ...core.export_size import text_export_warning
+
+            warning = text_export_warning(self._export_estimates, formats)
+            if warning:
+                choice = QMessageBox.warning(
+                    self,
+                    "Very large text export",
+                    warning + "\n\nContinue with this export?",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if choice != QMessageBox.StandardButton.Yes:
+                    return
         try:
             out_dir = str(prepare_export_output_dir(out_dir_text))
         except ValueError as exc:
@@ -5236,6 +5725,9 @@ class MsrReaderDialog(QWidget):
         self._save_settings()
         tmp = self._temp_dir()
         ipath = self.input_path_edit.text().strip()
+        self._export_conflict = self._ask_export_conflict(out_dir, formats)
+        if self._export_conflict is None:
+            return
         if self.mode_folder.isChecked():
             self._run_batch_export(ipath, out_dir, formats, tmp)
             return
@@ -5246,16 +5738,60 @@ class MsrReaderDialog(QWidget):
                 self.log("no msr file found!")
                 return
             self._store_parse_result(parse_msr_general(msr, tmp, log=self.log))
+        # Formatting tens or hundreds of millions of text values is inherently
+        # slow, but it need not freeze the whole application.  The worker keeps
+        # the UI responsive; errors still return through the normal dialog/log.
+        self._run_single_export(out_dir, formats)
+
+    def _ask_export_conflict(self, out_dir: str, formats: list[str]) -> str | None:
+        """How to treat export targets that already exist; ``None`` cancels.
+
+        The writers refuse to clobber anything, so before this the only way to
+        re-export into a used folder was to read a FileExistsError out of the
+        log and delete the files by hand.
+        """
+        if self.mode_folder.isChecked():
+            # A batch spans many files with different conflicts, so one prompt
+            # cannot answer for them all: the row's dropdown is the standing
+            # policy instead.
+            return str(self.conflict_combo.currentData() or "skip")
+        if not self.parsed:
+            return "error"
         try:
-            self._export_current_parsed(out_dir, formats)
-        except Exception as exc:
-            # Export preflight deliberately raises on ambiguous selections,
-            # collisions, and overwrite attempts.  Surface the exact conflict
-            # instead of leaving a partial-looking success message.
-            self.log(f"[error] export failed: {exc}")
-            QMessageBox.critical(self, "Export failed", str(exc))
-            return
-        self.log("[done] Export complete.")
+            existing = existing_export_targets(
+                self.parsed, self._msr_state(), out_dir, formats,
+                field_selection=self.field_selection,
+            )
+        except Exception as exc:                                # noqa: BLE001
+            self.log(f"[warn] could not check existing outputs: {exc}")
+            return "error"
+        if not existing:
+            return "error"
+
+        listed = "\n".join(f"  {path.name}" for path in existing[:8])
+        if len(existing) > 8:
+            listed += f"\n  ... and {len(existing) - 8} more"
+        message = QMessageBox(self)
+        message.setIcon(QMessageBox.Icon.Question)
+        message.setWindowTitle("Output already exists")
+        message.setText(
+            f"{len(existing)} export target(s) already exist in\n{out_dir}")
+        message.setInformativeText(
+            f"{listed}\n\nOverwrite replaces them. Skip existing "
+            "keeps them and writes only what is missing.")
+        overwrite = message.addButton("Overwrite",
+                                      QMessageBox.ButtonRole.DestructiveRole)
+        skip = message.addButton("Skip existing", QMessageBox.ButtonRole.AcceptRole)
+        cancel = message.addButton(QMessageBox.StandardButton.Cancel)
+        message.setDefaultButton(skip)
+        message.setEscapeButton(cancel)
+        message.exec()
+        clicked = message.clickedButton()
+        if clicked is overwrite:
+            return "overwrite"
+        if clicked is skip:
+            return "skip"
+        return None
 
     # ------------------------------------------------------------------
     # Open in viewer (viewer-specific addition)
@@ -5393,11 +5929,27 @@ class MsrReaderDialog(QWidget):
                     try:
                         from ...msr.io import read_zarr_attrs
                         from ...core.mfx_sequence import extract_sequence_from_zattrs
+                        from ...core.acquisition_time import (
+                            acquisition_date_from_zattrs, stamp_dataset_acquisition,
+                        )
                         _zroot = ds.get("zroot")
                         if _zroot is not None:
-                            _seq = extract_sequence_from_zattrs(read_zarr_attrs(_zroot, "mfx"))
+                            from ...core.minflux_zarr import capture_native_zarr_metadata
+
+                            # Retain the small native attrs + search-grid payload
+                            # needed by the self-contained Zarr v2 writer. Do not
+                            # retain the full in-memory source store (hundreds of MB).
+                            capture_native_zarr_metadata(dataset, _zroot)
+                            _mfx_attrs = read_zarr_attrs(_zroot, "mfx")
+                            _seq = extract_sequence_from_zattrs(_mfx_attrs)
                             if _seq:
                                 dataset.metadata["mfx_sequence"] = _seq
+                            # The instrument's own acquisition timestamp: m2410
+                            # 'acquisition_date' (ISO 8601 + offset) or the m2205
+                            # 'tms' epoch. NOT the MFXDTA container timestamp,
+                            # which is the file's save time.
+                            stamp_dataset_acquisition(
+                                dataset, acquisition_date_from_zattrs(_mfx_attrs))
                     except Exception:
                         pass
                     if not individual:
@@ -5447,6 +5999,36 @@ class MsrReaderDialog(QWidget):
                                 f"[viewer confocal] '{result.attribute_name}' on '{key}': "
                                 f"{result.finite_count:,}/{result.total_count:,} localizations in bounds"
                             )
+                    # A recipe sidecar saved beside this .msr (File > Save As >
+                    # .msr writes one) was previously written and never read:
+                    # `apply_metadata_sidecar` is wired into the load_* functions,
+                    # and .msr opens through this plugin instead, so Z scaling factor, filters
+                    # and the channel transform silently evaporated on reopen.
+                    # Applied before add_dataset so the Z scaling factor pin is in place before
+                    # the post-load chain runs its auto-estimate.
+                    try:
+                        from ...core.loader import apply_metadata_recipe
+                        from ...core.save import (
+                            is_metadata_json_payload, metadata_sidecar_path,
+                        )
+                        _side = metadata_sidecar_path(msr_path)
+                        if _side.is_file():
+                            _recipe = json.loads(_side.read_text(encoding="utf-8"))
+                            # One sidecar sits beside a file that may hold several
+                            # channels, so only apply it to the dataset it names —
+                            # or when this import produced a single dataset.
+                            _named = str(_recipe.get("name") or "")
+                            if is_metadata_json_payload(_recipe) and (
+                                not _named or _named == display_name
+                                or len(datasets_info) == 1
+                            ):
+                                _applied = apply_metadata_recipe(dataset, _recipe)
+                                if _applied:
+                                    self.log(f"[viewer] applied '{_side.name}' to "
+                                             f"'{display_name}': {', '.join(_applied)}")
+                    except Exception as _exc:
+                        self.log(f"[warn] recipe sidecar beside '{msr_path.name}' "
+                                 f"could not be applied: {_exc}")
                     idx = self._state.add_dataset(dataset)
                     loaded = self._state.datasets[idx]
                     if not individual:

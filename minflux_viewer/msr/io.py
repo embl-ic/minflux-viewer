@@ -2,16 +2,16 @@
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import numpy as np
-import zarr
 
+from . import zarr2
 from .descriptions import describe_dtype, describe_path
 
 
 # -------- collect_zarr_fields --------
 def collect_zarr_fields(store) -> List[Dict[str, Any]]:
-    """Enumerate a zarr group's fields. *store* is anything ``zarr.open`` accepts
+    """Enumerate a zarr group's fields. *store* is anything ``zarr2.open`` accepts
     — a directory path or an in-memory ``{key: bytes}`` store."""
-    g = zarr.open(store, mode="r")
+    g = zarr2.open(store, mode="r")
     out: List[Dict[str, Any]] = []
     def visitor(path, obj):
         if path == "":
@@ -45,7 +45,7 @@ def collect_zarr_fields(store) -> List[Dict[str, Any]]:
 
 def read_zarr_attrs(store, path: str = "") -> dict:
     """Read a node's ``.zattrs``. *store* is a path or an in-memory zarr store."""
-    arch = zarr.open(store, mode="r")
+    arch = zarr2.open(store, mode="r")
     node = arch[path] if path else arch
     attrs = getattr(node, "attrs", None)
     if attrs is None:

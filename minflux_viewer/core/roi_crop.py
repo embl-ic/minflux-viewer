@@ -11,7 +11,7 @@ Two crop models share one per-localization selection mask:
   round-trips through Save. Wiring lives in the UI; this module supplies the mask
   and the specs.
 - **Model B** (real subset) — :func:`subset_dataset` builds a new dataset from
-  only the in-ROI localizations (native coordinates, no baked-in RIMF/transform).
+  only the in-ROI localizations (native coordinates, no baked-in Z scaling factor/transform).
 
 The selection mask itself ( :func:`compute_crop_mask` ) is computed in **display
 nm** (``loc_nm`` + overlay transform), so it matches what the user drew, and
@@ -167,7 +167,7 @@ def plane_localizations(state, channels, plane) -> np.ndarray:
 
 def plane_localizations_version(state, channels, plane):
     """A cheap token that changes only when :func:`plane_localizations` would
-    (dataset / filter mask / RIMF / channel visibility / plane) — **not** on
+    (dataset / filter mask / Z scaling factor / channel visibility / plane) — **not** on
     zoom/pan — so a poller can skip re-fetching while idle. ``None`` off-plane."""
     if plane not in _PLANE_AXES:
         return None
@@ -184,8 +184,8 @@ def plane_localizations_version(state, channels, plane):
         if mask is not None:
             mask = np.asarray(mask, dtype=bool)
             mtok = (int(mask.sum()), int(mask.shape[0]))
-        rimf = round(float(getattr(getattr(ds, "cali", None), "RIMF", 1.0) or 1.0), 6)
-        toks.append((di, bool(ch.get("visible", True)), mtok, rimf))
+        z_scaling_factor = round(float(getattr(getattr(ds, "cali", None), "z_scaling_factor", 1.0) or 1.0), 6)
+        toks.append((di, bool(ch.get("visible", True)), mtok, z_scaling_factor))
     return tuple(toks)
 
 
@@ -300,8 +300,8 @@ def crop_filter_specs(
 def subset_dataset(src, keep_mask, *, name: str, prefs: dict | None = None):
     """Build a new dataset from only the kept (in-ROI) localizations (Model B).
 
-    Uses **native** coordinates (loc_x/y/z × 1e9, no RIMF/transform baked in), so
-    the subset is a clean standalone dataset whose RIMF/dimensionality are
+    Uses **native** coordinates (loc_x/y/z × 1e9, no Z scaling factor/transform baked in), so
+    the subset is a clean standalone dataset whose Z scaling factor/dimensionality are
     re-derived like any fresh load.
     """
     from .dataset import build_localization_dataset

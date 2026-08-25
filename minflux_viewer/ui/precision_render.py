@@ -389,8 +389,8 @@ def resolve_precision_xyz_nm(ds, n_rows: int) -> tuple[np.ndarray, str]:
 
     sigma[~np.isfinite(sigma) | (sigma <= 0.0)] = _DEFAULT_SIGMA_NM
     np.maximum(sigma, _MIN_SIGMA_NM, out=sigma)
-    rimf = abs(float(getattr(ds.cali, "RIMF", 1.0) or 1.0))
-    sigma[:, 2] *= rimf
+    z_scaling_factor = abs(float(getattr(ds.cali, "z_scaling_factor", 1.0) or 1.0))
+    sigma[:, 2] *= z_scaling_factor
 
     if not sources:
         sources.append(fallback_source)

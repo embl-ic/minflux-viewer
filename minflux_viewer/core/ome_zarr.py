@@ -739,6 +739,19 @@ def _write_mbm(root: Path, base: str, ds) -> list[dict[str, Any]]:
     schema = []
     for name, value in attrs.items():
         array = np.asarray(value)
+        if array.dtype.names is not None:
+            # MBM points arrive as one structured array (gri/xyz/tim/str), which
+            # Zarr v3 cannot express. Split it into flat per-field arrays exactly
+            # as the raw MFX table is split, rather than refusing the export --
+            # essentially every real .msr carries beads in this form.
+            schema.extend(_write_structured_table(
+                root,
+                f"{base}/{_component(name)}",
+                array,
+                row_name="bead_event",
+                component_role=f"MINFLUX bead/reference field group {name!r}",
+            ))
+            continue
         if array.ndim == 0:
             array = array.reshape(1)
         dimensions = ["bead_event"] + [f"{_component(name)}_component_{i}" for i in range(1, array.ndim)]
@@ -917,7 +930,7 @@ def _write_package(
             "selection": {"iteration": "last", "valid_only": True},
             "coordinates_baked": {
                 "unit": "nanometer",
-                "rimf": True,
+                "z_scaling_factor": True,
                 "overlay_transform": True,
             },
             "filter_representation": "ftr boolean column; rows are retained",
@@ -1095,7 +1108,7 @@ def _write_package(
                 "num_traces": int(ds.prop.num_traces),
             },
             "calibration": {
-                "rimf": float(ds.cali.RIMF),
+                "z_scaling_factor": float(ds.cali.z_scaling_factor),
                 "pixel_size_nm": float(ds.cali.pixel_size),
                 "localization_precision_nm": ds.cali.loc_precision,
             },

@@ -270,3 +270,43 @@ def test_ome_zarr_preserves_counts_across_3d_chunks_and_levels(tmp_path):
             for path in chunk_files
         )
         assert count == ds.prop.num_loc
+
+
+def test_ome_zarr_exports_structured_mbm_beads(tmp_path):
+    """MBM points are one structured array, which Zarr v3 cannot express.
+
+    Splitting it into flat per-field arrays is the same treatment the raw MFX
+    table gets. Before this the exporter raised ``TypeError`` on the structured
+    dtype, so exporting any real acquisition -- essentially all of which carry
+    beads -- failed outright.
+    """
+    from minflux_viewer.core.dataset import AttributeComponent
+
+    beads = np.zeros(5, dtype=np.dtype([
+        ("gri", np.uint32),
+        ("xyz", np.float64, (3,)),
+        ("tim", np.float32),
+        ("str", np.float32),
+    ]))
+    beads["gri"] = np.arange(5, dtype=np.uint32)
+    beads["xyz"] = np.linspace(0.0, 4.0, 15).reshape(5, 3) * 1e-9
+    beads["tim"] = np.linspace(0.0, 1.0, 5)
+
+    ds = _dataset()
+    ds.mbm = AttributeComponent({"points": beads})
+
+    result = write_ome_zarr(
+        ds, tmp_path / "beads.zarr", pixel_size_nm=20.0, z_voxel_nm=20.0)
+    root = OZ.normalize_ome_zarr_path(tmp_path / "beads.zarr")
+    assert root.exists()
+
+    group = next(p for p in root.rglob("mbm") if p.is_dir()) / "points"
+    written = {child.name for child in group.iterdir() if child.is_dir()}
+    assert set(beads.dtype.names) <= written, written
+
+    # Real, decodable arrays, not merely schema entries.
+    meta = _read_json(group / "gri" / "zarr.json")
+    assert meta["shape"] == [5]
+    assert meta["dimension_names"][0] == "bead_event"
+    assert _read_json(group / "xyz" / "zarr.json")["shape"] == [5, 3]
+    assert result is not None

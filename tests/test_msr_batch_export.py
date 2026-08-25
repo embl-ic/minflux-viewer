@@ -125,8 +125,7 @@ def test_msr_is_no_longer_an_export_format(_app):
     try:
         assert not hasattr(dlg, "fmt_msr")
         # The remaining formats are unchanged.
-        for name in ("fmt_mat", "fmt_npy", "fmt_npz", "fmt_json", "fmt_csv",
-                     "fmt_zarr"):
+        for name in ("fmt_mat", "fmt_npy", "fmt_json", "fmt_csv", "fmt_zarr"):
             assert hasattr(dlg, name)
         dlg._save_settings()
         assert "msr" not in dlg._load_settings("")["formats"]
@@ -134,14 +133,22 @@ def test_msr_is_no_longer_an_export_format(_app):
         dlg.close()
 
 
-def test_npz_is_labelled_write_only(_app):
-    """.npz has no loader, so the dialog must not imply it round-trips."""
-    from minflux_viewer.ui.main_window import _SUPPORTED_EXTS
+def test_npz_still_opens_but_is_no_longer_offered_for_saving(_app):
+    """.npz was retired as a save format; reading it must keep working.
 
-    assert ".npz" not in _SUPPORTED_EXTS
+    It is a NumPy zip of the same flat columns `.npy` already carries, so it
+    added a fourth thing to keep in sync for no MINFLUX-specific gain. Files
+    already written this way must still open, so the loader stays.
+    """
+    from minflux_viewer.core.save import DATA_FORMATS
+    from minflux_viewer.ui.main_window import _FMT_LOADERS, _SUPPORTED_EXTS
+
+    assert "npz" not in DATA_FORMATS
+    assert ".npz" in _SUPPORTED_EXTS
+    assert _FMT_LOADERS["npz"] == "_load_npz"
     dlg = MsrReaderDialog(state=None)
     try:
-        assert "write-only" in dlg.fmt_npz.toolTip().lower()
+        assert not hasattr(dlg, "fmt_npz")
     finally:
         dlg.close()
 
@@ -681,41 +688,11 @@ def _image_nodes(dlg, item):
     return found
 
 
-def test_zarr_export_also_unpacks_the_source_container(tmp_path, monkeypatch):
-    """The MFXDTA container holds more than the localization table — acquisition
-    ROIs, the search grid, which beads were used, the sequence and scan geometry.
-    ``.zarr`` is a directory store already, so the source rides along there and
-    nowhere else."""
+def test_mfxdta_companion_export_is_retired():
+    """Zarr is now one enriched dataset, not mfx + mbm + mfxdta companions."""
     from minflux_viewer.plugins.msr_reader import msr_reader_dialog as mod
 
-    unpacked = []
-    monkeypatch.setattr("minflux_viewer.msr.mfxdta.unpack_zarr_store_to_dir",
-                        lambda store, dest: unpacked.append((store, Path(dest))))
-
-    mod.export_source_store(str(tmp_path), "run", ["zarr"], {"mfx/.zarray": b"{}"})
-    assert [p.name for _s, p in unpacked] == ["run_mfxdta.zarr"]
-
-    # Every other format ignores it: a byte container is not a table.
-    unpacked.clear()
-    for fmt in ("mat", "npy", "csv", "json", "npz"):
-        mod.export_source_store(str(tmp_path), "run", [fmt], {"mfx/.zarray": b"{}"})
-    assert unpacked == []
-
-    # A dataset with no embedded store (the legacy path) contributes nothing.
-    mod.export_source_store(str(tmp_path), "run", ["zarr"], None)
-    assert unpacked == []
-
-
-def test_a_failed_source_unpack_does_not_abort_the_export(tmp_path, monkeypatch):
-    from minflux_viewer.plugins.msr_reader import msr_reader_dialog as mod
-
-    def _boom(_store, _dest):
-        raise OSError("disk full")
-
-    monkeypatch.setattr("minflux_viewer.msr.mfxdta.unpack_zarr_store_to_dir", _boom)
-    logs = []
-    mod.export_source_store(str(tmp_path), "run", ["zarr"], {"k": b""}, logs.append)
-    assert any("could not unpack" in line for line in logs)
+    assert not hasattr(mod, "export_source_store")
 
 
 def test_image_series_are_shown_in_the_tree_beside_and_under_datasets(_app, monkeypatch):
@@ -811,7 +788,8 @@ def test_datasets_sharing_a_label_both_export_with_their_own_data(_app, tmp_path
 
         written = []
 
-        def _fake_export(out_dir, stem, formats, mfx, mbm, log=None, mbm_meta=None):
+        def _fake_export(out_dir, stem, formats, mfx, mbm, log=None,
+                         mbm_meta=None, overwrite=False, **kwargs):
             written.append((stem, None if mfx is None else int(mfx.size)))
 
         import minflux_viewer.msr.export as export_mod
@@ -988,3 +966,109 @@ def test_closing_the_dialog_cancels_a_running_batch(_app, tmp_path):
 
     assert task._cancelled is True
     assert dlg._batch_task is None
+
+
+def test_export_conflict_modes_error_skip_and_overwrite(tmp_path, monkeypatch):
+    """Re-exporting into a used folder must be a choice, not a dead end.
+
+    Every writer refuses to clobber, so before this the only route was to read
+    a FileExistsError out of the log and delete the files by hand.
+    """
+    import numpy as np
+
+    from minflux_viewer.plugins.msr_reader.msr_reader_dialog import (
+        existing_export_targets,
+        export_parsed_result,
+    )
+
+    dtype = np.dtype([
+        ("vld", np.bool_), ("tid", np.int64), ("tim", np.float64),
+        ("itr", np.int32), ("loc", np.float64, (3,)),
+    ])
+    mfx = np.zeros(6, dtype=dtype)
+    mfx["vld"] = True
+    mfx["tid"] = np.repeat(np.arange(3), 2)
+    mfx["itr"] = np.tile([0, 1], 3)
+    mfx["loc"][:, 0] = np.linspace(0, 3e-7, 6)
+    parsed = {
+        "mode": "modern",
+        "msr": str(tmp_path / "acq.msr"),
+        "datasets": [{"display_name": "run", "did": "d1", "_mfx": mfx, "_mbm": None}],
+    }
+
+    def run(mode=None):
+        kwargs = {} if mode is None else {"on_conflict": mode}
+        export_parsed_result(parsed, None, str(tmp_path), ["mat"],
+                             image_indices=set(), log=lambda _m: None, **kwargs)
+
+    run()
+    produced = sorted(p.name for p in tmp_path.glob("*.mat"))
+    assert produced, "first export must write something"
+    stamps = {p: p.stat().st_mtime_ns for p in tmp_path.glob("*.mat")}
+
+    # Default refuses, and changes nothing.
+    with pytest.raises(FileExistsError):
+        run()
+    assert {p: p.stat().st_mtime_ns for p in tmp_path.glob("*.mat")} == stamps
+
+    # The preflight sees exactly what would be clobbered.
+    existing = existing_export_targets(parsed, None, str(tmp_path), ["mat"])
+    assert sorted(p.name for p in existing) == produced
+
+    # Skip leaves every existing file untouched.
+    run("skip")
+    assert {p: p.stat().st_mtime_ns for p in tmp_path.glob("*.mat")} == stamps
+
+    # Overwrite actually rewrites them.
+    run("overwrite")
+    assert {p: p.stat().st_mtime_ns for p in tmp_path.glob("*.mat")} != stamps
+    assert sorted(p.name for p in tmp_path.glob("*.mat")) == produced
+
+
+def test_unknown_conflict_mode_is_refused(tmp_path):
+    from minflux_viewer.plugins.msr_reader.msr_reader_dialog import export_parsed_result
+
+    with pytest.raises(ValueError, match="conflict mode"):
+        export_parsed_result({"mode": "modern", "datasets": []}, None,
+                             str(tmp_path), ["mat"], image_indices=set(),
+                             log=lambda _m: None, on_conflict="clobber")
+
+
+def test_batch_conflict_dropdown_sits_in_the_output_row_and_persists(_app, tmp_path):
+    """Batch needs a standing policy, not a prompt.
+
+    One dialog cannot sensibly answer for many files with different conflicts,
+    so the choice lives beside the output folder and is remembered.
+    """
+    dlg = MsrReaderDialog(state=None)
+    try:
+        assert [dlg.conflict_combo.itemData(i)
+                for i in range(dlg.conflict_combo.count())] == ["skip", "overwrite"]
+        # Skip is the default: a re-run should complete an interrupted batch,
+        # not rewrite hours of finished output.
+        assert dlg.conflict_combo.currentData() == "skip"
+
+        dlg.mode_folder.setChecked(True)
+        dlg._on_mode_changed()
+        assert dlg.conflict_combo.isEnabled()
+        assert dlg._ask_export_conflict(str(tmp_path), ["mat"]) == "skip"
+
+        dlg.conflict_combo.setCurrentIndex(1)
+        assert dlg._ask_export_conflict(str(tmp_path), ["mat"]) == "overwrite"
+        assert dlg._load_settings("")["batch_conflict"] == "overwrite"
+
+        # A single file asks instead, so the fixed choice does not apply.
+        dlg.mode_file.setChecked(True)
+        dlg._on_mode_changed()
+        assert not dlg.conflict_combo.isEnabled()
+    finally:
+        dlg.close()
+
+
+def test_output_field_leaves_room_for_the_row_widgets(_app):
+    """The field is the only stretching item, so trailing widgets shrink it."""
+    dlg = MsrReaderDialog(state=None)
+    try:
+        assert dlg.out_dir_edit.minimumWidth() <= 120
+    finally:
+        dlg.close()

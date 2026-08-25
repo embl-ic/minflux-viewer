@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import QPoint, QRect, Qt
+from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -58,9 +58,11 @@ from ..core.overlay import (
     manual_alignment_matrix4,
     matrix4_to_xy3,
     overlay_members,
+    transform_key,
     transform_to_matrix4,
 )
 from ..core.roi_selection import active_roi_mask, roi_region_mask
+from .attribute_help import apply_attribute_menu_tooltips, apply_attribute_tooltips
 from .gl_3d_reference import nice_step, three_plane_grid_positions, tick_values
 from .plot_format import plot_widget
 
@@ -147,6 +149,7 @@ class ScatterWindow(QWidget):
         state.filter_changed.connect(self._on_filter_changed)
         state.attributes_changed.connect(self._on_attributes_changed)
         state.calibration_changed.connect(self._on_calibration_changed)
+        state.overlay_transform_changed.connect(self._on_overlay_transform_changed)
         state.roi_selection_changed.connect(self._on_roi_selection_changed)
         state.rois.selection_changed.connect(self._redraw_roi_highlight)
 
@@ -276,8 +279,19 @@ class ScatterWindow(QWidget):
             attribute_names=self._colorbar_attribute_names,
             current_attribute=self._current_colorbar_attribute,
             on_attribute_changed=self._set_colorbar_attribute,
+            plot_area=self._colorbar_plot_area,
+            background_color=self._colorbar_background,
         )
         self._colorbar.set_bar_visible(False)
+
+        # A docked bar aligns its gradient with the ViewBox, so repaint it
+        # whenever that geometry changes (resize, axis shown/hidden).
+        try:
+            self._plot_2d.getPlotItem().getViewBox().sigResized.connect(
+                lambda *_: self._colorbar.update()
+            )
+        except Exception:
+            pass
 
         self._channel_area = QScrollArea()
         self._channel_area.setWidgetResizable(True)
@@ -516,6 +530,7 @@ class ScatterWindow(QWidget):
                 action.setChecked(text == active_color_by)
                 action.triggered.connect(
                     lambda _=False, value=text, ci=active_ci: self._set_channel_color_by(ci, value))
+            apply_attribute_menu_tooltips(color_menu, self._colorbar_attribute_names())
 
             # Solid color of the active channel — same options as the render dropdown.
             current_lut = str(ch.get("lut", "Gray"))
@@ -534,6 +549,7 @@ class ScatterWindow(QWidget):
                 action.setCheckable(True)
                 action.setChecked(text == self._cbar_combo.currentText())
                 action.triggered.connect(lambda _=False, value=text: self._cbar_combo.setCurrentText(value))
+            apply_attribute_menu_tooltips(color_menu, self._colorbar_attribute_names())
 
             cmap_menu = menu.addMenu("Colormap")
             current_cmap = self._cmap_combo.currentText()
@@ -644,6 +660,30 @@ class ScatterWindow(QWidget):
         else:
             self._cbar_combo.setCurrentText(name)
 
+    def _colorbar_plot_area(self) -> QRect | None:
+        """The 2-D ViewBox rectangle in ``_stack`` coordinates.
+
+        A docked colorbar aligns its gradient to this, so it spans exactly the
+        plot's own data area the way the in-plot colorbar used to.  The 3-D view
+        has no ViewBox, so it returns None and the bar falls back to its own
+        height.
+        """
+        plot = getattr(self, "_plot_2d", None)
+        if plot is None or self._stack.currentWidget() is not plot:
+            return None
+        try:
+            scene_rect = plot.getPlotItem().getViewBox().sceneBoundingRect()
+            offset = plot.viewport().mapTo(self._stack, QPoint(0, 0))
+            return QRect(
+                plot.mapFromScene(scene_rect.topLeft()) + offset,
+                plot.mapFromScene(scene_rect.bottomRight()) + offset,
+            )
+        except Exception:
+            return None
+
+    def _colorbar_background(self) -> QColor:
+        return QColor(0, 0, 0) if self._black_bg_check.isChecked() else QColor(255, 255, 255)
+
     def _set_colorbar_visible(self, visible: bool) -> None:
         self._show_colorbar = bool(visible)
         self._update_colorbar_visibility()
@@ -720,9 +760,29 @@ class ScatterWindow(QWidget):
             self._refresh()
 
     def _on_calibration_changed(self, idx: int) -> None:
-        # RIMF / z-scaling changed: the cached loc_nm (keyed only by dataset
+        # Z scaling factor changed: the cached loc_nm (keyed only by dataset
         # index) is now stale on z — invalidate it before redrawing.
         if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
+            self._cached_dataset_idx = None
+            self._cached_locs_nm = None
+            self._redraw_current(save_state=False)
+
+    def _on_overlay_transform_changed(self, idx: int) -> None:
+        """Reload a changed live transform and redraw its overlay channel."""
+        if not (0 <= idx < len(self._state.datasets)):
+            return
+        current = (
+            self._state.datasets[idx].state.get("overlay_transform")
+            or self._state.datasets[idx].state.get("render_transform_2d")
+        )
+        changed = False
+        for channel in self._channels:
+            if channel.get("dataset_idx") != idx:
+                continue
+            if transform_key(channel.get("loc_transform")) != transform_key(current):
+                channel["loc_transform"] = current
+                changed = True
+        if changed:
             self._cached_dataset_idx = None
             self._cached_locs_nm = None
             self._redraw_current(save_state=False)
@@ -1095,6 +1155,16 @@ class ScatterWindow(QWidget):
         self._overlay_alignment_panel.show()
         self._overlay_alignment_panel.setFocus()
 
+    def start_manual_alignment_for_dataset(self, dataset_idx: int) -> bool:
+        """Start the same mode as channel-row right-click → Manual align."""
+        if len(self._channels) < 2:
+            return False
+        for channel_idx, channel in enumerate(self._channels):
+            if channel.get("dataset_idx") == dataset_idx:
+                self._manual_align_channel(channel_idx)
+                return True
+        return False
+
     def _overlay_alignment_control_config(self) -> dict:
         plot = self._state.prefs.setdefault("plot", {})
         return {
@@ -1203,6 +1273,7 @@ class ScatterWindow(QWidget):
     def _overlay_alignment_apply(self) -> None:
         if self._overlay_alignment_panel is None:
             return
+        changed_dataset_indices: list[int] = []
         for ch in self._channels:
             transform = ch.get("transform") or {}
             if not any(abs(float(transform.get(key, 0.0))) > 1e-12 for key in ("dx_nm", "dy_nm", "angle")):
@@ -1230,10 +1301,13 @@ class ScatterWindow(QWidget):
             ds.state["render_transform_2d"] = record
             ch["loc_transform"] = record
             ch["transform"] = {}
+            changed_dataset_indices.append(ds_idx)
         self._cached_dataset_idx = None
         self._cached_locs_nm = None
         self._redraw_current(save_state=False)
         self._end_overlay_alignment()
+        for ds_idx in changed_dataset_indices:
+            self._state.notify_overlay_transform_changed(ds_idx)
 
     def _overlay_alignment_cancel(self) -> None:
         if self._overlay_alignment_original is not None:
@@ -1258,7 +1332,7 @@ class ScatterWindow(QWidget):
             panel.deleteLater()
         self._channel_area.show()
 
-    def _active_channel_index(self) -> "int | None":
+    def _active_channel_index(self) -> int | None:
         for i, ch in enumerate(self._channels):
             if ch.get("dataset_idx") == self._dataset_idx:
                 return i
@@ -1307,7 +1381,7 @@ class ScatterWindow(QWidget):
                 self._style_channel_swatch(self._channel_rows[ch_idx][1], lut)
             self._redraw_current(save_state=False)
 
-    def _set_channel_color_by(self, ch_idx: int, attr: "str | None") -> None:
+    def _set_channel_color_by(self, ch_idx: int, attr: str | None) -> None:
         """Color an overlay channel by an attribute (``attr``) or, when ``None``,
         revert it to its solid channel color."""
         if 0 <= ch_idx < len(self._channels):
@@ -1417,6 +1491,7 @@ class ScatterWindow(QWidget):
         self._cbar_combo.clear()
         numeric_attrs = plot_attribute_names(ds, self._state.prefs, exclude=("ftr",))
         self._cbar_combo.addItems(numeric_attrs)
+        apply_attribute_tooltips(self._cbar_combo)
         prefs_color_by = self._state.prefs.get("plot", {}).get("scatter_color_by", "tid")
         color_default = saved.get("color_by") or old or prefs_color_by
         if color_default in numeric_attrs:
@@ -1918,7 +1993,7 @@ class ScatterWindow(QWidget):
 
     def _color_bins_for_points(
         self, x: np.ndarray, y: np.ndarray, z: np.ndarray | None,
-        ds, indices: np.ndarray, attr: "str | None" = None,
+        ds, indices: np.ndarray, attr: str | None = None,
     ) -> tuple[np.ndarray, np.ndarray, str, float, float]:
         """Return values, uint8 color bins, label, and display levels.
 
@@ -2135,7 +2210,7 @@ class ScatterWindow(QWidget):
 
     def profile_locs_version(self):
         """Cheap token — changes only when :meth:`profile_localizations` would
-        (dataset / filter / RIMF / visibility / projection), never on zoom/pan."""
+        (dataset / filter / Z scaling factor / visibility / projection), never on zoom/pan."""
         if self.roi_view_plane() is None:
             return None
         from ..core.roi_crop import plane_localizations_version

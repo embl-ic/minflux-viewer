@@ -67,7 +67,7 @@ density.  The shapes are ranked by AIC, so the data — not the diagram — deci
 whether the distance is sharp, broad, or trimeric.
 
 Pure NumPy/SciPy — Qt-free and unit-testable.  Coordinates: ``loc`` in metres
-(raw, z **not** RIMF-baked); ``z_scaling_factor`` is applied here.
+(raw, z **not** Z-scaling-baked); ``z_scaling_factor`` is applied here.
 """
 
 from __future__ import annotations

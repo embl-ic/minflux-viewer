@@ -80,6 +80,8 @@ class RoiRecord:
 class RoiStore(QObject):
     changed = pyqtSignal()
     selection_changed = pyqtSignal()
+    #: "Redraw the displayed ROIs from the stored records" — see restore_view_edits.
+    restore_requested = pyqtSignal()
     tool_changed = pyqtSignal(str)
     active_adapter_changed = pyqtSignal(object)
 
@@ -152,15 +154,31 @@ class RoiStore(QObject):
         self.changed.emit()
         self.selection_changed.emit()
 
+    def restore_view_edits(self) -> None:
+        """Ask every view to redraw its displayed ROIs from the **stored** records,
+        discarding uncommitted moves / reshapes.
+
+        A ROI shown in a view is a live-edit *copy* of its record (ImageJ's
+        ``RoiManager.restore`` puts a ``roi.clone()`` on the image), and only
+        *Update* writes an edited copy back. So whenever the user acts on the list
+        the stored geometry is authoritative again — selecting another entry, or
+        clicking the selected entry a second time, restores it. Selection-only:
+        emits neither `changed` nor `selection_changed`."""
+        self.restore_requested.emit()
+
     def deselect(self) -> None:
         # Selection-only change → emit *only* selection_changed. Emitting `changed`
         # too would make the ROI Manager rebuild its whole list, which resets the
         # current item and breaks arrow-key navigation through the ROIs.
+        self.restore_view_edits()
         self.selected_ids = []
         self.selection_changed.emit()
 
     def select(self, ids: list[str]) -> None:
         valid = {r.id for r in self.records}
+        # Acting on the list makes the stored geometry authoritative again, so any
+        # uncommitted view edit is dropped before the new selection is drawn.
+        self.restore_view_edits()
         self.selected_ids = [i for i in ids if i in valid]
         self.selection_changed.emit()      # not `changed` — see deselect()
 
@@ -367,7 +385,15 @@ def record_to_imagej(record: RoiRecord):
 def is_roi_json_file(path: str | Path) -> bool:
     """True when *path* is a native ROI-set JSON (a dict with a ``"rois"`` list)."""
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        source = Path(path)
+        # Canonical MINFLUX JSON is a top-level array and may be several GiB.
+        # Reject that shape from a bounded prefix instead of reading the whole
+        # localization file once merely to classify it before the real loader.
+        with source.open("r", encoding="utf-8-sig") as handle:
+            prefix = handle.read(4096).lstrip()
+        if prefix.startswith("["):
+            return False
+        data = json.loads(source.read_text(encoding="utf-8-sig"))
     except Exception:
         return False
     return isinstance(data, dict) and isinstance(data.get("rois"), list)

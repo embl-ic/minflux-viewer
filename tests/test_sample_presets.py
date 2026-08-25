@@ -23,6 +23,7 @@ def test_default_presets_are_the_named_entries():
         "Sphere Shell 3D (simulation)",
         "NPC 3-channel overlay (simulation)",
         "NPC 2-channel by DCR (simulation)",
+        "E. coli HlyB dimers 3D (simulation)",
     ]
     overlay = next(p for p in default_presets() if p["structure"] == "npc_overlay_3ch")
     assert "ch1_diameter_nm" in overlay["params"]        # multi-sim params merged
@@ -47,7 +48,8 @@ def test_normalize_preset_fills_and_coerces():
 def test_load_seeds_and_save_roundtrips_prefs():
     prefs: dict = {}
     loaded = load_presets(prefs)                       # seeds defaults
-    assert len(loaded) == 6 and prefs["simulate"]["presets"]
+    assert len(loaded) == len(default_presets())
+    assert prefs["simulate"]["presets"]
     custom = [normalize_preset({"name": "My NPC", "structure": "npc"})]
     save_presets(prefs, custom)
     assert [p["name"] for p in load_presets(prefs)] == ["My NPC"]

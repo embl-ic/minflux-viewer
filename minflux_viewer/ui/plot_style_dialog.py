@@ -25,7 +25,7 @@ class PlotStyleDialog(QDialog):
     def __init__(self, layer: dict[str, Any], parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Plot style: {layer.get('label', '')}")
-        self.resize(360, 180)
+        self.resize(360, 240)
         self._color = tuple(layer.get("color", (30, 90, 180)))
         self._color_changed = False
 
@@ -66,10 +66,36 @@ class PlotStyleDialog(QDialog):
         )
         grid.addWidget(self.alpha_spin, 2, 1)
 
-        grid.addWidget(QLabel("Color:"), 3, 0)
+        grid.addWidget(QLabel("Line style:"), 3, 0)
+        self.line_style_combo = QComboBox()
+        # MATLAB's line specifiers, which is what people reach for.
+        for label, value in (
+            ("─  solid", "-"),
+            ("╌  dashed", "--"),
+            ("···  dotted", ":"),
+            ("─·  dash-dot", "-."),
+        ):
+            self.line_style_combo.addItem(label, value)
+        index = self.line_style_combo.findData(layer.get("line_style", "-"))
+        if index >= 0:
+            self.line_style_combo.setCurrentIndex(index)
+        self.line_style_combo.setToolTip(
+            "Style of the connecting line drawn by the Lines option."
+        )
+        grid.addWidget(self.line_style_combo, 3, 1)
+
+        grid.addWidget(QLabel("Line width:"), 4, 0)
+        self.line_width_spin = QDoubleSpinBox()
+        self.line_width_spin.setRange(0.5, 10.0)
+        self.line_width_spin.setSingleStep(0.5)
+        self.line_width_spin.setDecimals(1)
+        self.line_width_spin.setValue(float(layer.get("line_width", 1.0)))
+        grid.addWidget(self.line_width_spin, 4, 1)
+
+        grid.addWidget(QLabel("Color:"), 5, 0)
         self.color_button = QPushButton(self._color_label())
         self.color_button.clicked.connect(self._choose_color)
-        grid.addWidget(self.color_button, 3, 1)
+        grid.addWidget(self.color_button, 5, 1)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -102,4 +128,6 @@ class PlotStyleDialog(QDialog):
             "size": int(self.size_spin.value()),
             "color": self._color,
             "alpha": max(0, min(255, alpha)),
+            "line_style": self.line_style_combo.currentData(),
+            "line_width": float(self.line_width_spin.value()),
         }

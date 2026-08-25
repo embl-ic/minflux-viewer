@@ -467,6 +467,10 @@ class RoiOverlayController(QObject):
         # so `refresh` rebuilds the item when the identity no longer matches (else a
         # convert silently changes the type but keeps the old shape on screen).
         self._item_records: dict[str, Any] = {}
+        # Stored ROIs whose displayed copy has been moved / reshaped in this view
+        # but not committed to the record (no Manager *Update* yet). They are the
+        # ones `restore_view_edits` has to rebuild; see `_connect_edit`.
+        self._dirty_items: set[str] = set()
         self.labels: dict[str, pg.TextItem] = {}
         self.draft: RoiRecord | None = None
         self.draft_item = None
@@ -510,6 +514,7 @@ class RoiOverlayController(QObject):
             self.view_widget.installEventFilter(self)
         store.changed.connect(self.refresh)
         store.selection_changed.connect(self.refresh)
+        store.restore_requested.connect(self.restore_view_edits)
         self.refresh()
 
     def activate(self) -> None:
@@ -591,8 +596,33 @@ class RoiOverlayController(QObject):
             record.geometry = item_to_geometry(record.type, item, prev=record.geometry)
         record.selection_dirty = True
         record = self._normalize_record(record)
+        self._dirty_items.discard(selected_record.id)   # committed → no longer pending
         self._queue_selection_update(record)
         return record
+
+    def restore_view_edits(self) -> None:
+        """Drop the uncommitted view edits of stored ROIs: rebuild their displayed
+        items from the store records (ImageJ ``RoiManager.restore``).
+
+        A displayed stored ROI is a live-edit *copy* — dragging or reshaping it
+        leaves the record untouched until the Manager's *Update*. Acting on the
+        Manager list (selecting another entry, or clicking the selected entry
+        again) makes the record authoritative again, so the edited copy is thrown
+        away and the stored geometry redrawn. Only ROIs actually edited since they
+        were built are rebuilt, so this stays cheap with many ROIs on screen."""
+        if not self._dirty_items:
+            return
+        for roi_id in list(self._dirty_items):
+            item = self.items.pop(roi_id, None)
+            self._item_records.pop(roi_id, None)
+            if item is None:
+                continue
+            try:
+                self.plot_item.removeItem(item)
+            except Exception:
+                pass
+        self._dirty_items.clear()
+        self.refresh()          # rebuilds the dropped items from their records
 
     def refresh(self) -> None:
         wanted = set()
@@ -631,6 +661,7 @@ class RoiOverlayController(QObject):
                 item = self._make_item(record)
                 self.items[record.id] = item
                 self._item_records[record.id] = record
+                self._dirty_items.discard(record.id)   # freshly built from the record
                 self.plot_item.addItem(item)
                 self._connect_edit(item, record)
             elif record.type == "point":
@@ -646,6 +677,7 @@ class RoiOverlayController(QObject):
             if roi_id not in wanted:
                 self.plot_item.removeItem(self.items.pop(roi_id))
                 self._item_records.pop(roi_id, None)
+                self._dirty_items.discard(roi_id)
         for roi_id in list(self.labels):
             if roi_id not in wanted:
                 self.plot_item.removeItem(self.labels.pop(roi_id))
@@ -1075,10 +1107,13 @@ class RoiOverlayController(QObject):
         except Exception:
             return
         # Draft / session records are ours to update in place; a stored point is a
-        # live-edit copy (committed only on Manager Update).
+        # live-edit copy (committed only on Manager Update). `setPos` emits only
+        # sigPositionChanged, so mark the pending edit for `restore_view_edits` here.
         if kind in {"draft", "session"}:
             old = record.geometry.get("point", [0.0, 0.0])
             record.geometry = {"point": update_point_in_plane(new_xy, old, self._view_plane())}
+        else:
+            self._dirty_items.add(record.id)
         self._emit_status(self._roi_status_text("point", {"point": [new_xy[0], new_xy[1]]}))
 
     def _move_vertex(self, item, kind: str, record, key, idx: int) -> None:
@@ -1148,9 +1183,11 @@ class RoiOverlayController(QObject):
         """Finish a keyboard ROI edit. For a draft the ``sigRegionChangeFinished``
         handler has already re-read the geometry, rebuilt the item and re-queued
         the selection; a stored ROI is a live-edit copy (committed only on Manager
-        Update), so just refresh the read-out."""
+        Update), so just refresh the read-out — and note the pending edit so the
+        next Manager list action restores the stored geometry."""
         if kind != "stored":
             return
+        self._dirty_items.add(record.id)
         try:
             if record.type == "point":
                 p = item.pos()
@@ -1794,7 +1831,14 @@ class RoiOverlayController(QObject):
         # A stored ROI displayed in the view is a live *editable copy*: moving or
         # reshaping it must NOT change the Manager's record until the user clicks
         # Update (which calls record_for_update). So we deliberately do not commit
-        # edits here — only the angle ROI's live status read-out is wired up.
+        # edits here — we only *note* that this copy now deviates from its record,
+        # so `restore_view_edits` knows which items to redraw from the store when
+        # the user acts on the Manager list again.
+        rid = record.id
+        for signal_name in ("sigRegionChangeFinished", "sigPositionChangeFinished"):
+            signal = getattr(item, signal_name, None)
+            if signal is not None:
+                signal.connect(lambda *_a, _rid=rid: self._dirty_items.add(_rid))
         if record.type == "angle" and hasattr(item, "sigRegionChanged"):
             item.sigRegionChanged.connect(lambda _item=item: self._report_angle_from_item(_item))
 

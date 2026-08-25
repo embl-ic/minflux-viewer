@@ -125,10 +125,10 @@ def test_parse_channel_spec(text, n, expected):
     assert RC.parse_channel_spec(text, n) == expected
 
 
-def test_subset_preserves_native_z_no_rimf_bake():
-    # 3-D source; subset z must equal native input nm, not RIMF-scaled.
+def test_subset_preserves_native_z_no_z_scaling_factor_bake():
+    # 3-D source; subset z must equal native input nm, not Z-scaled.
     ds = _dataset([300, 300], [300, 300], z_nm=[40, 120])
-    ds.set_rimf(0.8, source="manual (anisotropy plugin)")   # display z would scale
+    ds.set_z_scaling_factor(0.8, source="manual (anisotropy plugin)")   # display z would scale
     mask = RC.compute_crop_mask(ds, _rect(0, 0, 1000, 1000))  # keep both
     sub = RC.subset_dataset(ds, mask, name="CROP")
     np.testing.assert_allclose(sorted(np.asarray(sub.attr["loc_z"]) * 1e9), [40.0, 120.0], atol=1e-6)

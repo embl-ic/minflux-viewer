@@ -509,7 +509,13 @@ class Group:
                 pad = np.zeros((chunk_len,) + arr.shape[1:], arr.dtype)
                 pad[: block.shape[0]] = block
                 block = pad
-            self._store.set(f"{abs_path}/{i}", codec.encode(block.tobytes()))
+            # Hand Blosc the ARRAY, not raw bytes: numcodecs then sets
+            # typesize = dtype.itemsize, which is what its SHUFFLE filter needs.
+            # With .tobytes() the filter saw typesize 1 and had nothing to
+            # reorder, making every .msr we write ~1.8x larger than necessary
+            # (439 -> 238 MiB of chunks on a 20.6 M-row acquisition, against
+            # Imspector's own 292 MiB for the same data).
+            self._store.set(f"{abs_path}/{i}", codec.encode(block))
         return Array(self._store, abs_path, self._meta_at(abs_path, _ZARRAY))
 
     def __repr__(self) -> str:            # pragma: no cover - debugging aid

@@ -384,7 +384,7 @@ def test_precision_render_window_smoke(qtbot):
         tid=np.repeat(np.arange(100), 5),
         attrs={"sx_nm": sx, "sy_nm": sy, "sz_nm": sz},
     )
-    dataset.set_rimf(0.7, source="test")
+    dataset.set_z_scaling_factor(0.7, source="test")
     state.add_dataset(dataset)
     window = PrecisionRenderWindow(state, dataset_idx=0)
     qtbot.addWidget(window)

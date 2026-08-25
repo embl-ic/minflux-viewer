@@ -1,9 +1,11 @@
 """
 "Show Beads Drift" dialog for the MSR reader.
 
-One tab per dataset; each tab lists the MBM beads as rows of four plots
-(Y–X, X–t, Y–t, Z–t). Points are colored by **time** (blue→red) so the drift
-trajectory's dynamics are visible; a horizontal color bar shows the mapping.
+One tab per dataset; each tab lists the MBM beads as rows of five plots
+(Y–X, X–t, Y–t, Z–t, PMT signal–t). Points are colored by **time** (blue→red)
+so the drift trajectory's dynamics are visible; a horizontal color bar shows
+the mapping. All plot panels use a white background, all time axes are linked,
+and each plotted quantity has one shared range per dataset.
 
 Per-bead checkboxes mark beads for alignment, **linked across datasets by gri-ID**
 (the same physical bead) with logical-AND semantics. *Common* beads (present in
@@ -32,9 +34,10 @@ from PyQt6.QtWidgets import (
 _CMAP_POS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 _CMAP_RGB = [(0, 0, 255), (0, 255, 255), (0, 255, 0), (255, 255, 0), (255, 165, 0), (255, 0, 0)]
 _COL_TITLES = ("Y (nm) vs X (nm)", "X (nm) vs time (sec)",
-               "Y (nm) vs time (sec)", "Z (nm) vs time (sec)")
+               "Y (nm) vs time (sec)", "Z (nm) vs time (sec)",
+               "PMT signal (str) vs time (sec)")
 #: (x source index, y index); x index None => time axis
-_PLOT_KEYS = ((0, 1), (None, 0), (None, 1), (None, 2))
+_PLOT_KEYS = ((0, 1), (None, 0), (None, 1), (None, 2), (None, "str"))
 _MAX_PTS = 600                # display cap per bead (keeps the dialog snappy)
 # Sub-plot size — ~75% of the original (168×210) so more beads fit vertically
 # (beads are stacked as rows).
@@ -44,7 +47,8 @@ _ROW_HEIGHT = _SUBPLOT_H + 12     # subplot + grid vertical spacing per bead row
 _DIALOG_CHROME = 320              # instructions + colorbar + headers + buttons + margins
 
 #: axis key -> label; keys 0/1/2 = X/Y/Z columns, "t" = time
-_AXIS_LABEL = {0: "X (nm)", 1: "Y (nm)", 2: "Z (nm)", "t": "time (sec)"}
+_AXIS_LABEL = {0: "X (nm)", 1: "Y (nm)", 2: "Z (nm)",
+               "t": "time (sec)", "str": "PMT signal (str)"}
 
 
 def _fmt_axis_value(key, value: float) -> str:
@@ -58,9 +62,16 @@ def _point_tip(x, y, data) -> str:
 
 
 def _build_point_tips(idxs, axis_vals: dict, xi, yi) -> list[str]:
-    """Per-point hover strings for a sub-plot: ``<idx>: <a>: v; <b>: v`` where
-    *a*/*b* are the two axes NOT plotted here (the plot shows axes *xi*,*yi*;
-    ``xi is None`` means the x-axis is time)."""
+    """Per-point hover strings with the spatial/time values not on the axes.
+
+    Positional plots retain the original two-value tips. The PMT-vs-time plot
+    shows all three spatial coordinates for the selected PMT sample.
+    """
+    if yi == "str":
+        hidden = (0, 1, 2)
+        return [f"{int(idxs[j])}: " + "; ".join(
+            _fmt_axis_value(key, axis_vals[key][j]) for key in hidden)
+            for j in range(len(idxs))]
     shown = {xi, yi} if xi is not None else {"t", yi}
     k1, k2 = [k for k in (0, 1, 2, "t") if k not in shown]
     a1, a2 = axis_vals[k1], axis_vals[k2]
@@ -175,8 +186,8 @@ class BeadsDriftDialog(QDialog):
 
         # Size the dialog to the bead count: tall when many beads (capped at 95%
         # of the screen height, so nothing is hidden — the plot grid scrolls),
-        # compact when only a few beads. Width fits the four sub-plots + labels.
-        self.setMinimumSize(940, 360)
+        # compact when only a few beads. Width fits the five sub-plots + labels.
+        self.setMinimumSize(1080, 360)
         self.resize(*self._initial_size())
 
         # gri -> 1-based dataset numbers it appears in; "common" = in all datasets.
@@ -279,7 +290,7 @@ class BeadsDriftDialog(QDialog):
         avail = screen.availableGeometry() if screen is not None else None
         cap_h = int(avail.height() * 0.95) if avail is not None else 1000
         height = max(min(desired_h, cap_h), 460)
-        width = 1000 if avail is None else min(1000, int(avail.width() * 0.95))
+        width = 1160 if avail is None else min(1160, int(avail.width() * 0.95))
         return width, height
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt API
@@ -313,16 +324,25 @@ class BeadsDriftDialog(QDialog):
 
     @staticmethod
     def _dataset_ranges(beads: list[dict]) -> dict:
-        x = np.concatenate([b["xyz_nm"][:, 0] for b in beads])
-        y = np.concatenate([b["xyz_nm"][:, 1] for b in beads])
-        z = np.concatenate([b["xyz_nm"][:, 2] for b in beads])
-        t = np.concatenate([b["tim_s"] for b in beads])
-
-        def rng(a):
-            lo, hi = float(np.min(a)), float(np.max(a))
+        def rng(arrays):
+            chunks = [np.asarray(a, dtype=float).ravel() for a in arrays
+                      if a is not None and np.asarray(a).size]
+            if not chunks:
+                return (0.0, 1.0)
+            values = np.concatenate(chunks)
+            values = values[np.isfinite(values)]
+            if not values.size:
+                return (0.0, 1.0)
+            lo, hi = float(np.min(values)), float(np.max(values))
             return (lo, hi if hi > lo else lo + 1.0)
 
-        return {"x": rng(x), "y": rng(y), "z": rng(z), "t": rng(t)}
+        return {
+            "x": rng([b["xyz_nm"][:, 0] for b in beads]),
+            "y": rng([b["xyz_nm"][:, 1] for b in beads]),
+            "z": rng([b["xyz_nm"][:, 2] for b in beads]),
+            "t": rng([b["tim_s"] for b in beads]),
+            "str": rng([b.get("pmt_signal") for b in beads]),
+        }
 
     def _build_tab(self, index: int) -> None:
         if index in self._built or not (0 <= index < len(self._datasets)):
@@ -334,7 +354,8 @@ class BeadsDriftDialog(QDialog):
         ranges = self._dataset_ranges(beads)
         cmap = _time_cmap()
         t_lo, t_hi = ranges["t"]
-        y_range_for = {0: ranges["x"], 1: ranges["y"], 2: ranges["z"]}
+        y_range_for = {0: ranges["x"], 1: ranges["y"], 2: ranges["z"],
+                       "str": ranges["str"]}
 
         page = self._tabs.widget(index)
         old = page.layout()
@@ -355,6 +376,8 @@ class BeadsDriftDialog(QDialog):
             head.setAlignment(Qt.AlignmentFlag.AlignCenter)
             grid.addWidget(head, 0, 2 + c)
 
+        time_x_master = None
+        pmt_y_master = None
         for r, bead in enumerate(beads, start=1):
             gri = bead["gri"]
             common = gri in self._common_gris
@@ -378,11 +401,15 @@ class BeadsDriftDialog(QDialog):
 
             xyz = bead["xyz_nm"]
             tim = bead["tim_s"]
+            pmt = bead.get("pmt_signal")
+            if pmt is None or len(pmt) != len(tim):
+                pmt = np.full(len(tim), np.nan, dtype=float)
             sel = _subsample(len(tim))
             idxs = np.arange(len(tim))[sel]      # original sequence index per shown point
             xs, ys, zs, ts = xyz[sel, 0], xyz[sel, 1], xyz[sel, 2], tim[sel]
-            cols = (xs, ys, zs)
-            axis_vals = {0: xs, 1: ys, 2: zs, "t": ts}   # value array per axis key
+            pmt_s = np.asarray(pmt, dtype=float)[sel]
+            cols = {0: xs, 1: ys, 2: zs, "str": pmt_s}
+            axis_vals = {0: xs, 1: ys, 2: zs, "t": ts, "str": pmt_s}
             span = (t_hi - t_lo) or 1.0
             rgba = cmap.map(np.clip((ts - t_lo) / span, 0, 1), mode="byte")
             brushes = [pg.mkBrush(int(a), int(b_), int(c_), int(d_)) for a, b_, c_, d_ in rgba]
@@ -390,25 +417,50 @@ class BeadsDriftDialog(QDialog):
             for c, (xi, yi) in enumerate(_PLOT_KEYS):
                 xdata = cols[xi] if xi is not None else ts
                 ydata = cols[yi]
-                # hover datatip: show the index + the two axes NOT plotted here
+                # Hover datatip: positional plots show the two axes not plotted;
+                # the PMT plot shows the three spatial coordinates.
                 tips = _build_point_tips(idxs, axis_vals, xi, yi)
                 plot = pg.PlotWidget()
+                plot.setBackground("w")
                 plot.setFixedHeight(_SUBPLOT_H)
                 plot.setMinimumWidth(_SUBPLOT_W)
                 plot.setMenuEnabled(True)
-                plot.showGrid(x=True, y=True, alpha=0.15)
-                plot.plot(xdata, ydata, pen=pg.mkPen((170, 170, 170, 120), width=1))
-                plot.addItem(pg.ScatterPlotItem(
-                    x=xdata, y=ydata, size=5, pen=None, brush=brushes,
-                    data=tips, hoverable=True, hoverSize=9,
-                    hoverPen=pg.mkPen(255, 255, 255, 220), tip=_point_tip))
+                plot.showGrid(x=True, y=True, alpha=0.22)
+                for axis_name in ("left", "bottom"):
+                    axis = plot.getPlotItem().getAxis(axis_name)
+                    axis.setPen(pg.mkPen(75, 75, 75))
+                    axis.setTextPen(pg.mkPen(45, 45, 45))
+                valid = np.isfinite(xdata) & np.isfinite(ydata)
+                if np.any(valid):
+                    plot.plot(xdata, ydata, pen=pg.mkPen((80, 80, 80, 150), width=1))
+                    keep = np.flatnonzero(valid)
+                    plot.addItem(pg.ScatterPlotItem(
+                        x=xdata[valid], y=ydata[valid], size=5, pen=None,
+                        brush=[brushes[j] for j in keep],
+                        data=[tips[j] for j in keep], hoverable=True, hoverSize=9,
+                        hoverPen=pg.mkPen(20, 20, 20, 220), tip=_point_tip))
                 # shared axis limits per plot-type within the dataset
                 x_rng = ranges["x"] if xi == 0 else ranges["t"]
                 y_rng = y_range_for[yi]
                 plot.setXRange(*x_rng, padding=0.06)
                 plot.setYRange(*y_rng, padding=0.06)
+                if yi == "str" and not np.any(valid):
+                    note = pg.TextItem("not recorded", color=(100, 100, 100),
+                                       anchor=(0.5, 0.5))
+                    note.setPos((x_rng[0] + x_rng[1]) / 2.0,
+                                (y_rng[0] + y_rng[1]) / 2.0)
+                    plot.addItem(note)
                 if xi == 0:                       # Y vs X — equal nm scale
                     plot.getPlotItem().setAspectLocked(True)
+                elif time_x_master is None:
+                    time_x_master = plot
+                else:
+                    plot.setXLink(time_x_master)
+                if yi == "str":
+                    if pmt_y_master is None:
+                        pmt_y_master = plot
+                    else:
+                        plot.setYLink(pmt_y_master)
                 self._plots.append((plot, x_rng, y_rng))
                 grid.addWidget(plot, r, 2 + c)
 

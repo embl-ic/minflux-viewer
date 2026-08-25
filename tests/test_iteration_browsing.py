@@ -1,6 +1,10 @@
-"""Stage B iteration browsing: selector labels, loc_id grouping, and the
-derived-attribute broadcast contract (iter_load="all" must reproduce the
-iter_load="last" derived values for every iteration selection)."""
+"""Iteration browsing: selector labels, loc_id grouping, and the derived-attribute
+broadcast contract.
+
+Localizations always materialize at the last valid iteration; every other
+iteration is served from ``mfx_raw`` and must reproduce those derived values.
+The only materialization that is NOT last-valid is an invalid-inclusive load
+(``only_valid_locs=False``), which is what still exercises ``derived_last``."""
 
 import numpy as np
 import pytest
@@ -114,20 +118,16 @@ def m2205_mat(tmp_path):
 
 
 def test_broadcast_matches_last_load(m2205_mat):
-    ds_last = load_dataset(m2205_mat, prefs={"data": {"iter_load": "last"}})
-    ds_all = load_dataset(m2205_mat, prefs={"data": {"iter_load": "all"}})
+    ds = load_dataset(m2205_mat)
 
-    assert attr_matches_last_valid(ds_last)
-    # m2205 "all" loads keep one row per localization (per-iteration fields
-    # stay 2-D), so ds.attr remains last-valid-aligned here — unlike m2410.
-    # The broadcast source is then ds.attr itself; derived_last is only built
-    # when the materialization is NOT last-valid.
-    assert attr_matches_last_valid(ds_all)
-    assert len(ds_all.components.derived_last) == 0
+    # The materialization is last-valid, so ds.attr is itself the broadcast
+    # source; derived_last is only built when it is NOT last-valid.
+    assert attr_matches_last_valid(ds)
+    assert len(ds.components.derived_last) == 0
 
     for attr in DERIVED:
-        ref = np.asarray(ds_last.attr.get(attr), dtype=float).ravel()
-        got = mfx_get(ds_all, attr, itr="last", vld_only=True)
+        ref = np.asarray(ds.attr.get(attr), dtype=float).ravel()
+        got = mfx_get(ds, attr, itr="last", vld_only=True)
         assert got is not None
         np.testing.assert_allclose(np.asarray(got, dtype=float), ref)
 
@@ -135,29 +135,29 @@ def test_broadcast_matches_last_load(m2205_mat):
 def test_broadcast_duplicates_across_iterations(m2205_mat):
     # In the fixed m2205 grid every localization has all iterations, so any
     # single-iteration view must return the identical per-loc derived values.
-    ds_all = load_dataset(m2205_mat, prefs={"data": {"iter_load": "all"}})
-    ref = mfx_get(ds_all, "dt", itr="last", vld_only=True)
+    ds = load_dataset(m2205_mat)
+    ref = mfx_get(ds, "dt", itr="last", vld_only=True)
     for k in range(3):
-        got = mfx_get(ds_all, "dt", itr=k, vld_only=True)
+        got = mfx_get(ds, "dt", itr=k, vld_only=True)
         np.testing.assert_allclose(got, ref)
-    flat = mfx_get(ds_all, "dt", itr="all", vld_only=True)
+    flat = mfx_get(ds, "dt", itr="all", vld_only=True)
     assert flat.shape[0] == 3 * ref.shape[0]
     np.testing.assert_allclose(flat, np.repeat(ref, 3))
 
 
 def test_raw_attrs_not_broadcast(m2205_mat):
     # Genuine per-iteration attributes still come from the raw store rows.
-    ds_all = load_dataset(m2205_mat, prefs={"data": {"iter_load": "all"}})
-    efo_0 = mfx_get(ds_all, "efo", itr=0, vld_only=True)
-    efo_last = mfx_get(ds_all, "efo", itr="last", vld_only=True)
+    ds = load_dataset(m2205_mat)
+    efo_0 = mfx_get(ds, "efo", itr=0, vld_only=True)
+    efo_last = mfx_get(ds, "efo", itr="last", vld_only=True)
     assert efo_0.shape == efo_last.shape
     assert not np.allclose(efo_0, efo_last)
 
 
 # ---------------------------------------------------------------------------
 # End-to-end broadcast contract on an m2410 flat .mat file
-# (variable iterations per localization: ds.attr row count depends on
-# iter_load, so a "last" selection must come from derived_last)
+# (variable iterations per localization, so group anchoring — not a fixed
+# n_loc x n_itr grid — decides which raw rows a localization owns)
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -182,18 +182,17 @@ def m2410_mat(tmp_path):
 
 
 def test_m2410_broadcast_matches_last_load(m2410_mat):
-    ds_last = load_dataset(m2410_mat, prefs={"data": {"iter_load": "last"}})
-    ds_all = load_dataset(m2410_mat, prefs={"data": {"iter_load": "all"}})
+    ds = load_dataset(m2410_mat)
 
-    # last-valid rows: itr==2 & vld -> 3 from tid 1, 1 from tid 3.
-    assert ds_last.prop.num_loc == 4
-    assert ds_all.prop.num_loc == 8          # all valid rows
-    assert attr_matches_last_valid(ds_last)
-    assert not attr_matches_last_valid(ds_all)
+    # last-valid rows: itr==2 & vld -> 3 from tid 1, 1 from tid 3. The raw
+    # store still holds all 9 rows, so browsing reaches every iteration.
+    assert ds.prop.num_loc == 4
+    assert attr_matches_last_valid(ds)
+    assert len(np.asarray(ds.mfx_raw["itr"]).ravel()) == 9
 
     for attr in DERIVED:
-        ref = np.asarray(ds_last.attr.get(attr), dtype=float).ravel()
-        got = mfx_get(ds_all, attr, itr="last", vld_only=True)
+        ref = np.asarray(ds.attr.get(attr), dtype=float).ravel()
+        got = mfx_get(ds, attr, itr="last", vld_only=True)
         assert got is not None, attr
         np.testing.assert_allclose(np.asarray(got, dtype=float), ref, err_msg=attr)
 
@@ -224,8 +223,8 @@ def m2410_invalid_mat(tmp_path):
 
 
 def test_invalid_inclusive_load_metadata_and_selection(m2410_invalid_mat):
-    p_valid = {"data": {"iter_load": "last"}}
-    p_inval = {"data": {"iter_load": "last", "only_valid_locs": False}}
+    p_valid = {"data": {}}
+    p_inval = {"data": {"only_valid_locs": False}}
     ds_v = load_dataset(m2410_invalid_mat, prefs=p_valid)
     ds_i = load_dataset(m2410_invalid_mat, prefs=p_inval)
 
@@ -243,8 +242,8 @@ def test_invalid_inclusive_load_metadata_and_selection(m2410_invalid_mat):
 
 
 def test_invalid_inclusive_load_derived_broadcast(m2410_invalid_mat):
-    p_valid = {"data": {"iter_load": "last"}}
-    p_inval = {"data": {"iter_load": "last", "only_valid_locs": False}}
+    p_valid = {"data": {}}
+    p_inval = {"data": {"only_valid_locs": False}}
     ds_v = load_dataset(m2410_invalid_mat, prefs=p_valid)
     ds_i = load_dataset(m2410_invalid_mat, prefs=p_inval)
 
@@ -270,7 +269,7 @@ def test_invalid_inclusive_load_derived_broadcast(m2410_invalid_mat):
 
 
 def test_invalid_inclusive_raw_attrs_via_attr_values_1d(m2410_invalid_mat):
-    p_inval = {"data": {"iter_load": "last", "only_valid_locs": False}}
+    p_inval = {"data": {"only_valid_locs": False}}
     ds_i = load_dataset(m2410_invalid_mat, prefs=p_inval)
     efo = attr_values_1d(ds_i, "efo")
     np.testing.assert_allclose(
@@ -279,18 +278,18 @@ def test_invalid_inclusive_raw_attrs_via_attr_values_1d(m2410_invalid_mat):
     )
 
 
-def test_m2205_all_row_selection_still_last_valid(m2205_mat):
-    # m2205 "all" loads keep one row per localization; attr rows align with
-    # the last+valid selection even though iteration_load_mode == "all".
-    ds_all = load_dataset(m2205_mat, prefs={"data": {"iter_load": "all"}})
-    assert attr_matches_selection(ds_all, itr="last", vld_only=True)
-    assert not attr_matches_selection(ds_all, itr="all", vld_only=True)
+def test_m2205_row_selection_is_last_valid(m2205_mat):
+    # m2205 keeps one row per localization, and those rows align with the
+    # last+valid selection — not with the flattened all-iteration one.
+    ds = load_dataset(m2205_mat)
+    assert attr_matches_selection(ds, itr="last", vld_only=True)
+    assert not attr_matches_selection(ds, itr="all", vld_only=True)
 
 
 def test_m2410_flatten_inherits_group_values(m2410_mat):
-    ds_all = load_dataset(m2410_mat, prefs={"data": {"iter_load": "all"}})
-    dt_last = mfx_get(ds_all, "dt", itr="last", vld_only=True)
-    dt_flat = mfx_get(ds_all, "dt", itr="all", vld_only=True)
+    ds = load_dataset(m2410_mat)
+    dt_last = mfx_get(ds, "dt", itr="last", vld_only=True)
+    dt_flat = mfx_get(ds, "dt", itr="all", vld_only=True)
     assert dt_flat.shape[0] == 8
     # tid 1 ladder rows (itr 0,1) inherit the value of their group's anchor
     # (the first itr-2 row); valid flatten rows of anchored groups are finite.

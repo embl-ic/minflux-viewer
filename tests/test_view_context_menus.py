@@ -12,8 +12,9 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
-from PyQt6.QtCore import QPoint
-from PyQt6.QtGui import QContextMenuEvent
+from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtGui import QColor, QContextMenuEvent
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QMenu
 
 from minflux_viewer.colors import configure_colors
@@ -45,6 +46,20 @@ def _capture_context_menu(monkeypatch, callback) -> QMenu:
     captured: list[QMenu] = []
     monkeypatch.setattr(QMenu, "exec", lambda menu, *_args: captured.append(menu))
     callback(QPoint(0, 0))
+    assert len(captured) == 1
+    return captured[0]
+
+
+def _capture_bar_menu(monkeypatch, colorbar) -> QMenu:
+    captured: list[QMenu] = []
+    monkeypatch.setattr(QMenu, "exec", lambda menu, *_args: captured.append(menu))
+    colorbar.contextMenuEvent(
+        QContextMenuEvent(
+            QContextMenuEvent.Reason.Mouse,
+            QPoint(4, 4),
+            colorbar.mapToGlobal(QPoint(4, 4)),
+        )
+    )
     assert len(captured) == 1
     return captured[0]
 
@@ -154,6 +169,7 @@ def test_scatter_colorbar_is_linked_floating_and_persistent(
             "Attribute:",
             "Show values",
             "Placement",
+            "Undock",
             "---",
             "Customize",
         ]
@@ -166,11 +182,48 @@ def test_scatter_colorbar_is_linked_floating_and_persistent(
         assert win._cbar_combo.currentText() == "idx"
         assert colorbar._label == "idx"
 
+        # Docked (the default) is fixed to the plot border and paints flush:
+        # no panel outline, and the gradient spans the plot's own data area.
+        assert colorbar.docked
+        assert colorbar._panel_color() == QColor(255, 255, 255)
+        area = win._colorbar_plot_area()
+        assert area is not None and area.height() > 10
+        span = colorbar._docked_plot_span()
+        assert span is not None
+        assert span[1] - span[0] > 10
+        start = colorbar.geometry()
+        QTest.mouseMove(colorbar, QPoint(20, 40))
+        QTest.mousePress(colorbar, Qt.MouseButton.LeftButton, pos=QPoint(20, 40))
+        QTest.mouseMove(colorbar, QPoint(-40, 90))
+        QTest.mouseRelease(colorbar, Qt.MouseButton.LeftButton, pos=QPoint(-40, 90))
+        assert colorbar.geometry() == start
+        assert colorbar.docked
+
+        colorbar.set_docked(False)
+        _qt_app.processEvents()
+        assert not colorbar.docked
+        assert not colorbar.uses_default_placement
+        assert colorbar.serialized_geometry() is not None
+        assert win._stack.contentsMargins().right() == 0
+        assert colorbar._docked_plot_span() is None
+        assert _menu_texts(_capture_bar_menu(monkeypatch, colorbar))[4] == "Dock"
+        floating = colorbar.geometry()
+
+        colorbar.set_docked(True)
+        _qt_app.processEvents()
+        assert colorbar.docked
+        assert colorbar.serialized_geometry() is None
+        assert win._stack.contentsMargins().right() == colorbar.width()
+        colorbar.set_docked(False)
+        assert colorbar.geometry() == floating  # remembers where it floated
+        colorbar.set_docked(True)
+
         win._axis_combo.setCurrentText("3D")
         _qt_app.processEvents()
         assert win._3d_view is not None
         assert win._stack.currentWidget() is win._3d_view
         assert not colorbar.isHidden()
+        assert colorbar._docked_plot_span() is None  # no ViewBox in 3-D
         win._axis_combo.setCurrentText("XY")
 
         win._set_colorbar_visible(False)

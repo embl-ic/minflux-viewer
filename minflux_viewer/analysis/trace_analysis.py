@@ -13,7 +13,7 @@ estimate_size_nd(data, ids, ...)
     four size estimates (mean, median, max-bin, Gaussian-fit peak).
 
 estimate_anisotropy(loc_nm, tid, ...)
-    Estimate the z-scaling factor (rimf) from per-axis size ratios.
+    Estimate the Z scaling factor from per-axis size ratios.
 
 show_trace_size_dialog(parent, ds, state)
 show_anisotropy_dialog(parent, ds)
@@ -216,7 +216,7 @@ def estimate_anisotropy(
     bin_width: float = 0.1,
     exclude_zero_id: bool = False,
 ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
-    """Estimate the z-scaling factor (rimf) from per-axis trace sizes.
+    """Estimate the Z scaling factor from per-axis trace sizes.
 
     Port of MATLAB ``estimate_anisotropy``.
 
@@ -232,8 +232,8 @@ def estimate_anisotropy(
 
     Returns
     -------
-    rimf : float
-        z-scaling factor = geomean(size_x, size_y) / size_z.
+    z_scaling_factor : float
+        Z scaling factor = geomean(size_x, size_y) / size_z.
     sizes_x, sizes_y, sizes_z : ndarray (4,)
         The four size estimates for each axis.
     """
@@ -248,7 +248,7 @@ def estimate_anisotropy(
         exclude_zero_id=exclude_zero_id,
     )
     return (
-        result["rimf"],
+        result["z_scaling_factor"],
         result["x"].sizes,
         result["y"].sizes,
         result["z"].sizes,
@@ -276,20 +276,20 @@ def estimate_anisotropy_details(
     fit_y = estimate_size_nd_details(loc_nm[:, 1], tid, **kw)
     fit_z = estimate_size_nd_details(loc_nm[:, 2], tid, **kw)
 
-    # rimf for every size-estimate mode (mean, median, max-bin, Gaussian fit);
-    # the Gaussian-fit value (mode 3) is the default/final rimf.
-    rimf_by_mode = [
-        _rimf_from_sizes(
+    # Z scaling factor for every size-estimate mode (mean, median, max-bin,
+    # Gaussian fit); mode 3 is the default/final estimate.
+    z_scaling_factor_by_mode = [
+        _z_scaling_factor_from_sizes(
             float(fit_x.sizes[m]), float(fit_y.sizes[m]), float(fit_z.sizes[m])
         )
         for m in range(4)
     ]
-    rimf = rimf_by_mode[mode]
+    z_scaling_factor = z_scaling_factor_by_mode[mode]
 
-    z_corrected = estimate_size_nd_details(loc_nm[:, 2] * rimf, tid, **kw) if np.isfinite(rimf) else None
+    z_corrected = estimate_size_nd_details(loc_nm[:, 2] * z_scaling_factor, tid, **kw) if np.isfinite(z_scaling_factor) else None
     return {
-        "rimf": rimf,
-        "rimf_by_mode": rimf_by_mode,
+        "z_scaling_factor": z_scaling_factor,
+        "z_scaling_factor_by_mode": z_scaling_factor_by_mode,
         "mode": int(mode),
         "bin_width": float(bin_width),
         "x": fit_x,
@@ -299,8 +299,8 @@ def estimate_anisotropy_details(
     }
 
 
-def _rimf_from_sizes(sx: float, sy: float, sz: float) -> float:
-    """z-scaling factor = geomean(size_x, size_y) / size_z (NaN if undefined)."""
+def _z_scaling_factor_from_sizes(sx: float, sy: float, sz: float) -> float:
+    """Z scaling factor = geomean(size_x, size_y) / size_z (NaN if undefined)."""
     if (not np.isfinite(sx) or not np.isfinite(sy) or not np.isfinite(sz)
             or sx <= 0 or sy <= 0 or sz <= 0):
         return float("nan")
@@ -351,7 +351,7 @@ def show_trace_size_dialog(parent: QWidget, ds, state) -> None:
 
     # --- compute (same log-distance method as the anisotropy plugin) ---
     # XY  = lateral distance to the trace's XY centroid (loc x/y only).
-    # Z   = axial offset using the CALIBRATED z (ds.loc_nm already applied RIMF).
+    # Z   = axial offset using the CALIBRATED z (ds.loc_nm already applied Z scaling factor).
     # XYZ = full 3-D Euclidean distance.
     try:
         result = {
@@ -375,9 +375,9 @@ def raw_last_valid_loc_nm(ds) -> tuple[np.ndarray, np.ndarray] | None:
 
     Reads the raw ``loc_x``/``loc_y``/``loc_z`` (metres) from the last valid
     iteration via :func:`mfx_get` and scales to nm. The raw coordinates are
-    used deliberately and unconditionally: anisotropy / RIMF estimation must
-    NOT see the RIMF-corrected z that ``ds.loc_nm`` applies (that would make
-    the estimate circular and dependent on the dataset's current RIMF state).
+    used deliberately and unconditionally: Z scaling factor estimation from
+    trace anisotropy must not see the Z-scaled ``ds.loc_nm`` (that would make
+    the estimate circular and dependent on the current calibration).
     Returns ``None`` if coordinates are unavailable.
     """
     from ..core.loader import mfx_get
@@ -408,9 +408,9 @@ def raw_last_valid_loc_nm(ds) -> tuple[np.ndarray, np.ndarray] | None:
 def estimate_anisotropy_for_dataset(ds, *, mode: int = 3) -> dict | None:
     """Anisotropy estimate from a dataset's RAW last-valid coordinates.
 
-    Always reads the raw ``loc`` (never the RIMF-corrected ``ds.loc_nm``), so
-    the result is independent of the dataset's current RIMF state — running it
-    twice gives the same value. Returns the detailed result dict, or ``None``
+    Always reads raw ``loc`` (never the Z-scaled ``ds.loc_nm``), so the result
+    is independent of the current Z scaling factor: running it twice gives the
+    same value. Returns the detailed result dict, or ``None``
     when 3-D coordinates / traces are unavailable.
     """
     from ..core.dataset_kind import is_3d
@@ -427,56 +427,58 @@ def estimate_anisotropy_for_dataset(ds, *, mode: int = 3) -> dict | None:
 
 
 def show_anisotropy_dialog(parent: QWidget, ds, state=None) -> None:
-    """Run anisotropy estimation on *ds* and display a result dialog.
+    """Estimate a Z scaling factor from trace anisotropy and show the result.
 
     Uses the **raw** last-valid-iteration ``loc`` coordinates (nm), not the
-    RIMF-corrected ``ds.loc_nm`` and not the interactive filter — so the
+    Z-scaled ``ds.loc_nm`` and not the interactive filter — so the
     estimate is reproducible and not contaminated by a previously applied
     z-scaling. ``state`` (AppState) enables the dialog's "Apply to data"
-    button to set the dataset's RIMF and refresh open views.
+    button to set the dataset's Z scaling factor and refresh open views.
     """
     from ..core.dataset_kind import is_3d
 
     if not is_3d(ds):
         QMessageBox.warning(
-            parent, "Anisotropy",
-            "Anisotropy estimation requires a 3-D dataset (non-degenerate Z).",
+            parent, "Z Scaling Factor",
+            "Z scaling factor estimation requires a 3-D dataset (non-degenerate Z).",
         )
         return
     if ds.attr.get("tid") is None and ds.mfx_raw.get("tid") is None:
-        QMessageBox.warning(parent, "Anisotropy",
+        QMessageBox.warning(parent, "Z Scaling Factor",
                             "Dataset has no trace ID (tid) attribute.")
         return
 
     data = raw_last_valid_loc_nm(ds)
     if data is None:
-        QMessageBox.warning(parent, "Anisotropy", "Cannot read localisations (loc x/y/z).")
+        QMessageBox.warning(
+            parent, "Z Scaling Factor", "Cannot read localisations (loc x/y/z)."
+        )
         return
     loc, tid = data
 
     if loc.shape[1] < 3:
-        QMessageBox.warning(parent, "Anisotropy",
-                            "Anisotropy estimation requires 3-D data (x, y, z).")
+        QMessageBox.warning(parent, "Z Scaling Factor",
+                            "Z scaling factor estimation requires 3-D data (x, y, z).")
         return
 
     n_traces = int(np.unique(tid[tid != 0]).size)
     if n_traces == 0:
-        QMessageBox.warning(parent, "Anisotropy", "No valid traces found.")
+        QMessageBox.warning(parent, "Z Scaling Factor", "No valid traces found.")
         return
 
     # Check for actual finite Z variation as a defensive guard for raw data
     # containing missing Z measurements.
     finite_z = loc[:, 2][np.isfinite(loc[:, 2])]
     if finite_z.size == 0 or float(np.ptp(finite_z)) < 1.0:
-        QMessageBox.warning(parent, "Anisotropy",
+        QMessageBox.warning(parent, "Z Scaling Factor",
                             "Z range is < 1 nm — this appears to be 2-D data.\n"
-                            "Anisotropy estimation requires 3-D acquisitions.")
+                            "Z scaling factor estimation requires 3-D acquisitions.")
         return
 
     try:
         result = estimate_anisotropy_details(loc, tid)
     except Exception as exc:
-        QMessageBox.critical(parent, "Anisotropy", f"Computation failed:\n{exc}")
+        QMessageBox.critical(parent, "Z Scaling Factor", f"Computation failed:\n{exc}")
         return
 
     # Modeless result window (see show_trace_size_dialog).
@@ -568,7 +570,7 @@ class _TraceSizeDialog(QDialog):
             "d — each localization's offset from its trace centroid (Δ = coord − "
             "centroid), in nm:<br>"
             "&nbsp;&nbsp;XY — radial distance in the XY plane: d = √( Δx² + Δy² )<br>"
-            "&nbsp;&nbsp;Z — axial offset using the calibrated z (RIMF applied): "
+            "&nbsp;&nbsp;Z — axial offset using the calibrated z (Z scaling factor applied): "
             "d = | Δz |<br>"
             "&nbsp;&nbsp;XYZ — full 3-D Euclidean distance: "
             "d = √( Δx² + Δy² + Δz² )<br>"
@@ -593,16 +595,16 @@ class _AnisotropyDialog(QDialog):
         super().__init__(parent)
         self._ds = ds
         self._state = state
-        self.setWindowTitle("Estimated Anisotropy Factor (RIMF)")
+        self.setWindowTitle("Estimated Z Scaling Factor")
         self.resize(980, 800)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
 
-        rimf = float(result.get("rimf", np.nan))
-        self._rimf = rimf
-        rimf_by_mode = result.get("rimf_by_mode", [np.nan, np.nan, np.nan, rimf])
+        z_scaling_factor = float(result.get("z_scaling_factor", np.nan))
+        self._z_scaling_factor = z_scaling_factor
+        z_scaling_factor_by_mode = result.get("z_scaling_factor_by_mode", [np.nan, np.nan, np.nan, z_scaling_factor])
         sizes_x = result["x"].sizes
         sizes_y = result["y"].sizes
         sizes_z = result["z"].sizes
@@ -612,21 +614,20 @@ class _AnisotropyDialog(QDialog):
         root.addWidget(info)
 
         # Abnormal when outside the physically expected [0.5, 1.0] window.
-        abnormal = bool(np.isfinite(rimf)) and not (0.5 <= rimf <= 1.0)
-        val_txt = f"{rimf:.4f}" if np.isfinite(rimf) else "—"
+        abnormal = bool(np.isfinite(z_scaling_factor)) and not (0.5 <= z_scaling_factor <= 1.0)
+        val_txt = f"{z_scaling_factor:.4f}" if np.isfinite(z_scaling_factor) else "—"
         val_color = "#ff5a5a" if abnormal else "palette(text)"
-        rimf_lbl = QLabel(
+        z_scaling_factor_lbl = QLabel(
             f"<span style='font-size:18px; color:{val_color}'>"
-            f"<b>anisotropy factor = {val_txt}</b></span>"
+            f"<b>Z scaling factor = {val_txt}</b></span>"
             "<span style='color:gray'> &nbsp;(Gaussian fit)</span>"
         )
-        rimf_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        rimf_lbl.setToolTip(
-            "anisotropy factor = geomean(σx, σy) / σz = √(σx·σy) / σz\n"
-            "Applied as the RIMF (refractive index mismatch factor): "
-            "z_corrected = z × RIMF"
+        z_scaling_factor_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        z_scaling_factor_lbl.setToolTip(
+            "Z scaling factor = geomean(σx, σy) / σz = √(σx·σy) / σz\n"
+            "Applied as: z_calibrated = z_raw × z_scaling_factor"
         )
-        root.addWidget(rimf_lbl)
+        root.addWidget(z_scaling_factor_lbl)
 
         if abnormal:
             warn_lbl = QLabel("abnormal value, check the data!")
@@ -635,17 +636,17 @@ class _AnisotropyDialog(QDialog):
             root.addWidget(warn_lbl)
 
         grp = QGroupBox(
-            "Per-axis size estimates (nm) and anisotropy factor per mode — "
+            "Per-axis size estimates (nm) and Z scaling factor per mode — "
             "Gaussian fit is the final value"
         )
-        # A real grid keeps the X / Y / Z / anisotropy-factor columns aligned
+        # A real grid keeps the X / Y / Z / factor columns aligned
         # vertically with their value cells (a QFormLayout's field column would
         # not line the header row up with the value rows).
         grid = QGridLayout(grp)
         grid.setHorizontalSpacing(20)
         grid.setVerticalSpacing(4)
 
-        col_headers = ["", "X", "Y", "Z", "anisotropy factor"]
+        col_headers = ["", "X", "Y", "Z", "Z scaling factor"]
         for col, h in enumerate(col_headers):
             lbl = QLabel(f"<b>{h}</b>")
             lbl.setAlignment(
@@ -656,7 +657,7 @@ class _AnisotropyDialog(QDialog):
         row_labels = ["Mean", "Median", "Max-bin", "Gaussian fit ★"]
         for i, (row_lbl, vx, vy, vz) in enumerate(zip(row_labels, sizes_x, sizes_y, sizes_z)):
             bold = i == _DEFAULT_MODE
-            rmode = float(rimf_by_mode[i]) if i < len(rimf_by_mode) else np.nan
+            rmode = float(z_scaling_factor_by_mode[i]) if i < len(z_scaling_factor_by_mode) else np.nan
             name = QLabel(f"<b>{row_lbl}:</b>" if bold else f"{row_lbl}:")
             name.setAlignment(Qt.AlignmentFlag.AlignLeft)
             grid.addWidget(name, i + 1, 0)
@@ -703,40 +704,40 @@ class _AnisotropyDialog(QDialog):
             "(d = | coord − centroid |), in nm, for X, Y, or Z<br>"
             "size σ — peak of a log-normal fit to the distribution of d over all "
             "localizations<br>"
-            "anisotropy factor — geomean(σ<sub>x</sub>, σ<sub>y</sub>) ∕ σ<sub>z</sub> "
+            "Z scaling factor — geomean(σ<sub>x</sub>, σ<sub>y</sub>) ∕ σ<sub>z</sub> "
             "= √( σ<sub>x</sub> · σ<sub>y</sub> ) ∕ σ<sub>z</sub><br>"
             "<br>"
-            "Use the Gaussian-fit (★) estimate. The anisotropy factor is applied as the "
-            "RIMF z-scaling factor."
+            "Use the Gaussian-fit (★) estimate. This empirical factor is derived "
+            "from trace anisotropy; it is not calculated from refractive indices."
             f"{fit_note}"
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: gray; font-size: 11px;")
         root.addWidget(note)
 
-        # ── Apply row: editable RIMF (defaults to the computed value) + Apply ──
+        # ── Apply row: editable Z scaling factor (defaults to the computed value) + Apply ──
         btn_row = QHBoxLayout()
         self._apply_status = QLabel("")
         self._apply_status.setStyleSheet("color: #6c6;")
         btn_row.addWidget(self._apply_status)
         btn_row.addStretch()
-        btn_row.addWidget(QLabel("RIMF:"))
-        self._rimf_spin = QDoubleSpinBox()
-        self._rimf_spin.setRange(0.0, 100.0)
-        self._rimf_spin.setDecimals(4)
-        self._rimf_spin.setSingleStep(0.01)
-        self._rimf_spin.setValue(rimf if np.isfinite(rimf) else 1.0)
-        self._rimf_spin.setToolTip(
-            "RIMF value to apply to this dataset's z (defaults to the computed "
-            "anisotropy factor; editable)."
+        btn_row.addWidget(QLabel("Z scaling factor:"))
+        self._z_scaling_factor_spin = QDoubleSpinBox()
+        self._z_scaling_factor_spin.setRange(0.0, 100.0)
+        self._z_scaling_factor_spin.setDecimals(4)
+        self._z_scaling_factor_spin.setSingleStep(0.01)
+        self._z_scaling_factor_spin.setValue(z_scaling_factor if np.isfinite(z_scaling_factor) else 1.0)
+        self._z_scaling_factor_spin.setToolTip(
+            "Dimensionless multiplier applied to this dataset's raw z coordinates "
+            "(defaults to the trace-anisotropy estimate; editable)."
         )
-        btn_row.addWidget(self._rimf_spin)
+        btn_row.addWidget(self._z_scaling_factor_spin)
         self._apply_btn = QPushButton("Apply to data")
         self._apply_btn.setToolTip(
-            "Set this dataset's RIMF (z-scaling) and refresh open 3-D views. "
+            "Set this dataset's Z scaling factor and refresh open 3-D views. "
             "Raw z is not modified."
         )
-        self._apply_btn.setEnabled(self._ds is not None and np.isfinite(rimf))
+        self._apply_btn.setEnabled(self._ds is not None and np.isfinite(z_scaling_factor))
         self._apply_btn.clicked.connect(self._apply_to_data)
         btn_row.addWidget(self._apply_btn)
         close_btn = QPushButton("Close")
@@ -745,29 +746,32 @@ class _AnisotropyDialog(QDialog):
         root.addLayout(btn_row)
 
         from ..ui.text_select import make_labels_selectable
-        make_labels_selectable(self)   # let users copy the RIMF / size values
+        make_labels_selectable(self)   # let users copy the factor and size values
 
     def _apply_to_data(self) -> None:
         if self._ds is None:
             return
-        value = float(self._rimf_spin.value())
-        self._ds.set_rimf(value, source="manual (anisotropy plugin)")
+        value = float(self._z_scaling_factor_spin.value())
+        self._ds.set_z_scaling_factor(
+            value, source="manual (trace-anisotropy dialog)"
+        )
         if self._state is not None:
             idx = next(
                 (i for i, d in enumerate(self._state.datasets) if d is self._ds),
                 None,
             )
             if idx is not None:
-                # Refresh render, scatter, 3-D, and the dataset-info RIMF text
-                # (they re-pull the RIMF-corrected loc_nm / invalidate caches).
+                # Refresh render, scatter, 3-D, and the dataset-info Z scaling factor text
+                # (they re-pull the Z-scaled loc_nm / invalidate caches).
                 self._state.notify_calibration_changed(idx)
             try:
                 self._state.log(
-                    f"Applied RIMF = {value:.4g} to '{self._ds.name}' (anisotropy plugin)."
+                    f"Applied Z scaling factor = {value:.4g} to "
+                    f"'{self._ds.name}' (trace-anisotropy dialog)."
                 )
             except Exception:
                 pass
-        self._apply_status.setText(f"Applied RIMF = {value:.4g}")
+        self._apply_status.setText(f"Applied Z scaling factor = {value:.4g}")
 
 
 def _anisotropy_hist_plot(axis: str, fit: SizeFitResult, color: str, mode: int):
@@ -829,7 +833,7 @@ def _anisotropy_overlay_plot(fits: list[tuple[str, SizeFitResult, str]], mode: i
             peaks.append({"axis": axis, "pos": float(np.log(val)), "height": height, "width": width})
 
     # Z' = geomean(size_x, size_y): the effective in-plane size used in
-    # RIMF = Z' / size_z. Distinct orange dash-dot line so it stands apart.
+    # Z scaling factor = Z' / size_z. Distinct orange dash-dot line so it stands apart.
     sx, sy = sizes_by_axis.get("X"), sizes_by_axis.get("Y")
     if sx and sy and sx > 0 and sy > 0:
         z_prime = float(np.exp((np.log(sx) + np.log(sy)) / 2.0))

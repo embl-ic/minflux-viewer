@@ -62,6 +62,13 @@ def default_presets() -> list[dict]:
                           "structure": "npc_overlay_3ch", "dim": 3}),
         normalize_preset({"name": "NPC 2-channel by DCR (simulation)",
                           "structure": "npc_dcr_2ch", "dim": 3}),
+        # Known-distance control for the HlyB/D pair analysis: trace statistics
+        # and cell geometry are the measured medians of the 2026 3-D MINFLUX
+        # E. coli set, and the dimer distance is planted, so the workflow can be
+        # checked against a truth it is not told.
+        normalize_preset({"name": "E. coli HlyB dimers 3D (simulation)",
+                          "structure": "ecoli_hlyb_dimer", "dim": 3,
+                          "locs_per_trace": 14.0, "precision_nm": 6.0}),
     ]
 
 

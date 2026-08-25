@@ -64,8 +64,8 @@ class HlyBStagedDialog(QDialog):
 
         self._zscale = self._dspin(0.1, 2.0, d.z_scaling_factor, 4, 0.01, "")
         self._zscale.setToolTip(
-            "Factor applied once to raw z. The project default is the fixed RIMF 0.67.")
-        form.addRow("Z scaling (RIMF):", self._zscale)
+            "Factor applied once to raw z. The project default is the fixed Z scaling factor 0.67.")
+        form.addRow("Z scaling (Z scaling factor):", self._zscale)
 
         self._merge = self._dspin(1.0, 8.0, d.site_merge_nm, 1, 0.5, " nm")
         self._merge.setToolTip(

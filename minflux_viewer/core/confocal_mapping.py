@@ -715,7 +715,7 @@ def attach_confocal_signal(
         "transform": asdict(tr),
         "pixel_coordinate_convention": "calibrated bounds; pixel centres at integer indices",
         "out_of_bounds": "NaN",
-        "z_coordinate": "raw un-RIMF-corrected localization z"
+        "z_coordinate": "raw un-Z-scaled localization z"
         if str(dimension).upper() == "3D"
         else None,
         "matched_datasets": [asdict(match) for match in candidate.matches],

@@ -11,7 +11,7 @@ Data content:
 - **Raw canonical** — the untouched all-iteration ``mfx`` (reloads + re-applies the
   recipe). For a file-backed dataset the raw is already on disk, so this offers a
   "recipe sidecar only" shortcut.
-- **Processed snapshot** — the current view with RIMF/transform/filter baked in.
+- **Processed snapshot** — the current view with Z scaling factor/transform/filter baked in.
 
 The writing is done by :func:`minflux_viewer.core.save.save_processed`.
 """
@@ -36,22 +36,19 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-# (extension label, format key)
-_FORMAT_LABELS = {
-    "mat": "MATLAB (.mat)", "npy": "NumPy (.npy)", "npz": "NumPy zip (.npz)",
-    "json": "JSON (.json)", "csv": "CSV (.csv)", "zarr": "Zarr (.zarr)",
-    "msr": "MINFLUX (.msr)",
-}
-_EXT = {"mat": ".mat", "npy": ".npy", "npz": ".npz", "json": ".json",
-        "csv": ".csv", "zarr": ".zarr", "msr": ".msr"}
-_FILTERS = {
-    "mat": "MATLAB (*.mat)", "npy": "NumPy (*.npy)", "npz": "NumPy zip (*.npz)",
-    "json": "JSON (*.json)", "csv": "CSV (*.csv)", "zarr": "Zarr (*.zarr)",
-    "msr": "MINFLUX (*.msr)",
-}
-_ALL_FORMATS = ["mat", "npy", "npz", "json", "csv", "zarr", "msr"]
+from ..core import formats as _formats
+
+# All derived from the one registry (:mod:`minflux_viewer.core.formats`); this
+# dialog used to keep its own copy of every table, which had to be hand-synced
+# with core.save, Preferences and the router each time a format changed.
+_FORMAT_LABELS = {spec.key: spec.label for spec in _formats.save_formats()}
+_EXT = {spec.key: spec.extensions[0] for spec in _formats.save_formats()}
+#: A Qt name filter is the label with a glob, e.g. "NumPy (*.npy)".
+_FILTERS = {key: label.replace("(.", "(*.")
+            for key, label in _FORMAT_LABELS.items()}
+_ALL_FORMATS = [spec.key for spec in _formats.save_formats()]
 #: Formats that only carry the canonical raw data (no processed snapshot).
-_RAW_ONLY_FORMATS = {"msr"}
+_RAW_ONLY_FORMATS = _formats.raw_only_formats()
 # A file-backed dataset can skip re-writing raw only for reloadable raw formats.
 _RELOADABLE_RAW_EXT = (".mat", ".npy", ".json")
 
@@ -223,28 +220,69 @@ class SaveProcessedDataDialog(QDialog):
         ext = _EXT[fmt]
         if self._chosen_path is not None:
             self._loc_lbl.setText(f"Location: {self._chosen_path.with_suffix(ext).parent}")
-        # .msr is raw-only: show its disclaimer and pin the content to raw.
+        # .msr and the self-contained Zarr schema retain canonical raw data;
+        # processing is separate state inside Zarr rather than baked coordinates.
         note = getattr(self, "_msr_note", None)
         if note is not None:
-            is_msr = fmt in _RAW_ONLY_FORMATS
-            note.setVisible(is_msr)
-            if is_msr:
+            is_raw_only = fmt in _RAW_ONLY_FORMATS
+            note.setVisible(is_raw_only)
+            if fmt == "zarr":
+                note.setText(
+                    "<span style='color:gray'>Self-contained MINFLUX Viewer "
+                    "Zarr v2: an active overlay is saved with all channels, "
+                    "transforms and LUTs; viewer ROIs and linked MSR images are "
+                    "included. An existing store can update processing only after "
+                    "raw-data verification. No sibling metadata JSON is written.</span>"
+                )
+            elif fmt == "msr":
+                note.setText(
+                    "<span style='color:gray'>.msr uses a custom writer — "
+                    "reopens in this viewer via the MSR reader; may not open in "
+                    "Abberior Imspector. Saves raw canonical data.</span>"
+                )
+            if is_raw_only:
                 i = self._content_combo.findData("raw")
                 if i >= 0:
                     self._content_combo.setCurrentIndex(i)
                 self._content_combo.setEnabled(False)
             else:
                 self._content_combo.setEnabled(self._content_combo.count() > 1)
+        recipe = getattr(self, "_inc_recipe", None)
+        derived = getattr(self, "_inc_derived", None)
+        if recipe is not None:
+            if fmt == "zarr":
+                recipe.setText("processing metadata is stored inside the Zarr dataset")
+                recipe.setChecked(True)
+                recipe.setEnabled(False)
+            else:
+                recipe.setText("write recipe sidecar")
+                recipe.setEnabled(True)
+        if derived is not None:
+            if fmt == "zarr":
+                derived.setText("derived arrays are stored inside the Zarr dataset")
+                derived.setChecked(True)
+                derived.setEnabled(False)
+            else:
+                derived.setText("freeze derived attributes")
+                derived.setEnabled(True)
 
     def _on_browse(self) -> None:
         fmt = self._format.currentData()
         ext = _EXT[fmt]
         suggested = str(self._default_dir / f"{self._name.text() or 'dataset'}{ext}")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save / export data", suggested, _FILTERS[fmt])
-        if not path:
-            return
-        p = Path(path)
+        if fmt == "zarr":
+            from .zarr_save_dialog import choose_zarr_save_path
+
+            p = choose_zarr_save_path(self, "Save / export data", suggested)
+            if p is None:
+                return
+        else:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save / export data", suggested, _FILTERS[fmt]
+            )
+            if not path:
+                return
+            p = Path(path)
         self._chosen_path = p
         self._name.setText(p.stem)
         self._loc_lbl.setText(f"Location: {p.parent}")
@@ -268,7 +306,7 @@ class SaveProcessedDataDialog(QDialog):
                     "include": {**include, "recipe": True}, "filter_mode": filter_mode}
         fmt = self._format.currentData()
         if fmt in _RAW_ONLY_FORMATS:
-            content = "raw"                  # .msr carries only canonical raw data
+            content = "raw"
         ext = _EXT[fmt]
         if self._chosen_path is not None:
             data_path = self._chosen_path.with_suffix(ext)

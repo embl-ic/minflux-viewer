@@ -70,6 +70,7 @@ class MsrChannel:
     beads: np.ndarray | None = None                  # grd/mbm/points structured array
     points_by_gri: dict | None = None                # {gri: {"name": R-id, "gri": n}}
     used: list | None = None                         # used bead R-ids (e.g. ["R1"])
+    acquisition_date: str | None = None              # ISO 8601 instrument timestamp
 
     def resolved_did(self) -> str:
         return self.did or str(uuid.uuid4())
@@ -81,20 +82,27 @@ class MsrChannel:
 def build_channel_store(channel: MsrChannel, did: str) -> dict[str, bytes]:
     """Return an in-memory zarr store ``{key: bytes}`` for one channel.
 
-    Contains ``mfx`` (with ``did`` attr) and, when beads are supplied, a
+    Contains ``mfx`` (with ``did`` and, when known, ``acquisition_date`` attrs)
+    and, when beads are supplied, a
     ``grd/mbm/points`` array (+ ``points_by_gri`` attr) and a root ``mbm`` group
     (+ ``used`` attr) — exactly the three nodes the reader + ``beads_drift``
     consume.
     """
-    import zarr
+    from . import zarr2
 
     mfx = np.asarray(channel.mfx)
     if mfx.dtype.names is None:
         raise ValueError("channel.mfx must be a structured array")
     store: dict[str, bytes] = {}
-    root = zarr.open(zarr.storage.KVStore(store), mode="w")
+    root = zarr2.open(store, mode="w")
     root["mfx"] = mfx.ravel()
     root["mfx"].attrs["did"] = str(did)
+    # The instrument acquisition timestamp, in the same place and format
+    # Imspector uses (see core.acquisition_time). Without this a round trip
+    # through our writer would silently lose when the data was recorded — the
+    # container timestamp below is only the save time.
+    if channel.acquisition_date:
+        root["mfx"].attrs["acquisition_date"] = str(channel.acquisition_date)
 
     beads = channel.beads
     if beads is not None and getattr(beads, "size", 0):
@@ -300,6 +308,7 @@ def channel_from_dataset(ds) -> MsrChannel:
         beads=beads,
         points_by_gri=meta.get("mbm_points_by_gri"),
         used=meta.get("mbm_used"),
+        acquisition_date=str(meta.get("acquisition_date") or "") or None,
     )
 
 

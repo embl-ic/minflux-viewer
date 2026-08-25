@@ -24,8 +24,8 @@ Supported formats
     Already-flattened variants produced by SMAP / Ries-lab export scripts.
 
 Both MATLAB v5/v6 (``scipy.io``) and v7.3 HDF5 (``h5py``) files are
-supported.  Canonical flat Zarr exports (``.zarr`` directories) are also
-supported.
+supported. Marked MINFLUX Viewer Zarr v2 directories are also supported; raw,
+MBM/search and processing components restore into the canonical model.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ def _flat_table_from_dict(
     A flat table is a dict of 1-D columns with ``xnm``/``ynm`` (or ``x``/``y``)
     coordinates and **no** structured mfx ``loc`` field — i.e. the layout written
     by *Save Processed Data*. Coordinates are treated as final/processed (already
-    RIMF-applied), so RIMF is pinned to 1.0 and the post-load auto-estimation is
+    Z-scaled), so Z scaling factor is pinned to 1.0 and the post-load auto-estimation is
     suppressed; derived attributes are recomputed; the saved ``ftr`` column, if
     present, restores the filter state.
     """
@@ -121,10 +121,10 @@ def _flat_table_from_dict(
         name=name, x_nm=x, y_nm=y, z_nm=z, folder=folder,
         tid=tid, tim=tim, attrs=attrs or None, prefs=prefs,
     )
-    # Re-imported processed coordinates are final: pin RIMF=1 and pre-empt the
-    # post-load auto-RIMF estimation (which would otherwise double-correct z).
-    ds.set_rimf(1.0, source="processed (re-imported, coordinates final)")
-    ds.derived["rimf"] = np.asarray([1.0], dtype=float)
+    # Re-imported processed coordinates are final: pin Z scaling factor=1 and pre-empt the
+    # post-load automatic Z scaling factor estimation (which would otherwise double-correct z).
+    ds.set_z_scaling_factor(1.0, source="processed (re-imported, coordinates final)")
+    ds.derived["z_scaling_factor"] = np.asarray([1.0], dtype=float)
     if ftr is not None and np.asarray(ftr).ravel().size == n:
         ds.filter_mask = np.asarray(ftr).ravel().astype(bool)
     return ds
@@ -157,9 +157,9 @@ def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
 
     prefs = prefs or {}
     data_prefs      = prefs.get("data", {})
-    load_all_itr    = data_prefs.get("iter_load", "last") == "all"
-    load_efc_cfr    = data_prefs.get("load_efc_cfr", True)
-    load_all_dcr    = data_prefs.get("load_all_dcr", True)
+    # Localizations always materialize at the last valid iteration; every other
+    # iteration stays reachable through mfx_raw (see core/iteration.py).
+    load_all_itr    = False
     only_valid      = data_prefs.get("only_valid_locs", True)
 
     # 1. Read the raw .mat file
@@ -179,7 +179,6 @@ def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
     attrs, num_loc, num_itr = _parse_raw(
         raw,
         load_all_itr=load_all_itr,
-        load_efc_cfr=load_efc_cfr,
         only_valid=only_valid,
     )
     if attrs is None:
@@ -304,7 +303,6 @@ def _h5_to_dict(group) -> dict:
 def _parse_raw(
     raw: dict,
     load_all_itr: bool = False,
-    load_efc_cfr: bool = True,
     only_valid: bool = True,
 ) -> tuple[AttrStore | None, int, int]:
     """
@@ -321,8 +319,7 @@ def _parse_raw(
 
     # m2205: nested struct inside itr (MATLAB struct or already-dict)
     if hasattr(itr_val, "_fieldnames") or isinstance(itr_val, dict):
-        return _parse_m2205(raw, load_all_itr=load_all_itr, load_efc_cfr=load_efc_cfr,
-                            only_valid=only_valid)
+        return _parse_m2205(raw, load_all_itr=load_all_itr, only_valid=only_valid)
 
     if isinstance(itr_val, np.ndarray) and np.issubdtype(itr_val.dtype, np.integer):
         # m2410: flat 1-D integer array — one iteration index per localization event.
@@ -333,12 +330,12 @@ def _parse_raw(
         # 2-D integer itr with loc at top level → m2205 flat format
         if "loc" in raw:
             return _parse_m2205_unwrapped(raw, load_all_itr=load_all_itr,
-                                          load_efc_cfr=load_efc_cfr, only_valid=only_valid)
+                                          only_valid=only_valid)
 
     # m2205-unwrapped: loc already at top level, itr is numeric (float or other)
     if "loc" in raw:
         return _parse_m2205_unwrapped(
-            raw, load_all_itr=load_all_itr, load_efc_cfr=load_efc_cfr, only_valid=only_valid,
+            raw, load_all_itr=load_all_itr, only_valid=only_valid,
         )
 
     return None, 0, 0
@@ -724,7 +721,6 @@ def _parse_m2410(
 def _parse_m2205(
     raw: dict,
     load_all_itr: bool = False,
-    load_efc_cfr: bool = True,
     only_valid: bool = True,
 ) -> tuple[AttrStore, int, int]:
     """
@@ -744,7 +740,7 @@ def _parse_m2205(
     merged.pop("mbm", None)     # remove reference-point field
 
     return _parse_m2205_unwrapped(
-        merged, load_all_itr=load_all_itr, load_efc_cfr=load_efc_cfr, only_valid=only_valid,
+        merged, load_all_itr=load_all_itr, only_valid=only_valid,
     )
 
 
@@ -755,7 +751,6 @@ def _parse_m2205(
 def _parse_m2205_unwrapped(
     raw: dict,
     load_all_itr: bool = False,
-    load_efc_cfr: bool = True,
     only_valid: bool = True,
 ) -> tuple[AttrStore, int, int]:
     """
@@ -874,7 +869,11 @@ def _parse_m2205_unwrapped(
 
         # ── Per-iteration attributes: (num_loc, num_itr) ─────────────
         if arr.ndim == 2 and arr.shape[1] == num_itr:
-            if load_efc_cfr and key in ("cfr", "efc"):
+            # cfr/efc are measured at ONE loop iteration and are zero/NaN
+            # elsewhere, so materialize the iteration carrying the signal.
+            # Always on: metadata["cfr_iteration"]/["efc_iteration"] and
+            # effective_attr_values_1d assume this per-loc value everywhere.
+            if key in ("cfr", "efc"):
                 col = int(np.argmax(np.nansum(np.abs(arr[vld, :]), axis=0)))
                 attrs[key] = arr[vld, col].ravel()
             elif load_all_itr:
@@ -1221,7 +1220,7 @@ def _derived_last_from_raw(
 
     Re-materializes ``loc``/``tid``/``tim`` from the raw store at
     ``itr="last", vld_only=True`` and runs the same trace-structure +
-    derived-attribute pipeline as an ``iter_load="last"`` load, so the values
+    derived-attribute pipeline as the last-valid materialization, so the values
     are identical regardless of the iteration load mode. The result is aligned
     to ``mfx_row_mask(raw, itr="last", vld_only=True)`` rows. ``den`` is not
     computed here — it is appended at dataset-add time where the density
@@ -1526,7 +1525,7 @@ def _mfx_get_rows(
             return None
         v = np.asarray(v, dtype=float) * 1.0e9
         if attr == "znm":
-            v = v * float(getattr(ds.cali, "RIMF", 1.0) or 1.0)
+            v = v * float(getattr(ds.cali, "z_scaling_factor", 1.0) or 1.0)
         return v
 
     raw = getattr(ds, "mfx_raw", None)
@@ -1801,38 +1800,142 @@ def apply_saved_filters(ds: "MinfluxDataset") -> bool:
     return applied
 
 
+def _restore_filter_mask(ds: "MinfluxDataset", saved_ftr) -> bool:
+    """Apply a saved ``ftr`` column as ``ds.filter_mask``.
+
+    A processed snapshot saved with ``filter_mode="flag"`` keeps every row and
+    records the filter as an ``ftr`` boolean column. It must be captured from the
+    source columns *before* ``_add_derived_attributes`` runs, because that resets
+    ``attrs["ftr"]`` to all-True — which silently turned a saved filter back into
+    "nothing filtered" on reload.
+    """
+    if saved_ftr is None:
+        return False
+    mask = np.asarray(saved_ftr).ravel()
+    n = len(np.asarray(ds.attr.get("loc_x", np.empty(0))).ravel())
+    if mask.size != n or n == 0:
+        return False
+    ds.filter_mask = mask.astype(bool, copy=False)
+    ds.attr["ftr"] = ds.filter_mask
+    return True
+
+
+def _transform_record_from_recipe(tf) -> dict | None:
+    """Coerce a recipe ``transform`` payload into a display-transform record.
+
+    Accepts what :func:`core.save.build_metadata` writes (a
+    ``display_transform_record`` dict) and, for sidecars written before that was
+    settled, a bare 4x4 or 3x3 matrix. Returns ``None`` when the payload cannot be
+    interpreted, so the caller can report it rather than dropping the alignment.
+    """
+    from .overlay import matrix4_to_xy3, transform_to_matrix4
+
+    if isinstance(tf, dict):
+        if transform_to_matrix4(tf) is None:
+            return None
+        record = dict(tf)
+        if "matrix_4x4" not in record:
+            matrix = transform_to_matrix4(tf)
+            record["matrix_4x4"] = np.asarray(matrix, dtype=float).tolist()
+        return record
+
+    matrix = transform_to_matrix4(tf)          # bare 4x4 / 3x3 from an old sidecar
+    if matrix is None:
+        return None
+    matrix = np.asarray(matrix, dtype=float)
+    return {
+        "matrix_4x4": matrix.tolist(),
+        "matrix_3x3": np.asarray(matrix4_to_xy3(matrix), dtype=float).tolist(),
+        "alignment_mode": "restored (metadata sidecar)",
+        "provenance": {"source": "metadata recipe", "original_type": type(tf).__name__},
+    }
+
+
 def apply_metadata_recipe(ds: "MinfluxDataset", meta: dict) -> list[str]:
     """Apply an already-parsed metadata-sidecar payload to *ds*.
 
-    Restores RIMF (pinned via ``ds.derived['rimf']`` so post-load auto-estimation
+    Restores Z scaling factor (pinned via ``ds.derived['z_scaling_factor']`` so post-load auto-estimation
     is suppressed), the overlay transform, and the filter specs (applying what is
     evaluable now).  Returns user-facing phrases for what was applied, so a
     caller can report an empty recipe rather than claiming success.
     """
     applied: list[str] = []
 
-    rimf = (meta.get("calibration") or {}).get("rimf")
-    if rimf is not None:
+    # Acquisition provenance: restored before anything else because it is a
+    # plain recorded fact — nothing re-derives it, and a data file alone
+    # (.csv/.mat/.npy) cannot carry it.
+    acq = meta.get("acquisition") or {}
+    if acq.get("date"):
+        from .acquisition_time import stamp_acquisition
+
+        stamp_acquisition(ds.metadata, acq.get("date"), acq.get("span_s"))
+        if ds.metadata.get("acquisition_date"):
+            applied.append("acquisition date")
+
+    calibration = meta.get("calibration") or {}
+    z_scaling_factor = calibration.get("z_scaling_factor")
+    if z_scaling_factor is not None:
         try:
-            ds.set_rimf(float(rimf), source="processed (metadata sidecar)")
-            ds.derived["rimf"] = np.asarray([float(rimf)], dtype=float)
-            applied.append(f"RIMF {float(rimf):.4g}")
+            ds.set_z_scaling_factor(float(z_scaling_factor), source="processed (metadata sidecar)")
+            ds.derived["z_scaling_factor"] = np.asarray([float(z_scaling_factor)], dtype=float)
+            applied.append(f"Z scaling factor {float(z_scaling_factor):.4g}")
         except Exception:
             pass
+    elif calibration.get("rimf") is not None:
+        # A sidecar written before the factor was renamed. The old key is NOT
+        # honoured: "RIMF" asserted a refractive-index model this value never
+        # came from, so silently adopting it would carry that claim forward.
+        # Reported instead of dropped, because the number is real and the user
+        # can re-enter it -- an unrestored z scaling silently changes 3-D shape.
+        applied.append(
+            f"[!] Z scaling factor NOT restored - sidecar predates the rename "
+            f"and stores the legacy 'rimf' key (value {calibration['rimf']!r}); "
+            f"set it in Dataset Information if it still applies")
 
     tf = meta.get("transform")
     if tf is not None:
-        try:
-            ds.state["overlay_transform"] = np.asarray(tf, dtype=float)
-            applied.append("overlay transform")
-        except Exception:
-            pass
+        # The canonical in-app transform is a ``display_transform_record`` *dict*.
+        # It must be restored as one: ``apply_display_transform_nm`` reads
+        # ``matrix_4x4``/``matrix_3x3`` off a dict and silently returns the points
+        # unchanged for anything else, so storing a bare ndarray here loses the
+        # channel alignment without any error — a 100 nm displacement on a
+        # two-colour dataset. (It also poisons the ``a or b`` fallbacks in
+        # render/scatter/roi_crop, which raise on an ndarray.)
+        from .overlay import transform_to_matrix4
+
+        record = _transform_record_from_recipe(tf)
+        if record is None:
+            # Surfaced through the returned list (the caller logs it) rather than
+            # swallowed: an unrestored transform silently moves a channel.
+            applied.append(
+                f"[!] overlay transform NOT restored - unreadable "
+                f"{type(tf).__name__} in recipe")
+        else:
+            ds.state["overlay_transform"] = record
+            ds.state["render_transform_2d"] = record
+            matrix = transform_to_matrix4(record)
+            shift = ""
+            if matrix is not None:
+                dx, dy, dz = (float(matrix[0, 3]), float(matrix[1, 3]), float(matrix[2, 3]))
+                if any(abs(v) > 1e-9 for v in (dx, dy, dz)):
+                    shift = f" (translation {dx:+.3g}, {dy:+.3g}, {dz:+.3g} nm)"
+            applied.append(f"overlay transform{shift}")
 
     filters = meta.get("filters") or []
     if filters:
         ds.state["filter_specs"] = list(filters)
         apply_saved_filters(ds)
         applied.append(f"{len(filters)} filter(s)")
+
+    # ROIs land on the same metadata key the Zarr v2 loader uses, so a caller
+    # that repopulates the ROI Manager works identically whether the dataset
+    # came from a self-contained store or from raw data plus this sidecar.
+    rois = meta.get("rois") or []
+    if rois:
+        ds.metadata["minflux_viewer_roi_records"] = [
+            dict(record) for record in rois if isinstance(record, dict)
+        ]
+        applied.append(f"{len(ds.metadata['minflux_viewer_roi_records'])} ROI(s)")
     return applied
 
 
@@ -1926,7 +2029,7 @@ def _attr_row_selection(ds: "MinfluxDataset") -> "tuple[str, bool] | None":
     """The raw-store selection whose rows align 1:1 with ``ds.attr`` rows.
 
     Usually the materialized selection from the load metadata; m2205-style
-    ``iter_load="all"`` stores keep one row per localization (2-D
+    m2205-style all-iteration stores keep one row per localization (2-D
     per-iteration columns), so their rows align with the ``last`` selection
     instead. ``None`` when no candidate matches (no aligned raw view exists).
     """
@@ -1959,7 +2062,7 @@ def attr_values_1d(ds: "MinfluxDataset", attr: str) -> "np.ndarray | None":
     Returns ``ds.attr[attr]`` when it is already 1-D — except for derived
     attributes on non-last-valid materializations, which are read through the
     :func:`mfx_get` broadcast so they show the same (last-valid) values in
-    every view. m2205-style ``iter_load="all"`` materializations keep
+    every view. m2205-style all-iteration materializations keep
     per-iteration columns 2-D (``n_loc × n_itr``); for those (and for attrs
     absent from ``ds.attr``), fall back to the raw-store selection whose rows
     align with ``ds.attr`` (:func:`_attr_row_selection`). Returns ``None``
@@ -1979,7 +2082,7 @@ def attr_values_1d(ds: "MinfluxDataset", attr: str) -> "np.ndarray | None":
             return None
         v = np.asarray(v, dtype=float) * 1.0e9
         if attr == "znm":
-            v = v * float(getattr(ds.cali, "RIMF", 1.0) or 1.0)
+            v = v * float(getattr(ds.cali, "z_scaling_factor", 1.0) or 1.0)
         return v
 
     # cfr/efc measured at a non-last iteration: the meaningful per-loc value is
@@ -2115,10 +2218,10 @@ def attr_values_for_selection(
 def attr_matches_last_valid(ds: "MinfluxDataset") -> bool:
     """True when ``ds.attr`` is the last-iteration, valid-only materialization.
 
-    This holds for the common ``iter_load="last"`` case, where the default plot
+    This holds for the normal last-valid materialization, where the default plot
     path (``ds.attr`` + ``ds.filter_mask``) equals the ``last`` iteration
     selection. It is False when the dataset was loaded with all iterations
-    (``iter_load="all"``) or invalid localizations, so a ``last`` view must be
+    (an all-iteration store) or invalid localizations, so a ``last`` view must be
     taken from the raw store instead of ``ds.attr``.
     """
     raw = getattr(ds, "mfx_raw", None)
@@ -2322,7 +2425,16 @@ def _add_mfx_attr(attrs: AttrStore, field_name: str, val: np.ndarray, num_raw: i
         arr = np.asarray(val)
         if arr.ndim > 1 and arr.shape[0] != num_raw and arr.shape[1] == num_raw:
             arr = arr.T
-        attrs[field_name] = arr[:, 0].ravel() if arr.ndim > 1 else arr.ravel()
+        if arr.ndim > 1:
+            # Keep every native DCR channel. The viewer's historical ``dcr``
+            # alias remains the primary/first column, but the second channel is
+            # an independent measured value and is required for a lossless Zarr
+            # round trip (real files do not always sum exactly to one).
+            attrs[field_name] = arr[:, 0].ravel()
+            for column in range(arr.shape[1]):
+                attrs[f"dcr_{column}"] = arr[:, column].ravel()
+        else:
+            attrs[field_name] = arr.ravel()
     else:
         arr = np.asarray(val)
         attrs[field_name] = arr.ravel() if arr.ndim == 1 else arr
@@ -2453,7 +2565,7 @@ def load_from_mfx_array(
     """
     prefs = prefs or {}
     data_prefs = prefs.get("data", {}) or {}
-    load_all_itr = data_prefs.get("iter_load", "last") == "all"
+    load_all_itr = False          # always last-valid; browse via mfx_raw
     only_valid   = data_prefs.get("only_valid_locs", True)
 
     file_info = FileInfo(
@@ -2659,56 +2771,94 @@ def load_npy(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
 
 
 # ---------------------------------------------------------------------------
-# .zarr loader — canonical flat columns
+# .npz loader — flat columns bundle
 # ---------------------------------------------------------------------------
 
-def load_zarr(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
-    """Load a canonical flat-column Zarr export.
+def load_npz(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
+    """Load a ``.npz`` flat-column export.
 
-    Zarr exports are directories rather than ordinary files.  The writer
-    stores vector fields as ``loc_x/y/z`` and ``dcr_0/1`` columns; recompose
-    those columns into the canonical flat m2410 structured array before using
-    the normal loader path.  A Zarr directory without the required MFX columns
-    is rejected explicitly, so an MBM companion cannot be opened as a dataset
-    by accident.
+    ``.npz`` is offered by the save dialog and enabled by default in
+    Preferences, but had no reader at all - every ``.npz`` save was a file the
+    application could never reopen. It carries the same flat columns as the
+    ``.zarr`` export, so it follows the same two shapes: canonical raw
+    (``loc_x``/``loc_y``/``itr``/``vld``) or a processed table (``xnm``/``ynm``).
     """
     path = Path(path).resolve()
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
-    if not path.is_dir():
-        raise ValueError(f"Zarr dataset must be a directory: '{path.name}'.")
+
+    with np.load(str(path), allow_pickle=False) as bundle:
+        columns = {str(key): np.asarray(bundle[key]) for key in bundle.files}
+    if not columns:
+        raise ValueError(f"'{path.name}' contains no arrays.")
+
+    required = {"loc_x", "loc_y", "itr", "vld"}
+    if required <= set(columns):
+        from .save import columns_to_mfx_array
+
+        ds = load_from_mfx_array(
+            mfx=columns_to_mfx_array(columns),
+            name=path.name,
+            folder=str(path.parent),
+            datetime_str=datetime.fromtimestamp(path.stat().st_mtime).strftime(
+                "%Y-%b-%d, %H:%M:%S"
+            ),
+            prefs=prefs,
+        )
+    else:
+        ds = _flat_table_from_dict(columns, path.name, str(path.parent), prefs)
+        if ds is None:
+            raise ValueError(
+                f"'{path.name}' is not a MINFLUX .npz export; it has neither the "
+                f"canonical raw columns ({', '.join(sorted(required))}) nor a "
+                f"processed table (xnm/ynm)."
+            )
+    ds.metadata["source_format"] = "npz"
+    apply_metadata_sidecar(ds, path)
+    return ds
+
+
+# ---------------------------------------------------------------------------
+# .zarr loader — marked, self-contained MINFLUX Viewer Zarr v2 dataset
+# ---------------------------------------------------------------------------
+
+def load_zarr(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
+    """Load the first supported MINFLUX Viewer Zarr dataset schema.
+
+    No legacy user data exists for the former experimental flat-column layout,
+    so unmarked stores are rejected instead of being guessed or silently
+    reinterpreted. Vendor/Imspector Zarr stores remain inspectable through the
+    MSR reader and are not application save files by themselves.
+    """
+    from .minflux_zarr import (
+        PROJECT_FORMAT_ID,
+        FORMAT_ATTR,
+        MinfluxZarrError,
+        load_minflux_zarr,
+        load_minflux_zarr_project,
+    )
 
     try:
-        import zarr
-    except ImportError:
-        raise ImportError("Loading .zarr requires the 'zarr' package.") from None
+        return load_minflux_zarr(path, prefs=prefs)
+    except MinfluxZarrError:
+        # A multi-dataset acquisition is marked as a *project*, and the
+        # single-dataset loader rejects it as "format marker missing" -- which
+        # is untrue and unhelpful. The GUI never hit this because it calls the
+        # project loader directly; scripts calling the documented entry point
+        # did. Return the first member, matching what this function promises.
+        project = load_minflux_zarr_project(path, prefs=prefs)
+        if not project.datasets:
+            raise
+        if len(project.datasets) > 1:
+            import warnings
 
-    root = zarr.open(str(path), mode="r")
-    keys = list(root.array_keys())
-    columns = {str(key): np.asarray(root[key][:]) for key in keys}
-    required = {"loc_x", "loc_y", "itr", "vld"}
-    missing = sorted(required - set(columns))
-    if missing:
-        raise ValueError(
-            f"'{path.name}' is not a canonical MINFLUX Zarr export; "
-            f"missing required column(s): {', '.join(missing)}."
-        )
-
-    from .save import columns_to_mfx_array
-
-    mfx = columns_to_mfx_array(columns)
-    ds = load_from_mfx_array(
-        mfx=mfx,
-        name=path.name,
-        folder=str(path.parent),
-        datetime_str=datetime.fromtimestamp(path.stat().st_mtime).strftime(
-            "%Y-%b-%d, %H:%M:%S"
-        ),
-        prefs=prefs,
-    )
-    apply_metadata_sidecar(ds, path)
-    ds.metadata["source_format"] = "zarr"
-    return ds
+            warnings.warn(
+                f"'{Path(path).name}' is a {PROJECT_FORMAT_ID} store with "
+                f"{len(project.datasets)} datasets; load_zarr returns the first. "
+                "Use load_minflux_zarr_project to get them all.",
+                stacklevel=2,
+            )
+        return project.datasets[0]
 
 
 # ---------------------------------------------------------------------------
@@ -2731,6 +2881,55 @@ _CSV_COL_ALIASES: dict[str, str] = {
     "pos_y": "loc_y",
     "pos_z": "loc_z",
 }
+
+_CANONICAL_CSV_BOOL_FIELDS = frozenset({"bot", "eot", "fnl", "vld"})
+_CANONICAL_CSV_U8_FIELDS = frozenset({"sqi", "sta", "thi"})
+_CANONICAL_CSV_I32_FIELDS = frozenset({"ecc", "eco", "itr"})
+_CANONICAL_CSV_I64_FIELDS = frozenset({"gri", "tid"})
+
+
+def _canonical_csv_dtype(headers: list[str]) -> np.dtype:
+    """Structured dtype matching the flattened canonical CSV column order.
+
+    CSV carries values but no binary dtype metadata. Integer/boolean fields use
+    the same conservative types as the existing loader; other values are read
+    as float64. Vector fields are recomposed directly while ``np.loadtxt``
+    parses, avoiding a multi-gigabyte temporary all-float matrix.
+    """
+    names = [str(value).strip().lower() for value in headers]
+    vectors = {
+        "loc_x": ("loc", ("loc_x", "loc_y", "loc_z"), 3),
+        "lnc_x": ("lnc", ("lnc_x", "lnc_y", "lnc_z"), 3),
+        "ext_x": ("ext", ("ext_x", "ext_y", "ext_z"), 3),
+        "dcr_0": ("dcr", ("dcr_0", "dcr_1"), 2),
+    }
+    fields: list[tuple] = []
+    index = 0
+    while index < len(names):
+        name = names[index]
+        vector = vectors.get(name)
+        if vector is not None:
+            output_name, expected, width = vector
+            if tuple(names[index:index + width]) != expected:
+                raise ValueError(
+                    f"Canonical CSV vector columns for {output_name!r} are not contiguous."
+                )
+            fields.append((output_name, np.float64, (width,)))
+            index += width
+            continue
+        if name in _CANONICAL_CSV_BOOL_FIELDS:
+            dtype = np.bool_
+        elif name in _CANONICAL_CSV_U8_FIELDS:
+            dtype = np.uint8
+        elif name in _CANONICAL_CSV_I32_FIELDS:
+            dtype = np.int32
+        elif name in _CANONICAL_CSV_I64_FIELDS:
+            dtype = np.int64
+        else:
+            dtype = np.float64
+        fields.append((name, dtype))
+        index += 1
+    return np.dtype(fields)
 
 
 def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
@@ -2780,32 +2979,36 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
         and all(str(raw).strip().lower() == str(raw).strip() for raw in raw_cols)
     ):
         try:
-            matrix = np.loadtxt(
+            mfx = np.loadtxt(
                 path,
                 delimiter=",",
                 skiprows=1,
-                dtype=np.float64,
-                ndmin=2,
+                dtype=_canonical_csv_dtype(raw_cols),
+                ndmin=1,
             )
-            if matrix.size == 0:
+            if mfx.size == 0:
                 raise ValueError(f"'{path.name}' is empty.")
-            if matrix.shape[1] != len(raw_cols):
-                raise ValueError("canonical CSV column count changed while reading")
-            data = {
-                col_map[raw]: matrix[:, index]
-                for index, raw in enumerate(raw_cols)
-            }
-            n = int(matrix.shape[0])
         except (ValueError, OSError):
             # Fall through to the bounded csv.reader path for unusual numeric
             # spellings or a noncanonical table.
-            data = None
-        if data is not None:
-            # Continue below with the same units/attribute normalization as
-            # the generic reader.
-            pass
+            mfx = None
+        if mfx is not None:
+            ds = load_from_mfx_array(
+                mfx=mfx,
+                name=path.name,
+                folder=str(path.parent),
+                datetime_str=datetime.fromtimestamp(path.stat().st_mtime).strftime(
+                    "%Y-%b-%d, %H:%M:%S"
+                ),
+                prefs=prefs,
+            )
+            ds.metadata["source_format"] = "csv"
+            apply_metadata_sidecar(ds, path)
+            return ds
     else:
-        data = None
+        mfx = None
+
+    data = None
 
     if data is None:
         from array import array
@@ -2849,6 +3052,46 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
             f"Found columns: {list(col_map.values())}"
         )
 
+    # --- canonical raw CSV: reassemble, do not treat rows as localizations ---
+    # A raw canonical export is one row per (localization x iteration). Building
+    # an AttrStore straight from those rows makes every iteration a separate
+    # localization, drops the iteration axis entirely and loses Z scaling factor/filters.
+    # `.zarr` already reassembles through `columns_to_mfx_array`; CSV must too.
+    #
+    # The discriminator is the *original* header, not the aliased names: a
+    # processed snapshot also carries `itr`/`vld`, but spells its coordinates
+    # `xnm/ynm/znm` (nanometres), whereas a raw export writes `loc_x/loc_y/loc_z`
+    # (metres). Aliasing maps `xnm -> loc_x`, so testing `data` would confuse the
+    # two.
+    if {"loc_x", "loc_y", "itr", "vld"} <= canonical_names:
+        from .save import columns_to_mfx_array
+
+        # np.loadtxt/csv give float64 for every column; restore the dtypes the
+        # canonical layout expects so `vld` masks and `itr` compares correctly.
+        typed = dict(data)
+        for name, dtype in (("itr", np.int32), ("tid", np.int64), ("eco", np.int32),
+                            ("ecc", np.int32), ("gri", np.int64), ("sta", np.uint8),
+                            ("thi", np.uint8), ("sqi", np.uint8)):
+            if name in typed:
+                typed[name] = np.asarray(typed[name]).astype(dtype, copy=False)
+        for name in ("vld", "fnl", "bot", "eot"):
+            if name in typed:
+                typed[name] = np.asarray(typed[name]).astype(bool, copy=False)
+        typed.pop("loc_id", None)          # internal cache column, never data
+
+        ds = load_from_mfx_array(
+            mfx=columns_to_mfx_array(typed),
+            name=path.name,
+            folder=str(path.parent),
+            datetime_str=datetime.fromtimestamp(path.stat().st_mtime).strftime(
+                "%Y-%b-%d, %H:%M:%S"
+            ),
+            prefs=prefs,
+        )
+        ds.metadata["source_format"] = "csv"
+        apply_metadata_sidecar(ds, path)
+        return ds
+
     file_info = FileInfo(
         name=path.name,
         folder=str(path.parent),
@@ -2865,6 +3108,7 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     if "tim" not in data:
         data["tim"] = np.zeros(n)
 
+    saved_ftr = data.pop("ftr", None)   # captured before derived attrs reset it
     attrs = AttrStore(data)
 
     prop = _compute_properties(attrs, n, 1, prefs=prefs)
@@ -2881,6 +3125,8 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     ds.metadata["source_version"] = "csv"
     ds.metadata["is_minflux"] = bool(has_real_tid)
     ds.metadata["has_real_tid"] = bool(has_real_tid)
+    _restore_filter_mask(ds, saved_ftr)
+    apply_metadata_sidecar(ds, path)
     return ds
 
 
@@ -2908,7 +3154,7 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     prefs = prefs or {}
     data_prefs   = prefs.get("data", {}) or {}
     only_valid   = data_prefs.get("only_valid_locs", True)
-    load_all_itr = data_prefs.get("iter_load", "last") == "all"
+    load_all_itr = False          # always last-valid; browse via mfx_raw
 
     with open(path, encoding="utf-8") as f:
         payload = json.load(f)
@@ -3020,6 +3266,7 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
         else 1
     )
 
+    saved_ftr = attrs.pop("ftr", None)   # before derived attrs reset it
     prop = _compute_properties(attrs, n, num_itr, prefs=prefs)
     attrs = _add_derived_attributes(attrs, prop, prefs=prefs)
     prop.attr_names = attrs.keys()
@@ -3048,6 +3295,7 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     ds.components.mfx_raw = mfx_raw_store
     if not attr_matches_last_valid(ds):
         ds.components.derived_last = _derived_last_from_raw(mfx_raw_store, _raw_num_itr, prefs)
+    _restore_filter_mask(ds, saved_ftr)
     apply_metadata_sidecar(ds, path)
     return ds
 

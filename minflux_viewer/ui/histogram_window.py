@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QPoint, QRect, Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -54,13 +55,22 @@ from ..core.loader import (
 )
 from ..core.roi_selection import rectangle_bounds, value_range_mask
 from ..utils.filters import TRACE_AGG_FUNCS, trace_agg_func
+from .attribute_help import apply_attribute_tooltips
 from .filter_dialog import SmartBoundsSpinBox, _filter_spinner_values
 from .plot_format import plot_widget
 
 
-def _iter_color(k: int, prefs: dict | None = None) -> tuple[int, int, int, int]:
+def _iter_color(k: int, prefs: dict | None = None, n: int = 1) -> tuple[int, int, int, int]:
+    """Colour of stacked iteration *k* of *n*, from the sequential ramp."""
     colors = list(component_colors(prefs, "functions", "Iteration series").values())
-    return colors[k % len(colors)] if colors else (70, 130, 180, 255)
+    if not colors:
+        return (70, 130, 180, 255)
+    if n <= 1 or len(colors) == 1:
+        return colors[0]
+    # Spread the ramp over the series actually drawn: with three iterations the
+    # plot should still run end to end, not sit in the ramp's dark corner.
+    position = min(k, n - 1) / (n - 1)
+    return colors[min(len(colors) - 1, round(position * (len(colors) - 1)))]
 
 #: Trace read-outs offered in the "As" dropdown. Order and membership come from
 #: the shared registry so the histogram, the filter and the raw path can never
@@ -268,7 +278,24 @@ class HistogramWindow(QWidget):
             self._plot.getPlotItem(),
             coordinate_space="plot",
         )
-        root.addWidget(self._plot)
+        # The plot sits in a one-cell grid so the legend can overlay it, the
+        # same component the Attribute Plot uses.
+        self._plot_page = QWidget()
+        page_layout = QGridLayout(self._plot_page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(self._plot, 0, 0)
+        root.addWidget(self._plot_page)
+
+        from .floating_legend import FloatingLegend
+
+        self._legend = FloatingLegend(
+            self._plot_page,
+            on_visibility_changed=self._set_legend_visible,
+            on_state_changed=lambda: None,
+            plot_area=self._legend_plot_area,
+            background_color=lambda: QColor(255, 255, 255),
+        )
+        self._show_legend = True
 
         self._bottom_bar = QHBoxLayout()
         self._info_label = QLabel("")
@@ -413,8 +440,7 @@ class HistogramWindow(QWidget):
         self._agg_combo.blockSignals(False)
 
     def _apply_attribute_combo_tooltips(self, combo: QComboBox) -> None:
-        for i in range(combo.count()):
-            combo.setItemData(i, attribute_description(combo.itemText(i)), Qt.ItemDataRole.ToolTipRole)
+        apply_attribute_tooltips(combo)
 
     def _apply_aggregation_combo_tooltips(self, combo: QComboBox) -> None:
         for i in range(combo.count()):
@@ -438,7 +464,7 @@ class HistogramWindow(QWidget):
         labels = self._iter_labels(ds)
         return f"last ({ordinal(self._num_itr(ds))})" if labels else ""
 
-    def _effective_iter_label(self, ds, attr: str) -> "str | None":
+    def _effective_iter_label(self, ds, attr: str) -> str | None:
         """Dropdown label for *attr*'s effective iteration (cfr/efc), else None."""
         eff = effective_iteration_for_attr(ds, attr)
         if eff is None:
@@ -510,7 +536,7 @@ class HistogramWindow(QWidget):
         """Axis/report name for the plotted quantity (log made explicit)."""
         return f"log({attr_name})" if self._log_chk.isChecked() else attr_name
 
-    def _current_value_itr(self) -> "str | int":
+    def _current_value_itr(self) -> str | int:
         """Iteration selector the materialized path reads values at.
 
         ``"auto"`` is the historical materialized value (cfr/efc at their
@@ -531,7 +557,7 @@ class HistogramWindow(QWidget):
             return int(itr_sel)
         return "auto"
 
-    def _materialized_values(self, ds, attr_name: str) -> "np.ndarray | None":
+    def _materialized_values(self, ds, attr_name: str) -> np.ndarray | None:
         """Per-loc values on the default (``ds.attr``-aligned) path.
 
         Honours the Iter dropdown's value-pooling modes (``all [sum]`` /
@@ -594,18 +620,24 @@ class HistogramWindow(QWidget):
             except Exception:
                 pass
         self._raw_items = []
-        if self._raw_legend is not None:
-            try:
-                self._raw_legend.scene().removeItem(self._raw_legend)
-            except Exception:
-                pass
-            self._raw_legend = None
-        # PlotItem caches its legend; clearing the attribute is required or a
-        # later addLegend() returns the detached (invisible) old one.
+        if getattr(self, "_legend", None) is not None:
+            self._legend.set_legend_visible(False)
+
+    def _legend_plot_area(self):
+        """The plot's data area in page coordinates, for docked placement."""
         try:
-            self._plot.getPlotItem().legend = None
+            scene_rect = self._plot.getPlotItem().getViewBox().sceneBoundingRect()
+            offset = self._plot.viewport().mapTo(self._plot_page, QPoint(0, 0))
+            return QRect(
+                self._plot.mapFromScene(scene_rect.topLeft()) + offset,
+                self._plot.mapFromScene(scene_rect.bottomRight()) + offset,
+            )
         except Exception:
-            pass
+            return None
+
+    def _set_legend_visible(self, visible: bool) -> None:
+        self._show_legend = bool(visible)
+        self._legend.set_legend_visible(self._show_legend)
 
     def _raw_values(self, ds, attr_name: str, sel, vld_only: bool, agg_mode: str):
         """Return histogram values + unevaluable filter attrs for one iteration.
@@ -762,12 +794,12 @@ class HistogramWindow(QWidget):
 
         # More overlaid iterations -> more transparent so overlaps stay readable.
         alpha = int(np.clip(round(255.0 / max(len(series), 1) * 1.4), 45, 200))
-        self._raw_legend = self._plot.addLegend(offset=(-10, 10))
         max_count = 1.0
+        legend_entries: list[tuple[str, tuple[int, int, int, int]]] = []
         for k, vals in series:
             counts, _ = np.histogram(vals, bins=edges)
             max_count = max(max_count, float(counts.max()) if counts.size else 1.0)
-            r, g, b, color_alpha = _iter_color(k, self._state.prefs)
+            r, g, b, color_alpha = _iter_color(k, self._state.prefs, len(series))
             series_alpha = int(round(alpha * color_alpha / 255.0))
             # self._plot.plot(name=...) registers a legend sample reliably.
             item = self._plot.plot(
@@ -776,6 +808,9 @@ class HistogramWindow(QWidget):
                 name=ordinal(k + 1),
             )
             self._raw_items.append(item)
+            legend_entries.append((ordinal(k + 1), (r, g, b, 255)))
+        self._legend.set_entries(legend_entries, title="Iteration")
+        self._legend.set_legend_visible(self._show_legend)
 
         self._last_histogram_bounds = (float(edges[0]), float(edges[-1]), 0.0, max(max_count, 1.0))
         x_label = self._value_label(attr_name)
@@ -1011,7 +1046,7 @@ class HistogramWindow(QWidget):
             return
         self._set_zoom_mode(None if self._zoom_mode == mode else mode)
 
-    def _set_zoom_mode(self, mode: "str | None") -> None:
+    def _set_zoom_mode(self, mode: str | None) -> None:
         self._zoom_mode = mode
         self._clear_zoom_preview()
         # Left-drag normally pans, so an armed zoom needs a visible affordance;
@@ -1120,8 +1155,8 @@ class HistogramWindow(QWidget):
         self,
         x0: float,
         x1: float,
-        y0: "float | None",
-        y1: "float | None",
+        y0: float | None,
+        y1: float | None,
         *,
         rebin: bool,
         auto_y: bool = False,
@@ -1157,7 +1192,7 @@ class HistogramWindow(QWidget):
         self._view_box.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0.0)
         self._update_filter_edit_labels()
 
-    def _auto_y_for_x_range(self, x0: float, x1: float) -> "tuple[float, float] | None":
+    def _auto_y_for_x_range(self, x0: float, x1: float) -> tuple[float, float] | None:
         """``(0, peak)`` over the bars currently visible in ``[x0, x1]``.
 
         Read off the drawn bars rather than the source values so it reflects the
@@ -1187,7 +1222,7 @@ class HistogramWindow(QWidget):
             return None
         return 0.0, top * (1.0 + _ZOOM_Y_HEADROOM)
 
-    def _zoom_bin_width(self, x0: float, x1: float) -> "float | None":
+    def _zoom_bin_width(self, x0: float, x1: float) -> float | None:
         """A bin width that resolves detail inside the zoomed x span.
 
         Aims for a bin *count* across the zoomed span, scaled by how many values
@@ -1418,7 +1453,7 @@ class HistogramWindow(QWidget):
         mode: str,
         lo: float,
         hi: float,
-        itr: "str | int | None" = None,
+        itr: str | int | None = None,
         on_update=None,
         on_finish=None,
         on_cancel=None,
@@ -1461,7 +1496,7 @@ class HistogramWindow(QWidget):
             self._valid_chk.blockSignals(False)
             self._clear_raw_items()
         ds = self._dataset()
-        saved_state = dict((ds.state.get(self._view_state_key, {}) if ds is not None else {}))
+        saved_state = dict(ds.state.get(self._view_state_key, {}) if ds is not None else {})
         self._reset_for_new_data()
         self._filter_edit = {
             "saved_state": saved_state,
@@ -1528,7 +1563,7 @@ class HistogramWindow(QWidget):
         self._fit_histogram_view()
         self._update_filter_edit_labels()
 
-    def _apply_filter_iteration(self, itr: "str | int | None", attr: str) -> bool:
+    def _apply_filter_iteration(self, itr: str | int | None, attr: str) -> bool:
         """Point the Iter dropdown at a filter row's selector; True when applied.
 
         Accepts the persisted spec tokens (``"last"``, ``"effective"``, an int,

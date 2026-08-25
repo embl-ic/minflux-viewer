@@ -38,3 +38,7 @@ htmlcov/
 MINFLUX-Viewer-*.zip
 MINFLUX-Viewer-*.tar.gz
 MINFLUX-Viewer-*.dmg
+
+# Local benchmark / round-trip scratch output
+output/
+rt/

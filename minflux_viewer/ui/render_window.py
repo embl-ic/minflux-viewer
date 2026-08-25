@@ -1056,9 +1056,10 @@ class RenderWindow(QWidget):
 
         state.active_changed.connect(self._on_active_changed)
         state.filter_changed.connect(self._on_filter_changed)
-        # RIMF / z-scaling change: re-pull loc_nm and re-render (same as a
+        # Z scaling factor change: re-pull loc_nm and re-render (same as a
         # filter change — it busts tile caches and refreshes depth).
         state.calibration_changed.connect(self._on_filter_changed)
+        state.overlay_transform_changed.connect(self._on_overlay_transform_changed)
         state.roi_selection_changed.connect(self._on_roi_selection_changed)
         state.rois.selection_changed.connect(self._redraw_roi_highlight)
         self._scheduler.tile_ready.connect(self._on_tile_ready)
@@ -1317,6 +1318,16 @@ class RenderWindow(QWidget):
         self._overlay_alignment_panel.show()
         self._overlay_alignment_panel.setFocus()
 
+    def start_manual_alignment_for_dataset(self, dataset_idx: int) -> bool:
+        """Start the same mode as channel-row right-click → Manual align."""
+        if len(self._channels) < 2:
+            return False
+        for channel_idx, channel in enumerate(self._channels):
+            if channel.get("dataset_idx") == dataset_idx:
+                self._manual_align_channel(channel_idx)
+                return True
+        return False
+
     def _overlay_alignment_control_config(self) -> dict:
         plot = self._state.prefs.setdefault("plot", {})
         return {
@@ -1475,6 +1486,7 @@ class RenderWindow(QWidget):
         self._phys_tile_cache.clear()
         self._scheduler.cancel()
         self._schedule_render()
+        self._state.notify_overlay_transform_changed(ds_idx)
 
     def _manual_transform_matrix(self, transform: dict) -> np.ndarray:
         return manual_alignment_matrix4(transform, self._orientation)
@@ -3570,7 +3582,7 @@ class RenderWindow(QWidget):
 
         A modal dialog collects XY pixel size, Z voxel depth, the export ranges
         (XY pre-filled from the active rectangle ROI when present, else the data
-        extent) and — for 3-D data — the editable RIMF z-scaling. Each visible
+        extent) and, for 3-D data, the editable Z scaling factor. Each visible
         channel becomes a Z-sliced 2-D-histogram stack with physical calibration
         in OME metadata. The binning/writing runs on a background worker so the
         viewer stays responsive; progress and completion go to the Log (no
@@ -3611,12 +3623,12 @@ class RenderWindow(QWidget):
         z_span = (float(finite_z.min()), float(finite_z.max()))
 
         ds0 = self._state.datasets[self._idx] if self._idx is not None else None
-        rimf = None
+        z_scaling_factor = None
         if is_3d and ds0 is not None:
             try:
-                rimf = float(getattr(ds0.cali, "RIMF", 1.0) or 1.0)
+                z_scaling_factor = float(getattr(ds0.cali, "z_scaling_factor", 1.0) or 1.0)
             except Exception:
-                rimf = None
+                z_scaling_factor = None
 
         stem = "render"
         folder = ""
@@ -3634,7 +3646,7 @@ class RenderWindow(QWidget):
             x_span=x_span,
             y_span=y_span,
             z_span=z_span,
-            rimf=rimf,
+            z_scaling_factor=z_scaling_factor,
             xy_from_roi=roi_bounds is not None,
             parent=self,
         )
@@ -3645,16 +3657,16 @@ class RenderWindow(QWidget):
             QMessageBox.warning(self, "Export to TIFF", "Choose an output file path.")
             return
 
-        # Apply an edited RIMF to the active dataset (single source of truth — the
-        # render and all views update too), then re-snapshot so the exported z
-        # and the rescaled Z range agree.
-        new_rimf = params.get("rimf")
-        if new_rimf is not None and rimf is not None and abs(new_rimf - rimf) > 1e-6 and ds0 is not None:
-            ds0.set_rimf(float(new_rimf), source="manual (tiff export)")
+        # Apply an edited Z scaling factor to the active dataset (the single
+        # source of truth), then re-snapshot so exported z and the rescaled
+        # Z range agree.
+        new_z_scaling_factor = params.get("z_scaling_factor")
+        if new_z_scaling_factor is not None and z_scaling_factor is not None and abs(new_z_scaling_factor - z_scaling_factor) > 1e-6 and ds0 is not None:
+            ds0.set_z_scaling_factor(float(new_z_scaling_factor), source="manual (tiff export)")
             if self._idx is not None:
                 self._state.notify_calibration_changed(self._idx)
             self._state.log(
-                f"RIMF set to {new_rimf:.4f} (manual, TIFF export)", dataset_idx=self._idx
+                f"Z scaling factor set to {new_z_scaling_factor:.4f} (manual, TIFF export)", dataset_idx=self._idx
             )
             channels = self._gather_export_channels()
             if not channels:
@@ -4087,7 +4099,7 @@ class RenderWindow(QWidget):
 
     def profile_locs_version(self):
         """Cheap token that changes only when :meth:`profile_localizations` would
-        (dataset / filter / RIMF / visibility / plane), never on zoom/pan."""
+        (dataset / filter / Z scaling factor / visibility / plane), never on zoom/pan."""
         if self._render_mode != "localizations" or self.roi_view_plane() is None:
             return None
         from ..core.roi_crop import plane_localizations_version
@@ -4301,6 +4313,24 @@ class RenderWindow(QWidget):
             self._schedule_render()
             if self._volume_window is not None and self._volume_window.isVisible():
                 self._volume_window.refresh_from_dataset()
+
+    def _on_overlay_transform_changed(self, idx: int) -> None:
+        """Reload a changed live transform and invalidate geometry caches."""
+        if not (0 <= idx < len(self._state.datasets)):
+            return
+        current = (
+            self._state.datasets[idx].state.get("overlay_transform")
+            or self._state.datasets[idx].state.get("render_transform_2d")
+        )
+        changed = False
+        for channel in self._channels:
+            if channel.get("dataset_idx") != idx:
+                continue
+            if transform_key(channel.get("loc_transform")) != transform_key(current):
+                channel["loc_transform"] = current
+                changed = True
+        if changed:
+            self._on_filter_changed(idx)
 
     def _on_roi_selection_changed(self, idx: int) -> None:
         if any(ch["dataset_idx"] == idx for ch in self._channels):

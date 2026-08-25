@@ -45,7 +45,7 @@ MINFLUX data exists in several structural versions (`m2410`, `m2205`, and older
 
 ## Analysis
 
-- Local density; localization precision (StdDev, CRLB, FRC); anisotropy / RIMF
+- Local density; localization precision (StdDev, CRLB, FRC); Z scaling factor estimation from trace anisotropy
   estimation; DCR channel separation; structure segmentation (NPC ring detection
   and general 2-D/3-D convolution matched-filter); sub-unit clustering; and
   particle averaging, including a canonical NPC two-ring model fit that reports

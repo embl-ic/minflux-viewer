@@ -131,9 +131,9 @@ def extract_particles(
                 attr_cols[name] = col
 
     try:
-        rimf = float(getattr(ds.cali, "RIMF", 1.0))
+        z_scaling_factor = float(getattr(ds.cali, "z_scaling_factor", 1.0))
     except Exception:
-        rimf = 1.0
+        z_scaling_factor = 1.0
     state = getattr(ds, "state", {}) or {}
     # Overlay datasets store the transform as a display_transform_record *dict*;
     # extract the bare 4×4 (np.asarray(dict) would raise) for the recipe.
@@ -174,7 +174,7 @@ def extract_particles(
 
         meta = {
             "rezero_offset": [cx, cy, z_med],
-            "rimf": rimf,
+            "z_scaling_factor": z_scaling_factor,
             "z_scale": 1.0,
             "source_version": str(src_ver),
         }
@@ -232,9 +232,9 @@ def load_any_dataset(path: str | Path, prefs: dict | None = None):
     """Load a dataset file (.mat/.npy/.csv/.tsv/.txt/.json) into a MinfluxDataset.
 
     Used by the *data + ROI pair* loading option to crop particles from a file on
-    disk without opening it in the viewer. RIMF/derived auto-computations done in
+    disk without opening it in the viewer. Z scaling factor/derived auto-computations done in
     the main window's post-load chain are NOT applied here — the dataset's default
-    RIMF is recorded in the particle metadata.
+    Z scaling factor is recorded in the particle metadata.
     """
     from .loader import load_csv, load_dataset, load_json, load_npy
 

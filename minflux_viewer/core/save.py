@@ -11,13 +11,15 @@ Design (per project decision):
   *regardless of the original source/version*. It therefore loads back through
   the normal parser, which re-applies the same Z-dimensionality check — so
   dimensionality and calibration are reproduced, not baked in.
-- All **gating, calibration and filtering** live in a sidecar
+- For the ordinary structured/flat exports, **gating, calibration and filtering** live in a sidecar
   ``<stem>_metadata.json`` (tagged with :data:`METADATA_JSON_MARKER`), never in
   the data file. No ``ftr`` column is written; the saved filter specs rebuild
   the filter state on load.
 - A dataset that already has a physical data file only needs the metadata
   sidecar (the raw data is already on disk). A dataset with no file (``.msr``
-  extract, duplicate) also writes the data, as ``.mat`` / ``.npy`` / ``.json``.
+  extract, duplicate) also writes the data. The marked MINFLUX Viewer ``.zarr``
+  format is the exception: it stores canonical raw data and processing state in
+  separate groups inside one self-contained directory and writes no sidecar.
 """
 
 from __future__ import annotations
@@ -29,16 +31,25 @@ from typing import Any
 
 import numpy as np
 
+from .acquisition_time import acquisition_metadata
+
+from . import formats as _formats
+
 #: Tag identifying the metadata sidecar JSON (a dict; filter/data JSON are lists).
 METADATA_JSON_MARKER = "minflux_viewer_metadata"
 
-DATA_FORMATS = ("mat", "npy", "npz", "json", "csv", "zarr", "msr")
-_EXT = {"mat": ".mat", "npy": ".npy", "npz": ".npz", "json": ".json",
-        "csv": ".csv", "zarr": ".zarr", "msr": ".msr"}
+# Derived from the one registry (:mod:`minflux_viewer.core.formats`) so the
+# writers, the save dialog, Preferences and the drag-and-drop router cannot
+# disagree about which formats exist.
+DATA_FORMATS = tuple(spec.key for spec in _formats.save_formats())
+_EXT = {spec.key: spec.extensions[0] for spec in _formats.save_formats()}
 #: Formats that only carry the **canonical raw** data (no processed snapshot).
-_RAW_ONLY_FORMATS = {"msr"}
+_RAW_ONLY_FORMATS = _formats.raw_only_formats()
 #: Formats that take a flat columns dict (rest take the structured mfx array).
-_COLUMN_FORMATS = {"csv", "npz", "zarr"}
+#: ``.zarr`` is deliberately absent: it is the marked, self-contained
+#: application store written by :mod:`minflux_viewer.core.minflux_zarr`, not a
+#: bag of flat columns.
+_COLUMN_FORMATS = {"csv"}
 #: Derived attributes offered in a processed snapshot when "freeze derived" is on.
 _DERIVED_FOR_SNAPSHOT = ("den", "siz", "dst", "spd", "dt", "dur", "len", "tim_trace")
 
@@ -48,6 +59,12 @@ _VEC_BASES = {"loc": ("x", "y", "z"), "lnc": ("x", "y", "z"), "ext": ("x", "y", 
 #: Keys never written into the canonical raw data (filter mask + derived attrs).
 _EXCLUDE_KEYS = {
     "ftr", "den", "siz", "dst", "dur", "len", "spd", "dt", "tim_trace", "idx",
+    # `loc_id` is an internal cache: `loader._raw_loc_id` lazily writes it into
+    # `mfx_raw` the first time anything groups raw rows by localization (applying
+    # a filter is enough). Without this exclusion it was exported as though it
+    # were acquisition data, so the columns in a saved file depended on what the
+    # user had clicked beforehand and two saves of the same dataset differed.
+    "loc_id",
 }
 
 
@@ -148,7 +165,7 @@ def dataset_to_mfx_array(ds) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Flat columns (CSV / npz / zarr) and the processed snapshot
+# Flat columns (CSV) and the processed snapshot
 # ---------------------------------------------------------------------------
 def flatten_mfx_array(mfx: np.ndarray) -> dict[str, np.ndarray]:
     """Structured ``mfx`` → ``{column: 1-D array}``, splitting vector fields with
@@ -240,7 +257,7 @@ def build_snapshot_table(
     filter_mode: str = "flag",
 ) -> tuple[dict[str, np.ndarray], int]:
     """Build the **processed snapshot** of the current view: the last-valid
-    selection with RIMF- and transform-baked ``xnm/ynm/znm`` (canonical
+    selection with Z scaling and transform baked into ``xnm/ynm/znm`` (canonical
     "baked XOR recipe" rule), the standard attributes, optionally frozen derived
     attributes, and the filter applied (rows dropped) or flagged (``ftr`` column).
 
@@ -259,7 +276,7 @@ def build_snapshot_table(
     znm = np.asarray(znm, dtype=float) if znm is not None else np.zeros_like(xnm)
     n = xnm.size
 
-    # Bake the per-dataset display transform into the (already RIMF-scaled) coords.
+    # Bake the per-dataset display transform into the (already Z-scaled) coords.
     transform = ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
     pts = _ov.apply_display_transform_nm(np.column_stack([xnm, ynm, znm]), transform)
     cols: dict[str, np.ndarray] = {"xnm": pts[:, 0], "ynm": pts[:, 1], "znm": pts[:, 2]}
@@ -323,20 +340,40 @@ def _sanitize(obj: Any) -> Any:
     return obj
 
 
+def roi_records_to_json(records) -> list[dict]:
+    """ROI records as plain JSON dicts.
+
+    One representation shared by the Zarr v2 store, the OME-Zarr v3 package and
+    this sidecar, so a ROI means the same thing wherever it is written.
+    """
+    import dataclasses as _dc
+
+    out = []
+    for record in records or ():
+        if _dc.is_dataclass(record) and not isinstance(record, type):
+            out.append(_sanitize(_dc.asdict(record)))
+        elif isinstance(record, dict):
+            out.append(_sanitize(record))
+        else:
+            raise TypeError(f"Unsupported ROI record type: {type(record).__name__}")
+    return out
+
+
 def build_metadata(ds, *, data_filename: str | None = None,
-                   content: str = "raw", snapshot: dict | None = None) -> dict:
+                   content: str = "raw", snapshot: dict | None = None,
+                   roi_records=None) -> dict:
     """Build the processing-recipe sidecar: source, gating, calibration, filters.
 
-    For ``content="raw"`` (default) nothing is baked — ``rimf``/``transform``/
+    For ``content="raw"`` (default) nothing is baked — ``z_scaling_factor``/``transform``/
     ``filters`` are recorded so reload reproduces the processed state. For
-    ``content="snapshot"`` the data file already has RIMF + transform + filter
-    baked in, so the **applied** ``rimf`` is pinned to ``1.0`` and ``transform``/
+    ``content="snapshot"`` the data file already has Z scaling factor + transform + filter
+    baked in, so the **applied** ``z_scaling_factor`` is pinned to ``1.0`` and ``transform``/
     ``filters`` are cleared (the baked-XOR-recipe rule); the original values are
     kept under ``*_baked`` keys for provenance only.
     """
     md = ds.metadata
     transform = ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
-    rimf = float(getattr(ds.cali, "RIMF", 1.0) or 1.0)
+    z_scaling_factor = float(getattr(ds.cali, "z_scaling_factor", 1.0) or 1.0)
     filters = ds.state.get("filter_specs") or []
     meta = {
         METADATA_JSON_MARKER: 1,
@@ -345,21 +382,31 @@ def build_metadata(ds, *, data_filename: str | None = None,
         "data_file": data_filename,
         "original_source_version": md.get("source_version"),
         "source_format": md.get("source_format"),
+        # When the instrument recorded the run. A provenance fact, so it is
+        # carried on BOTH raw and snapshot content — unlike z_scaling_factor/transform/
+        # filters, there is nothing here to bake, hence nothing to un-bake.
+        "acquisition": acquisition_metadata(ds),
         "gating": {
             "iteration_load_mode": md.get("iteration_load_mode"),
             "includes_invalid": bool(md.get("includes_invalid", False)),
         },
         "calibration": {
-            "rimf": rimf,
-            "rimf_provenance": ds.rimf_provenance,
+            "z_scaling_factor": z_scaling_factor,
+            "z_scaling_factor_provenance": ds.z_scaling_factor_provenance,
         },
         "transform": transform,
         "filters": filters,
+        # ROIs are selections over the data, not a transformation of it, so they
+        # are carried on snapshot content too — a baked export still has the
+        # same regions marked on it.
+        "rois": roi_records_to_json(
+            roi_records if roi_records is not None
+            else ds.metadata.get("minflux_viewer_roi_records")),
     }
     if content == "snapshot":
         # Everything is baked into the data; reload must NOT re-apply it.
-        meta["calibration"]["rimf"] = 1.0
-        meta["calibration"]["baked_rimf"] = rimf
+        meta["calibration"]["z_scaling_factor"] = 1.0
+        meta["calibration"]["baked_z_scaling_factor"] = z_scaling_factor
         meta["transform"] = None
         meta["transform_baked"] = transform
         meta["filters"] = []
@@ -420,7 +467,7 @@ def _write_json(path: Path, mfx: np.ndarray) -> None:
 _WRITERS = {"mat": _write_mat, "npy": _write_npy, "json": _write_json}
 
 
-# --- flat-columns writers (CSV / npz / zarr) -------------------------------
+# --- flat-columns writers (CSV) --------------------------------------------
 def _write_csv(path: Path, columns: dict[str, np.ndarray]) -> None:
     names = list(columns)
     if not names:
@@ -467,7 +514,7 @@ def spreadsheet_export_columns(ds) -> dict[str, np.ndarray]:
     """Return selectable columns for a processed spreadsheet export.
 
     The table uses the current filtered, last-valid view. Coordinates are
-    RIMF/overlay-transform aware and expressed in nanometres.
+    Z scaling factor/overlay-transform aware and expressed in nanometres.
     """
     from .loader import mfx_filter_mask, mfx_get
 
@@ -551,29 +598,12 @@ def write_spreadsheet_csv(
     return output
 
 
-def _write_npz(path: Path, columns: dict[str, np.ndarray]) -> None:
-    np.savez(str(path), **{str(k): np.asarray(v) for k, v in columns.items()})
-
-
-def _write_zarr(path: Path, columns: dict[str, np.ndarray]) -> None:
-    import zarr
-
-    store = zarr.DirectoryStore(str(path))
-    root = zarr.group(store=store, overwrite=True)
-    for k, v in columns.items():
-        root.create_dataset(str(k), data=np.asarray(v))
-
-
 def _write_columns(fmt: str, path: Path, columns: dict[str, np.ndarray]) -> None:
     """Write a flat columns dict in *fmt*. Structured formats (.mat/.npy/.json)
-    serialize a structured array built from the columns; .csv/.npz/.zarr take the
-    columns directly."""
+    serialize a structured array built from the columns; .csv takes the
+    columns directly. ``.zarr`` never reaches here — see ``_COLUMN_FORMATS``."""
     if fmt == "csv":
         _write_csv(path, columns)
-    elif fmt == "npz":
-        _write_npz(path, columns)
-    elif fmt == "zarr":
-        _write_zarr(path, columns)
     elif fmt in _WRITERS:
         _WRITERS[fmt](path, columns_to_structured(columns))
     else:
@@ -601,8 +631,11 @@ def write_raw_array(
     fmt = str(fmt).lower().lstrip(".")
     if fmt not in _EXT:
         raise ValueError(f"Unsupported data format: {fmt!r}")
-    if fmt == "msr":
-        raise ValueError("The .msr format must be written from a dataset so MBM metadata is preserved.")
+    if fmt in {"msr", "zarr"}:
+        raise ValueError(
+            f"The .{fmt} format must be written from a dataset so acquisition, "
+            "MBM/search metadata and processing state are preserved."
+        )
 
     arr = np.asarray(array)
     if arr.dtype.names is None:
@@ -810,6 +843,11 @@ def save_processed(
     content: str = "raw",
     include: dict | None = None,
     filter_mode: str = "flag",
+    related_datasets=None,
+    roi_records=None,
+    image_specs=None,
+    project_name: str | None = None,
+    zarr_overwrite: str = "replace",
 ) -> list[Path]:
     """Save *ds* to file; returns the written paths.
 
@@ -820,7 +858,7 @@ def save_processed(
         ``data_path`` for a metadata-only save (file-backed raw already on disk).
     content :
         ``"raw"`` — canonical all-iteration ``mfx`` (m2410 layout); reloads and
-        re-processes via the recipe. ``"snapshot"`` — the current view with RIMF/
+        re-processes via the recipe. ``"snapshot"`` — the current view with Z scaling factor/
         transform/filter baked in (self-contained).
     include :
         ``{"attrs": bool, "derived": bool, "recipe": bool}`` (defaults
@@ -828,6 +866,10 @@ def save_processed(
     filter_mode :
         Snapshot only — ``"apply"`` drops filtered rows; ``"flag"`` keeps all and
         adds an ``ftr`` column.
+    zarr_overwrite :
+        Existing MINFLUX Viewer Zarr stores use ``"viewer"`` to update only
+        processing/viewer groups after raw-data verification, ``"replace"`` to
+        replace the complete store, or ``"error"`` to refuse overwriting.
     """
     include = include or {}
     inc_attrs = bool(include.get("attrs", True))
@@ -840,13 +882,55 @@ def save_processed(
     if data_path is not None:
         if fmt not in _EXT:
             raise ValueError(f"Unsupported data format: {fmt!r}")
-        data_path = Path(data_path).with_suffix(_EXT[fmt])
+        data_path = _formats.normalize_path(fmt, data_path)
         if fmt in _RAW_ONLY_FORMATS and content == "snapshot":
             raise ValueError(
-                f".{fmt} stores canonical raw data (it round-trips through the "
-                "parser) and cannot bake a processed snapshot — choose 'raw' "
-                "content, or save the snapshot to another format.")
-        if fmt == "msr":
+                f"{_EXT[fmt]} stores canonical raw data plus separate processing state "
+                "and cannot replace the raw acquisition with a baked snapshot — "
+                "choose 'raw' content, or save the snapshot to another format.")
+        if fmt == "zarr":
+            # The new Zarr v2 format is one marked, self-contained dataset. It
+            # intentionally does not use the old unmarked flat-column layout or
+            # a sibling metadata JSON; the processing state lives inside it.
+            from .minflux_zarr import write_minflux_zarr, write_minflux_zarr_project
+
+            if zarr_overwrite not in {"viewer", "replace", "error"}:
+                raise ValueError(f"Unsupported Zarr overwrite mode: {zarr_overwrite!r}")
+            members = list(related_datasets or [ds])
+            if len(members) > 1:
+                data_path = write_minflux_zarr_project(
+                    members,
+                    data_path,
+                    overwrite=zarr_overwrite != "error",
+                    viewer_only=zarr_overwrite == "viewer",
+                    roi_records=roi_records,
+                    image_specs=image_specs,
+                    name=project_name,
+                )
+            else:
+                data_path = write_minflux_zarr(
+                    members[0], data_path,
+                    overwrite=zarr_overwrite != "error",
+                    viewer_only=zarr_overwrite == "viewer",
+                    roi_records=roi_records,
+                    image_specs=image_specs,
+                )
+        elif fmt == "zarr_zip":
+            # The same content as .zarr, sealed into one file. There is no
+            # processing-only mode: a zip cannot replace a member, so saving
+            # over a package always rewrites it (see write_minflux_zarr_package).
+            from .minflux_zarr import write_minflux_zarr_package
+
+            members = list(related_datasets or [ds])
+            data_path = write_minflux_zarr_package(
+                members if len(members) > 1 else members[0],
+                data_path,
+                overwrite=zarr_overwrite != "error",
+                roi_records=roi_records,
+                image_specs=image_specs,
+                name=project_name,
+            )
+        elif fmt == "msr":
             # Our custom OBF/MFXDTA writer: a round-trippable .msr that reopens in
             # this viewer via the MSR reader (raw canonical mfx + any MBM beads).
             from ..msr.writer import write_datasets_msr
@@ -862,6 +946,8 @@ def save_processed(
             mfx = dataset_to_mfx_array(ds)
             write_raw_array(data_path, fmt, mfx)
         written.append(data_path)
+        if fmt in {"zarr", "zarr_zip"}:
+            return written
         sidecar = metadata_sidecar_path(data_path)
         data_filename = data_path.name
     else:
@@ -875,7 +961,8 @@ def save_processed(
     if inc_recipe:
         sidecar.write_text(
             json.dumps(build_metadata(ds, data_filename=data_filename,
-                                      content=content, snapshot=snapshot_meta),
+                                      content=content, snapshot=snapshot_meta,
+                                      roi_records=roi_records),
                        indent=2, ensure_ascii=False),
             encoding="utf-8",
         )

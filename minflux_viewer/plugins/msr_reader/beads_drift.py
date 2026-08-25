@@ -8,7 +8,7 @@ drift correction. Per dataset we combine three zarr nodes:
 - ``grd/mbm/points`` attrs ``["points_by_gri"]`` — ``{gri: {"name": R-ID, …}}``,
   the digit gri-ID ↔ R-ID map.
 - ``grd/mbm/points`` array — per-measurement ``gri`` / ``xyz`` (metres) / ``tim``
-  (seconds).
+  (seconds) / ``str`` (PMT signal).
 
 :func:`extract_bead_drift` returns, for each *used* bead, its drift trace in
 **nanometres** (re-zeroed to the per-bead median) with time zeroed to its start.
@@ -35,11 +35,13 @@ def _name_to_gri(points_by_gri: dict) -> dict[str, int]:
 
 
 def extract_bead_drift(points, points_by_gri, used_rids, *, min_points: int = 1) -> list[dict]:
-    """Per used bead, return ``{gri, rid, xyz_nm, pos_nm, tim_s, n}``.
+    """Per used bead, return drift arrays plus the raw ``str`` PMT signal.
 
     ``xyz_nm`` is (n×3) in nm, re-zeroed to the bead's per-axis **median**
     (``pos_nm`` = that median, the bead's absolute position for a scatter);
-    ``tim_s`` is sorted ascending and zeroed to its start.
+    ``tim_s`` is sorted ascending and zeroed to its start. ``pmt_signal`` is
+    ``points["str"]`` in the same chronological order, or ``None`` for older
+    point arrays that do not carry that field.
 
     Bead identity degrades gracefully through three sources, because only the
     first is guaranteed to travel with a dataset:
@@ -64,6 +66,7 @@ def extract_bead_drift(points, points_by_gri, used_rids, *, min_points: int = 1)
     gri_arr = np.asarray(points["gri"]).ravel()
     xyz = np.asarray(points["xyz"], dtype=float)
     tim = np.asarray(points["tim"], dtype=float).ravel()
+    pmt = np.asarray(points["str"], dtype=float).ravel() if "str" in names else None
     if xyz.ndim != 2 or xyz.shape[1] < 3:
         return []
 
@@ -91,8 +94,10 @@ def extract_bead_drift(points, points_by_gri, used_rids, *, min_points: int = 1)
         tim_s = tim_s[order]
         tim_s = tim_s - tim_s[0]                             # zero to start
         xyz_nm = xyz_nm[order]
+        pmt_signal = pmt[mask][order] if pmt is not None else None
         beads.append({"gri": int(gri), "rid": str(rid),
-                      "xyz_nm": xyz_nm, "pos_nm": pos_nm, "tim_s": tim_s, "n": n})
+                      "xyz_nm": xyz_nm, "pos_nm": pos_nm, "tim_s": tim_s,
+                      "pmt_signal": pmt_signal, "n": n})
     beads.sort(key=lambda b: b["gri"])
     return beads
 

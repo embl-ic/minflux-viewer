@@ -51,11 +51,11 @@ particle-set HDF5 (`core/particle_set.py`), Picasso HDF5, and the OME-Zarr packa
 ### 2.2 Round-trip matrix (measured)
 
 One synthetic dataset (50 localizations × 4 iterations) carrying realistic
-processing — RIMF 0.67, a +100/−50 nm channel transform, an `efo` filter, a derived
+processing — Z scaling factor 0.67, a +100/−50 nm channel transform, an `efo` filter, a derived
 `den`, a precision calibration, overlay membership, an ROI mask — saved and reloaded
 through every format × content mode.
 
-| Target | Locs | Raw rows | Itr | RIMF | Filter | Transform | Overlay | ROI | Reopens |
+| Target | Locs | Raw rows | Itr | Z scaling factor | Filter | Transform | Overlay | ROI | Reopens |
 |---|---|---|---|---|---|---|---|---|---|
 | *original (in app)* | 50 | 200 | 4 | 0.67 | 33/50 | yes | yes | 1 | — |
 | mat / raw | 50 | 200 | 4 | 0.67 | 33/50 | **LOST** | no | 0 | yes |
@@ -80,10 +80,10 @@ covered, because no test round-trips a dataset that has been processed.
 | ID | Sev | Finding |
 |---|---|---|
 | **F1** | critical | **Channel alignment destroyed by every raw round trip.** Measured displacement **100.000 nm**, silent. `save.build_metadata` writes the transform correctly (a `display_transform_record` **dict**); `loader.apply_metadata_recipe` reloads it with `np.asarray(tf, dtype=float)`, which raises `TypeError` on a dict, swallowed by a bare `except Exception: pass`. Had it not raised, the ndarray it stored is ignored by `apply_display_transform_nm` (dict-only) but honoured by `transform_to_matrix4` — so render and crop/save would then disagree about where the data is. |
-| **F2** | critical | **CSV "raw canonical" reloads as structurally different data.** 200 raw iteration rows return as *200 localizations* instead of 50 × 4 iterations; iteration axis gone, RIMF reset to 1.0, filters lost, metre-scale `loc_x` re-read by a path assuming processed nm. Cause: `load_zarr` reassembles via `save.columns_to_mfx_array`; `load_csv` does not, despite the same writer. |
+| **F2** | critical | **CSV "raw canonical" reloads as structurally different data.** 200 raw iteration rows return as *200 localizations* instead of 50 × 4 iterations; iteration axis gone, Z scaling factor reset to 1.0, filters lost, metre-scale `loc_x` re-read by a path assuming processed nm. Cause: `load_zarr` reassembles via `save.columns_to_mfx_array`; `load_csv` does not, despite the same writer. |
 | **F3** | high | **Three format combinations write files that can never be reopened.** `.npz` is enabled by default in Preferences but absent from `_SUPPORTED_EXTS`. `.zarr` + snapshot writes a store `load_zarr` then rejects (`missing required column(s): itr, loc_x, loc_y, vld`). All report success. |
-| **F4** | high | **`.msr` recipe sidecar written but never read.** `apply_metadata_sidecar` is wired into `load_dataset`, `load_npy`, `load_zarr`, `load_csv`, `load_json` only; `.msr` opens through the MSR reader plugin. RIMF, filters, transform evaporate. |
-| **F5** | medium | **The "processing recipe" records 3 of ~20 operations** — RIMF, transform, `filter_specs`. Not recorded: ROI crop, duplication, aggregation, drift correction, channel flatten, DCR separation, time-window separation, confocal mapping, local-density params, precision method, overlay membership/LUT, ROI masks, any analysis result. The dataset already carries in-memory provenance keys for most (`aggregation`, `drift_correction`, `cropped_from_dataset`, `flattened_overlay`, `separated_by`, `particle_average`, `time_channels_*`); all dropped at save. |
+| **F4** | high | **`.msr` recipe sidecar written but never read.** `apply_metadata_sidecar` is wired into `load_dataset`, `load_npy`, `load_zarr`, `load_csv`, `load_json` only; `.msr` opens through the MSR reader plugin. Z scaling factor, filters, transform evaporate. |
+| **F5** | medium | **The "processing recipe" records 3 of ~20 operations** — Z scaling factor, transform, `filter_specs`. Not recorded: ROI crop, duplication, aggregation, drift correction, channel flatten, DCR separation, time-window separation, confocal mapping, local-density params, precision method, overlay membership/LUT, ROI masks, any analysis result. The dataset already carries in-memory provenance keys for most (`aggregation`, `drift_correction`, `cropped_from_dataset`, `flattened_overlay`, `separated_by`, `particle_average`, `time_channels_*`); all dropped at save. |
 | **F6** | medium | **"Raw canonical" is not the file's raw data.** `dataset_to_mfx_array` re-serializes `mfx_raw`, which import already truncated. A two-channel `dcr` (N,2) exports as (N,) — **the second DCR channel is gone**, and DCR separation is a shipped feature. m2205/JSON raw builders keep `dcr_0`/`dcr_1`; the flat m2410 path keeps only column 0 (`attrs[key] = arr[vld, 0].ravel()`). |
 | **F7** | medium | **Internal cache columns leak into saved files.** `_raw_loc_id` lazily caches a `loc_id` column into `mfx_raw`; `dataset_to_mfx_array` has no exclusion, so it is written as acquisition data. File contents therefore depend on what the user clicked before saving. |
 | **F8** | medium | **`ftr` filter-state restore is format-dependent.** Snapshot+flag: `.mat`/`.npy` restore the mask (33/50); `.json`/`.csv` do not (50/50). |
@@ -404,7 +404,7 @@ no-op improvement under zarr 2 today and unblocks zarr 3 whenever the pin moves.
    | Tier | Operations | Storage rule | Scope |
    |---|---|---|---|
    | T0 import | format detection, iteration materialization, validity gating, unit conversion | parameters only; replay by re-import | common |
-   | T1 view/calibration | RIMF, overlay transform, filter specs, LUT, overlay membership, depth range | recipe, never baked (except a deliberate snapshot) | common |
+   | T1 view/calibration | Z scaling factor, overlay transform, filter specs, LUT, overlay membership, depth range | recipe, never baked (except a deliberate snapshot) | common |
    | T2 derived attrs | `den`, localization precision, confocal mapping, `dst/spd/dt/siz/dur/len` | parameters always; values optionally frozen | common |
    | T3 dataset-producing | ROI crop, duplicate, aggregation, drift correction, channel flatten, DCR/time separation | lineage edge + frozen result | common |
    | T4 analysis products | conv/NPC/curvilinear/rod segmentation, particle averaging, HlyB, plot profiles, precision estimates | **must be frozen** — not reproducible from parameters | **project-specific** |

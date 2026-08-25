@@ -6,7 +6,7 @@ from pathlib import Path
 
 import html
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -118,7 +118,32 @@ class RoiManagerWindow(QWidget):
         row.addStretch()
         root.addLayout(row)
 
+    def eventFilter(self, obj, event):
+        """Clicking the **already-selected** entry restores it.
+
+        A displayed ROI is a live-edit copy of its record, so a click on the list
+        means "make the stored geometry authoritative again" — ImageJ's
+        ``select(index)`` deselects and re-selects, which always runs ``restore``.
+        Qt emits no selection signal when the sole selected row is clicked again,
+        so that case is caught here. A genuine selection change is left alone:
+        `_on_list_selection` → `RoiStore.select` already restores. The filter sits
+        on the viewport, which sees the press *before* the view updates the
+        selection, so `selected_ids` still holds the pre-click state.
+        """
+        if (obj is self._list.viewport()
+                and event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton
+                and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                              | Qt.KeyboardModifier.ShiftModifier))):
+            item = self._list.itemAt(event.position().toPoint())
+            if item is not None:
+                roi_id = item.data(Qt.ItemDataRole.UserRole)
+                if list(self._store.selected_ids) == [roi_id]:
+                    self._store.restore_view_edits()
+        return super().eventFilter(obj, event)
+
     def _connect(self) -> None:
+        self._list.viewport().installEventFilter(self)
         self._list.itemSelectionChanged.connect(self._on_list_selection)
         self._show_all.toggled.connect(self._store.set_show_all)
         self._labels.toggled.connect(self._store.set_show_labels)

@@ -43,10 +43,10 @@ class TiffExportDialog(QDialog):
     """Modal dialog for the TIFF export parameters.
 
     Collects the output path, XY pixel size, Z voxel depth, the XY/Z export
-    range and (for 3-D data) the editable RIMF z-scaling factor. The XY range is
-    pre-filled from the active rectangle ROI when present, otherwise the data
-    extent. Editing RIMF rescales the Z-range fields so they keep tracking the
-    same physical structure (the new RIMF is applied to the dataset on export).
+    range and, for 3-D data, the editable Z scaling factor. The XY range is
+    pre-filled from the active rectangle ROI when present, otherwise from the
+    data extent. Editing the factor rescales the Z-range fields so they keep
+    tracking the same structure; the new value is applied on export.
     """
 
     def __init__(
@@ -59,7 +59,7 @@ class TiffExportDialog(QDialog):
         x_span: tuple[float, float],
         y_span: tuple[float, float],
         z_span: tuple[float, float],
-        rimf: float | None = None,
+        z_scaling_factor: float | None = None,
         xy_from_roi: bool = False,
         parent: QWidget | None = None,
     ) -> None:
@@ -67,7 +67,7 @@ class TiffExportDialog(QDialog):
         self.setWindowTitle("Export to TIFF")
         self.setModal(True)
         self._is_3d = bool(is_3d)
-        self._rimf_current = float(rimf) if rimf else None
+        self._z_scaling_factor_current = float(z_scaling_factor) if z_scaling_factor else None
 
         root = QVBoxLayout(self)
         form = QFormLayout()
@@ -102,19 +102,19 @@ class TiffExportDialog(QDialog):
             self._voxel_spin.setToolTip("2-D dataset: a single Z slice is exported.")
         form.addRow("Voxel depth (Z):", self._voxel_spin)
 
-        self._rimf_spin: QDoubleSpinBox | None = None
-        if self._is_3d and self._rimf_current:
-            self._rimf_spin = QDoubleSpinBox()
-            self._rimf_spin.setDecimals(4)
-            self._rimf_spin.setRange(0.1000, 2.0000)
-            self._rimf_spin.setSingleStep(0.01)
-            self._rimf_spin.setValue(self._rimf_current)
-            self._rimf_spin.setToolTip(
-                "Refractive Index Mismatch Factor (z-scaling). Changing it rescales "
-                "the Z range and is applied to the dataset on export."
+        self._z_scaling_factor_spin: QDoubleSpinBox | None = None
+        if self._is_3d and self._z_scaling_factor_current:
+            self._z_scaling_factor_spin = QDoubleSpinBox()
+            self._z_scaling_factor_spin.setDecimals(4)
+            self._z_scaling_factor_spin.setRange(0.1000, 2.0000)
+            self._z_scaling_factor_spin.setSingleStep(0.01)
+            self._z_scaling_factor_spin.setValue(self._z_scaling_factor_current)
+            self._z_scaling_factor_spin.setToolTip(
+                "Dimensionless multiplier applied to raw z coordinates. Changing it "
+                "rescales the Z range and updates the dataset on export."
             )
-            self._rimf_spin.valueChanged.connect(self._on_rimf_changed)
-            form.addRow("RIMF (z-scaling):", self._rimf_spin)
+            self._z_scaling_factor_spin.valueChanged.connect(self._on_z_scaling_factor_changed)
+            form.addRow("Z scaling factor:", self._z_scaling_factor_spin)
 
         self._x_lo, self._x_hi = self._range_row(form, "X range:", x_span)
         self._y_lo, self._y_hi = self._range_row(form, "Y range:", y_span)
@@ -150,15 +150,15 @@ class TiffExportDialog(QDialog):
         form.addRow(label, box)
         return lo, hi
 
-    def _on_rimf_changed(self, value: float) -> None:
-        old = self._rimf_current or 0.0
+    def _on_z_scaling_factor_changed(self, value: float) -> None:
+        old = self._z_scaling_factor_current or 0.0
         if old <= 0.0 or value <= 0.0:
-            self._rimf_current = float(value)
+            self._z_scaling_factor_current = float(value)
             return
         scale = float(value) / old
         self._z_lo.setValue(self._z_lo.value() * scale)
         self._z_hi.setValue(self._z_hi.value() * scale)
-        self._rimf_current = float(value)
+        self._z_scaling_factor_current = float(value)
 
     def _browse(self) -> None:
         current = self._path_edit.text().strip()
@@ -176,7 +176,7 @@ class TiffExportDialog(QDialog):
             "path": self._path_edit.text().strip(),
             "pixel_size_nm": float(self._pixel_spin.value()),
             "voxel_depth_nm": float(self._voxel_spin.value()),
-            "rimf": float(self._rimf_spin.value()) if self._rimf_spin is not None else None,
+            "z_scaling_factor": float(self._z_scaling_factor_spin.value()) if self._z_scaling_factor_spin is not None else None,
             "x_range": (float(self._x_lo.value()), float(self._x_hi.value())),
             "y_range": (float(self._y_lo.value()), float(self._y_hi.value())),
             "z_range": (

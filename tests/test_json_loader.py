@@ -60,7 +60,7 @@ def test_abberior_minflux_json_records_load(tmp_path):
 
 
 def test_json_filter_discriminator_rejects_minflux_records():
-    from minflux_viewer.ui.filter_dialog import is_filter_json_payload
+    from minflux_viewer.core.filter_io import is_filter_json_payload
 
     assert is_filter_json_payload([
         {"apply": True, "attribute": "efo", "value_as": "per loc", "min": 1, "max": 10}
