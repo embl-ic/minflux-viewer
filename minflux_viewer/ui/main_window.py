@@ -1945,6 +1945,7 @@ class MainWindow(QMainWindow):
             for spec, idx in zip(members, dataset_indices)
         }
         existing = {record.id for record in self._state.rois.records}
+        added = 0
         for payload in records:
             if not isinstance(payload, dict):
                 continue
@@ -1961,6 +1962,12 @@ class MainWindow(QMainWindow):
             if record.id not in existing:
                 self._state.rois.add(record)
                 existing.add(record.id)
+                added += 1
+        if added:
+            # Same contract as the sidecar path: the ROIs are visible in the
+            # Manager, concatenated with whatever it already held.
+            self._show_roi_manager()
+            self._state.log(f"Restored {added} ROI(s) into the ROI Manager.")
 
     def _load_csv(self, path: str) -> None:
         # CSV/TSV/TXT all go through the smart spreadsheet importer.
@@ -6483,8 +6490,12 @@ class MainWindow(QMainWindow):
                     return
         from ..core.save import save_processed
 
+        # ROIs travel with EVERY format: the Zarr store keeps them inside, the
+        # others in the metadata sidecar. Only the Zarr context (overlay members,
+        # linked images) is format-specific.
         zarr_context = (self._zarr_save_context(ds)
-                        if fmt in {"zarr", "zarr_zip"} else {})
+                        if fmt in {"zarr", "zarr_zip"}
+                        else {"roi_records": self.save_roi_records(ds)})
         # Only the directory store can be updated in place; a sealed package is
         # always rewritten, and QFileDialog already confirmed the overwrite.
         zarr_overwrite = self._zarr_overwrite_mode(path) if fmt == "zarr" else "replace"
@@ -6537,6 +6548,62 @@ class MainWindow(QMainWindow):
         )
         self._status_label.setText(f"{action.strip()} {name}.")
 
+    def save_roi_records(self, ds, member_indices=None, index_to_id=None) -> list[dict]:
+        """Every ROI displayed on *ds* right now, as portable dicts.
+
+        The ROI Manager holds many ROIs at once, so a saved dataset carries the
+        whole set rather than only the active draft. ``dataset_id`` is stamped
+        for a Zarr project (whose members each get their own id); a single-file
+        save passes neither argument and gets the active dataset's ROIs.
+        """
+        from dataclasses import asdict
+
+        from ..core.roi_selection import ROI_MASKS_STATE_KEY
+
+        if member_indices is None:
+            try:
+                idx = next(i for i, item in enumerate(self._state.datasets)
+                           if item is ds)
+            except StopIteration:
+                return []
+            member_indices = {idx}
+            index_to_id = {idx: "d000000"}
+        index_to_id = index_to_id or {}
+
+        mask_owner = {
+            roi_id: idx
+            for idx in member_indices
+            for roi_id in dict(
+                self._state.datasets[idx].state.get(ROI_MASKS_STATE_KEY) or {})
+        }
+        candidates = list(self._state.rois.records)
+        adapter = self._state.rois.active_adapter
+        if adapter is not None:
+            # The ROI being drawn is not in the store yet, but it is on screen.
+            try:
+                draft = adapter.current_record()
+            except Exception:                                   # noqa: BLE001
+                draft = None
+            if draft is not None and all(r.id != draft.id for r in candidates):
+                candidates.append(draft)
+
+        records = []
+        for record in candidates:
+            context = dict(getattr(record, "context", {}) or {})
+            owner = context.get("dataset_idx")
+            if owner not in member_indices:
+                owner = mask_owner.get(record.id)
+            if owner not in member_indices:
+                continue
+            payload = asdict(record)
+            if index_to_id:
+                payload["dataset_id"] = index_to_id[int(owner)]
+            payload["context"] = {
+                key: value for key, value in context.items() if key != "dataset_idx"
+            }
+            records.append(payload)
+        return records
+
     def _zarr_save_context(self, ds) -> dict:
         """Overlay members, portable ROI geometry and linked MSR images."""
         from dataclasses import asdict
@@ -6553,35 +6620,8 @@ class MainWindow(QMainWindow):
             pairs = [(anchor_idx, ds)]
         member_indices = {idx for idx, _member in pairs}
         index_to_id = {idx: f"d{position:06d}" for position, (idx, _ds) in enumerate(pairs)}
-        mask_owner = {
-            roi_id: idx
-            for idx, member in pairs
-            for roi_id in dict(member.state.get(ROI_MASKS_STATE_KEY) or {})
-        }
-
-        candidates = list(self._state.rois.records)
-        adapter = self._state.rois.active_adapter
-        if adapter is not None:
-            try:
-                draft = adapter.current_record()
-            except Exception:
-                draft = None
-            if draft is not None and all(record.id != draft.id for record in candidates):
-                candidates.append(draft)
-        roi_records = []
-        for record in candidates:
-            context = dict(getattr(record, "context", {}) or {})
-            owner = context.get("dataset_idx")
-            if owner not in member_indices:
-                owner = mask_owner.get(record.id)
-            if owner not in member_indices:
-                continue
-            payload = asdict(record)
-            payload["dataset_id"] = index_to_id[int(owner)]
-            payload["context"] = {
-                key: value for key, value in context.items() if key != "dataset_idx"
-            }
-            roi_records.append(payload)
+        roi_records = self.save_roi_records(
+            ds, member_indices=member_indices, index_to_id=index_to_id)
 
         image_specs = []
         seen_images: set[tuple[str, int]] = set()
@@ -7019,10 +7059,12 @@ class MainWindow(QMainWindow):
         opts = dlg.options()
         from ..core.save import save_processed
 
-        # Overlay members, ROI geometry and linked images travel with BOTH Zarr
-        # forms; only the directory store can be updated in place.
+        # Overlay members and linked images travel with BOTH Zarr forms; only the
+        # directory store can be updated in place. ROIs travel with every format
+        # -- inside the store, or in the sidecar.
         zarr_context = (self._zarr_save_context(ds)
-                        if opts.get("fmt") in {"zarr", "zarr_zip"} else {})
+                        if opts.get("fmt") in {"zarr", "zarr_zip"}
+                        else {"roi_records": self.save_roi_records(ds)})
         zarr_overwrite = (
             self._zarr_overwrite_mode(opts["data_path"])
             if opts.get("fmt") == "zarr"
@@ -7362,7 +7404,77 @@ class MainWindow(QMainWindow):
                     self._state.notify_filter_changed(idx)
             except Exception as exc:
                 self._state.log(f"Restoring filters for '{ds.name}' failed: {exc}", "WARN")
+        self._restore_saved_rois(ds, idx)
+        self._show_saved_filters(ds, idx)
         self._state.status_message.emit(f"Finished processing '{ds.name}'.")
+
+    def _restore_saved_rois(self, ds, idx: int) -> None:
+        """Put a reopened dataset's saved ROIs into the ROI Manager.
+
+        They are *concatenated*: an already-open Manager keeps what it holds and
+        gains these, so opening a second processed dataset does not discard the
+        first one's regions. Records already present by id are skipped, which is
+        what makes re-opening the same file idempotent.
+        """
+        records = list(ds.metadata.get("minflux_viewer_roi_records") or [])
+        if not records:
+            return
+        from ..core.roi import RoiRecord
+
+        existing = {record.id for record in self._state.rois.records}
+        added = 0
+        for payload in records:
+            if not isinstance(payload, dict):
+                continue
+            values = dict(payload)
+            values.pop("dataset_id", None)
+            context = dict(values.get("context") or {})
+            context["dataset_idx"] = idx
+            values["context"] = context
+            try:
+                record = RoiRecord(**values)
+            except (TypeError, ValueError) as exc:
+                self._state.log(
+                    f"Skipped a saved ROI of '{ds.name}': {exc}", "WARN")
+                continue
+            if record.id in existing:
+                continue
+            self._state.rois.add(record)
+            existing.add(record.id)
+            added += 1
+        if not added:
+            return
+        self._show_roi_manager()
+        self._state.log(
+            f"Restored {added} ROI(s) of '{ds.name}' into the ROI Manager.",
+            dataset_idx=idx)
+
+    def _show_saved_filters(self, ds, idx: int) -> None:
+        """Open the Filter dialog on a dataset that was saved with filters.
+
+        Showing them is the point: a reopened dataset can be filtered without
+        anything on screen saying so. Each row keeps the enabled/disabled state
+        it was saved with, so this displays the filter rather than changing it.
+        """
+        specs = list(ds.state.get("filter_specs") or [])
+        if not specs:
+            return
+        previous = self._state.active_idx
+        try:
+            self._state.set_active(idx)
+            self._show_filter()
+        except Exception as exc:                                # noqa: BLE001
+            self._state.log(
+                f"Could not show filters for '{ds.name}': {exc}", "WARN")
+            return
+        finally:
+            if previous != idx and 0 <= previous < len(self._state.datasets):
+                self._state.set_active(previous)
+        enabled = sum(1 for spec in specs
+                      if isinstance(spec, dict) and spec.get("enabled", True))
+        self._state.log(
+            f"'{ds.name}' was saved with {len(specs)} filter row(s), "
+            f"{enabled} enabled.", dataset_idx=idx)
 
     def _on_dataset_removed(self, idx: int) -> None:
         for mapping in (

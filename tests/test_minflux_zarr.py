@@ -743,7 +743,7 @@ def test_sealed_project_loads_its_child_datasets(tmp_path):
     The project loader addressed children as filesystem paths
     (``<store>/datasets/d000000``). That exists for a directory store and does
     not exist inside a package, so every multi-channel ``.zarr.zip`` failed with
-    ``FileNotFoundError: ...zarr.zip\datasets\d000000`` while the same content
+    ``FileNotFoundError`` naming ``...zarr.zip/datasets/d000000`` while
     as a directory opened fine.
     """
     from minflux_viewer.core.minflux_zarr import (
@@ -1017,3 +1017,135 @@ def test_zarr2_hands_blosc_the_array_so_shuffle_works(tmp_path):
             np.testing.assert_allclose(left, right, rtol=0, atol=0)
         else:
             np.testing.assert_array_equal(left, right)
+
+
+def _roi_payload(name, x, dataset_idx=0):
+    from minflux_viewer.core.roi import RoiRecord
+
+    record = RoiRecord.create("rectangle", {"bounds": [x, 20.0, 30.0, 40.0]},
+                              name=name)
+    record.context = {"dataset_idx": dataset_idx, "source_view": "render"}
+    return record
+
+
+def _roi_host(datasets, records):
+    """A stand-in for MainWindow carrying just what the ROI helpers touch.
+
+    Constructing a real MainWindow drags in the render/post-load chain and every
+    child window; these methods only need the dataset list, the ROI store and a
+    way to raise the Manager.
+    """
+    import types
+
+    from minflux_viewer.core.roi import RoiStore
+
+    store = RoiStore()
+    for record in records:
+        store.add(record)
+    shown = []
+    host = types.SimpleNamespace(
+        _state=types.SimpleNamespace(
+            datasets=list(datasets),
+            rois=store,
+            active_idx=0,
+            log=lambda *a, **k: None,
+            set_active=lambda idx: None,
+        ),
+        _roi_manager_shown=shown,
+    )
+    host._show_roi_manager = lambda: shown.append(True)
+    host._show_filter = lambda: shown.append("filter")
+    return host
+
+
+@pytest.mark.parametrize("fmt", ["zarr", "mat", "csv"])
+def test_every_format_saves_the_whole_roi_set(tmp_path, fmt):
+    """A dataset carries all displayed ROIs, not just the active draft.
+
+    The ROI Manager holds many at once. Only the Zarr path used to pass them,
+    so a .mat/.csv sidecar stored none at all.
+    """
+    import json
+
+    from minflux_viewer.core.save import save_processed
+    from minflux_viewer.ui.main_window import MainWindow
+
+    ds = _dataset(tmp_path)
+    records = [_roi_payload(f"cell-{n}", 10.0 * n) for n in range(3)]
+    host = _roi_host([ds], records)
+    host._state.rois.active_adapter = None
+
+    gathered = MainWindow.save_roi_records(host, ds)
+    assert len(gathered) == 3
+
+    written = save_processed(
+        ds, data_path=tmp_path / f"out_{fmt}", fmt=fmt, content="raw",
+        include={"attrs": True, "derived": False, "recipe": True},
+        roi_records=gathered)
+
+    if fmt == "zarr":
+        from minflux_viewer.core.minflux_zarr import load_minflux_zarr_project
+        stored = load_minflux_zarr_project(written[0]).roi_records
+    else:
+        sidecar = next(p for p in written if p.name.endswith("_metadata.json"))
+        stored = json.loads(sidecar.read_text(encoding="utf-8"))["rois"]
+    assert sorted(r["name"] for r in stored) == ["cell-0", "cell-1", "cell-2"]
+
+
+def test_restored_rois_concatenate_and_do_not_duplicate(tmp_path):
+    """Opening a second processed dataset must not discard the first one's ROIs."""
+    import dataclasses
+
+    from minflux_viewer.ui.main_window import MainWindow
+
+    first, second = _dataset(tmp_path), _dataset(tmp_path)
+    first.metadata["minflux_viewer_roi_records"] = [
+        dataclasses.asdict(_roi_payload("a-1", 1.0)),
+        dataclasses.asdict(_roi_payload("a-2", 2.0)),
+    ]
+    second.metadata["minflux_viewer_roi_records"] = [
+        dataclasses.asdict(_roi_payload("b-1", 3.0)),
+    ]
+    host = _roi_host([first, second], [])
+
+    MainWindow._restore_saved_rois(host, first, 0)
+    assert len(host._state.rois.records) == 2
+    assert host._roi_manager_shown, "the Manager must be raised"
+
+    MainWindow._restore_saved_rois(host, second, 1)
+    assert sorted(r.name for r in host._state.rois.records) == ["a-1", "a-2", "b-1"]
+
+    # Re-opening the same dataset is idempotent: records match by id.
+    MainWindow._restore_saved_rois(host, first, 0)
+    assert len(host._state.rois.records) == 3
+
+
+def test_saved_filters_open_the_dialog_without_changing_them(tmp_path):
+    """A reopened dataset can be filtered with nothing on screen saying so.
+
+    Each row keeps the enabled/disabled state it was saved with -- this displays
+    the filter, it does not apply or alter it.
+    """
+    from minflux_viewer.ui.main_window import MainWindow
+
+    ds = _dataset(tmp_path)
+    specs = [
+        {"attribute": "efo", "mode": "per loc", "itr": "last", "lo": 1.0,
+         "hi": 900.0, "lo_inc": True, "hi_inc": True, "enabled": True},
+        {"attribute": "efo", "mode": "per loc", "itr": "last", "lo": 2.0,
+         "hi": 800.0, "lo_inc": True, "hi_inc": True, "enabled": False},
+    ]
+    ds.state["filter_specs"] = [dict(spec) for spec in specs]
+    host = _roi_host([ds], [])
+
+    MainWindow._show_saved_filters(host, ds, 0)
+    assert "filter" in host._roi_manager_shown, "the Filter dialog must be shown"
+    assert ds.state["filter_specs"] == specs, "showing must not rewrite them"
+
+    # No filters means no dialog. (_dataset ships with filter_specs, so clear
+    # them rather than assuming a fresh one has none.)
+    plain = _dataset(tmp_path)
+    plain.state.pop("filter_specs", None)
+    host._roi_manager_shown.clear()
+    MainWindow._show_saved_filters(host, plain, 0)
+    assert not host._roi_manager_shown
