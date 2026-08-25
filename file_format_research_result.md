@@ -1,7 +1,22 @@
 # Processed MINFLUX project format research result
 
-**Status:** implementation handoff / proposed architecture  
+**Status:** PARTLY SUPERSEDED — retained for the parts not built.  
 **Research date:** 2026-08-23  
+
+> The shipped format is **MINFLUX Viewer Zarr v2** (`file_format_zarr_v2_schema.md`),
+> not the `.mfxp` package proposed below. What this document proposed and we
+> **did** adopt: a separate application-owned store, a strict versioned JSON
+> manifest, SHA-256 integrity, `ZIP_STORED` at the archive layer, and a
+> transactional temp-write/validate/atomic-replace. What we did **not** adopt:
+> the `.mfxp` extension (we use `.zarr` / `.zarr.zip`) and, centrally,
+> **embedding the original `.msr` byte-for-byte inside the package** — the store
+> holds canonical raw data plus its own OME-TIFF images instead, and never reads
+> the source `.msr`.
+>
+> Still genuinely open from §15: stable row-ID construction (#5), the temporary
+> extraction/cache lifecycle (#8), and whether preserving the untouched source
+> acquisition alongside the processed store is worth doing at all. Those are the
+> reason this file is kept.
 **Input:** [`file_write_format.md`](file_write_format.md) plus independent review of the
 repository, the MSR/MFXDTA reader, and current upstream specifications.
 
