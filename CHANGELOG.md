@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.4.2
+
+Settles the application file format and tidies the save paths around it.
+
+### File format
+
+- **Zarr v2 is the working format for saving processed data** — one store
+  holding the raw data, the processing and, for a multi-channel acquisition,
+  every channel together.
+- **Processing metadata is saved as `<data file>_viewer_metadata.json`** beside
+  `.mat`, `.npy`, `.json` and `.csv` data. Opening the data offers to restore
+  it, and the file can be applied to a dataset you choose.
+- **OME-NGFF / Zarr v3 export moved to a development branch** while it is
+  finished; it is no longer offered under *File > Save As*.
+
+### Viewers and plots
+
+- **LUT and colormap controls extended to the image viewer.**
+- **Colormap list can be reordered**, and `parula` was added.
+- Filter dialog: *All filters On* / *All filters Off* replace *Apply all* /
+  *Reset all filters*.
+- ROIs from the ROI Manager stay on the views they belong to, and can be shown
+  on another dataset deliberately.
+
+### Other
+
+- **New Task monitor** (*Help > Monitor Tasks…*) listing background work.
+- Bead information files saved beside a dataset can be opened again.
+- Various bug fixes.
+
 ## v0.4.1
 
 This release makes colormaps an application-owned feature, removes Matplotlib and
