@@ -68,7 +68,6 @@ def test_file_menu_save_as_layout(_app):
         "Zarr (.zarr v2) format",
         "Zarr (.zarr.zip v2) single file",
         "OME-TIFF...",
-        "OME-NGFF 0.5 / Zarr v3...",
     ]
     assert hasattr(w, "actionSaveAsHdf5"), "the Picasso writer stays reachable"
     w.close()

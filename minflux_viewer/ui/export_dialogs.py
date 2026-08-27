@@ -1,4 +1,4 @@
-"""Focused dialogs for spreadsheet and OME-Zarr exports."""
+"""Focused dialogs for spreadsheet export."""
 
 from __future__ import annotations
 
@@ -158,75 +158,5 @@ class CsvExportDialog(QDialog):
             decode_csv_separator(self.separator_edit.text())
         except ValueError as exc:
             QMessageBox.warning(self, "Save Spreadsheet", str(exc))
-            return
-        super().accept()
-
-
-class OmeZarrExportDialog(QDialog):
-    """Collect the small set of choices needed by the OME-NGFF export."""
-
-    def __init__(
-        self,
-        default_path: str | Path,
-        *,
-        pixel_size_nm: float,
-        z_voxel_nm: float,
-        is_3d: bool,
-        parent=None,
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Save OME-NGFF 0.5 / Zarr v3")
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-
-        self.path_edit = QLineEdit(str(default_path))
-        form.addRow("Package:", _path_row(self, self.path_edit, self._browse))
-
-        self.pixel_size_spin = QDoubleSpinBox()
-        self.pixel_size_spin.setDecimals(3)
-        self.pixel_size_spin.setRange(0.001, 1_000_000.0)
-        self.pixel_size_spin.setValue(max(0.001, float(pixel_size_nm)))
-        self.pixel_size_spin.setSuffix(" nm")
-        form.addRow("XY pixel size:", self.pixel_size_spin)
-
-        self.z_voxel_spin = QDoubleSpinBox()
-        self.z_voxel_spin.setDecimals(3)
-        self.z_voxel_spin.setRange(0.001, 1_000_000.0)
-        self.z_voxel_spin.setValue(max(0.001, float(z_voxel_nm)))
-        self.z_voxel_spin.setSuffix(" nm")
-        form.addRow("Z voxel depth:", self.z_voxel_spin)
-        self.z_voxel_spin.setVisible(bool(is_3d))
-        z_label = form.labelForField(self.z_voxel_spin)
-        if z_label is not None:
-            z_label.setVisible(bool(is_3d))
-        self.is_3d = bool(is_3d)
-
-        self.levels_spin = QSpinBox()
-        self.levels_spin.setRange(1, 10)
-        self.levels_spin.setValue(6)
-        form.addRow("Maximum pyramid levels:", self.levels_spin)
-        layout.addLayout(form)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def _browse(self) -> None:
-        path, _selected = QFileDialog.getSaveFileName(
-            self,
-            "Save OME-NGFF 0.5 / Zarr v3",
-            self.path_edit.text(),
-            "OME-Zarr (*.ome.zarr)",
-        )
-        if path:
-            self.path_edit.setText(path)
-
-    def accept(self) -> None:
-        if not self.path_edit.text().strip():
-            QMessageBox.warning(self, "Save OME-Zarr", "Choose an output package path.")
             return
         super().accept()
