@@ -56,7 +56,7 @@ def main() -> int:
 
     # Data files named on the command line. route_paths (not _route_file) so a
     # directory is scanned exactly as dropping it is, AND so naming a data file
-    # together with its _metadata.json applies the recipe without a prompt --
+    # together with its _viewer_metadata.json applies the recipe with no
     # the command line is a batch, like a multi-file drop.
     window.route_paths(startup_paths_from_argv(sys.argv[1:]))
 

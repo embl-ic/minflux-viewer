@@ -1,6 +1,6 @@
 """Matching a processing-metadata sidecar to a loaded dataset.
 
-A ``<stem>_metadata.json`` sidecar is a **processing recipe**, not a property of
+A ``<stem>_viewer_metadata.json`` file is a **processing recipe**, not a property of
 one particular dataset: applying a saved processing to another copy of the same
 run, or to a different dataset entirely, is a legitimate thing to want. So
 identity here only ever picks the **default** in a dropdown — it never gates

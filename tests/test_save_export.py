@@ -131,7 +131,7 @@ def test_snapshot_writes_each_format(tmp_path, fmt):
     data_path = written[0]
     assert data_path.exists()
     # sidecar written by default (include recipe)
-    assert any(p.name.endswith("_metadata.json") for p in written)
+    assert any(p.name.endswith("_viewer_metadata.json") for p in written)
 
 
 @pytest.mark.parametrize("fmt,loader,expect_ver", [
@@ -274,7 +274,7 @@ def test_save_msr_rejects_snapshot(tmp_path):
 def test_save_msr_writes_recipe_sidecar_by_default(tmp_path):
     ds = _dataset()
     written = save_processed(ds, data_path=tmp_path / "out.msr", fmt="msr", content="raw")
-    assert any(p.name.endswith("_metadata.json") for p in written)
+    assert any(p.name.endswith("_viewer_metadata.json") for p in written)
 
 
 def test_picasso_hdf5_export_writes_locs_and_yaml(tmp_path):

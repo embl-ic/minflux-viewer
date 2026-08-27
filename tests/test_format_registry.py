@@ -108,7 +108,7 @@ def test_filter_json_goes_to_the_filter_dialog(tmp_path):
 def test_metadata_sidecar_is_a_recipe_not_data(tmp_path):
     from minflux_viewer.core.save import METADATA_JSON_MARKER
 
-    path = _write(tmp_path / "x_metadata.json",
+    path = _write(tmp_path / "x_viewer_metadata.json",
                   {METADATA_JSON_MARKER: 1, "content": "raw"})
     assert resolve_open(path).action is OpenAction.METADATA_RECIPE
 
@@ -149,7 +149,7 @@ def test_a_metadata_sidecar_is_not_mistaken_for_the_roi_set_it_contains(tmp_path
 
     from minflux_viewer.core.roi import is_roi_json_file
 
-    sidecar = tmp_path / "run_metadata.json"
+    sidecar = tmp_path / "run_viewer_metadata.json"
     sidecar.write_text(json.dumps({
         "minflux_viewer_metadata": 1,
         "content": "raw",
@@ -368,7 +368,7 @@ def test_saving_a_sealed_package_matches_the_directory_store(tmp_path):
         )
         # Both are self-contained: the processing lives inside, so neither
         # writes the sidecar the other formats rely on.
-        assert not any(p.name.endswith("_metadata.json") for p in paths)
+        assert not any(p.name.endswith("_viewer_metadata.json") for p in paths)
         written[fmt] = paths[0]
 
     assert written["zarr"].is_dir()

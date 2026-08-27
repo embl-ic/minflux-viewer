@@ -5474,7 +5474,7 @@ class MainWindow(QMainWindow):
         _formats.drop_on_dataset_extensions() + _formats.supported_extensions()))
 
     # ------------------------------------------------------------------
-    # Processing metadata (``<stem>_metadata.json``)
+    # Processing metadata (``<stem>_viewer_metadata.json``)
     # ------------------------------------------------------------------
     def apply_metadata_to_dataset(self, idx: int, meta: dict, source: str) -> bool:
         """Apply a parsed recipe to dataset *idx* and bring the UI in line.
@@ -7582,7 +7582,7 @@ class MainWindow(QMainWindow):
         """Open a whole batch of paths — a multi-file drop, or the command line.
 
         The batch is classified **before** anything is routed, so a data file
-        dropped together with its ``_metadata.json`` applies the recipe without
+        dropped together with its ``_viewer_metadata.json`` applies the recipe
         asking: dropping both files is the answer to the question point 1 would
         otherwise pose, and it must not be asked whichever of the two the OS
         happens to list first. Routing them one at a time could not know a

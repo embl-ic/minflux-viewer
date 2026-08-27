@@ -12,7 +12,7 @@ Design (per project decision):
   the normal parser, which re-applies the same Z-dimensionality check — so
   dimensionality and calibration are reproduced, not baked in.
 - For the ordinary structured/flat exports, **gating, calibration and filtering** live in a sidecar
-  ``<stem>_metadata.json`` (tagged with :data:`METADATA_JSON_MARKER`), never in
+  ``<stem>_viewer_metadata.json`` (tagged with :data:`METADATA_JSON_MARKER`), never in
   the data file. No ``ftr`` column is written; the saved filter specs rebuild
   the filter state on load.
 - A dataset that already has a physical data file only needs the metadata
@@ -37,6 +37,17 @@ from . import formats as _formats
 
 #: Tag identifying the metadata sidecar JSON (a dict; filter/data JSON are lists).
 METADATA_JSON_MARKER = "minflux_viewer_metadata"
+
+#: Suffix of the processing-metadata file: ``<data stem>_viewer_metadata.json``.
+#: It names the application, so a user meeting the file months later next to
+#: their MINFLUX data can see what wrote it and what opens it.
+#:
+#: This is the **default**, and the intended seam for a future Preferences field
+#: letting the user choose their own suffix. Nothing may pair a recipe to a
+#: dataset by this name: discovery narrows the search, but identity is decided
+#: by the payload (``core/metadata_match.py``), so a user-chosen suffix cannot
+#: break the pairing and no history of past suffixes has to be remembered.
+METADATA_SUFFIX = "viewer_metadata"
 
 # Derived from the one registry (:mod:`minflux_viewer.core.formats`) so the
 # writers, the save dialog, Preferences and the drag-and-drop router cannot
@@ -85,10 +96,16 @@ def is_metadata_json_file(path) -> bool:
         return False
 
 
-def metadata_sidecar_path(data_path) -> Path:
-    """The ``<stem>_metadata.json`` path that accompanies *data_path*."""
+def metadata_sidecar_path(data_path, *, suffix: str | None = None) -> Path:
+    """The ``<stem>_viewer_metadata.json`` path that accompanies *data_path*.
+
+    *suffix* overrides :data:`METADATA_SUFFIX` -- the hook a Preferences field
+    will use. Only the suffix is variable: the ``<data stem>`` prefix is always
+    kept, so the pair stays adjacent in a sorted folder and a search for the
+    recipe of a given data file stays cheap.
+    """
     p = Path(data_path)
-    return p.with_name(p.stem + "_metadata.json")
+    return p.with_name(f"{p.stem}_{suffix or METADATA_SUFFIX}.json")
 
 
 # ---------------------------------------------------------------------------
@@ -869,7 +886,7 @@ def save_processed(
         transform/filter baked in (self-contained).
     include :
         ``{"attrs": bool, "derived": bool, "recipe": bool}`` (defaults
-        True/False/True). ``recipe`` controls the ``_metadata.json`` sidecar.
+        True/False/True). ``recipe`` controls the ``_viewer_metadata.json`` sidecar.
     filter_mode :
         Snapshot only — ``"apply"`` drops filtered rows; ``"flag"`` keeps all and
         adds an ``ftr`` column.
@@ -961,7 +978,7 @@ def save_processed(
         # Metadata-only (file-backed): sidecar next to the existing data file.
         stem = Path(getattr(ds.file, "name", "dataset") or "dataset").stem or "dataset"
         folder = Path(metadata_dir or getattr(ds.file, "folder", "") or ".")
-        sidecar = folder / f"{stem}_metadata.json"
+        sidecar = metadata_sidecar_path(folder / stem)
         data_filename = getattr(ds.file, "name", None)
         content = "raw"          # nothing baked when only the recipe is written
 
