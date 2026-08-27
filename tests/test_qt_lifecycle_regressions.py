@@ -9,13 +9,12 @@ whole test session down with it.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
-
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _WINDOWS_ERROR_MODE = 0x0001 | 0x0002 | 0x8000

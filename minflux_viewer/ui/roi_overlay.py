@@ -443,6 +443,14 @@ def _angle_abc(a, b, c) -> float:
     return float(np.degrees(np.arccos(cos_ang)))
 
 
+def _controller_disposed(controller) -> bool:
+    """Safe even when Qt calls Python during partial QObject destruction."""
+    try:
+        return bool(controller._disposed)
+    except (AttributeError, RuntimeError):
+        return True
+
+
 class RoiOverlayController(QObject):
     """Attach shared ROI state to one pyqtgraph plot/image view."""
 
@@ -458,6 +466,7 @@ class RoiOverlayController(QObject):
         source_view: str = "",
     ) -> None:
         super().__init__(owner)
+        self._disposed = False
         self.store = store
         self.owner = owner
         self.view_widget = view_widget
@@ -525,7 +534,82 @@ class RoiOverlayController(QObject):
         store.restore_requested.connect(self.restore_view_edits)
         self.refresh()
 
+    def dispose(self) -> None:
+        """Detach this controller before its owner or plot hierarchy is deleted.
+
+        The method is deliberately idempotent: dataset removal, application
+        shutdown, and Qt parent destruction may all converge on the same window.
+        """
+        if _controller_disposed(self):
+            return
+        self._disposed = True
+
+        from .qt_lifecycle import disconnect_signal, remove_event_filter
+
+        timer = getattr(self, "_selection_timer", None)
+        try:
+            timer.stop()
+        except (AttributeError, RuntimeError):
+            pass
+
+        target = None
+        try:
+            target = self._event_target()
+        except (AttributeError, RuntimeError):
+            pass
+        for widget in (
+            target,
+            getattr(self, "view_widget", None),
+            *tuple(getattr(self, "_extra_key_sources", ())),
+        ):
+            remove_event_filter(widget, self)
+        try:
+            self._extra_key_sources.clear()
+        except AttributeError:
+            pass
+
+        store = getattr(self, "store", None)
+        if store is not None:
+            disconnect_signal(getattr(store, "changed", None), self.refresh)
+            disconnect_signal(getattr(store, "selection_changed", None), self.refresh)
+            disconnect_signal(
+                getattr(store, "restore_requested", None), self.restore_view_edits
+            )
+            if getattr(store, "active_adapter", None) is self:
+                try:
+                    store.set_active_adapter(None)
+                except RuntimeError:
+                    pass
+
+        plot = getattr(self, "plot_item", None)
+        graphics = [
+            *getattr(self, "items", {}).values(),
+            *getattr(self, "labels", {}).values(),
+            *getattr(self, "_session_items", {}).values(),
+            getattr(self, "draft_item", None),
+        ]
+        seen: set[int] = set()
+        for item in graphics:
+            if item is None or id(item) in seen:
+                continue
+            seen.add(id(item))
+            try:
+                plot.removeItem(item)
+            except (AttributeError, RuntimeError):
+                pass
+        for name in ("items", "labels", "_session_items", "_item_records"):
+            try:
+                getattr(self, name).clear()
+            except AttributeError:
+                pass
+        self.draft_item = None
+        self.draft = None
+        self._pending_selection_record = None
+        self._rect_request = None
+
     def activate(self) -> None:
+        if _controller_disposed(self):
+            return
         self.store.set_active_adapter(self)
 
     def add_key_event_source(self, widget) -> None:
@@ -533,6 +617,8 @@ class RoiOverlayController(QObject):
         focus. Used by the render window to register its ``pg.ImageView`` — whose
         own ``keyPressEvent`` otherwise consumes the arrow keys (for an unused
         timeline) before they reach the ROI controller."""
+        if _controller_disposed(self):
+            return
         if widget is None or widget in self._extra_key_sources:
             return
         self._extra_key_sources.add(widget)
@@ -618,7 +704,7 @@ class RoiOverlayController(QObject):
         again) makes the record authoritative again, so the edited copy is thrown
         away and the stored geometry redrawn. Only ROIs actually edited since they
         were built are rebuilt, so this stays cheap with many ROIs on screen."""
-        if not self._dirty_items:
+        if _controller_disposed(self) or not self._dirty_items:
             return
         for roi_id in list(self._dirty_items):
             item = self.items.pop(roi_id, None)
@@ -633,6 +719,8 @@ class RoiOverlayController(QObject):
         self.refresh()          # rebuilds the dropped items from their records
 
     def refresh(self) -> None:
+        if _controller_disposed(self):
+            return
         wanted = set()
         selected = set(self.store.selected_ids)
         plane = self._view_plane()
@@ -715,9 +803,11 @@ class RoiOverlayController(QObject):
             self.plot_item.addItem(self.draft_item)
 
     def eventFilter(self, obj, event) -> bool:
+        if _controller_disposed(self):
+            return False
         try:
             target = self._event_target()
-        except RuntimeError:
+        except (AttributeError, RuntimeError):
             return False
         if obj is not target and obj is not self.view_widget and obj not in self._extra_key_sources:
             return False
@@ -1446,7 +1536,7 @@ class RoiOverlayController(QObject):
             return None
         return None
 
-    def _view_dataset_indices(self) -> "frozenset[int] | None":
+    def _view_dataset_indices(self) -> frozenset[int] | None:
         """Datasets this view displays -- every channel of an overlay, not just
         the anchor. ``None`` means the view declines to scope by dataset."""
         try:
