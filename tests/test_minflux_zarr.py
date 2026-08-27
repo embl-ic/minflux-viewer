@@ -143,7 +143,7 @@ def test_self_contained_schema_roundtrip(tmp_path):
         include={"recipe": True, "derived": True},
     )
     assert written == [tmp_path / "processed.zarr"]
-    assert not (tmp_path / "processed_metadata.json").exists()
+    assert not (tmp_path / "processed_viewer_metadata.json").exists()
 
     import zarr
 
@@ -1087,7 +1087,7 @@ def test_every_format_saves_the_whole_roi_set(tmp_path, fmt):
         from minflux_viewer.core.minflux_zarr import load_minflux_zarr_project
         stored = load_minflux_zarr_project(written[0]).roi_records
     else:
-        sidecar = next(p for p in written if p.name.endswith("_metadata.json"))
+        sidecar = next(p for p in written if p.name.endswith("_viewer_metadata.json"))
         stored = json.loads(sidecar.read_text(encoding="utf-8"))["rois"]
     assert sorted(r["name"] for r in stored) == ["cell-0", "cell-1", "cell-2"]
 

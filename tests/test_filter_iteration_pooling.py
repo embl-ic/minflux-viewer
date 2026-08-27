@@ -216,7 +216,7 @@ def test_metadata_sidecar_round_trips_the_iteration(tmp_path):
         _spec("efo", 0.0, 9e9),                       # legacy-style, no keys
     ]
     meta = save_mod.build_metadata(ds, content="raw")
-    path = tmp_path / "d_metadata.json"
+    path = tmp_path / "d_viewer_metadata.json"
     path.write_text(json.dumps(meta), encoding="utf-8")
 
     reloaded = _make_dataset()

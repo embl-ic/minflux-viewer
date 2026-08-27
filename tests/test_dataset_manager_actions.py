@@ -310,7 +310,7 @@ def test_dropping_a_filter_preset_on_a_row_adds_it_to_that_dataset(manager, tmp_
     assert win._filter_dlgs[1]._table.rowCount() == 1
 
 
-def _sidecar(tmp_path, name="d_metadata.json"):
+def _sidecar(tmp_path, name="d_viewer_metadata.json"):
     from minflux_viewer.core.save import METADATA_JSON_MARKER
 
     side = tmp_path / name

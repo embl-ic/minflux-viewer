@@ -1971,8 +1971,9 @@ def read_metadata_file(path: "str | Path") -> "dict | None":
     """Parse *path* itself as a metadata sidecar, or ``None`` if it is not one.
 
     ⚠ Distinct from :func:`read_metadata_sidecar`, which derives a *sibling*
-    ``<stem>_metadata.json`` from a **data** file. Handing this one's job to
-    that one looks for ``d_metadata_metadata.json`` and silently finds nothing.
+    ``<stem>_viewer_metadata.json`` from a **data** file. Handing this one's
+    job to that one looks for ``d_viewer_metadata_viewer_metadata.json`` and
+    silently finds nothing.
     """
     from .save import is_metadata_json_payload
 
@@ -1984,7 +1985,7 @@ def read_metadata_file(path: "str | Path") -> "dict | None":
 
 
 def read_metadata_sidecar(data_path: "str | Path") -> "tuple[Path, dict] | None":
-    """The ``<stem>_metadata.json`` beside *data_path* and its payload, if any.
+    """The ``<stem>_viewer_metadata.json`` beside *data_path*, and its payload.
 
     Split out of :func:`apply_metadata_sidecar` so the UI can *find* a recipe
     and describe it to the user **before** deciding whether to apply it: a
@@ -2003,7 +2004,7 @@ def read_metadata_sidecar(data_path: "str | Path") -> "tuple[Path, dict] | None"
 
 
 def apply_metadata_sidecar(ds: "MinfluxDataset", data_path: "str | Path") -> bool:
-    """Restore the processing recipe from a ``<stem>_metadata.json`` sidecar.
+    """Restore the processing recipe from a ``<stem>_viewer_metadata.json`` file.
 
     If a metadata sidecar sits next to *data_path*, its recipe is applied via
     :func:`apply_metadata_recipe`.  Returns True if a sidecar was consumed.

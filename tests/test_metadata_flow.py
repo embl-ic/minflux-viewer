@@ -89,7 +89,7 @@ def test_a_sidecar_beside_the_data_is_never_applied_without_asking(
         _app, tmp_path, monkeypatch):
     data = tmp_path / "run.mat"
     data.write_bytes(b"")
-    (tmp_path / "run_metadata.json").write_text(json.dumps(_recipe()),
+    (tmp_path / "run_viewer_metadata.json").write_text(json.dumps(_recipe()),
                                                 encoding="utf-8")
     window = _window()
 
@@ -117,7 +117,7 @@ def test_dropping_the_data_with_its_recipe_asks_nothing(
     """Dropping both files IS the answer, whichever order the OS lists them."""
     data = tmp_path / "run.mat"
     data.write_bytes(b"")
-    side = tmp_path / "run_metadata.json"
+    side = tmp_path / "run_viewer_metadata.json"
     side.write_text(json.dumps(_recipe()), encoding="utf-8")
 
     import minflux_viewer.ui.metadata_apply_dialog as dialogs
@@ -138,7 +138,7 @@ def test_the_batch_routes_data_first_and_skips_a_consumed_recipe(
         _app, tmp_path, monkeypatch):
     data = tmp_path / "run.mat"
     data.write_bytes(b"")
-    side = tmp_path / "run_metadata.json"
+    side = tmp_path / "run_viewer_metadata.json"
     side.write_text(json.dumps(_recipe()), encoding="utf-8")
 
     window = _window()
@@ -158,7 +158,7 @@ def test_the_batch_routes_data_first_and_skips_a_consumed_recipe(
 
 
 def test_a_recipe_dropped_alone_is_still_routed(_app, tmp_path):
-    side = tmp_path / "run_metadata.json"
+    side = tmp_path / "run_viewer_metadata.json"
     side.write_text(json.dumps(_recipe()), encoding="utf-8")
     window = _window()
     window.route_paths([str(side)])
@@ -169,17 +169,17 @@ def test_a_recipe_dropped_alone_is_still_routed(_app, tmp_path):
 
 def test_only_one_recipe_is_held_and_a_second_replaces_it(_app, tmp_path):
     window = _window()
-    first, second = tmp_path / "a_metadata.json", tmp_path / "b_metadata.json"
+    first, second = tmp_path / "a_viewer_metadata.json", tmp_path / "b_viewer_metadata.json"
     window._remember_pending_metadata(first, _recipe(data_file="a.mat"))
     window._remember_pending_metadata(second, _recipe(data_file="b.mat"))
-    assert window._pending_metadata[0].name == "b_metadata.json"
+    assert window._pending_metadata[0].name == "b_viewer_metadata.json"
 
 
 def test_the_held_recipe_applies_to_a_matching_dataset(_app, tmp_path):
     window = _window()
     ds = _dataset()
     ds.file.name = "run.mat"
-    window._remember_pending_metadata(tmp_path / "run_metadata.json",
+    window._remember_pending_metadata(tmp_path / "run_viewer_metadata.json",
                                       _recipe(data_file="run.mat"))
     taken = window._take_pending_metadata(ds)
     assert taken and taken[2] == "data_file"
@@ -193,7 +193,7 @@ def test_the_held_recipe_is_discarded_by_a_dataset_that_does_not_match(
     window = _window()
     ds = _dataset()
     ds.file.name = "unrelated.mat"
-    window._remember_pending_metadata(tmp_path / "run_metadata.json",
+    window._remember_pending_metadata(tmp_path / "run_viewer_metadata.json",
                                       _recipe(data_file="run.mat"))
     assert window._take_pending_metadata(ds) == ()
     assert window._pending_metadata == ()
@@ -206,7 +206,7 @@ def test_holding_a_recipe_opens_nothing(_app, tmp_path):
     """3.1: no Filter dialog, no ROI Manager -- there is no dataset yet."""
     window = _window()
     window._remember_pending_metadata(
-        tmp_path / "run_metadata.json",
+        tmp_path / "run_viewer_metadata.json",
         _recipe(filters=[{"attribute": "idx", "mode": "per loc",
                           "lo": 0.0, "hi": 1.0}],
                 rois=[{"id": "r1", "type": "rectangle"}]))
@@ -223,7 +223,7 @@ def test_applying_a_recipe_puts_its_rois_in_front_of_the_user(_app):
     window = _window()
     window._state.add_dataset(_dataset())
     ok = window.apply_metadata_to_dataset(
-        0, _recipe(rois=[{"id": "r1", "type": "rectangle"}]), "run_metadata.json")
+        0, _recipe(rois=[{"id": "r1", "type": "rectangle"}]), "run_viewer_metadata.json")
     assert ok
     assert window.restored_rois == [0]
     assert window.shown_filters == [0]
@@ -233,7 +233,7 @@ def test_an_empty_recipe_is_reported_rather_than_claimed_as_applied(_app):
     window = _window()
     window._state.add_dataset(_dataset())
     assert window.apply_metadata_to_dataset(0, {"minflux_viewer_metadata": 1},
-                                            "empty_metadata.json") is True
+                                            "empty_viewer_metadata.json") is True
     assert window.restored_rois == []
     messages = [entry.get("message", "") for entry in window._state.log_history]
     assert any("nothing to apply" in text for text in messages)
@@ -248,7 +248,7 @@ def test_applying_to_a_row_that_no_longer_exists_is_refused(_app):
 def _apply_dialog(meta, datasets):
     from minflux_viewer.ui.metadata_apply_dialog import MetadataApplyDialog
 
-    return MetadataApplyDialog("run_metadata.json", meta, datasets)
+    return MetadataApplyDialog("run_viewer_metadata.json", meta, datasets)
 
 
 def test_the_dropdown_preselects_the_match_and_still_offers_every_dataset(_app):

@@ -104,7 +104,7 @@ def test_metadata_only_when_file_backed(tmp_path):
     ds = _dataset()
     written = save_processed(ds, data_path=None, metadata_dir=tmp_path)
     assert len(written) == 1
-    assert written[0].name.endswith("_metadata.json")
+    assert written[0].name.endswith("_viewer_metadata.json")
     assert is_metadata_json_file(written[0])
 
 

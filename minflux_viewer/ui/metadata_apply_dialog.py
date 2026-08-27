@@ -1,6 +1,6 @@
 """Asking before a processing recipe is applied.
 
-A ``<stem>_metadata.json`` sidecar changes Z scaling, filters and ROIs, so it is
+A ``<stem>_viewer_metadata.json`` file changes Z scaling, filters and ROIs, so it is
 never restored silently — not even the one sitting next to the data file being
 opened. Two questions, two dialogs:
 

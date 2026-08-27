@@ -208,10 +208,10 @@ def test_read_metadata_sidecar_finds_and_parses_without_applying(tmp_path):
     data.write_bytes(b"")
     assert read_metadata_sidecar(data) is None       # nothing beside it
 
-    (tmp_path / "run_metadata.json").write_text(
+    (tmp_path / "run_viewer_metadata.json").write_text(
         json.dumps(_meta(did="DID-1", data_file="run.mat")), encoding="utf-8")
     found = read_metadata_sidecar(data)
-    assert found is not None and found[0].name == "run_metadata.json"
+    assert found is not None and found[0].name == "run_viewer_metadata.json"
     assert found[1]["msr_dataset_did"] == "DID-1"
 
 
@@ -221,21 +221,21 @@ def test_an_unreadable_sidecar_is_not_a_sidecar_not_an_error(tmp_path):
 
     data = tmp_path / "run.mat"
     data.write_bytes(b"")
-    (tmp_path / "run_metadata.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "run_viewer_metadata.json").write_text("{not json", encoding="utf-8")
     assert read_metadata_sidecar(data) is None
 
 
 def test_reading_a_sidecar_by_its_own_path_is_not_the_sibling_lookup(tmp_path):
     """⚠ The two readers answer different questions and are easy to confuse.
 
-    ``read_metadata_sidecar`` derives ``<stem>_metadata.json`` from a **data**
+    ``read_metadata_sidecar`` derives ``<stem>_viewer_metadata.json`` from a **data**
     file; handing it a path that already IS the sidecar makes it look for
-    ``d_metadata_metadata.json`` and quietly find nothing — which is exactly
+    ``d_metadata_viewer_metadata.json`` and quietly find nothing — which is exactly
     how dropping a recipe on a Dataset Manager row silently did nothing.
     """
     from minflux_viewer.core.loader import read_metadata_file, read_metadata_sidecar
 
-    side = tmp_path / "d_metadata.json"
+    side = tmp_path / "d_viewer_metadata.json"
     side.write_text(json.dumps(_meta(did="DID-1")), encoding="utf-8")
 
     assert read_metadata_file(side)["msr_dataset_did"] == "DID-1"
