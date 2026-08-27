@@ -101,17 +101,32 @@ class _AverageSignals(QObject):
 class _AverageTask(QRunnable):
     """Run an averaging closure off the UI thread, reporting progress + result."""
 
-    def __init__(self, fn) -> None:
+    def __init__(self, fn, *, description: str = "Particle average") -> None:
         super().__init__()
         self._fn = fn
+        self.description = str(description)
         self.signals = _AverageSignals()
 
     def run(self) -> None:  # noqa: N802 - Qt API
+        from ..core.task_registry import registry as task_registry
+
+        # No cancel=: the aligners run a fixed iteration budget with no stop
+        # checkpoint, so the monitor lists this as not stoppable.
+        handle = task_registry.register(self.description, "analysis")
+        handle.start()
+
+        def report(done, total) -> None:
+            handle.update(progress=int(done) / max(int(total), 1),
+                          detail=f"{int(done)}/{int(total)}")
+            self.signals.progress.emit(int(done), int(total))
+
         try:
-            result = self._fn(lambda d, t: self.signals.progress.emit(int(d), int(t)))
+            result = self._fn(report)
         except Exception as exc:               # never let a worker exception escape
+            handle.finish("failed", detail=str(exc))
             self.signals.failed.emit(str(exc))
             return
+        handle.finish("done")
         pts, desc = result[0], result[1]
         extra = result[2] if len(result) > 2 else None
         self.signals.done.emit(np.asarray(pts), desc, extra)

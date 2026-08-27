@@ -37,7 +37,8 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 #: The semantic roles a column can be mapped to. ``x`` and ``y`` are required.
-ROLES: tuple[str, ...] = ("x", "y", "z", "prec_xy", "prec_z", "id", "frame", "photons")
+ROLES: tuple[str, ...] = ("x", "y", "z", "prec_xy", "prec_z", "id", "frame",
+                          "photons", "itr", "vld")
 REQUIRED_ROLES: tuple[str, ...] = ("x", "y")
 COORD_ROLES: tuple[str, ...] = ("x", "y", "z")
 
@@ -65,7 +66,15 @@ _ROLE_SYNONYMS: dict[str, set[str]] = {
         "clusterid", "cluster", "molecule", "moleculeid",
     },
     "frame": {"frame", "framenumber", "t", "time", "tim", "slice", "frameid"},
-    "photons": {"photons", "phot", "intensity", "nphotons", "npho", "amplitude"},
+    # ``eco`` is the MINFLUX photon count (effective counts at the offset), so a
+    # canonical export's photon column is named that and nothing else.
+    "photons": {"photons", "phot", "intensity", "nphotons", "npho", "amplitude",
+                "eco"},
+    # MINFLUX-specific: one row of a raw export is one (localization x iteration)
+    # event, so a table can only be reduced to localizations by knowing which
+    # iteration a row is and whether the localization was valid.
+    "itr": {"itr", "iter", "iteration"},
+    "vld": {"vld", "valid", "isvalid"},
 }
 
 
@@ -510,10 +519,74 @@ def read_table_preview(
     )
 
 
+#: Column names of a raw canonical MINFLUX export that no generic localization
+#: table shares. ``itr`` + ``vld`` are the pair that makes the table
+#: *reassemblable*: without them a row cannot be placed on an iteration axis.
+MINFLUX_RAW_MARKERS: frozenset[str] = frozenset({"itr", "vld"})
+#: Accepted spellings of the raw coordinate columns (``loc`` split by
+#: ``core.save.flatten_mfx_array``, or by numeric component index).
+MINFLUX_RAW_XY: tuple[frozenset[str], ...] = (
+    frozenset({"loc_x", "loc_y"}),
+    frozenset({"loc_0", "loc_1"}),
+)
+#: Coordinate columns of a **processed snapshot** (nanometres, Z scaling and
+#: transform already baked in) written by File > Save Processed Data.
+MINFLUX_SNAPSHOT_XY: frozenset[str] = frozenset({"xnm", "ynm"})
+#: Other canonical MINFLUX attribute names; a snapshot is only claimed when at
+#: least one of these accompanies ``xnm``/``ynm``, so an arbitrary table that
+#: happens to spell its columns that way is not hijacked.
+MINFLUX_ATTRIBUTES: frozenset[str] = frozenset({
+    "tid", "tim", "itr", "vld", "efo", "cfr", "dcr", "dcr_0", "dcr_1",
+    "eco", "ecc", "efc", "fbg", "sta", "thi", "sqi", "gri", "fnl", "bot", "eot",
+    "lnc_x", "lnc_y", "lnc_z", "ext_x", "ext_y", "ext_z", "ftr", "znm",
+})
+
+
+def minflux_table_kind(headers) -> str | None:
+    """``"raw"``, ``"snapshot"`` or ``None`` for a table's header row.
+
+    This is what lets a MINFLUX table this application wrote skip the interactive
+    column-mapping dialog: the header names are unambiguous, and reducing them
+    through the generic mapping loses the iteration axis and the validity mask.
+
+    * ``"raw"`` — the flat canonical export (``loc_x``/``loc_y`` in metres plus
+      ``itr`` and ``vld``); reassembled into a structured ``mfx`` array.
+    * ``"snapshot"`` — the processed table (``xnm``/``ynm`` with the correction
+      baked in) plus at least one other canonical attribute.
+    """
+    names = {str(header).strip().lower() for header in headers}
+    if MINFLUX_RAW_MARKERS <= names and any(xy <= names for xy in MINFLUX_RAW_XY):
+        return "raw"
+    if MINFLUX_SNAPSHOT_XY <= names and (names & MINFLUX_ATTRIBUTES):
+        return "snapshot"
+    return None
+
+
 def is_canonical_minflux_table(table: SpreadsheetTable) -> bool:
     """Whether headers identify the canonical raw MINFLUX CSV representation."""
-    names = {str(header).strip().lower() for header in table.headers}
-    return {"loc_x", "loc_y", "loc_z", "itr", "vld"} <= names
+    return minflux_table_kind(table.headers) == "raw"
+
+
+def delimited_header_row(path) -> list[str]:
+    """The first row of a delimited text file, from an 8 KiB prefix.
+
+    Cheaper than :func:`read_table_preview` when only the column names are
+    wanted -- deciding whether a table is a MINFLUX one must not do the preview
+    sampling that would then be repeated for the table that is not.
+    Returns ``[]`` when the file cannot be read as delimited text.
+    """
+    target = Path(path)
+    try:
+        delimiter, sample = _delimited_dialect(target)
+    except (OSError, ValueError):
+        return []
+    lines = sample.splitlines()
+    if not lines:
+        return []
+    try:
+        return [str(cell).strip() for cell in next(csv.reader(lines[:1], delimiter=delimiter))]
+    except (csv.Error, StopIteration):
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +791,35 @@ def guess_mapping(table: SpreadsheetTable, *, use_values: bool = False,
     return mapping
 
 
+def minflux_row_mask(itr_values, vld_values) -> np.ndarray | None:
+    """Rows of a raw MINFLUX table that are the **last valid iteration**.
+
+    One row of a raw MINFLUX export is one (localization x iteration) event, so
+    a table mapped only to x/y/z/tid/tim pools every iteration of every
+    localization into one cloud and keeps the invalid probes too. Given the
+    ``itr`` and/or ``vld`` columns this reproduces the materialization the
+    native loaders use (``loader.mfx_row_mask(itr="last", vld_only=True)``):
+    valid rows at the **global maximum** iteration.
+
+    Either input may be ``None`` (that half is simply not constrained), and
+    ``None`` is returned when neither is given.
+    """
+    itr = None if itr_values is None else np.asarray(itr_values, dtype=float).ravel()
+    vld = None if vld_values is None else np.asarray(vld_values, dtype=float).ravel()
+    if itr is None and vld is None:
+        return None
+    n = int((itr if itr is not None else vld).size)
+    mask = np.ones(n, dtype=bool)
+    if vld is not None:
+        mask &= np.isfinite(vld) & (vld != 0.0)
+    if itr is not None:
+        finite = np.isfinite(itr)
+        candidates = itr[mask & finite]
+        if candidates.size:
+            mask &= finite & (itr == float(candidates.max()))
+    return mask
+
+
 def guess_units(table: SpreadsheetTable, mapping: dict[str, str | None],
                 *, stats_map: dict[str, ColumnStats] | None = None) -> dict[str, str]:
     """Per-coordinate length unit, from the column annotation, the detected tool,
@@ -893,6 +995,11 @@ def build_dataset_from_mapping(
     ``time_unit`` (``"s"`` / ``"ms"`` / ``None``) rescales the ``frame`` column to
     the canonical ``tim`` in **seconds** (``"ms"`` → ÷1000; ``"s"``/``None`` kept),
     so the derived ``dt`` / ``spd`` attributes come out in sensible units.
+
+    Mapping the MINFLUX ``itr`` / ``vld`` columns **selects rows** rather than
+    adding attributes: a raw MINFLUX table has one row per (localization x
+    iteration), so without them every iteration and every failed probe is
+    imported as its own localization. See :func:`minflux_row_mask`.
     """
     from .dataset import build_localization_dataset
 
@@ -911,19 +1018,55 @@ def build_dataset_from_mapping(
     if n == 0:
         raise ValueError("Mapped x/y columns are empty.")
 
-    x_nm = _to_nm(cx.values[:n], units.get("x"), pixel_size_nm)
-    y_nm = _to_nm(cy.values[:n], units.get("y"), pixel_size_nm)
+    # A raw MINFLUX table is one row per (localization x iteration): reduce it
+    # to the last valid iteration before anything else reads a column, so every
+    # array below is already row-aligned to the surviving localizations.
+    def column_rows(column: SpreadsheetColumn | None) -> np.ndarray | None:
+        """A column's first *n* values, NaN-padded if it is short.
+
+        A ragged table (fewer cells in a trailing column) must not turn into an
+        IndexError once rows are selected by position.
+        """
+        if column is None:
+            return None
+        values = np.asarray(column.values, dtype=float).ravel()[:n]
+        if values.size == n:
+            return values
+        return np.concatenate([values, np.full(n - values.size, np.nan)])
+
+    citr, cvld = col("itr"), col("vld")
+    rows = minflux_row_mask(column_rows(citr), column_rows(cvld))
+    if rows is not None:
+        if not rows.any():
+            raise ValueError(
+                "No rows survive the mapped itr / vld selection (no valid "
+                "localization at the last iteration)."
+            )
+        keep = np.flatnonzero(rows)
+    else:
+        keep = None
+
+    def take(values: np.ndarray) -> np.ndarray:
+        sliced = np.asarray(values)[:n]
+        if sliced.size < n:                       # ragged column, see column_rows
+            sliced = np.concatenate([
+                sliced.astype(float),
+                np.full(n - sliced.size, np.nan)])
+        return sliced if keep is None else sliced[keep]
+
+    x_nm = _to_nm(take(cx.values), units.get("x"), pixel_size_nm)
+    y_nm = _to_nm(take(cy.values), units.get("y"), pixel_size_nm)
     cz = col("z")
-    z_nm = (_to_nm(cz.values[:n], units.get("z"), pixel_size_nm)
-            if cz is not None else np.zeros(n))
+    z_nm = (_to_nm(take(cz.values), units.get("z"), pixel_size_nm)
+            if cz is not None else np.zeros(x_nm.size))
 
     # tid from the id column (real → MINFLUX-eligible) and time from frame.
     cid = col("id")
-    tid = np.asarray(cid.values[:n]) if cid is not None else None
+    tid = take(cid.values) if cid is not None else None
     cframe = col("frame")
     tim = None
     if cframe is not None:
-        tim = np.asarray(cframe.values[:n], dtype=float)
+        tim = np.asarray(take(cframe.values), dtype=float)
         if time_unit == "ms":                       # → canonical seconds
             tim = tim / 1000.0
 
@@ -934,30 +1077,43 @@ def build_dataset_from_mapping(
     loc_prec_xy = None
     if cpxy is not None:
         unit = bracket_unit(cpxy.name) or units.get("x")
-        loc_prec_xy = _to_nm(cpxy.values[:n], unit, pixel_size_nm)
+        loc_prec_xy = _to_nm(take(cpxy.values), unit, pixel_size_nm)
     cpz = col("prec_z")
     if cpz is not None:
         unit = bracket_unit(cpz.name) or units.get("z", units.get("x"))
-        extra["loc_precision_z"] = _to_nm(cpz.values[:n], unit, pixel_size_nm)
+        extra["loc_precision_z"] = _to_nm(take(cpz.values), unit, pixel_size_nm)
     cphot = col("photons")
     if cphot is not None:
-        extra["photons"] = np.asarray(cphot.values[:n], dtype=float)
+        # ``eco`` is the MINFLUX name for this; keep the canonical spelling so
+        # the CRLB / photon-weighted paths find it.
+        key = "eco" if cphot.key == "eco" else "photons"
+        extra[key] = np.asarray(take(cphot.values), dtype=float)
 
     # Carry through any remaining numeric columns under sanitised keys.
     mapped_names = {mapping.get(r) for r in ROLES}
     reserved = {"loc_x", "loc_y", "loc_z", "tid", "tim",
-                "loc_precision_xy", "loc_precision_z", "photons"}
-    taken = set(reserved)
+                "loc_precision_xy", "loc_precision_z", "photons", "eco"}
+    taken = set(reserved) | set(extra)
     for c in table.columns:
         if not c.numeric or c.name in mapped_names:
             continue
         key = _safe_attr_key(c.name, taken)
         taken.add(key)
-        extra[key] = np.asarray(c.values[:n], dtype=float)
+        extra[key] = np.asarray(take(c.values), dtype=float)
 
-    return build_localization_dataset(
+    ds = build_localization_dataset(
         name=name, folder=folder,
         x_nm=x_nm, y_nm=y_nm, z_nm=z_nm,
         attrs=extra, loc_precision_nm=loc_prec_xy,
         tid=tid, tim=tim, source_version="spreadsheet", prefs=prefs,
     )
+    if keep is not None:
+        # Provenance: the import dropped rows, and how many is the one number a
+        # user needs to sanity-check the mapping against the source table.
+        ds.metadata["spreadsheet_row_selection"] = {
+            "itr": mapping.get("itr"),
+            "vld": mapping.get("vld"),
+            "rows_read": int(n),
+            "rows_kept": int(keep.size),
+        }
+    return ds

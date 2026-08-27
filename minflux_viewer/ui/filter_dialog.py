@@ -416,17 +416,22 @@ class FilterDialog(QDialog):
         add_btn.clicked.connect(lambda _checked=False: self._add_row())
         bar.addWidget(add_btn)
 
-        apply_btn = QPushButton("Apply all")
-        apply_btn.setAutoDefault(False)
-        apply_btn.setDefault(False)
-        apply_btn.clicked.connect(self._apply_all)
-        bar.addWidget(apply_btn)
+        all_on_btn = QPushButton("All filters On")
+        all_on_btn.setAutoDefault(False)
+        all_on_btn.setDefault(False)
+        all_on_btn.setToolTip(
+            "Tick every filter row, then apply. The rows themselves are kept.")
+        all_on_btn.clicked.connect(lambda _checked=False: self._set_all_rows_enabled(True))
+        bar.addWidget(all_on_btn)
 
-        reset_btn = QPushButton("Reset all filters")
-        reset_btn.setAutoDefault(False)
-        reset_btn.setDefault(False)
-        reset_btn.clicked.connect(self._reset_all)
-        bar.addWidget(reset_btn)
+        all_off_btn = QPushButton("All filters Off")
+        all_off_btn.setAutoDefault(False)
+        all_off_btn.setDefault(False)
+        all_off_btn.setToolTip(
+            "Untick every filter row, then apply. The rows are kept, so any of "
+            "them can be switched back on individually.")
+        all_off_btn.clicked.connect(lambda _checked=False: self._set_all_rows_enabled(False))
+        bar.addWidget(all_off_btn)
 
         bar.addStretch()
 
@@ -877,14 +882,34 @@ class FilterDialog(QDialog):
             f"{n_pass:,} / {ds.prop.num_loc:,} localisations pass all enabled filters."
         )
 
-    def _reset_all(self) -> None:
-        ds = self._dataset()
-        if ds is None:
-            return
-        ds.state["filter_specs"] = []
-        ds.filter_mask = np.ones(ds.prop.num_loc, dtype=bool)
-        self._state.notify_filter_changed(self._dataset_idx)
-        self._info.setText("All filters reset.")
+    def _set_all_rows_enabled(self, enabled: bool) -> None:
+        """Tick or untick every filter row, then apply once.
+
+        This backs both **All filters On** and **All filters Off**, which act on
+        the rows -- the table's ``On`` boxes and the linked views always agree
+        afterwards. The button they replaced ("Reset all filters") cleared
+        ``filter_specs`` and the mask *directly* and left every ``On`` box
+        ticked, so the dialog claimed filters were active while the data was
+        ungated, and the next edit to any row silently brought them all back.
+
+        Off keeps the rows (unticked), so a filter can be switched back on
+        individually; ``_apply_all`` skips unticked rows, so the end state is
+        the same all-True mask and empty ``filter_specs`` the old reset wrote.
+
+        Each row's checkbox is wired to ``_apply_all``, so the boxes are set
+        with their signals blocked and the single apply is done here -- eight
+        rows would otherwise re-filter and redraw every linked view eight times.
+        """
+        for row in range(self._table.rowCount()):
+            chk = self._table.cellWidget(row, _COL_ENABLED)
+            if not isinstance(chk, QCheckBox) or chk.isChecked() == enabled:
+                continue
+            blocked = chk.blockSignals(True)
+            try:
+                chk.setChecked(enabled)
+            finally:
+                chk.blockSignals(blocked)
+        self._apply_all()
 
     def _display_filter(self, row: int) -> None:
         ds = self._dataset()

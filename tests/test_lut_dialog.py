@@ -388,6 +388,18 @@ def test_only_one_lut_dialog_is_visible_app_wide(qtbot):
     assert not hasattr(rwin, "_adopt_visible_lut_dialog")
 
     # And it is literally one object, not one-visible-of-several.
+    #
+    # ⚠ Collect first. A ``LutDialog`` is parentless by design, and the ones the
+    # earlier tests in this file constructed directly are cyclic garbage: they
+    # linger in ``topLevelWidgets()`` until the *cyclic* collector runs, which it
+    # does in bulk at an arbitrary point (traced: instances accumulating to six,
+    # then all released at once). Without this the assertion measures Python's
+    # GC schedule rather than the application's behaviour, and any change to how
+    # much this dialog allocates flips it.
+    import gc
+
+    gc.collect()
+    QApplication.processEvents()
     from minflux_viewer.ui.lut_dialog import LutDialog
     instances = [w for w in QApplication.topLevelWidgets() if isinstance(w, LutDialog)]
     assert len(instances) == 1

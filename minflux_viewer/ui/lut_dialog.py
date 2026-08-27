@@ -57,25 +57,25 @@ from PyQt6.QtWidgets import (
 )
 
 from ..colormaps import (
-    channel_colormap_names,
+    colormap_tree_entries,
     custom_colormap_stops,
     delete_custom_colormap,
     is_custom_colormap,
     make_colormap,
     store_custom_colormap,
 )
+from .colormap_combo import ColormapComboBox
 
 if TYPE_CHECKING:
     from ..core.app_state import AppState
 
 
 # ---------------------------------------------------------------------------
-# Colormap options are resolved dynamically so newly saved custom maps appear
-# without restarting the application.
+# Colormap options are resolved dynamically so a newly saved custom map -- or a
+# reordered list -- appears without restarting the application. (An
+# ``ALL_COLORMAPS`` module-level snapshot used to sit here, unread and frozen at
+# import, which would silently pin the order for anything that started using it.)
 # ---------------------------------------------------------------------------
-
-ALL_COLORMAPS: list[str] = channel_colormap_names()
-
 
 _SLIDER_RES = 1000
 _IMAGEJ_AUTO_THRESHOLD = 5000
@@ -251,9 +251,11 @@ class LutDialog(QDialog):
         # ── Colormap dropdown ────────────────────────────────────
         row = QHBoxLayout()
         row.addWidget(QLabel("Colormap:"))
-        self._cmap_combo = QComboBox()
-        self._cmap_combo.addItems(channel_colormap_names())
-        self._cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
+        # A tree-backed combo: folded, the solid colours sit under a
+        # 'Solid color' node, matching the render and scatter menus.
+        self._cmap_combo = ColormapComboBox()
+        self._cmap_combo.set_entries(colormap_tree_entries())
+        self._cmap_combo.colormap_changed.connect(self._on_cmap_changed)
         row.addWidget(self._cmap_combo, stretch=1)
         self._custom_cmap_button = QToolButton()
         self._custom_cmap_button.setText("Custom")
@@ -279,6 +281,11 @@ class LutDialog(QDialog):
         self._delete_custom_cmap_action.triggered.connect(
             self._delete_custom_colormap
         )
+        custom_menu.addSeparator()
+        self._reorder_cmaps_action = custom_menu.addAction(
+            "Reorder colormap list…"
+        )
+        self._reorder_cmaps_action.triggered.connect(self._reorder_colormaps)
         custom_menu.aboutToShow.connect(self._update_custom_colormap_actions)
         self._custom_cmap_button.setMenu(custom_menu)
         self._custom_cmap_button.setEnabled(self._state is not None)
@@ -711,7 +718,7 @@ class LutDialog(QDialog):
             self._cb_invert(self._invert)
         else:
             # Fallback — re-emit cmap with invert flag
-            self._cb_cmap(self._cmap_combo.currentText(), self._invert)
+            self._cb_cmap(self._cmap_combo.current_colormap(), self._invert)
 
     def _on_reset_clicked(self) -> None:
         if self._initial_state is None:
@@ -728,27 +735,56 @@ class LutDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _update_custom_colormap_actions(self) -> None:
-        editable = is_custom_colormap(self._cmap_combo.currentText())
+        editable = is_custom_colormap(self._cmap_combo.current_colormap())
         self._edit_custom_cmap_action.setEnabled(editable)
         self._delete_custom_cmap_action.setEnabled(editable)
 
     def _refresh_colormap_combo(self, select: str | None = None) -> None:
-        current = select or self._cmap_combo.currentText() or "hot"
-        names = channel_colormap_names()
+        current = select or self._cmap_combo.current_colormap() or "hot"
+        entries = colormap_tree_entries()
         # Hidden compatibility maps are not offered to new users, but an old
         # saved selection must remain visible while it is active.
-        if current not in names:
+        if not self._cmap_combo.contains(current) and current not in entries:
             try:
                 make_colormap(current)
             except (KeyError, ValueError):
                 current = "hot"
             else:
-                names.append(current)
-        self._cmap_combo.blockSignals(True)
-        self._cmap_combo.clear()
-        self._cmap_combo.addItems(names)
-        self._cmap_combo.setCurrentText(current)
-        self._cmap_combo.blockSignals(False)
+                entries.append(current)
+        self._cmap_combo.set_entries(entries)
+        self._cmap_combo.set_current_colormap(current, silent=True)
+
+    def _reorder_colormaps(self) -> None:
+        """Edit the shared order of the colormap list (Custom ▸ Reorder…)."""
+        if self._state is None:
+            return
+        from ..colormaps import (
+            channel_colormap_names,
+            configure_colormap_order,
+            solids_are_folded,
+        )
+        from .colormap_order_dialog import ColormapOrderDialog
+
+        dialog = ColormapOrderDialog(
+            self, entries=channel_colormap_names(),
+            fold_solids=solids_are_folded())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        plot = self._state.prefs.setdefault("plot", {})
+        plot["colormap_order"] = dialog.entries()
+        plot["colormap_fold_solids"] = dialog.fold_solids()
+        configure_colormap_order(plot["colormap_order"], plot["colormap_fold_solids"])
+        self._state.save_prefs()
+        self._refresh_colormap_combo(self._cmap_combo.current_colormap())
+        # Menus are rebuilt each time they open, so they follow on their own;
+        # a long-lived combo has to be told.
+        signal = getattr(self._state, "colormap_order_changed", None)
+        if signal is not None:
+            try:
+                signal.emit()
+            except Exception:                                   # noqa: BLE001
+                pass
+        self._state.log("Colormap list reordered.")
 
     def _save_custom_colormap_dialog(self, dialog) -> None:
         if self._state is None:
@@ -777,7 +813,7 @@ class LutDialog(QDialog):
             self._save_custom_colormap_dialog(dialog)
 
     def _edit_custom_colormap(self) -> None:
-        current = self._cmap_combo.currentText()
+        current = self._cmap_combo.current_colormap()
         if self._state is None or not is_custom_colormap(current):
             return
         from .custom_colormap_dialog import CustomColormapDialog
@@ -789,7 +825,7 @@ class LutDialog(QDialog):
             self._save_custom_colormap_dialog(dialog)
 
     def _delete_custom_colormap(self) -> None:
-        current = self._cmap_combo.currentText()
+        current = self._cmap_combo.current_colormap()
         if self._state is None or not is_custom_colormap(current):
             return
         answer = QMessageBox.question(
@@ -814,13 +850,11 @@ class LutDialog(QDialog):
         self._cb_cmap(name, self._invert)
 
     def _set_combo_silent(self, name: str) -> None:
-        if self._cmap_combo.findText(name, Qt.MatchFlag.MatchFixedString) < 0:
+        # ``findText`` is deliberately not used: it does not descend into the
+        # 'Solid color' node, so it reports every solid as missing.
+        if not self._cmap_combo.contains(name):
             self._refresh_colormap_combo(name)
-        self._cmap_combo.blockSignals(True)
-        i = self._cmap_combo.findText(name, Qt.MatchFlag.MatchFixedString)
-        if i >= 0:
-            self._cmap_combo.setCurrentIndex(i)
-        self._cmap_combo.blockSignals(False)
+        self._cmap_combo.set_current_colormap(name, silent=True)
 
     def _update_histogram(self) -> None:
         """Draw a simplified histogram on the preview plot."""

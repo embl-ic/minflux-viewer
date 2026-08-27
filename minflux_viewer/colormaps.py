@@ -35,6 +35,7 @@ BUILTIN_COLORMAP_NAMES: tuple[str, ...] = (
     "glasbey",
     "viridis",
     "inferno",
+    "parula",
     "gray",
 )
 
@@ -42,7 +43,6 @@ BUILTIN_COLORMAP_NAMES: tuple[str, ...] = (
 # change appearance or fail to open.  They are intentionally omitted from new
 # menus because their roles overlap the focused set above.
 LEGACY_COLORMAP_NAMES: tuple[str, ...] = (
-    "parula",
     "turbo",
     "magma",
     "plasma",
@@ -112,12 +112,29 @@ _CONTROL_POINTS: dict[str, tuple[np.ndarray, np.ndarray]] = {
         [252, 165, 10], [250, 198, 45], [242, 230, 97], [252, 255, 164],
     ]),
     "gray": _rgb_stops([[0, 0, 0], [255, 255, 255]]),
-    # Hidden compatibility maps -------------------------------------------------
+    # Sampled at 64 points from a 256-entry MATLAB parula table, which keeps
+    # every channel within 2/255 of it -- imperceptible, and a tenth of the
+    # source lines. (The ten-point approximation this replaced was off by up
+    # to 29/255, visibly flattening the blue-to-cyan half of the ramp.)
     "parula": _rgb_stops([
-        [53, 42, 135], [15, 92, 221], [18, 125, 216], [7, 156, 207],
-        [21, 177, 180], [89, 189, 140], [165, 190, 107], [225, 185, 82],
-        [252, 206, 46], [249, 251, 14],
+        [62, 38, 168], [64, 42, 180], [66, 46, 191], [67, 50, 202],
+        [69, 55, 213], [70, 59, 222], [71, 65, 229], [71, 70, 235],
+        [72, 76, 240], [72, 82, 244], [71, 87, 247], [70, 94, 251],
+        [69, 100, 253], [66, 106, 254], [62, 112, 255], [56, 118, 254],
+        [50, 124, 252], [47, 130, 250], [46, 135, 247], [45, 140, 243],
+        [43, 145, 239], [39, 151, 235], [37, 155, 232], [35, 160, 229],
+        [32, 165, 227], [29, 169, 224], [25, 173, 220], [18, 177, 214],
+        [8, 180, 209], [1, 183, 202], [1, 186, 196], [9, 189, 189],
+        [26, 192, 181], [37, 194, 174], [44, 196, 166], [50, 198, 159],
+        [56, 200, 150], [64, 202, 141], [75, 203, 132], [87, 204, 122],
+        [100, 205, 111], [114, 205, 100], [129, 204, 89], [143, 203, 78],
+        [157, 201, 67], [171, 199, 57], [184, 196, 49], [197, 194, 42],
+        [208, 191, 39], [219, 189, 40], [230, 187, 45], [239, 186, 53],
+        [247, 186, 61], [254, 190, 60], [254, 196, 56], [254, 202, 51],
+        [252, 208, 48], [249, 214, 45], [247, 221, 42], [245, 227, 39],
+        [245, 233, 36], [246, 239, 32], [247, 245, 27], [249, 251, 21],
     ]),
+    # Hidden compatibility maps -------------------------------------------------
     "turbo": _rgb_stops([
         [48, 18, 59], [65, 67, 167], [71, 113, 233], [62, 155, 254],
         [34, 197, 226], [26, 228, 182], [70, 248, 132], [136, 255, 78],
@@ -195,9 +212,14 @@ def validate_custom_colormap_name(name: str, *, replacing: str | None = None) ->
     if len(clean) > 64:
         raise ValueError("Custom colormap names may contain at most 64 characters.")
     key = clean.casefold()
+    # Only the maps actually OFFERED are reserved. A hidden compatibility map
+    # (``LEGACY_COLORMAP_NAMES``) is deliberately allowed: adopting its name is
+    # exactly how a user puts a preset that is not in the list back into it, and
+    # both ``canonical_colormap_name`` and ``_base_colormap`` already resolve a
+    # custom map before the built-in table, so the custom one wins consistently.
     reserved = {
         *(item.casefold() for item in solid_color_names()),
-        *_CANONICAL_BY_KEY.keys(),
+        *(item.casefold() for item in BUILTIN_COLORMAP_NAMES),
     }
     if key in reserved or key.startswith("solid:"):
         raise ValueError(f"'{clean}' is reserved by a built-in colormap.")
@@ -287,9 +309,113 @@ def delete_custom_colormap(prefs: dict, name: str) -> bool:
     return True
 
 
-def named_colormap_names(
-    *, include_custom: bool = True, include_legacy: bool = False
+#: Placeholder standing for "every solid colour, as one block" in a saved
+#: order. Folded, the solids are not individually orderable -- their sequence
+#: is the COLOR dialog's Solid Color List -- but the block's *position* is.
+SOLID_GROUP_TOKEN = "@solids"
+
+#: Runtime ordering state, configured from preferences by
+#: :func:`configure_colormap_order`. Empty means "the order these are declared
+#: in", which is what a fresh installation gets.
+_COLORMAP_ORDER: tuple[str, ...] = ()
+_FOLD_SOLIDS: bool = True
+
+
+def configure_colormap_order(order: object, fold_solids: object = True) -> None:
+    """Replace the runtime colormap order from a preference value."""
+    global _COLORMAP_ORDER, _FOLD_SOLIDS
+    if isinstance(order, Sequence) and not isinstance(order, (str, bytes)):
+        _COLORMAP_ORDER = tuple(
+            str(name) for name in order if isinstance(name, str) and str(name).strip()
+        )
+    else:
+        _COLORMAP_ORDER = ()
+    _FOLD_SOLIDS = bool(fold_solids)
+
+
+def colormap_order() -> tuple[str, ...]:
+    return _COLORMAP_ORDER
+
+
+def solids_are_folded() -> bool:
+    return _FOLD_SOLIDS
+
+
+def ordered_colormap_names(
+    colormaps: Sequence[str],
+    solids: Sequence[str],
+    order: Sequence[str] = (),
+    *,
+    fold_solids: bool = True,
 ) -> list[str]:
+    """Apply a saved order to the colormaps and solids currently available.
+
+    Pure, so the rule is testable without preferences or a window.
+
+    * a saved entry that no longer exists is dropped (a deleted custom map);
+    * anything available but unsaved is appended (a map added since, or a solid
+      the user added to the Solid Color List) -- **never silently hidden**;
+    * folded, the individual solids are replaced by :data:`SOLID_GROUP_TOKEN`,
+      which expands in place into the Solid Color List's own order, so the
+      block moves as one and the COLOR dialog stays authoritative for what is
+      inside it;
+    * unfolded, each solid is an ordinary orderable entry and any not yet
+      placed default to the end of the list.
+    """
+    colormaps = [str(name) for name in colormaps]
+    solids = [str(name) for name in solids]
+    # ⚠ Solids and colormaps are SEPARATE namespaces, matched case-sensitively,
+    # because the grayscale colormap ``gray`` and the solid colour ``Gray``
+    # differ only by case -- exactly the distinction ``canonical_colormap_name``
+    # relies on. Folding them into one case-insensitive key set made ``gray``
+    # read as the solid and disappear from the list entirely.
+    solid_set = set(solids)
+    exact_maps = {name: name for name in colormaps}
+    #: Case-insensitive fallback for colormaps only, so an order saved with a
+    #: different spelling still resolves. Never consulted for a solid.
+    folded_maps = {name.casefold(): name for name in colormaps}
+
+    result: list[str] = []
+    seen_solids: set[str] = set()
+    seen_maps: set[str] = set()
+    group_placed = False
+    for raw in order:
+        name = str(raw)
+        if name == SOLID_GROUP_TOKEN:
+            if fold_solids and not group_placed:
+                result.append(SOLID_GROUP_TOKEN)
+                group_placed = True
+            continue
+        if name in solid_set:                 # exact: 'Gray' yes, 'gray' no
+            if fold_solids:
+                continue                      # folded: only the group is placed
+            if name not in seen_solids:
+                result.append(name)
+                seen_solids.add(name)
+            continue
+        canonical = exact_maps.get(name) or folded_maps.get(name.casefold())
+        if canonical is not None and canonical not in seen_maps:
+            result.append(canonical)
+            seen_maps.add(canonical)
+
+    for name in colormaps:                    # added since the order was saved
+        if name not in seen_maps:
+            result.append(name)
+            seen_maps.add(name)
+    if fold_solids:
+        if not group_placed:
+            result.append(SOLID_GROUP_TOKEN)
+        index = result.index(SOLID_GROUP_TOKEN)
+        result[index:index + 1] = list(solids)
+    else:
+        for name in solids:                   # unplaced solids default to the end
+            if name not in seen_solids:
+                result.append(name)
+                seen_solids.add(name)
+    return result
+
+
+def _available_colormaps(*, include_custom: bool, include_legacy: bool) -> list[str]:
     names = list(BUILTIN_COLORMAP_NAMES)
     if include_legacy:
         names.extend(LEGACY_COLORMAP_NAMES)
@@ -298,8 +424,62 @@ def named_colormap_names(
     return names
 
 
+def named_colormap_names(
+    *, include_custom: bool = True, include_legacy: bool = False
+) -> list[str]:
+    """The colormaps offered, in the user's order (see the reorder dialog)."""
+    names = _available_colormaps(
+        include_custom=include_custom, include_legacy=include_legacy)
+    if not _COLORMAP_ORDER:
+        return names
+    # No solids here: this list is colormaps only, so folding cannot apply.
+    return ordered_colormap_names(names, (), _COLORMAP_ORDER, fold_solids=False)
+
+
+def colormap_tree_entries(*, include_custom: bool = True) -> list[str]:
+    """The offered list with the solid block left **folded**, for a tree widget.
+
+    :func:`channel_colormap_names` is the flat answer every ordinary combo and
+    menu needs, and folded it inlines the solids as a contiguous block --
+    the best a flat list can do. A widget that can show child rows wants the
+    block *unexpanded* instead, so :data:`SOLID_GROUP_TOKEN` is returned in its
+    place and the widget nests the solids under it.
+
+    Unfolded, this is exactly the flat list: there is no group to show.
+    """
+    solids = list(solid_color_names())
+    names = _available_colormaps(include_custom=include_custom, include_legacy=False)
+    if not _FOLD_SOLIDS:
+        return channel_colormap_names(include_custom=include_custom)
+    if not _COLORMAP_ORDER:
+        return [SOLID_GROUP_TOKEN, *names]
+    flat = ordered_colormap_names(names, solids, _COLORMAP_ORDER, fold_solids=True)
+    out: list[str] = []
+    placed = False
+    for name in flat:
+        if name in solids:
+            if not placed:
+                out.append(SOLID_GROUP_TOKEN)
+                placed = True
+            continue
+        out.append(name)
+    if not placed:
+        out.append(SOLID_GROUP_TOKEN)
+    return out
+
+
 def channel_colormap_names(*, include_custom: bool = True) -> list[str]:
-    return [*solid_color_names(), *named_colormap_names(include_custom=include_custom)]
+    """Solid colours and colormaps together, in the user's order.
+
+    A fresh installation has no saved order, and then the solids lead as they
+    always did.
+    """
+    solids = list(solid_color_names())
+    names = _available_colormaps(include_custom=include_custom, include_legacy=False)
+    if not _COLORMAP_ORDER:
+        return [*solids, *names]
+    return ordered_colormap_names(
+        names, solids, _COLORMAP_ORDER, fold_solids=_FOLD_SOLIDS)
 
 
 def canonical_colormap_name(name: str) -> str:

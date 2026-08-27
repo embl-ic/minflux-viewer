@@ -136,6 +136,61 @@ def _planned_paths(
     return paths
 
 
+#: Relative cost of writing one dataset in each format, used **only** to keep
+#: the export progress reading honest. Counting one tick per dataset made the
+#: bar sit at a single value for nearly the whole run: measured on a synthetic
+#: 26-column canonical array (200 k / 1 M rows, ratios stable across both),
+#: taking the NumPy write as 1 -- npy 1, msr 2.5, zarr 4-10, mat 20-24,
+#: csv 23-29, json 51-67. Every writer scales close to linearly with row count,
+#: so a weight times the row count predicts the share of the run each write is.
+FORMAT_WORK_WEIGHT: dict[str, float] = {
+    "npy": 1.0,
+    "msr": 2.5,
+    "zarr": 6.0,
+    "zarr_zip": 7.0,
+    "hdf5": 3.0,
+    "mat": 22.0,
+    "csv": 25.0,
+    "json": 55.0,
+}
+#: Weight for a format not measured above -- between mat and npy, so an
+#: unlisted writer neither dominates nor vanishes from the reading.
+DEFAULT_FORMAT_WORK_WEIGHT: float = 10.0
+#: Row count one weight unit is expressed per, so the numbers above are
+#: "cost of writing this many rows in npy" and stay comparable to an image.
+WORK_ROWS_UNIT: float = 1.0e6
+#: Preparing one dataset (``canonical_dataset``: normalization + building the
+#: dataset object) before any format is written -- twice the cost of the NumPy
+#: write it precedes, and measured linear in row count like the writers
+#: (10 k / 200 k / 1 M -> 0.024 / 0.081 / 0.387 s, once imports are warm).
+#: Charging it separately is what makes the FIRST tick arrive on time.
+DATASET_PREPARE_WEIGHT: float = 2.0
+#: Flat floor per dataset, so one with almost no rows still moves the bar.
+DATASET_WORK_OVERHEAD: float = 0.1
+#: One exported image series, in the same units (an OME-TIFF page write is
+#: comparable to a small array write).
+IMAGE_WORK_WEIGHT: float = 1.0
+
+
+def format_work_weight(fmt) -> float:
+    """Relative cost of writing one million rows in *fmt* (npy = 1)."""
+    key = str(fmt).lower().lstrip(".")
+    return FORMAT_WORK_WEIGHT.get(key, DEFAULT_FORMAT_WORK_WEIGHT)
+
+
+def dataset_prepare_weight(n_rows) -> float:
+    """Cost of the shared canonical dataset every format write is built on."""
+    scale = max(int(n_rows or 0), 0) / WORK_ROWS_UNIT
+    return DATASET_PREPARE_WEIGHT * scale + DATASET_WORK_OVERHEAD
+
+
+def dataset_work_weight(n_rows, formats) -> float:
+    """Predicted share of the export run that writing *n_rows* in *formats* is."""
+    scale = max(int(n_rows or 0), 0) / WORK_ROWS_UNIT
+    written = sum(format_work_weight(fmt) for fmt in formats) * scale
+    return written + dataset_prepare_weight(n_rows)
+
+
 def export_arrays(
     out_dir: str,
     base_name: str,
@@ -148,6 +203,8 @@ def export_arrays(
     mbm_meta: dict | None = None,
     source_zarr=None,
     overwrite: bool = False,
+    on_format=None,
+    on_prepared=None,
 ) -> List[str]:
     """Export parsed MSR components through the canonical File > Save writers.
 
@@ -158,6 +215,13 @@ def export_arrays(
 
     ``json_chunk_rows`` remains accepted for compatibility with the old fast
     writer; JSON now intentionally follows the File > Save implementation.
+
+    ``on_format(fmt)`` -- when given -- is called after each format finishes, so
+    a caller can advance a progress reading per written file rather than once
+    per dataset (a CSV or JSON write is tens of times a NumPy one, see
+    :data:`FORMAT_WORK_WEIGHT`). ``on_prepared()`` fires once the shared
+    canonical dataset exists, before the first format is written -- that step is
+    a flat ~0.37 s and would otherwise make the first tick arrive late.
     """
     del json_chunk_rows  # compatibility argument; the canonical writer owns JSON policy
 
@@ -215,8 +279,15 @@ def export_arrays(
             mbm_meta=mbm_meta,
             source_zarr=source_zarr,
         )
+    if on_prepared is not None:
+        on_prepared()
 
     written: list[str] = []
+
+    def _done(fmt: str) -> None:
+        if on_format is not None:
+            on_format(fmt)
+
     for fmt in normalized_formats:
         if fmt == "zarr":
             paths = save_processed(
@@ -228,6 +299,7 @@ def export_arrays(
             )
             written.extend(str(path) for path in paths)
             log(f"[zarr] wrote {paths[0]} (self-contained MINFLUX Viewer store)")
+            _done(fmt)
             continue
         if fmt == "msr":
             paths = save_processed(
@@ -239,6 +311,7 @@ def export_arrays(
             )
             written.extend(str(path) for path in paths)
             log(f"[msr] wrote {paths[0]}")
+            _done(fmt)
             continue
 
         if has_mfx:
@@ -261,5 +334,7 @@ def export_arrays(
             )
             written.append(str(mbm_path))
             log(f"[{fmt}] wrote {mbm_path}")
+
+        _done(fmt)
 
     return written

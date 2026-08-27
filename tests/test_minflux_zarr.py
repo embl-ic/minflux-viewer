@@ -1149,3 +1149,111 @@ def test_saved_filters_open_the_dialog_without_changing_them(tmp_path):
     host._roi_manager_shown.clear()
     MainWindow._show_saved_filters(host, plain, 0)
     assert not host._roi_manager_shown
+
+
+def test_chunks_use_a_zarr_v3_core_codec_and_arrays_round_trip_exactly():
+    """zstd over lz4 — 16% smaller on a real acquisition, and v3-portable.
+
+    ``blosc`` with ``cname: zstd`` is a core codec of the Zarr v3 spec, so the
+    choice does not cost forward compatibility with v3 / OME-NGFF.
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    import numpy as np
+
+    from minflux_viewer.core.minflux_zarr import (
+        CHUNK_CLEVEL, CHUNK_CODEC, load_minflux_zarr, write_minflux_zarr,
+    )
+
+    assert CHUNK_CODEC == "zstd"
+
+    dataset = _dataset(Path(tempfile.mkdtemp()))
+    target = Path(tempfile.mkdtemp()) / "codec.zarr"
+    write_minflux_zarr(dataset, target)
+
+    meta = json.loads((target / "mfx" / "loc_x" / ".zarray").read_text())
+    assert meta["compressor"]["id"] == "blosc"          # a v3 core codec
+    assert meta["compressor"]["cname"] == CHUNK_CODEC
+    assert meta["compressor"]["clevel"] == CHUNK_CLEVEL
+    # ⚠ No filter chain: a Delta filter destroys NaN-bearing coordinates.
+    assert meta["filters"] is None
+
+    back = load_minflux_zarr(target, prefs={})
+    for key in dataset.attr.keys():
+        before = np.asarray(dataset.attr[key])
+        after = np.asarray(back.attr[key])
+        if before.dtype.kind == "f":
+            assert np.array_equal(before, after, equal_nan=True), key
+        else:
+            assert np.array_equal(before, after), key
+
+
+def test_nan_coordinates_survive_the_write():
+    """94% of raw rows are invalid probes with NaN loc — they must come back."""
+    import tempfile
+    from pathlib import Path
+
+    import numpy as np
+
+    from minflux_viewer.core.minflux_zarr import load_minflux_zarr, write_minflux_zarr
+
+    dataset = _dataset(Path(tempfile.mkdtemp()))
+    # The writer serialises the RAW store, not the materialized view — that is
+    # where the invalid probes with NaN coordinates live.
+    raw = dataset.mfx_raw
+    coords = np.asarray(raw["loc_x"], dtype=float).copy()
+    coords[::3] = np.nan                                # scatter NaN through it
+    raw["loc_x"] = coords
+    target = Path(tempfile.mkdtemp()) / "nan.zarr"
+    write_minflux_zarr(dataset, target)
+
+    back = np.asarray(load_minflux_zarr(target, prefs={}).mfx_raw["loc_x"], dtype=float)
+    assert np.isnan(coords).sum() > 0
+    assert np.isnan(back).sum() == np.isnan(coords).sum()
+    assert np.array_equal(back, coords, equal_nan=True)
+
+
+def test_embedded_images_are_compressed_and_lossless():
+    """They were stored raw: 69.8 MB of label maps in one real project."""
+    tifffile = pytest.importorskip("tifffile")
+    import tempfile
+    from pathlib import Path
+
+    import numpy as np
+
+    from minflux_viewer.core.tiff_export import TIFF_COMPRESSION, write_ome_tiff
+
+    assert TIFF_COMPRESSION == "zlib"                   # built in; no imagecodecs
+
+    rng = np.random.default_rng(0)
+    # A label image: a handful of distinct values, hugely redundant.
+    data = rng.integers(0, 12, size=(8, 256, 256)).astype(np.int32)
+    folder = Path(tempfile.mkdtemp())
+    kwargs = dict(axes="ZYX", shape=data.shape, dtype=data.dtype)
+    packed, plain = folder / "packed.tif", folder / "plain.tif"
+    write_ome_tiff(packed, data, **kwargs)
+    write_ome_tiff(plain, data, compression=None, **kwargs)
+
+    assert packed.stat().st_size < plain.stat().st_size / 5
+    assert np.array_equal(tifffile.imread(packed), data)     # lossless
+    assert np.array_equal(tifffile.imread(plain), data)
+
+
+def test_the_package_survives_the_zip64_thresholds():
+    """Member count is the reachable one; a >4 GiB member is the other."""
+    import inspect
+    import zipfile
+
+    import minflux_viewer.core.minflux_zarr as mod
+
+    source = inspect.getsource(mod.pack_minflux_zarr)
+    assert "allowZip64=True" in source
+    # ⚠ ``ZipFile.write(path, arcname)`` knows the size and upgrades on its own;
+    # the streaming ``ZipFile.open(name, "w")`` form cannot and raises
+    # "File size too large, try using force_zip64". Do not switch to it.
+    assert "archive.write(" in source
+    assert ".open(" not in source
+    assert zipfile.ZIP_STORED == 0
+    assert "ZIP_STORED" in source

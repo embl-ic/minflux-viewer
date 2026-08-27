@@ -865,3 +865,53 @@ def test_rename_and_delete_preserve_existing_dataset_lut(qtbot):
     assert dataset.state["render_channel_lut"] == "solid:custom:#ff0000ff"
     assert dataset.state["overlay_lut"] == "solid:custom:#ff0000ff"
     configure_colors(default_prefs())
+
+
+# --------------------------------------------------- the HEX field (COLOR dialog)
+
+def test_hex_parser_accepts_the_forms_a_pasted_code_arrives_in():
+    """``QColor('FF8000')`` is invalid for want of a '#', which is how a hex
+    code copied from a web page or a figure legend normally arrives — so the
+    field silently reverted whatever was pasted into it."""
+    from minflux_viewer.colors import parse_hex_rgba
+
+    assert parse_hex_rgba("#FF8000") == (255, 128, 0, 255)
+    assert parse_hex_rgba("FF8000") == (255, 128, 0, 255)      # no '#'
+    assert parse_hex_rgba("  ff8000 ") == (255, 128, 0, 255)   # padded, lower case
+    assert parse_hex_rgba("0xFF8000") == (255, 128, 0, 255)
+    assert parse_hex_rgba("f80") == (255, 136, 0, 255)         # shorthand
+    # Eight digits are RRGGBBAA (the CSS convention an external source uses),
+    # deliberately NOT Qt's #AARRGGBB, which would change the colour.
+    assert parse_hex_rgba("#FF800080") == (255, 128, 0, 128)
+    assert parse_hex_rgba("FF8000FF") == (255, 128, 0, 255)
+    assert parse_hex_rgba("#f80", default_alpha=64) == (255, 136, 0, 64)
+
+    for text in ("", "#GG0000", "12345", "not a colour", None, 7):
+        assert parse_hex_rgba(text) is None
+
+
+def test_typing_a_hex_code_recolours_the_preview_at_once(qtbot):
+    from PyQt6.QtGui import QColor
+
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.global_color_dialog import GlobalColorDialog
+
+    dialog = GlobalColorDialog(AppState())
+    qtbot.addWidget(dialog)
+    dialog._picker.setCurrentColor(QColor(10, 20, 30))
+
+    for text, expected in (("FF8000", (255, 128, 0)),
+                           ("#00ff00", (0, 255, 0)),
+                           ("0x0000FF", (0, 0, 255))):
+        dialog._html.setText(text)
+        dialog._html_field_edited(text)                 # what typing/pasting emits
+        colour = dialog._picker.currentColor()
+        assert (colour.red(), colour.green(), colour.blue()) == expected
+        assert (dialog._red.value(), dialog._green.value(),
+                dialog._blue.value()) == expected
+
+    # Incomplete or invalid input is left alone rather than fought mid-typing.
+    dialog._html.setText("#0")
+    dialog._html_field_edited("#0")
+    colour = dialog._picker.currentColor()
+    assert (colour.red(), colour.green(), colour.blue()) == (0, 0, 255)

@@ -35,7 +35,12 @@ def test_matches_the_router_tables():
     from minflux_viewer.ui.main_window import _SUPPORTED_EXTS, MainWindow
 
     assert set(F.supported_extensions()) == set(_SUPPORTED_EXTS)
-    assert set(F.drop_on_dataset_extensions()) == set(MainWindow.DROP_ON_DATASET_EXTS)
+    # A Dataset-Manager row accepts two different verbs: the apply-to-this-
+    # dataset kinds, and every openable data format (which the row cannot
+    # receive, so it is opened as a new dataset instead of being refused).
+    assert set(MainWindow.DROP_ON_DATASET_EXTS) == (
+        set(F.drop_on_dataset_extensions()) | set(F.supported_extensions()))
+    assert set(F.drop_on_dataset_extensions()) <= set(MainWindow.DROP_ON_DATASET_EXTS)
 
 
 def test_msr_export_is_available_but_not_ticked():
@@ -123,11 +128,56 @@ def test_plain_localization_json_is_still_data(tmp_path):
     assert spec.key == "json"
 
 
-def test_json_detection_order_is_markers_before_data():
+def test_json_detection_order_is_the_strongest_claim_first():
+    """Self-identifying first, shape guesses next, plain data last.
+
+    ⚠ The metadata sidecar is the only ``.json`` kind that names itself, with a
+    dedicated top-level marker. The other two are guesses about shape — and a
+    sidecar legitimately *contains* both a ``"rois"`` list and filter specs, so
+    on shape alone it looks like either of them. Probing the ROI test first made
+    every sidecar route to the ROI Manager.
+    """
     order = {spec.key: spec.detect_order
              for spec in F.FORMATS if ".json" in spec.extensions}
-    assert order["roi_set"] < order["filter_preset"] < order["metadata_sidecar"]
+    assert order["metadata_sidecar"] < order["roi_set"] < order["filter_preset"]
     assert order["json"] == max(order.values()), "plain data must be probed last"
+
+
+def test_a_metadata_sidecar_is_not_mistaken_for_the_roi_set_it_contains(tmp_path):
+    """The reported bug: saving in any format then re-opening the sidecar."""
+    import json
+
+    from minflux_viewer.core.roi import is_roi_json_file
+
+    sidecar = tmp_path / "run_metadata.json"
+    sidecar.write_text(json.dumps({
+        "minflux_viewer_metadata": 1,
+        "content": "raw",
+        "name": "run.msr | channel",
+        "filters": [{"attribute": "efo", "lo": 1.0, "hi": 2.0}],
+        # A sidecar carries the dataset's whole ROI set — the shape a ROI-set
+        # file has, which is why the shape test alone is not enough.
+        "rois": [{"id": "a", "name": "rectangle-1", "type": "rectangle",
+                  "geometry": {"bounds": [0, 0, 1, 1]}, "dataset_id": "d0"}],
+    }), encoding="utf-8")
+
+    assert is_roi_json_file(sidecar) is False
+    spec = resolve_open(sidecar)
+    assert spec.key == "metadata_sidecar"
+    assert spec.action is F.OpenAction.METADATA_RECIPE
+
+
+def test_a_real_roi_set_still_routes_to_the_manager(tmp_path):
+    import json
+
+    from minflux_viewer.core.roi import is_roi_json_file
+
+    roi_set = tmp_path / "regions.json"
+    roi_set.write_text(json.dumps({"version": 1, "rois": [
+        {"id": "a", "name": "rectangle-1", "type": "rectangle",
+         "geometry": {"bounds": [0, 0, 1, 1]}}]}), encoding="utf-8")
+    assert is_roi_json_file(roi_set) is True
+    assert resolve_open(roi_set).action is F.OpenAction.ROI_MANAGER
 
 
 def test_an_unreadable_json_falls_through_rather_than_aborting(tmp_path):

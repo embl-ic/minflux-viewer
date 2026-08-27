@@ -35,6 +35,7 @@ from ..colors import (
     DEFAULT_COLOR_PREFS,
     normalize_color_preferences,
     normalize_rgba,
+    parse_hex_rgba,
 )
 from .color_button import ColorSwatchButton, qcolor_from_rgba, rgba_from_qcolor
 
@@ -622,6 +623,9 @@ class GlobalColorDialog(QDialog):
             widget.valueChanged.connect(self._hsv_fields_changed)
         for widget in (self._red, self._green, self._blue, self._alpha):
             widget.valueChanged.connect(self._rgba_fields_changed)
+        # textEdited as well as editingFinished: a pasted hex code must show up
+        # in the preview at once, not only when the field happens to lose focus.
+        self._html.textEdited.connect(self._html_field_edited)
         self._html.editingFinished.connect(self._html_field_changed)
         self._picker.currentColorChanged.connect(self._sync_picker_fields)
         self._sync_picker_fields(self._picker.currentColor())
@@ -664,14 +668,30 @@ class GlobalColorDialog(QDialog):
             self._alpha.value()
         ))
 
+    def _html_field_edited(self, text: str) -> None:
+        """Follow the field live, so a pasted code recolours the preview at once.
+
+        Incomplete input is simply ignored -- typing the second digit of a
+        six-digit code must not fight the user by rewriting the field.
+        """
+        if self._field_guard:
+            return
+        rgba = parse_hex_rgba(text, default_alpha=self._alpha.value())
+        if rgba is None:
+            return
+        red, green, blue, alpha = rgba
+        self._picker.setCurrentColor(QColor(red, green, blue, alpha))
+
     def _html_field_changed(self) -> None:
         if self._field_guard:
             return
-        color = QColor(self._html.text().strip())
-        if color.isValid():
-            color.setAlpha(self._alpha.value())
-            self._picker.setCurrentColor(color)
+        rgba = parse_hex_rgba(self._html.text(), default_alpha=self._alpha.value())
+        if rgba is not None:
+            red, green, blue, alpha = rgba
+            self._picker.setCurrentColor(QColor(red, green, blue, alpha))
         else:
+            # Not a colour at all: put the current one back rather than leaving
+            # the field disagreeing with everything beside it.
             self._sync_picker_fields(self._picker.currentColor())
 
     @staticmethod

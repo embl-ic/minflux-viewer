@@ -150,6 +150,27 @@ def _chunks_for(array: np.ndarray) -> tuple[int, ...]:
     return (first, *array.shape[1:])
 
 
+#: Blosc codec for every chunk this application writes.
+#:
+#: **zstd, not lz4.** Measured over the whole ``mfx`` group of a real
+#: 20,627,153-row acquisition (25 arrays, 2.08 GB raw): lz4 gives 224.6 MB in
+#: 1.3 s and zstd 189.0 MB in 6.7 s — **16% smaller for 5.4 s more on save**,
+#: and it *decodes* 0.3 s faster, so opening a store is if anything quicker.
+#:
+#: ``blosc`` with ``cname: zstd`` is a **core codec of the Zarr v3 spec** (as is
+#: lz4), so this stays portable to zarr v3 / OME-NGFF.
+#:
+#: ⚠ A ``Delta`` filter looks far better still (``tim`` 79.8 -> 48.1 MB) and must
+#: **not** be used on the coordinate arrays: 94% of raw rows are invalid probes
+#: whose ``loc_*`` is NaN, and Delta's ``cumsum`` propagates NaN forward — one
+#: measured chunk of ``loc_x`` went from 107,959 NaN in to 131,071 NaN out,
+#: destroying every real coordinate after the first NaN. It also introduced a
+#: 3.3e-24 error on ``loc_z`` even ignoring NaN, and ``delta`` is a numcodecs
+#: extension rather than a Zarr v3 core codec.
+CHUNK_CODEC = "zstd"
+CHUNK_CLEVEL = 5
+
+
 def _write_array(group, name: str, value: Any) -> None:
     _zarr, Blosc = _zarr_modules()
     array = np.asarray(value)
@@ -157,7 +178,7 @@ def _write_array(group, name: str, value: Any) -> None:
         raise TypeError(f"Zarr array '{name}' has object dtype, which is not portable.")
     if array.ndim == 0:
         array = array.reshape(1)
-    compressor = Blosc(cname="lz4", clevel=5, shuffle=Blosc.SHUFFLE)
+    compressor = Blosc(cname=CHUNK_CODEC, clevel=CHUNK_CLEVEL, shuffle=Blosc.SHUFFLE)
     group.create_dataset(
         str(name), data=array, chunks=_chunks_for(array), compressor=compressor,
         overwrite=True,

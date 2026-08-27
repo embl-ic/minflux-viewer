@@ -86,9 +86,11 @@ class CustomColormapDialog(QDialog):
         root.addLayout(form)
 
         help_label = QLabel(
-            "Right-click on the gradient for preset maps. Click a stop to set "
-            "color, drag to change position, right-click to remove. Double-click "
-            "in empty stop area to add a new color stop."
+            "Right-click on the gradient for preset maps — the chosen preset's "
+            "name is offered above while the Name field is still empty, so a "
+            "preset this application does not list can be adopted as-is. Click "
+            "a stop to set color, drag to change position, right-click to "
+            "remove. Double-click in empty stop area to add a new color stop."
         )
         help_label.setWordWrap(True)
         root.addWidget(help_label)
@@ -150,9 +152,40 @@ class CustomColormapDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
+    @staticmethod
+    def _preset_display_name(raw: str) -> str:
+        """A PyQtGraph menu entry's name, as a name a user would type.
+
+        The menu hands out ``preset-gradient:thermal`` and collection-qualified
+        names such as ``CET-L01``; the last path/colon segment is the part that
+        reads as a colormap name.
+        """
+        text = str(raw or "").strip()
+        for separator in (":", "/"):
+            if separator in text:
+                text = text.rsplit(separator, 1)[1]
+        return text.strip()
+
+    def _suggest_name(self, raw: str) -> None:
+        """Offer the chosen preset's name, so it can be adopted with one click.
+
+        Only into an EMPTY field: silently renaming a map the user is editing
+        (or has already named) would be worse than making them retype it. The
+        field stays editable, and ``validate_custom_colormap_name`` allows a
+        preset name that this application does not itself offer -- adopting one
+        is the whole point.
+        """
+        if self._name_edit.text().strip():
+            return
+        suggestion = self._preset_display_name(raw)
+        if suggestion:
+            self._name_edit.setText(suggestion)
+            self._name_edit.selectAll()
+
     def _on_gradient_colormap_selected(self, cmap: pg.ColorMap) -> None:
         """Load a PyQtGraph menu colormap as a manageable editable gradient."""
         name = str(getattr(cmap, "name", ""))
+        self._suggest_name(name)
         if name.startswith("preset-gradient:"):
             self._gradient.item.loadPreset(name.split(":", 1)[1])
         else:

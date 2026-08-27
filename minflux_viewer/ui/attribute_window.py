@@ -63,6 +63,7 @@ from .attribute_cpu import (
 from .attribute_help import apply_attribute_menu_tooltips, apply_attribute_tooltips
 from .gpu_capabilities import point_limit_from_memory
 from .gl_3d_reference import three_plane_grid_positions, tick_values
+from .zoom_guide import zoom_guide_points
 from .plot_format import plot_widget
 
 _VIEW_DIMENSIONS = {
@@ -420,6 +421,7 @@ class AttributeWindow(QWidget):
             self._plot,
             self._plot.getPlotItem(),
             coordinate_space="plot",
+            source_view="attribute",
         )
 
         self._stack = QStackedWidget()
@@ -1818,30 +1820,21 @@ class AttributeWindow(QWidget):
             self._clear_zoom_preview()
 
     def _update_zoom_preview(self, start, current) -> None:
+        """Draw the rubber band: an 'H' for horizontal, an 'I' for vertical, a
+        rectangle for unconstrained — riding at the **cursor** on its free axis.
+
+        This used to pin the guide to the middle of the view, so a vertical
+        zoom drawn near an edge appeared far from the mouse. The geometry is
+        shared with both histograms (``ui/zoom_guide.py``); that is where the
+        three copies had drifted apart.
+        """
         if self._zoom_preview is None:
             return
-        x0, x1 = float(start.x()), float(current.x())
-        y0, y1 = float(start.y()), float(current.y())
-        (vx0, vx1), (vy0, vy1) = self._view_box.viewRange()
-        if self._zoom_mode == "horizontal":
-            ymid = (vy0 + vy1) / 2.0
-            cap = (vy1 - vy0) * 0.08
-            self._zoom_preview.setData(
-                [x0, x1, np.nan, x0, x0, np.nan, x1, x1],
-                [ymid, ymid, np.nan, ymid - cap, ymid + cap, np.nan, ymid - cap, ymid + cap],
-            )
-        elif self._zoom_mode == "vertical":
-            xmid = (vx0 + vx1) / 2.0
-            cap = (vx1 - vx0) * 0.08
-            self._zoom_preview.setData(
-                [xmid, xmid, np.nan, xmid - cap, xmid + cap, np.nan, xmid - cap, xmid + cap],
-                [y0, y1, np.nan, y0, y0, np.nan, y1, y1],
-            )
-        else:
-            self._zoom_preview.setData(
-                [x0, x1, x1, x0, x0],
-                [y0, y0, y1, y1, y0],
-            )
+        self._zoom_preview.setData(*zoom_guide_points(
+            self._zoom_mode,
+            (start.x(), start.y()), (current.x(), current.y()),
+            self._view_box.viewRange(),
+        ))
 
     def _apply_zoom_drag(self, start, current) -> None:
         x0, x1 = sorted((float(start.x()), float(current.x())))

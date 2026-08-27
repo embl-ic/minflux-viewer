@@ -1802,24 +1802,13 @@ class HlyBResultWindow(QDialog):
     def _update_distance_zoom_preview(self, start, current) -> None:
         if self._distance_zoom_preview is None:
             return
-        x0, x1 = float(start.x()), float(current.x())
-        y0, y1 = float(start.y()), float(current.y())
-        (vx0, vx1), (vy0, vy1) = self._distance_view_box.viewRange()
-        if self._distance_zoom_mode == "horizontal":
-            cap = (vy1 - vy0) * 0.08
-            self._distance_zoom_preview.setData(
-                [x0, x1, np.nan, x0, x0, np.nan, x1, x1],
-                [y1, y1, np.nan, y1 - cap, y1 + cap, np.nan, y1 - cap, y1 + cap],
-            )
-        elif self._distance_zoom_mode == "vertical":
-            cap = (vx1 - vx0) * 0.08
-            self._distance_zoom_preview.setData(
-                [x1, x1, np.nan, x1 - cap, x1 + cap, np.nan, x1 - cap, x1 + cap],
-                [y0, y1, np.nan, y0, y0, np.nan, y1, y1],
-            )
-        else:
-            self._distance_zoom_preview.setData(
-                [x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0])
+        from .zoom_guide import zoom_guide_points
+
+        self._distance_zoom_preview.setData(*zoom_guide_points(
+            self._distance_zoom_mode,
+            (start.x(), start.y()), (current.x(), current.y()),
+            self._distance_view_box.viewRange(),
+        ))
 
     def _apply_distance_zoom_drag(self, start, current) -> None:
         x0, x1 = sorted((float(start.x()), float(current.x())))

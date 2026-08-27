@@ -722,14 +722,17 @@ class _AnisotropyDialog(QDialog):
         btn_row.addWidget(self._apply_status)
         btn_row.addStretch()
         btn_row.addWidget(QLabel("Z scaling factor:"))
-        self._z_scaling_factor_spin = QDoubleSpinBox()
-        self._z_scaling_factor_spin.setRange(0.0, 100.0)
-        self._z_scaling_factor_spin.setDecimals(4)
-        self._z_scaling_factor_spin.setSingleStep(0.01)
+        from ..ui.z_scaling_widgets import (
+            Z_SCALING_ARROW_STEP, Z_SCALING_WHEEL_STEP, ZScalingFactorSpinBox,
+        )
+
+        self._z_scaling_factor_spin = ZScalingFactorSpinBox(minimum=0.0, maximum=100.0)
         self._z_scaling_factor_spin.setValue(z_scaling_factor if np.isfinite(z_scaling_factor) else 1.0)
         self._z_scaling_factor_spin.setToolTip(
             "Dimensionless multiplier applied to this dataset's raw z coordinates "
-            "(defaults to the trace-anisotropy estimate; editable)."
+            "(defaults to the trace-anisotropy estimate; editable). "
+            f"Arrows step by {Z_SCALING_ARROW_STEP:g}, the mouse wheel by "
+            f"{Z_SCALING_WHEEL_STEP:g}."
         )
         btn_row.addWidget(self._z_scaling_factor_spin)
         self._apply_btn = QPushButton("Apply to data")
@@ -749,6 +752,8 @@ class _AnisotropyDialog(QDialog):
         make_labels_selectable(self)   # let users copy the factor and size values
 
     def _apply_to_data(self) -> None:
+        from ..ui.z_scaling_widgets import format_z_scaling_factor
+
         if self._ds is None:
             return
         value = float(self._z_scaling_factor_spin.value())
@@ -766,12 +771,14 @@ class _AnisotropyDialog(QDialog):
                 self._state.notify_calibration_changed(idx)
             try:
                 self._state.log(
-                    f"Applied Z scaling factor = {value:.4g} to "
+                    f"Applied Z scaling factor = "
+                    f"{format_z_scaling_factor(value)} to "
                     f"'{self._ds.name}' (trace-anisotropy dialog)."
                 )
             except Exception:
                 pass
-        self._apply_status.setText(f"Applied Z scaling factor = {value:.4g}")
+        self._apply_status.setText(
+            f"Applied Z scaling factor = {format_z_scaling_factor(value)}")
 
 
 def _anisotropy_hist_plot(axis: str, fit: SizeFitResult, color: str, mode: int):

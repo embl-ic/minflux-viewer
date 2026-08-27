@@ -189,12 +189,18 @@ def store_roi_mask(
     context: dict[str, Any] | None = None,
 ) -> str:
     """Cache an ROI mask on a dataset and mirror it in derived attributes."""
+    from .roi_scope import scope_context
+
     arr = np.asarray(mask, dtype=bool).ravel()
     key = roi_mask_key(record)
     record.mask_key = key
     record.selected_count = int(np.count_nonzero(arr))
     record.selection_dirty = False
-    record.context = dict(context or {})
+    # Merge, not replace: the view's context describes this selection, but the
+    # record's own scope (which dataset owns it, which extra datasets the user
+    # shared it with) must survive a recompute -- otherwise recomputing against
+    # a shared dataset would silently retarget the ROI to it.
+    record.context = scope_context(record.context, context)
 
     dataset.derived[key] = arr
     dataset.state.setdefault(ROI_MASKS_STATE_KEY, {})[record.id] = {
