@@ -81,10 +81,6 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "Export the active dataset as Picasso-compatible HDF5 + YAML.", "file"),
     "actionSaveAsOmeTiff": CommandMeta(C + "tiff_export.py", ("save as", "ome", "tiff", "render", "imagej"),
                               "Export the active render as an OME-TIFF stack.", "file"),
-    "actionSaveAsOmeZarr": CommandMeta(C + "ome_zarr.py",
-                              ("save as", "ome", "ngff", "zarr", "v3", "provenance", "roi"),
-                              "Export an OME-NGFF 0.5 density pyramid and versioned "
-                              "MINFLUX localization package as Zarr v3.", "file"),
     "actionClose": CommandMeta(U + "main_window.py", ("close", "remove", "dataset"),
                                "Close the active dataset and its windows.", "file"),
     "actionCloseAll": CommandMeta(U + "main_window.py", ("close", "remove", "all", "datasets"),

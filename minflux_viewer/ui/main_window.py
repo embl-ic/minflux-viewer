@@ -230,62 +230,6 @@ class _ZarrIoTask(QRunnable):
             self.signals.done.emit(result)
 
 
-class _OmeZarrCancelled(RuntimeError):
-    pass
-
-
-class _OmeZarrSignals(QObject):
-    progress = pyqtSignal(float, str)
-    done = pyqtSignal(object)
-    failed = pyqtSignal(str)
-    cancelled = pyqtSignal()
-
-
-class _OmeZarrTask(QRunnable):
-    """Run an OME-Zarr export off the UI thread with cancellable progress."""
-
-    def __init__(self, fn) -> None:
-        super().__init__()
-        self._fn = fn
-        self._cancelled = False
-        self.signals = _OmeZarrSignals()
-        self.last_percent = -1
-        self.last_stage = ""
-
-    def cancel(self) -> None:
-        self._cancelled = True
-
-    def run(self) -> None:  # noqa: N802 - Qt API
-        from ..core.task_registry import registry as task_registry
-
-        handle = task_registry.register(
-            "OME-Zarr export", "export", cancel=self.cancel)
-        handle.start()
-
-        def report(fraction: float, stage: str) -> None:
-            if self._cancelled:
-                raise _OmeZarrCancelled()
-            handle.update(progress=float(fraction), detail=str(stage))
-            self.signals.progress.emit(float(fraction), str(stage))
-
-        try:
-            result = self._fn(report)
-        except _OmeZarrCancelled:
-            handle.finish("cancelled")
-            self.signals.cancelled.emit()
-        except Exception as exc:
-            if self._cancelled:
-                handle.finish("cancelled")
-                self.signals.cancelled.emit()
-            else:
-                handle.finish("failed", detail=str(exc))
-                self.signals.failed.emit(str(exc))
-        else:
-            handle.finish("cancelled" if self._cancelled else "done")
-            if not self._cancelled:
-                self.signals.done.emit(result)
-
-
 def _human_bytes(value: int) -> str:
     amount = float(max(0, int(value)))
     for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
@@ -512,7 +456,6 @@ class MainWindow(QMainWindow):
         # it never slows startup; silent unless a newer release exists.
         self._is_shutting_down = False
         self._update_tasks: set = set()
-        self._ome_zarr_tasks: set = set()
         #: At most ONE processing recipe held for a dataset not yet
         #: loaded, as ``(path, payload)``. A second one replaces it, and
         #: it is dropped as soon as a dataset is added that it does not
@@ -590,8 +533,6 @@ class MainWindow(QMainWindow):
         self.actionSaveAsHdf5.triggered.connect(self._save_as_picasso_hdf5)
         self.actionSaveAsOmeTiff = QAction("OME-TIFF...", self)
         self.actionSaveAsOmeTiff.triggered.connect(self._save_as_ome_tiff)
-        self.actionSaveAsOmeZarr = QAction("OME-NGFF 0.5 / Zarr v3...", self)
-        self.actionSaveAsOmeZarr.triggered.connect(self._save_as_ome_zarr)
         u.actionQuit.triggered.connect(self.close)
         self.actionClose = QAction("Close Dataset", self)
         self.actionClose.setShortcut(QKeySequence("Ctrl+W"))
@@ -999,7 +940,6 @@ class MainWindow(QMainWindow):
         self.actionSaveAsZarrZip.setText("Zarr (.zarr.zip v2) single file")
         self.actionSaveAsHdf5.setText("HDF5...")
         self.actionSaveAsOmeTiff.setText("OME-TIFF...")
-        self.actionSaveAsOmeZarr.setText("OME-NGFF 0.5 / Zarr v3...")
         u.menuBatchProcessing.setTitle("Batch Processing")
         u.menuAnalysis.setTitle("Analyze")
         u.menuLocPrecision.setTitle("Localization Precision")
@@ -1023,7 +963,6 @@ class MainWindow(QMainWindow):
         self.menuSaveAs.addAction(self.actionSaveAsZarr)
         self.menuSaveAs.addAction(self.actionSaveAsZarrZip)
         self.menuSaveAs.addAction(self.actionSaveAsOmeTiff)
-        self.menuSaveAs.addAction(self.actionSaveAsOmeZarr)
         u.menuFile.addAction(self.menuSaveAs.menuAction())
         u.menuFile.addSeparator()
         u.menuFile.addAction(u.actionQuit)
@@ -7091,257 +7030,6 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "OME-TIFF export failed", str(exc))
 
-    def _save_as_ome_zarr(self) -> None:
-        ds = self._active_dataset_for_save()
-        if ds is None:
-            return
-        idx = self._state.active_idx
-        from ..core.ome_zarr import (
-            estimate_ome_zarr_export,
-            normalize_ome_zarr_path,
-            write_ome_zarr,
-        )
-        from .export_dialogs import OmeZarrExportDialog
-
-        pixel_size_nm = float(getattr(ds.cali, "pixel_size", 4.0) or 4.0)
-        is_3d = int(getattr(ds.prop, "num_dim", 2)) >= 3
-        loc_precision = getattr(ds.cali, "loc_precision", None)
-        try:
-            z_default = float(loc_precision[2])
-        except (TypeError, IndexError, ValueError):
-            z_default = 0.0
-        if not z_default > 0.0:
-            z_default = max(10.0, pixel_size_nm * 2.0)
-        dialog = OmeZarrExportDialog(
-            self._default_save_path(ds, ".ome.zarr"),
-            pixel_size_nm=pixel_size_nm,
-            z_voxel_nm=z_default,
-            is_3d=is_3d,
-            parent=self,
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        output = normalize_ome_zarr_path(dialog.path_edit.text().strip())
-        pixel_size_nm = dialog.pixel_size_spin.value()
-        z_voxel_nm = dialog.z_voxel_spin.value() if is_3d else None
-        max_levels = dialog.levels_spin.value()
-        overwrite = False
-        if output.exists():
-            answer = QMessageBox.question(
-                self,
-                "Replace OME-Zarr package?",
-                f"{output}\nalready exists. Replace the complete package?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            overwrite = True
-
-        self._state.status_progress(
-            f"Estimating OME-Zarr export of '{ds.name}'", 0.0
-        )
-        QApplication.processEvents()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        preflight_error = None
-        try:
-            estimate = estimate_ome_zarr_export(
-                ds,
-                output,
-                pixel_size_nm=pixel_size_nm,
-                z_voxel_nm=z_voxel_nm,
-                max_levels=max_levels,
-            )
-        except Exception as exc:
-            preflight_error = exc
-        finally:
-            QApplication.restoreOverrideCursor()
-        if preflight_error is not None:
-            self._state.status_message.emit("OME-Zarr preflight: failed.")
-            QMessageBox.critical(
-                self,
-                "OME-Zarr preflight failed",
-                f"Could not estimate OME-Zarr resources:\n{preflight_error}",
-            )
-            return
-
-        estimate_text = self._ome_zarr_estimate_text(estimate)
-        self._state.log(
-            f"OME-Zarr preflight for '{ds.name}': "
-            f"shape {' x '.join(str(value) for value in estimate.image_shape)}, "
-            f"estimated {_human_bytes(estimate.estimated_output_bytes)}, "
-            f"working RAM {_human_bytes(estimate.peak_working_ram_bytes)}, "
-            f"time {_human_duration(estimate.estimated_seconds)}.",
-            dataset_idx=idx,
-        )
-        if estimate.blockers:
-            QMessageBox.critical(
-                self,
-                "OME-Zarr export exceeds system capacity",
-                estimate_text
-                + "\n\nExport cannot start:\n"
-                + "\n".join(f"- {reason}" for reason in estimate.blockers),
-            )
-            return
-        if estimate.warnings:
-            answer = QMessageBox.warning(
-                self,
-                "Large OME-Zarr export",
-                estimate_text
-                + "\n\n"
-                + "\n".join(f"- {warning}" for warning in estimate.warnings)
-                + "\n\nContinue with the export?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-
-        roi_records = []
-        for record in self._state.rois.records:
-            context = getattr(record, "context", {}) or {}
-            record_idx = context.get("dataset_idx")
-            if record_idx is not None:
-                if idx is not None and int(record_idx) == int(idx):
-                    roi_records.append(record)
-                continue
-            target = str(getattr(record, "target_hint", "") or "")
-            if len(self._state.datasets) == 1 or (target and ds.name in target):
-                roi_records.append(record)
-
-        journal_entries = []
-        source_path = str(getattr(getattr(ds, "file", None), "path", "") or "")
-        for entry in self._state.journal.entries:
-            if len(self._state.datasets) == 1:
-                journal_entries.append(entry)
-                continue
-            details = getattr(entry, "details", {}) or {}
-            haystack = f"{getattr(entry, 'summary', '')} {details}"
-            if ds.name in haystack or (source_path and source_path in haystack):
-                journal_entries.append(entry)
-
-        def export(progress):
-            return write_ome_zarr(
-                ds,
-                output,
-                pixel_size_nm=pixel_size_nm,
-                z_voxel_nm=z_voxel_nm,
-                max_levels=max_levels,
-                dataset_idx=idx,
-                roi_records=roi_records,
-                journal_entries=journal_entries,
-                overwrite=overwrite,
-                progress=progress,
-            )
-
-        from ..core.app_state import format_progress_bar
-
-        task = _OmeZarrTask(export)
-        task.signals.progress.connect(
-            lambda fraction, stage, t=task: self._on_ome_zarr_progress(
-                fraction, stage, t
-            )
-        )
-        task.signals.done.connect(
-            lambda result, t=task, dataset=ds: self._on_ome_zarr_done(
-                result, t, dataset
-            )
-        )
-        task.signals.failed.connect(
-            lambda message, t=task, dataset=ds: self._on_ome_zarr_failed(
-                message, t, dataset
-            )
-        )
-        task.signals.cancelled.connect(
-            lambda t=task: self._on_ome_zarr_cancelled(t)
-        )
-        self._ome_zarr_tasks.add(task)
-        self._state.log(
-            f"OME-Zarr export started for '{ds.name}' -> {output}",
-            dataset_idx=idx,
-        )
-        self._state.log_progress(format_progress_bar(0.0))
-        self._state.status_progress(f"OME-Zarr export of '{ds.name}'", 0.0)
-        QThreadPool.globalInstance().start(task)
-
-    @staticmethod
-    def _ome_zarr_estimate_text(estimate) -> str:
-        axes = "Z x Y x X" if estimate.is_3d else "Y x X"
-        voxel = " x ".join(f"{value:g}" for value in estimate.voxel_size_nm)
-        return (
-            f"Level-0 shape ({axes}): "
-            f"{' x '.join(str(value) for value in estimate.image_shape)}\n"
-            f"Voxel/pixel size: {voxel} nm\n"
-            f"Pyramid levels: {len(estimate.level_shapes)}\n"
-            f"Filtered localizations: {estimate.filtered_localizations:,}\n"
-            f"Estimated compressed package: "
-            f"{_human_bytes(estimate.estimated_output_bytes)}\n"
-            f"Conservative upper bound: {_human_bytes(estimate.upper_output_bytes)}\n"
-            f"Exporter working RAM: {_human_bytes(estimate.peak_working_ram_bytes)} "
-            f"of {_human_bytes(estimate.available_ram_bytes)} available\n"
-            f"Dense level-0 stack in a reader: "
-            f"{_human_bytes(estimate.dense_level_zero_bytes)}\n"
-            f"Free target-disk space: {_human_bytes(estimate.free_disk_bytes)}\n"
-            f"Estimated conversion time: {_human_duration(estimate.estimated_seconds)}"
-        )
-
-    def _on_ome_zarr_progress(self, fraction: float, stage: str, task) -> None:
-        if task not in self._ome_zarr_tasks or self._is_shutting_down:
-            return
-        from ..core.app_state import format_progress_bar
-
-        fraction = max(0.0, min(1.0, float(fraction)))
-        percent = int(round(fraction * 100.0))
-        if percent != task.last_percent:
-            task.last_percent = percent
-            self._state.log_progress(format_progress_bar(fraction))
-        task.last_stage = str(stage)
-        self._state.status_progress(f"OME-Zarr: {stage}", fraction)
-
-    def _on_ome_zarr_done(self, result, task, ds) -> None:
-        self._ome_zarr_tasks.discard(task)
-        if self._is_shutting_down:
-            return
-        from ..core.app_state import format_progress_bar
-
-        self._state.log_progress(format_progress_bar(1.0, done=True), final=True)
-        self._state.status_message.emit("OME-Zarr export: done.")
-        idx = self._post_load_index(ds)
-        details = (
-            f"Saved OME-NGFF 0.5 / Zarr v3: {result.path} "
-            f"({result.levels} pyramid level(s), "
-            f"shape {' x '.join(str(value) for value in result.image_shape)}, "
-            f"voxel/pixel size "
-            f"{' x '.join(f'{value:g}' for value in result.voxel_size_nm)} nm)"
-        )
-        self._state.log(details, dataset_idx=idx)
-        for warning in result.warnings:
-            self._state.log(f"OME-Zarr export warning: {warning}", dataset_idx=idx)
-
-    def _on_ome_zarr_failed(self, message: str, task, ds) -> None:
-        self._ome_zarr_tasks.discard(task)
-        if self._is_shutting_down:
-            return
-        self._state.log_progress("=" * 10 + "  FAILED  " + "=" * 10, final=True)
-        self._state.status_message.emit("OME-Zarr export: failed.")
-        self._state.log(
-            f"OME-Zarr export failed: {message}",
-            level="ERROR",
-            dataset_idx=self._post_load_index(ds),
-        )
-        QMessageBox.critical(
-            self,
-            "OME-Zarr export failed",
-            f"Could not save OME-NGFF 0.5 / Zarr v3:\n{message}",
-        )
-
-    def _on_ome_zarr_cancelled(self, task) -> None:
-        self._ome_zarr_tasks.discard(task)
-        if self._is_shutting_down:
-            return
-        self._state.log_progress("=" * 10 + "  CANCELLED  " + "=" * 10, final=True)
-        self._state.status_message.emit("OME-Zarr export: cancelled.")
-
     def save_dataset(self, ds) -> None:
         """Open the Save / Export dialog for *ds* (the active dataset from File ›
         Save Processed Data, or a right-clicked one from the Dataset Manager)."""
@@ -8659,17 +8347,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._update_tasks.clear()
-        for task in list(getattr(self, "_ome_zarr_tasks", set())):
-            try:
-                task.cancel()
-            except Exception:
-                pass
-            for signal_name in ("progress", "done", "failed", "cancelled"):
-                try:
-                    getattr(task.signals, signal_name).disconnect()
-                except Exception:
-                    pass
-        self._ome_zarr_tasks.clear()
         # A Zarr load/save in flight must not deliver into a closing window.
         for task in list(getattr(self, "_zarr_io_tasks", [])):
             for signal_name in ("stage", "done", "failed"):
