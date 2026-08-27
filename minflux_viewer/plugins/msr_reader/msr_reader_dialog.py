@@ -2352,6 +2352,23 @@ def _export_entries(parsed, msr_state):
     return [(key, None) for key in sorted(keys)] or [("legacy", None)]
 
 
+def _entry_row_count(entry, msr_state, key: str) -> int:
+    """Rows the mfx array of one export entry holds, for the work budget.
+
+    Resolved the same way the export itself resolves the array (the per-entry
+    capture first, the name-keyed map as the fallback), so the budget and the
+    writes cannot disagree about which dataset is the large one. Zero when
+    nothing is there -- an unresolvable entry simply costs the flat overhead.
+    """
+    array = (entry or {}).get("_mfx")
+    if array is None:
+        array = getattr(msr_state, "mfx_map", {}).get(key)
+    try:
+        return int(np.asarray(array).size) if array is not None else 0
+    except Exception:                                       # noqa: BLE001
+        return 0
+
+
 def existing_export_targets(parsed, msr_state, out_dir: str, formats: list[str], *,
                             field_selection=None) -> list[Path]:
     """Planned outputs of this export that already exist on disk.
@@ -2399,14 +2416,22 @@ def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
 
     Free of Qt and of dialog state so the batch runner can call it from a
     worker thread; the dialog's own export is a thin wrapper over it.
-    ``progress(done, total)`` — when given — is called once per exported unit
-    (dataset or image series), which is what gives the batch a finer progress
-    reading than one step per file.
+
+    ``progress(done, total, label)`` — when given — is called after every
+    written file. ``done``/``total`` are **work units**, not counts: writing one
+    dataset as CSV costs ~25× writing it as NumPy and ~50 M rows of JSON is most
+    of a run, so counting one unit per dataset left the bar at a single value
+    for nearly the whole export (see ``msr/export.py::FORMAT_WORK_WEIGHT``).
+    ``label`` names what has just been written, for the progress line.
     """
     os.makedirs(out_dir, exist_ok=True)
     _log = log if log is not None else (lambda _m: None)
 
-    from ...msr.export import canonical_dataset, export_arrays
+    from ...msr.export import (
+        IMAGE_WORK_WEIGHT, WORK_ROWS_UNIT as _WORK_ROWS_UNIT, canonical_dataset,
+        dataset_prepare_weight, dataset_work_weight, export_arrays,
+        format_work_weight,
+    )
 
     # Pair each dataset with its own arrays.  A .msr can carry two entries under
     # one display name (same did, different data — seen in the wild with a large
@@ -2422,18 +2447,37 @@ def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
 
     images = select_image_series(image_series_of(parsed, _log),
                                  names=image_names, indices=image_indices)
-    total = len(entries) + len(images)
-    done = 0
-
-    def _tick():
-        nonlocal done
-        done += 1
-        if progress is not None:
-            progress(done, total)
 
     used_names: set[str] = set()
     zarr_requested = "zarr" in {str(fmt).lower().lstrip(".") for fmt in formats}
     other_formats = [fmt for fmt in formats if str(fmt).lower().lstrip(".") != "zarr"]
+
+    # Budget the run in work units before writing anything, so the reading is a
+    # share of the real cost instead of a share of the dataset count.
+    rows_by_key = {key: _entry_row_count(entry, msr_state, key)
+                   for key, entry in entries}
+    zarr_weight = {
+        key: (format_work_weight("zarr") * max(rows, 0) / _WORK_ROWS_UNIT
+              if zarr_requested else 0.0)
+        for key, rows in rows_by_key.items()
+    }
+    total = float(sum(dataset_work_weight(rows, other_formats)
+                      for rows in rows_by_key.values()))
+    total += float(sum(zarr_weight.values()))
+    total += IMAGE_WORK_WEIGHT * len(images)
+    total = max(total, 1e-9)
+    done = 0.0
+
+    def _advance(weight: float, label: str = "") -> None:
+        nonlocal done
+        done = min(done + float(weight), total)
+        if progress is not None:
+            progress(done, total, label)
+
+    def _tick_dataset(key: str) -> None:
+        """The whole remaining budget of one dataset (skipped or finished)."""
+        _advance(dataset_work_weight(rows_by_key.get(key, 0), other_formats), key)
+
     zarr_members = []
     selection = field_selection or {}
     for key, entry in entries:
@@ -2449,7 +2493,7 @@ def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
             sel = selection.get(key, {"checked": True, "mfx": None, "mbm": None})
             if not sel.get("checked", True):
                 _log(f"[export] skip dataset '{key}' (unchecked).")
-                _tick()
+                _tick_dataset(key)
                 continue
             mfx_sel = sel.get("mfx")
             mbm_sel = sel.get("mbm")
@@ -2457,7 +2501,7 @@ def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
         mbm_sub = subset_struct_fields(mbm_arr, mbm_sel)
         if mfx_sub is None and mbm_sub is None:
             _log(f"[export] skip dataset '{key}' (no selected data).")
-            _tick()
+            _tick_dataset(key)
             continue
 
         stem = unique_export_stem(key, used_names, _log)
@@ -2498,10 +2542,19 @@ def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
                     has_mfx=mfx_sub is not None, has_mbm=mbm_sub is not None)
                 if planned and all(path.exists() for path in planned):
                     _log(f"[export] skip '{key}': outputs already exist.")
-                    _tick()
+                    _tick_dataset(key)
                     continue
-            export_arrays(out_dir, stem, other_formats, mfx_sub, mbm_sub, **export_kwargs)
-        _tick()
+            rows = rows_by_key.get(key, 0)
+            export_arrays(
+                out_dir, stem, other_formats, mfx_sub, mbm_sub,
+                on_prepared=lambda _key=key, _rows=rows: _advance(
+                    dataset_prepare_weight(_rows), _key),
+                on_format=lambda fmt, _key=key, _rows=rows: _advance(
+                    format_work_weight(fmt) * max(_rows, 0) / _WORK_ROWS_UNIT,
+                    f"{_key} · {fmt}"),
+                **export_kwargs)
+        else:
+            _tick_dataset(key)
 
     if zarr_requested and zarr_members:
         from ...core.minflux_zarr import (
@@ -2565,8 +2618,10 @@ def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
             f"[zarr] wrote {target} ({len(zarr_members)} dataset(s), "
             f"{len(images)} embedded image(s))"
         )
-        for _entry in images:
-            _tick()
+        # One store carried every member and every embedded image, so their
+        # whole remaining budget is spent here.
+        _advance(sum(zarr_weight.values()) + IMAGE_WORK_WEIGHT * len(images),
+                 target.name)
     elif images:
         # ASCII only: the dialog's log() falls back to print(), which raises on
         # a cp1252 console.
@@ -2575,7 +2630,12 @@ def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
         for entry in images:
             export_image_series(out_dir, parsed.get("msr"), [entry], _log,
                                 used=used_image_stems)
-            _tick()
+            _advance(IMAGE_WORK_WEIGHT, str((entry or {}).get("name") or "image"))
+
+    # Anything the branches above did not reach (a Zarr export whose members all
+    # dropped out, for instance) still has to leave the reading at 100 %.
+    if progress is not None and done < total - 1e-9:
+        _advance(total - done)
 
 
 class _BatchExportSignals(QObject):
@@ -2615,16 +2675,22 @@ class _BatchExportTask(QRunnable):
         self._cancelled = True
 
     def run(self):
+        from ...core.task_registry import registry as task_registry
         from ...msr import parse_msr_general
 
         total = max(len(self._files), 1)
         exported = 0
         failures: list[tuple[Path, str]] = []
         log = self.signals.message.emit
+        handle = task_registry.register(
+            f"MSR batch export ({len(self._files)} file(s))", "msr-export",
+            cancel=self.cancel)
+        handle.start()
         for index, msr_path in enumerate(self._files):
             if self._cancelled:
                 break
             base = index / total
+            handle.update(progress=base, detail=msr_path.name)
             self.signals.progress.emit(base, msr_path.name)
             sub_out = self._targets[msr_path]
             try:
@@ -2640,14 +2706,18 @@ class _BatchExportTask(QRunnable):
                     image_indices=self._image_indices,
                     field_selection=self._field_selection,
                     log=log,
-                    progress=lambda d, t, _b=base: self.signals.progress.emit(
-                        _b + (d / max(t, 1)) / total, msr_path.name),
+                    progress=lambda d, t, label="", _b=base: self.signals.progress.emit(
+                        _b + (d / max(t, 1e-9)) / total,
+                        f"{msr_path.name} · {label}" if label else msr_path.name),
                     on_conflict=self._on_conflict,
                 )
                 exported += 1
             except Exception as exc:                           # noqa: BLE001
                 failures.append((msr_path, str(exc)))
                 log(f"[batch error] {msr_path}: {exc}")
+        handle.finish("cancelled" if self._cancelled
+                      else ("failed" if failures else "done"),
+                      detail=f"{exported}/{len(self._files)} file(s)")
         self.signals.progress.emit(1.0, "")
         self.signals.finished.emit(exported, failures, self._cancelled)
 
@@ -2674,13 +2744,18 @@ class _ParsedExportTask(QRunnable):
         self._cancelled = True
 
     def run(self) -> None:  # noqa: N802 - Qt API
+        from ...core.task_registry import registry as task_registry
+
         source = Path(str((self._parsed or {}).get("msr") or "MINFLUX data"))
         failures = []
+        handle = task_registry.register(
+            f"MSR export — {source.name}", "msr-export", cancel=self.cancel)
+        handle.start()
 
-        def progress(done: int, total: int) -> None:
-            self.signals.progress.emit(
-                done / max(total, 1), source.name
-            )
+        def progress(done: float, total: float, label: str = "") -> None:
+            fraction = done / max(total, 1e-9)
+            handle.update(progress=fraction, detail=label or source.name)
+            self.signals.progress.emit(fraction, label or source.name)
 
         try:
             self.signals.message.emit(
@@ -2701,6 +2776,8 @@ class _ParsedExportTask(QRunnable):
         except Exception as exc:  # noqa: BLE001
             failures.append((source, str(exc)))
             self.signals.message.emit(f"[export error] {source}: {exc}")
+        handle.finish("cancelled" if self._cancelled
+                      else ("failed" if failures else "done"))
         self.signals.progress.emit(1.0, "")
         self.signals.finished.emit(0 if failures else 1, failures, self._cancelled)
 
@@ -2819,15 +2896,25 @@ class _ParseWorker(QThread):
         self._tmp_dir = tmp_dir
 
     def run(self):
+        from ...core.task_registry import registry as task_registry
+
+        # No cancel=: parsing one .msr is a single pass with no checkpoint to
+        # honour a stop at, so the monitor lists it as not stoppable.
+        handle = task_registry.register(
+            f"Parse {Path(self._msr_path).name}", "msr-parse")
+        handle.start()
         try:
             from ...msr import parse_msr_general
             result = parse_msr_general(
                 self._msr_path,
                 self._tmp_dir,
-                log=lambda msg: self.progress.emit(msg),
+                log=lambda msg: (handle.update(detail=str(msg)[:120]),
+                                 self.progress.emit(msg))[1],
             )
+            handle.finish("done")
             self.finished.emit(result)
         except Exception as exc:
+            handle.finish("failed", detail=str(exc))
             self.failed.emit(str(exc))
 
 
@@ -5586,7 +5673,8 @@ class MsrReaderDialog(QWidget):
         self._parse_button.setEnabled(not running and self.mode_folder.isChecked())
         if running:
             self._progress_bar.setValue(0)
-            self._progress_label.setText(f"0 / {total}")
+            kind = str((self._batch_context or {}).get("kind", "batch"))
+            self._progress_label.setText("" if kind == "single" else f"0 / {total}")
             self._last_batch_pct = -1
             if self._state is not None:
                 from ...core.app_state import format_progress_bar
@@ -5605,11 +5693,16 @@ class MsrReaderDialog(QWidget):
         self._progress_bar.setValue(int(round(fraction * 1000)))
         total = int((self._batch_context or {}).get("total", 0))
         done = int(fraction * total)
-        self._progress_label.setText(
-            f"{done} / {total}" + (f"  ·  {current}" if current else ""))
+        kind = str((self._batch_context or {}).get("kind", "batch"))
+        if kind == "single":
+            # A single file has no "n of m" to count: the progress bar already
+            # shows the percentage, so the line names what is being written.
+            self._progress_label.setText(current)
+        else:
+            self._progress_label.setText(
+                f"{done} / {total}" + (f"  ·  {current}" if current else ""))
         # The title carries the percentage so it is legible even when the
         # dialog is behind another window, as requested.
-        kind = str((self._batch_context or {}).get("kind", "batch"))
         operation = "batch export" if kind == "batch" else "export"
         self.setWindowTitle(
             f"{_READER_TITLE} ({operation} {fraction * 100:.1f}%…)"
@@ -5624,7 +5717,10 @@ class MsrReaderDialog(QWidget):
                     "status_header", _BATCH_STATUS_HEADER
                 )
             )
-            self._state.status_progress(header, fraction)
+            # Name the file being written in the status line: on a long export
+            # the percentage alone does not say what is taking the time.
+            self._state.status_progress(
+                f"{header} — {current}" if current else header, fraction)
 
     def _cancel_batch_export(self) -> None:
         if self._batch_task is not None:

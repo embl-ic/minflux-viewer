@@ -1142,6 +1142,7 @@ class RenderWindow(QWidget):
             self._image_view.ui.graphicsView,
             self._image_view.view,
             coordinate_space="plot",
+            source_view="render",
         )
         # The pg.ImageView's own keyPressEvent grabs the arrow keys for its (unused)
         # timeline; register it (and this window) as ROI key sources so the arrow
@@ -4133,6 +4134,18 @@ class RenderWindow(QWidget):
         win = int(np.clip(round(float(window_nm) / px), 3, 51))
         sc, sr = snap_density_centroid(density, col, row, window=win, iterations=iterations)
         return (x0 + sc * px, y0 + sr * px)
+
+    def roi_dataset_indices(self) -> "set[int]":
+        """Datasets this render displays — every visible localization channel.
+
+        An overlay window is keyed by its anchor but draws several datasets, so
+        a ROI belonging to a non-anchor channel must still show here.
+        """
+        indices = {ch["dataset_idx"] for ch in getattr(self, "_channels", [])
+                   if isinstance(ch.get("dataset_idx"), int)}
+        if isinstance(self._idx, int):
+            indices.add(int(self._idx))
+        return indices
 
     def normalize_roi_record(self, record):
         """Tag a drawn ROI with the view plane it was drawn in and the centre of

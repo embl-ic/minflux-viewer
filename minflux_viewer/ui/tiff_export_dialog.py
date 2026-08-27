@@ -223,10 +223,20 @@ class TiffExportWorker(QThread):
         self._z_range = z_range
 
     def run(self) -> None:
+        from ..core.task_registry import registry as task_registry
+
         last_pct = [-1]
+        # No cancel=: the writer streams pages through tifffile with no stop
+        # checkpoint, so the monitor lists this as not stoppable rather than
+        # offering a button that would do nothing.
+        handle = task_registry.register(
+            f"TIFF export — {Path(self._path).name}", "export")
+        handle.start()
 
         def report(done: int, total: int, message: str) -> None:
             pct = int(done * 100 / max(total, 1))
+            handle.update(progress=done / max(total, 1),
+                          detail=f"{done}/{total} slices — {message}")
             if pct >= last_pct[0] + 10 or done >= total:
                 last_pct[0] = pct
                 self.progress.emit(
@@ -245,6 +255,8 @@ class TiffExportWorker(QThread):
                 z_range=self._z_range,
                 progress=report,
             )
+            handle.finish("done")
             self.completed.emit(result)
         except Exception as exc:  # noqa: BLE001 - surfaced to the Log, never crashes the app
+            handle.finish("failed", detail=str(exc))
             self.failed.emit(str(exc))

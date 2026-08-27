@@ -20,7 +20,6 @@ from PyQt6.QtWidgets import (
     QDialog,
     QFrame,
     QGridLayout,
-    QInputDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -30,6 +29,7 @@ from PyQt6.QtWidgets import (
 
 from ..core.app_state import AppState
 from ..core.dataset import MinfluxDataset
+from .z_scaling_widgets import ZScalingFactorDialog, format_z_scaling_factor
 
 
 class DataWindow(QWidget):
@@ -189,22 +189,17 @@ class DataWindow(QWidget):
 
         self._state.set_active(self._idx)
         current = float(getattr(ds.cali, "z_scaling_factor", 1.0) or 1.0)
-        value, accepted = QInputDialog.getDouble(
-            self,
-            "Set Z Scaling Factor",
-            "Dimensionless multiplier in\n"
-            "z_calibrated = z_raw × z_scaling_factor:",
-            current,
-            0.0001,
-            100.0,
-            4,
-        )
+        # Not QInputDialog.getDouble: its spin box uses one step for both
+        # the arrows and the wheel, and this factor wants a fine arrow step
+        # with a coarse wheel sweep.
+        value, accepted = ZScalingFactorDialog.ask(self, current)
         if not accepted or np.isclose(value, current, rtol=0.0, atol=1e-12):
             return
 
         ds.set_z_scaling_factor(value, source="manual (Dataset Information)")
         self._state.log(
-            f"Z scaling factor for '{ds.name}': {value:.4g} "
+            f"Z scaling factor for '{ds.name}': "
+            f"{format_z_scaling_factor(value)} "
             "(manual, Dataset Information).",
             dataset_idx=self._idx,
         )
@@ -444,10 +439,11 @@ def _dims_text(ds: MinfluxDataset) -> str:
         return dims
     z_scaling_factor = float(getattr(ds.cali, "z_scaling_factor", 1.0) or 1.0)
     source = str((ds.metadata.get("z_scaling_factor_provenance") or {}).get("source", "") or "")
-    label, calculated = _z_scaling_factor_source_label(source)
-    # A calculated in-range value keeps 4 decimals; manual / fixed / any 1.0
-    # use 2 decimals (e.g. "1.00").
-    value_txt = f"{z_scaling_factor:.4f}" if (calculated and z_scaling_factor != 1.0) else f"{z_scaling_factor:.2f}"
+    label, _calculated = _z_scaling_factor_source_label(source)
+    # Up to four decimals for every source, trailing zeros trimmed but never
+    # below two: a manually set 0.6667 must not be shown as 0.67, while a plain
+    # 1.0 still reads as "1.00".
+    value_txt = format_z_scaling_factor(z_scaling_factor)
     suffix = f" ({label})" if label else ""
     return f"{dims}  |  Z scaling factor = {value_txt}{suffix}"
 

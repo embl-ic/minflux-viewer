@@ -263,6 +263,7 @@ class ScatterWindow(QWidget):
             self._plot_2d,
             self._plot_2d.getPlotItem(),
             coordinate_space="plot",
+            source_view="scatter",
         )
         # Also catch arrow-nudge / 't' when focus is on the window itself (not the
         # inner graphics view), so ROI keyboard editing works regardless of focus.
@@ -621,6 +622,21 @@ class ScatterWindow(QWidget):
         # Re-project point markers onto the new projection plane.
         if self._roi_overlay is not None and not is_3d:
             self._roi_overlay.refresh()
+
+    def refresh_colormap_list(self) -> None:
+        """Rebuild the colormap choices after the shared list was reordered.
+
+        The combo is editable and also carries ``solid:`` encodings, so the
+        current text is restored verbatim rather than by index.
+        """
+        current = self._cmap_combo.currentText()
+        self._cmap_combo.blockSignals(True)
+        try:
+            self._cmap_combo.clear()
+            self._cmap_combo.addItems(named_colormap_names())
+            self._cmap_combo.setCurrentText(current)
+        finally:
+            self._cmap_combo.blockSignals(False)
 
     def _on_cmap_changed(self, name: str) -> None:
         self._cmap = _load_cmap(name)
@@ -2256,6 +2272,15 @@ class ScatterWindow(QWidget):
         i, j = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}[axis]
         k = {"XY": 2, "XZ": 1, "YZ": 0}[axis]
         return weighted_depths(points, locs[:, i], locs[:, j], locs[:, k])
+
+    def roi_dataset_indices(self) -> "set[int]":
+        """Datasets this scatter displays — every overlay channel, not just the
+        anchor it is keyed by."""
+        indices = {ch["dataset_idx"] for ch in getattr(self, "_channels", [])
+                   if isinstance(ch.get("dataset_idx"), int)}
+        if isinstance(getattr(self, "_dataset_idx", None), int):
+            indices.add(int(self._dataset_idx))
+        return indices
 
     def normalize_roi_record(self, record):
         """Tag a drawn ROI with its view plane and the centre of the out-of-plane

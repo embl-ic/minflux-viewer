@@ -63,12 +63,14 @@ class MbmInfoWindow(QWidget):
     the main window.
     """
 
+    #: Nominal opening size; the real one is at least the content's own hint.
+    PREFERRED_SIZE = (1150, 820)
+
     def __init__(self, dataset_name: str, beads: list[dict], *,
                  data_bounds_nm=None) -> None:
         super().__init__(None)
         self.setWindowTitle(f"MBM info — {dataset_name}")
         self.setWindowFlags(Qt.WindowType.Window)
-        self.resize(1150, 820)
 
         self._beads = beads
         root = QVBoxLayout(self)
@@ -94,6 +96,18 @@ class MbmInfoWindow(QWidget):
             self._tabs.addTab(region, "Beads && data region")
         root.addWidget(self._tabs, 1)
 
+        # ⚠ Size LAST, and never below what the assembled content asks for.
+        # Two full dialogs are embedded as tab pages, and their combined
+        # ``sizeHint`` is taller than the nominal 820: requesting 820 before
+        # they existed left Qt to enlarge the window on show, which on Windows
+        # prints "QWindowsWindow::setGeometry: Unable to set geometry ...".
+        # Asking for what the content actually needs makes the request
+        # satisfiable, so there is nothing to warn about — and the window no
+        # longer changes size under the user right after it opens.
+        hint = self.sizeHint()
+        self.resize(max(self.PREFERRED_SIZE[0], hint.width()),
+                    max(self.PREFERRED_SIZE[1], hint.height()))
+
     # -- tabs ----------------------------------------------------------------
 
     def _build_drift_tab(self, name: str, beads: list[dict]) -> QWidget:
@@ -115,7 +129,13 @@ class MbmInfoWindow(QWidget):
         # fills its table with drift instead of fit residuals.
         self._region = AlignmentPlotWindow(
             [], None, data_bounds_nm=data_bounds_nm, single_channel=payload)
-        return _as_page(self._region)
+        page = _as_page(self._region)
+        if data_bounds_nm is None:
+            # Say why the yellow data-region box is absent. The region is the
+            # extent of the LOCALIZATIONS, which a standalone bead companion
+            # does not carry -- an unexplained missing box reads as a bug.
+            _prepend_note(page, NO_DATA_REGION_NOTE)
+        return page
 
     # -- lifetime ------------------------------------------------------------
 
@@ -130,6 +150,36 @@ class MbmInfoWindow(QWidget):
                 except RuntimeError:
                     pass
         super().closeEvent(event)
+
+
+#: Shown above the bead plot when there is no localization extent to draw.
+#: Deliberately phrased around the *fact* rather than the caller: it is also
+#: reached by a loaded dataset whose coordinates are all non-finite.
+NO_DATA_REGION_NOTE = (
+    "No data region shown — there are no localizations to take an extent from. "
+    "The yellow box is the extent of the localization data, which a standalone "
+    "bead companion does not carry: those live in the accompanying "
+    "<tt>_mfx</tt> file. Open that dataset and use <i>View mbm info…</i> on it "
+    "to see the beads against their data."
+)
+
+
+def _prepend_note(page: QWidget, text: str) -> QWidget:
+    """Put an explanatory line above a page's existing content."""
+    from PyQt6.QtWidgets import QLabel
+
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setTextInteractionFlags(
+        Qt.TextInteractionFlag.TextSelectableByMouse
+        | Qt.TextInteractionFlag.TextSelectableByKeyboard
+    )
+    label.setStyleSheet(
+        "QLabel { background: #fff4cc; border: 1px solid #d6b84b; "
+        "padding: 5px; color: #4b3b00; }"
+    )
+    page.layout().insertWidget(0, label)
+    return page
 
 
 def _as_page(dialog) -> QWidget:

@@ -352,6 +352,11 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "Console (raw stdout/stderr).", "help"),
     "actionMemoryMonitor": CommandMeta(U + "main_window.py", ("memory", "monitor", "ram"),
                               "Monitor memory usage.", "help"),
+    "actionTaskMonitor": CommandMeta(U + "task_monitor.py",
+                              ("thread", "task", "background", "job", "worker",
+                               "cancel", "stop", "kill", "monitor"),
+                              "Background tasks and threads in flight; ask a "
+                              "running task to stop.", "help"),
     "actionCommandFinder": CommandMeta(U + "command_finder.py", ("search", "commands", "finder", "palette"),
                               "Search all menu commands (Fiji-style).", "help"),
     "actionCheckUpdates": CommandMeta(C + "updater.py", ("update", "version", "release"),

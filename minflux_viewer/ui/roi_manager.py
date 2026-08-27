@@ -16,12 +16,14 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
+from ..core import roi_scope
 from ..core.app_state import AppState
 
 
@@ -87,6 +89,8 @@ class RoiManagerWindow(QWidget):
 
         self._list = QListWidget()
         self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._show_list_menu)
         root.addWidget(self._list, stretch=1)
 
         grid = QGridLayout()
@@ -154,8 +158,10 @@ class RoiManagerWindow(QWidget):
         self._refreshing = True
         self._list.clear()
         for idx, record in enumerate(self._store.records):
-            item = QListWidgetItem(f"{idx + 1:04d}  {record.name}")
+            item = QListWidgetItem(
+                f"{idx + 1:04d}  {record.name}{self._scope_suffix(record)}")
             item.setData(Qt.ItemDataRole.UserRole, record.id)
+            item.setToolTip(self._scope_tooltip(record))
             self._list.addItem(item)
         self._show_all.blockSignals(True)
         self._labels.blockSignals(True)
@@ -165,6 +171,96 @@ class RoiManagerWindow(QWidget):
         self._labels.blockSignals(False)
         self._refreshing = False
         self._refresh_selection()
+
+    # -- ROI scope (which dataset / which views an entry appears in) ------
+
+    def _dataset_name(self, index) -> str:
+        datasets = getattr(self._state, "datasets", [])
+        if isinstance(index, int) and 0 <= index < len(datasets):
+            return str(getattr(datasets[index], "name", f"dataset {index}"))
+        if index == roi_scope.ORPHANED_DATASET:
+            # Its dataset was closed. The ROI is kept and re-attachable through
+            # "Show on active dataset" rather than deleted behind the user.
+            return "closed dataset"
+        return f"dataset {index}"
+
+    def _scope_suffix(self, record) -> str:
+        """The bracketed dataset tag on a list row.
+
+        Without it a ROI that is correctly hidden (it belongs to another
+        dataset) looks like a Manager entry that simply does not work.
+        """
+        owner = roi_scope.roi_owner_dataset(record)
+        if owner is None:
+            return ""
+        shared = roi_scope.roi_shared_datasets(record)
+        extra = f" +{len(shared)}" if shared else ""
+        return f"   [{self._dataset_name(owner)}{extra}]"
+
+    def _scope_tooltip(self, record) -> str:
+        owner = roi_scope.roi_owner_dataset(record)
+        family = roi_scope.roi_family(record)
+        lines = []
+        if owner is not None:
+            lines.append(f"Drawn on: {self._dataset_name(owner)}")
+        shared = roi_scope.roi_shared_datasets(record)
+        if shared:
+            lines.append("Also shown on: "
+                         + ", ".join(self._dataset_name(i) for i in shared))
+        if family:
+            lines.append(f"Shown in: {family} views")
+        if not lines:
+            lines.append("No scope recorded — shown in every view.")
+        return "\n".join(lines)
+
+    def _show_list_menu(self, pos) -> None:
+        item = self._list.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self._list.setCurrentItem(item)
+        records = self._store.selected_records()
+        if not records:
+            return
+        active = getattr(self._state, "active_idx", None)
+        menu = QMenu(self)
+        share = menu.addAction(
+            f"Show on active dataset ({self._dataset_name(active)})"
+            if isinstance(active, int) else "Show on active dataset")
+        share.setEnabled(isinstance(active, int) and any(
+            roi_scope.roi_owner_dataset(r) != active
+            and active not in roi_scope.roi_shared_datasets(r) for r in records))
+        share.setToolTip(
+            "Also display the selected ROI(s) on the active dataset, so the same "
+            "region can be compared across datasets. Nothing does this "
+            "automatically — a ROI otherwise stays on the dataset it was drawn on."
+        )
+        unshare = menu.addAction("Show only on its own dataset")
+        unshare.setEnabled(any(roi_scope.roi_shared_datasets(r) for r in records))
+        menu.setToolTipsVisible(True)
+        chosen = menu.exec(self._list.viewport().mapToGlobal(pos))
+        if chosen is share:
+            self._share_with_active(records, active)
+        elif chosen is unshare:
+            self._unshare_all(records)
+
+    def _share_with_active(self, records, active) -> None:
+        if not isinstance(active, int):
+            return
+        changed = [r for r in records if roi_scope.share_with_dataset(r, active)]
+        if not changed:
+            return
+        self._store.changed.emit()
+        self._state.log(
+            f"ROI Manager: {len(changed)} ROI(s) now also shown on "
+            f"'{self._dataset_name(active)}'.")
+
+    def _unshare_all(self, records) -> None:
+        changed = [r for r in records if roi_scope.unshare_dataset(r)]
+        if not changed:
+            return
+        self._store.changed.emit()
+        self._state.log(
+            f"ROI Manager: {len(changed)} ROI(s) now shown only on the dataset "
+            "they were drawn on.")
 
     def _refresh_selection(self) -> None:
         self._refreshing = True

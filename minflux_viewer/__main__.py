@@ -54,10 +54,11 @@ def main() -> int:
     window = MainWindow(state)
     window.show()
 
-    # Data files named on the command line. _route_path (not _route_file) so a
-    # directory is scanned for supported files, exactly as dropping it is.
-    for path in startup_paths_from_argv(sys.argv[1:]):
-        window._route_path(path)
+    # Data files named on the command line. route_paths (not _route_file) so a
+    # directory is scanned exactly as dropping it is, AND so naming a data file
+    # together with its _metadata.json applies the recipe without a prompt --
+    # the command line is a batch, like a multi-file drop.
+    window.route_paths(startup_paths_from_argv(sys.argv[1:]))
 
     exit_code = app.exec()
 

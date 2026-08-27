@@ -20,6 +20,7 @@ from ..colors import (
     rgba_hex,
     viewer_color,
 )
+from ..core import roi_scope
 from ..core.roi import RoiRecord, RoiStore
 from ..core.roi_selection import ROI_MASKS_STATE_KEY, store_roi_mask
 
@@ -453,6 +454,8 @@ class RoiOverlayController(QObject):
         plot_item,
         *,
         coordinate_space: str = "plot",
+        view_family: str | None = None,
+        source_view: str = "",
     ) -> None:
         super().__init__(owner)
         self.store = store
@@ -461,6 +464,11 @@ class RoiOverlayController(QObject):
         self.plot_item = plot_item
         self.view_box = plot_item.vb
         self.coordinate_space = coordinate_space
+        # What this view's axes MEAN, and the name a drawn ROI is stamped with.
+        # A ROI is only drawn where both its family and its dataset match; see
+        # ``core/roi_scope.py`` for why one store cannot simply show everything.
+        self.source_view = str(source_view or "")
+        self.view_family = view_family or roi_scope.view_family(self.source_view)
         self.items: dict[str, Any] = {}
         # The record object each displayed item was built from — a stored ROI is
         # replaced by a *new* record on convert / resize / vertex-edit (store.update),
@@ -641,6 +649,11 @@ class RoiOverlayController(QObject):
             # unchecking it faithfully hides everything. (Points being *drawn* live
             # in _session_points and stay visible via _refresh_session_points.)
             if not self.store.show_all and record.id not in selected:
+                continue
+            # A ROI belongs to one dataset and one family of axes: a render ROI
+            # is meaningless on a histogram, and dataset A's ROIs must not
+            # appear the moment dataset B's view is opened.
+            if not self._record_in_scope(record):
                 continue
             wanted.add(record.id)
             # Rebuild the item when the store record was replaced (convert / resize /
@@ -1386,7 +1399,72 @@ class RoiOverlayController(QObject):
             "coordinate_space": self.coordinate_space,
             "target_hint": self.owner.windowTitle(),
             "stroke_color": color,
+            "context": self._scope_context(),
         }
+
+    def _scope_context(self) -> dict[str, Any]:
+        """The scope stamped on a ROI drawn here: its view family and dataset.
+
+        Stamped at creation rather than at the first selection pass, because a
+        line / point / angle never runs one -- those types would otherwise stay
+        unscoped and reappear in every view.
+        """
+        context: dict[str, Any] = {}
+        if self.source_view:
+            context["source_view"] = self.source_view
+        owner_idx = self._owner_dataset_index()
+        if owner_idx is not None:
+            context["dataset_idx"] = int(owner_idx)
+        return context
+
+    def _owner_dataset_index(self) -> int | None:
+        """The dataset a ROI drawn in this view belongs to.
+
+        Every access is guarded: ``refresh`` runs on a store signal, which can
+        arrive while the owning window is being torn down, and touching a
+        widget whose C++ half is gone raises ``RuntimeError``.
+        """
+        try:
+            getter = getattr(self.owner, "roi_owner_dataset_index", None)
+            if callable(getter):
+                value = getter()
+                if isinstance(value, int):
+                    return value
+            for attr in ("_idx", "_dataset_idx"):
+                value = getattr(self.owner, attr, None)
+                if isinstance(value, int):
+                    return value
+            # Last resort: a view that only publishes its dataset set and shows
+            # exactly one dataset has no ambiguity about the owner. (An overlay
+            # shows several, and its anchor -- read above -- is the owner.)
+            indices = getattr(self.owner, "roi_dataset_indices", None)
+            if callable(indices):
+                values = list(indices() or ())
+                if len(values) == 1:
+                    return int(values[0])
+        except Exception:                                       # noqa: BLE001
+            return None
+        return None
+
+    def _view_dataset_indices(self) -> "frozenset[int] | None":
+        """Datasets this view displays -- every channel of an overlay, not just
+        the anchor. ``None`` means the view declines to scope by dataset."""
+        try:
+            getter = getattr(self.owner, "roi_dataset_indices", None)
+            if callable(getter):
+                value = getter()
+                if value is None:
+                    return None
+                return frozenset(int(index) for index in value)
+        except Exception:                                       # noqa: BLE001
+            return None
+        own = self._owner_dataset_index()
+        return None if own is None else frozenset({own})
+
+    def _record_in_scope(self, record) -> bool:
+        return roi_scope.roi_visible_in(
+            record, family=self.view_family,
+            dataset_indices=self._view_dataset_indices())
 
     def _event_target(self):
         return self.view_widget.viewport() if hasattr(self.view_widget, "viewport") else self.view_widget
@@ -1981,6 +2059,8 @@ class RoiOverlayController(QObject):
                 continue
             # Only hit-test ROIs that are actually on screen (same gate as refresh).
             if not self.store.show_all and record.id not in self.store.selected_ids:
+                continue
+            if not self._record_in_scope(record):
                 continue
             if self._point_hits_record(pos, record, tolerance):
                 return "stored", record

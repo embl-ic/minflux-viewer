@@ -382,6 +382,13 @@ def build_metadata(ds, *, data_filename: str | None = None,
         "data_file": data_filename,
         "original_source_version": md.get("source_version"),
         "source_format": md.get("source_format"),
+        # Identity, so a sidecar handed over on its own can find the dataset it
+        # came from (core/metadata_match.py). The DID is Imspector's per-run
+        # UUID, and a .mat/.npy/.csv/.json data file cannot carry it -- this
+        # sidecar is the only route by which it reaches such a dataset. Written
+        # only when known, so it never claims an identity the source lacked.
+        **({"msr_dataset_did": str(md["msr_dataset_did"])}
+           if md.get("msr_dataset_did") else {}),
         # When the instrument recorded the run. A provenance fact, so it is
         # carried on BOTH raw and snapshot content — unlike z_scaling_factor/transform/
         # filters, there is nothing here to bake, hence nothing to un-bake.

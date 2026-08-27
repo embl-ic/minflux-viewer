@@ -75,17 +75,22 @@ DEFAULT_COLOR_PREFS: dict = {
                 "label": [0, 229, 255, 255],
             },
         },
-        # A sequential ramp (viridis, sampled evenly), not a categorical set:
-        # iterations are ordered, so the colour should read as ordered too, and
-        # a perceptually uniform ramp keeps overlapping series legible where a
-        # rainbow turns to mud. Consumers spread these across the iterations
-        # actually present, so a 3-iteration plot still uses the whole range.
+        # ``jet`` sampled at TEN points, blue -> red. Iterations are ordered, so
+        # the colour must read as ordered.
+        #
+        # ⚠ The count is load-bearing: a MINFLUX sequence normally has ten
+        # iterations, and consumers index this table by
+        # ``round(k/(n-1) * (len-1))``. With ELEVEN stops over ten iterations
+        # that expression skips stop 5 and shifts iterations 5..9 up by one, so
+        # the drawn colours no longer matched the legend's -- the reported bug.
+        # Ten stops make it the identity for the common case. Do not add a
+        # stop here without re-checking that mapping.
         "Iteration series": {
-            "1st": [68, 1, 84, 255], "2nd": [71, 39, 119, 255],
-            "3rd": [62, 74, 136, 255], "4th": [49, 104, 142, 255],
-            "5th": [37, 130, 142, 255], "6th": [32, 157, 136, 255],
-            "7th": [53, 183, 121, 255], "8th": [108, 204, 89, 255],
-            "9th": [180, 221, 44, 255], "10th": [253, 231, 37, 255],
+            "1st": [0, 0, 127, 255], "2nd": [0, 5, 238, 255],
+            "3rd": [0, 98, 255, 255], "4th": [0, 212, 255, 255],
+            "5th": [76, 255, 168, 255], "6th": [168, 255, 76, 255],
+            "7th": [255, 229, 0, 255], "8th": [255, 124, 0, 255],
+            "9th": [238, 26, 0, 255], "10th": [127, 0, 0, 255],
         },
         "Localization precision": {
             "Lateral sigma": [34, 211, 211, 255],
@@ -210,6 +215,37 @@ def rgba_from_qt_hex(value, fallback: Sequence[int] = (0, 0, 0, 255)) -> RGBA:
     return normalize_rgba(value, fallback)
 
 
+def parse_hex_rgba(text, *, default_alpha: int = 255):
+    """A hand-typed or pasted hex colour -> ``(r, g, b, a)``, or ``None``.
+
+    ``QColor(str)`` is stricter than a user is: it rejects ``FF8000`` outright
+    because there is no leading ``#``, which is exactly the form a hex code
+    copied from a web page or a paper figure arrives in -- so the COLOR
+    dialog's HEX field silently reverted whatever was pasted into it.
+
+    Accepted: an optional ``#`` or ``0x`` prefix, and 3 (``RGB``), 4 (``RGBA``),
+    6 (``RRGGBB``) or 8 hex digits.
+
+    ⚠ Eight digits are read as **RRGGBBAA**, the CSS convention an external
+    source uses -- *not* Qt's ``#AARRGGBB``, which would silently turn a pasted
+    ``FF8000FF`` into a different colour. ``rgba_from_qt_hex`` remains the
+    reader for this application's own stored record colours.
+    """
+    if not isinstance(text, str):
+        return None
+    raw = text.strip().lstrip("#").strip()
+    if raw[:2].lower() == "0x":
+        raw = raw[2:]
+    if len(raw) not in (3, 4, 6, 8) or any(c not in "0123456789abcdefABCDEF" for c in raw):
+        return None
+    if len(raw) in (3, 4):                       # shorthand: each digit doubled
+        raw = "".join(c * 2 for c in raw)
+    values = [int(raw[i:i + 2], 16) for i in range(0, len(raw), 2)]
+    if len(values) == 3:
+        values.append(int(default_alpha))
+    return tuple(values)
+
+
 def _merge(saved, defaults):
     result = copy.deepcopy(defaults)
     if not isinstance(saved, Mapping):
@@ -242,6 +278,20 @@ def normalize_color_preferences(value) -> dict:
         result["solid"] = solid
     else:
         result["solid"] = copy.deepcopy(DEFAULT_SOLID_COLORS)
+    # ⚠ The iteration palette's SIZE is part of its contract, not just its
+    # colours: ``_iter_color`` indexes ``round(k/(n-1) * (len-1))``, so a stop
+    # the defaults no longer declare makes that mapping skip one and mis-colour
+    # the last iterations. ``_merge`` keeps a saved key the defaults lack, so a
+    # customised palette would carry a retired stop forever; prune it here as
+    # well as in the one-shot migration, so it can never come back.
+    functions = result.setdefault("functions", {})
+    series = functions.get("Iteration series")
+    declared = DEFAULT_COLOR_PREFS["functions"]["Iteration series"]
+    if isinstance(series, Mapping):
+        functions["Iteration series"] = {
+            name: color for name, color in series.items() if name in declared
+        }
+
     viewer = result.setdefault("viewer", {})
     # The single pre-split ROI color seeds face/edge/highlight, so an existing
     # preference carries over instead of silently reverting to the default.

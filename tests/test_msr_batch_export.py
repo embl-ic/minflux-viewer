@@ -821,15 +821,68 @@ def test_export_reports_one_progress_unit_per_dataset_and_image(tmp_path,
         {"raw_index": 0, "name": "img"}])
     monkeypatch.setattr(mod, "export_image_series", lambda *a, **k: None)
     import minflux_viewer.msr.export as export_mod
-    monkeypatch.setattr(export_mod, "export_arrays", lambda *a, **k: None)
+    def _fake_export(*_a, on_prepared=None, on_format=None, **_k):
+        if on_prepared is not None:
+            on_prepared()
+        if on_format is not None:
+            on_format("mat")
+
+    monkeypatch.setattr(export_mod, "export_arrays", _fake_export)
 
     seen = []
     mod.export_parsed_result(
         parsed, mod.state_namespace_for(parsed), str(tmp_path), ["mat"],
-        image_indices={0}, progress=lambda d, t: seen.append((d, t)))
+        image_indices={0},
+        progress=lambda d, t, label="": seen.append((d, t, label)))
 
-    # 2 datasets + 1 image series = 3 units, counted up to the total.
-    assert seen == [(1, 3), (2, 3), (3, 3)]
+    # Progress is reported per written file, not per dataset: each dataset
+    # reports its canonical preparation and then its format write, and the image
+    # series reports itself. The last call must land exactly on the total.
+    assert [label for _d, _t, label in seen] == [
+        "a", "a · mat", "b", "b · mat", "img"]
+    totals = {t for _d, t, _l in seen}
+    assert len(totals) == 1
+    assert seen[-1][0] == pytest.approx(seen[-1][1])
+    # Monotonically non-decreasing, never past the total.
+    assert all(a[0] <= b[0] for a, b in zip(seen, seen[1:]))
+
+
+def test_progress_weights_track_the_measured_cost_of_each_format():
+    """A CSV/JSON write dominates a run; the budget must say so.
+
+    Counting one unit per dataset is what made the bar sit at a single value:
+    on a one-dataset file exported to every format, the whole slow part was a
+    single tick.
+    """
+    from minflux_viewer.msr.export import (
+        dataset_prepare_weight, dataset_work_weight, format_work_weight,
+    )
+
+    assert format_work_weight("json") > format_work_weight("csv")
+    assert format_work_weight("csv") > format_work_weight("mat")
+    assert format_work_weight("mat") > format_work_weight("zarr")
+    assert format_work_weight("zarr") > format_work_weight("npy")
+    assert format_work_weight(".JSON") == format_work_weight("json")
+
+    # Writing the same dataset as JSON is most of a mixed-format run.
+    rows = 1_000_000
+    every = ["npy", "mat", "csv", "json"]
+    total = dataset_work_weight(rows, every)
+    json_share = format_work_weight("json") * rows / 1_000_000
+    assert json_share / total > 0.5
+
+    # Twice the rows is (essentially) twice the work.
+    assert (dataset_work_weight(2 * rows, every)
+            > 1.9 * dataset_work_weight(rows, every))
+
+    # Building the canonical dataset is charged separately and is part of the
+    # same budget, so the ticks can never overshoot the total.
+    assert dataset_prepare_weight(rows) < dataset_work_weight(rows, every)
+    assert (dataset_prepare_weight(rows)
+            + sum(format_work_weight(f) for f in every) * rows / 1_000_000
+            == pytest.approx(dataset_work_weight(rows, every)))
+    # A dataset with no rows still costs something, so it moves the bar.
+    assert dataset_prepare_weight(0) > 0.0
 
 
 def test_batch_task_runs_files_and_reports_progress(tmp_path, monkeypatch):

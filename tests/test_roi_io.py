@@ -74,3 +74,39 @@ def test_rotated_rectangle_exports_as_polygon(tmp_path):
     assert pts.shape[0] >= 4
     # the polygon is rotated (not axis-aligned): some vertex y differs from the corners
     assert pts[:, 1].max() > 40  # rotation pushes a corner beyond the unrotated height
+
+
+def test_loading_a_roi_set_tolerates_keys_the_record_does_not_have():
+    """``RoiRecord(**item)`` raised on any extra key, with a message about
+    ``__init__`` that said nothing about the file.
+
+    Saved sets legitimately carry extras — ``dataset_id`` is written per member
+    of a Zarr project — and a set written by a newer version will carry more.
+    """
+    from minflux_viewer.core.roi import roi_record_from_dict
+
+    record = roi_record_from_dict({
+        "id": "abc", "name": "rectangle-1", "type": "rectangle",
+        "geometry": {"bounds": [0.0, 0.0, 10.0, 10.0]},
+        "dataset_id": "d000000", "a_field_from_the_future": 7,
+    })
+    assert record.name == "rectangle-1" and record.type == "rectangle"
+    # Dropped, but named rather than silently discarded.
+    assert record.context["unrecognised_keys"] == ["a_field_from_the_future",
+                                                   "dataset_id"]
+
+
+def test_a_roi_set_with_extra_keys_loads_through_the_store(tmp_path):
+    import json
+
+    from minflux_viewer.core.roi import RoiStore
+
+    path = tmp_path / "regions.json"
+    path.write_text(json.dumps({"version": 1, "rois": [
+        {"id": "a", "name": "r1", "type": "rectangle",
+         "geometry": {"bounds": [0, 0, 4, 4]}, "dataset_id": "d0"},
+    ]}), encoding="utf-8")
+
+    store = RoiStore()
+    records = store.load(path)
+    assert len(records) == 1 and records[0].name == "r1"

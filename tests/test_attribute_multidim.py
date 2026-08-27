@@ -1083,8 +1083,11 @@ def test_gpu_mode_falls_back_when_the_canvas_draws_nothing(monkeypatch, _qt_app)
 def test_stacked_iterations_use_a_ramp_spread_over_the_series(_qt_app):
     """Iterations are ordered, so their colours run as an ordered ramp.
 
-    And the ramp is spread over the iterations actually drawn: three of them
-    should still run end to end, not sit together in the ramp's dark corner.
+    The ramp is ``jet`` sampled at ten points, blue to red (see
+    ``tests/test_iteration_colors.py`` for the palette itself). What matters
+    here is that it is *spread over the iterations actually drawn* — three of
+    them should still run end to end rather than sitting together in one corner
+    — and that the two plots colour the same series identically.
     """
     from minflux_viewer.core.app_state import default_prefs
     from minflux_viewer.ui.attribute_window import _iter_color
@@ -1092,10 +1095,11 @@ def test_stacked_iterations_use_a_ramp_spread_over_the_series(_qt_app):
 
     prefs = default_prefs()
     ten = [_iter_color(prefs, k, 10)[:3] for k in range(10)]
-    assert ten[0] == (68, 1, 84) and ten[-1] == (253, 231, 37)   # viridis ends
-    # Monotone in luminance: neighbouring iterations are ordered, not random.
-    luminance = [0.2126 * r + 0.7152 * g + 0.0722 * b for r, g, b in ten]
-    assert luminance == sorted(luminance)
+    assert ten[0] == (0, 0, 127) and ten[-1] == (127, 0, 0)      # jet, blue -> red
+    # Ten iterations onto ten stops is the identity: no stop is skipped, so the
+    # drawn series always matches its legend swatch.
+    assert all(a != b for a, b in zip(ten, ten[1:]))
+    assert len(set(ten)) == len(ten)
 
     three = [_iter_color(prefs, k, 3)[:3] for k in range(3)]
     assert three[0] == ten[0] and three[-1] == ten[-1]

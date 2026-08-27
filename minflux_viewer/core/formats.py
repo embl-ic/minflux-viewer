@@ -59,6 +59,7 @@ class OpenAction(str, Enum):
     ROI_MANAGER = "roi_manager"          # ROI set -> ROI Manager
     FILTER_DIALOG = "filter_dialog"      # filter preset -> Filter dialog rows
     METADATA_RECIPE = "metadata_recipe"  # sidecar -> applied to a dataset
+    MBM_INFO = "mbm_info"                # standalone bead table -> MBM info window
 
 
 @dataclass(frozen=True)
@@ -156,18 +157,34 @@ FORMATS: tuple[FormatSpec, ...] = (
     FormatSpec(
         "roi_set", "ROI set", (".json", ".roi", ".zip"), OpenAction.ROI_MANAGER,
         detect="minflux_viewer.core.roi:is_roi_json_file",
-        detect_order=10, drop_on_dataset=True,
+        detect_order=20, drop_on_dataset=True,
     ),
     FormatSpec(
         "filter_preset", "Filter preset", (".json",), OpenAction.FILTER_DIALOG,
         detect="minflux_viewer.core.filter_io:is_filter_json_file",
-        detect_order=20, drop_on_dataset=True,
+        detect_order=30, drop_on_dataset=True,
     ),
     FormatSpec(
         "metadata_sidecar", "Processing metadata sidecar", (".json",),
         OpenAction.METADATA_RECIPE,
         detect="minflux_viewer.core.save:is_metadata_json_file",
-        detect_order=30, drop_on_dataset=True,
+        # ⚠ FIRST of the .json kinds. It is the only one that identifies itself
+        # by a dedicated top-level marker; the ROI-set and filter-preset tests
+        # are shape/key-intersection guesses, and a sidecar legitimately carries
+        # both a "rois" list and filter specs, so on shape it looks like either.
+        # The strongest claim has to be asked first.
+        detect_order=10, drop_on_dataset=True,
+    ),
+    # --- a component, not a dataset ---------------------------------------
+    FormatSpec(
+        "mbm_points", "MBM bead companion",
+        (".mat", ".npy", ".json", ".csv"), OpenAction.MBM_INFO,
+        detect="minflux_viewer.core.mbm_file:is_mbm_points_file",
+        detect_order=40,
+        notes="The '<stem>_mbm' companion the MSR reader writes beside the "
+              "localizations, because these formats cannot carry both in one "
+              "file. It is bead reference data, not localizations, so it opens "
+              "the MBM info window rather than loading as an (empty) dataset.",
     ),
 )
 

@@ -174,11 +174,13 @@ class _UpdateCheckTask(QRunnable):
         self._cancelled = True
 
     def run(self) -> None:  # noqa: N802 - Qt API
+        from ..core.task_registry import track
         from ..core.updater import UpdateCheckResult, check_for_update
-        try:
-            result = check_for_update(self._current)
-        except Exception as exc:  # never let a worker exception escape
-            result = UpdateCheckResult("error", self._current, None, str(exc))
+        with track("Check for updates", "update", cancel=self.cancel):
+            try:
+                result = check_for_update(self._current)
+            except Exception as exc:  # never let a worker exception escape
+                result = UpdateCheckResult("error", self._current, None, str(exc))
         if not self._cancelled:
             self.signals.done.emit(result)
 
@@ -209,11 +211,22 @@ class _ZarrIoTask(QRunnable):
         self.signals = _ZarrIoSignals()
 
     def run(self) -> None:  # noqa: N802 - Qt API
+        from ..core.task_registry import registry as task_registry
+
+        # No cancel=: a Zarr read/write is one uninterruptible numpy/blosc call,
+        # so there is no checkpoint to honour a stop at. The monitor shows it as
+        # not stoppable rather than offering a button that does nothing.
+        handle = task_registry.register(self.description, "zarr")
+        handle.start()
         try:
-            result = self._fn(self.signals.stage.emit)
+            result = self._fn(
+                lambda stage: (handle.update(detail=str(stage)),
+                               self.signals.stage.emit(stage))[1])
         except Exception as exc:                                # noqa: BLE001
+            handle.finish("failed", detail=str(exc))
             self.signals.failed.emit(str(exc))
         else:
+            handle.finish("done")
             self.signals.done.emit(result)
 
 
@@ -243,21 +256,32 @@ class _OmeZarrTask(QRunnable):
         self._cancelled = True
 
     def run(self) -> None:  # noqa: N802 - Qt API
+        from ..core.task_registry import registry as task_registry
+
+        handle = task_registry.register(
+            "OME-Zarr export", "export", cancel=self.cancel)
+        handle.start()
+
         def report(fraction: float, stage: str) -> None:
             if self._cancelled:
                 raise _OmeZarrCancelled()
+            handle.update(progress=float(fraction), detail=str(stage))
             self.signals.progress.emit(float(fraction), str(stage))
 
         try:
             result = self._fn(report)
         except _OmeZarrCancelled:
+            handle.finish("cancelled")
             self.signals.cancelled.emit()
         except Exception as exc:
             if self._cancelled:
+                handle.finish("cancelled")
                 self.signals.cancelled.emit()
             else:
+                handle.finish("failed", detail=str(exc))
                 self.signals.failed.emit(str(exc))
         else:
+            handle.finish("cancelled" if self._cancelled else "done")
             if not self._cancelled:
                 self.signals.done.emit(result)
 
@@ -372,6 +396,7 @@ class MainWindow(QMainWindow):
         self._log_win       = None
         self._console_win   = None
         self._memory_win    = None
+        self._task_monitor_win = None
         self._roi_manager_win = None
         self._script_editor_win = None
         self._color_dialog = None
@@ -470,6 +495,7 @@ class MainWindow(QMainWindow):
         state.status_message.connect(self._status_label.setText)
         state.log_message.connect(self._on_log_message)
         state.colors_changed.connect(self._on_colors_changed)
+        state.colormap_order_changed.connect(self._on_colormap_order_changed)
         state.overlay_manual_alignment_requested.connect(
             self._on_overlay_manual_alignment_requested
         )
@@ -487,6 +513,19 @@ class MainWindow(QMainWindow):
         self._is_shutting_down = False
         self._update_tasks: set = set()
         self._ome_zarr_tasks: set = set()
+        #: At most ONE processing recipe held for a dataset not yet
+        #: loaded, as ``(path, payload)``. A second one replaces it, and
+        #: it is dropped as soon as a dataset is added that it does not
+        #: match -- see ``_take_pending_metadata``. Session-only: a stale
+        #: recipe applying itself days later would be worse than none.
+        self._pending_metadata: tuple = ()
+        #: Sidecar paths named explicitly in the drop/argv batch being
+        #: routed, so a data file dropped WITH its recipe applies it
+        #: without asking (the user already said so by dropping both).
+        self._batch_sidecars: dict = {}
+        #: Batch sidecars already consumed by their data file, so the recipe is
+        #: not routed a second time on its own.
+        self._batch_sidecars_used: set = set()
         if state.prefs.get("file", {}).get("check_updates_on_startup", False):
             QTimer.singleShot(3000, self._maybe_startup_update_check)
 
@@ -821,6 +860,10 @@ class MainWindow(QMainWindow):
         self.actionCommandFinder = QAction("Command Finder…", self)
         self.actionCommandFinder.setStatusTip("Search all menu commands (Fiji-style)")
         self.actionCommandFinder.triggered.connect(lambda: self._open_command_finder(""))
+        self.actionTaskMonitor = QAction("Monitor Tasks...", self)
+        self.actionTaskMonitor.setStatusTip(
+            "Background tasks and threads in flight; ask a task to stop")
+        self.actionTaskMonitor.triggered.connect(self._show_task_monitor)
         self.actionCheckUpdates = QAction("Check for Updates…", self)
         self.actionCheckUpdates.triggered.connect(
             lambda: self._check_for_updates(silent=False)
@@ -1030,6 +1073,9 @@ class MainWindow(QMainWindow):
         u.menuHelp.clear()
         u.menuHelp.addAction(u.actionConsole)
         u.menuHelp.addAction(u.actionMemoryMonitor)
+        task_monitor = getattr(self, "actionTaskMonitor", None)
+        if task_monitor is not None:                    # beside Monitor Memory
+            u.menuHelp.addAction(task_monitor)
         cf = getattr(self, "actionCommandFinder", None)
         if cf is not None:                              # between Monitor Memory & Updates
             u.menuHelp.addAction(cf)
@@ -1747,18 +1793,20 @@ class MainWindow(QMainWindow):
                 self._load_filter_json(path)
                 return
             if action is _formats.OpenAction.METADATA_RECIPE:
-                # A recipe needs a dataset to act on; dropped on the main window
-                # there is no target. Dropping it on a dataset row applies it.
-                self._state.log(
-                    f"'{p.name}' is a processing metadata sidecar, not loadable "
-                    f"data — drop it on a dataset row to apply it.", "WARN")
-                self._status_label.setText(f"Skipped: {p.name} (metadata sidecar)")
+                # A recipe needs a dataset to act on, so this asks which one --
+                # every loaded dataset is offered and the match only picks the
+                # default, because applying a saved processing to another copy
+                # (or another dataset) is a legitimate thing to want.
+                self._open_metadata_sidecar(path)
                 return
             if action is _formats.OpenAction.MSR_READER:
                 self._open_msr_dialog(path)
                 return
             if action is _formats.OpenAction.IMAGE_VIEWER:
                 self._load_tiff(path)
+                return
+            if action is _formats.OpenAction.MBM_INFO:
+                self._load_mbm_companion(path)
                 return
 
         # Dataset and spreadsheet paths still go through content sniffing, which
@@ -1803,8 +1851,9 @@ class MainWindow(QMainWindow):
                     f"Folder dropped: found {len(found)} supported file(s) in '{p.name}'",
                     "INFO",
                 )
-                for f in found:
-                    self._route_file(str(f))
+                # Through the batch router, so a folder holding a data file
+                # and its recipe pairs them exactly as dropping both does.
+                self.route_paths([str(f) for f in found])
             else:
                 msg = (
                     f"Folder '{p.name}' contains no supported files "
@@ -1822,7 +1871,8 @@ class MainWindow(QMainWindow):
         self._state.log(f"Opening .mat: {path}", "INFO")
         try:
             from ..core.loader import load_dataset
-            dataset = load_dataset(path, prefs=self._state.prefs)
+            dataset = load_dataset(path, prefs=self._state.prefs,
+                                  apply_sidecar=self._sidecar_for_load(path))
             self._state.add_dataset(dataset)
         except Exception as exc:
             self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
@@ -1834,7 +1884,8 @@ class MainWindow(QMainWindow):
         self._state.log(f"Opening .npy: {path}", "INFO")
         try:
             from ..core.loader import load_npy
-            dataset = load_npy(path, prefs=self._state.prefs)
+            dataset = load_npy(path, prefs=self._state.prefs,
+                                  apply_sidecar=self._sidecar_for_load(path))
             self._state.add_dataset(dataset)
         except Exception as exc:
             self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
@@ -1846,7 +1897,8 @@ class MainWindow(QMainWindow):
         self._state.log(f"Opening .npz: {path}", "INFO")
         try:
             from ..core.loader import load_npz
-            dataset = load_npz(path, prefs=self._state.prefs)
+            dataset = load_npz(path, prefs=self._state.prefs,
+                                  apply_sidecar=self._sidecar_for_load(path))
             self._state.add_dataset(dataset)
         except Exception as exc:
             self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
@@ -1969,19 +2021,63 @@ class MainWindow(QMainWindow):
             self._show_roi_manager()
             self._state.log(f"Restored {added} ROI(s) into the ROI Manager.")
 
+    def _load_mbm_companion(self, path: str) -> None:
+        """Open a standalone ``_mbm`` bead table in the MBM info window.
+
+        ``.mat`` / ``.npy`` / ``.json`` / ``.csv`` cannot hold localizations and
+        their bead reference together, so the MSR reader writes the beads as a
+        companion file. It is not a dataset -- loading it as one produced an
+        error or an empty dataset -- so it goes straight to the same window
+        *View mbm info...* opens for a loaded dataset.
+        """
+        from ..core.mbm_file import read_mbm_points
+        from ..plugins.msr_reader.beads_drift import extract_bead_drift
+        from .mbm_info_window import MbmInfoWindow
+        from .modeless import show_modeless
+
+        name = Path(path).name
+        self._status_label.setText(f"Loading {name}…")
+        try:
+            points = read_mbm_points(path)
+            beads = extract_bead_drift(points, {}, [])
+        except Exception as exc:                            # noqa: BLE001
+            self._state.log(f"Failed to read MBM companion '{name}': {exc}", "ERROR")
+            QMessageBox.critical(self, "MBM companion", str(exc))
+            self._status_label.setText("Load failed.")
+            return
+        if not beads:
+            msg = (f"'{name}' is an MBM bead table but carries no usable bead "
+                   "traces (no gri / xyz / tim rows).")
+            self._state.log(msg, "WARN")
+            QMessageBox.information(self, "MBM companion", msg)
+            self._status_label.setText(f"Skipped: {name} (no bead traces)")
+            return
+        # No localizations accompany a companion file, so there is no data
+        # region box to draw the beads against.
+        win = MbmInfoWindow(name, beads, data_bounds_nm=None)
+        show_modeless(win, self)
+        self._state.log(
+            f"Opened MBM companion '{name}': {len(beads)} bead(s), "
+            f"{int(points.size):,} recorded position(s).")
+        self._status_label.setText(f"MBM info: {name}")
+
     def _load_csv(self, path: str) -> None:
         # CSV/TSV/TXT all go through the smart spreadsheet importer.
         self._load_spreadsheet(path)
 
     def _load_spreadsheet(self, path: str) -> None:
-        # Always open the column-mapping dialog (pre-filled from a value-based
-        # best guess of x/y/z/tid/tim + units) so the user confirms/corrects the
-        # mapping before importing — never a silent auto-import.
+        # A table this application wrote is recognised by its headers and loaded
+        # directly; anything else opens the column-mapping dialog (pre-filled
+        # from a value-based best guess of x/y/z/tid/tim + units) so the user
+        # confirms the mapping — never a silent *generic* import.
         self._status_label.setText(f"Loading {Path(path).name}…")
         self._state.log(f"Opening spreadsheet: {path}", "INFO")
         try:
             from .spreadsheet_import_dialog import import_spreadsheet
-            dataset = import_spreadsheet(path, prefs=self._state.prefs, parent=self)
+            dataset = import_spreadsheet(
+                path, prefs=self._state.prefs, parent=self,
+                log=lambda msg: self._state.log(msg, "INFO"),
+                apply_sidecar=self._sidecar_for_load(path))
             if dataset is None:
                 self._status_label.setText("Spreadsheet import cancelled.")
                 return
@@ -2016,7 +2112,7 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 self._tiff_windows.pop(key, None)
         from .tiff_viewer_window import TiffViewerWindow
-        win = TiffViewerWindow(source)
+        win = TiffViewerWindow(source, state=self._state)
         win.destroyed.connect(lambda _=None, k=key: self._tiff_windows.pop(k, None))
         self._tiff_windows[key] = win
         win.show()
@@ -2083,7 +2179,8 @@ class MainWindow(QMainWindow):
                 return
         try:
             from ..core.loader import load_json
-            dataset = load_json(path, prefs=self._state.prefs)
+            dataset = load_json(path, prefs=self._state.prefs,
+                                apply_sidecar=self._sidecar_for_load(path))
             self._state.add_dataset(dataset)
             return
         except Exception as data_exc:
@@ -2130,6 +2227,10 @@ class MainWindow(QMainWindow):
             ctx = dict(r.context) if isinstance(r.context, dict) else {}
             if isinstance(idx, int):
                 ctx["dataset_idx"] = idx
+            # An ImageJ .roi/.zip carries no family, and neither does a native
+            # set saved before scoping existed; both are spatial. Only fill it
+            # in when absent, so a saved histogram band keeps its own family.
+            ctx.setdefault("source_view", "render")
             r.context = ctx
             r.selection_dirty = True
         self._state.rois.set_show_all(True)
@@ -3508,7 +3609,10 @@ class MainWindow(QMainWindow):
                 {"bounds": [float(cx) - side / 2.0, float(cy) - side / 2.0, side, side]},
                 name=name, coordinate_space="plot",
                 stroke_color=stroke)
-            rec.context = {"dataset_idx": idx, "source": source}
+            # source_view scopes it to the coordinate views (render/scatter):
+            # a detected region is spatial and must not land on a histogram.
+            rec.context = {"dataset_idx": idx, "source": source,
+                           "source_view": "render"}
             self._state.rois.add(rec)
         self._state.rois.set_show_all(True)
         self._show_render(idx)
@@ -3537,7 +3641,10 @@ class MainWindow(QMainWindow):
             rec = RoiRecord.create(
                 "point", {"point": [float(cx), float(cy), float(cz)]},
                 name=name, coordinate_space="plot", stroke_color=stroke)
-            rec.context = {"dataset_idx": idx, "source": source}
+            # source_view scopes it to the coordinate views (render/scatter):
+            # a detected region is spatial and must not land on a histogram.
+            rec.context = {"dataset_idx": idx, "source": source,
+                           "source_view": "render"}
             self._state.rois.add(rec)
         self._state.rois.set_show_all(True)
         self._show_render(idx)
@@ -3579,7 +3686,10 @@ class MainWindow(QMainWindow):
                 record_type,
                 {"points": pts.tolist(), "closed": False},
                 name=name, coordinate_space="plot", stroke_color=stroke)
-            rec.context = {"dataset_idx": idx, "source": source}
+            # source_view scopes it to the coordinate views (render/scatter):
+            # a detected region is spatial and must not land on a histogram.
+            rec.context = {"dataset_idx": idx, "source": source,
+                           "source_view": "render"}
             self._state.rois.add(rec)
             added += 1
         if added:
@@ -3624,7 +3734,10 @@ class MainWindow(QMainWindow):
             rec = RoiRecord.create(
                 "polygon", {"points": pts.tolist(), "closed": True},
                 name=name, coordinate_space="plot", stroke_color=stroke)
-            rec.context = {"dataset_idx": idx, "source": source}
+            # source_view scopes it to the coordinate views (render/scatter):
+            # a detected region is spatial and must not land on a histogram.
+            rec.context = {"dataset_idx": idx, "source": source,
+                           "source_view": "render"}
             self._state.rois.add(rec)
             added += 1
         if added:
@@ -4210,6 +4323,22 @@ class MainWindow(QMainWindow):
             refresh = getattr(win, "refresh_preferences", None)
             if callable(refresh):
                 refresh()
+
+    def _on_colormap_order_changed(self) -> None:
+        """Rebuild the colormap selectors that are built once and kept.
+
+        A menu is rebuilt every time it opens and needs nothing; a ``QComboBox``
+        populated in a window's constructor does.
+        """
+        for registry in (self._scatter_windows, self._render_windows,
+                         self._attr_windows, self._attr_cpu_windows):
+            for window in list(registry.values()):
+                refresh = getattr(window, "refresh_colormap_list", None)
+                if callable(refresh):
+                    try:
+                        refresh()
+                    except RuntimeError:
+                        continue
 
     def _on_colors_changed(self, payload) -> None:
         """Repaint only consumers touched by a global color change."""
@@ -5115,6 +5244,15 @@ class MainWindow(QMainWindow):
                     luts[idx] = str(ch.get("lut") or "")
         return {idx: lut for idx, lut in luts.items() if lut}
 
+    def _show_task_monitor(self) -> None:
+        """Open (or raise) the background-task monitor (Help → Monitor Tasks…)."""
+        if getattr(self, "_task_monitor_win", None) is None:
+            from .task_monitor import TaskMonitor
+            self._task_monitor_win = TaskMonitor(self._state, parent=self)
+        self._task_monitor_win.show()
+        self._task_monitor_win.raise_()
+        self._task_monitor_win.activateWindow()
+
     def _show_memory_monitor(self) -> None:
         """Open (or raise) the memory monitor (Help → Monitor memory…)."""
         if getattr(self, "_memory_win", None) is None:
@@ -5386,10 +5524,150 @@ class MainWindow(QMainWindow):
     # Files dropped ONTO a dataset (Dataset Manager row drop)
     # ------------------------------------------------------------------
 
-    #: Extensions a Dataset-Manager row accepts, and what each does to that
-    #: dataset.  A ``.json`` is ambiguous on extension alone, so it is resolved
-    #: by content (ROI set / filter preset / metadata sidecar).
-    DROP_ON_DATASET_EXTS = _formats.drop_on_dataset_extensions()
+    #: Extensions a Dataset-Manager row accepts.  Two different verbs share it:
+    #: the *apply to this dataset* kinds (a ROI set, a filter preset, a
+    #: processing recipe, a confocal TIFF -- a ``.json`` is ambiguous on
+    #: extension alone and is resolved by content), and every openable data
+    #: format, which the row cannot meaningfully receive and is therefore opened
+    #: as a NEW dataset.  Both are accepted because refusing a data file dropped
+    #: on the manager -- the window that lists datasets -- reads as a bug.
+    DROP_ON_DATASET_EXTS = tuple(dict.fromkeys(
+        _formats.drop_on_dataset_extensions() + _formats.supported_extensions()))
+
+    # ------------------------------------------------------------------
+    # Processing metadata (``<stem>_metadata.json``)
+    # ------------------------------------------------------------------
+    def apply_metadata_to_dataset(self, idx: int, meta: dict, source: str) -> bool:
+        """Apply a parsed recipe to dataset *idx* and bring the UI in line.
+
+        ⚠ ``apply_metadata_recipe`` only writes ROI records into
+        ``ds.metadata``; it is ``_post_load_finalize`` that puts them in the ROI
+        Manager, and that runs at *dataset-load* time. Applying a recipe to an
+        already-loaded dataset therefore reported "3 ROI(s)" and left the
+        Manager empty. Every apply path goes through here so the ROIs and the
+        filter dialog actually appear.
+        """
+        from ..core.loader import apply_metadata_recipe
+
+        if not (0 <= idx < len(self._state.datasets)):
+            return False
+        ds = self._state.datasets[idx]
+        try:
+            applied = apply_metadata_recipe(ds, meta)
+        except Exception as exc:
+            self._state.log(f"Processing metadata '{source}' on '{ds.name}': {exc}",
+                            "ERROR")
+            QMessageBox.critical(self, "Apply processing metadata", str(exc))
+            return False
+        if not applied:
+            self._state.log(
+                f"Processing metadata '{source}' on '{ds.name}': nothing to "
+                "apply (empty recipe).", "WARN")
+            return True
+        self._state.log(
+            f"Applied '{source}' to '{ds.name}': " + ", ".join(applied) + ".",
+            dataset_idx=idx)
+        self._state.notify_filter_changed(idx)
+        self._state.notify_calibration_changed(idx)
+        self._restore_saved_rois(ds, idx)
+        self._show_saved_filters(ds, idx)
+        self._refresh_overlay_windows()
+        return True
+
+    def _remember_pending_metadata(self, path, meta: dict) -> None:
+        """Hold one recipe for a dataset not yet loaded (points 3.1 / 4).
+
+        Deliberately inert: nothing is opened, no Filter dialog, no ROI Manager
+        — there is no dataset for them to describe yet.
+        """
+        previous = self._pending_metadata
+        self._pending_metadata = (Path(path), dict(meta))
+        if previous:
+            self._state.log(
+                f"Processing metadata '{Path(path).name}' held; replaced the "
+                f"pending '{previous[0].name}' (only one is kept).", "WARN")
+        else:
+            self._state.log(
+                f"Processing metadata '{Path(path).name}' held — it will be "
+                "applied to the next matching dataset loaded, and discarded "
+                "otherwise.")
+
+    def _take_pending_metadata(self, ds) -> tuple:
+        """Consume the pending recipe for a just-added *ds*, or drop it.
+
+        The lifetime is one dataset load, by design: the expected next action
+        after loading a recipe is loading its data. Anything else and the
+        recipe is discarded (reported to the Log, never a dialog).
+        """
+        pending = self._pending_metadata
+        if not pending:
+            return ()
+        from ..core.metadata_match import match_kind
+
+        path, meta = pending
+        self._pending_metadata = ()
+        kind = match_kind(meta, ds)
+        if kind is None:
+            self._state.log(
+                f"Pending processing metadata '{path.name}' discarded — "
+                f"'{getattr(ds, 'name', '?')}' does not match it.", "WARN")
+            return ()
+        return path, meta, kind
+
+    def _sidecar_for_load(self, path) -> bool:
+        """Whether the recipe beside *path* may be applied — asks if needed.
+
+        Point 1: a sidecar is never restored silently. The question is asked
+        **before** the data is read, so the answer is simply passed to the
+        loader and nothing has to be undone afterwards. A sidecar named in the
+        same drop is not asked about — dropping both files IS the answer.
+        """
+        from ..core.loader import read_metadata_sidecar
+
+        found = read_metadata_sidecar(path)
+        if found is None:
+            return False
+        side, meta = found
+        key = str(side.resolve()).casefold()
+        if key in self._batch_sidecars:
+            self._batch_sidecars_used.add(key)
+            self._state.log(
+                f"'{side.name}' was dropped together with its data — applying "
+                "it without asking.")
+            return True
+        from .metadata_apply_dialog import LOAD, ask_load_sidecar
+
+        choice = ask_load_sidecar(self, Path(path).name, side.name, meta)
+        if choice != LOAD:
+            self._state.log(
+                f"Processing metadata '{side.name}' skipped by the user; "
+                f"'{Path(path).name}' opened unprocessed.")
+            return False
+        return True
+
+    def _open_metadata_sidecar(self, path: str) -> None:
+        """A recipe dropped on the main window: ask which dataset it acts on."""
+        from ..core.loader import read_metadata_file
+        from .metadata_apply_dialog import APPLY, KEEP, ask_apply_metadata
+
+        name = Path(path).name
+        meta = read_metadata_file(path)
+        if meta is None:
+            self._state.log(
+                f"'{name}' is not a readable processing metadata file.", "ERROR")
+            self._status_label.setText(f"Skipped: {name}")
+            return
+        choice, index = ask_apply_metadata(self, name, meta, self._state.datasets)
+        if choice == APPLY and index is not None:
+            self.apply_metadata_to_dataset(index, meta, name)
+            self._status_label.setText(f"Applied {name}.")
+            return
+        if choice == KEEP:
+            self._remember_pending_metadata(path, meta)
+            self._status_label.setText(f"Holding {name}.")
+            return
+        self._state.log(f"Processing metadata '{name}' cancelled.")
+        self._status_label.setText(f"Cancelled: {name}")
 
     def drop_file_on_dataset(self, idx: int, path: str) -> bool:
         """Apply a dropped file to the dataset at *idx*.  Returns True if handled.
@@ -5418,7 +5696,11 @@ class MainWindow(QMainWindow):
 
         if ext in (".tif", ".tiff"):
             return self._drop_confocal_tiff(idx, p)
-        if ext in (".roi", ".zip"):
+        # ⚠ Compound suffix first: a ``.zarr.zip`` is a sealed dataset store,
+        # not a RoiSet archive, and both end in ``.zip``.
+        if p.name.lower().endswith(".zarr.zip"):
+            ext = ".zarr.zip"
+        elif ext in (".roi", ".zip"):
             return self._drop_roi_file(idx, p)
         if ext == ".json":
             # Resolve by content — the three JSON kinds share an extension.
@@ -5437,10 +5719,19 @@ class MainWindow(QMainWindow):
                 self._state.log(f"Drop on '{ds.name}': could not read '{p.name}': {exc}",
                                 "ERROR")
                 return False
+            # Not one of the three annotation kinds — it may still be a data
+            # file or an MBM companion, so let the open path decide rather than
+            # refusing a .json the application can read.
+
+        # Not an apply-to-a-dataset kind. If the application can open it at
+        # all, open it -- the row is simply not a meaningful target for a data
+        # file, which the Log says rather than leaving the drop looking broken.
+        if ext in _SUPPORTED_EXTS or (p.is_dir() and ext == ".zarr"):
             self._state.log(
-                f"Drop on '{ds.name}': '{p.name}' is not a ROI set, filter preset "
-                "or metadata sidecar.", "WARN")
-            return False
+                f"Drop on '{ds.name}': '{p.name}' is a data file — opening it "
+                "as a new dataset (the row it was dropped on is not used).")
+            self._route_path(str(p))
+            return True
 
         self._state.log(
             f"Drop on '{ds.name}': '{p.name}' cannot be applied to a dataset "
@@ -5465,29 +5756,43 @@ class MainWindow(QMainWindow):
         return True
 
     def _drop_metadata_sidecar(self, idx: int, path: Path) -> bool:
-        """Apply a dropped processing-recipe sidecar to the row's dataset."""
-        from ..core.loader import apply_metadata_sidecar_file
+        """Apply a dropped processing recipe to the row's dataset, once confirmed.
+
+        The row already names the target, so this asks only *whether* to apply
+        — never silently, because a recipe changes Z scaling, filters and ROIs.
+        """
+        from ..core.loader import read_metadata_file
+        from ..core.metadata_match import (
+            is_snapshot_recipe,
+            match_kind,
+            recipe_summary,
+        )
+        from .metadata_apply_dialog import SNAPSHOT_WARNING
 
         ds = self._state.datasets[idx]
-        try:
-            applied = apply_metadata_sidecar_file(ds, path)
-        except Exception as exc:
-            self._state.log(f"Metadata sidecar '{path.name}' on '{ds.name}': {exc}",
-                            "ERROR")
-            QMessageBox.critical(self, "Apply processing metadata", str(exc))
-            return False
-        if not applied:
+        meta = read_metadata_file(path)
+        if meta is None:
             self._state.log(
-                f"Metadata sidecar '{path.name}' on '{ds.name}': nothing to apply "
-                "(empty recipe).", "WARN")
+                f"'{path.name}' is not a readable processing metadata file.",
+                "ERROR")
+            return False
+        text = (f"Apply the processing in '{path.name}' to '{ds.name}'?\n\n"
+                f"{recipe_summary(meta)}")
+        if match_kind(meta, ds) is None:
+            text += ("\n\nThis recipe does not identify this dataset — it was "
+                     "saved for other data. Filters and ROIs are added to what "
+                     "the dataset already has.")
+        if is_snapshot_recipe(meta):
+            text += f"\n\n⚠ {SNAPSHOT_WARNING}"
+        answer = QMessageBox.question(
+            self, "Apply processing metadata", text,
+            QMessageBox.StandardButton.Apply | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Apply,
+        )
+        if answer != QMessageBox.StandardButton.Apply:
+            self._state.log(f"Processing metadata '{path.name}' cancelled.")
             return True
-        self._state.log(
-            f"Applied '{path.name}' to '{ds.name}': " + ", ".join(applied) + ".",
-            dataset_idx=idx)
-        self._state.notify_filter_changed(idx)
-        self._state.notify_calibration_changed(idx)
-        self._refresh_overlay_windows()
-        return True
+        return self.apply_metadata_to_dataset(idx, meta, path.name)
 
     def _drop_confocal_tiff(self, idx: int, path: Path) -> bool:
         """Map a dropped TIFF onto the row's dataset as a confocal signal attribute."""
@@ -5827,6 +6132,9 @@ class MainWindow(QMainWindow):
         clone.id = uuid.uuid4().hex
         ctx = dict(clone.context) if isinstance(clone.context, dict) else {}
         ctx["dataset_idx"] = new_idx
+        # The copy belongs to the crop. Inheriting the source's manual sharing
+        # list would put it on datasets the user never chose it for.
+        ctx.pop("shared_datasets", None)
         clone.context = ctx
         clone.mask_key = ""
         clone.selected_count = None
@@ -7105,6 +7413,18 @@ class MainWindow(QMainWindow):
 
     def _on_dataset_added(self, idx: int) -> None:
         ds  = self._state.datasets[idx]
+        # A recipe loaded while its data was not yet open applies here, or is
+        # discarded -- its lifetime is exactly one dataset load.
+        pending = self._take_pending_metadata(ds)
+        if pending:
+            path, meta, kind = pending
+            from ..core.metadata_match import describe_match
+
+            self._state.log(
+                f"Pending processing metadata '{path.name}' matches "
+                f"'{ds.name}' ({describe_match(kind)}) — applying.",
+                dataset_idx=idx)
+            self.apply_metadata_to_dataset(idx, meta, path.name)
         win = DataWindow(ds, idx, self._state)
         offset = idx * 22
         win.move(120 + offset, 600 - offset)
@@ -7494,6 +7814,13 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
             self._reindex_window_map_after_remove(mapping, idx)
+        # ROI scopes hold absolute dataset indices, and removing a dataset
+        # shifts every later one — without this a ROI would silently be
+        # re-attributed to whatever now sits at its index.
+        from ..core.roi_scope import remap_dataset_indices
+
+        if remap_dataset_indices(self._state.rois.records, idx):
+            self._state.rois.changed.emit()
         self._notify_view_state_changed()
 
     def _reindex_window_map_after_remove(self, mapping: dict[int, QWidget], removed_idx: int) -> None:
@@ -7560,9 +7887,50 @@ class MainWindow(QMainWindow):
         event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:
-        for url in event.mimeData().urls():
-            self._route_path(url.toLocalFile())
+        self.route_paths([url.toLocalFile() for url in event.mimeData().urls()])
         event.acceptProposedAction()
+
+    def route_paths(self, paths) -> None:
+        """Open a whole batch of paths — a multi-file drop, or the command line.
+
+        The batch is classified **before** anything is routed, so a data file
+        dropped together with its ``_metadata.json`` applies the recipe without
+        asking: dropping both files is the answer to the question point 1 would
+        otherwise pose, and it must not be asked whichever of the two the OS
+        happens to list first. Routing them one at a time could not know a
+        sidecar was coming.
+
+        Data files are routed **first** for the same reason from the other
+        side: a recipe named in the batch then finds its dataset already loaded
+        instead of going through the pending-recipe path.
+        """
+        from ..core.save import is_metadata_json_file
+
+        paths = [str(path) for path in (paths or []) if str(path or "").strip()]
+        sidecars: dict = {}
+        for path in paths:
+            try:
+                if Path(path).is_file() and is_metadata_json_file(path):
+                    sidecars[str(Path(path).resolve()).casefold()] = path
+            except Exception:                                   # noqa: BLE001
+                continue
+        previous, previous_used = self._batch_sidecars, self._batch_sidecars_used
+        self._batch_sidecars, self._batch_sidecars_used = sidecars, set()
+        try:
+            data_first = [path for path in paths
+                          if str(Path(path).resolve()).casefold() not in sidecars]
+            for path in data_first:
+                self._route_path(path)
+            for key, path in sidecars.items():
+                # A recipe already consumed by its data file in this same batch
+                # is finished: routing it again would re-apply it and ask the
+                # very question dropping both files answered.
+                if key in self._batch_sidecars_used:
+                    continue
+                self._route_path(path)
+        finally:
+            self._batch_sidecars = previous
+            self._batch_sidecars_used = previous_used
 
     # ------------------------------------------------------------------
     # Helpers
@@ -7707,6 +8075,29 @@ class MainWindow(QMainWindow):
             self._state.log(f"LUT failed for active view: {exc}", "ERROR")
             return True
 
+    def _image_viewer_for_lut(self, active) -> "object | None":
+        """The image viewer the LUT button should act on, or ``None``.
+
+        The focused window wins; failing that the last plot window, if it is one;
+        failing that a lone open image viewer, so the button works right after an
+        image is opened and the main window has focus. With several open and none
+        focused there is no defensible target, so the dataset path runs instead.
+        """
+        windows = [win for win in self._tiff_windows.values() if win is not None]
+        for candidate in (active, getattr(self, "_last_active_plot_window", None)):
+            if candidate is not None and any(candidate is win for win in windows):
+                return candidate
+        visible = []
+        for win in windows:
+            try:
+                if win.isVisible():
+                    visible.append(win)
+            except RuntimeError:
+                continue
+        if len(visible) == 1 and self._state.active_dataset is None:
+            return visible[0]
+        return None
+
     def _show_lut(self) -> None:
         """Toolbar LUT button — open the LUT / colormap editor for the active
         view: render, scatter, Attribute Plot C dimension, or 3-D volume.
@@ -7717,6 +8108,24 @@ class MainWindow(QMainWindow):
         window) for one showing the active dataset.
         """
         active = QApplication.activeWindow()
+        # An image viewer is resolved first and WITHOUT a dataset: a TIFF /
+        # OME-TIFF is not a dataset (images stay outside the dataset model), so
+        # the dataset gate below would refuse the button for the very window the
+        # user is looking at.
+        image_view = self._image_viewer_for_lut(active)
+        if image_view is not None:
+            if image_view.open_lut_dialog():
+                self._close_other_lut_dialogs(image_view)
+                self._last_active_plot_window = image_view
+            else:
+                self._state.log(
+                    "LUT: this image plane is RGB, so it has no single channel "
+                    "to map. Convert it to a single channel first.", "WARN")
+                QMessageBox.information(
+                    self, "LUT",
+                    "This image plane is RGB — there is no single channel for a "
+                    "colormap to map.")
+            return
         if self._state.active_dataset is None:
             self._no_data_warning(); return
         idx = self._state.active_idx
@@ -8326,7 +8735,8 @@ class MainWindow(QMainWindow):
         # Singleton tool windows
         singletons = [
             "_filter_dlg",  "_ds_manager",
-            "_log_win",     "_console_win", "_memory_win", "_roi_manager_win",
+            "_log_win",     "_console_win", "_memory_win", "_task_monitor_win",
+            "_roi_manager_win",
             "_script_editor_win",
         ]
         if keep_log_console:

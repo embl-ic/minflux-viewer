@@ -61,10 +61,15 @@ class RoiRecord:
         target_hint: str = "",
         stroke_color: str = "#ffff00",
         line_width: float = 1.5,
+        context: dict[str, Any] | None = None,
     ) -> "RoiRecord":
         roi_id = uuid.uuid4().hex
         # Leave the name empty for auto-named ROIs; RoiStore.add assigns a
         # human-friendly 1-based name (e.g. "rectangle-1") when the ROI is stored.
+        # ``context`` is accepted at creation so the drawing view can stamp its
+        # scope (source_view + dataset_idx) on the ROI immediately: a line, point
+        # or angle never runs a selection pass, so waiting for one would leave
+        # those types permanently unscoped -- see ``core/roi_scope.py``.
         return cls(
             id=roi_id,
             name=name or "",
@@ -74,6 +79,7 @@ class RoiRecord:
             target_hint=target_hint,
             stroke_color=stroke_color,
             line_width=line_width,
+            context=dict(context) if context else {},
         )
 
 
@@ -254,7 +260,8 @@ class RoiStore(QObject):
         path = Path(path)
         if path.suffix.lower() == ".json":
             payload = json.loads(path.read_text(encoding="utf-8"))
-            records = [RoiRecord(**item) for item in payload.get("rois", [])]
+            records = [roi_record_from_dict(item)
+                       for item in payload.get("rois", [])]
         else:
             from roifile import roiread
             loaded = roiread(str(path))
@@ -382,8 +389,43 @@ def record_to_imagej(record: RoiRecord):
     return roi
 
 
+def roi_record_from_dict(payload: dict) -> RoiRecord:
+    """Build a :class:`RoiRecord` from a saved dict, ignoring keys it lacks.
+
+    ``RoiRecord(**payload)`` raises ``TypeError`` on any extra key, which turned
+    a forward-compatible field into a hard failure with an error message about
+    ``__init__`` that says nothing about the file. Saved sets legitimately carry
+    extras — ``dataset_id`` is written per member of a Zarr project — and a set
+    written by a newer version will carry more. Unknown keys are dropped and
+    **named** in the returned record's context, so nothing is lost silently.
+    """
+    from dataclasses import fields
+
+    known = {field.name for field in fields(RoiRecord)}
+    data = {key: value for key, value in dict(payload).items() if key in known}
+    extra = sorted(set(payload) - known)
+    record = RoiRecord(**data)
+    if extra:
+        context = dict(record.context) if isinstance(record.context, dict) else {}
+        context.setdefault("unrecognised_keys", extra)
+        record.context = context
+    return record
+
+
 def is_roi_json_file(path: str | Path) -> bool:
-    """True when *path* is a native ROI-set JSON (a dict with a ``"rois"`` list)."""
+    """True when *path* is a native ROI-set JSON (a dict with a ``"rois"`` list).
+
+    ⚠ A **processing metadata sidecar is excluded**, even though it also carries
+    a ``"rois"`` list: it saves the dataset's whole ROI set alongside the filter
+    specs and the calibration, so on shape alone it looks exactly like a ROI
+    set. This test is the weakest of the ``.json`` predicates — a shape, not a
+    marker — so it must yield to the one file kind that identifies itself by
+    name. Without this, saving in any format and re-opening the sidecar landed
+    in the ROI Manager and failed with an unrelated ``RoiRecord.__init__()``
+    error.
+    """
+    from .save import is_metadata_json_payload
+
     try:
         source = Path(path)
         # Canonical MINFLUX JSON is a top-level array and may be several GiB.
@@ -396,7 +438,9 @@ def is_roi_json_file(path: str | Path) -> bool:
         data = json.loads(source.read_text(encoding="utf-8-sig"))
     except Exception:
         return False
-    return isinstance(data, dict) and isinstance(data.get("rois"), list)
+    if not isinstance(data, dict) or not isinstance(data.get("rois"), list):
+        return False
+    return not is_metadata_json_payload(data)
 
 
 def record_from_imagej(roi) -> RoiRecord:

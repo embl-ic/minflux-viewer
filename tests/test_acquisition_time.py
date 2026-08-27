@@ -284,9 +284,9 @@ def test_data_window_row_order_and_labels():
 def test_dims_row_double_click_sets_z_scaling_factor(qtbot, monkeypatch):
     from PyQt6.QtCore import Qt
     from PyQt6.QtTest import QTest
-    from PyQt6.QtWidgets import QInputDialog
 
     from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui import data_window as data_window_module
     from minflux_viewer.ui.data_window import DataWindow
 
     ds = _make_ds()
@@ -295,9 +295,9 @@ def test_dims_row_double_click_sets_z_scaling_factor(qtbot, monkeypatch):
     changed: list[int] = []
     state.calibration_changed.connect(changed.append)
     monkeypatch.setattr(
-        QInputDialog,
-        "getDouble",
-        lambda *_args, **_kwargs: (0.73, True),
+        data_window_module.ZScalingFactorDialog,
+        "ask",
+        staticmethod(lambda *_args, **_kwargs: (0.73, True)),
     )
 
     window = DataWindow(ds, 0, state)

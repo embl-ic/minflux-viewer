@@ -130,7 +130,8 @@ def _flat_table_from_dict(
     return ds
 
 
-def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
+def load_dataset(path: str | Path, prefs: dict | None = None, *,
+                 apply_sidecar: bool = True) -> MinfluxDataset:
     """
     Load a MINFLUX ``.mat`` file and return a fully populated
     :class:`MinfluxDataset`.
@@ -225,7 +226,8 @@ def load_dataset(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
     # so mfx_get can broadcast them to any selection.
     if not attr_matches_last_valid(dataset):
         dataset.components.derived_last = _derived_last_from_raw(mfx_raw_store, num_itr, prefs)
-    apply_metadata_sidecar(dataset, path)
+    if apply_sidecar:
+        apply_metadata_sidecar(dataset, path)
     return dataset
 
 
@@ -1861,6 +1863,15 @@ def apply_metadata_recipe(ds: "MinfluxDataset", meta: dict) -> list[str]:
     """
     applied: list[str] = []
 
+    # Identity, restored silently (it is provenance, not processing, so it is
+    # not reported as something "applied"). Carrying it onto the dataset is what
+    # lets a *later* sidecar find this dataset by DID: the data file itself
+    # cannot hold one. Never overwritten -- a dataset that already knows its own
+    # DID outranks a recipe that may have come from a different copy.
+    did = str(meta.get("msr_dataset_did") or "")
+    if did and not ds.metadata.get("msr_dataset_did"):
+        ds.metadata["msr_dataset_did"] = did
+
     # Acquisition provenance: restored before anything else because it is a
     # plain recorded fact — nothing re-derives it, and a data file alone
     # (.csv/.mat/.npy) cannot carry it.
@@ -1921,22 +1932,74 @@ def apply_metadata_recipe(ds: "MinfluxDataset", meta: dict) -> list[str]:
                     shift = f" (translation {dx:+.3g}, {dy:+.3g}, {dz:+.3g} nm)"
             applied.append(f"overlay transform{shift}")
 
+    # Filters and ROIs CONCATENATE onto whatever the dataset already carries,
+    # rather than replacing it: a recipe may be deliberately applied on top of a
+    # dataset the user has already been working on, and silently discarding
+    # their filters would be the worse failure. A repeated apply therefore
+    # duplicates rows -- which is plainly visible in the Filter dialog, where it
+    # can be undone, unlike work that has vanished.
     filters = meta.get("filters") or []
     if filters:
-        ds.state["filter_specs"] = list(filters)
+        existing = list(ds.state.get("filter_specs") or [])
+        ds.state["filter_specs"] = existing + list(filters)
         apply_saved_filters(ds)
-        applied.append(f"{len(filters)} filter(s)")
+        applied.append(f"{len(filters)} filter(s)"
+                       + (f" (added to {len(existing)} already set)" if existing else ""))
 
     # ROIs land on the same metadata key the Zarr v2 loader uses, so a caller
     # that repopulates the ROI Manager works identically whether the dataset
     # came from a self-contained store or from raw data plus this sidecar.
-    rois = meta.get("rois") or []
+    # Records already present *by id* are skipped, which is what makes applying
+    # the same sidecar twice idempotent for ROIs (the ids are stable) while
+    # still concatenating genuinely different sets.
+    rois = [dict(record) for record in (meta.get("rois") or [])
+            if isinstance(record, dict)]
     if rois:
-        ds.metadata["minflux_viewer_roi_records"] = [
-            dict(record) for record in rois if isinstance(record, dict)
-        ]
-        applied.append(f"{len(ds.metadata['minflux_viewer_roi_records'])} ROI(s)")
+        kept = [dict(record)
+                for record in (ds.metadata.get("minflux_viewer_roi_records") or [])
+                if isinstance(record, dict)]
+        seen = {str(record.get("id")) for record in kept if record.get("id")}
+        added = [record for record in rois
+                 if not record.get("id") or str(record["id"]) not in seen]
+        ds.metadata["minflux_viewer_roi_records"] = kept + added
+        if added:
+            applied.append(f"{len(added)} ROI(s)")
     return applied
+
+
+def read_metadata_file(path: "str | Path") -> "dict | None":
+    """Parse *path* itself as a metadata sidecar, or ``None`` if it is not one.
+
+    ⚠ Distinct from :func:`read_metadata_sidecar`, which derives a *sibling*
+    ``<stem>_metadata.json`` from a **data** file. Handing this one's job to
+    that one looks for ``d_metadata_metadata.json`` and silently finds nothing.
+    """
+    from .save import is_metadata_json_payload
+
+    try:
+        meta = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return meta if is_metadata_json_payload(meta) else None
+
+
+def read_metadata_sidecar(data_path: "str | Path") -> "tuple[Path, dict] | None":
+    """The ``<stem>_metadata.json`` beside *data_path* and its payload, if any.
+
+    Split out of :func:`apply_metadata_sidecar` so the UI can *find* a recipe
+    and describe it to the user **before** deciding whether to apply it: a
+    processing recipe changes Z scaling, filters and ROIs, so it must never be
+    restored silently. Returns ``None`` when there is no sidecar or it is not
+    one (an unreadable file is "not a sidecar", never an error, because this
+    runs speculatively for every data file opened).
+    """
+    from .save import metadata_sidecar_path
+
+    side = metadata_sidecar_path(data_path)
+    if not side.is_file():
+        return None
+    meta = read_metadata_file(side)
+    return None if meta is None else (side, meta)
 
 
 def apply_metadata_sidecar(ds: "MinfluxDataset", data_path: "str | Path") -> bool:
@@ -1945,18 +2008,10 @@ def apply_metadata_sidecar(ds: "MinfluxDataset", data_path: "str | Path") -> boo
     If a metadata sidecar sits next to *data_path*, its recipe is applied via
     :func:`apply_metadata_recipe`.  Returns True if a sidecar was consumed.
     """
-    from .save import is_metadata_json_payload, metadata_sidecar_path
-
-    side = metadata_sidecar_path(data_path)
-    try:
-        if not side.is_file():
-            return False
-        meta = json.loads(side.read_text(encoding="utf-8"))
-    except Exception:
+    found = read_metadata_sidecar(data_path)
+    if found is None:
         return False
-    if not is_metadata_json_payload(meta):
-        return False
-    apply_metadata_recipe(ds, meta)
+    apply_metadata_recipe(ds, found[1])
     return True
 
 
@@ -2667,7 +2722,8 @@ def load_from_mfx_array(
 # .npy loader  — structured or plain numpy arrays
 # ---------------------------------------------------------------------------
 
-def load_npy(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
+def load_npy(path: str | Path, prefs: dict | None = None, *,
+             apply_sidecar: bool = True) -> "MinfluxDataset":
     """
     Load a ``.npy`` file exported from the MSR reader or the viewer itself.
 
@@ -2715,7 +2771,8 @@ def load_npy(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
             datetime_str=file_info.datetime,
             prefs=prefs,
         )
-        apply_metadata_sidecar(ds, path)
+        if apply_sidecar:
+            apply_metadata_sidecar(ds, path)
         return ds
 
     # ── Plain numeric array — treat as xyz coordinates ───────────────
@@ -2766,7 +2823,8 @@ def load_npy(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
         "iteration_load_mode": "last",
     })
     ds.components.mfx_raw = mfx_raw_store
-    apply_metadata_sidecar(ds, path)
+    if apply_sidecar:
+        apply_metadata_sidecar(ds, path)
     return ds
 
 
@@ -2774,7 +2832,8 @@ def load_npy(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
 # .npz loader — flat columns bundle
 # ---------------------------------------------------------------------------
 
-def load_npz(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
+def load_npz(path: str | Path, prefs: dict | None = None, *,
+             apply_sidecar: bool = True) -> "MinfluxDataset":
     """Load a ``.npz`` flat-column export.
 
     ``.npz`` is offered by the save dialog and enabled by default in
@@ -2814,7 +2873,8 @@ def load_npz(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
                 f"processed table (xnm/ynm)."
             )
     ds.metadata["source_format"] = "npz"
-    apply_metadata_sidecar(ds, path)
+    if apply_sidecar:
+        apply_metadata_sidecar(ds, path)
     return ds
 
 
@@ -2880,6 +2940,12 @@ _CSV_COL_ALIASES: dict[str, str] = {
     "pos_x": "loc_x",
     "pos_y": "loc_y",
     "pos_z": "loc_z",
+    # A flat export that split the ``loc`` vector by component index rather than
+    # by axis letter (``flatten_mfx_array``'s fallback naming for a vector field
+    # it does not know) still means x/y/z.
+    "loc_0": "loc_x",
+    "loc_1": "loc_y",
+    "loc_2": "loc_z",
 }
 
 _CANONICAL_CSV_BOOL_FIELDS = frozenset({"bot", "eot", "fnl", "vld"})
@@ -2932,7 +2998,8 @@ def _canonical_csv_dtype(headers: list[str]) -> np.dtype:
     return np.dtype(fields)
 
 
-def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
+def load_csv(path: str | Path, prefs: dict | None = None, *,
+             apply_sidecar: bool = True) -> "MinfluxDataset":
     """
     Load a ``.csv`` file exported from the MSR reader or Imspector.
 
@@ -2972,10 +3039,18 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
         norm = raw.strip().lower().replace(" ", "_")
         col_map[raw] = _CSV_COL_ALIASES.get(norm, norm)
 
-    canonical_names = {str(raw).strip().lower() for raw in raw_cols}
+    # Two name sets, deliberately: the FAST np.loadtxt path below builds its
+    # dtype from the header text itself and hands the result straight to the mfx
+    # parser, so it needs the exact canonical spelling. The general reassembly
+    # further down works from the aliased columns, where ``loc_0/loc_1/loc_2``
+    # has already become ``loc_x/loc_y/loc_z``. (A processed snapshot also
+    # carries itr/vld but spells its coordinates ``xnm/ynm/znm``, which alias to
+    # ``loc_x_nm`` -- a different key -- so the two stay distinguishable.)
+    header_names = {str(raw).strip().lower() for raw in raw_cols}
+    canonical_names = set(col_map.values())
     if (
         dialect.delimiter == ","
-        and {"loc_x", "loc_y", "loc_z", "itr", "vld"} <= canonical_names
+        and {"loc_x", "loc_y", "loc_z", "itr", "vld"} <= header_names
         and all(str(raw).strip().lower() == str(raw).strip() for raw in raw_cols)
     ):
         try:
@@ -3003,7 +3078,8 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
                 prefs=prefs,
             )
             ds.metadata["source_format"] = "csv"
-            apply_metadata_sidecar(ds, path)
+            if apply_sidecar:
+                apply_metadata_sidecar(ds, path)
             return ds
     else:
         mfx = None
@@ -3037,6 +3113,14 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
             col_map[raw_col]: np.frombuffer(buffer, dtype=np.float64)
             for raw_col, buffer in buffers.items()
         }
+
+    # Nanometre coordinate columns mean a **processed snapshot** (Save Processed
+    # Data bakes the Z scaling factor and the transform into xnm/ynm/znm), which
+    # the .mat/.npy flat-table reader already recognises. Remember that before
+    # the columns are renamed, so the same file pins Z scaling the same way in
+    # every format -- otherwise a 3-D snapshot reopened as CSV would be
+    # z-corrected a second time.
+    is_processed_snapshot = any(f"loc_{axis}_nm" in data for axis in ("x", "y"))
 
     # Normalise any nm coordinate columns to the canonical metres store, so a
     # dataset only ever carries one coordinate convention (loc_x/loc_y/loc_z).
@@ -3089,7 +3173,8 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
             prefs=prefs,
         )
         ds.metadata["source_format"] = "csv"
-        apply_metadata_sidecar(ds, path)
+        if apply_sidecar:
+            apply_metadata_sidecar(ds, path)
         return ds
 
     file_info = FileInfo(
@@ -3125,12 +3210,20 @@ def load_csv(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     ds.metadata["source_version"] = "csv"
     ds.metadata["is_minflux"] = bool(has_real_tid)
     ds.metadata["has_real_tid"] = bool(has_real_tid)
+    if is_processed_snapshot:
+        # Same contract as _flat_table_from_dict: coordinates are final, so pin
+        # the factor and pre-empt the post-load automatic estimation.
+        ds.set_z_scaling_factor(
+            1.0, source="processed (re-imported, coordinates final)")
+        ds.derived["z_scaling_factor"] = np.asarray([1.0], dtype=float)
     _restore_filter_mask(ds, saved_ftr)
-    apply_metadata_sidecar(ds, path)
+    if apply_sidecar:
+        apply_metadata_sidecar(ds, path)
     return ds
 
 
-def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
+def load_json(path: str | Path, prefs: dict | None = None, *,
+              apply_sidecar: bool = True) -> "MinfluxDataset":
     """
     Load Abberior-style MINFLUX JSON localization records.
 
@@ -3149,7 +3242,8 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     # for large arrays so reopening a large MSR export does not first create a
     # Python list of millions of record dictionaries.
     if path.stat().st_size >= 128 * 1024 * 1024:
-        return _load_json_streaming_canonical(path, prefs)
+        return _load_json_streaming_canonical(
+            path, prefs, apply_sidecar=apply_sidecar)
 
     prefs = prefs or {}
     data_prefs   = prefs.get("data", {}) or {}
@@ -3296,7 +3390,8 @@ def load_json(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     if not attr_matches_last_valid(ds):
         ds.components.derived_last = _derived_last_from_raw(mfx_raw_store, _raw_num_itr, prefs)
     _restore_filter_mask(ds, saved_ftr)
-    apply_metadata_sidecar(ds, path)
+    if apply_sidecar:
+        apply_metadata_sidecar(ds, path)
     return ds
 
 
@@ -3364,7 +3459,8 @@ def _iter_json_array_records(path: Path):
                 position = 0
 
 
-def _load_json_streaming_canonical(path: Path, prefs: dict | None) -> "MinfluxDataset":
+def _load_json_streaming_canonical(path: Path, prefs: dict | None, *,
+                                   apply_sidecar: bool = True) -> "MinfluxDataset":
     """Load the large flat JSON representation emitted by the canonical saver."""
     from array import array
 
@@ -3467,7 +3563,8 @@ def _load_json_streaming_canonical(path: Path, prefs: dict | None) -> "MinfluxDa
     ds.metadata["source_version"] = "json"
     ds.metadata["source_format"] = "json"
     ds.metadata["raw_num_loc"] = row_count
-    apply_metadata_sidecar(ds, path)
+    if apply_sidecar:
+        apply_metadata_sidecar(ds, path)
     return ds
 
 

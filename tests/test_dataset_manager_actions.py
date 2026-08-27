@@ -310,11 +310,10 @@ def test_dropping_a_filter_preset_on_a_row_adds_it_to_that_dataset(manager, tmp_
     assert win._filter_dlgs[1]._table.rowCount() == 1
 
 
-def test_dropping_a_metadata_sidecar_applies_its_recipe(manager, tmp_path):
-    mgr, win = manager
+def _sidecar(tmp_path, name="d_metadata.json"):
     from minflux_viewer.core.save import METADATA_JSON_MARKER
 
-    side = tmp_path / "d_metadata.json"
+    side = tmp_path / name
     side.write_text(json.dumps({
         METADATA_JSON_MARKER: 1,
         "content": "raw",
@@ -322,12 +321,45 @@ def test_dropping_a_metadata_sidecar_applies_its_recipe(manager, tmp_path):
         "filters": [{"attribute": "efo", "mode": "per loc",
                      "lo": 0.0, "hi": 1e9, "itr": "last"}],
     }), encoding="utf-8")
+    return side
 
-    _drop(mgr, 1, [side])
+
+def _answer(monkeypatch, button):
+    """Answer the confirmation QMessageBox without a user."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: button))
+
+
+def test_dropping_a_metadata_sidecar_applies_its_recipe(
+        manager, tmp_path, monkeypatch):
+    """A recipe changes Z scaling, filters and ROIs, so the drop confirms first
+    -- the row already names the target, so the only question is whether."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    mgr, win = manager
+    _answer(monkeypatch, QMessageBox.StandardButton.Apply)
+
+    _drop(mgr, 1, [_sidecar(tmp_path)])
 
     ds = win._state.datasets[1]
     assert ds.cali.z_scaling_factor == pytest.approx(0.67)
     assert len(ds.state["filter_specs"]) == 1
+
+
+def test_cancelling_the_confirmation_applies_nothing(
+        manager, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    mgr, win = manager
+    _answer(monkeypatch, QMessageBox.StandardButton.Cancel)
+
+    _drop(mgr, 1, [_sidecar(tmp_path)])
+
+    ds = win._state.datasets[1]
+    assert ds.cali.z_scaling_factor == pytest.approx(1.0)
+    assert not ds.state.get("filter_specs")
 
 
 def test_dropping_a_roi_set_targets_the_dropped_on_dataset(manager, tmp_path):
@@ -345,18 +377,21 @@ def test_dropping_a_roi_set_targets_the_dropped_on_dataset(manager, tmp_path):
     assert len(win._state.rois.records) == 1
 
 
-def test_an_unsupported_drop_is_refused_not_opened_as_a_dataset(manager, tmp_path):
-    """Aiming at a row means "apply to this dataset" — a .mat must not sneak
-    through to the open-a-new-dataset path."""
+def test_a_data_file_on_a_row_is_opened_as_a_new_dataset(manager, tmp_path):
+    """A row is not a meaningful target for a data file, but refusing one
+    dropped on the window that *lists* datasets reads as a bug -- so it opens,
+    and the Log says the row was not used."""
     mgr, win = manager
     data = tmp_path / "x.mat"
     data.write_bytes(b"not really a mat")
 
-    before = len(win._state.datasets)
-    event = _drop(mgr, 0, [data])
+    routed = []
+    win._route_path = lambda path: routed.append(str(path))
 
-    assert not event.isAccepted()
-    assert len(win._state.datasets) == before
+    assert win.drop_file_on_dataset(0, str(data)) is True
+    assert routed == [str(data)]
+    messages = [entry.get("message", "") for entry in win._state.log_history]
+    assert any("not used" in text for text in messages)
 
 
 def test_a_drop_between_rows_is_ignored(manager, tmp_path):
@@ -379,9 +414,11 @@ def test_a_drop_between_rows_is_ignored(manager, tmp_path):
     assert handled == []
 
 
-def test_unhandled_extension_reports_and_returns_false(manager, tmp_path):
+def test_an_extension_the_application_cannot_open_at_all_is_refused(
+        manager, tmp_path):
+    """Only a kind that is neither an annotation nor openable data is refused."""
     mgr, win = manager
-    other = tmp_path / "x.npy"
+    other = tmp_path / "x.docx"
     other.write_bytes(b"")
 
     assert win.drop_file_on_dataset(0, str(other)) is False

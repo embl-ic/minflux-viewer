@@ -38,8 +38,10 @@ from ..core.spreadsheet_loader import (
     build_dataset_from_mapping,
     guess_mapping,
     guess_time_unit,
+    delimited_header_row,
     guess_units,
     is_canonical_minflux_table,
+    minflux_table_kind,
     read_table,
     read_table_preview,
     representative_row_indices,
@@ -55,7 +57,22 @@ _ROLE_LABELS: dict[str, tuple[str, bool]] = {
     "prec_z": ("precision z", False),
     "id": ("trace id (→ tid)", False),
     "frame": ("time / frame (→ tim)", False),
-    "photons": ("photons", False),
+    "photons": ("photons (→ eco)", False),
+    "itr": ("iteration (itr)", False),
+    "vld": ("valid mask (vld)", False),
+}
+# Hover help for the two MINFLUX-only roles: they SELECT rows rather than adding
+# an attribute, which is not guessable from the label alone.
+_ROLE_TIPS: dict[str, str] = {
+    "itr": ("MINFLUX iteration index. One row of a raw export is one "
+            "(localization × iteration) event, so mapping this keeps only the "
+            "last iteration — otherwise every iteration is imported as its own "
+            "localization."),
+    "vld": ("MINFLUX validity flag. Mapping this drops the invalid rows "
+            "(failed probes), matching what the native loaders materialize."),
+    "photons": ("Photon count per localization. In a MINFLUX export this is "
+                "'eco'; it is stored under that name so the CRLB precision "
+                "estimate finds it."),
 }
 # Display unit ↔ internal unit token.
 _UNIT_CHOICES = (("nm", "nm"), ("µm", "um"), ("mm", "mm"), ("m", "m"), ("pixel", "px"))
@@ -143,6 +160,8 @@ class SpreadsheetMappingDialog(QDialog):
             combo.setCurrentIndex(max(0, idx))
             combo.currentIndexChanged.connect(lambda _i, cb=combo: self._sync_combo_tooltip(cb))
             self._sync_combo_tooltip(combo)
+            if role in _ROLE_TIPS:
+                grid.itemAtPosition(r, 0).widget().setToolTip(_ROLE_TIPS[role])
             grid.addWidget(combo, r, 1)
             self._role_combos[role] = combo
 
@@ -275,10 +294,45 @@ class SpreadsheetMappingDialog(QDialog):
             time_unit=time_unit, prefs=self._prefs)
 
 
-def import_spreadsheet(path, *, prefs: dict | None = None, parent=None):
-    """Read *path*, pre-fill the mapping dialog from the value-based best guess,
-    and build the dataset on OK. Always shows the dialog for confirmation (never a
-    silent import); returns the dataset, or ``None`` if cancelled."""
+#: Delimited-text suffixes ``core.loader.load_csv`` can read directly. An Excel
+#: workbook cannot take the direct route however its columns are named.
+_DELIMITED_SUFFIXES = frozenset({".csv", ".tsv", ".txt"})
+
+
+def minflux_direct_load_kind(path) -> str | None:
+    """``"raw"``/``"snapshot"`` when *path* is a MINFLUX table to load directly.
+
+    Reads only the header row. A table this application wrote names its columns
+    unambiguously, and putting it through the generic mapping actively loses
+    information — the iteration axis and the validity mask have no role in a
+    generic localization table — so it bypasses the confirmation dialog.
+    """
+    if Path(path).suffix.lower() not in _DELIMITED_SUFFIXES:
+        return None
+    try:
+        headers = delimited_header_row(path)
+    except Exception:                                    # noqa: BLE001
+        return None
+    return minflux_table_kind(headers) if headers else None
+
+
+def import_spreadsheet(path, *, prefs: dict | None = None, parent=None, log=None,
+                       apply_sidecar: bool = True):
+    """Read *path* and return a dataset, or ``None`` if the user cancelled.
+
+    A table this application wrote (recognised by :func:`minflux_table_kind`) is
+    loaded straight through ``core.loader.load_csv``, which keeps every raw
+    iteration field. Anything else opens the mapping dialog, pre-filled from the
+    value-based best guess — never a silent generic import.
+    """
+    kind = minflux_direct_load_kind(path)
+    if kind is not None:
+        from ..core.loader import load_csv
+
+        if log is not None:
+            log(f"'{Path(path).name}': canonical MINFLUX {kind} table — "
+                "loaded directly, no column mapping needed.")
+        return load_csv(path, prefs=prefs, apply_sidecar=apply_sidecar)
     table = read_table_preview(path)
     dlg = SpreadsheetMappingDialog(table, prefs=prefs, parent=parent)
     if dlg.exec() != QDialog.DialogCode.Accepted:

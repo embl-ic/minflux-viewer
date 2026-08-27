@@ -86,14 +86,22 @@ def _sum_z_planes(source, *, t: int, c: int, z_start: int, z_stop: int) -> np.nd
 class TiffViewerWindow(QWidget):
     """Fiji-like single-file TIFF viewer backed by lazy plane reads."""
 
-    def __init__(self, source: ImageSource, parent: QWidget | None = None) -> None:
+    def __init__(self, source: ImageSource, parent: QWidget | None = None, *,
+                 state=None) -> None:
         super().__init__(parent)
         self._source = source
+        # The application state, only so the shared LUT dialog can bind to this
+        # window the way a render/scatter view does. An image is not a dataset,
+        # so nothing else here consults it.
+        self._state = state
         self._plane: np.ndarray | None = None
         self._manual_levels: tuple[float, float] | None = None
         self._auto_bc = True
         self._bc_auto_threshold = 0
         self._bc_dialog = None
+        self._lut_dialog = None
+        self._lut_invert = False
+        self._lut_gamma = 1.0
         self._info_window: TiffInfoWindow | None = None
         self._active_cmap = "gray"
         self._show_axes = False          # axes/ticks hidden by default (right-click › Axis)
@@ -125,6 +133,13 @@ class TiffViewerWindow(QWidget):
                 self._info_window.close()
             except Exception:
                 pass
+        if self._lut_dialog is not None:
+            try:
+                if getattr(self._lut_dialog, "isVisible", lambda: False)():
+                    self._lut_dialog.close()
+            except (RuntimeError, AttributeError):
+                pass
+            self._lut_dialog = None
         if self._bc_dialog is not None:
             try:
                 self._bc_dialog.close()
@@ -520,16 +535,98 @@ class TiffViewerWindow(QWidget):
     def _on_cmap_changed(self, name: str) -> None:
         self._active_cmap = name
         self._apply_colormap()
+        self.sync_lut_dialog()
 
     def _apply_colormap(self) -> None:
         if self._plane is None or self._is_color_plane(self._plane):
             return
         try:
-            cmap = make_colormap(self._active_cmap)
+            cmap = make_colormap(
+                self._active_cmap, invert=self._lut_invert, gamma=self._lut_gamma)
         except (KeyError, ValueError) as exc:
             print(f"Unknown TIFF colormap '{self._active_cmap}'; using gray: {exc}")
             cmap = make_colormap("gray")
         self._image_view.setColorMap(cmap)
+
+    # ------------------------------------------------------------------
+    # LUT / colormap editor (the toolbar LUT button)
+    # ------------------------------------------------------------------
+
+    def open_lut_dialog(self) -> bool:
+        """Open the shared LUT editor on this image, as a render view does.
+
+        The image viewer already had a right-click Colormap submenu, but not the
+        editor with draggable level lines, gamma and the custom-colormap menu.
+        Returns False (without opening) for an RGB plane, which has no single
+        channel to map -- the caller reports that rather than showing an editor
+        that cannot do anything.
+        """
+        if self._plane is None or self._is_color_plane(self._plane):
+            return False
+        pixels = self._bc_pixels()
+        if pixels is None:
+            return False
+        from .lut_dialog import shared_lut_dialog
+
+        shared_lut_dialog(
+            self,
+            on_levels_changed=self._on_levels_changed,
+            on_cmap_changed=self._on_lut_cmap_changed,
+            on_invert_changed=self._on_lut_invert_changed,
+            on_gamma_changed=self._on_lut_gamma_changed,
+            on_reset=self._on_bc_reset,
+            on_auto=self._on_bc_auto,
+            state=self._state,
+        )
+        self._refresh_lut_dialog(capture_baseline=True)
+        self._lut_dialog.show()
+        self._lut_dialog.raise_()
+        self._lut_dialog.activateWindow()
+        return True
+
+    def _refresh_lut_dialog(self, *, capture_baseline: bool) -> bool:
+        dlg = self._lut_dialog
+        if dlg is None:
+            return False
+        pixels = self._bc_pixels()
+        if pixels is None:
+            return False
+        finite = np.asarray(pixels, dtype=float)
+        finite = finite[np.isfinite(finite)]
+        if finite.size == 0:
+            return False
+        data_lo = float(finite.min())
+        data_hi = float(finite.max() if finite.max() > finite.min() else finite.min() + 1.0)
+        lo, hi = self._manual_levels if self._manual_levels is not None else (data_lo, data_hi)
+        dlg.load_image(
+            finite, data_lo, data_hi, float(lo), float(hi),
+            self._active_cmap, self._lut_invert, self._lut_gamma,
+            capture_baseline=capture_baseline,
+        )
+        return True
+
+    def sync_lut_dialog(self) -> None:
+        """Reflect a colormap/level change made outside the dialog back into it."""
+        dlg = self._lut_dialog
+        try:
+            if dlg is None or not dlg.isVisible() or dlg.isActiveWindow():
+                return
+        except RuntimeError:
+            return
+        self._refresh_lut_dialog(capture_baseline=False)
+
+    def _on_lut_cmap_changed(self, name: str, invert: bool) -> None:
+        self._lut_invert = bool(invert)
+        self._active_cmap = str(name)
+        self._apply_colormap()
+
+    def _on_lut_invert_changed(self, invert: bool) -> None:
+        self._lut_invert = bool(invert)
+        self._apply_colormap()
+
+    def _on_lut_gamma_changed(self, gamma: float) -> None:
+        self._lut_gamma = float(gamma)
+        self._apply_colormap()
 
     def _reset_view(self) -> None:
         self._manual_levels = None

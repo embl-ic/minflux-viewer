@@ -132,6 +132,10 @@ DEFAULT_PREFS: dict = {
         # Application-owned named gradients created from the LUT dialog.
         # Values are JSON-compatible ``{"stops": [[position, RGBA], ...]}``.
         "custom_colormaps": {},
+        # User order of the colormap list (see the LUT dialog's Custom ▸
+        # Reorder colormap list…). Empty = the order they are declared in.
+        "colormap_order": [],
+        "colormap_fold_solids": True,
         "roi_highlight_in_roi": True,   # highlight in-ROI data on the drawing view
         "roi_sync_highlight": True,     # highlight in-ROI data on other views too
         "roi_edge_size": 1,
@@ -269,6 +273,9 @@ _MIGRATION_KEYS: tuple[str, ...] = (
     "v041_global_rgba_colours",
     "v042_linear_iteration_colours",
     "v043_msr_export_opt_in",
+    "v044_rainbow_iteration_colours",
+    "v045_jet_iteration_colours",
+    "v046_drop_surplus_iteration_stops",
 )
 
 
@@ -376,6 +383,121 @@ def _migrate_prefs(prefs: dict) -> dict:
         if isinstance(formats, list):
             data["export_formats"] = [f for f in formats if f not in {"msr", "npz"}]
         migrations["v043_msr_export_opt_in"] = True
+    if not migrations.get("v045_jet_iteration_colours"):
+        # The stacked-iteration palette became ``jet`` sampled at TEN points.
+        # Eleven stops over a ten-iteration sequence made the index expression
+        # in ``_iter_color`` skip a stop, so the drawn series stopped matching
+        # the legend. Replace a saved palette only while it is still one of the
+        # sets this application shipped, so a customised one survives -- and
+        # delete the now-surplus 11th key explicitly, because a saved value
+        # wins over the defaults and would otherwise linger forever.
+        from ..colors import DEFAULT_COLOR_PREFS
+
+        shipped = (
+            {   # v044: the 11-stop saturated rainbow
+                "1st": [0, 0, 255, 255], "2nd": [0, 102, 255, 255],
+                "3rd": [0, 204, 255, 255], "4th": [0, 255, 204, 255],
+                "5th": [0, 255, 102, 255], "6th": [0, 255, 0, 255],
+                "7th": [102, 255, 0, 255], "8th": [204, 255, 0, 255],
+                "9th": [255, 204, 0, 255], "10th": [255, 102, 0, 255],
+                "11th": [255, 0, 0, 255],
+            },
+            {   # v042: viridis sampled at 10 points
+                "1st": [68, 1, 84, 255], "2nd": [71, 39, 119, 255],
+                "3rd": [62, 74, 136, 255], "4th": [49, 104, 142, 255],
+                "5th": [37, 130, 142, 255], "6th": [32, 157, 136, 255],
+                "7th": [53, 183, 121, 255], "8th": [108, 204, 89, 255],
+                "9th": [180, 221, 44, 255], "10th": [253, 231, 37, 255],
+            },
+            {   # the categorical tab10 set that preceded both
+                "1st": [31, 119, 180, 255], "2nd": [255, 127, 14, 255],
+                "3rd": [44, 160, 44, 255], "4th": [214, 39, 40, 255],
+                "5th": [148, 103, 189, 255], "6th": [140, 86, 75, 255],
+                "7th": [227, 119, 194, 255], "8th": [127, 127, 127, 255],
+                "9th": [188, 189, 34, 255], "10th": [23, 190, 207, 255],
+            },
+        )
+        series = (
+            prefs.setdefault("colors", {})
+            .setdefault("functions", {})
+            .get("Iteration series")
+        )
+        if isinstance(series, dict) and any(
+            all(list(series.get(key, [])) == value for key, value in old_set.items())
+            for old_set in shipped
+        ):
+            prefs["colors"]["functions"]["Iteration series"] = copy.deepcopy(
+                DEFAULT_COLOR_PREFS["functions"]["Iteration series"]
+            )
+        migrations["v045_jet_iteration_colours"] = True
+    if not migrations.get("v046_drop_surplus_iteration_stops"):
+        # Drop any stop the palette no longer defines — unconditionally, and
+        # regardless of whether the palette was customised.
+        #
+        # ⚠ ORDER MATTERS: this must run AFTER ``v045``, which replaces a
+        # palette that still exactly matches a shipped set. Pruning first would
+        # strip the 11th stop, so the 11-stop rainbow no longer matched and
+        # v045 would leave the old colours in place.
+        #
+        # ⚠ ``v045`` only rewrote a palette that still matched a set this
+        # application shipped, so as not to discard a user's own colours. But an
+        # 11th stop is never legitimate: it existed only while the shipped
+        # palette had eleven, and the bug it caused is about the *count*, not
+        # the colours (``_iter_color`` indexes ``round(k/(n-1) * (len-1))``,
+        # which skips a stop when eleven of them span ten iterations). A
+        # customised palette therefore kept the surplus row forever, because
+        # ``_merge`` preserves a saved key the defaults do not have.
+        from ..colors import DEFAULT_COLOR_PREFS
+
+        known = set(DEFAULT_COLOR_PREFS["functions"]["Iteration series"])
+        series = (
+            prefs.setdefault("colors", {})
+            .setdefault("functions", {})
+            .get("Iteration series")
+        )
+        if isinstance(series, dict):
+            for key in [name for name in series if name not in known]:
+                series.pop(key, None)
+        migrations["v046_drop_surplus_iteration_stops"] = True
+    if not migrations.get("v044_rainbow_iteration_colours"):
+        # The stacked-iteration palette became an 11-stop saturated rainbow
+        # (blue -> red, one stop per iteration of a standard sequence). Saved
+        # colours win over defaults, so an existing installation would keep the
+        # viridis ramp forever -- replace it only while it is still exactly that
+        # ramp (or the tab10 set that preceded it), so a customised palette
+        # survives. A 10-key saved palette also gains the 11th stop from the
+        # defaults through the ordinary merge; that is intended.
+        from ..colors import DEFAULT_COLOR_PREFS
+
+        superseded = (
+            {   # v042: viridis sampled at 10 points
+                "1st": [68, 1, 84, 255], "2nd": [71, 39, 119, 255],
+                "3rd": [62, 74, 136, 255], "4th": [49, 104, 142, 255],
+                "5th": [37, 130, 142, 255], "6th": [32, 157, 136, 255],
+                "7th": [53, 183, 121, 255], "8th": [108, 204, 89, 255],
+                "9th": [180, 221, 44, 255], "10th": [253, 231, 37, 255],
+            },
+            {   # the categorical tab10 set that preceded it
+                "1st": [31, 119, 180, 255], "2nd": [255, 127, 14, 255],
+                "3rd": [44, 160, 44, 255], "4th": [214, 39, 40, 255],
+                "5th": [148, 103, 189, 255], "6th": [140, 86, 75, 255],
+                "7th": [227, 119, 194, 255], "8th": [127, 127, 127, 255],
+                "9th": [188, 189, 34, 255], "10th": [23, 190, 207, 255],
+            },
+        )
+        series = (
+            prefs.setdefault("colors", {})
+            .setdefault("functions", {})
+            .get("Iteration series")
+        )
+        if isinstance(series, dict) and any(
+            all(list(series.get(key, [])) == value for key, value in old_set.items())
+            for old_set in superseded
+        ):
+            prefs["colors"]["functions"]["Iteration series"] = copy.deepcopy(
+                DEFAULT_COLOR_PREFS["functions"]["Iteration series"]
+            )
+        migrations["v044_rainbow_iteration_colours"] = True
     if not migrations.get("v042_linear_iteration_colours"):
         # The stacked-iteration palette became a sequential ramp. Saved colours
         # win over defaults, so an existing installation would keep the old
@@ -483,6 +605,9 @@ class AppState(QObject):
     overlay_manual_alignment_requested = pyqtSignal(int)
     roi_selection_changed = pyqtSignal(int)
     colors_changed = pyqtSignal(object)  # {paths, previous, current}
+    #: The shared colormap list was reordered (LUT ▸ Custom ▸ Reorder…), so
+    #: every long-lived colormap selector should rebuild itself.
+    colormap_order_changed = pyqtSignal()
     status_message  = pyqtSignal(str)
     log_message     = pyqtSignal(str, str)  # (message, level)
     progress_log    = pyqtSignal(str, bool)  # (bar text, final) — refreshing line
@@ -494,9 +619,14 @@ class AppState(QObject):
         self._active_idx: int | None = None
         self.prefs: dict = self._load_prefs()
         configure_colors(self.prefs)
-        from ..colormaps import configure_custom_colormaps
+        from ..colormaps import configure_colormap_order, configure_custom_colormaps
         configure_custom_colormaps(
             self.prefs.get("plot", {}).get("custom_colormaps", {})
+        )
+        # After the custom maps: the order refers to them by name.
+        configure_colormap_order(
+            self.prefs.get("plot", {}).get("colormap_order", []),
+            self.prefs.get("plot", {}).get("colormap_fold_solids", True),
         )
 
         # Processing-history journal — used by the Generate Method Text plugin.
@@ -809,9 +939,14 @@ class AppState(QObject):
 
     def save_prefs(self) -> None:
         configure_colors(self.prefs)
-        from ..colormaps import configure_custom_colormaps
+        from ..colormaps import configure_colormap_order, configure_custom_colormaps
         configure_custom_colormaps(
             self.prefs.get("plot", {}).get("custom_colormaps", {})
+        )
+        # After the custom maps: the order refers to them by name.
+        configure_colormap_order(
+            self.prefs.get("plot", {}).get("colormap_order", []),
+            self.prefs.get("plot", {}).get("colormap_fold_solids", True),
         )
         qs = QSettings("EMBL-IC", "MinfluxViewer")
         qs.setValue("prefs", json.dumps(self.prefs))
