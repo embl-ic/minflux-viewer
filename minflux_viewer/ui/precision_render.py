@@ -13,7 +13,7 @@ from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 
 import numpy as np
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, QRunnable, pyqtSignal, pyqtSlot
 from scipy.special import ndtr
 
 from ..analysis.voronoi_density import (
@@ -21,6 +21,7 @@ from ..analysis.voronoi_density import (
     ProjectedVoronoiField,
     build_projected_voronoi_field,
 )
+from .background_tasks import clear_pool_nonblocking, shared_thread_pool
 
 _DEFAULT_SIGMA_NM = 5.0
 _MIN_SIGMA_NM = 1.0e-3
@@ -904,8 +905,9 @@ class PrecisionRenderScheduler(QObject):
     def __init__(self, parent: QObject | None = None, max_threads: int = 4) -> None:
         super().__init__(parent)
         self._generation = 0
-        self._pool = QThreadPool(self)
-        self._pool.setMaxThreadCount(max(int(max_threads), 1))
+        self._pool = shared_thread_pool(
+            "precision-render", max_threads=max(int(max_threads), 1)
+        )
 
     @property
     def generation(self) -> int:
@@ -913,7 +915,7 @@ class PrecisionRenderScheduler(QObject):
 
     def cancel(self) -> None:
         self._generation += 1
-        self._pool.clear()
+        clear_pool_nonblocking(self._pool)
 
     def request(self, requests: list[PrecisionTileRequest]) -> int:
         self.cancel()
@@ -984,9 +986,8 @@ class VoronoiFieldScheduler(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._generation = 0
-        self._pool = QThreadPool(self)
         # Overlay channels run serially to avoid simultaneous Qhull memory peaks.
-        self._pool.setMaxThreadCount(1)
+        self._pool = shared_thread_pool("voronoi-field", max_threads=1)
 
     @property
     def generation(self) -> int:
@@ -994,12 +995,13 @@ class VoronoiFieldScheduler(QObject):
 
     def cancel(self) -> None:
         self._generation += 1
-        self._pool.clear()
+        clear_pool_nonblocking(self._pool)
 
     def shutdown(self, timeout_ms: int = 5_000) -> bool:
-        """Cancel queued work and briefly drain the non-interruptible Qhull task."""
+        """Cancel queued work without waiting for a non-interruptible Qhull task."""
+        del timeout_ms
         self.cancel()
-        return bool(self._pool.waitForDone(max(int(timeout_ms), 0)))
+        return self._pool.activeThreadCount() == 0
 
     def request(self, requests: list[VoronoiFieldRequest]) -> int:
         self.cancel()
