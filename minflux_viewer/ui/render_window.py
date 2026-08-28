@@ -4240,7 +4240,7 @@ class RenderWindow(QWidget):
     def closeEvent(self, event) -> None:
         from .background_tasks import retire_qthreads
         from .lut_dialog import release_shared_lut_owner
-        from .qt_lifecycle import close_view_boxes
+        from .qt_lifecycle import close_image_views
 
         self._redraw_timer.stop()
         self._clear_overlay_alignment_preview()
@@ -4273,7 +4273,7 @@ class RenderWindow(QWidget):
             signal_names=("progress", "completed", "failed"),
         )
         self._export_workers.clear()
-        close_view_boxes(self._image_view)
+        close_image_views(self._image_view)
         super().closeEvent(event)
 
     # ------------------------------------------------------------------

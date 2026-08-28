@@ -239,6 +239,40 @@ def test_tiff_viewer_z_range_controls_sum_selected_planes(tmp_path, _app):
         _app.processEvents()
 
 
+def test_large_tiff_z_projection_runs_on_background_pool(tmp_path, _app):
+    import time
+
+    tifffile = pytest.importorskip("tifffile")
+    from minflux_viewer.core.tiff_source import TiffImageSource
+    from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+
+    stack = np.stack(
+        [
+            np.ones((1024, 1024), dtype=np.uint16),
+            np.full((1024, 1024), 2, dtype=np.uint16),
+        ]
+    )
+    path = tmp_path / "large_z_stack.tif"
+    tifffile.imwrite(path, stack, imagej=True, metadata={"axes": "ZYX"})
+    window = TiffViewerWindow(TiffImageSource(path))
+    try:
+        started = time.perf_counter()
+        window._set_z_range(1, 2, reload=True)
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 0.15
+        assert window._plane_task is not None
+        deadline = time.time() + 5.0
+        while window._plane_task is not None and time.time() < deadline:
+            _app.processEvents()
+            time.sleep(0.01)
+        assert window._plane_task is None
+        assert np.all(window._plane == 3)
+    finally:
+        window.close()
+        _app.processEvents()
+
+
 def test_tiff_viewer_keeps_series_selector_left_of_xyz_controls(tmp_path, _app):
     tifffile = pytest.importorskip("tifffile")
     from minflux_viewer.core.tiff_source import TiffImageSource

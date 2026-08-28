@@ -76,6 +76,25 @@ def test_qt_heavy_module_exits_cleanly(test_file: str, tmp_path: Path) -> None:
     _assert_clean(result, test_file)
 
 
+def test_main_window_then_image_views_survive_shared_process_gc(tmp_path: Path) -> None:
+    """Guard the ViewBox.destroyed weak-registry crash seen in long sessions."""
+    base = str(tmp_path / "mixed-main-image")
+    targets = [
+        str(Path("tests") / "test_async_file_io.py"),
+        str(Path("tests") / "test_post_load.py"),
+        str(Path("tests") / "test_image_source.py"),
+    ]
+    code = f"""
+        import pytest
+        raise SystemExit(pytest.main([
+            "-q", "-p", "no:cacheprovider", "--basetemp", {base!r},
+            *{targets!r},
+        ]))
+    """
+    result = _run_python(code, timeout=60)
+    _assert_clean(result, "mixed MainWindow and ImageView lifecycle")
+
+
 def test_render_close_never_waits_for_a_tiff_export() -> None:
     """A long export must not make RenderWindow.close() block the GUI thread."""
     code = """
@@ -263,3 +282,92 @@ def test_main_window_close_detaches_running_zarr_io() -> None:
     """
     result = _run_python(code)
     _assert_clean(result, "MainWindow close during Zarr I/O")
+
+
+def test_main_window_close_detaches_running_generic_file_io() -> None:
+    code = """
+        import time
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QApplication
+        from minflux_viewer.core.app_state import AppState
+        from minflux_viewer.ui.background_tasks import BackgroundTask, shared_thread_pool
+        from minflux_viewer.ui.main_window import MainWindow
+
+        app = QApplication([])
+        state = AppState()
+        state.prefs.setdefault("file", {})["check_updates_on_startup"] = False
+        state.save_prefs = lambda: None
+        window = MainWindow(state)
+        task = BackgroundTask(
+            lambda report: (time.sleep(0.45), object())[1],
+            description="test generic file I/O",
+        )
+        window._begin_file_io(task)
+        time.sleep(0.05)
+        started = time.perf_counter()
+        window.close()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+        elapsed = time.perf_counter() - started
+        shared_thread_pool("file-io", max_threads=2).waitForDone()
+        if elapsed >= 0.2:
+            raise AssertionError(f"MainWindow close during file I/O blocked for {elapsed:.3f}s")
+    """
+    result = _run_python(code)
+    _assert_clean(result, "MainWindow close during generic file I/O")
+
+
+def test_tiff_window_close_defers_source_close_until_export_finishes() -> None:
+    code = """
+        import tempfile
+        import time
+        from pathlib import Path
+        import numpy as np
+        import tifffile
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QApplication
+        from minflux_viewer.core.tiff_source import TiffImageSource
+        from minflux_viewer.ui.background_tasks import BackgroundTask, shared_thread_pool
+        from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+
+        class SourceProxy:
+            def __init__(self, source):
+                self._source = source
+                self.close_count = 0
+            def __getattr__(self, name):
+                return getattr(self._source, name)
+            def close(self):
+                self.close_count += 1
+                self._source.close()
+
+        app = QApplication([])
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "image.tif"
+            tifffile.imwrite(path, np.zeros((8, 8), dtype=np.uint16))
+            source = SourceProxy(TiffImageSource(path))
+            window = TiffViewerWindow(source)
+            window._source_lease.acquire()
+            task = BackgroundTask(
+                lambda report: time.sleep(0.45),
+                description="test TIFF export",
+                finally_callback=window._source_lease.release,
+            )
+            window._save_tasks.append(task)
+            pool = shared_thread_pool("tiff-io", max_threads=2)
+            pool.start(task)
+            time.sleep(0.05)
+            started = time.perf_counter()
+            window.close()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            app.processEvents()
+            elapsed = time.perf_counter() - started
+            if elapsed >= 0.2:
+                raise AssertionError(f"TIFF window close blocked for {elapsed:.3f}s")
+            if source.close_count != 0:
+                raise AssertionError("source closed while background export still held it")
+            pool.waitForDone()
+            if source.close_count != 1:
+                raise AssertionError(f"source close count after export: {source.close_count}")
+    """
+    result = _run_python(code)
+    _assert_clean(result, "TIFF close during source-backed export")

@@ -185,70 +185,11 @@ class _UpdateCheckTask(QRunnable):
             self.signals.done.emit(result)
 
 
-class _ZarrIoSignals(QObject):
-    """Progress/result signals for a Zarr load or save running off the UI thread."""
+from .background_tasks import BackgroundTask
 
-    stage = pyqtSignal(str)
-    done = pyqtSignal(object)
-    failed = pyqtSignal(str)
-    finished = pyqtSignal()
-
-
-class _ZarrIoTask(QRunnable):
-    """Run one Zarr load or save on a worker thread.
-
-    Reading and writing a MINFLUX Zarr store is **CPU**-bound, not I/O-bound:
-    on a 20.6 M-row acquisition a load spends 2.0 s decompressing but 8.2 s
-    building the structured array and normalizing it, and a save spends 9.6 s
-    compressing plus 2.8 s hashing. A thread therefore does not make it faster
-    -- it stops it freezing the window, which it can do because numpy, blosc
-    and hashlib all release the GIL for the length of those operations.
-    """
-
-    def __init__(self, fn, *, description: str) -> None:
-        super().__init__()
-        self._fn = fn
-        self.description = str(description)
-        self.signals = _ZarrIoSignals()
-        self._cancelled = False
-
-    def cancel(self) -> None:
-        """Suppress callbacks; the current numpy/blosc operation finishes safely."""
-        self._cancelled = True
-
-    def run(self) -> None:  # noqa: N802 - Qt API
-        from ..core.task_registry import registry as task_registry
-
-        if self._cancelled:
-            self.signals.finished.emit()
-            return
-        handle = task_registry.register(
-            self.description, "zarr", cancel=self.cancel
-        )
-        handle.start()
-
-        def report(stage) -> None:
-            handle.update(detail=str(stage))
-            if not self._cancelled:
-                self.signals.stage.emit(str(stage))
-
-        try:
-            try:
-                result = self._fn(report)
-            except Exception as exc:                            # noqa: BLE001
-                if self._cancelled:
-                    handle.finish("cancelled")
-                    return
-                handle.finish("failed", detail=str(exc))
-                self.signals.failed.emit(str(exc))
-            else:
-                if self._cancelled:
-                    handle.finish("cancelled")
-                    return
-                handle.finish("done")
-                self.signals.done.emit(result)
-        finally:
-            self.signals.finished.emit()
+# Compatibility name retained for focused tests and third-party extensions.
+# Zarr now uses the same lifecycle-safe runner as every other heavy file task.
+_ZarrIoTask = BackgroundTask
 
 
 def _human_bytes(value: int) -> str:
@@ -1826,44 +1767,73 @@ class MainWindow(QMainWindow):
 
     # -- individual loaders ----------------------------------------
 
+    def _start_dataset_load(self, path: str, loader, *, kind: str) -> None:
+        """Load one ordinary dataset without running its parser on Qt's thread."""
+        import copy
+
+        name = Path(path).name
+        prefs = copy.deepcopy(self._state.prefs)
+        apply_sidecar = self._sidecar_for_load(path)
+
+        def work(report):
+            report(f"Reading {name}")
+            dataset = loader(path, prefs=prefs, apply_sidecar=apply_sidecar)
+            report(f"Read {name}")
+            return dataset
+
+        task = BackgroundTask(
+            work, description=f"Loading {name}", category="load"
+        )
+        task.signals.done.connect(
+            lambda dataset, _n=name, _k=kind: self._on_dataset_loaded(
+                dataset, _n, _k
+            )
+        )
+        task.signals.failed.connect(
+            lambda message, _n=name: self._on_file_load_failed(_n, message)
+        )
+        self._begin_file_io(task)
+
+    def _on_dataset_loaded(self, dataset, name: str, kind: str) -> None:
+        if self._is_shutting_down:
+            return
+        try:
+            self._state.add_dataset(dataset)
+        except Exception as exc:  # noqa: BLE001 - Qt callback boundary
+            self._on_file_load_failed(name, str(exc))
+            return
+        self._state.log(
+            f"Opened {kind} '{name}' ({dataset.prop.num_loc:,} localizations).",
+            "INFO",
+        )
+        self._status_label.setText(f"Opened {name}.")
+
+    def _on_file_load_failed(self, name: str, message: str) -> None:
+        self._state.log(f"Failed to load '{name}': {message}", "ERROR")
+        if not self._is_shutting_down:
+            QMessageBox.critical(self, "Load error", message)
+        self._status_label.setText("Load failed.")
+
     def _load_mat(self, path: str) -> None:
         self._status_label.setText(f"Loading {Path(path).name}…")
         self._state.log(f"Opening .mat: {path}", "INFO")
-        try:
-            from ..core.loader import load_dataset
-            dataset = load_dataset(path, prefs=self._state.prefs,
-                                  apply_sidecar=self._sidecar_for_load(path))
-            self._state.add_dataset(dataset)
-        except Exception as exc:
-            self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
-            QMessageBox.critical(self, "Load error", str(exc))
-            self._status_label.setText("Load failed.")
+        from ..core.loader import load_dataset
+
+        self._start_dataset_load(path, load_dataset, kind="MATLAB data")
 
     def _load_npy(self, path: str) -> None:
         self._status_label.setText(f"Loading {Path(path).name}…")
         self._state.log(f"Opening .npy: {path}", "INFO")
-        try:
-            from ..core.loader import load_npy
-            dataset = load_npy(path, prefs=self._state.prefs,
-                                  apply_sidecar=self._sidecar_for_load(path))
-            self._state.add_dataset(dataset)
-        except Exception as exc:
-            self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
-            QMessageBox.critical(self, "Load error", str(exc))
-            self._status_label.setText("Load failed.")
+        from ..core.loader import load_npy
+
+        self._start_dataset_load(path, load_npy, kind="NumPy data")
 
     def _load_npz(self, path: str) -> None:
         self._status_label.setText(f"Loading {Path(path).name}…")
         self._state.log(f"Opening .npz: {path}", "INFO")
-        try:
-            from ..core.loader import load_npz
-            dataset = load_npz(path, prefs=self._state.prefs,
-                                  apply_sidecar=self._sidecar_for_load(path))
-            self._state.add_dataset(dataset)
-        except Exception as exc:
-            self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
-            QMessageBox.critical(self, "Load error", str(exc))
-            self._status_label.setText("Load failed.")
+        from ..core.loader import load_npz
+
+        self._start_dataset_load(path, load_npz, kind="NumPy archive")
 
     def _load_zarr(self, path: str) -> None:
         """Open a ``.zarr`` store off the UI thread.
@@ -1894,24 +1864,37 @@ class MainWindow(QMainWindow):
             lambda message: self._on_zarr_io_failed(name, message, "Load error"))
         self._begin_zarr_io(task)
 
-    def _begin_zarr_io(self, task) -> None:
-        """Start a Zarr load/save task and keep it alive until it finishes."""
+    def _begin_file_io(self, task, *, pool_name: str = "file-io") -> None:
+        """Start heavy non-Qt work and retain it until its terminal signal."""
         from .background_tasks import shared_thread_pool
 
         self._status_label.setText(f"{task.description}…")
         self._state.status_progress(task.description)
-        tasks = getattr(self, "_zarr_io_tasks", None)
+        tasks = getattr(self, "_file_io_tasks", None)
         if tasks is None:
-            tasks = self._zarr_io_tasks = []
+            tasks = self._file_io_tasks = []
         tasks.append(task)
-        task.signals.finished.connect(lambda _t=task: self._finish_zarr_io(_t))
-        shared_thread_pool("zarr-io", max_threads=2).start(task)
+        task.signals.finished.connect(lambda _t=task: self._finish_file_io(_t))
+        shared_thread_pool(pool_name, max_threads=2).start(task)
 
-    def _finish_zarr_io(self, task) -> None:
+    def _begin_zarr_io(self, task) -> None:
+        """Compatibility wrapper for the former Zarr-only task runner."""
+        if getattr(self, "_file_io_tasks", None) is None:
+            self._file_io_tasks = []
+        # Some extensions/tests use this list to pump the event loop until a
+        # store finishes. Keep it as an alias, not a second ownership registry.
+        self._zarr_io_tasks = self._file_io_tasks
+        self._begin_file_io(task, pool_name="zarr-io")
+
+    def _finish_file_io(self, task) -> None:
         try:
-            getattr(self, "_zarr_io_tasks", []).remove(task)
+            getattr(self, "_file_io_tasks", []).remove(task)
         except ValueError:
             pass
+
+    def _finish_zarr_io(self, task) -> None:
+        """Compatibility wrapper for the former Zarr-only task runner."""
+        self._finish_file_io(task)
 
     def _on_zarr_io_failed(self, name: str, message: str, title: str) -> None:
         self._state.log(f"Failed: '{name}': {message}", "ERROR")
@@ -1989,21 +1972,34 @@ class MainWindow(QMainWindow):
         error or an empty dataset -- so it goes straight to the same window
         *View mbm info...* opens for a loaded dataset.
         """
-        from ..core.mbm_file import read_mbm_points
-        from ..plugins.msr_reader.beads_drift import extract_bead_drift
-        from .mbm_info_window import MbmInfoWindow
-        from .modeless import show_modeless
-
         name = Path(path).name
         self._status_label.setText(f"Loading {name}…")
-        try:
+        self._state.log(f"Opening MBM companion: {path}", "INFO")
+
+        def work(report):
+            from ..core.mbm_file import read_mbm_points
+            from ..plugins.msr_reader.beads_drift import extract_bead_drift
+
+            report(f"Reading {name}")
             points = read_mbm_points(path)
             beads = extract_bead_drift(points, {}, [])
-        except Exception as exc:                            # noqa: BLE001
-            self._state.log(f"Failed to read MBM companion '{name}': {exc}", "ERROR")
-            QMessageBox.critical(self, "MBM companion", str(exc))
-            self._status_label.setText("Load failed.")
+            return points, beads
+
+        task = BackgroundTask(
+            work, description=f"Loading {name}", category="load"
+        )
+        task.signals.done.connect(
+            lambda result, _n=name: self._on_mbm_companion_loaded(_n, result)
+        )
+        task.signals.failed.connect(
+            lambda message, _n=name: self._on_file_load_failed(_n, message)
+        )
+        self._begin_file_io(task)
+
+    def _on_mbm_companion_loaded(self, name: str, result) -> None:
+        if self._is_shutting_down:
             return
+        points, beads = result
         if not beads:
             msg = (f"'{name}' is an MBM bead table but carries no usable bead "
                    "traces (no gri / xyz / tim rows).")
@@ -2011,6 +2007,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "MBM companion", msg)
             self._status_label.setText(f"Skipped: {name} (no bead traces)")
             return
+        from .mbm_info_window import MbmInfoWindow
+        from .modeless import show_modeless
+
         # No localizations accompany a companion file, so there is no data
         # region box to draw the beads against.
         win = MbmInfoWindow(name, beads, data_bounds_nm=None)
@@ -2031,23 +2030,78 @@ class MainWindow(QMainWindow):
         # confirms the mapping — never a silent *generic* import.
         self._status_label.setText(f"Loading {Path(path).name}…")
         self._state.log(f"Opening spreadsheet: {path}", "INFO")
-        try:
-            from .spreadsheet_import_dialog import import_spreadsheet
-            dataset = import_spreadsheet(
-                path, prefs=self._state.prefs, parent=self,
-                log=lambda msg: self._state.log(msg, "INFO"),
-                apply_sidecar=self._sidecar_for_load(path))
-            if dataset is None:
-                self._status_label.setText("Spreadsheet import cancelled.")
-                return
+        from .spreadsheet_import_dialog import minflux_direct_load_kind
+
+        kind = minflux_direct_load_kind(path)
+        if kind is not None:
+            from ..core.loader import load_csv
+
             self._state.log(
-                f"Imported '{Path(path).name}' "
-                f"({dataset.prop.num_loc:,} localizations).", "INFO")
-            self._state.add_dataset(dataset)
-        except Exception as exc:
-            self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
-            QMessageBox.critical(self, "Load error", str(exc))
-            self._status_label.setText("Load failed.")
+                f"'{Path(path).name}': canonical MINFLUX {kind} table — "
+                "loading directly, no column mapping needed.",
+                "INFO",
+            )
+            self._start_dataset_load(path, load_csv, kind="spreadsheet")
+            return
+
+        import copy
+
+        from ..core.spreadsheet_loader import read_table_preview
+
+        prefs = copy.deepcopy(self._state.prefs)
+        apply_sidecar = self._sidecar_for_load(path)
+        name = Path(path).name
+
+        def work(report):
+            report(f"Reading spreadsheet preview for {name}")
+            return read_table_preview(path)
+
+        task = BackgroundTask(
+            work, description=f"Inspecting {name}", category="load"
+        )
+        task.signals.done.connect(
+            lambda table, _p=prefs, _s=apply_sidecar: self._on_spreadsheet_preview(
+                table, _p, _s
+            )
+        )
+        task.signals.failed.connect(
+            lambda message, _n=name: self._on_file_load_failed(_n, message)
+        )
+        self._begin_file_io(task)
+
+    def _on_spreadsheet_preview(self, table, prefs: dict, apply_sidecar: bool) -> None:
+        if self._is_shutting_down:
+            return
+        from .spreadsheet_import_dialog import (
+            SpreadsheetMappingDialog,
+            build_spreadsheet_dataset,
+        )
+
+        dialog = SpreadsheetMappingDialog(table, prefs=prefs, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self._status_label.setText("Spreadsheet import cancelled.")
+            return
+        spec = dialog.dataset_build_spec()
+        name = Path(table.path).name
+
+        def work(report):
+            report(f"Building dataset from {name}")
+            return build_spreadsheet_dataset(
+                table, spec, prefs=prefs, apply_sidecar=apply_sidecar
+            )
+
+        task = BackgroundTask(
+            work, description=f"Importing {name}", category="load"
+        )
+        task.signals.done.connect(
+            lambda dataset, _n=name: self._on_dataset_loaded(
+                dataset, _n, "spreadsheet"
+            )
+        )
+        task.signals.failed.connect(
+            lambda message, _n=name: self._on_file_load_failed(_n, message)
+        )
+        self._begin_file_io(task)
 
     def _open_image_viewer(self, source, key: str, *, initial_series_index: int | None = None) -> None:
         """Show *source* (a TIFF or OBF image source) in a TIFF viewer window,
@@ -2090,22 +2144,49 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"Opening TIFF {Path(path).name}…")
         self._state.log(f"Opening TIFF: {path}", "INFO")
         resolved = str(Path(path).resolve())
-        try:
+
+        def work(report):
             from ..core.tiff_source import TiffImageSource
 
+            report(f"Reading TIFF metadata for {Path(path).name}")
+            return TiffImageSource(path)
+
+        task = BackgroundTask(
+            work,
+            description=f"Opening TIFF {Path(path).name}",
+            category="load",
+            discard_result=lambda source: source.close(),
+        )
+        task.signals.done.connect(
+            lambda source, _p=path, _r=resolved: self._on_tiff_source_loaded(
+                source, _p, _r
+            )
+        )
+        task.signals.failed.connect(
+            lambda message, _n=Path(path).name: self._on_file_load_failed(
+                _n, message
+            )
+        )
+        self._begin_file_io(task)
+
+    def _on_tiff_source_loaded(self, source, path: str, resolved: str) -> None:
+        if self._is_shutting_down:
+            source.close()
+            return
+        try:
             # One window per file; multi-series files switch via the in-window
             # Series dropdown (no separate chooser dialog).
-            self._open_image_viewer(TiffImageSource(path), f"{resolved}#img")
-            try:
-                self._state._record_recent(resolved)
-                self._populate_recent_menu()
-            except Exception:
-                pass
-            self._status_label.setText(f"TIFF opened: {Path(path).name}")
-        except Exception as exc:
-            self._state.log(f"Failed to load '{Path(path).name}': {exc}", "ERROR")
-            QMessageBox.critical(self, "Load error", str(exc))
-            self._status_label.setText("Load failed.")
+            self._open_image_viewer(source, f"{resolved}#img")
+        except Exception as exc:  # noqa: BLE001 - Qt callback boundary
+            source.close()
+            self._on_file_load_failed(Path(path).name, str(exc))
+            return
+        try:
+            self._state._record_recent(resolved)
+            self._populate_recent_menu()
+        except Exception:
+            pass
+        self._status_label.setText(f"TIFF opened: {Path(path).name}")
 
     def _load_json(self, path: str) -> None:
         self._status_label.setText(f"Loading {Path(path).name}…")
@@ -2136,40 +2217,9 @@ class MainWindow(QMainWindow):
             if choice != QMessageBox.StandardButton.Yes:
                 self._status_label.setText("JSON load cancelled.")
                 return
-        try:
-            from ..core.loader import load_json
-            dataset = load_json(path, prefs=self._state.prefs,
-                                apply_sidecar=self._sidecar_for_load(path))
-            self._state.add_dataset(dataset)
-            return
-        except Exception as data_exc:
-            try:
-                from ..core.filter_io import is_filter_json_file
-                if is_filter_json_file(path):
-                    self._load_filter_json(path)
-                    return
-            except Exception:
-                pass
-            try:
-                from ..core.save import is_metadata_json_file
-                if is_metadata_json_file(path):
-                    self._state.log(
-                        f"'{Path(path).name}' is a metadata sidecar, not loadable data.",
-                        "WARN",
-                    )
-                    QMessageBox.information(
-                        self, "Metadata file",
-                        "This is a MINFLUX-viewer metadata sidecar (Z scaling factor, transform, "
-                        "filter specs). It documents an exported dataset and is not "
-                        "itself loadable as data.",
-                    )
-                    self._status_label.setText("Ready.")
-                    return
-            except Exception:
-                pass
-            self._state.log(f"Failed to load JSON '{Path(path).name}': {data_exc}", "ERROR")
-            QMessageBox.critical(self, "Load error", str(data_exc))
-            self._status_label.setText("Load failed.")
+        from ..core.loader import load_json
+
+        self._start_dataset_load(path, load_json, kind="JSON data")
 
     def _load_roi_json(self, path: str) -> None:
         """Load a native ROI-set file (.json / .roi / .zip) into the ROI Manager,
@@ -6660,6 +6710,28 @@ class MainWindow(QMainWindow):
             return None
         return ds
 
+    def _start_file_save(self, work, *, name: str, on_done) -> None:
+        """Run a prepared writer without blocking Qt's event loop."""
+        task = BackgroundTask(
+            work, description=f"Saving {name}", category="save"
+        )
+        task.signals.stage.connect(
+            lambda text: self._state.status_progress(text)
+        )
+        task.signals.done.connect(on_done)
+        task.signals.failed.connect(
+            lambda message, _n=name: self._on_file_save_failed(_n, message)
+        )
+        self._begin_file_io(task)
+
+    def _on_file_save_failed(self, name: str, message: str) -> None:
+        self._state.log(f"Failed to save '{name}': {message}", "ERROR")
+        if not self._is_shutting_down:
+            QMessageBox.critical(
+                self, "Save failed", f"Could not save {name}:\n{message}"
+            )
+        self._status_label.setText("Save failed.")
+
     def _default_save_path(self, ds, suffix: str) -> Path:
         default_dir = Path(self._state.prefs["file"].get("default_folder", str(Path.home())))
         folder = Path(str(getattr(getattr(ds, "file", None), "folder", "") or default_dir))
@@ -6774,44 +6846,32 @@ class MainWindow(QMainWindow):
             filter_mode="flag", zarr_overwrite=zarr_overwrite, **zarr_context,
         )
         action = "Updated processing in " if zarr_overwrite == "viewer" else "Saved "
-        if fmt in {"zarr", "zarr_zip"}:
-            # Writing a store is CPU-bound (compress + hash), ~15 s on a large
-            # acquisition. Off the UI thread so the window stays usable; the
-            # dataset is only read here, so nothing touches widgets.
-            name = Path(path).name
+        name = Path(path).name
 
-            def work(report, _ds=ds, _kwargs=kwargs, _name=name):
-                report(f"Writing {_name}")
-                written = save_processed(_ds, **_kwargs)
-                report(f"Wrote {_name}")
-                return written
+        def work(report, _ds=ds, _kwargs=kwargs, _name=name):
+            report(f"Writing {_name}")
+            written = save_processed(_ds, **_kwargs)
+            report(f"Wrote {_name}")
+            return written
 
-            task = _ZarrIoTask(work, description=f"Saving {name}")
-            task.signals.stage.connect(lambda text: self._state.status_progress(text))
-            task.signals.done.connect(
-                lambda written, _a=action, _n=name: self._on_zarr_saved(written, _a, _n))
-            task.signals.failed.connect(
-                lambda message, _n=name: self._on_zarr_io_failed(
-                    _n, message, "Save failed"))
-            self._begin_zarr_io(task)
-            return
-        try:
-            written = save_processed(ds, **kwargs)
-        except Exception as exc:
-            QMessageBox.critical(
-                self, "Save failed", f"Could not save {title}:\n{exc}")
-            return
-        self._state.log(
-            action + ", ".join(str(p) for p in written),
-            dataset_idx=self._state.active_idx,
+        self._start_file_save(
+            work,
+            name=name,
+            on_done=lambda written, _a=action, _n=name, _ds=ds: self._on_files_saved(
+                written, _a, _n, _ds
+            ),
         )
 
     def _on_zarr_saved(self, written, action: str, name: str) -> None:
+        self._on_files_saved(written, action, name, None)
+
+    def _on_files_saved(self, written, action: str, name: str, ds) -> None:
         if self._is_shutting_down:
             return
+        idx = self._post_load_index(ds) if ds is not None else self._state.active_idx
         self._state.log(
             action + ", ".join(str(path) for path in written),
-            dataset_idx=self._state.active_idx,
+            dataset_idx=idx,
         )
         self._status_label.setText(f"{action.strip()} {name}.")
 
@@ -6943,21 +7003,28 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        try:
+        output_path = dialog.path_edit.text().strip()
+        selected_columns = dialog.selected_columns()
+        separator = dialog.separator_edit.text()
+        name = Path(output_path).name or "spreadsheet"
+
+        def work(report):
+            report(f"Writing {name}")
             path = write_spreadsheet_csv(
                 ds,
-                dialog.path_edit.text().strip(),
-                column_headers=dialog.selected_columns(),
-                separator=dialog.separator_edit.text(),
+                output_path,
+                column_headers=selected_columns,
+                separator=separator,
             )
-        except Exception as exc:
-            QMessageBox.critical(
-                self, "Spreadsheet export failed", f"Could not save spreadsheet:\n{exc}"
-            )
-            return
-        self._state.log(
-            f"Saved spreadsheet: {path}",
-            dataset_idx=self._state.active_idx,
+            report(f"Wrote {name}")
+            return [path]
+
+        self._start_file_save(
+            work,
+            name=name,
+            on_done=lambda written, _n=name, _ds=ds: self._on_files_saved(
+                written, "Saved spreadsheet: ", _n, _ds
+            ),
         )
 
     def _save_as_picasso_hdf5(self) -> None:
@@ -7019,15 +7086,23 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Save Picasso HDF5", "Choose an output file path.")
             return
         from ..core.save import write_picasso_hdf5
+        pixel_size_nm = pixel_spin.value()
+        name = Path(path).name
 
-        try:
-            written = write_picasso_hdf5(ds, path, pixel_size_nm=pixel_spin.value())
-        except Exception as exc:
-            QMessageBox.critical(self, "Save failed", f"Could not save Picasso HDF5:\n{exc}")
-            return
-        self._state.log(
-            "Saved Picasso HDF5: " + ", ".join(str(p) for p in written),
-            dataset_idx=self._state.active_idx,
+        def work(report):
+            report(f"Writing {name}")
+            written = write_picasso_hdf5(
+                ds, path, pixel_size_nm=pixel_size_nm
+            )
+            report(f"Wrote {name}")
+            return written
+
+        self._start_file_save(
+            work,
+            name=name,
+            on_done=lambda written, _n=name, _ds=ds: self._on_files_saved(
+                written, "Saved Picasso HDF5: ", _n, _ds
+            ),
         )
 
     def _save_as_ome_tiff(self) -> None:
@@ -7088,7 +7163,14 @@ class MainWindow(QMainWindow):
         )
         if zarr_overwrite is None:
             return
-        try:
+        action = (
+            "Updated processing in" if zarr_overwrite == "viewer"
+            else "Saved processed data"
+        )
+        name = Path(opts["data_path"] or src.name or ds.name).name
+
+        def work(report):
+            report(f"Writing {name}")
             written = save_processed(
                 ds,
                 data_path=opts["data_path"],
@@ -7100,16 +7182,27 @@ class MainWindow(QMainWindow):
                 zarr_overwrite=zarr_overwrite,
                 **zarr_context,
             )
-        except Exception as exc:
-            QMessageBox.critical(
-                self, "Save failed", f"Could not save processed data:\n{exc}"
-            )
-            return
-        action = (
-            "Updated processing in" if zarr_overwrite == "viewer"
-            else "Saved processed data"
+            report(f"Wrote {name}")
+            return written
+
+        self._start_file_save(
+            work,
+            name=name,
+            on_done=lambda written, _a=action, _n=name, _ds=ds: self._on_processed_saved(
+                written, _a, _n, _ds
+            ),
         )
-        self._state.log(f"{action}: {', '.join(p.name for p in written)}", "INFO")
+
+    def _on_processed_saved(self, written, action: str, name: str, ds) -> None:
+        if self._is_shutting_down:
+            return
+        idx = self._post_load_index(ds)
+        self._state.log(
+            f"{action}: {', '.join(p.name for p in written)}",
+            "INFO",
+            dataset_idx=idx,
+        )
+        self._status_label.setText(f"{action}: {name}.")
         QMessageBox.information(
             self, "Save processed data",
             f"{action}:\n" + "\n".join(str(p) for p in written),
@@ -7173,15 +7266,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(delay_ms, lambda i=idx: self._run_post_load_computations(i))
 
     def _run_post_load_computations(self, idx: int) -> None:
-        """Kick off the one-time computed attributes (Z scaling factor, localization
-        precision, local density) as a chain of single-shot steps.
-
-        Each step returns to the event loop before the next runs, so the Log
-        updates live and the UI stays responsive — the heavy estimators are now
-        vectorised, so every step is sub-second instead of the old ~20 s block.
-        Steps re-resolve the dataset by identity, so closing it mid-chain (or
-        removing another dataset, which shifts indices) aborts/retargets safely.
-        """
+        """Compute derived attributes in a worker and apply them on Qt's thread."""
+        if self._is_shutting_down:
+            return
         if not (0 <= idx < len(self._state.datasets)):
             return
         ds = self._state.datasets[idx]
@@ -7200,8 +7287,161 @@ class MainWindow(QMainWindow):
         if needs:
             self._state.log(f"Post-load processing of '{ds.name}' (Z scaling factor, precision, density)…")
             self._state.status_progress(f"Processing '{ds.name}'")
-        # Schedule (don't call) the first step so the line above paints first.
-        self._post_load_next(ds, self._post_load_z_scaling_factor)
+        else:
+            self._post_load_finalize(ds)
+            return
+
+        import copy
+
+        from ..core.post_load import compute_post_load_results
+
+        tasks = getattr(self, "_post_load_tasks", None)
+        if tasks is None:
+            tasks = self._post_load_tasks = {}
+        key = id(ds)
+        if key in tasks:
+            return
+        prefs = copy.deepcopy(self._state.prefs)
+
+        def work(report):
+            return compute_post_load_results(ds, prefs, report)
+
+        task = BackgroundTask(
+            work,
+            description=f"Post-load processing of {ds.name}",
+            category="analysis",
+        )
+        tasks[key] = task
+        task.signals.stage.connect(
+            lambda text: self._state.status_progress(text)
+        )
+        task.signals.done.connect(
+            lambda result, _ds=ds: self._apply_post_load_results(_ds, result)
+        )
+        task.signals.failed.connect(
+            lambda message, _ds=ds: self._on_post_load_failed(_ds, message)
+        )
+        task.signals.finished.connect(
+            lambda _key=key, _task=task: self._finish_post_load_task(_key, _task)
+        )
+        from .background_tasks import shared_thread_pool
+
+        shared_thread_pool("post-load", max_threads=2).start(task)
+
+    def _finish_post_load_task(self, key: int, task) -> None:
+        tasks = getattr(self, "_post_load_tasks", {})
+        if tasks.get(key) is task:
+            tasks.pop(key, None)
+
+    def _on_post_load_failed(self, ds, message: str) -> None:
+        if self._post_load_index(ds) is None:
+            return
+        self._state.log(
+            f"Post-load processing failed for '{ds.name}': {message}", "WARN"
+        )
+        self._start_saved_filter_restore(ds)
+
+    def _apply_post_load_results(self, ds, result: dict) -> None:
+        idx = self._post_load_index(ds)
+        if idx is None or self._is_shutting_down:
+            return
+        import numpy as np
+
+        attributes_changed = False
+        z_update = result.get("z_update")
+        if z_update is not None and "z_scaling_factor" not in ds.derived:
+            value = float(z_update["value"])
+            ds.set_z_scaling_factor(value, source=str(z_update["source"]))
+            ds.derived["z_scaling_factor"] = np.asarray([value], dtype=float)
+            details = z_update.get("details")
+            if details is not None:
+                ds.derived["z_scaling_factor_sizes_x"] = details["x"].sizes
+                ds.derived["z_scaling_factor_sizes_y"] = details["y"].sizes
+                ds.derived["z_scaling_factor_sizes_z"] = details["z"].sizes
+            self._state.notify_calibration_changed(idx)
+
+        precision = result.get("loc_precision")
+        if precision is not None and "sigma_per_trace_nm" not in ds.derived:
+            ds.attr["sigma_per_trace_nm"] = precision["per_trace_sigma_xyz"]
+            ds.attr["sigma_trace_ids"] = precision["trace_ids"]
+            ds.derived["sigma_per_trace_nm"] = precision["per_trace_sigma_xyz"]
+            ds.derived["sigma_trace_ids"] = precision["trace_ids"]
+            ds.cali.loc_precision = np.asarray(
+                precision["median_sigma_xyz"], dtype=float
+            )
+            attributes_changed = True
+
+        density = result.get("density")
+        if density is not None and "den" not in ds.attr:
+            ds.attr["den"] = density
+            ds.attr["local_density"] = density
+            ds.derived["den"] = density
+            ds.derived["local_density"] = density
+            for name in ("den", "local_density"):
+                if name not in ds.prop.attr_names:
+                    ds.prop.attr_names.append(name)
+            attributes_changed = True
+
+        last_density = result.get("last_density")
+        if last_density is not None and "den" not in ds.components.derived_last:
+            ds.components.derived_last["den"] = last_density
+
+        for message, level in result.get("logs", []):
+            self._state.log(message, level)
+        if attributes_changed:
+            self._state.notify_attributes_changed(idx)
+        self._start_saved_filter_restore(ds)
+
+    def _start_saved_filter_restore(self, ds) -> None:
+        if self._post_load_index(ds) is None:
+            return
+        if not ds.state.get("filter_specs"):
+            self._post_load_finalize(ds)
+            return
+        from ..core.loader import evaluate_saved_filters
+
+        def work(report):
+            report(f"Restoring saved filters for '{ds.name}'")
+            return evaluate_saved_filters(ds)
+
+        task = BackgroundTask(
+            work,
+            description=f"Restoring filters for {ds.name}",
+            category="analysis",
+        )
+        task.signals.done.connect(
+            lambda mask, _ds=ds: self._on_saved_filters_evaluated(_ds, mask)
+        )
+        task.signals.failed.connect(
+            lambda message, _ds=ds: self._on_saved_filter_failed(_ds, message)
+        )
+        task.signals.finished.connect(
+            lambda _t=task: self._finish_file_io(_t)
+        )
+        tasks = getattr(self, "_file_io_tasks", None)
+        if tasks is None:
+            tasks = self._file_io_tasks = []
+        tasks.append(task)
+        from .background_tasks import shared_thread_pool
+
+        shared_thread_pool("post-load", max_threads=2).start(task)
+
+    def _on_saved_filters_evaluated(self, ds, mask) -> None:
+        idx = self._post_load_index(ds)
+        if idx is None:
+            return
+        if mask is not None:
+            ds.filter_mask = mask
+            self._state.notify_filter_changed(idx)
+        self._post_load_finalize(ds)
+
+    def _on_saved_filter_failed(self, ds, message: str) -> None:
+        if self._post_load_index(ds) is None:
+            return
+        self._state.log(
+            f"Restoring filters for '{ds.name}' failed: {message}", "WARN"
+        )
+        self._post_load_finalize(ds)
 
     def _post_load_index(self, ds) -> "int | None":
         """Current index of *ds* by identity, or None if it was removed."""
@@ -7214,7 +7454,16 @@ class MainWindow(QMainWindow):
         """Run the next post-load step from the event loop (keeps the UI live)."""
         QTimer.singleShot(0, lambda: step(ds))
 
+    def _restart_post_load_in_background(self, ds) -> None:
+        """Compatibility entry point for extensions calling the former steps."""
+        idx = self._post_load_index(ds)
+        if idx is not None:
+            self._run_post_load_computations(idx)
+
     def _post_load_z_scaling_factor(self, ds) -> None:
+        self._restart_post_load_in_background(ds)
+
+    def _legacy_post_load_z_scaling_factor(self, ds) -> None:
         idx = self._post_load_index(ds)
         if idx is None:
             return
@@ -7250,6 +7499,9 @@ class MainWindow(QMainWindow):
         self._post_load_next(ds, self._post_load_loc_prec)
 
     def _post_load_z_scaling_factor_estimate(self, ds) -> None:
+        self._restart_post_load_in_background(ds)
+
+    def _legacy_post_load_z_scaling_factor_estimate(self, ds) -> None:
         idx = self._post_load_index(ds)
         if idx is None:
             return
@@ -7292,6 +7544,9 @@ class MainWindow(QMainWindow):
         self._post_load_next(ds, self._post_load_loc_prec)
 
     def _post_load_loc_prec(self, ds) -> None:
+        self._restart_post_load_in_background(ds)
+
+    def _legacy_post_load_loc_prec(self, ds) -> None:
         if self._post_load_index(ds) is None:
             return
         # A pooled averaged particle has no real traces — its ``tid`` is a per-loc
@@ -7334,6 +7589,9 @@ class MainWindow(QMainWindow):
         self._post_load_next(ds, self._post_load_density)
 
     def _post_load_density(self, ds) -> None:
+        self._restart_post_load_in_background(ds)
+
+    def _legacy_post_load_density(self, ds) -> None:
         if self._post_load_index(ds) is None:
             return
         # A pooled averaged particle is a dense superposition centred at the origin.
@@ -7422,16 +7680,8 @@ class MainWindow(QMainWindow):
         idx = self._post_load_index(ds)
         if idx is None:
             return
-        # Restored filters (metadata sidecar or Zarr viewer/state) re-evaluate
-        # now that derived attributes (den, …) exist, so a re-opened processed
-        # dataset shows its saved filter state.
-        if ds.state.get("filter_specs"):
-            try:
-                from ..core.loader import apply_saved_filters
-                if apply_saved_filters(ds):
-                    self._state.notify_filter_changed(idx)
-            except Exception as exc:
-                self._state.log(f"Restoring filters for '{ds.name}' failed: {exc}", "WARN")
+        # Persisted filters were evaluated by ``_start_saved_filter_restore``
+        # after derived arrays were applied, so finalization is Qt-only UI work.
         self._restore_saved_rois(ds, idx)
         self._show_saved_filters(ds, idx)
         self._state.status_message.emit(f"Finished processing '{ds.name}'.")
@@ -7505,6 +7755,14 @@ class MainWindow(QMainWindow):
             f"{enabled} enabled.", dataset_idx=idx)
 
     def _on_dataset_removed(self, idx: int) -> None:
+        # A derived computation may still be reading the removed dataset. Its
+        # native call is allowed to finish, but no result may target shifted UI
+        # indices or keep updating this window.
+        from .background_tasks import retire_background_tasks
+
+        post_load_tasks = getattr(self, "_post_load_tasks", {})
+        retire_background_tasks(post_load_tasks.values())
+        post_load_tasks.clear()
         for mapping in (
             self._data_windows,
             self._render_windows,
@@ -8370,13 +8628,24 @@ class MainWindow(QMainWindow):
             getattr(self, "_update_tasks", set()), signal_names=("done",)
         )
         self._update_tasks.clear()
-        # A Zarr load/save in flight must not deliver into a closing window.
+        # File I/O and filter restoration in flight must not deliver into a
+        # closing window. Native reads/writes finish on their process-owned pool.
         retire_background_tasks(
-            getattr(self, "_zarr_io_tasks", []),
-            signal_names=("stage", "done", "failed", "finished"),
+            getattr(self, "_file_io_tasks", []),
+            signal_names=(
+                "stage", "done", "failed", "cancelled", "finished"
+            ),
         )
-        if hasattr(self, "_zarr_io_tasks"):
-            self._zarr_io_tasks.clear()
+        if hasattr(self, "_file_io_tasks"):
+            self._file_io_tasks.clear()
+        retire_background_tasks(
+            getattr(self, "_post_load_tasks", {}).values(),
+            signal_names=(
+                "stage", "done", "failed", "cancelled", "finished"
+            ),
+        )
+        if hasattr(self, "_post_load_tasks"):
+            self._post_load_tasks.clear()
 
         try:
             pool = QThreadPool.globalInstance()
