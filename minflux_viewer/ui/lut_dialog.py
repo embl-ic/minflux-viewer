@@ -153,6 +153,10 @@ class LutDialog(QDialog):
         self.setWindowTitle("LUT")
         # Non-modal so the user can adjust levels while watching the image
         self.setModal(False)
+        # Closing retires the pyqtgraph plot and the application-wide factory
+        # creates a fresh dialog on demand; do not leave the empty parentless
+        # shell in QApplication.topLevelWidgets() until cyclic GC happens.
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.resize(380, 420)
 
         # Data range (the two extremes the sliders can reach)
@@ -173,7 +177,7 @@ class LutDialog(QDialog):
         self._build_ui()
 
     def closeEvent(self, event) -> None:
-        """Release pyqtgraph internals while preserving close-as-hide semantics."""
+        """Retire pyqtgraph internals before this parentless dialog is deleted."""
         from .qt_lifecycle import close_plot_widgets
 
         if not self._plot_disposed:

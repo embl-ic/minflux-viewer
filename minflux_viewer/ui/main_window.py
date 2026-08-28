@@ -1149,13 +1149,20 @@ class MainWindow(QMainWindow):
 
     def _refresh_owned_window_shortcuts(self) -> None:
         for widget in QApplication.topLevelWidgets():
-            if widget is self:
-                self._install_window_shortcuts(widget, include_action_commands=False)
-            elif getattr(widget, "TAG", None) in {
-                "render_window", "attribute_window", "histogram_window",
-                "scatter_window",
-            }:
-                self._install_window_shortcuts(widget)
+            try:
+                if widget is self:
+                    self._install_window_shortcuts(
+                        widget, include_action_commands=False
+                    )
+                elif getattr(widget, "TAG", None) in {
+                    "render_window", "attribute_window", "histogram_window",
+                    "scatter_window",
+                }:
+                    self._install_window_shortcuts(widget)
+            except RuntimeError:
+                # topLevelWidgets can briefly contain a Python wrapper whose
+                # deferred C++ deletion was processed earlier in this turn.
+                continue
 
     def _trigger_shortcut_command(self, command: str) -> None:
         # QKeySequenceEdit must receive the key sequence it is recording; it is
@@ -3910,13 +3917,16 @@ class MainWindow(QMainWindow):
                     continue
             if visible_overlay or is_overlay:
                 return f"Overlay {overlay_idx}" if overlay_idx else "Overlay"
-        own_maps = (
-            self._render_windows,
-            self._scatter_windows,
-            self._histogram_windows,
-            self._attr_windows,
-            self._attr_cpu_windows,
-            self._filter_dlgs,
+        own_maps = tuple(
+            getattr(self, name, {})
+            for name in (
+                "_render_windows",
+                "_scatter_windows",
+                "_histogram_windows",
+                "_attr_windows",
+                "_attr_cpu_windows",
+                "_filter_dlgs",
+            )
         )
         for mapping in own_maps:
             win = mapping.get(idx)

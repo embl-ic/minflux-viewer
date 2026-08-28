@@ -13,6 +13,41 @@ from collections.abc import Iterable
 from typing import Any
 
 
+def install_pyqtgraph_lifecycle_guards() -> None:
+    """Ignore pyqtgraph label resizes only after SIP confirms deletion.
+
+    PyQtGraph 0.14 can dispatch a deferred ``LabelItem.resizeEvent`` after Qt
+    has deleted the graphics item or its text child. Every callback on a live
+    object still runs through the original implementation and propagates its
+    errors normally.
+    """
+    try:
+        from PyQt6 import sip
+        from pyqtgraph.graphicsItems.LabelItem import LabelItem
+    except ImportError:  # pragma: no cover - non-GUI/minimal installations
+        return
+    if getattr(LabelItem, "_mfv_deleted_object_guard", False):
+        return
+
+    original_resize_event = LabelItem.resizeEvent
+
+    def resize_event(label, event):
+        if sip.isdeleted(label):
+            return
+        text_item = getattr(label, "item", None)
+        if text_item is None or sip.isdeleted(text_item):
+            return
+        try:
+            return original_resize_event(label, event)
+        except RuntimeError as exc:
+            if "has been deleted" in str(exc):
+                return
+            raise
+
+    LabelItem.resizeEvent = resize_event
+    LabelItem._mfv_deleted_object_guard = True
+
+
 def qobject_alive(obj: Any) -> bool:
     """Return whether *obj* still wraps a live Qt object."""
     if obj is None:
@@ -207,11 +242,13 @@ def close_view_boxes(*candidates: Any) -> None:
 
 
 def close_plot_widgets(*plots: Any) -> None:
-    """Close complete PlotWidgets after unregistering their ViewBoxes.
+    """Retire PlotWidgets without clearing their scene during a close event.
 
-    PlotWidget.close() also detaches axes, labels, proxy widgets, and its scene;
-    closing only the ViewBox leaves those objects able to receive queued layout
-    events during owner destruction.
+    PyQtGraph's ``PlotWidget.close()`` clears the graphics scene immediately.
+    With a deferred layout activation still queued, that can delete a
+    ``LabelItem`` before its pending resize callback runs. Make the plot inert,
+    detach it from the owner, and defer deletion until already-posted layout
+    work has run.
     """
     for plot in plots:
         if plot is None or getattr(plot, "_mfv_plot_widget_closed", False):
@@ -225,7 +262,10 @@ def close_plot_widgets(*plots: Any) -> None:
         close_view_boxes(plot)
         _disconnect_widget_group(getattr(plot, "stateGroup", None))
         try:
-            plot.close()
+            plot.setUpdatesEnabled(False)
+            plot.hide()
+            plot.setParent(None)
+            plot.deleteLater()
         except (AttributeError, RuntimeError):
             pass
 

@@ -487,7 +487,15 @@ class GlobalColorDialog(QDialog):
         # is what keeps the dialog short instead of stacking every section.
         self._tabs = QTabWidget()
         self._tabs.addTab(self._page(self._solid_section()), "Solid Color List")
-        self._tabs.addTab(self._page(self._viewer_section()), "Viewer / Plots")
+        viewer_page = self._page(self._viewer_section())
+        self._viewer_page = viewer_page
+        # Viewer rows deliberately stay on one line and can therefore have a
+        # wider size hint than the visible page. Keep Reset attached to the
+        # viewport, not that scrolling content, so it remains reachable.
+        self._viewer_reset.setParent(viewer_page.viewport())
+        self._viewer_reset.raise_()
+        viewer_page.viewport().installEventFilter(self)
+        self._tabs.addTab(viewer_page, "Viewer / Plots")
         self._tabs.addTab(self._page(self._components_section()), "Components")
         self._tabs.addTab(self._page(self._plugins_section()), "Plugins")
         self._tabs.currentChanged.connect(lambda _i: self._refresh_wrapping())
@@ -878,6 +886,7 @@ class GlobalColorDialog(QDialog):
                 "plugins", self._plugin_combo.currentText(), self._plugin_components
             )
             self._refresh_viewer_spacing()
+            self._position_viewer_reset()
         except RuntimeError:  # pragma: no cover - dialog destroyed before timer
             return
         finally:
@@ -1021,19 +1030,37 @@ class GlobalColorDialog(QDialog):
                 pair.addWidget(QLabel(component))
                 pair.addWidget(self._make_button(path))
                 grid.addLayout(pair, row_index, col)
+        self._viewer_reset = self._reset_button(self._reset_viewer)
         grid.setColumnStretch(7, 1)
         self._viewer_grid = grid
-        top = QHBoxLayout()
-        top.setContentsMargins(0, 0, 0, 0)
-        top.addLayout(grid, 1)
-        self._viewer_reset = self._reset_button(self._reset_viewer)
-        top.addWidget(
-            self._viewer_reset,
-            0,
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
-        )
-        root.addLayout(top)
+        root.addLayout(grid)
         return group
+
+    def eventFilter(self, watched, event):
+        viewer_page = getattr(self, "_viewer_page", None)
+        try:
+            is_viewer_viewport = (
+                viewer_page is not None and watched is viewer_page.viewport()
+            )
+        except RuntimeError:
+            is_viewer_viewport = False
+        if (
+            is_viewer_viewport
+            and event.type() == QEvent.Type.Resize
+        ):
+            self._position_viewer_reset()
+        return super().eventFilter(watched, event)
+
+    def _position_viewer_reset(self) -> None:
+        """Keep the Viewer reset pinned to the visible page's top-right."""
+        try:
+            viewport = self._viewer_page.viewport()
+            reset = self._viewer_reset
+            reset.adjustSize()
+            reset.move(max(0, viewport.width() - reset.width() - 12), 12)
+            reset.raise_()
+        except RuntimeError:  # pragma: no cover - queued resize during teardown
+            return
 
     def _refresh_viewer_spacing(self) -> None:
         """Close the Viewer/Plots gaps as the dialog narrows.
@@ -1051,7 +1078,7 @@ class GlobalColorDialog(QDialog):
                 widths.get(column, 0), grid.itemAt(index).sizeHint().width()
             )
         gaps = max(1, len(widths) - 1)
-        available = self._section_content_width(self._viewer_reset)
+        available = self._section_content_width()
         if available <= 1:
             return
         spacing = (available - sum(widths.values())) / gaps
