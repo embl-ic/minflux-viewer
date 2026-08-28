@@ -7497,8 +7497,12 @@ class MainWindow(QMainWindow):
             win = mapping.pop(idx, None)
             if win is not None:
                 try:
+                    delete_on_close = win.testAttribute(
+                        Qt.WidgetAttribute.WA_DeleteOnClose
+                    )
                     win.close()
-                    win.deleteLater()
+                    if not delete_on_close:
+                        win.deleteLater()
                 except Exception:
                     pass
             self._reindex_window_map_after_remove(mapping, idx)

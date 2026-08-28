@@ -2351,6 +2351,18 @@ class ScatterWindow(QWidget):
         self._lut_gamma = float(gamma)
         self._on_lut_cmap_changed(self._cmap_combo.currentText(), self._lut_invert)
 
+    def closeEvent(self, event) -> None:
+        from .lut_dialog import release_shared_lut_owner
+        from .qt_lifecycle import close_plot_widgets
+
+        self._end_overlay_alignment()
+        if self._roi_overlay is not None:
+            self._roi_overlay.dispose()
+            self._roi_overlay = None
+        release_shared_lut_owner(self)
+        close_plot_widgets(self._plot_2d)
+        super().closeEvent(event)
+
     def focusInEvent(self, event) -> None:
         if self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets):
             self._state.set_active(self._dataset_idx)

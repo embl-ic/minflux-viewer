@@ -73,6 +73,12 @@ class ParticleInspectorWindow(QWidget):
         root.addWidget(self._build_view(), 1)
         self._apply_visibility()
 
+    def closeEvent(self, event) -> None:
+        from .qt_lifecycle import close_plot_widgets
+
+        close_plot_widgets(self._plot)
+        super().closeEvent(event)
+
     def _toggle(self, layout, text: str, checked: bool, enabled: bool) -> QCheckBox:
         chk = QCheckBox(text)
         chk.setChecked(checked)

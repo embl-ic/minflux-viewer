@@ -32,6 +32,21 @@ def test_image_view_boxes_are_closed_and_unregistered_idempotently(_app):
     image_view.close()
 
 
+def test_plot_widget_is_fully_closed_after_viewbox_unregistration(_app):
+    import pyqtgraph as pg
+
+    from minflux_viewer.ui.qt_lifecycle import close_plot_widgets
+
+    plot = pg.PlotWidget()
+    box = plot.getViewBox()
+
+    close_plot_widgets(plot)
+    close_plot_widgets(plot)
+
+    assert box not in pg.ViewBox.AllViews
+    assert plot.plotItem is None
+
+
 def test_roi_controller_dispose_detaches_store_and_queued_callbacks(_app):
     import pyqtgraph as pg
 
@@ -56,6 +71,7 @@ def test_roi_controller_dispose_detaches_store_and_queued_callbacks(_app):
     store.changed.emit()
     store.selection_changed.emit()
     store.restore_requested.emit()
-    close_view_boxes(plot)
-    plot.close()
+    from minflux_viewer.ui.qt_lifecycle import close_plot_widgets
+
+    close_plot_widgets(plot)
     owner.close()

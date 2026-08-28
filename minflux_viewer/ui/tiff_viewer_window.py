@@ -7,6 +7,7 @@ render-view style while reading selected TIFF planes lazily from disk.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -122,6 +123,9 @@ class TiffViewerWindow(QWidget):
         self._init_roi_overlay()
 
     def closeEvent(self, event) -> None:
+        from .lut_dialog import release_shared_lut_owner
+        from .qt_lifecycle import close_view_boxes
+
         if self._roi_overlay is not None:
             try:
                 self._roi_overlay.detach()
@@ -133,19 +137,14 @@ class TiffViewerWindow(QWidget):
                 self._info_window.close()
             except Exception:
                 pass
-        if self._lut_dialog is not None:
-            try:
-                if getattr(self._lut_dialog, "isVisible", lambda: False)():
-                    self._lut_dialog.close()
-            except (RuntimeError, AttributeError):
-                pass
-            self._lut_dialog = None
+        release_shared_lut_owner(self)
         if self._bc_dialog is not None:
             try:
                 self._bc_dialog.close()
             except Exception:
                 pass
         self._source.close()
+        close_view_boxes(self._image_view)
         super().closeEvent(event)
 
     def _build_ui(self) -> None:

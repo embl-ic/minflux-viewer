@@ -1038,10 +1038,9 @@ class RenderWindow(QWidget):
         self.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
         self.setWindowFlags(Qt.WindowType.Window)
         self.resize(880, 920)
-        # Keep pyqtgraph ImageView/ViewBox objects alive after close. On
-        # Windows, deleting them while more render windows are being created can
-        # crash inside pyqtgraph's ViewBox cleanup path.
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        # The ViewBoxes are explicitly unregistered in closeEvent before Qt
+        # recursively deletes their menus and scene objects.
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
@@ -4240,7 +4239,14 @@ class RenderWindow(QWidget):
             pass
 
     def closeEvent(self, event) -> None:
+        from .lut_dialog import release_shared_lut_owner
+        from .qt_lifecycle import close_view_boxes
+
+        self._redraw_timer.stop()
         self._clear_overlay_alignment_preview()
+        if self._roi_overlay is not None:
+            self._roi_overlay.dispose()
+            self._roi_overlay = None
         if self._volume_window is not None:
             try:
                 self._volume_window.close()
@@ -4261,6 +4267,7 @@ class RenderWindow(QWidget):
                 self._bc_dialog.close()
             except Exception:
                 pass
+        release_shared_lut_owner(self)
         # Let any in-flight TIFF export finish so its QThread is not destroyed
         # while running (the file write is short relative to the binning).
         for worker in list(self._export_workers):
@@ -4270,6 +4277,7 @@ class RenderWindow(QWidget):
             except Exception:
                 pass
         self._export_workers.clear()
+        close_view_boxes(self._image_view)
         super().closeEvent(event)
 
     # ------------------------------------------------------------------

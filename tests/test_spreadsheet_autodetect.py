@@ -231,7 +231,7 @@ def test_dialog_prefills_roles_units_and_builds(tmp_path):
 
     from minflux_viewer.ui.spreadsheet_import_dialog import SpreadsheetMappingDialog
 
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     rng = np.random.default_rng(0)
     tid, x, y, z, tim, ph = _minflux_like(rng)
     p = _write_cols(tmp_path / "raw.csv",
@@ -248,3 +248,4 @@ def test_dialog_prefills_roles_units_and_builds(tmp_path):
     ds = dlg.build_dataset()                              # OK-path build works
     assert ds.prop.num_dim == 3 and ds.prop.num_loc == tid.size
     dlg.close()
+    app.processEvents()
