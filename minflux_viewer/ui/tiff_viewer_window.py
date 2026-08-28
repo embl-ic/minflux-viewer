@@ -8,6 +8,7 @@ render-view style while reading selected TIFF planes lazily from disk.
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Lock
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -50,6 +51,50 @@ if TYPE_CHECKING:
 _IMAGEJ_AUTO_THRESHOLD = 5000
 _IMAGEJ_AUTO_RESET_THRESHOLD = 10
 _IMAGEJ_AUTO_HIST_BINS = 256
+_BACKGROUND_PLANE_VALUES = 1_000_000
+
+
+class _SourceLease:
+    """Defer closing an image source until its last background reader exits."""
+
+    def __init__(self, source) -> None:
+        self._source = source
+        self._lock = Lock()
+        self._active = 0
+        self._close_requested = False
+        self._closed = False
+
+    def acquire(self) -> None:
+        with self._lock:
+            if self._close_requested or self._closed:
+                raise RuntimeError("Image source is closing")
+            self._active += 1
+
+    def release(self) -> None:
+        close = False
+        with self._lock:
+            self._active = max(0, self._active - 1)
+            if self._close_requested and self._active == 0 and not self._closed:
+                self._closed = True
+                close = True
+        if close:
+            try:
+                self._source.close()
+            except Exception:
+                pass
+
+    def request_close(self) -> None:
+        close = False
+        with self._lock:
+            self._close_requested = True
+            if self._active == 0 and not self._closed:
+                self._closed = True
+                close = True
+        if close:
+            try:
+                self._source.close()
+            except Exception:
+                pass
 
 
 def _z_sum_dtype(dtype) -> np.dtype:
@@ -91,6 +136,12 @@ class TiffViewerWindow(QWidget):
                  state=None) -> None:
         super().__init__(parent)
         self._source = source
+        self._source_lease = _SourceLease(source)
+        self._save_tasks: list = []
+        self._plane_task = None
+        self._pending_plane_request: tuple | None = None
+        self._plane_generation = 0
+        self._initial_plane_loaded = False
         # The application state, only so the shared LUT dialog can bind to this
         # window the way a render/scatter view does. An image is not a dataset,
         # so nothing else here consults it.
@@ -123,8 +174,9 @@ class TiffViewerWindow(QWidget):
         self._init_roi_overlay()
 
     def closeEvent(self, event) -> None:
+        from .background_tasks import retire_background_tasks
         from .lut_dialog import release_shared_lut_owner
-        from .qt_lifecycle import close_view_boxes
+        from .qt_lifecycle import close_image_views
 
         if self._roi_overlay is not None:
             try:
@@ -143,8 +195,20 @@ class TiffViewerWindow(QWidget):
                 self._bc_dialog.close()
             except Exception:
                 pass
-        self._source.close()
-        close_view_boxes(self._image_view)
+        retire_background_tasks(
+            self._save_tasks,
+            signal_names=("stage", "done", "failed", "cancelled", "finished"),
+        )
+        self._save_tasks.clear()
+        if self._plane_task is not None:
+            retire_background_tasks(
+                [self._plane_task],
+                signal_names=("stage", "done", "failed", "cancelled", "finished"),
+            )
+            self._plane_task = None
+        self._pending_plane_request = None
+        self._source_lease.request_close()
+        close_image_views(self._image_view)
         super().closeEvent(event)
 
     def _build_ui(self) -> None:
@@ -412,14 +476,117 @@ class TiffViewerWindow(QWidget):
             self._load_current_plane(fit_view=False)
 
     def _load_current_plane(self, *, fit_view: bool) -> None:
+        # The TIFF/OBF handles are lazy and not guaranteed thread-safe. An
+        # export owns the source until it finishes, so axis-driven reads pause
+        # instead of racing the writer over a changing series selection.
+        if self._save_tasks:
+            self._info_label.setText("Export in progress — image reads are paused.")
+            return
         z_lo, z_hi = self._z_range_values
-        self._plane = _sum_z_planes(
-            self._source,
-            t=self._t_spin.value() - 1,
-            c=self._c_spin.value() - 1,
-            z_start=z_lo - 1,
-            z_stop=z_hi - 1,
+        request = (
+            self._t_spin.value() - 1,
+            self._c_spin.value() - 1,
+            z_lo - 1,
+            z_hi - 1,
+            bool(fit_view),
         )
+        z_count = max(1, z_hi - z_lo + 1)
+        try:
+            values = (
+                max(1, self._source.axis_size("X"))
+                * max(1, self._source.axis_size("Y"))
+                * z_count
+            )
+        except Exception:
+            shape = tuple(self._source.metadata.shape)
+            values = int(np.prod(shape[-2:])) * z_count if len(shape) >= 2 else z_count
+        if self._initial_plane_loaded and values >= _BACKGROUND_PLANE_VALUES:
+            self._start_plane_load(request)
+            return
+        self._initial_plane_loaded = True
+        plane = _sum_z_planes(
+            self._source,
+            t=request[0],
+            c=request[1],
+            z_start=request[2],
+            z_stop=request[3],
+        )
+        self._apply_loaded_plane(plane, fit_view=fit_view)
+
+    def _start_plane_load(self, request: tuple) -> None:
+        """Serialize a large lazy plane read and keep only the newest request."""
+        from .background_tasks import (
+            BackgroundTask,
+            request_task_cancel,
+            shared_thread_pool,
+        )
+
+        self._plane_generation += 1
+        generation = self._plane_generation
+        if self._plane_task is not None:
+            request_task_cancel(self._plane_task)
+            self._pending_plane_request = request
+            self._info_label.setText("Waiting for the current image read to finish…")
+            return
+        self._source_lease.acquire()
+        t_index, c_index, z_start, z_stop, fit_view = request
+
+        def work(report):
+            report(
+                f"Reading Z planes {z_start + 1}-{z_stop + 1}"
+            )
+            return _sum_z_planes(
+                self._source,
+                t=t_index,
+                c=c_index,
+                z_start=z_start,
+                z_stop=z_stop,
+            )
+
+        task = BackgroundTask(
+            work,
+            description=f"Reading {self._source_name()}",
+            category="image",
+            finally_callback=self._source_lease.release,
+        )
+        self._plane_task = task
+        self._pending_plane_request = None
+        self._control_row.setEnabled(False)
+        self._info_label.setText(
+            f"Reading Z planes {z_start + 1}-{z_stop + 1}…"
+        )
+        task.signals.done.connect(
+            lambda plane, _g=generation, _fit=fit_view: self._on_plane_loaded(
+                _g, plane, _fit
+            )
+        )
+        task.signals.failed.connect(self._on_plane_load_failed)
+        task.signals.finished.connect(
+            lambda _task=task: self._finish_plane_load(_task)
+        )
+        shared_thread_pool("tiff-plane", max_threads=1).start(task)
+
+    def _on_plane_loaded(self, generation: int, plane, fit_view: bool) -> None:
+        if generation != self._plane_generation:
+            return
+        self._apply_loaded_plane(plane, fit_view=fit_view)
+
+    def _on_plane_load_failed(self, message: str) -> None:
+        self._info_label.setText(f"Image read failed: {message}")
+
+    def _finish_plane_load(self, task) -> None:
+        if self._plane_task is not task:
+            return
+        self._plane_task = None
+        if not self._save_tasks:
+            self._control_row.setEnabled(True)
+        pending = self._pending_plane_request
+        self._pending_plane_request = None
+        if pending is not None:
+            self._start_plane_load(pending)
+
+    def _apply_loaded_plane(self, plane, *, fit_view: bool) -> None:
+        self._plane = np.asarray(plane)
         if self._auto_bc and not self._is_color_plane(self._plane):
             levels = self._compute_auto_levels(self._plane)
             if levels is not None:
@@ -837,7 +1004,18 @@ class TiffViewerWindow(QWidget):
 
     def _save_as_tiff(self) -> None:
         """Write the current series — with its active ROI — as an OME-TIFF."""
+        if self._plane_task is not None:
+            QMessageBox.information(
+                self, "Image export", "Wait for the current image read to finish."
+            )
+            return
+        if self._save_tasks:
+            QMessageBox.information(
+                self, "Image export", "This image is already being exported."
+            )
+            return
         from ..core.tiff_export import export_image_series_to_tiff
+        from .background_tasks import BackgroundTask, shared_thread_pool
 
         stem = self._source.metadata.image_name or Path(self._source_name()).stem
         suggested = f"{stem}.tif"
@@ -846,11 +1024,40 @@ class TiffViewerWindow(QWidget):
         if not path:
             return
         roi = self._roi_overlay.current_roi() if self._roi_overlay is not None else None
+        self._source_lease.acquire()
+
+        def work(report):
+            report(f"Writing {Path(path).name}")
+            return export_image_series_to_tiff(self._source, path, roi=roi)
+
+        task = BackgroundTask(
+            work,
+            description=f"Saving {Path(path).name}",
+            category="save",
+            finally_callback=self._source_lease.release,
+        )
+        task.signals.done.connect(
+            lambda _result, _p=path, _r=roi: self._on_tiff_saved(_p, _r)
+        )
+        task.signals.failed.connect(
+            lambda message: QMessageBox.critical(self, "Save failed", message)
+        )
+        task.signals.finished.connect(
+            lambda _t=task: self._finish_save_task(_t)
+        )
+        self._save_tasks.append(task)
+        self._control_row.setEnabled(False)
+        shared_thread_pool("tiff-io", max_threads=2).start(task)
+
+    def _finish_save_task(self, task) -> None:
         try:
-            export_image_series_to_tiff(self._source, path, roi=roi)
-        except Exception as exc:                                   # noqa: BLE001
-            QMessageBox.critical(self, "Save failed", str(exc))
-            return
+            self._save_tasks.remove(task)
+        except ValueError:
+            pass
+        if not self._save_tasks:
+            self._control_row.setEnabled(True)
+
+    def _on_tiff_saved(self, path: str, roi) -> None:
         note = "with its active ROI" if roi else "without a ROI (none is set)"
         QMessageBox.information(self, "Image saved", f"Saved {note}:\n{path}")
 

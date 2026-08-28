@@ -271,27 +271,62 @@ class SpreadsheetMappingDialog(QDialog):
         self.accept()
 
     def build_dataset(self):
+        return build_spreadsheet_dataset(
+            self._table, self.dataset_build_spec(), prefs=self._prefs
+        )
+
+    def dataset_build_spec(self) -> dict:
+        """Capture widget choices as plain data safe to use on a worker thread."""
         mapping = self._current_mapping()
-        units = {role: cb.currentData() for role, cb in self._unit_combos.items()}
+        units = {
+            role: combo.currentData() for role, combo in self._unit_combos.items()
+        }
         pixel = float(self._px_spin.value()) if self._px_spin.isEnabled() else None
-        time_unit = self._time_combo.currentData() if self._time_combo is not None else None
+        time_unit = (
+            self._time_combo.currentData() if self._time_combo is not None else None
+        )
         # The canonical MSR-reader table has richer semantics than a generic
         # spreadsheet: one row is an iteration event, and every raw field must
         # survive.  When the user accepted the untouched canonical mapping, use
         # its dedicated loader instead of reducing it to x/y/z/tid/tim.
-        if (
+        canonical = (
             is_canonical_minflux_table(self._table)
             and mapping == self._mapping0
             and units == self._units0
             and time_unit == self._time_unit0
-        ):
-            from ..core.loader import load_csv
+        )
+        return {
+            "mapping": mapping,
+            "units": units,
+            "pixel_size_nm": pixel,
+            "time_unit": time_unit,
+            "canonical": canonical,
+        }
 
-            return load_csv(self._table.path, prefs=self._prefs)
-        table = read_table(self._table.path) if self._table.preview_only else self._table
-        return build_dataset_from_mapping(
-            table, mapping, units=units, pixel_size_nm=pixel,
-            time_unit=time_unit, prefs=self._prefs)
+
+def build_spreadsheet_dataset(
+    table: SpreadsheetTable,
+    spec: dict,
+    *,
+    prefs: dict | None = None,
+    apply_sidecar: bool = True,
+):
+    """Build from a dialog snapshot without reading any Qt widget state."""
+    if spec.get("canonical"):
+        from ..core.loader import load_csv
+
+        return load_csv(
+            table.path, prefs=prefs, apply_sidecar=apply_sidecar
+        )
+    complete = read_table(table.path) if table.preview_only else table
+    return build_dataset_from_mapping(
+        complete,
+        dict(spec.get("mapping") or {}),
+        units=dict(spec.get("units") or {}),
+        pixel_size_nm=spec.get("pixel_size_nm"),
+        time_unit=spec.get("time_unit"),
+        prefs=prefs,
+    )
 
 
 #: Delimited-text suffixes ``core.loader.load_csv`` can read directly. An Excel

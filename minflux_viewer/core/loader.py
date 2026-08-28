@@ -1740,9 +1740,8 @@ def mfx_filter_mask(
     return mask, unevaluable
 
 
-def apply_saved_filters(ds: "MinfluxDataset") -> bool:
-    """Apply ``ds.state['filter_specs']`` over the materialized attributes and
-    set ``ds.filter_mask``; returns True if at least one spec was applied.
+def evaluate_saved_filters(ds: "MinfluxDataset") -> np.ndarray | None:
+    """Return the persisted-filter mask without mutating *ds*.
 
     When a raw store aligned with ``ds.attr`` is available, this delegates to
     :func:`mfx_filter_mask` over the materialized selection so each spec is
@@ -1759,7 +1758,7 @@ def apply_saved_filters(ds: "MinfluxDataset") -> bool:
 
     specs = ds.state.get("filter_specs") or []
     if not specs:
-        return False
+        return None
     n = int(ds.prop.num_loc)
 
     # Preferred path: re-evaluate over the raw store's materialized selection so
@@ -1773,8 +1772,7 @@ def apply_saved_filters(ds: "MinfluxDataset") -> bool:
         if res is not None:
             rmask, uneval = res
             if rmask.shape[0] == n and len(uneval) < len(specs):
-                ds.filter_mask = rmask
-                return True
+                return np.asarray(rmask, dtype=bool)
 
     tid_v = attr_values_1d(ds, "tid")
     tid = np.arange(n) if tid_v is None else np.asarray(tid_v).ravel()
@@ -1797,9 +1795,16 @@ def apply_saved_filters(ds: "MinfluxDataset") -> bool:
             bool(spec.get("lo_inc", True)), bool(spec.get("hi_inc", True)),
         )
         applied = True
-    if applied:
-        ds.filter_mask = mask
-    return applied
+    return mask if applied else None
+
+
+def apply_saved_filters(ds: "MinfluxDataset") -> bool:
+    """Apply ``ds.state['filter_specs']`` and report whether any were usable."""
+    mask = evaluate_saved_filters(ds)
+    if mask is None:
+        return False
+    ds.filter_mask = mask
+    return True
 
 
 def _restore_filter_mask(ds: "MinfluxDataset", saved_ftr) -> bool:

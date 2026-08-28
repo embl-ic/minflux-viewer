@@ -9,9 +9,10 @@ while widgets only cancel generations and detach result callbacks.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any
+from threading import Event
+from typing import Any, Callable
 
-from PyQt6.QtCore import QThreadPool, Qt
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal
 
 from .qt_lifecycle import disconnect_signal, qobject_alive
 
@@ -25,8 +26,126 @@ _COMMON_SIGNAL_NAMES = (
     "result_ready",
     "done",
     "failed",
+    "cancelled",
     "finished",
 )
+
+
+class BackgroundTaskSignals(QObject):
+    """Terminal/result signals shared by ordinary GUI-owned operations."""
+
+    stage = pyqtSignal(str)
+    done = pyqtSignal(object)
+    failed = pyqtSignal(str)
+    cancelled = pyqtSignal()
+    finished = pyqtSignal()
+
+
+class BackgroundTaskCancelled(Exception):
+    """Private cooperative-cancellation checkpoint raised by ``report``."""
+
+
+class BackgroundTask(QRunnable):
+    """Run non-Qt work on a process-owned pool and report back to the GUI.
+
+    ``work`` receives a stage-report callback. Calling it after cancellation is
+    a checkpoint that aborts the remaining Python work. Native reads/writes that
+    are already inside NumPy, compression, or a file library finish normally;
+    their result is then discarded instead of being delivered to a closing UI.
+    """
+
+    def __init__(
+        self,
+        work: Callable[[Callable[[str], None]], Any],
+        *,
+        description: str,
+        category: str = "I/O",
+        discard_result: Callable[[Any], None] | None = None,
+        finally_callback: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self._work = work
+        self.description = str(description)
+        self.category = str(category)
+        self.signals = BackgroundTaskSignals()
+        self._cancelled = Event()
+        self._discard_result = discard_result
+        self._finally_callback = finally_callback
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    def run(self) -> None:  # noqa: N802 - Qt API
+        from ..core.task_registry import registry as task_registry
+
+        if self.is_cancelled:
+            self._finish_cancelled(None)
+            return
+        handle = task_registry.register(
+            self.description, self.category, cancel=self.cancel
+        )
+        handle.start()
+        result = None
+
+        def report(stage: str) -> None:
+            if self.is_cancelled:
+                raise BackgroundTaskCancelled
+            text = str(stage)
+            handle.update(detail=text)
+            self.signals.stage.emit(text)
+
+        try:
+            result = self._work(report)
+            if self.is_cancelled:
+                handle.finish("cancelled")
+                self._discard(result)
+                self.signals.cancelled.emit()
+            else:
+                handle.finish("done")
+                self.signals.done.emit(result)
+        except BackgroundTaskCancelled:
+            handle.finish("cancelled")
+            self._discard(result)
+            self.signals.cancelled.emit()
+        except Exception as exc:  # noqa: BLE001 - exceptions cross the Qt boundary
+            if self.is_cancelled:
+                handle.finish("cancelled")
+                self._discard(result)
+                self.signals.cancelled.emit()
+            else:
+                handle.finish("failed", detail=str(exc))
+                self.signals.failed.emit(str(exc))
+        finally:
+            self._run_finally()
+            self.signals.finished.emit()
+
+    def _finish_cancelled(self, result: Any) -> None:
+        try:
+            self._discard(result)
+            self.signals.cancelled.emit()
+        finally:
+            self._run_finally()
+            self.signals.finished.emit()
+
+    def _discard(self, result: Any) -> None:
+        if result is None or self._discard_result is None:
+            return
+        try:
+            self._discard_result(result)
+        except Exception:
+            pass
+
+    def _run_finally(self) -> None:
+        if self._finally_callback is None:
+            return
+        try:
+            self._finally_callback()
+        except Exception:
+            pass
 
 
 def shared_thread_pool(name: str, *, max_threads: int | None = None) -> QThreadPool:

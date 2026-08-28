@@ -7,6 +7,7 @@ pytest.importorskip("PyQt6")
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from minflux_viewer.ui.background_tasks import (
+    BackgroundTask,
     retire_background_tasks,
     shared_thread_pool,
 )
@@ -82,4 +83,48 @@ def test_cancelled_zarr_task_always_emits_finished_without_work() -> None:
     task.run()
 
     assert called == []
+    assert finished == [True]
+
+
+def test_background_task_reports_result_and_always_finishes() -> None:
+    stages = []
+    done = []
+    finished = []
+    task = BackgroundTask(
+        lambda report: (report("halfway"), 42)[1],
+        description="generic result",
+    )
+    task.signals.stage.connect(stages.append)
+    task.signals.done.connect(done.append)
+    task.signals.finished.connect(lambda: finished.append(True))
+
+    task.run()
+
+    assert stages == ["halfway"]
+    assert done == [42]
+    assert finished == [True]
+
+
+def test_background_task_discards_a_result_cancelled_during_work() -> None:
+    discarded = []
+    cancelled = []
+    finished = []
+    task = None
+
+    def work(_report):
+        task.cancel()
+        return "resource"
+
+    task = BackgroundTask(
+        work,
+        description="cancel after native work",
+        discard_result=discarded.append,
+    )
+    task.signals.cancelled.connect(lambda: cancelled.append(True))
+    task.signals.finished.connect(lambda: finished.append(True))
+
+    task.run()
+
+    assert discarded == ["resource"]
+    assert cancelled == [True]
     assert finished == [True]
