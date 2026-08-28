@@ -8340,31 +8340,27 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _drain_background_tasks(self) -> None:
-        """Cancel queued Qt background work before QApplication teardown."""
-        for task in list(getattr(self, "_update_tasks", set())):
-            try:
-                task.cancel()
-            except Exception:
-                pass
-            try:
-                task.signals.done.disconnect()
-            except Exception:
-                pass
+        """Detach background work without ever blocking the GUI close path."""
+        from .background_tasks import (
+            clear_pool_nonblocking,
+            retire_background_tasks,
+        )
+
+        retire_background_tasks(
+            getattr(self, "_update_tasks", set()), signal_names=("done",)
+        )
         self._update_tasks.clear()
         # A Zarr load/save in flight must not deliver into a closing window.
-        for task in list(getattr(self, "_zarr_io_tasks", [])):
-            for signal_name in ("stage", "done", "failed"):
-                try:
-                    getattr(task.signals, signal_name).disconnect()
-                except Exception:
-                    pass
+        retire_background_tasks(
+            getattr(self, "_zarr_io_tasks", []),
+            signal_names=("stage", "done", "failed"),
+        )
         if hasattr(self, "_zarr_io_tasks"):
             self._zarr_io_tasks.clear()
 
         try:
             pool = QThreadPool.globalInstance()
-            pool.clear()
-            pool.waitForDone(2500)
+            clear_pool_nonblocking(pool)
         except Exception:
             pass
 
