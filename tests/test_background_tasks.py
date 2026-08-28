@@ -51,3 +51,35 @@ def test_named_thread_pools_are_process_owned_and_reused() -> None:
     assert first is second
     assert other is not first
     assert first.maxThreadCount() == 2
+
+
+def test_cancelled_particle_task_emits_terminal_signal_without_work() -> None:
+    from minflux_viewer.ui.particle_average_dialog import _AverageTask
+
+    called = []
+    cancelled = []
+    task = _AverageTask(lambda _report: called.append(True))
+    task.signals.cancelled.connect(lambda: cancelled.append(True))
+
+    task.cancel()
+    task.run()
+
+    assert called == []
+    assert cancelled == [True]
+
+
+def test_cancelled_zarr_task_always_emits_finished_without_work() -> None:
+    from minflux_viewer.ui.main_window import _ZarrIoTask
+
+    called = []
+    finished = []
+    task = _ZarrIoTask(
+        lambda _report: called.append(True), description="cancelled test"
+    )
+    task.signals.finished.connect(lambda: finished.append(True))
+
+    task.cancel()
+    task.run()
+
+    assert called == []
+    assert finished == [True]

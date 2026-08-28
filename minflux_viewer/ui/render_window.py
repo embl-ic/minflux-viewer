@@ -3684,8 +3684,11 @@ class RenderWindow(QWidget):
             x_range=params["x_range"],
             y_range=params["y_range"],
             z_range=params["z_range"],
-            parent=self,
+            parent=None,
         )
+        from .background_tasks import retain_qthread
+
+        retain_qthread(worker)
         self._export_workers.append(worker)
         worker.progress.connect(lambda msg: self._state.log(msg, dataset_idx=self._idx))
         worker.completed.connect(self._on_tiff_export_done)
@@ -3712,10 +3715,6 @@ class RenderWindow(QWidget):
         self._state.log(f"Export to TIFF failed: {message}", level="ERROR", dataset_idx=self._idx)
 
     def _forget_export_worker(self, worker) -> None:
-        try:
-            worker.wait(50)
-        except Exception:
-            pass
         if worker in self._export_workers:
             self._export_workers.remove(worker)
 
@@ -4239,6 +4238,7 @@ class RenderWindow(QWidget):
             pass
 
     def closeEvent(self, event) -> None:
+        from .background_tasks import retire_qthreads
         from .lut_dialog import release_shared_lut_owner
         from .qt_lifecycle import close_view_boxes
 
@@ -4268,14 +4268,10 @@ class RenderWindow(QWidget):
             except Exception:
                 pass
         release_shared_lut_owner(self)
-        # Let any in-flight TIFF export finish so its QThread is not destroyed
-        # while running (the file write is short relative to the binning).
-        for worker in list(self._export_workers):
-            try:
-                if worker.isRunning():
-                    worker.wait()
-            except Exception:
-                pass
+        retire_qthreads(
+            self._export_workers,
+            signal_names=("progress", "completed", "failed"),
+        )
         self._export_workers.clear()
         close_view_boxes(self._image_view)
         super().closeEvent(event)

@@ -168,3 +168,98 @@ def test_precision_scheduler_deletion_does_not_wait_for_running_work() -> None:
     """
     result = _run_python(code)
     _assert_clean(result, "PrecisionRenderScheduler deletion with active work")
+
+
+def test_msr_dialog_close_does_not_destroy_running_parse_thread() -> None:
+    code = """
+        import time
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QApplication
+        from minflux_viewer.plugins.msr_reader.msr_reader_dialog import (
+            MsrReaderDialog, _ParseWorker,
+        )
+
+        app = QApplication([])
+        _ParseWorker.run = lambda self: time.sleep(0.45)
+        dialog = MsrReaderDialog(state=None)
+        dialog._save_settings = lambda: None
+        dialog._start_parse_worker("ignored.msr", ".")
+        worker = dialog._worker
+        time.sleep(0.05)
+        started = time.perf_counter()
+        dialog.close()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+        elapsed = time.perf_counter() - started
+        worker.wait()
+        if elapsed >= 0.2:
+            raise AssertionError(f"MSR dialog close blocked for {elapsed:.3f}s")
+    """
+    result = _run_python(code)
+    _assert_clean(result, "MSR dialog close during parse")
+
+
+def test_particle_average_close_detaches_running_task() -> None:
+    code = """
+        import time
+        import numpy as np
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QApplication
+        from minflux_viewer.core.app_state import AppState
+        from minflux_viewer.ui.background_tasks import shared_thread_pool
+        from minflux_viewer.ui.particle_average_dialog import (
+            ParticleAverageWindow, _AverageTask,
+        )
+
+        app = QApplication([])
+        dialog = ParticleAverageWindow(AppState())
+        task = _AverageTask(
+            lambda report: (time.sleep(0.45), (np.empty((0, 3)), "done"))[1]
+        )
+        dialog._task = task
+        pool = shared_thread_pool("particle-average", max_threads=1)
+        pool.start(task)
+        time.sleep(0.05)
+        started = time.perf_counter()
+        dialog.close()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+        elapsed = time.perf_counter() - started
+        pool.waitForDone()
+        if elapsed >= 0.2:
+            raise AssertionError(f"Particle Average close blocked for {elapsed:.3f}s")
+    """
+    result = _run_python(code)
+    _assert_clean(result, "Particle Average close during work")
+
+
+def test_main_window_close_detaches_running_zarr_io() -> None:
+    code = """
+        import time
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QApplication
+        from minflux_viewer.core.app_state import AppState
+        from minflux_viewer.ui.background_tasks import shared_thread_pool
+        from minflux_viewer.ui.main_window import MainWindow, _ZarrIoTask
+
+        app = QApplication([])
+        state = AppState()
+        state.prefs.setdefault("file", {})["check_updates_on_startup"] = False
+        state.save_prefs = lambda: None
+        window = MainWindow(state)
+        task = _ZarrIoTask(
+            lambda report: (time.sleep(0.45), object())[1], description="test Zarr"
+        )
+        window._begin_zarr_io(task)
+        time.sleep(0.05)
+        started = time.perf_counter()
+        window.close()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+        elapsed = time.perf_counter() - started
+        shared_thread_pool("zarr-io", max_threads=2).waitForDone()
+        if elapsed >= 0.2:
+            raise AssertionError(f"MainWindow close during Zarr I/O blocked for {elapsed:.3f}s")
+    """
+    result = _run_python(code)
+    _assert_clean(result, "MainWindow close during Zarr I/O")

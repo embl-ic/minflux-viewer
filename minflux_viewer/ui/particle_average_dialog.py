@@ -33,7 +33,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -96,6 +96,7 @@ class _AverageSignals(QObject):
     progress = pyqtSignal(int, int)        # done, total
     done = pyqtSignal(object, str, object)  # pooled points, description, extra(dict|None)
     failed = pyqtSignal(str)
+    cancelled = pyqtSignal()
 
 
 class _AverageTask(QRunnable):
@@ -106,16 +107,25 @@ class _AverageTask(QRunnable):
         self._fn = fn
         self.description = str(description)
         self.signals = _AverageSignals()
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
 
     def run(self) -> None:  # noqa: N802 - Qt API
         from ..core.task_registry import registry as task_registry
 
-        # No cancel=: the aligners run a fixed iteration budget with no stop
-        # checkpoint, so the monitor lists this as not stoppable.
-        handle = task_registry.register(self.description, "analysis")
+        if self._cancelled:
+            self.signals.cancelled.emit()
+            return
+        handle = task_registry.register(
+            self.description, "analysis", cancel=self.cancel
+        )
         handle.start()
 
         def report(done, total) -> None:
+            if self._cancelled:
+                raise _AverageCancelled
             handle.update(progress=int(done) / max(int(total), 1),
                           detail=f"{int(done)}/{int(total)}")
             self.signals.progress.emit(int(done), int(total))
@@ -123,13 +133,25 @@ class _AverageTask(QRunnable):
         try:
             result = self._fn(report)
         except Exception as exc:               # never let a worker exception escape
+            if self._cancelled or isinstance(exc, _AverageCancelled):
+                handle.finish("cancelled")
+                self.signals.cancelled.emit()
+                return
             handle.finish("failed", detail=str(exc))
             self.signals.failed.emit(str(exc))
+            return
+        if self._cancelled:
+            handle.finish("cancelled")
+            self.signals.cancelled.emit()
             return
         handle.finish("done")
         pts, desc = result[0], result[1]
         extra = result[2] if len(result) > 2 else None
         self.signals.done.emit(np.asarray(pts), desc, extra)
+
+
+class _AverageCancelled(Exception):
+    """Internal cooperative-cancellation checkpoint from progress callbacks."""
 
 
 class ParticleAverageWindow(QDialog):
@@ -771,8 +793,11 @@ class ParticleAverageWindow(QDialog):
         task.signals.progress.connect(self._on_progress)
         task.signals.done.connect(self._on_done)
         task.signals.failed.connect(self._on_failed)
+        task.signals.cancelled.connect(self._on_cancelled)
         self._task = task                                    # keep a ref (QRunnable auto-deletes)
-        QThreadPool.globalInstance().start(task)
+        from .background_tasks import shared_thread_pool
+
+        shared_thread_pool("particle-average", max_threads=1).start(task)
 
     def _on_progress(self, done: int, total: int) -> None:
         if total <= 0:
@@ -969,6 +994,25 @@ class ParticleAverageWindow(QDialog):
         self._state.log_progress("=" * 10 + "  FAILED  " + "=" * 10, final=True)
         self._state.status_message.emit("Particle average: failed.")
         self._status.setText(f"Averaging failed: {msg}")
+
+    def _on_cancelled(self) -> None:
+        self._task = None
+        self._run_btn.setEnabled(True)
+        self._state.log_progress("=" * 10 + "  CANCELLED  " + "=" * 10, final=True)
+        self._state.status_message.emit("Particle average: cancelled.")
+        self._status.setText("Averaging cancelled.")
+
+    def closeEvent(self, event) -> None:
+        from .background_tasks import retire_background_tasks
+
+        if self._task is not None:
+            retire_background_tasks(
+                [self._task],
+                signal_names=("progress", "done", "failed", "cancelled"),
+            )
+            self._task = None
+        self._pending.clear()
+        super().closeEvent(event)
 
     def _n_sources(self) -> int:
         return len({p.source for p in self._particles})

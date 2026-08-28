@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from PyQt6.QtCore import QObject, QRunnable, Qt, QThread, QThreadPool, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication,
@@ -2894,7 +2894,7 @@ class PathDropLineEdit(QLineEdit):
 
 class _ParseWorker(QThread):
     progress = pyqtSignal(str)
-    finished = pyqtSignal(dict)
+    succeeded = pyqtSignal(dict)
     failed = pyqtSignal(str)
 
     def __init__(self, msr_path: str, tmp_dir: str):
@@ -2919,7 +2919,7 @@ class _ParseWorker(QThread):
                                  self.progress.emit(msg))[1],
             )
             handle.finish("done")
-            self.finished.emit(result)
+            self.succeeded.emit(result)
         except Exception as exc:
             handle.finish("failed", detail=str(exc))
             self.failed.emit(str(exc))
@@ -3125,26 +3125,30 @@ class MsrReaderDialog(QWidget):
             ensure_on_screen(self, self._owner, align=align)
 
     def closeEvent(self, event):
+        from ...ui.background_tasks import (
+            retire_background_tasks,
+            retire_qthreads,
+        )
+
         self._save_settings()
+        if self._worker is not None:
+            retire_qthreads(
+                [self._worker], signal_names=("progress", "succeeded", "failed")
+            )
+            self._worker = None
         # The dialog is WA_DeleteOnClose, so a running batch task must stop
         # signalling into it before Qt tears the widgets down.
         if self._batch_task is not None:
-            self._batch_task.cancel()
-            for signal in (self._batch_task.signals.progress,
-                           self._batch_task.signals.message,
-                           self._batch_task.signals.finished):
-                try:
-                    signal.disconnect()
-                except (TypeError, RuntimeError):
-                    pass
+            retire_background_tasks(
+                [self._batch_task],
+                signal_names=("progress", "message", "finished"),
+            )
             self._batch_task = None
             self._batch_context = None
         if self._estimate_task is not None:
-            self._estimate_task.cancel()
-            try:
-                self._estimate_task.signals.done.disconnect()
-            except (TypeError, RuntimeError):
-                pass
+            retire_background_tasks(
+                [self._estimate_task], signal_names=("done",)
+            )
             self._estimate_task = None
         for win in list(self._plot_windows):
             try:
@@ -3601,10 +3605,17 @@ class MsrReaderDialog(QWidget):
             "Switch to Folder (batch) mode to pick a file to preview.")
 
     def _start_parse_worker(self, msr: str, tmp: str):
+        from ...ui.background_tasks import retain_qthread, retire_qthreads
+
         self._parse_button.setEnabled(False)
+        if self._worker is not None:
+            retire_qthreads(
+                [self._worker], signal_names=("progress", "succeeded", "failed")
+            )
         self._worker = _ParseWorker(msr, tmp)
+        retain_qthread(self._worker)
         self._worker.progress.connect(self.log)
-        self._worker.finished.connect(self._on_parse_done)
+        self._worker.succeeded.connect(self._on_parse_done)
         self._worker.failed.connect(self._on_parse_failed)
         self._worker.start()
 
@@ -3644,6 +3655,7 @@ class MsrReaderDialog(QWidget):
         export_image_series(out_dir, self.parsed.get("msr"), series, self.log)
 
     def _on_parse_done(self, result: dict):
+        self._worker = None
         self._store_parse_result(result)
         self._parse_button.setEnabled(True)
         self._build_tree_from_result(result)
@@ -3663,6 +3675,7 @@ class MsrReaderDialog(QWidget):
         self._start_export_estimate()
 
     def _on_parse_failed(self, error: str):
+        self._worker = None
         self.log(f"[ERROR] {error}")
         self._parse_button.setEnabled(True)
 
@@ -4383,7 +4396,9 @@ class MsrReaderDialog(QWidget):
         task = _ExportEstimateTask(generation, components)
         task.signals.done.connect(self._on_export_estimate_ready)
         self._estimate_task = task
-        QThreadPool.globalInstance().start(task)
+        from ...ui.background_tasks import shared_thread_pool
+
+        shared_thread_pool("msr-work").start(task)
 
     def _on_export_estimate_ready(self, generation: int, result: object) -> None:
         if generation != self._estimate_generation:
@@ -5646,7 +5661,9 @@ class MsrReaderDialog(QWidget):
         task.signals.finished.connect(self._on_batch_finished)
         self._batch_task = task
         self._set_batch_running(True, len(files))
-        QThreadPool.globalInstance().start(task)
+        from ...ui.background_tasks import shared_thread_pool
+
+        shared_thread_pool("msr-work").start(task)
 
     def _run_single_export(self, out_dir: str, formats: list[str]) -> None:
         """Start a single parsed export off-thread, like the existing batch path."""
@@ -5670,7 +5687,9 @@ class MsrReaderDialog(QWidget):
         }
         self._batch_task = task
         self._set_batch_running(True, 1)
-        QThreadPool.globalInstance().start(task)
+        from ...ui.background_tasks import shared_thread_pool
+
+        shared_thread_pool("msr-work").start(task)
 
     # -- batch progress -------------------------------------------------
 
