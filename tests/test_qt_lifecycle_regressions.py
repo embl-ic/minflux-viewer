@@ -95,6 +95,43 @@ def test_main_window_then_image_views_survive_shared_process_gc(tmp_path: Path) 
     _assert_clean(result, "mixed MainWindow and ImageView lifecycle")
 
 
+def test_repeated_lut_plot_teardown_survives_deferred_layout_events() -> None:
+    """Deleted pyqtgraph labels must not receive a later layout resize event."""
+    code = """
+        import gc
+        import numpy as np
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QApplication
+        from minflux_viewer.ui.lut_dialog import LutDialog
+
+        app = QApplication([])
+        pixels = np.linspace(0.0, 100.0, 1000)
+        for _ in range(80):
+            dialog = LutDialog(
+                on_levels_changed=lambda _lo, _hi: None,
+                on_cmap_changed=lambda _name, _invert: None,
+            )
+            dialog.load_image(
+                pixels=pixels,
+                data_lo=0.0,
+                data_hi=100.0,
+                lo=20.0,
+                hi=80.0,
+                cmap_name="gray",
+                invert=False,
+            )
+            dialog.close()
+            dialog.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            app.processEvents()
+            del dialog
+            gc.collect()
+            app.processEvents()
+    """
+    result = _run_python(code, timeout=60)
+    _assert_clean(result, "repeated LUT plot teardown")
+
+
 def test_render_close_never_waits_for_a_tiff_export() -> None:
     """A long export must not make RenderWindow.close() block the GUI thread."""
     code = """

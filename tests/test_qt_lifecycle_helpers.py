@@ -32,7 +32,7 @@ def test_image_view_boxes_are_closed_and_unregistered_idempotently(_app):
     image_view.close()
 
 
-def test_plot_widget_is_fully_closed_after_viewbox_unregistration(_app):
+def test_plot_widget_is_retired_after_viewbox_unregistration(_app):
     import pyqtgraph as pg
 
     from minflux_viewer.ui.qt_lifecycle import close_plot_widgets
@@ -44,7 +44,18 @@ def test_plot_widget_is_fully_closed_after_viewbox_unregistration(_app):
     close_plot_widgets(plot)
 
     assert box not in pg.ViewBox.AllViews
-    assert plot.plotItem is None
+    assert plot.plotItem is not None
+    assert plot.updatesEnabled() is False
+    assert plot.isHidden()
+
+
+def test_deleted_pyqtgraph_label_ignores_deferred_resize(_app):
+    from PyQt6 import sip
+    from pyqtgraph.graphicsItems.LabelItem import LabelItem
+
+    label = LabelItem("queued layout")
+    sip.delete(label)
+    label.resizeEvent(None)
 
 
 def test_roi_controller_dispose_detaches_store_and_queued_callbacks(_app):

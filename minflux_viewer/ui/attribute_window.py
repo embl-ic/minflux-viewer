@@ -265,6 +265,7 @@ class AttributeWindow(QWidget):
         self._gpu_fallback_note = ""
         self._gl2d_verified = False
         self._gl2d_blank_checks = 0
+        self._fallback_gpu_point_limit: int | None = None
         # Extent of the *un-thinned* series, so the ViewBox fits the data even
         # when only part of it is on the canvas.
         self._data_extent: tuple[float, float, float, float] | None = None
@@ -884,23 +885,27 @@ class AttributeWindow(QWidget):
         return capabilities is None or bool(getattr(capabilities, "available", False))
 
     def _gpu_point_limit(self) -> int:
-        """Current memory-derived marker upload limit."""
+        """Stable marker upload limit for this window session."""
 
         capabilities = getattr(self._state, "gpu_capabilities", None)
         if capabilities is not None:
             return max(0, int(getattr(capabilities, "point_limit", 0)))
         # AppState can be constructed directly by tests/embedders without the
-        # startup probe. Retain a dynamic RAM guard in that case.
+        # startup probe. Measure its RAM guard once so repeated draws do not
+        # jitter as unrelated processes allocate and release memory.
+        if self._fallback_gpu_point_limit is not None:
+            return self._fallback_gpu_point_limit
         try:
             import psutil
 
             available = int(psutil.virtual_memory().available)
         except Exception:
             return 0
-        return point_limit_from_memory(
+        self._fallback_gpu_point_limit = point_limit_from_memory(
             available_system_memory_bytes=available,
             free_gpu_memory_bytes=None,
         )
+        return self._fallback_gpu_point_limit
 
     def set_gpu_2d(self, enabled: bool) -> None:
         """Public entry point for View ▸ GPU rendering in the main menu."""
