@@ -191,6 +191,7 @@ class _ZarrIoSignals(QObject):
     stage = pyqtSignal(str)
     done = pyqtSignal(object)
     failed = pyqtSignal(str)
+    finished = pyqtSignal()
 
 
 class _ZarrIoTask(QRunnable):
@@ -209,25 +210,45 @@ class _ZarrIoTask(QRunnable):
         self._fn = fn
         self.description = str(description)
         self.signals = _ZarrIoSignals()
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Suppress callbacks; the current numpy/blosc operation finishes safely."""
+        self._cancelled = True
 
     def run(self) -> None:  # noqa: N802 - Qt API
         from ..core.task_registry import registry as task_registry
 
-        # No cancel=: a Zarr read/write is one uninterruptible numpy/blosc call,
-        # so there is no checkpoint to honour a stop at. The monitor shows it as
-        # not stoppable rather than offering a button that does nothing.
-        handle = task_registry.register(self.description, "zarr")
+        if self._cancelled:
+            self.signals.finished.emit()
+            return
+        handle = task_registry.register(
+            self.description, "zarr", cancel=self.cancel
+        )
         handle.start()
+
+        def report(stage) -> None:
+            handle.update(detail=str(stage))
+            if not self._cancelled:
+                self.signals.stage.emit(str(stage))
+
         try:
-            result = self._fn(
-                lambda stage: (handle.update(detail=str(stage)),
-                               self.signals.stage.emit(stage))[1])
-        except Exception as exc:                                # noqa: BLE001
-            handle.finish("failed", detail=str(exc))
-            self.signals.failed.emit(str(exc))
-        else:
-            handle.finish("done")
-            self.signals.done.emit(result)
+            try:
+                result = self._fn(report)
+            except Exception as exc:                            # noqa: BLE001
+                if self._cancelled:
+                    handle.finish("cancelled")
+                    return
+                handle.finish("failed", detail=str(exc))
+                self.signals.failed.emit(str(exc))
+            else:
+                if self._cancelled:
+                    handle.finish("cancelled")
+                    return
+                handle.finish("done")
+                self.signals.done.emit(result)
+        finally:
+            self.signals.finished.emit()
 
 
 def _human_bytes(value: int) -> str:
@@ -1875,7 +1896,7 @@ class MainWindow(QMainWindow):
 
     def _begin_zarr_io(self, task) -> None:
         """Start a Zarr load/save task and keep it alive until it finishes."""
-        from PyQt6.QtCore import QThreadPool
+        from .background_tasks import shared_thread_pool
 
         self._status_label.setText(f"{task.description}…")
         self._state.status_progress(task.description)
@@ -1883,9 +1904,8 @@ class MainWindow(QMainWindow):
         if tasks is None:
             tasks = self._zarr_io_tasks = []
         tasks.append(task)
-        for signal in (task.signals.done, task.signals.failed):
-            signal.connect(lambda *_a, _t=task: self._finish_zarr_io(_t))
-        QThreadPool.globalInstance().start(task)
+        task.signals.finished.connect(lambda _t=task: self._finish_zarr_io(_t))
+        shared_thread_pool("zarr-io", max_threads=2).start(task)
 
     def _finish_zarr_io(self, task) -> None:
         try:
@@ -8353,7 +8373,7 @@ class MainWindow(QMainWindow):
         # A Zarr load/save in flight must not deliver into a closing window.
         retire_background_tasks(
             getattr(self, "_zarr_io_tasks", []),
-            signal_names=("stage", "done", "failed"),
+            signal_names=("stage", "done", "failed", "finished"),
         )
         if hasattr(self, "_zarr_io_tasks"):
             self._zarr_io_tasks.clear()
