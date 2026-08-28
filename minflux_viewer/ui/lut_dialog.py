@@ -148,6 +148,7 @@ class LutDialog(QDialog):
         self._state      = state
         self._gamma: float = 1.0
         self._auto_threshold: int = 0
+        self._plot_disposed = False
 
         self.setWindowTitle("LUT")
         # Non-modal so the user can adjust levels while watching the image
@@ -170,6 +171,24 @@ class LutDialog(QDialog):
         self._hist_ymax: float = 1.0
 
         self._build_ui()
+
+    def closeEvent(self, event) -> None:
+        """Release pyqtgraph internals while preserving close-as-hide semantics."""
+        from .qt_lifecycle import close_plot_widgets
+
+        if not self._plot_disposed:
+            self._plot_disposed = True
+            close_plot_widgets(self._hist_plot)
+        state = self._state
+        owner = getattr(state, "_shared_lut_owner", None)
+        if owner is not None:
+            try:
+                owner._lut_dialog = None
+            except (AttributeError, RuntimeError):
+                pass
+        if state is not None:
+            state._shared_lut_owner = None
+        super().closeEvent(event)
 
     def rebind(
         self,
@@ -898,12 +917,21 @@ def shared_lut_dialog(owner, **callbacks) -> "LutDialog":
     state = getattr(owner, "_state", None)
     dialog = getattr(state, "_shared_lut_dialog", None)
     try:
-        alive = dialog is not None and dialog.objectName() is not None
+        alive = (
+            dialog is not None
+            and not getattr(dialog, "_plot_disposed", False)
+            and dialog.objectName() is not None
+        )
     except RuntimeError:                      # C++ side already gone
         alive = False
         dialog = None
 
     if not alive:
+        if dialog is not None:
+            try:
+                dialog.deleteLater()
+            except RuntimeError:
+                pass
         dialog = LutDialog(**callbacks)
         if state is not None:
             state._shared_lut_dialog = dialog
@@ -941,3 +969,25 @@ def close_shared_lut_dialog(state) -> None:
         except (AttributeError, RuntimeError):
             pass
     state._shared_lut_owner = None
+
+
+def release_shared_lut_owner(owner) -> None:
+    """Close the shared LUT if it is still bound to a view being destroyed."""
+    state = getattr(owner, "_state", None)
+    if state is None or getattr(state, "_shared_lut_owner", None) is not owner:
+        try:
+            owner._lut_dialog = None
+        except (AttributeError, RuntimeError):
+            pass
+        return
+    dialog = getattr(state, "_shared_lut_dialog", None)
+    if dialog is not None:
+        try:
+            dialog.close()
+        except RuntimeError:
+            pass
+    state._shared_lut_owner = None
+    try:
+        owner._lut_dialog = None
+    except (AttributeError, RuntimeError):
+        pass

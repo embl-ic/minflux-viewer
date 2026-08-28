@@ -492,6 +492,9 @@ class PlotWindow(QDialog):
             self._owner._on_plot_window_focused(self)
 
     def closeEvent(self, event):
+        from ...ui.qt_lifecycle import close_plot_widgets
+
+        close_plot_widgets(self.plot)
         if hasattr(self._owner, "_on_plot_window_closed"):
             self._owner._on_plot_window_closed(self)
         super().closeEvent(event)
@@ -926,6 +929,7 @@ class AlignmentPlotWindow(QDialog):
             else "Beads and alignment result")
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.resize(1150, 800)
         self._owner = parent
         self.results = results
@@ -1519,6 +1523,9 @@ class AlignmentPlotWindow(QDialog):
             self.resid_table.itemChanged.disconnect(self._on_bead_item_changed)
         except (TypeError, RuntimeError):
             pass
+        from ...ui.qt_lifecycle import close_plot_widgets
+
+        close_plot_widgets(self.plot)
         super().closeEvent(event)
 
     @staticmethod

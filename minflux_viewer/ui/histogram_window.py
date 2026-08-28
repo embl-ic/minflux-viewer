@@ -1974,6 +1974,15 @@ class HistogramWindow(QWidget):
         if idx == self._dataset_idx:
             self._refresh()
 
+    def closeEvent(self, event) -> None:
+        from .qt_lifecycle import close_plot_widgets
+
+        if self._roi_overlay is not None:
+            self._roi_overlay.dispose()
+            self._roi_overlay = None
+        close_plot_widgets(self._plot)
+        super().closeEvent(event)
+
     def focusInEvent(self, event) -> None:
         if self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets):
             self._state.set_active(self._dataset_idx)

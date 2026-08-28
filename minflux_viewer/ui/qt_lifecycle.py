@@ -121,3 +121,26 @@ def close_view_boxes(*candidates: Any) -> None:
             # ``ViewBox.close`` is not idempotent in pyqtgraph 0.14 because its
             # unregister step deletes from a WeakKeyDictionary unconditionally.
             pass
+
+
+def close_plot_widgets(*plots: Any) -> None:
+    """Close complete PlotWidgets after unregistering their ViewBoxes.
+
+    PlotWidget.close() also detaches axes, labels, proxy widgets, and its scene;
+    closing only the ViewBox leaves those objects able to receive queued layout
+    events during owner destruction.
+    """
+    for plot in plots:
+        if plot is None or getattr(plot, "_mfv_plot_widget_closed", False):
+            continue
+        try:
+            plot._mfv_plot_widget_closed = True
+        except (AttributeError, RuntimeError):
+            pass
+        if not qobject_alive(plot):
+            continue
+        close_view_boxes(plot)
+        try:
+            plot.close()
+        except (AttributeError, RuntimeError):
+            pass

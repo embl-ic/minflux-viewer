@@ -453,8 +453,11 @@ def test_shared_lut_dialog_is_closed_with_the_application(qtbot):
     ]
     assert survivors == []
 
-    rwin.close()
-    QApplication.processEvents()
+    from minflux_viewer.ui.qt_lifecycle import qobject_alive
+
+    if qobject_alive(rwin):
+        rwin.close()
+        QApplication.processEvents()
 
 
 def test_inverting_actually_repaints_the_background(qtbot):

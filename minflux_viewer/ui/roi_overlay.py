@@ -532,7 +532,17 @@ class RoiOverlayController(QObject):
         store.changed.connect(self.refresh)
         store.selection_changed.connect(self.refresh)
         store.restore_requested.connect(self.restore_view_edits)
+        # QWidget.destroyed is emitted before Qt recursively deletes its child
+        # widgets.  Dispose here as a final safety net for owners that do not
+        # provide their own closeEvent (including small test/tool plots).
+        try:
+            owner.destroyed.connect(self._on_owner_destroyed)
+        except (AttributeError, TypeError, RuntimeError):
+            pass
         self.refresh()
+
+    def _on_owner_destroyed(self, *_args) -> None:
+        self.dispose()
 
     def dispose(self) -> None:
         """Detach this controller before its owner or plot hierarchy is deleted.
@@ -570,16 +580,32 @@ class RoiOverlayController(QObject):
 
         store = getattr(self, "store", None)
         if store is not None:
-            disconnect_signal(getattr(store, "changed", None), self.refresh)
-            disconnect_signal(getattr(store, "selection_changed", None), self.refresh)
-            disconnect_signal(
-                getattr(store, "restore_requested", None), self.restore_view_edits
-            )
-            if getattr(store, "active_adapter", None) is self:
+            for name, slot in (
+                ("changed", self.refresh),
+                ("selection_changed", self.refresh),
+                ("restore_requested", self.restore_view_edits),
+            ):
+                try:
+                    signal = getattr(store, name, None)
+                except RuntimeError:
+                    signal = None
+                disconnect_signal(signal, slot)
+            try:
+                is_active = getattr(store, "active_adapter", None) is self
+            except RuntimeError:
+                is_active = False
+            if is_active:
                 try:
                     store.set_active_adapter(None)
                 except RuntimeError:
                     pass
+
+        owner = getattr(self, "owner", None)
+        try:
+            destroyed = getattr(owner, "destroyed", None)
+        except RuntimeError:
+            destroyed = None
+        disconnect_signal(destroyed, self._on_owner_destroyed)
 
         plot = getattr(self, "plot_item", None)
         graphics = [

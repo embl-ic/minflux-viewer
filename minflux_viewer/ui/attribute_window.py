@@ -3484,6 +3484,23 @@ class AttributeWindow(QWidget):
         if idx == self._dataset_idx:
             self._refresh()
 
+    def closeEvent(self, event) -> None:
+        from .lut_dialog import release_shared_lut_owner
+        from .qt_lifecycle import close_plot_widgets
+
+        self._rethin_timer.stop()
+        if self._roi_overlay is not None:
+            self._roi_overlay.dispose()
+            self._roi_overlay = None
+        if self._view_box is not None and self._original_mouse_drag_event is not None:
+            try:
+                self._view_box.mouseDragEvent = self._original_mouse_drag_event
+            except RuntimeError:
+                pass
+        release_shared_lut_owner(self)
+        close_plot_widgets(self._plot)
+        super().closeEvent(event)
+
     def focusInEvent(self, event) -> None:
         if self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets):
             self._state.set_active(self._dataset_idx)
