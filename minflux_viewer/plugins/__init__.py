@@ -46,6 +46,22 @@ class PluginEntry:
     name: str
     tooltip: str
     launch: Callable[..., None]   # launch(state, parent=None)
+    # Nested menu placement, e.g. ``("HlyB",)`` for *Plugins ▸ HlyB ▸ …*.
+    # ``ui/main_window.py::_populate_plugins_menu`` currently builds a FLAT
+    # menu, so a user plugin's path is flattened into ``name`` instead (see
+    # ``plugins/loader.py::MENU_SEPARATOR``). The field is declared now so the
+    # menu builder can honour it without a second change to this dataclass;
+    # the diff it needs is in ``docs/extension-layer/track-b-notes.md``.
+    menu_path: tuple[str, ...] = ()
+    # Non-empty when the plugin was found but cannot run. The entry is still
+    # listed — a plugin that silently fails to appear is a worse bug report
+    # than one that appears and explains itself — and ``launch`` reports the
+    # reason. A future menu builder should also disable the action.
+    error: str = ""
+    # True for an entry created by ``discover()`` from a user folder, as
+    # opposed to a built-in that registered itself at import time. ``rediscover``
+    # drops only these.
+    discovered: bool = False
     # Extra search tags for the Command Finder — synonyms and domain terms that
     # are NOT already in ``name``. Optional; the plugin is findable by its name
     # either way. Built-in menu commands get the equivalent from
@@ -75,28 +91,180 @@ def discover(prefs: dict | None = None) -> List[PluginEntry]:
     """
     Find and register user plugins from folders **outside** this package.
 
-    Owned by extension-layer **track B**; Phase 0 lands it as a no-op so the
-    main window can call it from ``_populate_plugins_menu`` without track B
-    having started. Returns the entries it registered, so the caller can report
-    how many were found.
+    Scans the three roots (:func:`loader.plugin_roots`), builds one
+    :class:`PluginEntry` per plugin found, and registers those not already
+    registered. Returns the entries it added, so the caller can report how many
+    were found.
 
-    The design it will implement (``docs/extension-layer/PLAN.md`` 3.2-3.4):
+    Nothing is imported here: the plugin body is loaded when its menu entry is
+    first invoked. A plugin that cannot run is still registered, carrying the
+    reason -- silently missing is a worse bug report than present-and-explained.
 
-    * three roots -- ``<app dir>/plugins/``, the per-user application-data
-      folder, and any extra paths in ``prefs["plugin"]["paths"]``. When frozen,
-      resolve the app directory from ``sys.executable``, **not** ``__file__``:
-      ``_MEIPASS`` is the bundle's ``_internal/``, which is both the wrong place
-      to look and replaced on every update.
-    * two tiers -- a single ``.py`` file is one menu entry; a directory with a
-      ``plugin.toml`` is a full plugin with a manifest.
-    * load under a namespaced module name (``mfv_plugins.<id>``) so two users'
-      plugins can both contain a ``utils.py``.
-    * import the plugin body lazily, when its menu entry is first invoked, so a
-      plugin that imports a heavy library does not slow every launch.
-    * contain every failure: a broken plugin becomes a *disabled* entry whose
-      tooltip is the error, and never stops the rest of the menu building.
+    Registration is by display name, so calling this repeatedly (a rescan) does
+    not duplicate entries. To pick up an *edited* plugin, call
+    :func:`rediscover` instead.
     """
-    return []
+    from . import loader
+
+    added: List[PluginEntry] = []
+    known = {entry.name for entry in _REGISTRY}
+    for root in loader.plugin_roots(prefs):
+        for found in loader.scan_root(root):
+            entry = _entry_for(found, prefs)
+            if entry.name in known:
+                continue
+            register(entry)
+            known.add(entry.name)
+            added.append(entry)
+    return added
+
+
+def rediscover(prefs: dict | None = None) -> List[PluginEntry]:
+    """
+    Drop every discovered user plugin and scan again.
+
+    Used by *Preferences ▸ Plugin ▸ Rescan now* so an edited plugin is picked
+    up without restarting. Built-in plugins are untouched: only entries this
+    module created are removed, and the imported plugin modules are dropped
+    from ``sys.modules`` so the next launch re-imports from disk.
+    """
+    from . import loader
+
+    # Mutate in place rather than rebinding: anything holding a reference to
+    # the registry list (including ``ensure_loaded``'s idea of what is already
+    # registered) must see the same object.
+    _REGISTRY[:] = [e for e in _REGISTRY if not e.discovered]
+    loader.unload_plugin_modules()
+    return discover(prefs)
+
+
+def _entry_for(found, prefs: dict | None) -> PluginEntry:
+    """Build the registry entry for one discovered plugin."""
+    from . import loader
+
+    def launch(state, parent=None, *, _found=found, _prefs=prefs) -> None:
+        _launch_discovered(_found, state, parent, _prefs)
+
+    return PluginEntry(
+        name=found.label,
+        tooltip=found.tooltip,
+        launch=launch,
+        keywords=found.keywords,
+        error=found.error,
+        discovered=True,
+    )
+
+
+def _launch_discovered(found, state, parent, prefs: dict | None) -> None:
+    """
+    Run one discovered plugin, containing every failure.
+
+    Three gates, in order: the plugin must be runnable at all; the user must
+    have accepted the folder it came from; and the import must succeed. Each
+    failure is reported where the user is looking -- a message box when there is
+    a window, and always the Log -- rather than as a traceback into the void.
+    """
+    from . import loader
+
+    log = getattr(state, "log", None)
+
+    def report(message: str, level: str = "ERROR") -> None:
+        if callable(log):
+            log(message, level)
+        _show_message(parent, message, level)
+
+    if found.error:
+        report(f"Plugin '{found.label}' cannot run: {found.error}")
+        return
+
+    settings = prefs if prefs is not None else getattr(state, "prefs", None)
+    if settings is not None and not loader.root_is_confirmed(settings, found.root):
+        if not _confirm_root(parent, found.root):
+            if callable(log):
+                log(f"Plugins in {found.root} were not enabled.", "INFO")
+            return
+        loader.confirm_root(settings, found.root)
+        save = getattr(state, "save_prefs", None)
+        if callable(save):
+            try:
+                save()
+            except Exception:
+                pass
+
+    try:
+        func = loader.load_entry_callable(found)
+    except BaseException as exc:                # noqa: BLE001 - third-party code
+        report(f"Plugin '{found.label}' failed to load: {exc!r}")
+        return
+
+    ctx = getattr(state, "mfv", None)
+    try:
+        func(ctx)
+    except BaseException as exc:                # noqa: BLE001 - third-party code
+        report(f"Plugin '{found.label}' failed: {exc!r}")
+
+
+def _confirm_root(parent, root) -> bool:
+    """
+    Ask once before running code from a folder the user has not accepted.
+
+    Deliberately asked at **first launch**, not at scan: nothing is imported
+    while the menu is built, so listing a plugin is harmless and a dialog at
+    startup would be noise. This is the moment the trust actually matters.
+
+    With no window (headless, tests) there is nobody to ask, so the folder is
+    accepted -- a script-driven session has already chosen its preferences.
+    """
+    try:
+        from PyQt6.QtWidgets import QApplication, QMessageBox
+    except Exception:
+        return True
+    if QApplication.instance() is None:
+        return True
+    answer = QMessageBox.question(
+        parent, "Enable plugins from this folder?",
+        f"Run plugins from:\n\n{root}\n\n"
+        "Plugins are ordinary Python with full access to your files and this "
+        "application — the same as a Fiji plugin or a Script Editor script. "
+        "Enable this folder only if you trust what is in it.",
+    )
+    return answer == QMessageBox.StandardButton.Yes
+
+
+def _show_message(parent, message: str, level: str) -> None:
+    """
+    Report a plugin failure in a box, **without blocking**, beside its window.
+
+    Two deliberate choices:
+
+    * Not ``QMessageBox.critical(...)``. The static helpers run their own event
+      loop, so a failure reported from a scripted or automated run — or from
+      anywhere nobody is there to click OK — stops the application dead.
+      Nothing here needs an answer, so nothing here waits for one.
+      (``_confirm_root`` *is* modal, correctly: it does need an answer.)
+    * **No parent, no box.** Every real call site passes the main window, which
+      owns and cleans up the box. A parentless one would be an unowned
+      top-level widget nothing closes — the shape this project's window rules
+      exist to avoid — and the message is in the Log either way.
+    """
+    if parent is None:
+        return
+    try:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QApplication, QMessageBox
+    except Exception:
+        return
+    if QApplication.instance() is None:
+        return
+
+    box = QMessageBox(parent)
+    box.setWindowTitle("Plugin")
+    box.setText(message)
+    box.setIcon(
+        QMessageBox.Icon.Critical if level == "ERROR" else QMessageBox.Icon.Warning
+    )
+    box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    box.show()
 
 
 def ensure_loaded() -> None:
