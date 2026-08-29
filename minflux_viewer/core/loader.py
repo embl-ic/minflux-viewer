@@ -31,6 +31,7 @@ MBM/search and processing components restore into the canonical model.
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1181,6 +1182,9 @@ def _mfx_raw_len(raw: "AttrStore") -> int:
     return int(np.asarray(arr).shape[0]) if arr is not None else 0
 
 
+_LOC_ID_PUBLISH_LOCK = threading.Lock()
+
+
 def _raw_loc_id(raw: "AttrStore") -> "np.ndarray | None":
     """Per-row localization-group id over the flattened raw store (cached).
 
@@ -1190,8 +1194,12 @@ def _raw_loc_id(raw: "AttrStore") -> "np.ndarray | None":
     increase within a trace. This single rule covers m2205-style fixed
     ``n_loc × n_itr`` grids, m2410 flat event streams (variable iterations
     per localization, traces interleaved in time, repeated final-iteration
-    rows in tracking sequences), and single-iteration stores. Computed once
-    and cached in the store as ``loc_id``.
+    rows in tracking sequences), and single-iteration stores.
+
+    ⚠ Computed once and **cached into the store** as ``loc_id`` — so this
+    reader writes to ``mfx_raw``. It is the one such write, it is
+    idempotent, and it is thread-safe (see the publish below), which is
+    what lets a background worker call it while the GUI thread reads.
     """
     cached = raw.get("loc_id")
     if cached is not None:
@@ -1211,7 +1219,17 @@ def _raw_loc_id(raw: "AttrStore") -> "np.ndarray | None":
         new_s = np.r_[True, (tid_s[1:] != tid_s[:-1]) | (np.diff(itr_s) <= 0)]
         loc_id = np.empty(n, dtype=np.int64)
         loc_id[order] = np.cumsum(new_s) - 1
-    raw["loc_id"] = loc_id
+    # Published under a lock because a background worker may compute this at the
+    # same time as the GUI thread (see core/post_load.py). The value is a pure
+    # function of the store, so a concurrent computation is duplicated work, not
+    # a disagreement; the lock is held only for the publish so neither thread
+    # ever waits out the other's argsort, and every reader ends up with the same
+    # array. Do not widen it to cover the computation above.
+    with _LOC_ID_PUBLISH_LOCK:
+        cached = raw.get("loc_id")
+        if cached is not None:
+            return np.asarray(cached).ravel()
+        raw["loc_id"] = loc_id
     return loc_id
 
 

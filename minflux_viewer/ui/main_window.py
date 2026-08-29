@@ -291,11 +291,9 @@ class MainWindow(QMainWindow):
         self._scatter_windows: dict[int, QWidget] = {}
         self._histogram_windows: dict[int, QWidget] = {}
         self._attr_windows: dict[int, QWidget] = {}
-        self._attr_cpu_windows: dict[int, QWidget] = {}
         self._scatter_win   = None       # compatibility alias: most recently raised
         self._histogram_win = None       # compatibility alias: most recently raised
         self._attr_win      = None       # compatibility alias: most recently raised
-        self._attr_cpu_win  = None
         self._filter_dlg    = None
         self._filter_dlgs: dict[int | None, QWidget] = {}
         self._ds_manager    = None
@@ -405,7 +403,6 @@ class MainWindow(QMainWindow):
         state.overlay_manual_alignment_requested.connect(
             self._on_overlay_manual_alignment_requested
         )
-        self._sync_attribute_gpu_action()
 
         # Remembered ROI duplicate/crop options, per dataset (session-only,
         # keyed by dataset identity — "use the same setup and stop asking").
@@ -735,28 +732,6 @@ class MainWindow(QMainWindow):
         self.actionAggregate = QAction("Aggregate Localizations…", self)
         self.actionAggregate.triggered.connect(self._aggregate_active_dataset)
 
-        # Attribute Plot renderer switch. Lives in the app View menu as well as
-        # the plot's own right-click menu, so the two renderers can be compared
-        # without hunting for the context menu.
-        self.actionAttributeGpu = QAction(
-            "Attribute Plot: GPU rendering (OpenGL, experimental)", self
-        )
-        self.actionAttributeGpu.setCheckable(True)
-        self.actionAttributeGpu.setToolTip(
-            "Draw exact Attribute Plot markers with OpenGL when startup probing\n"
-            "and the current memory-derived upload budget permit it. Axes, ROI,\n"
-            "zoom and connecting lines remain in the pyqtgraph overlay."
-        )
-        self.actionAttributeGpu.triggered.connect(self._toggle_attribute_gpu)
-        self.actionAttributeCpu = QAction("Attribute Plot (CPU fix)", self)
-        self.actionAttributeCpu.setObjectName("actionAttributeCpu")
-        self.actionAttributeCpu.setToolTip(
-            "Open a separate, non-OpenGL Attribute Plot. Sparse views use Qt "
-            "bulk point painting; dense views aggregate every visible row into "
-            "a display-sized count grid (and mean C per cell)."
-        )
-        self.actionAttributeCpu.triggered.connect(self._show_attr_plot_cpu)
-
         # Help menu
         u.actionAbout.triggered.connect(self._show_about)
         u.actionMemoryMonitor.triggered.connect(self._show_memory_monitor)
@@ -942,16 +917,12 @@ class MainWindow(QMainWindow):
         u.menuView.addAction(u.actionShowInfo)
         u.menuView.addSeparator()
         u.menuView.addAction(u.actionAttributePlot)
-        u.menuView.addAction(self.actionAttributeCpu)
         u.menuView.addAction(u.actionHistogram)
         u.menuView.addAction(u.actionScatter)
         u.menuView.addAction(u.actionRender)
         u.menuView.addSeparator()
-        u.menuView.addAction(self.actionAttributeGpu)
-        u.menuView.addSeparator()
         u.menuView.addAction(u.actionLog)
         u.menuView.setToolTipsVisible(True)
-        u.menuView.aboutToShow.connect(self._sync_attribute_gpu_action)
 
         u.menuProcess.clear()
         u.menuProcess.addAction(self.menuProcessChannel.menuAction())
@@ -2331,8 +2302,30 @@ class MainWindow(QMainWindow):
         too, in insertion order.
         """
         from .. import plugins
+        from ..core import user_libs
+
+        # External library folders must be on sys.path BEFORE any plugin is
+        # imported, so a plugin can rely on them at import time. Appended,
+        # never prepended -- see core/user_libs.py for the measured reason.
+        try:
+            added = user_libs.install_paths(self._state.prefs)
+        except Exception as exc:                      # never block startup
+            self._state.log(f"Could not add external library folders: {exc}", "WARN")
+        else:
+            if added:
+                self._state.log(
+                    f"Added {len(added)} external library folder(s) to the Python path.",
+                    "INFO",
+                )
 
         plugins.ensure_loaded()
+        # User plugins from folders outside the package. A failure here must
+        # never stop the built-in plugins from reaching the menu.
+        try:
+            plugins.discover(self._state.prefs)
+        except Exception as exc:
+            self._state.log(f"Plugin discovery failed: {exc}", "WARN")
+
         menu = self._ui.menuPlugins
         menu.clear()
 
@@ -2361,6 +2354,80 @@ class MainWindow(QMainWindow):
             if entry.name == "Generate Method Text":
                 self._mark_action_ai_unapproved(act)
             menu.addAction(act)
+
+    # ------------------------------------------------------------------
+    # Public window API  — the surface scripts and plugins may rely on
+    # ------------------------------------------------------------------
+    #
+    # These are the ONLY window entry points published through ``mfv``. They
+    # exist because external code cannot be refactored alongside a private
+    # name: ``minflux_viewer/api/`` is a contract with code this project does
+    # not own, and a leading underscore in that contract is a promise nobody
+    # made. Same reasoning — and the same shape — as the Dataset Manager's
+    # public ``close_datasets`` / ``duplicate_datasets`` /
+    # ``combine_datasets_as_overlay`` batch entry points.
+    #
+    # Deliberately thin: each one delegates, unchanged, to the private
+    # implementation. Do not move logic up here, and do not let the private
+    # bodies start calling these.
+    #
+    # ⚠ Every ``_show_*`` below guards against ``QAction.triggered``'s
+    # ``checked=False`` with ``type(x) is int`` — a bool would otherwise be
+    # read as dataset index 0. So these wrappers must pass an ``int`` or
+    # ``None`` through and nothing else; ``_dataset_idx_arg`` enforces that
+    # rather than trusting the caller, because the caller is a script.
+
+    @staticmethod
+    def _dataset_idx_arg(idx) -> int | None:
+        """
+        Return the only two argument shapes the private openers accept.
+
+        ``bool`` maps to ``None`` deliberately: a plugin may well connect a
+        public opener straight to a ``QAction.triggered``, which supplies
+        ``checked=False``, and index 0 is the wrong reading of that.
+
+        Anything integer-*like* is accepted and narrowed — ``numpy`` integers
+        above all, because a script index is very often ``np.argmax(...)`` or a
+        value pulled out of an array. A plain ``type(idx) is int`` test is
+        right for the private methods, which only ever see Qt's own arguments,
+        but as the public contract it would silently retarget such a call to
+        the active dataset. Anything else raises rather than guessing: a
+        silent fallback that masks a caller error is exactly what this project
+        does not do.
+        """
+        if idx is None or isinstance(idx, bool):
+            return None
+        try:
+            return int(idx.__index__())
+        except AttributeError:
+            raise TypeError(
+                f"dataset index must be an integer or None, not "
+                f"{type(idx).__name__}."
+            ) from None
+
+    def show_render(self, idx: int | None = None):
+        """Open (or raise) the Render View for a dataset (default: active)."""
+        return self._show_render(self._dataset_idx_arg(idx))
+
+    def show_scatter(self, idx: int | None = None):
+        """Open (or raise) the Localization Scatter Plot for a dataset."""
+        return self._show_scatter(self._dataset_idx_arg(idx))
+
+    def show_histogram(self, idx: int | None = None):
+        """Open (or raise) the Attribute Histogram for a dataset."""
+        return self._show_histogram(self._dataset_idx_arg(idx))
+
+    def show_attribute_plot(self, idx: int | None = None):
+        """Open (or raise) the Attribute Plot for a dataset."""
+        return self._show_attr_plot(self._dataset_idx_arg(idx))
+
+    def show_console(self) -> None:
+        """Open (or raise) the Console window."""
+        return self._show_console()
+
+    def show_script_editor(self) -> None:
+        """Open (or raise) the Script Editor."""
+        return self._show_script_editor()
 
     def _bind_scripting_api(self) -> None:
         """Expose this viewer instance through the runtime ``mfv`` module."""
@@ -2502,105 +2569,9 @@ class MainWindow(QMainWindow):
         self._notify_view_state_changed()
         return win
 
-    def _show_attr_plot_cpu(self, dataset_idx: int | None = None):
-        """Open the independent CPU bulk/aggregation attribute plot."""
 
-        if self._state.active_dataset is None:
-            self._no_data_warning()
-            return None
-        from .attribute_window import AttributeWindow
 
-        idx = dataset_idx if type(dataset_idx) is int else self._state.active_idx
-        if idx is None:
-            return None
-        win = self._attr_cpu_windows.get(idx)
-        if win is None:
-            win = AttributeWindow(self._state, dataset_idx=idx, cpu_fix=True)
-            win.destroyed.connect(
-                lambda _=None, i=idx: self._attr_cpu_windows.pop(i, None)
-            )
-            self._attr_cpu_windows[idx] = win
-        self._attr_cpu_win = win
-        self._install_window_shortcuts(win)
-        win.show()
-        win.raise_()
-        win.activateWindow()
-        self._notify_view_state_changed()
-        return win
 
-    def _attribute_gpu_state(self) -> bool:
-        """Whether the active dataset's Attribute Plot uses the GPU renderer.
-
-        Falls back to the dataset's saved view state, so the menu is right even
-        before the plot has been opened.
-        """
-        idx = self._state.active_idx
-        if idx is None:
-            return False
-        win = self._attr_windows.get(idx)
-        if win is not None:
-            return bool(getattr(win, "gpu_2d", False))
-        if 0 <= idx < len(self._state.datasets):
-            saved = self._state.datasets[idx].state.get("attribute_plot_state")
-            if isinstance(saved, dict):
-                return bool(saved.get("gl_2d", False))
-        return False
-
-    def _sync_attribute_gpu_action(self) -> None:
-        action = getattr(self, "actionAttributeGpu", None)
-        if action is None:
-            return
-        capabilities = getattr(self._state, "gpu_capabilities", None)
-        gpu_available = (
-            capabilities is None
-            or bool(getattr(capabilities, "available", False))
-        )
-        action.setEnabled(self._state.active_idx is not None and gpu_available)
-        if capabilities is not None:
-            if gpu_available:
-                action.setToolTip(
-                    "Draw exact 2-D markers with OpenGL when they fit the current "
-                    f"memory budget ({int(capabilities.point_limit):,} points).\n"
-                    f"Renderer: {capabilities.renderer or 'unknown'}; "
-                    f"{capabilities.memory_summary}."
-                )
-            else:
-                action.setToolTip(
-                    "GPU rendering is unavailable on this display: "
-                    f"{capabilities.reason}"
-                )
-        action.blockSignals(True)
-        action.setChecked(gpu_available and self._attribute_gpu_state())
-        action.blockSignals(False)
-
-    def _toggle_attribute_gpu(self, enabled: bool) -> None:
-        """Switch the Attribute Plot renderer, opening the plot if needed."""
-        capabilities = getattr(self._state, "gpu_capabilities", None)
-        if (
-            enabled and capabilities is not None
-            and not bool(getattr(capabilities, "available", False))
-        ):
-            self._state.log(
-                f"Attribute Plot GPU unavailable: {capabilities.reason}",
-                level="WARN",
-            )
-            self._sync_attribute_gpu_action()
-            return
-        win = self._show_attr_plot()
-        if win is None:
-            self._sync_attribute_gpu_action()
-            return
-        win.set_gpu_2d(bool(enabled))
-        # The switch is a property of the 2-D projections; say so rather than
-        # letting a click on a 3-D plot look like it did nothing.
-        pending = (
-            "  Applies to XY/XZ/YZ; this plot is showing 3D."
-            if getattr(win, "view_mode", "") == "3D" else ""
-        )
-        self._state.log(
-            "Attribute Plot renderer: "
-            f"{'GPU (OpenGL)' if enabled else 'pyqtgraph'}.{pending}"
-        )
 
     def _show_filter(self) -> None:
         from .filter_dialog import FilterDialog
@@ -3924,7 +3895,6 @@ class MainWindow(QMainWindow):
                 "_scatter_windows",
                 "_histogram_windows",
                 "_attr_windows",
-                "_attr_cpu_windows",
                 "_filter_dlgs",
             )
         )
@@ -4320,15 +4290,44 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _show_preferences(self) -> None:
-        """Open the modal Preferences dialog (Edit → Preferences…)."""
+        """Open the modeless Preferences dialog (Edit → Preferences…).
+
+        Modeless so a preference can be chosen while looking at the plot or
+        dataset it applies to. That is only safe because ``_accept`` merges the
+        edited leaves into the live preferences instead of assigning its opening
+        snapshot wholesale — see ``core/app_state.py::merge_pref_changes``.
+
+        Single-instance: two dialogs would each snapshot, and the second OK
+        would decide every field the first had just set.
+        """
+        from .modeless import show_modeless
         from .preferences_dialog import PreferencesDialog
-        dlg = PreferencesDialog(self._state, parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            # After OK the dialog has already written prefs + saved; rebuild
-            # any UI bits that depend on them.
-            self._apply_shortcuts()
-            self._populate_recent_menu()
-            self._refresh_plot_preferences()
+        from .qt_lifecycle import qobject_alive
+
+        existing = getattr(self, "_prefs_dialog", None)
+        if existing is not None and qobject_alive(existing):
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+
+        # Non-owned, per the modeless window convention: a parented top-level
+        # is an *owned* window the OS pins above its owner.
+        dlg = PreferencesDialog(self._state)
+        dlg.accepted.connect(self._on_preferences_accepted)
+        dlg.destroyed.connect(
+            lambda _=None: setattr(self, "_prefs_dialog", None)
+        )
+        self._prefs_dialog = dlg
+        show_modeless(dlg, self)
+
+    def _on_preferences_accepted(self) -> None:
+        """Rebuild the UI bits that depend on preferences, after OK."""
+        if self._is_shutting_down:
+            return
+        self._apply_shortcuts()
+        self._populate_recent_menu()
+        self._refresh_plot_preferences()
 
     def _refresh_plot_preferences(self) -> None:
         windows = (
@@ -4336,7 +4335,6 @@ class MainWindow(QMainWindow):
             + list(self._scatter_windows.values())
             + list(self._histogram_windows.values())
             + list(self._attr_windows.values())
-            + list(self._attr_cpu_windows.values())
         )
         for win in windows:
             refresh = getattr(win, "refresh_preferences", None)
@@ -4350,7 +4348,7 @@ class MainWindow(QMainWindow):
         populated in a window's constructor does.
         """
         for registry in (self._scatter_windows, self._render_windows,
-                         self._attr_windows, self._attr_cpu_windows):
+                         self._attr_windows):
             for window in list(registry.values()):
                 refresh = getattr(window, "refresh_colormap_list", None)
                 if callable(refresh):
@@ -4464,7 +4462,6 @@ class MainWindow(QMainWindow):
                 *self._scatter_windows.values(),
                 *self._histogram_windows.values(),
                 *self._attr_windows.values(),
-                *self._attr_cpu_windows.values(),
             ):
                 adapter = getattr(win, "_roi_overlay", None)
                 if adapter is not None and adapter not in adapters:
@@ -4486,7 +4483,6 @@ class MainWindow(QMainWindow):
         if attribute_changed:
             for win in (
                 *self._attr_windows.values(),
-                *self._attr_cpu_windows.values(),
             ):
                 refresh = getattr(win, "refresh_colors", None)
                 if callable(refresh):
@@ -7308,6 +7304,12 @@ class MainWindow(QMainWindow):
         tasks = getattr(self, "_post_load_tasks", None)
         if tasks is None:
             tasks = self._post_load_tasks = {}
+        # ⚠ Keyed by id(ds), which is only safe because the entry keeps the
+        # dataset alive: `work` closes over `ds` and every signal lambda binds
+        # it, so while `tasks[key]` exists the object cannot be freed and its
+        # id cannot be recycled onto a different dataset. If those closures are
+        # ever refactored away, key this by something stable instead, or a new
+        # dataset landing at a freed address would silently skip post-load.
         key = id(ds)
         if key in tasks:
             return
@@ -7779,7 +7781,6 @@ class MainWindow(QMainWindow):
             self._scatter_windows,
             self._histogram_windows,
             self._attr_windows,
-            self._attr_cpu_windows,
             self._filter_dlgs,
         ):
             win = mapping.pop(idx, None)
@@ -7831,7 +7832,6 @@ class MainWindow(QMainWindow):
         mapping.update(moved)
 
     def _on_active_changed(self, idx: int) -> None:
-        self._sync_attribute_gpu_action()
         if not (0 <= idx < len(self._state.datasets)):
             return
         ds = self._state.datasets[idx]
@@ -8000,7 +8000,6 @@ class MainWindow(QMainWindow):
             self._render_windows,
             self._scatter_windows,
             self._attr_windows,
-            self._attr_cpu_windows,
         ]
         # Present only when the advanced renderer has been opened.
         advanced = getattr(self, "_advanced_render_windows", None)
@@ -8114,7 +8113,6 @@ class MainWindow(QMainWindow):
             self._render_windows,
             self._scatter_windows,
             self._attr_windows,
-            self._attr_cpu_windows,
         ):
             candidates.extend(registry.values())
             for view in registry.values():
@@ -8662,6 +8660,18 @@ class MainWindow(QMainWindow):
             clear_pool_nonblocking(pool)
         except Exception:
             pass
+        # The named process-owned pools outlive this window, so work already
+        # queued on them would still start after it closed. Retirement above
+        # cancelled those tasks, but dropping what has not begun is cheaper
+        # than starting each one only to have it exit at its first checkpoint.
+        # Still non-blocking: clear() never touches work already running.
+        try:
+            from .background_tasks import shared_thread_pools
+
+            for pool in shared_thread_pools():
+                clear_pool_nonblocking(pool)
+        except Exception:
+            pass
 
     def _close_all_child_windows(self, *, keep_log_console: bool = False) -> None:
         """
@@ -8695,7 +8705,6 @@ class MainWindow(QMainWindow):
             self._scatter_windows,
             self._histogram_windows,
             self._attr_windows,
-            self._attr_cpu_windows,
         ):
             for win in list(mapping.values()):
                 try: win.close()
@@ -8754,6 +8763,7 @@ class MainWindow(QMainWindow):
         owner of its children, we clean those subprocesses up here.
         """
         import subprocess  # stdlib, no deps
+        import threading
         if not self._paraview_procs:
             return
 
@@ -8765,20 +8775,35 @@ class MainWindow(QMainWindow):
             f"Terminating {len(still_alive)} ParaView process(es)…",
             "INFO",
         )
-        # Graceful shutdown first
+        # Graceful shutdown first. terminate() only posts the request, so this
+        # part is instant and every process has been asked before we return.
         for p in still_alive:
             try: p.terminate()
             except Exception: pass
-        # Give each a couple of seconds, then kill anything still running
-        for p in still_alive:
-            try:
-                p.wait(timeout=2)
-            except subprocess.TimeoutExpired:
+
+        # ⚠ The escalation must NOT run here. This is called from closeEvent,
+        # and `p.wait(timeout=2)` per process made application close hang for up
+        # to 2 s × N on ParaView instances that ignore the request — the same
+        # class of freeze the Qt background-work rules exist to prevent, just
+        # via a subprocess rather than a QThread. A daemon thread cannot hold
+        # interpreter exit open, so the kill is best-effort by design; the
+        # terminate above is the part that is guaranteed to have been delivered.
+        def _escalate(procs) -> None:
+            for proc in procs:
                 try:
-                    p.kill()
-                except Exception: pass
-            except Exception:
-                pass
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+        threading.Thread(
+            target=_escalate, args=(list(still_alive),),
+            name="paraview-terminate", daemon=True,
+        ).start()
         self._paraview_procs.clear()
 
 

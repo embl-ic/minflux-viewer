@@ -434,4 +434,9 @@ class DriftCorrectionWindow(QDialog):
             self._state.active_changed.disconnect(self._on_active_changed)
         except Exception:
             pass
+        from ...ui.qt_lifecycle import dispose_plot_widgets
+
+        # Retire the pyqtgraph plots last, after this window's own
+        # teardown, so nothing here touches an already-inert plot.
+        dispose_plot_widgets(self)
         super().closeEvent(event)

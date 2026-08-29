@@ -658,4 +658,9 @@ class ShapeSegmentationWindow(QDialog):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
         self._save_prefs()
+        from .qt_lifecycle import dispose_plot_widgets
+
+        # Retire the pyqtgraph plots last, after this window's own
+        # teardown, so nothing here touches an already-inert plot.
+        dispose_plot_widgets(self)
         super().closeEvent(event)

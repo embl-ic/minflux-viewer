@@ -185,3 +185,14 @@ class MemoryMonitor(QWidget):
             self._state.log(msg, "INFO")
         self._status.setText(msg)
         event.accept()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        """Retire this window's pyqtgraph plots before Qt deletes them."""
+        from .qt_lifecycle import dispose_plot_widgets
+
+        try:
+            self._timer.stop()
+        except (AttributeError, RuntimeError):
+            pass
+        dispose_plot_widgets(self)
+        super().closeEvent(event)

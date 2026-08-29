@@ -38,18 +38,37 @@ def _isolate_preferences(tmp_path_factory):
         yield
         return
 
-    prefs_file = tmp_path_factory.mktemp("prefs") / "prefs.json"
+    prefs_root = tmp_path_factory.mktemp("prefs")
+    prefs_file = prefs_root / "prefs.json"
+    plugin_root = prefs_root / "plugins"
+    pylibs_root = prefs_root / "pylibs"
+    plugin_root.mkdir()
+    pylibs_root.mkdir()
+
+    def _with_isolated_extension_dirs(prefs):
+        """Keep plugin discovery and external imports out of real user dirs."""
+        plugin = prefs.setdefault("plugin", {})
+        plugin["paths"] = [str(plugin_root)]
+        plugin["scan_user_dir"] = False
+        plugin["confirmed_dirs"] = [str(plugin_root)]
+        plugin["user_lib_paths"] = [str(pylibs_root)]
+        return prefs
 
     def _load(self):
         if prefs_file.exists():
             try:
-                return _mod._migrate_prefs(
-                    _mod._merge(json.loads(prefs_file.read_text()), _mod.DEFAULT_PREFS))
+                return _with_isolated_extension_dirs(
+                    _mod._migrate_prefs(
+                        _mod._merge(
+                            json.loads(prefs_file.read_text()), _mod.DEFAULT_PREFS
+                        )
+                    )
+                )
             except Exception:
                 pass
         # Match the real fresh-install path, including pre-recording every
         # one-shot migration so old migrations cannot rewrite current defaults.
-        return _mod.default_prefs()
+        return _with_isolated_extension_dirs(_mod.default_prefs())
 
     def _save(self):
         try:

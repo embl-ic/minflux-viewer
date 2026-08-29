@@ -56,7 +56,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..colors import DEFAULT_COLOR_PREFS, normalize_color_preferences
-from ..core.app_state import DEFAULT_PREFS, AppState
+from ..core.app_state import DEFAULT_PREFS, AppState, merge_pref_changes
 from ..core.attributes import aggregation_description
 from ..core.iteration import POOL_KEYS
 from ..msr.descriptions import describe_path
@@ -184,34 +184,6 @@ _SHORTCUT_LABELS = {
 
 # Hover help for the Attribute Plot thinning preference. States the mechanism,
 # why it exists (measured), and what it costs the reader in accuracy.
-ATTRIBUTE_THINNING_TOOLTIP = (
-    "When a view holds more points than the display budget, the Attribute Plot\n"
-    "keeps spatial representatives from the points currently in view — never\n"
-    "a density-weighted or averaged summary, so no value is altered.\n"
-    "\n"
-    "Why: pyqtgraph draws one marker per point. Measured on a 246,437-\n"
-    "localization MINFLUX dataset, drawing every point costs ~0.2 s, and\n"
-    "browsing its 20.6 M raw iteration rows costs ~19 s for each redraw —\n"
-    "a cost repeated on every pan and zoom.\n"
-    "\n"
-    "Limitation: in a dense region the marker density no longer reflects the\n"
-    "data density. One row from every occupied spatial cell is retained before\n"
-    "remaining capacity is filled, so isolated features are protected. It is\n"
-    "recomputed for the visible range, so zooming in restores the omitted\n"
-    "points, and the plot's status line always reports how many of how many\n"
-    "points are drawn.\n"
-    "\n"
-    "Applies to the legacy pyqtgraph CPU renderer. GPU mode draws exact markers\n"
-    "up to its startup memory-derived limit. The separate View > Attribute Plot\n"
-    "(CPU fix) instead bulk-paints sparse views and screen-aggregates every\n"
-    "visible row in dense views.\n"
-    "\n"
-    "Turn off for a faithful plot of every point; expect seconds-long redraws\n"
-    "on multi-million-row selections. Each Attribute Plot can also switch it\n"
-    "from its right-click View menu, starting from this preference."
-)
-
-
 class _NoWheelComboBox(QComboBox):
     """Combo box that ignores mouse-wheel scrolling.
 
@@ -295,16 +267,28 @@ class PreferencesDialog(QDialog):
         # Work on a deep copy so Cancel really cancels
         self._draft: dict = copy.deepcopy(state.prefs)
         sync_custom_palette(self._draft)
+        # What the preferences looked like when this dialog opened. `_accept`
+        # diffs the draft against it so only genuinely edited leaves are
+        # written back, leaving concurrent writes by the rest of the
+        # application intact.
+        self._baseline: dict = copy.deepcopy(self._draft)
+        self._syncing_colors = False
         self._page_keys: list[list[str]] = []
 
         self.setWindowTitle("Preferences")
-        self.setModal(True)
+        # Modeless: opened through `show_modeless`, so a preference can be
+        # chosen while looking at the view it applies to. `_accept` merges only
+        # the edited leaves, which is what makes that safe.
         # Tall enough that the longest page (Shortcuts) fits without resizing.
         self.resize(820, 760)
         self.setMinimumSize(720, 560)
 
         self._build_ui()
         self._load_draft_into_widgets()
+        # The global COLOR dialog edits the same `prefs["colors"]` registry and
+        # is also modeless, so both can be open at once. Follow its edits rather
+        # than showing a stale swatch and writing it back on OK.
+        self._state.colors_changed.connect(self._on_external_colors_changed)
 
     # ------------------------------------------------------------------
     # UI
@@ -787,13 +771,6 @@ class PreferencesDialog(QDialog):
         attr_colors.addStretch(1)
         form_attr.addRow("Colors", attr_colors)
 
-        self._attribute_thinning = QCheckBox(
-            "Thin dense views to keep drawing responsive "
-            "(zoom in to see every point)"
-        )
-        self._attribute_thinning.setToolTip(ATTRIBUTE_THINNING_TOOLTIP)
-        form_attr.addRow(self._attribute_thinning)
-
         root.addWidget(grp_attr)
 
         # ── Histogram Plot ───────────────────────────────────────────
@@ -996,6 +973,21 @@ class PreferencesDialog(QDialog):
         msr_row.addWidget(self._msr_remember)
         msr_row.addStretch()
         root.addLayout(msr_row)
+
+        # Extension-layer groups. Each lives in its own module so that the
+        # plugin-discovery and external-library work can add a Preferences
+        # group without both editing this file. The seam is exactly the three
+        # calls here + in _load_values / _save_values; do not add a fourth.
+        from .prefs_plugin_paths import build_plugin_paths_group
+        from .prefs_python_packages import build_python_packages_group
+
+        root.addSpacing(8)
+        self._plugin_paths_group = build_plugin_paths_group(w)
+        root.addWidget(self._plugin_paths_group)
+
+        root.addSpacing(8)
+        self._python_packages_group = build_python_packages_group(w)
+        root.addWidget(self._python_packages_group)
 
         root.addStretch()
         return w
@@ -1290,7 +1282,6 @@ class PreferencesDialog(QDialog):
                         _SCATTER_COLOR_BY_OPTIONS)
         self._set_combo(self._scatter_cmap_combo, p.get("scatter_cmap", "jet"), _SCATTER_CMAPS)
         self._set_combo_data(self._scatter_xy_origin_combo, p.get("scatter_xy_origin", "top_left"))
-        self._attribute_thinning.setChecked(bool(p.get("attribute_thinning", True)))
         self._attribute_data_color.set_rgba(viewer["attribute_data"])
         self._attribute_background_color.set_rgba(viewer["attribute_background"])
         self._histogram_data_color.set_rgba(viewer["histogram_data"])
@@ -1321,6 +1312,8 @@ class PreferencesDialog(QDialog):
         # Plugin
         self._paraview_edit.setText(f.get("paraview_path", ""))
         self._msr_remember.setChecked(bool(g.get("msr_remember_last", True)))
+        self._plugin_paths_group.load(self._draft)
+        self._python_packages_group.load(self._draft)
 
         self._shortcut_table.setRowCount(0)
         for key, label in _SHORTCUT_LABELS.items():
@@ -1339,6 +1332,48 @@ class PreferencesDialog(QDialog):
         self._mbm_average_count.setValue(int(m.get("average_occurrence_count", 10)))
         self._set_combo(self._mbm_transform_type, m.get("transform_type", _MBM_TRANSFORM_TYPES[0]), _MBM_TRANSFORM_TYPES)
         self._set_combo(self._mbm_align_to, m.get("align_to_channel", "first"), ["first", "last"])
+
+    def _viewer_color_widgets(self) -> dict:
+        """Colour swatches keyed by their ``colors["viewer"]`` entry."""
+        return {
+            "attribute_data": self._attribute_data_color,
+            "attribute_background": self._attribute_background_color,
+            "histogram_data": self._histogram_data_color,
+            "histogram_background": self._histogram_background_color,
+            "roi_edge": self._roi_color,
+            "filter_range": self._filter_range_color,
+            "filter_bounds": self._filter_bounds_color,
+            "filter_text": self._filter_text_color,
+        }
+
+    def _on_external_colors_changed(self, _payload=None) -> None:
+        """Adopt a colour edit made elsewhere while this dialog is open.
+
+        Rebasing the ``colors`` baseline as well as the draft is the point: an
+        untouched subtree must not read as a change on OK, or this dialog would
+        write its stale copy back over the other editor's work.
+        """
+        if self._syncing_colors:
+            return
+        self._syncing_colors = True
+        try:
+            colors = normalize_color_preferences(
+                copy.deepcopy(self._state.prefs.get("colors", {}))
+            )
+            self._draft["colors"] = colors
+            self._baseline["colors"] = copy.deepcopy(colors)
+            viewer = colors["viewer"]
+            for key, button in self._viewer_color_widgets().items():
+                if key in viewer:
+                    button.set_rgba(viewer[key])
+            for button, color in zip(self._overlay_color_buttons, viewer["overlay"]):
+                button.set_rgba(color)
+        except (KeyError, RuntimeError):
+            # Torn down, or a payload shape this build does not know: the merge
+            # on OK stays correct without the refresh.
+            pass
+        finally:
+            self._syncing_colors = False
 
     def _apply_widgets_to_draft(self) -> None:
         f = self._draft["file"]
@@ -1402,7 +1437,6 @@ class PreferencesDialog(QDialog):
         p["scatter_color_by"] = self._scatter_color_by_combo.currentText()
         p["scatter_cmap"] = self._scatter_cmap_combo.currentText()
         p["scatter_xy_origin"] = str(self._scatter_xy_origin_combo.currentData() or "top_left")
-        p["attribute_thinning"] = bool(self._attribute_thinning.isChecked())
         viewer["attribute_data"] = list(self._attribute_data_color.rgba())
         viewer["attribute_background"] = list(self._attribute_background_color.rgba())
         viewer["histogram_data"] = list(self._histogram_data_color.rgba())
@@ -1437,6 +1471,8 @@ class PreferencesDialog(QDialog):
         # Plugin
         f["paraview_path"] = self._paraview_edit.text().strip()
         g["msr_remember_last"] = bool(self._msr_remember.isChecked())
+        self._plugin_paths_group.save(self._draft)
+        self._python_packages_group.save(self._draft)
 
         s.clear()
         for command in _SHORTCUT_LABELS:
@@ -1491,7 +1527,14 @@ class PreferencesDialog(QDialog):
     def _accept(self) -> None:
         previous_colors = copy.deepcopy(self._state.prefs.get("colors", {}))
         self._apply_widgets_to_draft()
-        self._state.prefs = self._draft
+        # ⚠ Write only what this dialog changed, never `state.prefs = self._draft`.
+        # The draft is a snapshot taken when the dialog opened; assigning it
+        # wholesale reverts everything the rest of the application wrote in the
+        # meantime — recent files, custom colormaps, the colour registry,
+        # per-dialog settings — silently and unrecoverably. Modality used to
+        # hide that; the dialog is modeless now, so the merge is what keeps it
+        # correct. See core/app_state.py::merge_pref_changes.
+        merge_pref_changes(self._state.prefs, self._baseline, self._draft)
         self._state.save_prefs()
         self._state.notify_color_preferences_changed(previous_colors)
         self._state.log("Preferences saved.")

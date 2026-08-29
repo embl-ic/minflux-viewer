@@ -1,9 +1,18 @@
-"""Pure, worker-safe post-load computations.
+"""Worker-safe post-load computations.
 
-This module deliberately contains no Qt calls and does not mutate a dataset.
-The GUI submits :func:`compute_post_load_results` to a shared pool, then applies
-the returned arrays atomically on Qt's thread after confirming that the dataset
-is still open.
+This module contains no Qt calls. The GUI submits
+:func:`compute_post_load_results` to a shared pool, then applies the returned
+arrays atomically on Qt's thread after confirming the dataset is still open —
+so nothing here writes a *result* onto the dataset.
+
+⚠ It is **not** free of side effects on the dataset, and claiming otherwise
+would hide the one place that matters: reading through ``mfx_get`` /
+``mfx_filter_mask`` populates the lazily cached ``loc_id`` column of
+``ds.components.mfx_raw`` (``loader._raw_loc_id``). That write is idempotent,
+is a pure function of the store, and is published under a lock, so the GUI
+thread may compute it concurrently without the two disagreeing. Any *new*
+worker-side cache must meet the same three conditions or be pre-computed on the
+GUI thread before the task is submitted.
 """
 
 from __future__ import annotations
@@ -53,7 +62,12 @@ def compute_post_load_results(
     prefs: dict,
     report: Callable[[str], None],
 ) -> dict:
-    """Compute optional derived arrays without changing *ds* or touching Qt."""
+    """Compute optional derived arrays for *ds* without touching Qt.
+
+    Returns them for the GUI thread to apply; writes no result onto *ds*.
+    See the module docstring for the one cache this populates as a side
+    effect of reading.
+    """
     data_prefs = prefs.get("data", {})
     plot_prefs = prefs.get("plot", {})
     logs: list[tuple[str, str]] = []

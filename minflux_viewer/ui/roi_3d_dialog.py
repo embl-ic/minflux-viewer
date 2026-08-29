@@ -353,3 +353,10 @@ class Roi3DWindow(QDialog):
             self._state.log(msg)
         except Exception:
             pass
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        """Retire this window's pyqtgraph plots before Qt deletes them."""
+        from .qt_lifecycle import dispose_plot_widgets
+
+        dispose_plot_widgets(self)
+        super().closeEvent(event)

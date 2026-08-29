@@ -104,12 +104,13 @@ COMMAND_META: dict[str, CommandMeta] = {
     # ---- View -----------------------------------------------------------------
     "actionShowInfo": CommandMeta(U + "data_window.py", ("dataset", "information", "metadata"),
                               "Show the Dataset Information window.", "view"),
-    "actionAttributePlot": CommandMeta(U + "attribute_window.py", ("scatter", "attribute", "color"),
-                              "Attribute plot (color localizations by an attribute).", "view"),
-    "actionAttributeCpu": CommandMeta(U + "attribute_cpu.py",
-                              ("cpu", "bulk", "painter", "aggregation", "density", "large data", "lod"),
-                              "Non-GPU Attribute Plot using exact bulk painting for sparse views and "
-                              "complete screen-space count/mean aggregation for dense views.", "view"),
+    "actionAttributePlot": CommandMeta(U + "attribute_window.py",
+                              ("scatter", "attribute", "color", "opengl", "gpu", "cpu",
+                               "aggregation", "density", "large data", "millions"),
+                              "Attribute plot (color localizations by an attribute). The 2-D "
+                              "renderer is chosen automatically: GPU for round markers when "
+                              "OpenGL is available, otherwise exact bulk painting or a "
+                              "screen-space count/mean aggregation for dense views.", "view"),
     "actionHistogram": CommandMeta(U + "histogram_window.py", ("distribution", "attribute", "bins"),
                               "Attribute histogram.", "view"),
     "actionScatter": CommandMeta(U + "scatter_window.py", ("points", "localizations", "xy", "xz", "yz", "3d"),
@@ -118,12 +119,6 @@ COMMAND_META: dict[str, CommandMeta] = {
                               ("image", "reconstruction", "histogram", "gaussian", "advanced", "precision", "bilinear"),
                               "Rendered localization image (right-click › View › Render Method "
                               "selects the reconstruction method).", "view"),
-    "actionAttributeGpu": CommandMeta(U + "attribute_window.py",
-                              ("opengl", "gpu", "graphics card", "fast", "millions", "performance",
-                               "renderer", "experimental"),
-                              "Draw the Attribute Plot's 2-D projection on the GPU: every point of a "
-                              "multi-million-row selection at interactive speed, without thinning "
-                              "(no ROI selection or Lines in this mode).", "view"),
     "actionLog": CommandMeta(U + "log_window.py", ("events", "messages"), "Event log window.", "view"),
 
     # ---- Process › Channel ----------------------------------------------------

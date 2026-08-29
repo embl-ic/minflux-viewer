@@ -143,12 +143,18 @@ def test_default_context_menu_has_view_controls_and_reset(monkeypatch, _qt_app):
             "Axis",
             "Grid lines",
             "Plot style",
-            "Thinning",
+            "Automatic screen aggregation",
             "Legend",
             "Colorbar",
         ]
-        thinning = next(a for a in view_menu.actions() if a.text() == "Thinning")
-        assert thinning.isCheckable() and thinning.isChecked() is window._thinning
+        # Aggregation is automatic, so the entry states it rather than
+        # offering a choice: checked, and deliberately not clickable.
+        aggregation = next(
+            a for a in view_menu.actions()
+            if a.text() == "Automatic screen aggregation"
+        )
+        assert aggregation.isCheckable() and aggregation.isChecked()
+        assert not aggregation.isEnabled()
         colorbar = next(a for a in view_menu.actions() if a.text() == "Colorbar")
         # Nothing to colour yet, so the toggle is offered but inert.
         assert colorbar.isCheckable() and not colorbar.isEnabled()
@@ -285,40 +291,49 @@ def test_c_dimension_disables_stacked_iterations(monkeypatch, _qt_app):
         window.close()
 
 
-def test_lines_keep_styled_markers_visible(_qt_app):
-    """Lines adds a connecting curve without taking the markers away.
+def test_marker_symbol_decides_the_renderer_and_is_actually_drawn(_qt_app):
+    """A non-circular marker is honoured, by moving off the GPU to draw it.
 
-    On the GPU the markers are on the canvas and the curve is still the
-    pyqtgraph one, so the option works in both renderers.
+    ``GLScatterPlotItem``'s fragment shader hard-codes a filled disc, so shape
+    is not a parameter of the GPU path — picking a diamond used to change
+    nothing at all. The CPU renderer's ``BulkScatterItem`` draws the real
+    symbol, so the symbol now selects the renderer.
     """
+    from minflux_viewer.ui.attribute_cpu import BulkScatterItem
     from minflux_viewer.ui.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(), dataset_idx=0)
     try:
-        window.set_gpu_2d(False)               # the CPU marker path
+        # The CPU renderer sizes its work from the viewport, so it needs a real
+        # one; unshown, its line budget collapses to a single pixel.
+        window.resize(600, 400)
+        window.show()
+        _qt_app.processEvents()
         window._lines_chk.setChecked(True)
+
+        # A circle is what the GPU can draw, so the GPU stays in use.
         window._apply_plot_style(
-            {
-                "symbol": "d",
-                "size": 9,
-                "alpha": 140,
-                "color": (12, 34, 56),
-            },
+            {"symbol": "o", "size": 9, "alpha": 140, "color": (12, 34, 56)},
             color_changed=True,
         )
-        curve, scatter = window._series_items[0]
-        assert len(curve.xData) == 8
-        assert len(scatter.data) == 8
-        assert scatter.opts["size"] == 9
-        assert scatter.opts["symbol"] == "d"
+        assert window._symbol_allows_gpu() is True
         assert window._point_color == (12, 34, 56, 140)
+        curve, _marker = window._series_items[0]
+        assert len(curve.xData) == 8            # the connecting line is drawn
 
-        window.set_gpu_2d(True)
-        curve, scatter = window._series_items[0]
-        assert len(curve.xData) == 8           # the line is still drawn
-        assert len(scatter.data) == 0          # ...and the points are not paid for twice
-        if window._gl2d_view is not None:
-            assert window._gl2d_items
+        # A diamond cannot be a disc: the draw moves to the CPU renderer and
+        # the symbol reaches the item that paints it.
+        window._apply_plot_style(
+            {"symbol": "d", "size": 9, "alpha": 140, "color": (12, 34, 56)},
+            color_changed=False,
+        )
+        assert window._symbol_allows_gpu() is False
+        curve, marker = window._series_items[0]
+        assert len(curve.xData) == 8            # ...the line still is, too
+        assert isinstance(marker, BulkScatterItem)
+        assert marker._symbol == "d"
+        assert marker.point_count == 8
+        assert not window._gl2d_items           # nothing left on the GPU
     finally:
         window.close()
 
@@ -606,8 +621,9 @@ def _thinning_window(_qt_app, n_points: int = 400):
     window = AttributeWindow(state, dataset_idx=0)
     window._dimension_attrs.update({"X": "idx", "Y": "efo"})
     window._view_mode = "XY"
-    # Thinning is the CPU renderer's remedy; the GPU never applies it.
-    window.set_gpu_2d(False)
+    # Thinning now exists only to fit the GPU upload budget (and in 3-D); the
+    # CPU renderer aggregates instead. Drive it through a small budget.
+    window.set_gpu_2d(True)
     return state, window
 
 
@@ -618,11 +634,10 @@ def test_thinning_is_zoom_aware_and_ignores_the_unseen_rest(monkeypatch, _qt_app
     ceil(n / budget) sampled a fixed zoom window 44x more coarsely once
     unchecking the box grew the *unseen* part of the selection.
     """
-    from minflux_viewer.ui import attribute_window as aw
 
     _state_obj, window = _thinning_window(_qt_app)
     try:
-        monkeypatch.setattr(aw, "_MAX_DISPLAY_POINTS", 20)
+        monkeypatch.setattr(window, "_gpu_point_limit", lambda: 20)
         window._view_box.disableAutoRange()
         window._view_box.setRange(xRange=(0.0, 9.0), yRange=(-1.0, 1.0), padding=0.0)
 
@@ -664,11 +679,10 @@ def test_thinning_leaves_the_view_alone_while_it_still_auto_ranges(
     restricting to it would draw almost nothing and then fit the view to that
     remnant.
     """
-    from minflux_viewer.ui import attribute_window as aw
 
     _state_obj, window = _thinning_window(_qt_app)
     try:
-        monkeypatch.setattr(aw, "_MAX_DISPLAY_POINTS", 20)
+        monkeypatch.setattr(window, "_gpu_point_limit", lambda: 20)
         window._view_box.enableAutoRange()
         values = {"X": np.arange(1_000.0), "Y": np.zeros(1_000)}
         drawn, n = window._thin_for_view(values, 1_000)
@@ -689,7 +703,6 @@ def test_thinning_spends_the_budget_on_rows_that_can_be_drawn(
     where checking it drew 246,437 — 88.8 % of the selection being empty probes
     with NaN coordinates.
     """
-    from minflux_viewer.ui import attribute_window as aw
 
     _state_obj, window = _thinning_window(_qt_app)
     try:
@@ -698,7 +711,7 @@ def test_thinning_spends_the_budget_on_rows_that_can_be_drawn(
         y[::2] = np.nan                             # half cannot be drawn
         values = {"X": np.arange(1_000.0), "Y": y}
 
-        monkeypatch.setattr(aw, "_MAX_DISPLAY_POINTS", 50)
+        monkeypatch.setattr(window, "_gpu_point_limit", lambda: 50)
         drawn, n = window._thin_for_view(values, 1_000)
         assert n == 1_000
         assert np.all(np.isfinite(drawn["Y"]))
@@ -711,7 +724,7 @@ def test_thinning_spends_the_budget_on_rows_that_can_be_drawn(
 
         # Room for every drawable row: no stride at all, and the count no
         # longer depends on how many undrawable rows sit beside them.
-        monkeypatch.setattr(aw, "_MAX_DISPLAY_POINTS", 600)
+        monkeypatch.setattr(window, "_gpu_point_limit", lambda: 600)
         drawn, n = window._thin_for_view(values, 1_000)
         assert drawn["X"].size == 500 and window._thin_step == 1
         assert window._point_count_text([{"values": drawn}], n) == (
@@ -721,24 +734,21 @@ def test_thinning_spends_the_budget_on_rows_that_can_be_drawn(
         window.close()
 
 
-def test_thinning_off_draws_every_point_and_says_so(monkeypatch, _qt_app):
-    from minflux_viewer.ui import attribute_window as aw
+def test_point_count_readout_names_why_a_draw_was_short(monkeypatch, _qt_app):
+    """Thinning is never silent, and its two causes read differently.
 
+    Off-screen rows were simply not painted (nothing about the visible plot is
+    approximate); a stride means the visible region itself is sampled.
+    """
     _state_obj, window = _thinning_window(_qt_app)
     try:
-        monkeypatch.setattr(aw, "_MAX_DISPLAY_POINTS", 20)
+        monkeypatch.setattr(window, "_gpu_point_limit", lambda: 20)
         values = {"X": np.arange(1_000.0), "Y": np.zeros(1_000)}
 
-        window._thinning = False
-        drawn, n = window._thin_for_view(values, 1_000)
-        assert drawn["X"].size == 1_000 and n == 1_000
-        assert not window._view_restricted
-        records = [{"values": drawn}]
-        assert window._point_count_text(records, n) == "1,000 points"
+        # Everything drawn: no qualifier at all.
+        assert window._point_count_text([{"values": values}], 1_000) == "1,000 points"
         assert window._thinned is False
 
-        # ...and the read-out distinguishes "off screen" from "sampled".
-        window._thinning = True
         window._view_restricted = True
         window._thin_step = 1
         assert window._point_count_text([{"values": {"X": np.zeros(12)}}], 1_000) == (
@@ -757,69 +767,37 @@ def test_thinning_off_draws_every_point_and_says_so(monkeypatch, _qt_app):
         window.close()
 
 
-def test_c_colour_brushes_are_cached_per_lut_entry(_qt_app):
-    """Indexing <=257 brushes must paint exactly what one-per-point did."""
-    from minflux_viewer.colormaps import colormap_lut
+def test_screen_aggregation_is_automatic_and_has_no_setting(monkeypatch, _qt_app):
+    """The Thinning switch and its preference were retired with the CPU path.
 
-    _state_obj, window = _thinning_window(_qt_app)
-    try:
-        values = np.concatenate([np.linspace(0.0, 1.0, 500), [np.nan]])
-        brushes, rgba, lo, hi = window._mapped_colors(values)
-        assert len(brushes) == values.size
-
-        bins, _lo, _hi = window._linear_color_bins(values, levels=None)
-        lut = colormap_lut(
-            window._c_mapping,
-            n=256,
-            invert=window._lut_invert,
-            gamma=window._lut_gamma,
-            alpha=True,
-        ).copy()
-        lut[:, 3] = window._point_alpha
-        expected = lut[bins]
-        expected[~np.isfinite(values), 3] = 0
-        for brush, want in zip(brushes, expected):
-            colour = brush.color()
-            if want[3] == 0:
-                assert colour.alpha() == 0
-                continue
-            assert (colour.red(), colour.green(), colour.blue(), colour.alpha()) == (
-                tuple(int(channel) for channel in want)
-            )
-        # Distinct QBrush objects are shared, not rebuilt per point.
-        assert len({id(brush) for brush in brushes}) <= 257
-        assert lo == 0.0 and hi == 1.0
-        assert rgba.shape == (values.size, 4)
-    finally:
-        window.close()
-
-
-def test_thinning_lives_in_preferences_and_the_view_menu(monkeypatch, _qt_app):
-    """No top-row checkbox: the default is a preference, the switch is in View."""
+    Every non-GPU 2-D view now goes to the CPU renderer, which aggregates a
+    dense selection instead of sampling it, so there is nothing left for the
+    user to choose. The View entry says so rather than offering a choice.
+    """
     from minflux_viewer.core.app_state import DEFAULT_PREFS
 
-    assert DEFAULT_PREFS["plot"]["attribute_thinning"] is True
+    assert "attribute_thinning" not in DEFAULT_PREFS["plot"]
 
     state, window = _thinning_window(_qt_app)
     try:
         assert not hasattr(window, "_thin_chk")
-        assert window._thinning
+        assert not hasattr(window, "_thinning")
 
         menu = _capture_context_menu(monkeypatch, window)
+        view_actions = _submenu(menu, "View").actions()
+        assert not any(item.text() == "Thinning" for item in view_actions)
         action = next(
-            item for item in _submenu(menu, "View").actions()
-            if item.text() == "Thinning"
+            item for item in view_actions
+            if item.text() == "Automatic screen aggregation"
         )
         assert action.isCheckable() and action.isChecked()
-        action.trigger()                       # a menu click toggles first
-        assert window._thinning is False
-        saved = state.datasets[0].state["attribute_plot_state"]
-        assert saved["thinning"] is False
+        assert not action.isEnabled()          # informational, not a switch
 
-        # Preferences OK pushes the new default onto open windows.
-        state.prefs["plot"]["attribute_thinning"] = True
+        # Nothing to adopt from Preferences any more, and it must stay callable
+        # because MainWindow refreshes every plot window after OK.
         window.refresh_preferences()
-        assert window._thinning
+        saved = state.datasets[0].state["attribute_plot_state"]
+        assert "thinning" not in saved
     finally:
         window.close()
 
@@ -878,6 +856,12 @@ def test_gpu_2d_is_the_default_and_draws_behind_the_plot(monkeypatch, _qt_app):
         values = {"X": np.zeros(3), "Y": np.zeros(3), "C": np.zeros(3)}
         assert window._display_budget(values) == window._gpu_point_limit()
         assert window._display_budget(values) > 0
+        # The CPU renderer aggregates instead of sampling, so it takes no
+        # budget at all -- handing it a thinned selection would drop rows it
+        # is specifically there to keep.
+        window.set_gpu_2d(False)
+        assert window._display_budget(values) is None
+        window.set_gpu_2d(True)
 
         if window._gl2d_view is None or not window._gl2d_view.isValid():
             pytest.skip("OpenGL unavailable")
@@ -900,10 +884,10 @@ def test_gpu_2d_is_the_default_and_draws_behind_the_plot(monkeypatch, _qt_app):
         _dataset, mask, context = selection
         assert mask.any() and context["source_view"] == "attribute"
 
-        # Back to pyqtgraph: opaque plot, canvas hidden, markers drawn again.
+        # Back to the CPU renderer: opaque plot, canvas hidden, bulk markers.
         window.set_gpu_2d(False)
         _qt_app.processEvents()
-        assert window._display_budget(values) == 50_000
+        assert window._display_budget(values) is None      # aggregates, never samples
         assert not window._plot.testAttribute(
             Qt.WidgetAttribute.WA_TranslucentBackground
         )
@@ -994,10 +978,13 @@ def test_gpu_zoom_and_reset_follow_the_data_not_the_rubber_band(_qt_app):
         assert x0 <= 1.0 and x1 >= 400.0
         assert y0 <= 1_000.0 and y1 >= 9_000.0
 
-        # Leaving GPU mode takes the stand-in with it; pyqtgraph reports its own.
+        # The CPU renderer keeps publishing the bounds: its aggregated image
+        # covers only the viewport, so Reset View has nothing else to go on.
         window._use_gl_2d = False
         window._draw()
-        assert window._gl_bounds_item is None
+        assert window._gl_bounds_item is not None
+        rect = window._gl_bounds_item.boundingRect()
+        assert rect.left() <= 1.0 and rect.right() >= 400.0
     finally:
         window.close()
 
@@ -1022,7 +1009,9 @@ def test_gpu_mode_falls_back_to_the_cpu_without_opengl(monkeypatch, _qt_app):
 
         assert window._use_gl_2d is False           # the toggle reverts
         assert window._gl2d_view is None
-        assert window._gl_bounds_item is None
+        # The CPU renderer publishes the un-thinned extent so Reset View still
+        # finds the whole series; only the GL *series* are gone.
+        assert not window._gl2d_items
         assert "GPU rendering unavailable" in window._info.text()
         assert "drawing on the CPU" in window._info.text()
         assert any(
@@ -1030,12 +1019,13 @@ def test_gpu_mode_falls_back_to_the_cpu_without_opengl(monkeypatch, _qt_app):
             for entry in _state_obj.log_history
         )
 
-        # ...and the points are on screen, drawn by pyqtgraph.
-        drawn = sum(
-            len(item[1].getData()[0]) for item in window._series_items
-        )
-        assert drawn == 200
-        assert all(item[1].isVisible() for item in window._series_items)
+        # ...and every point is on screen, bulk-painted by the CPU renderer.
+        from minflux_viewer.ui.attribute_cpu import BulkScatterItem
+
+        markers = [item[1] for item in window._series_items]
+        assert markers and all(isinstance(m, BulkScatterItem) for m in markers)
+        assert sum(m.point_count for m in markers) == 200
+        assert all(m.isVisible() for m in markers)
         assert not window._plot.testAttribute(
             Qt.WidgetAttribute.WA_TranslucentBackground
         )
@@ -1074,8 +1064,11 @@ def test_gpu_mode_falls_back_when_the_canvas_draws_nothing(monkeypatch, _qt_app)
         assert window._use_gl_2d is False
         assert "rendered nothing" in window._info.text()
         assert not window._gl2d_view.isVisible()
-        drawn = sum(len(item[1].getData()[0]) for item in window._series_items)
-        assert drawn == 200
+        from minflux_viewer.ui.attribute_cpu import BulkScatterItem
+
+        markers = [item[1] for item in window._series_items]
+        assert markers and all(isinstance(m, BulkScatterItem) for m in markers)
+        assert sum(m.point_count for m in markers) == 200
     finally:
         window.close()
 
@@ -1530,3 +1523,59 @@ def test_multidimensional_attribute_state_restores(_qt_app):
         assert restored._c_combo.currentText() == "tid"
     finally:
         restored.close()
+
+
+def test_gpu_transparency_does_not_cascade_onto_the_roi_context_menu(_qt_app):
+    """The GPU plot's stylesheet must not reach widgets parented to it.
+
+    A Qt stylesheet cascades to every descendant, and ``RoiOverlayController``
+    parents its context menu to the view widget (``QMenu(self.view_widget)``).
+    A bare ``background: transparent`` on the plot therefore made the ROI menu
+    resolve a black window colour and paint almost nothing — entries appeared
+    only while the hover highlight drew its own rectangle. Render and scatter
+    were unaffected because neither styles its view widget.
+    """
+    from PyQt6.QtWidgets import QMenu
+
+    from minflux_viewer.ui.attribute_window import AttributeWindow
+
+    window = AttributeWindow(_state(), dataset_idx=0)
+    try:
+        window.resize(600, 400)
+        window.show()
+        _qt_app.processEvents()
+        if not window._use_gl_2d:
+            pytest.skip("OpenGL unavailable, so nothing is made transparent")
+
+        # The transparency is still applied -- but only to the plot itself.
+        assert window._plot.testAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground
+        )
+        sheet = window._plot.styleSheet()
+        assert sheet.startswith("#"), sheet   # scoped, so it cannot cascade
+
+        # A menu parented to the view widget must look like one parented to the
+        # window; comparing the two keeps this independent of the active theme.
+        on_plot = QMenu(window._roi_overlay.view_widget)
+        on_window = QMenu(window)
+        for menu in (on_plot, on_window):
+            menu.addAction("Convert to")
+            menu.ensurePolished()
+        assert (
+            on_plot.palette().window().color()
+            == on_window.palette().window().color()
+        )
+
+        def painted(menu):
+            menu.resize(menu.sizeHint())
+            image = menu.grab().toImage()
+            return sum(
+                1
+                for x in range(0, image.width(), 3)
+                for y in range(0, image.height(), 3)
+                if image.pixelColor(x, y).alpha() > 0
+            )
+
+        assert painted(on_plot) == painted(on_window) > 0
+    finally:
+        window.close()

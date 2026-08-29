@@ -8,11 +8,11 @@ while widgets only cancel generations and detach result callbacks.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from threading import Event
-from typing import Any, Callable
+from typing import Any
 
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal
 
 from .qt_lifecycle import disconnect_signal, qobject_alive
 
@@ -216,9 +216,20 @@ def clear_pool_nonblocking(pool: QThreadPool | None) -> None:
 
 
 def retain_qthread(thread: Any) -> None:
-    """Keep a parentless QThread alive until its real ``finished`` signal."""
+    """Keep a parentless QThread alive until its real ``finished`` signal.
+
+    A thread that has already finished needs no protection, and retaining it
+    would hold it for the life of the process because its ``finished`` signal
+    can no longer fire. ``isFinished()`` is False for a thread that was never
+    started, so the ordinary retain-before-``start()`` call sites are unaffected.
+    """
     if thread is None or thread in _LIVE_QTHREADS:
         return
+    try:
+        if thread.isFinished():
+            return
+    except (AttributeError, RuntimeError):
+        pass
     _LIVE_QTHREADS.add(thread)
 
     def release() -> None:
@@ -229,6 +240,13 @@ def retain_qthread(thread: Any) -> None:
     except (AttributeError, TypeError, RuntimeError):
         # Unknown thread-like objects used by tests remain retained for the
         # process; that is safer than destroying a possibly active worker.
+        return
+    try:
+        # It may have finished between the check above and the connect; that
+        # emission is already gone, so drop it now instead of retaining it.
+        if thread.isFinished():
+            release()
+    except (AttributeError, RuntimeError):
         pass
 
 
@@ -245,3 +263,10 @@ def retire_qthreads(
                 signal = None
             disconnect_signal(signal)
         retain_qthread(thread)
+
+
+def shared_thread_pools() -> tuple[QThreadPool, ...]:
+    """Every named process-owned pool created so far, live ones only."""
+    return tuple(
+        pool for pool in _SHARED_POOLS.values() if qobject_alive(pool)
+    )
