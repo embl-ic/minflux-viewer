@@ -357,3 +357,50 @@ def test_genuine_3d_survives_the_threshold():
     ds = load_from_mfx_array(mfx, name="d", prefs={"data": {
         "enforce_min_z_range": True, "min_z_range_nm": 5.0}})
     assert ds.prop.num_dim == 3
+
+
+def test_loc_id_cache_is_published_once_under_concurrency():
+    """``mfx_get`` writes into ``mfx_raw``; the post-load worker races the GUI.
+
+    ``core/post_load.py`` reads the dataset from a background thread while the
+    GUI thread draws from it, and the lazily cached ``loc_id`` column is the one
+    write that path performs. Every reader must end up with the same array.
+    """
+    import threading
+
+    from minflux_viewer.core.loader import _raw_loc_id
+
+    n_loc, n_itr = 400, 5
+    raw = AttrStore({
+        "itr": np.tile(np.arange(n_itr), n_loc).astype(np.int64),
+        "tid": np.repeat(np.arange(n_loc) // 4, n_itr).astype(np.int64),
+    })
+    assert "loc_id" not in raw
+
+    results: list[np.ndarray] = []
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(8)
+
+    def worker() -> None:
+        try:
+            barrier.wait()
+            results.append(_raw_loc_id(raw))
+        except BaseException as exc:  # noqa: BLE001 - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors, errors
+    assert len(results) == 8
+    published = raw["loc_id"]
+    for value in results:
+        # Same values everywhere, and every caller agrees with what was stored.
+        assert np.array_equal(value, published)
+    # Idempotent: a later call returns the cache rather than recomputing.
+    assert np.array_equal(_raw_loc_id(raw), published)
+    # Correctness is unchanged by the locking: one group per localization.
+    assert int(published.max()) + 1 == n_loc

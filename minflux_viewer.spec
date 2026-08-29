@@ -14,6 +14,8 @@ import importlib.util
 import re
 import sys
 
+from PyInstaller.utils.hooks import collect_submodules
+
 ROOT = Path(SPECPATH)   # repo root (where this .spec lives)
 
 # PyInstaller analyzes whichever Python environment launched it.  Building via
@@ -119,7 +121,34 @@ datas = [
 # ---------------------------------------------------------------------------
 # Hidden imports that PyInstaller's static analysis misses
 # ---------------------------------------------------------------------------
-hidden_imports = [
+# External scripts and plugins may import standard-library modules that this
+# application never imports itself. PyInstaller would otherwise omit them from
+# the frozen interpreter (observed for logging.handlers, html.parser,
+# configparser and tomllib). Include every stdlib top-level module and recurse
+# through every stdlib package; the excludes below still remove explicitly
+# unwanted development/UI packages such as test and tkinter.
+#
+# Two filters, both only to keep the build log readable — neither changes what
+# ships. Tk is in ``excludes`` below (this is a Qt application and never needs
+# it), and listing it here too makes PyInstaller report a conflict; and roughly
+# a dozen POSIX-only names have no spec on Windows, each of which would be
+# reported as a missing hidden import.
+_STDLIB_SKIP = {"tkinter", "turtle", "turtledemo", "idlelib"}
+stdlib_hidden_imports = set()
+for stdlib_name in sorted(sys.stdlib_module_names):
+    if stdlib_name in _STDLIB_SKIP:
+        continue
+    try:
+        spec = importlib.util.find_spec(stdlib_name)
+    except (ImportError, ValueError, AttributeError):
+        continue                      # unimportable on this platform
+    if spec is None:
+        continue                      # e.g. fcntl/termios/pwd on Windows
+    stdlib_hidden_imports.add(stdlib_name)
+    if spec.submodule_search_locations is not None:
+        stdlib_hidden_imports.update(collect_submodules(stdlib_name))
+
+hidden_imports = sorted(stdlib_hidden_imports | {
     # scipy — submodules loaded dynamically
     "scipy._lib.array_api_compat",
     "scipy._lib.array_api_compat.numpy",
@@ -153,7 +182,7 @@ hidden_imports = [
     "minflux_viewer.plugins.msr_reader",
     "minflux_viewer.plugins.paraview",
     "minflux_viewer.plugins.generate_method_text",
-]
+})
 
 # ---------------------------------------------------------------------------
 # Modules to deliberately exclude (keeps the bundle smaller)
@@ -190,6 +219,8 @@ excludes = [
     # Many are imported indirectly through the stdlib chain at boot time
     # (e.g. urllib.parse imports ipaddress; pathlib imports urllib.parse).
     # Excluding them causes ModuleNotFoundError in PyInstaller runtime hooks.
+    # The hidden-import collection above intentionally ships the complete
+    # stdlib so external scripts/plugins can rely on normal Python behaviour.
 ]
 
 # ---------------------------------------------------------------------------

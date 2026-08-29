@@ -71,6 +71,34 @@ def available() -> List[PluginEntry]:
     return list(_REGISTRY)
 
 
+def discover(prefs: dict | None = None) -> List[PluginEntry]:
+    """
+    Find and register user plugins from folders **outside** this package.
+
+    Owned by extension-layer **track B**; Phase 0 lands it as a no-op so the
+    main window can call it from ``_populate_plugins_menu`` without track B
+    having started. Returns the entries it registered, so the caller can report
+    how many were found.
+
+    The design it will implement (``docs/extension-layer/PLAN.md`` 3.2-3.4):
+
+    * three roots -- ``<app dir>/plugins/``, the per-user application-data
+      folder, and any extra paths in ``prefs["plugin"]["paths"]``. When frozen,
+      resolve the app directory from ``sys.executable``, **not** ``__file__``:
+      ``_MEIPASS`` is the bundle's ``_internal/``, which is both the wrong place
+      to look and replaced on every update.
+    * two tiers -- a single ``.py`` file is one menu entry; a directory with a
+      ``plugin.toml`` is a full plugin with a manifest.
+    * load under a namespaced module name (``mfv_plugins.<id>``) so two users'
+      plugins can both contain a ``utils.py``.
+    * import the plugin body lazily, when its menu entry is first invoked, so a
+      plugin that imports a heavy library does not slow every launch.
+    * contain every failure: a broken plugin becomes a *disabled* entry whose
+      tooltip is the error, and never stops the rest of the menu building.
+    """
+    return []
+
+
 def ensure_loaded() -> None:
     """
     Import every built-in plugin package so each one gets to register.

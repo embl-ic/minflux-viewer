@@ -562,6 +562,11 @@ class ConvSegmentation3DWindow(QDialog):
             self._bc.close()
         except Exception:
             pass
+        from .qt_lifecycle import dispose_plot_widgets
+
+        # Retire the pyqtgraph plots last, after this window's own
+        # teardown, so nothing here touches an already-inert plot.
+        dispose_plot_widgets(self)
         super().closeEvent(event)
 
     # ----------------------------------------------------------- compute

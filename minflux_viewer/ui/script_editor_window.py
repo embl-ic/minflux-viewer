@@ -32,58 +32,119 @@ from .console_window import ConsoleWindow
 _DEFAULT_SCRIPT = """import mfv
 import numpy as np
 
-ds = mfv.get_active_dataset()
+ds = mfv.data.active()
 print("Active dataset:", ds.name if ds is not None else "none")
 
 if ds is not None:
-    loc = mfv.get_loc(ds, unit="nm", filtered=True)
-    view = mfv.viewer.scatter(loc[:, 0], loc[:, 1], title=ds.name)
-    view.show()
+    loc = mfv.data.loc(unit="nm", filtered=True)
+    print(f"{len(loc)} localizations, attributes: {mfv.data.attr_names()[:8]}")
+    mfv.view.render()
 """
 
 
-_API_HELP = """MINFLUX Viewer scripting MVP
+_API_HELP = """MINFLUX Viewer scripting API 1.0
 
-Python scripts run inside the current viewer session. The runtime module
-`mfv` is bound to the active application state.
+Scripts run inside the current viewer session. The runtime module `mfv` is
+bound to the live application state, and is the same object a plugin receives
+as its `ctx` argument.
 
 Common pattern:
 
 import mfv
 import numpy as np
 
-ds = mfv.get_active_dataset()
-loc = mfv.get_loc(ds, unit="nm", filtered=True)
-view = mfv.viewer.scatter(loc[:, 0], loc[:, 1], title=ds.name)
-view.show()
+ds  = mfv.data.active()
+loc = mfv.data.loc(unit="nm", filtered=True)
+mfv.view.render()
 
-Dataset helpers:
+NAMESPACES
 
-mfv.get_active_dataset()
-mfv.get_datasets()
-mfv.get_dataset(index_or_name=None)
-mfv.get_attr("efo", dataset=None, source="mfx", filtered=True)
-mfv.get_loc(dataset=None, unit="nm", filtered=True)
-mfv.log("message", level="INFO")
-mfv.show_console()
+mfv.data      datasets, attributes, coordinates, filters (read and write)
+mfv.roi       regions of interest, masks, crops, points inside
+mfv.results   the shared results table
+mfv.plot      line / scatter / histogram / image windows
+mfv.view      the dataset-owned viewer windows
+mfv.ui        log, status, parameter dialogs, file pickers
+mfv.run       background execution, progress, cancellation
+mfv.journal   record a step so it reaches Generate Method Text
 
-Viewer helpers:
+mfv.data
 
-mfv.viewer.render(dataset=None)
-mfv.viewer.scatter(x=None, y=None, z=None, dataset=None, color_by=None, title=None)
-mfv.viewer.histogram(values=None, dataset=None, attr=None, bins=None)
-mfv.viewer.attribute_plot(dataset=None, x="idx", y="efo")
+  datasets() | active() | get(ref) | index(ds) | properties()
+  attr_names() | attr(name, itr="auto", vld_only=True, filtered=True)
+  loc(unit="nm", filtered=True, transformed=False)
+  add_attr(name, values) | create(xyz, tid=None, attrs=None)
+  filter_mask() | filter_specs() | set_filter(specs, replace=True) | clear_filter()
 
-Notes:
+  `itr` picks the iteration: "auto" (what the viewer shows -- cfr/efc at their
+  effective iteration), "last", "effective", an int, or "sum"/"average".
+
+mfv.roi
+
+  list(region_only=False) | active() | selected() | select(rois)
+  add(type, geometry, view="render") | remove(roi)
+  mask(roi) | points_in(roi) | attr_in(roi, name) | crop(roi, exact_shape=True)
+  geometry(roi) | bounds(roi)
+
+mfv.view
+
+  render() | scatter() | histogram() | attribute_plot(x=, y=, z=, c=)
+  console() | script_editor() | snapshot(path) | refresh()
+
+mfv.ui
+
+  log(msg, level) | status(text, fraction)
+  ask({"radius_nm": 25.0}) -> dict or None if cancelled
+  choose_file() | choose_files() | choose_dir()
+  info(msg) | warn(msg) | error(msg) | confirm(msg) -> bool
+
+mfv.run   -- long work belongs here, not on the GUI thread
+
+  def work(task):
+      for i, item in enumerate(items):
+          task.check_cancelled()          # cooperative stop
+          task.progress(i, len(items), "measuring")
+      return result
+
+  mfv.run.background(work, on_done=lambda r: mfv.ui.log(f"got {r}"))
+
+  The worker must touch no Qt widget and no viewer state: capture what you need
+  first, and apply the result in on_done, which runs on the GUI thread. The task
+  appears in Help > Monitor Tasks with a working Request stop button.
+
+mfv.journal
+
+  mfv.journal.record("analysis", "Measured X", radius_nm=25)
+
+  Records the run so it reaches the generated method text. Pass the parameters
+  actually used, not the defaults.
+
+Compatibility
+
+  mfv.get_active_dataset(), get_datasets(), get_dataset(), get_attr(),
+  get_loc(), log(), show_console() and mfv.viewer.* all still work.
+
+Notes
 
 - Scripts are trusted local Python, not sandboxed.
-- Long-running scripts run synchronously in this MVP and may pause the UI.
-- Raw localization data are not modified by these helpers.
+- The script itself runs on the GUI thread; use mfv.run.background for the
+  slow part rather than running the whole script off-thread, because only you
+  know which part of it is free of Qt.
 """
 
 
 _COMPLETION_MAP = {
     "mfv": [
+        "data",
+        "roi",
+        "results",
+        "plot",
+        "view",
+        "ui",
+        "run",
+        "journal",
+        "viewer",
+        "ScriptError",
         "get_active_dataset()",
         "get_datasets()",
         "get_dataset()",
@@ -91,8 +152,80 @@ _COMPLETION_MAP = {
         "get_loc()",
         "log()",
         "show_console()",
-        "viewer",
-        "ScriptError",
+    ],
+    "mfv.data": [
+        "datasets()",
+        "active()",
+        "get()",
+        "index()",
+        "properties()",
+        "attr_names()",
+        "attr()",
+        "loc()",
+        "add_attr()",
+        "create()",
+        "filter_mask()",
+        "filter_specs()",
+        "set_filter()",
+        "clear_filter()",
+    ],
+    "mfv.roi": [
+        "list()",
+        "active()",
+        "selected()",
+        "add()",
+        "remove()",
+        "select()",
+        "mask()",
+        "points_in()",
+        "attr_in()",
+        "crop()",
+        "geometry()",
+        "bounds()",
+    ],
+    "mfv.results": [
+        "table()",
+        "tables()",
+        "close()",
+        "close_all()",
+    ],
+    "mfv.plot": [
+        "line()",
+        "scatter()",
+        "hist()",
+        "image()",
+        "close_all()",
+    ],
+    "mfv.view": [
+        "render()",
+        "scatter()",
+        "histogram()",
+        "attribute_plot()",
+        "console()",
+        "script_editor()",
+        "snapshot()",
+        "refresh()",
+    ],
+    "mfv.ui": [
+        "log()",
+        "status()",
+        "ask()",
+        "confirm()",
+        "info()",
+        "warn()",
+        "error()",
+        "choose_file()",
+        "choose_files()",
+        "choose_dir()",
+    ],
+    "mfv.run": [
+        "background()",
+        "is_cancelled()",
+        "active()",
+    ],
+    "mfv.journal": [
+        "record()",
+        "entries()",
     ],
     "mfv.viewer": [
         "render()",

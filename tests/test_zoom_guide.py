@@ -108,12 +108,17 @@ def _guide_x(window, view_box, update, mode_attr, preview_attr, qtbot):
     return float(xs[0]), float(x_at), (vx0 + vx1) / 2.0
 
 
-@pytest.mark.parametrize("cpu_fix", [False, True])
-def test_the_attribute_plot_draws_its_guide_at_the_cursor(_app, qtbot, cpu_fix):
-    """Both Attribute Plot renderers share the code, so both are covered."""
+@pytest.mark.parametrize("gpu", [False, True])
+def test_the_attribute_plot_draws_its_guide_at_the_cursor(_app, qtbot, gpu):
+    """Both Attribute Plot renderers share the code, so both are covered.
+
+    The guide is drawn on the ordinary 2-D ViewBox, which the GPU canvas sits
+    behind rather than replacing, so it must behave identically either way.
+    """
     from minflux_viewer.ui.attribute_window import AttributeWindow
 
-    window = AttributeWindow(_state_with_data(), dataset_idx=0, cpu_fix=cpu_fix)
+    window = AttributeWindow(_state_with_data(), dataset_idx=0)
+    window.set_gpu_2d(gpu)
     qtbot.addWidget(window)
     bar, cursor, middle = _guide_x(
         window, window._view_box, window._update_zoom_preview,

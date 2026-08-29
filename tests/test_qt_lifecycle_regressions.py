@@ -41,11 +41,28 @@ def _run_python(code: str, *, timeout: int = 30) -> subprocess.CompletedProcess[
     )
 
 
+# Native teardown faults that can leave the exit code at 0. A Qt abort usually
+# changes the return code, but a caught-and-reported fault, a faulthandler dump
+# from a non-fatal signal, or Qt's own "Destroyed while still running" warning
+# can all pass an exit-code-only check while describing exactly the failure
+# these tests exist to catch.
+_FATAL_STDERR_MARKERS = (
+    "Fatal Python error",
+    "Windows fatal exception",
+    "Current thread 0x",
+    "QThread: Destroyed while thread is still running",
+    "Segmentation fault",
+)
+
+
 def _assert_clean(result: subprocess.CompletedProcess[str], scenario: str) -> None:
+    detail = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert result.returncode == 0, (
-        f"{scenario} exited with {result.returncode}\n"
-        f"stdout:\n{result.stdout}\n"
-        f"stderr:\n{result.stderr}"
+        f"{scenario} exited with {result.returncode}\n{detail}"
+    )
+    found = [m for m in _FATAL_STDERR_MARKERS if m in (result.stderr or "")]
+    assert not found, (
+        f"{scenario} exited 0 but reported {found} on stderr\n{detail}"
     )
 
 
@@ -408,3 +425,70 @@ def test_tiff_window_close_defers_source_close_until_export_finishes() -> None:
     """
     result = _run_python(code)
     _assert_clean(result, "TIFF close during source-backed export")
+
+
+def test_update_dialog_close_does_not_destroy_a_running_download_thread() -> None:
+    """A QThread owned by the dialog aborts the process when destroyed running.
+
+    The download worker must therefore be parentless and retained by the
+    process-level registry, exactly like the MSR parse and TIFF export threads.
+    """
+    code = """
+        import gc
+        import time
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QApplication
+        from minflux_viewer.core.updater import (
+            ReleaseAsset, ReleaseInfo, UpdateCheckResult,
+        )
+        from minflux_viewer.ui.update_dialog import (
+            _DownloadCancelled, _DownloadWorker, _UpdateAvailableDialog,
+        )
+
+        def fake_run(self):
+            try:
+                for index in range(200):
+                    self._report(index, 200)   # the real cancellation checkpoint
+                    time.sleep(0.01)
+                self.finished_ok.emit(str(self._dest))
+            except _DownloadCancelled:
+                return
+            except Exception as exc:
+                self.failed.emit(str(exc))
+
+        _DownloadWorker.run = fake_run
+
+        app = QApplication([])
+        asset = ReleaseAsset(name="MINFLUX-Viewer-9.9.9-win.zip", url="http://x", size=1)
+        release = ReleaseInfo(
+            version="9.9.9", tag="v9.9.9", name="r", notes="n",
+            html_url="http://x", published_at="2026-01-01", assets=(asset,),
+        )
+        result = UpdateCheckResult(
+            status="update_available", current_version="0.4.2", latest=release,
+        )
+        dialog = _UpdateAvailableDialog(result, None, state=None)
+        dialog._start_install()
+        worker = dialog._worker
+        time.sleep(0.15)
+        if worker.parent() is not None:
+            raise AssertionError("download worker is owned by the dialog")
+        if not worker.isRunning():
+            raise AssertionError("download worker did not start")
+
+        started = time.perf_counter()
+        dialog.close()
+        dialog.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+        del dialog
+        gc.collect()
+        app.processEvents()
+        elapsed = time.perf_counter() - started
+        if elapsed >= 0.2:
+            raise AssertionError(f"update dialog close blocked for {elapsed:.3f}s")
+        worker.wait()
+        app.processEvents()
+    """
+    result = _run_python(code)
+    _assert_clean(result, "update dialog close during download")

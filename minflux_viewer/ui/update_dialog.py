@@ -62,8 +62,20 @@ def show_update_result(result: UpdateCheckResult, parent=None, *, silent: bool =
         )
 
 
+class _DownloadCancelled(Exception):
+    """Cooperative-cancellation checkpoint raised from the progress callback."""
+
+
 class _DownloadWorker(QThread):
-    """Streams a release asset to *dest* off the UI thread."""
+    """Streams a release asset to *dest* off the UI thread.
+
+    The thread is deliberately **parentless** and retained by the process-level
+    registry (see ``ui/background_tasks.py``): a ``QThread`` owned by the dialog
+    is destroyed with it, and Qt aborts the process when that happens while the
+    download is still running. Closing the dialog requests interruption instead;
+    :func:`~minflux_viewer.core.updater.download_url` calls ``progress`` once per
+    64 KiB block, so that callback is the cancellation checkpoint.
+    """
 
     progress = pyqtSignal(int, int)          # (bytes_done, bytes_total)
     finished_ok = pyqtSignal(str)            # dest path
@@ -74,11 +86,22 @@ class _DownloadWorker(QThread):
         self._asset = asset
         self._dest = dest
 
+    def _report(self, done: int, total: int) -> None:
+        if self.isInterruptionRequested():
+            raise _DownloadCancelled
+        self.progress.emit(int(done), int(total))
+
     def run(self) -> None:
         try:
-            download_asset(self._asset, self._dest,
-                           progress=lambda d, t: self.progress.emit(int(d), int(t)))
+            download_asset(self._asset, self._dest, progress=self._report)
             self.finished_ok.emit(str(self._dest))
+        except _DownloadCancelled:
+            # The dialog is gone; leave no half-written archive behind, and stay
+            # silent rather than reporting an abandoned download as a failure.
+            try:
+                Path(self._dest).unlink(missing_ok=True)
+            except OSError:
+                pass
         except Exception as exc:                                  # noqa: BLE001
             self.failed.emit(str(exc))
 
@@ -178,6 +201,23 @@ class _UpdateAvailableDialog(QDialog):
         except Exception:
             pass
 
+    def closeEvent(self, event) -> None:
+        """Detach a running download instead of destroying its thread.
+
+        Never waits: the request is cooperative and takes effect at the next
+        64 KiB block, while the process-level registry keeps the thread alive
+        until its inherited ``finished`` signal fires.
+        """
+        from .background_tasks import retire_qthreads
+
+        if self._worker is not None:
+            retire_qthreads(
+                [self._worker],
+                signal_names=("progress", "finished_ok", "failed"),
+            )
+            self._worker = None
+        super().closeEvent(event)
+
     # -- one-click install ---------------------------------------------------
     def _start_install(self) -> None:
         if self._asset is None:
@@ -195,7 +235,12 @@ class _UpdateAvailableDialog(QDialog):
         self._progress.setRange(0, 0)          # busy until first progress tick
         self._progress.show()
 
-        self._worker = _DownloadWorker(self._asset, dest, self)
+        from .background_tasks import retain_qthread
+
+        # Parentless: a QThread destroyed as a child of this dialog while the
+        # download is running aborts the process.
+        self._worker = _DownloadWorker(self._asset, dest)
+        retain_qthread(self._worker)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished_ok.connect(self._on_downloaded)
         self._worker.failed.connect(self._on_failed)

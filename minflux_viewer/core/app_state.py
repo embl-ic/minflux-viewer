@@ -128,7 +128,6 @@ DEFAULT_PREFS: dict = {
         # Attribute Plot: draw a uniform subsample when the view holds more
         # points than the display budget (ui/attribute_window.py). Off draws
         # every point, which costs ~19 s per redraw at 20 M raw rows.
-        "attribute_thinning": True,
         # Application-owned named gradients created from the LUT dialog.
         # Values are JSON-compatible ``{"stops": [[position, RGBA], ...]}``.
         "custom_colormaps": {},
@@ -159,6 +158,20 @@ DEFAULT_PREFS: dict = {
         "msr_export_folder": "",
         "msr_last_open_folder": "",
         "msr_remember_last": True,
+        # -- extension layer -------------------------------------------------
+        # These keys are declared together, by the extension-layer foundation
+        # phase, so the plugin-discovery and external-library work can proceed
+        # in parallel without both editing this file. Each is consumed by
+        # exactly one module; see docs/extension-layer/PLAN.md.
+        #
+        # Plugin discovery (plugins/loader.py):
+        "paths": [],              # extra plugin roots, beyond the app and per-user dirs
+        "scan_user_dir": True,    # scan %APPDATA%/… (macOS: Application Support)
+        "confirmed_dirs": [],     # roots the user has accepted; a new root is confirmed once
+        # External Python libraries (core/user_libs.py):
+        "user_lib_paths": [],     # extra site-packages roots APPENDED to sys.path
+        "user_lib_enabled": True,
+        "installed_packages": {}, # manifest of pip --target installs: {name: version}
     },
     "shortcuts": {
         "focus_main_window": "Shift+V",
@@ -276,7 +289,102 @@ _MIGRATION_KEYS: tuple[str, ...] = (
     "v044_rainbow_iteration_colours",
     "v045_jet_iteration_colours",
     "v046_drop_surplus_iteration_stops",
+    "v047_extension_layer_defaults",
 )
+
+
+# Subtrees whose *shape* carries meaning, so a leaf-by-leaf merge would corrupt
+# them. ``colors.solid`` is an ordered mapping whose key order drives every
+# solid-colour menu and whose missing keys are deliberate deletions (see the
+# global colour system rules), so a reordering or a deletion that changes no
+# single value must still be applied. These are replaced wholesale, but only
+# when the editor actually changed them.
+_ATOMIC_PREF_SUBTREES: tuple[tuple[str, ...], ...] = (
+    ("colors",),
+)
+
+
+def merge_pref_changes(live: dict, baseline: dict, edited: dict) -> list[str]:
+    """Apply only what changed between *baseline* and *edited* onto *live*.
+
+    A preferences editor takes a snapshot when it opens and hands it back when
+    the user accepts. Assigning that snapshot wholesale silently reverts every
+    write another part of the application made in between — recent files, custom
+    colormaps, the colour registry, per-dialog settings. That is invisible to
+    the user and unrecoverable, and it is the reason the Preferences dialog had
+    to be modal.
+
+    Writing only the changed leaves makes the editor safe to leave open: fields
+    the user did not touch keep whatever the rest of the application wrote,
+    while fields they did touch win (they just pressed OK). A key present in
+    *baseline* and absent from *edited* is a deletion and is removed from
+    *live*. Lists are values, not containers, and are replaced whole.
+
+    Returns the dotted paths that were written, for logging.
+    """
+    changed: list[str] = []
+    _merge_changes(live, baseline, edited, (), changed)
+    return changed
+
+
+def _merge_changes(
+    live: dict, baseline, edited, path: tuple[str, ...], changed: list[str]
+) -> None:
+    base_map = baseline if isinstance(baseline, dict) else {}
+    edit_map = edited if isinstance(edited, dict) else {}
+
+    for key, edited_value in edit_map.items():
+        here = path + (str(key),)
+        base_value = base_map.get(key, _UNSET)
+        if (
+            here not in _ATOMIC_PREF_SUBTREES
+            and isinstance(edited_value, dict)
+            and isinstance(base_value, dict)
+        ):
+            target = live.get(key)
+            if isinstance(target, dict):
+                _merge_changes(target, base_value, edited_value, here, changed)
+                continue
+            # Nothing to merge into: recurse into a scratch dict and attach it
+            # only if the edit actually wrote something, so an unchanged
+            # subtree never materialises as an empty container in `live`.
+            scratch: dict = {}
+            before = len(changed)
+            _merge_changes(scratch, base_value, edited_value, here, changed)
+            if len(changed) > before:
+                live[key] = scratch
+            continue
+        if base_value is _UNSET or not _pref_value_equal(base_value, edited_value):
+            live[key] = copy.deepcopy(edited_value)
+            changed.append(".".join(here))
+
+    for key in list(base_map):
+        if key in edit_map:
+            continue
+        # Present when the editor opened, gone when it accepted: a deletion.
+        live.pop(key, None)
+        changed.append(".".join(path + (str(key),)))
+
+
+def _pref_value_equal(a, b) -> bool:
+    """Equality that also notices a reordering.
+
+    ``{"A": 1, "B": 2} == {"B": 2, "A": 1}`` is True in Python, but for an
+    atomic subtree such as ``colors.solid`` the key order *is* the setting — it
+    drives every solid-colour menu — so a pure reorder has to read as a change.
+    """
+    if isinstance(a, dict) and isinstance(b, dict):
+        if list(a.keys()) != list(b.keys()):
+            return False
+        return all(_pref_value_equal(a[k], b[k]) for k in a)
+    return a == b
+
+
+class _Unset:
+    __slots__ = ()
+
+
+_UNSET = _Unset()
 
 
 def default_prefs() -> dict:
@@ -322,6 +430,22 @@ def _migrate_prefs(prefs: dict) -> dict:
     attrs["computed"] = computed
 
     migrations = prefs.setdefault("_migrations", {})
+
+    # Establish the extension-layer keys on genuinely old saved preferences.
+    # Normal loading already merges DEFAULT_PREFS first, but keeping the
+    # migration explicit also makes direct/headless migration calls complete.
+    if not migrations.get("v047_extension_layer_defaults"):
+        plugin = prefs.setdefault("plugin", {})
+        for key in (
+            "paths",
+            "scan_user_dir",
+            "confirmed_dirs",
+            "user_lib_paths",
+            "user_lib_enabled",
+            "installed_packages",
+        ):
+            plugin.setdefault(key, copy.deepcopy(DEFAULT_PREFS["plugin"][key]))
+        migrations["v047_extension_layer_defaults"] = True
 
     # Preferences are the one established persisted representation of this
     # setting. Preserve choices saved by releases that used the old terminology,

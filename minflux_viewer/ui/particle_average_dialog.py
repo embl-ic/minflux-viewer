@@ -1012,6 +1012,11 @@ class ParticleAverageWindow(QDialog):
             )
             self._task = None
         self._pending.clear()
+        from .qt_lifecycle import dispose_plot_widgets
+
+        # Retire the pyqtgraph plots last, after this window's own
+        # teardown, so nothing here touches an already-inert plot.
+        dispose_plot_widgets(self)
         super().closeEvent(event)
 
     def _n_sources(self) -> int:

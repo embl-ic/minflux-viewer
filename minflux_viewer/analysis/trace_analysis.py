@@ -588,6 +588,13 @@ class _TraceSizeDialog(QDialog):
         from ..ui.text_select import make_labels_selectable
         make_labels_selectable(self)   # let users copy the reported values
 
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        """Retire this window's pyqtgraph plots before Qt deletes them."""
+        from ..ui.qt_lifecycle import dispose_plot_widgets
+
+        dispose_plot_widgets(self)
+        super().closeEvent(event)
+
 
 class _AnisotropyDialog(QDialog):
     def __init__(self, parent: QWidget, result: dict, n_traces: int,
@@ -779,6 +786,13 @@ class _AnisotropyDialog(QDialog):
                 pass
         self._apply_status.setText(
             f"Applied Z scaling factor = {format_z_scaling_factor(value)}")
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        """Retire this window's pyqtgraph plots before Qt deletes them."""
+        from ..ui.qt_lifecycle import dispose_plot_widgets
+
+        dispose_plot_widgets(self)
+        super().closeEvent(event)
 
 
 def _anisotropy_hist_plot(axis: str, fit: SizeFitResult, color: str, mode: int):

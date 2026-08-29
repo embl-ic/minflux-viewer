@@ -941,4 +941,9 @@ class SpatialLinePatternWindow(QDialog):
     def closeEvent(self, event) -> None:
         self._timer.stop()
         self._remove_source_overlay()
+        from ...ui.qt_lifecycle import dispose_plot_widgets
+
+        # Retire the pyqtgraph plots last, after this window's own
+        # teardown, so nothing here touches an already-inert plot.
+        dispose_plot_widgets(self)
         super().closeEvent(event)

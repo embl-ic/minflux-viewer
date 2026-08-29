@@ -76,17 +76,12 @@ _VIEW_DIMENSIONS = {
 _VIEW_OPTIONS = tuple(_VIEW_DIMENSIONS)
 # Perceptually uniform sequential maps suited to linearly normalized values.
 _LINEAR_COLORMAPS = ("viridis", "cividis", "inferno", "magma", "plasma")
-# How many markers one draw may put on screen. Measured on a 246k-localization
-# MINFLUX file (900x700 window): a uniform-colour 2-D series costs ~0.2 s at
-# 246k and ~1 s at 1.16 M, so 1 M is the edge of comfortable. A C-coloured
-# series needs its own, far smaller budget: pyqtgraph keys a symbol per point
-# when brushes vary, costing ~16 us/point (4.1 s at 246k) no matter how the
-# brushes are built. Both are per *view*, not per dataset — see _series_data.
-_MAX_DISPLAY_POINTS = 1_000_000
-_MAX_COLOR_DISPLAY_POINTS = 50_000
-# The GPU draws every point of a real acquisition (20.6 M in 2.7 s, 0.04 s per
-# pan), so thinning is not applied there at all. This is only a guard against
-# exhausting graphics memory, and the status line reports it if it ever bites.
+# Marker budgets are now a GPU **memory** guard only (see _display_budget):
+# the OpenGL paths draw every point of a real acquisition (20.6 M in 2.7 s,
+# 0.04 s per pan) and only need the VBO to fit, while every non-GPU 2-D view
+# goes to the CPU renderer, which aggregates rather than sampling. The former
+# pyqtgraph marker budgets (1 M uniform, 50 k when brushes vary) went with that
+# path. Thinning below is still used to fit the GPU budget and in 3-D.
 # Fraction of the visible span kept as a margin, so a small pan does not
 # immediately expose an unpainted edge.
 _VIEW_THIN_MARGIN = 0.25
@@ -94,26 +89,15 @@ _VIEW_THIN_MARGIN = 0.25
 _RETHIN_DELAY_MS = 120
 
 
-# Hover help for the per-window Thinning checkbox. Preferences > Appearance >
-# Attribute Plot carries the long form of the same explanation.
-THINNING_TOOLTIP = (
-    "Keep spatial representatives from the points currently in view when there\n"
-    "are more than one draw can paint responsively. No value is altered and no\n"
-    "point is averaged away.\n"
+# Hover help for the informational View ▸ Automatic screen aggregation entry.
+AGGREGATION_TOOLTIP = (
+    "When the markers that could be drawn outnumber the pixels available,\n"
+    "every visible row is reduced into a display-sized count grid (and the\n"
+    "mean C per cell when a C dimension is set). Nothing is sampled away, so\n"
+    "the drawn density still reflects the data density.\n"
     "\n"
-    "The subsample is recomputed for the visible range, so zooming in restores\n"
-    "the omitted points; the status line reports how many of how many points\n"
-    "are drawn. In a dense region the marker density no longer reflects the\n"
-    "data density. One row per occupied spatial cell is protected before the\n"
-    "remaining capacity is filled, so isolated features are retained.\n"
-    "\n"
-    "Applies only to the legacy pyqtgraph CPU renderer. GPU mode is exact up to\n"
-    "its startup memory-derived upload limit; the separate CPU-fix window uses\n"
-    "bulk painting and complete screen-space aggregation instead.\n"
-    "\n"
-    "Uncheck for a faithful plot of every point. Expect seconds-long redraws\n"
-    "on multi-million-row selections (~19 s at 20 M rows), repeated on every\n"
-    "pan and zoom. The default comes from Preferences > Appearance."
+    "Zooming recomputes the grid, and a sparse view goes back to exact\n"
+    "bulk-painted markers. This is automatic and has no setting."
 )
 
 
@@ -176,15 +160,13 @@ class AttributeWindow(QWidget):
         parent: QWidget | None = None,
         *,
         dataset_idx: int | None = None,
-        cpu_fix: bool = False,
     ) -> None:
         super().__init__(parent)
         self._state = state
         self._dataset_idx = dataset_idx if dataset_idx is not None else state.active_idx
-        self._cpu_fix = bool(cpu_fix)
-        self._window_label = "Attribute Plot (CPU fix)" if self._cpu_fix else "Attribute Plot"
+        self._window_label = "Attribute Plot"
         self._view_state_key = (
-            "attribute_plot_cpu_state" if self._cpu_fix else "attribute_plot_state"
+            "attribute_plot_state"
         )
         self._zoom_active = False
         self._zoom_mode = "unconstrained"
@@ -197,9 +179,6 @@ class AttributeWindow(QWidget):
         self._has_z = False
         self._has_c = False
         # Thinning lives in Preferences and the View menu, not the top row.
-        self._thinning = bool(
-            state.prefs.get("plot", {}).get("attribute_thinning", True)
-        )
         self._dimension_attrs = {"X": "", "Y": "", "Z": "", "C": ""}
         self._view_mode = "XY"
         self._c_mapping = _LINEAR_COLORMAPS[0]
@@ -258,7 +237,7 @@ class AttributeWindow(QWidget):
         # view change is a per-frame affine instead of a re-upload.
         # GPU rendering is the default: it is tried on every 2-D draw and
         # falls back to pyqtgraph when the machine cannot do it.
-        self._use_gl_2d = not self._cpu_fix
+        self._use_gl_2d = True
         self._gl2d_origin = (0.0, 0.0)
         self._gl2d_span = (1.0, 1.0)
         self._gl_bounds_item = None
@@ -575,22 +554,11 @@ class AttributeWindow(QWidget):
     def _dimension_present(self, dimension: str) -> bool:
         return self._has_z if dimension == "Z" else self._has_c
 
-    def _set_thinning(self, enabled: bool) -> None:
-        """View ▸ Thinning; the default for new windows is in Preferences."""
-        enabled = bool(enabled)
-        if enabled == self._thinning:
-            return
-        self._thinning = enabled
-        self._persist_current_view_state()
-        self._draw()
-
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
 
         view_menu = menu.addMenu("View")
         view_options = _VIEW_OPTIONS if self._has_z else ("XY",)
-        if self._cpu_fix:
-            view_options = tuple(view for view in view_options if view != "3D")
         for view in view_options:
             action = view_menu.addAction(view)
             action.setCheckable(True)
@@ -618,22 +586,11 @@ class AttributeWindow(QWidget):
         view_menu.addAction("Plot style", self._show_plot_style_dialog)
 
         view_menu.setToolTipsVisible(True)
-        if self._cpu_fix:
-            aggregation_action = view_menu.addAction("Automatic screen aggregation")
-            aggregation_action.setCheckable(True)
-            aggregation_action.setChecked(True)
-            aggregation_action.setEnabled(False)
-            aggregation_action.setToolTip(
-                "When drawable markers outnumber display pixels, every visible "
-                "row is reduced into a count grid (and mean C per cell). Zooming "
-                "recomputes the grid; sparse views use exact bulk-painted markers."
-            )
-        else:
-            thinning_action = view_menu.addAction("Thinning")
-            thinning_action.setCheckable(True)
-            thinning_action.setChecked(self._thinning)
-            thinning_action.setToolTip(THINNING_TOOLTIP)
-            thinning_action.triggered.connect(self._set_thinning)
+        aggregation_action = view_menu.addAction("Automatic screen aggregation")
+        aggregation_action.setCheckable(True)
+        aggregation_action.setChecked(True)
+        aggregation_action.setEnabled(False)
+        aggregation_action.setToolTip(AGGREGATION_TOOLTIP)
 
         # The colorbar's own menu can hide it; without an entry here there
         # would be no way back once it is gone.
@@ -879,8 +836,6 @@ class AttributeWindow(QWidget):
     def _gpu_allowed(self) -> bool:
         """Whether startup probing permits an OpenGL 2-D renderer."""
 
-        if self._cpu_fix:
-            return False
         capabilities = getattr(self._state, "gpu_capabilities", None)
         return capabilities is None or bool(getattr(capabilities, "available", False))
 
@@ -907,8 +862,22 @@ class AttributeWindow(QWidget):
         )
         return self._fallback_gpu_point_limit
 
+    # GLScatterPlotItem's fragment shader hard-codes a filled disc
+    # (`if (dot(xy, xy) <= 1.0) ... else discard`), so shape is not a parameter
+    # of the GPU path. Anything else has to be drawn on the CPU, where
+    # `attribute_cpu.BulkScatterItem` renders the real symbol.
+    GPU_SYMBOL = "o"
+
+    def _symbol_allows_gpu(self) -> bool:
+        """Whether the chosen marker symbol is one the GPU path can draw."""
+        return str(self._point_symbol or self.GPU_SYMBOL) == self.GPU_SYMBOL
+
     def set_gpu_2d(self, enabled: bool) -> None:
-        """Public entry point for View ▸ GPU rendering in the main menu."""
+        """Programmatic override for the 2-D renderer (tests, scripting).
+
+        There is no menu entry: the startup OpenGL probe and the marker symbol
+        decide this, with an automatic CPU fallback if a context misbehaves.
+        """
         self._set_use_gl_2d(enabled and self._gpu_allowed())
 
     def _set_use_gl_2d(self, enabled: bool) -> None:
@@ -1061,7 +1030,7 @@ class AttributeWindow(QWidget):
     def _set_view_mode(self, view: str) -> None:
         if view not in _VIEW_OPTIONS or (
             not self._has_z and view != "XY"
-        ) or (self._cpu_fix and view == "3D"):
+        ):
             return
         if view == "3D" and not self._ensure_3d_built():
             return
@@ -1415,10 +1384,7 @@ class AttributeWindow(QWidget):
             else:
                 self._dimension_attrs[dimension] = self._default_dimension_attribute(dimension)
         saved_view = str(saved.get("view", self._view_mode))
-        allowed_views = (
-            tuple(view for view in _VIEW_OPTIONS if view != "3D")
-            if self._cpu_fix else _VIEW_OPTIONS
-        )
+        allowed_views = _VIEW_OPTIONS
         self._view_mode = (
             saved_view if self._has_z and saved_view in allowed_views else "XY"
         )
@@ -1448,13 +1414,9 @@ class AttributeWindow(QWidget):
         self._show_3d_bounding_box = bool(
             saved.get("show_3d_bounding_box", True)
         )
-        # The normal window attempts GPU rendering only when the startup probe
-        # succeeded. The separate CPU-fix window never constructs a GL view.
-        self._use_gl_2d = (
-            not self._cpu_fix
-            and self._gpu_allowed()
-            and bool(saved.get("gl_2d", True))
-        )
+        # GPU rendering is attempted only when the startup probe succeeded;
+        # `_draw_2d_series` additionally requires a symbol the GPU can draw.
+        self._use_gl_2d = self._gpu_allowed() and bool(saved.get("gl_2d", True))
         self._show_legend = bool(saved.get("show_legend", True))
         stored_legend = saved.get("legend_geometry")
         self._legend_geometry = (
@@ -1548,10 +1510,6 @@ class AttributeWindow(QWidget):
         self._lines_chk.setChecked(bool(saved.get("lines", False)))
         self._filter_chk.setChecked(bool(saved.get("filtered_only", True)))
         self._valid_chk.setChecked(bool(saved.get("valid_only", True)))
-        self._thinning = bool(saved.get(
-            "thinning",
-            self._state.prefs.get("plot", {}).get("attribute_thinning", True),
-        ))
         self._lines_chk.blockSignals(False)
         self._filter_chk.blockSignals(False)
         self._valid_chk.blockSignals(False)
@@ -1606,14 +1564,14 @@ class AttributeWindow(QWidget):
             axis.setTextPen(foreground)
 
     def refresh_preferences(self) -> None:
-        """Adopt the Appearance default for thinning after Preferences OK."""
-        wanted = bool(
-            self._state.prefs.get("plot", {}).get("attribute_thinning", True)
-        )
-        if wanted == self._thinning:
-            return
-        self._thinning = wanted
-        self._draw()
+        """Nothing here depends on Preferences any more.
+
+        The 2-D renderer is chosen from the startup OpenGL probe and the marker
+        symbol, and the non-GPU path aggregates rather than sampling, so there
+        is no longer a thinning default to adopt. Kept because
+        ``MainWindow._refresh_plot_preferences`` calls it on every plot window.
+        """
+        return
 
     def refresh_colors(self) -> None:
         if not self._plot_style_custom:
@@ -1882,26 +1840,22 @@ class AttributeWindow(QWidget):
         return None if v is None else np.asarray(v).ravel().astype(float)
 
     def _display_budget(self, values: dict[str, np.ndarray]) -> int | None:
-        """Markers one draw may paint, or None when nothing is held back.
+        """Markers one draw may upload, or None when nothing is held back.
 
-        Thinning exists because pyqtgraph costs ~1 µs of Python per point; the
-        GPU has no such cost, so a GPU-drawn view (the 2-D canvas, or 3-D,
-        which is always OpenGL) keeps only a memory guard. A C dimension on the
-        **CPU** means per-point brushes, which pyqtgraph paints roughly twenty
-        times slower than one shared brush, so that path gets its own budget.
+        Only the OpenGL paths have a budget, and it is a **memory** guard
+        rather than a speed one: a VBO of positions and colours has to fit.
+        Every 2-D view that is not on the GPU goes to the CPU renderer, which
+        reduces a dense selection into a display-sized grid instead of sampling
+        it, so handing it a budget would drop exactly the rows it exists to
+        keep.
         """
-        if self._cpu_fix:
-            # The CPU-fix path consumes the full selection in a chunked screen
-            # reduction when exact bulk markers would overplot the viewport.
-            return None
-        if self._use_gl_2d or self._view_mode == "3D":
+        del values  # every remaining budget is per-point, not per-dimension
+        if self._view_mode == "3D" or (
+            self._use_gl_2d and self._symbol_allows_gpu()
+        ):
             limit = self._gpu_point_limit()
             return limit if limit > 0 else None
-        if not self._thinning:
-            return None
-        if "C" in values:
-            return _MAX_COLOR_DISPLAY_POINTS
-        return _MAX_DISPLAY_POINTS
+        return None
 
     def _visible_row_mask(
         self, values: dict[str, np.ndarray]
@@ -2277,14 +2231,22 @@ class AttributeWindow(QWidget):
         use_lines: bool,
         stacked: bool,
     ) -> tuple[float | None, float | None]:
-        if self._cpu_fix:
-            return self._draw_cpu_2d_series(
-                records, dimensions, use_lines=use_lines, stacked=stacked
-            )
         self._stack.setCurrentWidget(self._plot_page)
         self._clear_series()
         self._clear_gl_series()
-        gpu = self._use_gl_2d and self._ensure_gl_canvas()
+        gpu = (
+            self._use_gl_2d
+            and self._symbol_allows_gpu()
+            and self._ensure_gl_canvas()
+        )
+        if not gpu:
+            # Bulk-painted markers when sparse, a complete screen reduction
+            # when dense. Never a thinned sample: this path exists because the
+            # GPU is unavailable or the symbol is not a disc, and in both cases
+            # dropping rows would be a worse answer than aggregating them.
+            return self._draw_cpu_2d_series(
+                records, dimensions, use_lines=use_lines, stacked=stacked
+            )
         self._set_plot_transparent(gpu)
         if not gpu:
             self._show_gl_canvas(False)
@@ -2662,9 +2624,6 @@ class AttributeWindow(QWidget):
         """
         self._use_gl_2d = False
         self._clear_gl_bounds()
-        # Without the GPU the CPU renderer needs the display budget back, or a
-        # multi-million-row selection would take seconds per redraw.
-        self._thinning = True
         message = f"GPU rendering unavailable ({reason}); drawing on the CPU."
         # _draw rewrites the status line at the end, so carry the reason there
         # instead of losing it a few milliseconds after setting it.
@@ -2782,9 +2741,24 @@ class AttributeWindow(QWidget):
         self._draw()
 
     def _set_plot_transparent(self, transparent: bool) -> None:
-        """Let the GL canvas show through the plot, or paint over it again."""
-        widgets = (self._plot, self._plot.viewport())
-        for widget in widgets:
+        """Let the GL canvas show through the plot, or paint over it again.
+
+        ⚠ The stylesheet **must** be scoped by object name. A Qt stylesheet
+        cascades to every descendant, and a bare ``background: transparent``
+        on the plot therefore reached the ROI context menu, which
+        ``RoiOverlayController`` parents to this very widget
+        (``QMenu(self.view_widget)``). The menu resolved a ``#000000`` window
+        colour and painted almost nothing — black, with each entry appearing
+        only while the hover highlight drew its own rectangle. Render and
+        scatter were unaffected because neither styles its view widget, and
+        this window's *own* menus were fine because they are ``QMenu(self)``.
+        The same reasoning is already recorded in ``_apply_page_background``,
+        which uses a palette rather than a stylesheet for exactly this reason.
+        """
+        for widget, name in (
+            (self._plot, "mfvAttributePlotView"),
+            (self._plot.viewport(), "mfvAttributePlotViewport"),
+        ):
             widget.setAttribute(
                 Qt.WidgetAttribute.WA_TranslucentBackground, transparent
             )
@@ -2792,8 +2766,11 @@ class AttributeWindow(QWidget):
                 Qt.WidgetAttribute.WA_NoSystemBackground, transparent
             )
             widget.setAutoFillBackground(not transparent)
+            if widget.objectName() != name:
+                widget.setObjectName(name)
             widget.setStyleSheet(
-                "background: transparent; border: none;" if transparent else ""
+                f"#{name} {{ background: transparent; border: none; }}"
+                if transparent else ""
             )
         if transparent:
             self._plot.setBackground(None)
@@ -3139,7 +3116,6 @@ class AttributeWindow(QWidget):
             "filtered_only": filtered_only,
             "iter": self._iter_combo.currentText() or "",
             "valid_only": vld_only,
-            "thinning": bool(self._thinning),
             "gl_2d": bool(self._use_gl_2d),
         }
 
@@ -3324,7 +3300,7 @@ class AttributeWindow(QWidget):
             note += f"  |  view: {self._view_mode}"
             if self._use_gl_2d:
                 note += " (GPU)"
-            elif self._cpu_fix and self._cpu_render_summary:
+            elif self._cpu_render_summary:
                 note += f"  |  {self._cpu_render_summary}"
 
         requested_names = [self._dimension_attrs[dim] for dim in data_dimensions]

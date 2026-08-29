@@ -742,3 +742,18 @@ class CurvilinearSegmentationWindow(QDialog):
         win = WidthProfileWindow(res, title=f"{name} — {len(paths)} centre line(s)",
                                  owner=self._owner)
         show_modeless(win, self._owner)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        """Retire this window's pyqtgraph plots before Qt deletes them."""
+        from .qt_lifecycle import dispose_plot_widgets
+
+        try:
+            self._recompute_timer.stop()
+        except (AttributeError, RuntimeError):
+            pass
+        try:
+            self._retrace_timer.stop()
+        except (AttributeError, RuntimeError):
+            pass
+        dispose_plot_widgets(self)
+        super().closeEvent(event)

@@ -24,7 +24,7 @@ PyQt6     = ">=6.5"
 numpy     = ">=1.24"
 scipy     = ">=1.11"
 scikit-learn = ">=1.3"   # GaussianMixture (channel separation by attribute distribution)
-pyqtgraph = ">=0.13"
+pyqtgraph = ">=0.13,<0.15"   # qt_lifecycle.py depends on 0.13/0.14 internals
 PyOpenGL  = ">=3.1"
 h5py      = ">=3.9"
 zarr      = ">=2.17,<3.0"

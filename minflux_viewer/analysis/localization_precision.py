@@ -1098,6 +1098,13 @@ class StdDevResultDialog(QDialog):
         bb.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.close)
         root.addWidget(bb)
 
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        """Retire this window's pyqtgraph plots before Qt deletes them."""
+        from ..ui.qt_lifecycle import dispose_plot_widgets
+
+        dispose_plot_widgets(self)
+        super().closeEvent(event)
+
 
 # ---------------------------------------------------------------------------
 # FRC result dialog
@@ -1301,6 +1308,13 @@ class FRCResultDialog(QDialog):
             return
         self._build(result)
         self._status_lbl.setText(f"recomputed ({result.mode}) @ {pixel:.2f} nm/px")
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        """Retire this window's pyqtgraph plots before Qt deletes them."""
+        from ..ui.qt_lifecycle import dispose_plot_widgets
+
+        dispose_plot_widgets(self)
+        super().closeEvent(event)
 
 
 def _res(val: float) -> str:
@@ -1679,6 +1693,13 @@ class CRLBResultDialog(QDialog):
         if lz is not None:
             msg += f", L_z = {lz:.0f} nm"
         self._status_lbl.setText(msg)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        """Retire this window's pyqtgraph plots before Qt deletes them."""
+        from ..ui.qt_lifecycle import dispose_plot_widgets
+
+        dispose_plot_widgets(self)
+        super().closeEvent(event)
 
 
 # ---------------------------------------------------------------------------

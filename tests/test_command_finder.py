@@ -194,53 +194,29 @@ def test_keyword_search_finds_nested_commands(_app):
         _app.processEvents()
 
 
-def test_view_menu_switches_the_attribute_plot_renderer(_app):
-    """View ▸ GPU rendering opens the Attribute Plot and switches its renderer.
+def test_view_menu_offers_one_attribute_plot_and_no_renderer_switches(_app):
+    """The renderer is automatic, so neither switch is a command any more.
 
-    The plot's own right-click menu carries the same switch; this is the app-menu
-    entry, so the two renderers can be compared without hunting for it.
+    *Attribute Plot (CPU fix)* and *Attribute Plot: GPU rendering* were both
+    retired: the startup OpenGL probe, its fallback, and the marker symbol
+    decide the 2-D renderer, and the CPU renderer that used to need its own
+    window is now the automatic non-GPU path.
     """
-    import numpy as np
-
-    from minflux_viewer.core.dataset import build_localization_dataset
-
     win = _real_window(_app)
     try:
-        action = win.actionAttributeGpu
-        assert action.isCheckable()
-        assert action in win._ui.menuView.actions()
-        # It is the only home of that command.
-        assert sum(
-            action in menu.actions()
-            for menu in win.menuBar().findChildren(type(win._ui.menuView))
-        ) == 1
+        assert not hasattr(win, "actionAttributeGpu")
+        assert not hasattr(win, "actionAttributeCpu")
+        assert not hasattr(win, "_attr_cpu_windows")
 
-        # No dataset: nothing to switch, and the entry says so.
-        win._sync_attribute_gpu_action()
-        assert not action.isEnabled()
+        texts = [a.text() for a in win._ui.menuView.actions() if not a.isSeparator()]
+        attribute_entries = [t for t in texts if "Attribute Plot" in t]
+        assert attribute_entries == ["Attribute Plot"], texts
 
-        win._state.add_dataset(
-            build_localization_dataset(
-                name="gpu-menu",
-                x_nm=np.arange(6, dtype=float),
-                y_nm=np.arange(6, dtype=float),
-                z_nm=np.zeros(6),
-            )
-        )
-        _app.processEvents()
-        win._sync_attribute_gpu_action()
-        assert action.isEnabled() and not action.isChecked()
-
-        action.trigger()          # a menu click toggles, then emits triggered
-        plot = win._attr_windows.get(win._state.active_idx)
-        assert plot is not None and plot.gpu_2d is True
-
-        # Reopening the menu reflects the window, not the last click.
-        win._sync_attribute_gpu_action()
-        assert action.isChecked()
-        plot.set_gpu_2d(False)
-        win._sync_attribute_gpu_action()
-        assert not action.isChecked()
+        # Nothing anywhere in the menu bar still offers a renderer switch.
+        for menu in win.menuBar().findChildren(type(win._ui.menuView)):
+            for action in menu.actions():
+                assert "CPU fix" not in action.text()
+                assert "GPU rendering" not in action.text()
     finally:
         win.close()
         _app.processEvents()

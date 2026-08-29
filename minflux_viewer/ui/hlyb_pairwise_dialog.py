@@ -727,6 +727,13 @@ class HlyBPairwiseWindow(QDialog):
     def report_text(self) -> str:
         return pairwise_report(self._result)
 
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        """Retire this window's pyqtgraph plots before Qt deletes them."""
+        from .qt_lifecycle import dispose_plot_widgets
+
+        dispose_plot_widgets(self)
+        super().closeEvent(event)
+
 
 def pairwise_report(result: dict) -> str:
     """Plain-text account of an ensemble pair-distance analysis."""

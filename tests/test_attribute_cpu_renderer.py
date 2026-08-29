@@ -122,32 +122,42 @@ def _state(n: int) -> AppState:
     return state
 
 
-def test_cpu_fix_window_uses_bulk_item_for_sparse_data(_qt_app):
+def test_cpu_renderer_is_the_automatic_non_gpu_path(_qt_app):
+    """The CPU renderer is reached by turning the GPU off, not by a window.
+
+    *Attribute Plot (CPU fix)* was retired: its renderer is now what the single
+    Attribute Plot uses whenever it is not on the GPU, so nothing was lost with
+    the extra menu entry.
+    """
     from minflux_viewer.ui.attribute_window import AttributeWindow
 
-    window = AttributeWindow(_state(5_000), dataset_idx=0, cpu_fix=True)
+    window = AttributeWindow(_state(5_000), dataset_idx=0)
     try:
+        window.set_gpu_2d(False)
         window.show()
         _qt_app.processEvents()
-        assert window.windowTitle().startswith("Attribute Plot (CPU fix)")
+        assert window.windowTitle().startswith("Attribute Plot")
+        assert "CPU fix" not in window.windowTitle()
         assert not window.gpu_2d
         assert isinstance(window._series_items[0][1], BulkScatterItem)
         assert "CPU bulk painting" in window._info.text()
-        assert window._view_state_key == "attribute_plot_cpu_state"
+        # One saved view state, not a second one for a second window.
+        assert window._view_state_key == "attribute_plot_state"
     finally:
         window.close()
         _qt_app.processEvents()
 
 
-def test_cpu_fix_window_switches_to_screen_aggregation_when_overplotted(
+def test_cpu_renderer_switches_to_screen_aggregation_when_overplotted(
     _qt_app, monkeypatch,
 ):
     from pyqtgraph import ImageItem
 
     from minflux_viewer.ui.attribute_window import AttributeWindow
 
-    window = AttributeWindow(_state(50_000), dataset_idx=0, cpu_fix=True)
+    window = AttributeWindow(_state(50_000), dataset_idx=0)
     try:
+        window.set_gpu_2d(False)
         window.resize(180, 140)
         window.show()
         _qt_app.processEvents()
@@ -172,7 +182,7 @@ def test_cpu_fix_window_switches_to_screen_aggregation_when_overplotted(
 def test_cpu_curve_lod_connects_skipped_vertices_but_preserves_nan_gaps(_qt_app):
     from minflux_viewer.ui.attribute_window import AttributeWindow
 
-    window = AttributeWindow(_state(100), dataset_idx=0, cpu_fix=True)
+    window = AttributeWindow(_state(100), dataset_idx=0)
     try:
         x = np.arange(1_000, dtype=float)
         y = np.sin(x / 30.0)
@@ -191,7 +201,12 @@ def test_cpu_curve_lod_connects_skipped_vertices_but_preserves_nan_gaps(_qt_app)
         window.close()
 
 
-def test_view_menu_has_separate_cpu_attribute_plot(_qt_app):
+def test_startup_gpu_failure_leaves_one_plot_that_draws_on_the_cpu(_qt_app):
+    """No probe, no GPU: the single Attribute Plot falls back by itself.
+
+    There is no longer a GPU action to disable or a CPU window to offer
+    instead — the fallback is the whole mechanism.
+    """
     from minflux_viewer.ui.main_window import MainWindow
 
     state = _state(100)
@@ -201,33 +216,18 @@ def test_view_menu_has_separate_cpu_attribute_plot(_qt_app):
         "compute_loc_prec": False,
         "compute_local_density": False,
     })
-    window = MainWindow(state)
-    try:
-        assert window.actionAttributeCpu.text() == "Attribute Plot (CPU fix)"
-        assert window.actionAttributeCpu in window._ui.menuView.actions()
-        cpu_window = window._show_attr_plot_cpu(0)
-        assert cpu_window is window._attr_cpu_windows[0]
-        assert cpu_window is not window._attr_windows.get(0)
-        assert not cpu_window.gpu_2d
-    finally:
-        window.close()
-        _qt_app.processEvents()
-
-
-def test_startup_gpu_result_disables_gpu_action_but_not_cpu_fix(_qt_app):
-    from minflux_viewer.ui.main_window import MainWindow
-
-    state = _state(100)
     state.gpu_capabilities = GpuCapabilities(
         available=False, reason="test OpenGL context unavailable"
     )
     window = MainWindow(state)
     try:
-        assert not window.actionAttributeGpu.isEnabled()
-        assert "test OpenGL context unavailable" in window.actionAttributeGpu.toolTip()
-        assert window.actionAttributeCpu.isEnabled()
-        cpu_window = window._show_attr_plot_cpu(0)
-        assert not cpu_window.gpu_2d
+        assert not hasattr(window, "actionAttributeGpu")
+        assert not hasattr(window, "actionAttributeCpu")
+        plot = window._show_attr_plot(0)
+        assert plot is window._attr_windows[0]
+        assert not plot.gpu_2d          # the probe result is honoured
+        _qt_app.processEvents()
+        assert isinstance(plot._series_items[0][1], BulkScatterItem)
     finally:
         window.close()
         _qt_app.processEvents()
