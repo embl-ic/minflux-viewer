@@ -79,7 +79,7 @@ class ViewerFacade:
     kept because published scripts use it.
     """
 
-    def __init__(self, owner: "MinfluxViewerFacade") -> None:
+    def __init__(self, owner: MinfluxViewerFacade) -> None:
         self._owner = owner
 
     def render(self, dataset=None):
@@ -144,7 +144,7 @@ class MinfluxViewerFacade:
 
     api_version = __api_version__
 
-    def __init__(self, state: "AppState") -> None:
+    def __init__(self, state: AppState) -> None:
         self.state = state
         self._main_window = None
         self._windows: list[_AdHocPlotWindow] = []
@@ -161,7 +161,7 @@ class MinfluxViewerFacade:
     # -- application access --------------------------------------------------
 
     @property
-    def _state(self) -> "AppState":
+    def _state(self) -> AppState:
         """Compatibility alias; the namespaces read :attr:`state`."""
         return self.state
 
@@ -173,7 +173,7 @@ class MinfluxViewerFacade:
             raise ScriptError("No main viewer window is bound to the scripting API yet.")
         return self._main_window
 
-    def resolve_dataset(self, dataset: Any = None) -> "MinfluxDataset":
+    def resolve_dataset(self, dataset: Any = None) -> MinfluxDataset:
         """``None`` / index / name / dataset -> dataset, or a readable error."""
         datasets = list(self.state.datasets)
         if dataset is None:
@@ -335,7 +335,7 @@ class MinfluxViewerFacade:
         return self.view.console()
 
 
-def create_facade(state: "AppState") -> MinfluxViewerFacade:
+def create_facade(state: AppState) -> MinfluxViewerFacade:
     return MinfluxViewerFacade(state)
 
 

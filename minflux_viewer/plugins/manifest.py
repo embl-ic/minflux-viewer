@@ -21,10 +21,11 @@ stop the rest of the menu building.
 from __future__ import annotations
 
 import re
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import tomllib
 
 #: The file that makes a directory a Tier 2 plugin.
 MANIFEST_NAME = "plugin.toml"

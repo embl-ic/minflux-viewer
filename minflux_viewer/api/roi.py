@@ -18,7 +18,8 @@ views work in. That is also why :meth:`Roi.points_in` uses
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Mapping
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -46,7 +47,7 @@ class Roi(Namespace):
 
     # -- finding -------------------------------------------------------------
 
-    def list(self, *, dataset: Any = None, region_only: bool = False) -> list["RoiRecord"]:
+    def list(self, *, dataset: Any = None, region_only: bool = False) -> list[RoiRecord]:
         """
         Every stored ROI belonging to *dataset*, in ROI Manager order.
 
@@ -68,7 +69,7 @@ class Roi(Namespace):
             out.append(record)
         return out
 
-    def active(self, *, dataset: Any = None) -> "RoiRecord | None":
+    def active(self, *, dataset: Any = None) -> RoiRecord | None:
         """
         The ROI a command would act on: the single selected stored ROI,
         otherwise the dataset's recorded active draft, otherwise ``None``.
@@ -88,7 +89,7 @@ class Roi(Namespace):
                     return record
         return None
 
-    def selected(self, *, dataset: Any = None) -> list["RoiRecord"]:
+    def selected(self, *, dataset: Any = None) -> list[RoiRecord]:
         """Every ROI currently selected in the ROI Manager."""
         return list(self._state.rois.selected_records())
 
@@ -97,14 +98,14 @@ class Roi(Namespace):
     def add(
         self,
         roi_type: str,
-        geometry: "Mapping[str, Any]",
+        geometry: Mapping[str, Any],
         *,
         dataset: Any = None,
         name: str = "",
         color: str | None = None,
         view: str = "render",
         select: bool = False,
-    ) -> "RoiRecord":
+    ) -> RoiRecord:
         """
         Store a new ROI and show it in the ROI Manager.
 
@@ -218,7 +219,7 @@ class Roi(Namespace):
         z_all: bool = True,
         name: str | None = None,
         add: bool = True,
-    ) -> "MinfluxDataset":
+    ) -> MinfluxDataset:
         """
         Duplicate a dataset restricted to a region ROI.
 
@@ -278,7 +279,7 @@ class Roi(Namespace):
             raise ApiError("Expected a ROI record or a ROI id.")
         return str(roi_id)
 
-    def _record(self, roi: Any) -> "RoiRecord":
+    def _record(self, roi: Any) -> RoiRecord:
         if hasattr(roi, "geometry"):
             return roi
         roi_id = self._roi_id(roi)

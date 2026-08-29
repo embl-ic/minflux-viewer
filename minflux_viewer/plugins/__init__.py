@@ -36,8 +36,8 @@ Usage from the main window
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, List
 
 
 @dataclass(frozen=True)
@@ -70,7 +70,7 @@ class PluginEntry:
     keywords: tuple[str, ...] = ()
 
 
-_REGISTRY: List[PluginEntry] = []
+_REGISTRY: list[PluginEntry] = []
 _LOADED = False
 
 
@@ -82,12 +82,12 @@ def register(entry: PluginEntry) -> None:
     _REGISTRY.append(entry)
 
 
-def available() -> List[PluginEntry]:
+def available() -> list[PluginEntry]:
     """Return all registered plugins in insertion order."""
     return list(_REGISTRY)
 
 
-def discover(prefs: dict | None = None) -> List[PluginEntry]:
+def discover(prefs: dict | None = None) -> list[PluginEntry]:
     """
     Find and register user plugins from folders **outside** this package.
 
@@ -106,7 +106,7 @@ def discover(prefs: dict | None = None) -> List[PluginEntry]:
     """
     from . import loader
 
-    added: List[PluginEntry] = []
+    added: list[PluginEntry] = []
     known = {entry.name for entry in _REGISTRY}
     for root in loader.plugin_roots(prefs):
         for found in loader.scan_root(root):
@@ -119,7 +119,7 @@ def discover(prefs: dict | None = None) -> List[PluginEntry]:
     return added
 
 
-def rediscover(prefs: dict | None = None) -> List[PluginEntry]:
+def rediscover(prefs: dict | None = None) -> list[PluginEntry]:
     """
     Drop every discovered user plugin and scan again.
 
@@ -140,7 +140,6 @@ def rediscover(prefs: dict | None = None) -> List[PluginEntry]:
 
 def _entry_for(found, prefs: dict | None) -> PluginEntry:
     """Build the registry entry for one discovered plugin."""
-    from . import loader
 
     def launch(state, parent=None, *, _found=found, _prefs=prefs) -> None:
         _launch_discovered(_found, state, parent, _prefs)
@@ -281,12 +280,14 @@ def ensure_loaded() -> None:
 
     # Built-in plugins — registration (and thus Plugins-menu) order follows the
     # import order here.
-    from . import msr_reader      # noqa: F401
-    from . import paraview        # noqa: F401
-    from . import data_simulator  # noqa: F401  (immediately under ParaView)
-    from . import drift_correction  # noqa: F401
-    from . import trace_viewer    # noqa: F401
-    from . import spatial_line_pattern  # noqa: F401
-    from . import hlyb_pair_analysis  # noqa: F401  (project-specific)
-    from . import generate_method_text  # noqa: F401
-    from . import script_editor   # noqa: F401  (moved to the bottom of the list)
+    from . import (
+        data_simulator,  # noqa: F401  (immediately under ParaView)
+        drift_correction,  # noqa: F401
+        generate_method_text,  # noqa: F401
+        hlyb_pair_analysis,  # noqa: F401  (project-specific)
+        msr_reader,  # noqa: F401
+        paraview,  # noqa: F401
+        script_editor,  # noqa: F401  (moved to the bottom of the list)
+        spatial_line_pattern,  # noqa: F401
+        trace_viewer,  # noqa: F401
+    )

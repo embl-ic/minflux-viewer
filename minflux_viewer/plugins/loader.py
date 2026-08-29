@@ -42,9 +42,10 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .manifest import MANIFEST_NAME, ManifestError, PluginManifest, read_manifest, version_satisfies
 
