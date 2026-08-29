@@ -15,7 +15,6 @@ import importlib
 import numpy as np
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # 0.2 -- the published API package
 # ---------------------------------------------------------------------------
@@ -37,18 +36,23 @@ def test_every_namespace_exists_and_is_importable():
         assert issubclass(cls, api._base.Namespace) if hasattr(api, "_base") else cls
 
 
-def test_unimplemented_members_raise_and_name_their_owning_track():
+def test_a_deferred_member_explains_itself_rather_than_vanishing():
     """
-    A premature call must explain itself.
+    Phase 0's scaffold raised ``NotImplementedError`` naming the owning track,
+    so a track could code against a namespace another track had not written
+    yet. Every track has now landed, and the property that survives is the one
+    that mattered: a *published but deferred* name must give the reason rather
+    than an AttributeError.
 
-    Track A calls ``mfv.results`` before track C has written it; the failure
-    should say so rather than surfacing as an AttributeError.
+    ``mfv.view.volume`` and ``mfv.view.lut`` are the two deferred in API 1.0.
     """
-    from minflux_viewer.api.results import Results
+    from minflux_viewer.api.view import View
 
-    with pytest.raises(NotImplementedError) as excinfo:
-        Results(facade=None).table("x")
-    assert "track C" in str(excinfo.value)
+    view = View(facade=None)
+    for call in (view.volume, view.lut):
+        with pytest.raises(NotImplementedError) as excinfo:
+            call()
+        assert "1.0" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

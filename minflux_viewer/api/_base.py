@@ -38,7 +38,7 @@ class Namespace:
     # -- access to the application ------------------------------------------
 
     @property
-    def _state(self) -> "AppState":
+    def _state(self) -> AppState:
         return self._facade.state
 
     def _main_window(self):
@@ -51,7 +51,7 @@ class Namespace:
         """
         return self._facade.require_main_window()
 
-    def _dataset(self, dataset=None) -> "MinfluxDataset":
+    def _dataset(self, dataset=None) -> MinfluxDataset:
         """Resolve *dataset* (None/index/name/object) to a dataset, or raise."""
         return self._facade.resolve_dataset(dataset)
 
@@ -62,7 +62,7 @@ class Namespace:
         return f"<mfv.{self.name or type(self).__name__}>"
 
 
-def _todo(track: str, what: str) -> "NotImplementedError":
+def _todo(track: str, what: str) -> NotImplementedError:
     """
     Build the placeholder raised by an unimplemented stub.
 

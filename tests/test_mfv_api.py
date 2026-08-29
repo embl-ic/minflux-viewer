@@ -371,7 +371,6 @@ def test_ui_status_reaches_the_status_line(mfv, state):
 # ---------------------------------------------------------------------------
 
 def test_background_work_runs_off_thread_and_delivers_on_the_gui_thread(mfv, qapp):
-    from PyQt6.QtCore import QDeadlineTimer, QThreadPool
 
     out = {}
 
@@ -382,8 +381,8 @@ def test_background_work_runs_off_thread_and_delivers_on_the_gui_thread(mfv, qap
     mfv.run.background(work, on_done=lambda v: out.setdefault("value", v),
                        name="unit test task")
 
-    pool = QThreadPool.globalInstance()
     from minflux_viewer.ui.background_tasks import shared_thread_pool
+
     shared_thread_pool("mfv-script").waitForDone(5000)
     for _ in range(50):
         qapp.processEvents()
@@ -460,11 +459,30 @@ def test_script_error_is_the_api_error(mfv):
 # the seam with track C
 # ---------------------------------------------------------------------------
 
-def test_track_c_namespaces_refuse_clearly_until_track_c_lands(mfv):
-    """Track A may call them; the failure must name the owner."""
-    with pytest.raises(NotImplementedError) as excinfo:
-        mfv.results.table("x")
-    assert "track C" in str(excinfo.value)
+def test_track_a_can_drive_the_results_and_plot_namespaces(mfv):
+    """
+    The seam between the two tracks, exercised from Track A's side: a script
+    reads through ``mfv.data`` and writes through ``mfv.results`` / ``mfv.plot``
+    without either namespace knowing about the other.
+    """
+    efo = mfv.data.attr("efo")
 
-    with pytest.raises(NotImplementedError):
-        mfv.plot.line([1, 2, 3])
+    table = mfv.results.table("Track A seam")
+    table.add_row(n=int(efo.size), median_efo=float(np.median(efo)))
+    assert len(table) == 1
+    assert table.to_dict()["n"] == [int(efo.size)]
+
+    handle = mfv.plot.hist(efo, bins=10, title="efo")
+    # chainable, and still the same handle
+    assert handle.labels(x="efo (Hz)", y="count").legend(True) is handle
+
+
+def test_deferred_members_explain_themselves(mfv):
+    """
+    ``volume`` and ``lut`` are published names deliberately not implemented in
+    API 1.0. A caller must get the reason, not an AttributeError.
+    """
+    for call in (mfv.view.volume, mfv.view.lut):
+        with pytest.raises(NotImplementedError) as excinfo:
+            call()
+        assert "1.0" in str(excinfo.value)

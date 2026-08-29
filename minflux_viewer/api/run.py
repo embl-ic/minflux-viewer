@@ -19,7 +19,8 @@ optional:
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from ._base import ApiError, Namespace
 
@@ -33,7 +34,7 @@ class TaskContext:
     to the GUI thread.
     """
 
-    def __init__(self, report: "Callable[[str], None]", task) -> None:
+    def __init__(self, report: Callable[[str], None], task) -> None:
         self._report = report
         self._task = task
 
@@ -107,11 +108,11 @@ class Run(Namespace):
 
     def background(
         self,
-        fn: "Callable[[TaskContext], Any]",
+        fn: Callable[[TaskContext], Any],
         *,
-        on_done: "Callable[[Any], None] | None" = None,
-        on_error: "Callable[[BaseException], None] | None" = None,
-        on_cancel: "Callable[[], None] | None" = None,
+        on_done: Callable[[Any], None] | None = None,
+        on_error: Callable[[BaseException], None] | None = None,
+        on_cancel: Callable[[], None] | None = None,
         name: str | None = None,
         kind: str = "plugin",
     ) -> TaskHandle:

@@ -14,7 +14,8 @@ silently returns different numbers than the UI shows for the same attribute.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -31,15 +32,15 @@ class Data(Namespace):
 
     # -- finding datasets ----------------------------------------------------
 
-    def datasets(self) -> list["MinfluxDataset"]:
+    def datasets(self) -> list[MinfluxDataset]:
         """Every loaded dataset, in viewer order."""
         return list(self._state.datasets)
 
-    def active(self) -> "MinfluxDataset | None":
+    def active(self) -> MinfluxDataset | None:
         """The active dataset, or ``None`` when nothing is loaded."""
         return self._state.active_dataset
 
-    def get(self, ref: Any = None) -> "MinfluxDataset":
+    def get(self, ref: Any = None) -> MinfluxDataset:
         """
         Resolve *ref* to a dataset: ``None`` = active, an ``int`` = index, a
         ``str`` = name or file name, or a dataset object (returned as-is).
@@ -214,11 +215,11 @@ class Data(Namespace):
         xyz: Any,
         *,
         tid: Any = None,
-        attrs: "Mapping[str, Any] | None" = None,
+        attrs: Mapping[str, Any] | None = None,
         name: str = "script dataset",
         unit: str = "nm",
         add: bool = True,
-    ) -> "MinfluxDataset":
+    ) -> MinfluxDataset:
         """
         Build a new dataset from computed coordinates and add it to the viewer.
 
@@ -275,7 +276,7 @@ class Data(Namespace):
 
     def set_filter(
         self,
-        specs: "Iterable[Mapping[str, Any]]",
+        specs: Iterable[Mapping[str, Any]],
         *,
         dataset: Any = None,
         replace: bool = True,
@@ -354,7 +355,7 @@ class Data(Namespace):
     # -- internal ------------------------------------------------------------
 
     @staticmethod
-    def _apply_filter(ds: "MinfluxDataset", arr: np.ndarray) -> np.ndarray:
+    def _apply_filter(ds: MinfluxDataset, arr: np.ndarray) -> np.ndarray:
         """Apply the filter mask when *arr* is one-row-per-localization."""
         if arr.ndim == 0 or arr.shape[0] != int(ds.prop.num_loc):
             return arr

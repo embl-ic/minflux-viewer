@@ -9,7 +9,8 @@ violate the project's window-ownership rules by accident.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping
+from typing import Any
 
 from ._base import ApiError, Namespace
 
@@ -47,10 +48,10 @@ class Ui(Namespace):
 
     def ask(
         self,
-        fields: "Mapping[str, Any]",
+        fields: Mapping[str, Any],
         *,
         title: str = "Parameters",
-        descriptions: "Mapping[str, str] | None" = None,
+        descriptions: Mapping[str, str] | None = None,
     ) -> dict | None:
         """
         Show a generated parameter dialog and return the edited values.
@@ -64,8 +65,15 @@ class Ui(Namespace):
         check for ``None`` before proceeding.
         """
         from PyQt6.QtWidgets import (
-            QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-            QFormLayout, QLineEdit, QSpinBox, QVBoxLayout,
+            QCheckBox,
+            QComboBox,
+            QDialog,
+            QDialogButtonBox,
+            QDoubleSpinBox,
+            QFormLayout,
+            QLineEdit,
+            QSpinBox,
+            QVBoxLayout,
         )
 
         if not fields:
