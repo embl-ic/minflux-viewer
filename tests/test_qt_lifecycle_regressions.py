@@ -492,3 +492,65 @@ def test_update_dialog_close_does_not_destroy_a_running_download_thread() -> Non
     """
     result = _run_python(code)
     _assert_clean(result, "update dialog close during download")
+
+
+def test_results_table_window_teardown_is_clean():
+    """
+    A results table opened through ``mfv.results`` and torn down the way the
+    main window tears one down.
+
+    Moved here from ``tests/test_results_table.py``: a native teardown fault can
+    leave the exit code at 0, and this file is where the marker scan and the
+    faulthandler wiring live.
+    """
+    code = """
+        from types import SimpleNamespace
+        from PyQt6.QtWidgets import QApplication, QWidget
+        from minflux_viewer.scripting import create_facade
+        from minflux_viewer.ui.modeless import close_modeless
+
+        app = QApplication([])
+        owner = QWidget()
+        facade = create_facade(SimpleNamespace(datasets=[], active_dataset=None))
+        facade.bind_main_window(owner)
+        table = facade.results.table("Lifecycle").from_arrays(x=range(50), y=range(50))
+        table.show()
+        app.processEvents()
+        close_modeless(owner)
+        facade.close_windows()
+        owner.close()
+        app.processEvents()
+    """
+    result = _run_python(code)
+    _assert_clean(result, "results table window teardown")
+
+
+def test_script_plot_window_teardown_is_clean():
+    """
+    A line plot and an image plot from ``mfv.plot``, torn down together.
+
+    The image path matters separately: it is an ``ImageView`` with a nested
+    ``ui.roiPlot``, so it takes the ``close_image_views`` tier rather than
+    ``close_plot_widgets``. Moved here from ``tests/test_script_plot.py``.
+    """
+    code = """
+        from types import SimpleNamespace
+        import numpy as np
+        from PyQt6.QtWidgets import QApplication, QWidget
+        from minflux_viewer.scripting import create_facade
+        from minflux_viewer.ui.modeless import close_modeless
+
+        app = QApplication([])
+        owner = QWidget()
+        facade = create_facade(SimpleNamespace(datasets=[], active_dataset=None))
+        facade.bind_main_window(owner)
+        facade.plot.line(np.arange(100), np.sin(np.arange(100))).labels(x="x", y="y").show()
+        facade.plot.image(np.arange(100).reshape(10, 10), colormap="hot").show()
+        app.processEvents()
+        close_modeless(owner)
+        facade.close_windows()
+        owner.close()
+        app.processEvents()
+    """
+    result = _run_python(code)
+    _assert_clean(result, "script plot window teardown")

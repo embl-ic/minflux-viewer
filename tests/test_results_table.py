@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import csv
 import os
-import subprocess
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -143,38 +140,3 @@ def test_save_csv_and_explicit_close_forgets_table(facade, tmp_path):
     assert results.results.tables() == []
     with pytest.raises(ApiError, match="closed"):
         table.add_row(value=2)
-
-
-def test_results_window_child_process_teardown_is_clean(tmp_path):
-    code = r"""
-import os
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from types import SimpleNamespace
-from PyQt6.QtWidgets import QApplication, QWidget
-from minflux_viewer.scripting import create_facade
-from minflux_viewer.ui.modeless import close_modeless
-
-app = QApplication([])
-owner = QWidget()
-facade = create_facade(SimpleNamespace(datasets=[], active_dataset=None))
-facade.bind_main_window(owner)
-table = facade.results.table("Lifecycle").from_arrays(x=range(50), y=range(50))
-table.show()
-app.processEvents()
-close_modeless(owner)
-facade.close_windows()
-owner.close()
-app.processEvents()
-"""
-    env = os.environ.copy()
-    env["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=Path(__file__).resolve().parents[1],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "has been deleted" not in completed.stderr
