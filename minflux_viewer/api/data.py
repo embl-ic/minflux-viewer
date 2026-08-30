@@ -141,22 +141,52 @@ class Data(Namespace):
         """
         Localization coordinates as ``(N, 3)``.
 
-        ``unit`` is ``"nm"`` (display units, Z scaling factor applied) or
-        ``"m"`` (raw metres). ``transformed`` additionally applies the
-        dataset's overlay transform, giving the coordinates the render and
-        scatter views actually draw -- which is the frame ROIs live in.
+        ``unit="nm"`` is the **display** view: ``loc_nm``, with the Z scaling
+        factor applied. ``transformed=True`` additionally applies the dataset's
+        overlay transform, giving the coordinates render and scatter actually
+        draw -- the frame ROI geometry lives in.
+
+        ``unit="m"`` is the **canonical raw** store, ``loc_x``/``loc_y``/``loc_z``
+        exactly as the file recorded them.
+
+        ⚠ These two are NOT a unit conversion of one another, and that is the
+        point. Z scaling is a *view* (``CLAUDE.md`` -- Z scaling factor: raw
+        ``loc_z`` is never modified), so dividing ``loc_nm`` by 1e9 yields
+        calibrated metres, silently off by the Z factor from what a caller
+        asking for metres means. Read the canonical columns instead.
+
+        ``transformed=True`` with ``unit="m"`` is refused rather than guessed:
+        an overlay transform is defined in display space, so there is no
+        meaningful raw-metre answer.
         """
         ds = self._dataset(dataset)
-        if transformed:
+        if unit not in ("nm", "m"):
+            raise ApiError("unit must be 'nm' or 'm'.")
+        if unit == "m" and transformed:
+            raise ApiError(
+                "transformed=True has no meaning with unit='m': the overlay "
+                "transform is defined in display nm. Use unit='nm'."
+            )
+
+        if unit == "m":
+            from ..core.loader import attr_values_1d
+
+            columns = []
+            for name in ("loc_x", "loc_y", "loc_z"):
+                values = attr_values_1d(ds, name)
+                if values is None:
+                    raise ApiError(
+                        f"Dataset {ds.name!r} has no canonical {name}; raw metre "
+                        "coordinates are unavailable. Use unit='nm'."
+                    )
+                columns.append(np.asarray(values, dtype=float).ravel())
+            loc = np.column_stack(columns)
+        elif transformed:
             from ..core.roi_crop import display_coords
 
             loc = np.asarray(display_coords(ds), dtype=float)
         else:
             loc = np.asarray(ds.loc_nm, dtype=float)
-        if unit == "m":
-            loc = loc / 1e9
-        elif unit != "nm":
-            raise ApiError("unit must be 'nm' or 'm'.")
         return self._apply_filter(ds, loc) if filtered else loc
 
     # -- writing -------------------------------------------------------------

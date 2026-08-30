@@ -638,3 +638,68 @@ def test_a_plugin_can_use_the_real_mfv_api(roots, qapp):
     assert "radius_nm" in state.mfv.data.attr_names()
     # and its run reached the record the method text is generated from
     assert list(state.journal)[-1].details["n"] == 10
+
+
+def test_two_plugins_may_share_a_leaf_label_under_different_submenus(roots):
+    """
+    Identity is the manifest id, not the display name. Two vendors publishing
+    *Lab A ▸ Analyse* and *Lab B ▸ Analyse* must both appear; the second is
+    disambiguated rather than silently dropped.
+    """
+    from minflux_viewer import plugins
+
+    root, prefs = roots
+    _tier2(root, "a", plugin_id="lab.a", name="Analyse", menu_path="Plugins > Lab A",
+           body="def run(ctx): pass\n")
+    _tier2(root, "b", plugin_id="lab.b", name="Analyse", menu_path="Plugins > Lab B",
+           body="def run(ctx): pass\n")
+
+    added = plugins.discover(prefs)
+    assert len(added) == 2
+    assert {e.plugin_id for e in added} == {"lab.a", "lab.b"}
+    assert len({e.name for e in added}) == 2, "both must be reachable"
+    assert {e.menu_path for e in added} == {("Lab A",), ("Lab B",)}
+
+
+def test_rescanning_is_idempotent_on_plugin_id(roots):
+    from minflux_viewer import plugins
+
+    root, prefs = roots
+    _tier2(root, "a", plugin_id="lab.a", name="Analyse", body="def run(ctx): pass\n")
+    assert len(plugins.discover(prefs)) == 1
+    assert plugins.discover(prefs) == []
+    assert sum(e.plugin_id == "lab.a" for e in plugins.available()) == 1
+
+
+@pytest.mark.parametrize("requirement, expected", [
+    ("numpy", ""),                                   # installed, no clause
+    ("numpy>=2", ""),                                # installed, clause met
+    ("scipy >= 1.0", ""),                            # whitespace tolerated
+    ("numpy[extra]>=2", ""),                         # extras are pip's business
+    ("definitely_absent_xyz", "definitely_absent_xyz"),
+])
+def test_a_satisfied_or_missing_requirement(requirement, expected):
+    from minflux_viewer.plugins.loader import _requirement_unmet
+
+    assert _requirement_unmet(requirement) == expected
+
+
+def test_a_version_clause_is_actually_checked_and_reports_what_is_installed():
+    """
+    Review finding: clauses used to be stripped, so `numpy>=99` silently
+    passed. The message must name both what was asked for and what is there.
+    """
+    from minflux_viewer.plugins.loader import _requirement_unmet
+
+    reason = _requirement_unmet("numpy>=99")
+    assert ">=99" in reason and "installed:" in reason
+
+
+def test_a_plugin_needing_a_newer_package_version_is_refused(roots):
+    from minflux_viewer.plugins import loader
+
+    root, _ = roots
+    _tier2(root, "d", plugin_id="a.b", name="Tool", body="def run(ctx): pass\n",
+           extra_manifest='\n[requires]\npython = ["numpy>=99"]\n')
+    found = loader.scan_root(root)[0]
+    assert "numpy" in found.error and "installed:" in found.error

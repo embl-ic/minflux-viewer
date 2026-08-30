@@ -486,3 +486,49 @@ def test_deferred_members_explain_themselves(mfv):
         with pytest.raises(NotImplementedError) as excinfo:
             call()
         assert "1.0" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# review findings, fixed
+# ---------------------------------------------------------------------------
+
+def test_metre_coordinates_are_the_canonical_store_not_scaled_nm(state):
+    """
+    ``unit="m"`` promises the raw store, and Z scaling is a *view* -- raw
+    ``loc_z`` is never modified. Dividing ``loc_nm`` by 1e9 therefore yields
+    *calibrated* metres, silently off by the Z factor from what a caller asking
+    for metres means. Caught in review; this pins the correction.
+    """
+    ds = _dataset("scaled", n=12, seed=3)
+    ds.set_z_scaling_factor(0.67, source="test")
+    state.add_dataset(ds)
+    mfv = state.mfv
+
+    raw_z = np.asarray(ds.attr["loc_z"]).ravel()
+    assert np.allclose(mfv.data.loc(unit="m", filtered=False)[:, 2], raw_z)
+
+    # ...and the nm view stays the calibrated one the viewer draws.
+    assert np.allclose(mfv.data.loc(filtered=False)[:, 2], raw_z * 1e9 * 0.67)
+
+
+def test_metre_coordinates_refuse_an_overlay_transform(mfv):
+    """An overlay transform is defined in display nm; there is no raw answer."""
+    from minflux_viewer.scripting import ScriptError
+
+    with pytest.raises(ScriptError, match="display nm"):
+        mfv.data.loc(unit="m", transformed=True)
+
+
+def test_the_facade_does_not_hand_out_appstate(mfv):
+    """
+    The eight namespaces are the contract. A public ``state`` would let external
+    code reach into internals this project refactors freely -- the coupling the
+    extension layer exists to prevent.
+    """
+    from minflux_viewer.scripting import ScriptError
+
+    with pytest.raises(ScriptError, match="namespaces"):
+        mfv.state
+
+    # the namespaces themselves still reach the application
+    assert isinstance(mfv.data.datasets(), list)
