@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..core.recorder import GuiClass
+
 
 @dataclass(frozen=True)
 class ParamMeta:
@@ -45,6 +47,8 @@ class CommandMeta:
     params: tuple[ParamMeta, ...] = ()
     inputs: tuple[str, ...] = ()
     outputs: tuple[str, ...] = ()
+    gui_class: GuiClass | None = None
+    record: str = ""
 
 
 A = "minflux_viewer/analysis/"
@@ -110,15 +114,23 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "Attribute plot (color localizations by an attribute). The 2-D "
                               "renderer is chosen automatically: GPU for round markers when "
                               "OpenGL is available, otherwise exact bulk painting or a "
-                              "screen-space count/mean aggregation for dense views.", "view"),
+                              "screen-space count/mean aggregation for dense views.", "view",
+                              gui_class=GuiClass.GUI_ONLY,
+                              record="mfv.view.attribute_plot()"),
     "actionHistogram": CommandMeta(U + "histogram_window.py", ("distribution", "attribute", "bins"),
-                              "Attribute histogram.", "view"),
+                              "Attribute histogram.", "view",
+                              gui_class=GuiClass.GUI_ONLY,
+                              record="mfv.view.histogram()"),
     "actionScatter": CommandMeta(U + "scatter_window.py", ("points", "localizations", "xy", "xz", "yz", "3d"),
-                              "Localization scatter plot.", "view"),
+                              "Localization scatter plot.", "view",
+                              gui_class=GuiClass.GUI_ONLY,
+                              record="mfv.view.scatter()"),
     "actionRender": CommandMeta(U + "render_window.py",
                               ("image", "reconstruction", "histogram", "gaussian", "advanced", "precision", "bilinear"),
                               "Rendered localization image (right-click › View › Render Method "
-                              "selects the reconstruction method).", "view"),
+                              "selects the reconstruction method).", "view",
+                              gui_class=GuiClass.GUI_ONLY,
+                              record="mfv.view.render()"),
     "actionLog": CommandMeta(U + "log_window.py", ("events", "messages"), "Event log window.", "view"),
 
     # ---- Process › Channel ----------------------------------------------------

@@ -22,14 +22,14 @@ import pytest
 def test_api_version_is_declared():
     from minflux_viewer import api
 
-    assert api.__api_version__ == "1.0"
+    assert api.__api_version__ == "1.1"
 
 
 def test_every_namespace_exists_and_is_importable():
     """A track must be able to code against a namespace it does not own."""
     from minflux_viewer import api
 
-    assert len(api.NAMESPACES) == 8
+    assert len(api.NAMESPACES) == 9
     for name in api.NAMESPACES:
         module = importlib.import_module(f"minflux_viewer.api.{name}")
         cls = getattr(module, name.capitalize())

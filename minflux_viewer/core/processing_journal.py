@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from .recorder import GuiClass
+
 
 @dataclass
 class JournalEntry:
@@ -26,6 +28,9 @@ class JournalEntry:
     category: str
     summary: str
     details: dict[str, Any] = field(default_factory=dict)
+    code: str | None = None
+    gui_class: GuiClass | None = None
+    command: str | None = None
 
 
 class ProcessingJournal:
@@ -40,6 +45,10 @@ class ProcessingJournal:
         self,
         category: str,
         summary: str,
+        *,
+        code: str | None = None,
+        gui_class: GuiClass | str | None = None,
+        command: str | None = None,
         **details: Any,
     ) -> JournalEntry:
         """Append a new entry. Returns the entry for chaining."""
@@ -48,6 +57,9 @@ class ProcessingJournal:
             category=str(category),
             summary=str(summary),
             details=dict(details) if details else {},
+            code=(str(code).strip() or None) if code is not None else None,
+            gui_class=GuiClass.coerce(gui_class),
+            command=(str(command).strip() or None) if command is not None else None,
         )
         self._entries.append(entry)
         return entry

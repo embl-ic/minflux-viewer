@@ -6,8 +6,8 @@ from .. import PluginEntry, register
 
 
 def _launch(state, parent=None) -> None:
-    if parent is not None and hasattr(parent, "_show_script_editor"):
-        parent._show_script_editor()
+    if parent is not None and hasattr(parent, "show_script_editor"):
+        parent.show_script_editor()
         return
     from ...ui.script_editor_window import ScriptEditorWindow
 

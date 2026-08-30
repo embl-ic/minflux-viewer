@@ -42,7 +42,7 @@ if ds is not None:
 """
 
 
-_API_HELP = """MINFLUX Viewer scripting API 1.0
+_API_HELP = """MINFLUX Viewer scripting API 1.1
 
 Scripts run inside the current viewer session. The runtime module `mfv` is
 bound to the live application state, and is the same object a plugin receives
@@ -67,6 +67,7 @@ mfv.view      the dataset-owned viewer windows
 mfv.ui        log, status, parameter dialogs, file pickers
 mfv.run       background execution, progress, cancellation
 mfv.journal   record a step so it reaches Generate Method Text
+mfv.record    record viewer work as a reusable Python script
 
 mfv.data
 
@@ -119,6 +120,14 @@ mfv.journal
   Records the run so it reaches the generated method text. Pass the parameters
   actually used, not the defaults.
 
+mfv.record
+
+  start(clear=True) | stop() | steps() | script(silent=False)
+  step(code, gui_class="gui_free", summary="...")
+
+  A plugin can contribute an exact replay statement while recording is active.
+  gui_class is "gui_free", "gui_result" or "gui_only".
+
 Compatibility
 
   mfv.get_active_dataset(), get_datasets(), get_dataset(), get_attr(),
@@ -143,6 +152,7 @@ _COMPLETION_MAP = {
         "ui",
         "run",
         "journal",
+        "record",
         "viewer",
         "ScriptError",
         "get_active_dataset()",
@@ -226,6 +236,13 @@ _COMPLETION_MAP = {
     "mfv.journal": [
         "record()",
         "entries()",
+    ],
+    "mfv.record": [
+        "start()",
+        "stop()",
+        "steps()",
+        "script()",
+        "step()",
     ],
     "mfv.viewer": [
         "render()",
@@ -471,6 +488,14 @@ class ScriptEditorWindow(QWidget):
             "np": np,
             "numpy": np,
         }
+
+    def set_script(self, text: str, *, source_name: str | None = None) -> None:
+        """Replace the editor contents with generated or externally supplied code."""
+        self._path = None
+        self.editor.setPlainText(str(text))
+        suffix = f" - {source_name}" if source_name else ""
+        self.setWindowTitle(f"Script Editor{suffix}")
+        self._reset_namespace()
 
     def _append_output(self, text: str, *, is_err: bool = False) -> None:
         self.output.moveCursor(QTextCursor.MoveOperation.End)
