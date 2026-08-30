@@ -309,14 +309,11 @@ def test_batch_summary_treats_acquisitions_not_pair_counts_as_replicates():
 
 
 def test_analysis_is_a_plugin_not_an_analyze_clustering_submenu(qtbot):
-    """The workflow lives in Plugins, and only in its current form.
+    """The workflow is discovered outside the package, in a real submenu.
 
     It is one project-specific analysis, not a family of general clustering
-    tools: the retired variants (2D/3D, pair-distance fit, template matching)
-    stay unexposed though their modules are kept. The two entries that do exist
-    are the same staged analysis over different input scopes -- the active
-    dataset, or a pool of ROI-delimited cells gathered across acquisitions --
-    and both sit directly under Plugins with no submenu.
+    tools: the retired variants stay unexposed though their numerical modules
+    are kept. One Tier 2 entry chooses between active and pooled-ROI scopes.
     """
     from minflux_viewer import plugins
     from minflux_viewer.core.app_state import AppState
@@ -324,22 +321,21 @@ def test_analysis_is_a_plugin_not_an_analyze_clustering_submenu(qtbot):
     from minflux_viewer.ui.main_window import MainWindow
 
     plugins.ensure_loaded()
-    names = [entry.name for entry in plugins.available()]
-    assert "HlyB/D subunit pair analysis" in names
+    assert not any(
+        "hlyb" in entry.name.lower() and not entry.discovered
+        for entry in plugins.available()
+    )
 
     window = MainWindow(AppState())
     qtbot.addWidget(window)
     commands = collect_commands(window.menuBar())
 
-    hlyb = [c for c in commands if "hlyb" in c.text.lower()]
-    assert sorted(c.text for c in hlyb) == sorted([
-        "HlyB/D subunit pair analysis",
-        "HlyB/D pooled pair analysis (multi-dataset)",
-    ]), [c.text for c in hlyb]
-    # Directly under Plugins -- no submenu -- and each carries its implementing
-    # file for the Command Finder.
-    assert {c.path for c in hlyb} == {"Plugins"}
-    assert all(c.source.endswith("__init__.py") for c in hlyb)
+    hlyb = [c for c in commands if "hlyb" in f"{c.text} {c.path}".lower()]
+    assert [c.text for c in hlyb] == ["Staged pair analysis"], [c.text for c in hlyb]
+    assert hlyb[0].path == "Plugins › HlyB/D"
+    assert hlyb[0].source.replace("\\", "/").endswith(
+        "plugins/hlyb_pair_analysis/main.py"
+    )
 
     # The retired workflows stay out of the menus.
     retired = [c.text for c in commands
@@ -353,18 +349,156 @@ def test_analysis_is_a_plugin_not_an_analyze_clustering_submenu(qtbot):
 
     # Findable by domain terms that are not in the menu label.
     for query in ("dimer", "surface null", "ecoli"):
-        assert "HlyB/D subunit pair analysis" in [
+        assert "Staged pair analysis" in [
             c.text for c in filter_commands(commands, query)]
+
+
+def test_external_plugin_exercises_the_published_extension_surfaces(monkeypatch):
+    """The proving plugin asks, backgrounds, tables, plots and journals."""
+    import sys
+    from types import SimpleNamespace
+
+    from minflux_viewer.plugins import loader
+
+    loader.unload_plugin_modules()
+    found = next(
+        plugin for plugin in loader.scan_root(loader.app_plugin_dir())
+        if plugin.id == "embl.hlyb_pair_analysis"
+    )
+    assert found.error == ""
+    launch = loader.load_entry_callable(found)
+    module = sys.modules[loader.module_name_for(found.id)]
+
+    result = {
+        "summary": {
+            "band_ratio": 1.5,
+            "band_ratio_z": 3.2,
+            "band_p": 0.02,
+            "peak_nm": 14.0,
+            "positive_excess_centroid_nm": 13.8,
+        },
+        "n_traces_used": 3,
+        "n_sites": 2,
+        "n_components": 1,
+        "robust_short_range_excess_calibrated": True,
+        "sensitivity": [],
+        "centers_nm": np.array([10.0, 11.0]),
+        "observed": np.array([4.0, 5.0]),
+        "null_mean": np.array([2.0, 2.5]),
+        "site_centers_nm": np.array([[0.0, 0.0, 0.0], [14.0, 0.0, 0.0]]),
+        "component_labels": np.array([0, 0]),
+    }
+
+    calls = []
+
+    def fake_analyse(task, request, config):
+        calls.append(("worker", request["scope"], config["site_merge_nm"]))
+        task.progress(1, 1, "done")
+        return result
+
+    monkeypatch.setattr(module, "_analyse", fake_analyse)
+
+    dataset = object()
+
+    class Data:
+        def active(self):
+            return dataset
+
+        def properties(self, *, dataset):
+            return {"name": "proof"}
+
+        def attr(self, name, **_kwargs):
+            values = {
+                "loc_x": [0.0, 1e-9, 2e-9],
+                "loc_y": [0.0, 0.0, 0.0],
+                "loc_z": [0.0, 6e-9, 12e-9],
+                "tid": [1, 1, 1],
+                "tim": [0.0, 0.1, 0.2],
+            }
+            return np.asarray(values[name])
+
+    class Ui:
+        def ask(self, fields, **_kwargs):
+            calls.append(("ask", tuple(fields)))
+            return {
+                key: value[0] if isinstance(value, list) else value
+                for key, value in fields.items()
+            }
+
+        def error(self, message, **_kwargs):
+            raise AssertionError(message)
+
+        def log(self, message, *_args, **_kwargs):
+            calls.append(("log", message))
+
+    class Table:
+        def add_rows(self, rows):
+            calls.append(("rows", list(rows)))
+            return self
+
+        def show(self):
+            calls.append(("table-show",))
+            return self
+
+    class PlotHandle:
+        def series(self, *_args, **_kwargs):
+            return self
+
+        def labels(self, **_kwargs):
+            return self
+
+        def legend(self):
+            return self
+
+        def grid(self):
+            return self
+
+        def show(self):
+            calls.append(("plot-show",))
+            return self
+
+    class Plot:
+        def line(self, *_args, **_kwargs):
+            calls.append(("line",))
+            return PlotHandle()
+
+        def scatter(self, *_args, **_kwargs):
+            calls.append(("scatter",))
+            return PlotHandle()
+
+    class Run:
+        def background(self, fn, *, on_done, **kwargs):
+            calls.append(("background", kwargs["name"], kwargs["kind"]))
+            task = SimpleNamespace(progress=lambda *args: calls.append(("progress", args)))
+            on_done(fn(task))
+            return "task-handle"
+
+    class Journal:
+        def record(self, category, summary, **details):
+            calls.append(("journal", category, summary, details))
+
+    ctx = SimpleNamespace(
+        data=Data(),
+        roi=SimpleNamespace(),
+        ui=Ui(),
+        run=Run(),
+        results=SimpleNamespace(table=lambda name: Table()),
+        plot=Plot(),
+        journal=Journal(),
+    )
+    assert launch(ctx) == "task-handle"
+    assert {call[0] for call in calls} >= {
+        "ask", "background", "worker", "rows", "table-show",
+        "line", "scatter", "plot-show", "journal", "log",
+    }
 
 
 def test_method_text_documents_parameters_and_terms():
     """Generate Method Text must be self-contained for a Methods section."""
     from types import SimpleNamespace
 
-    from minflux_viewer.analysis.method_text import (
-        RULES, _render_hlyb_staged_short_range)
-    from minflux_viewer.plugins.hlyb_pair_analysis.runner import (
-        _log_line, _method_payload)
+    from minflux_viewer.analysis.hlyb_reporting import _log_line, _method_payload
+    from minflux_viewer.analysis.method_text import RULES, _render_hlyb_staged_short_range
 
     rng = np.random.default_rng(3)
     all_sites = []

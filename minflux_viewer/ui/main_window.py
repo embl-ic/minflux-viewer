@@ -552,9 +552,10 @@ class MainWindow(QMainWindow):
         self.actionKNearestNeighbour.triggered.connect(
             lambda: self._placeholder("K nearest neighbour", "a later implementation")
         )
-        # The HlyB/D subunit pair analysis moved out of Clustering and is now a
-        # single entry under *Plugins* (it is one project-specific workflow, not
-        # a family of general clustering tools).  Its earlier menu entries —
+        # The HlyB/D subunit pair analysis moved out of Clustering and is now an
+        # external Tier 2 plugin under *Plugins › HlyB/D* (it is one
+        # project-specific workflow, not a family of general clustering tools).
+        # Its earlier menu entries —
         # "2D"/"3D", "Pair-distance model fit (2D/3D)" and "Template matching
         # (2D/3D)" — are retired, but every one of those analysis modules is
         # deliberately KEPT (analysis/hlyb_clustering.py, analysis/hlyb_pairwise.py,
@@ -2343,7 +2344,7 @@ class MainWindow(QMainWindow):
                 act.setStatusTip(entry.tooltip)
             # Record the plugin's implementing file so the Command Finder can show
             # it in the Source column, plus any extra search tags it declares.
-            act.setProperty("command_source", source_of(entry.launch))
+            act.setProperty("command_source", entry.source or source_of(entry.launch))
             if getattr(entry, "keywords", ()):
                 act.setProperty("command_keywords", " ".join(entry.keywords))
             # Capture `entry` per-iteration with a default argument so the
@@ -2353,7 +2354,24 @@ class MainWindow(QMainWindow):
             )
             if entry.name == "Generate Method Text":
                 self._mark_action_ai_unapproved(act)
-            menu.addAction(act)
+            if entry.error:
+                act.setEnabled(False)
+
+            # Reuse an existing submenu at every level so independently
+            # discovered plugins can share paths such as Plugins > HlyB/D.
+            target = menu
+            for level in entry.menu_path:
+                existing = next(
+                    (
+                        action.menu()
+                        for action in target.actions()
+                        if action.menu() is not None
+                        and action.menu().title() == level
+                    ),
+                    None,
+                )
+                target = existing or target.addMenu(level)
+            target.addAction(act)
 
     # ------------------------------------------------------------------
     # Public window API  — the surface scripts and plugins may rely on

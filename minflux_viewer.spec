@@ -116,6 +116,8 @@ USE_UPX = sys.platform != "darwin"
 datas = [
     # Application resources (icons, UI files, sample filters)
     (str(ROOT / "resources"), "resources"),
+    # pip must remain an ordinary on-disk package, never a frozen hidden import.
+    (str(ROOT / "resources" / "pip"), "resources/pip"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -148,7 +150,12 @@ for stdlib_name in sorted(sys.stdlib_module_names):
     if spec.submodule_search_locations is not None:
         stdlib_hidden_imports.update(collect_submodules(stdlib_name))
 
-hidden_imports = sorted(stdlib_hidden_imports | {
+# The public facade imports its namespace modules from strings so plugins can
+# receive one stable object without importing implementation packages. Static
+# analysis cannot see those imports; every published namespace must ship.
+api_hidden_imports = set(collect_submodules("minflux_viewer.api"))
+
+hidden_imports = sorted(stdlib_hidden_imports | api_hidden_imports | {
     # scipy — submodules loaded dynamically
     "scipy._lib.array_api_compat",
     "scipy._lib.array_api_compat.numpy",

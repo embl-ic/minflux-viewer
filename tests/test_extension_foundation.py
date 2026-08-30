@@ -161,12 +161,12 @@ def test_preferences_seam_modules_expose_the_agreed_interface():
         assert callable(getattr(cls, "save"))
 
 
-def test_startup_hooks_are_no_ops_that_return_the_right_shape():
+def test_startup_hooks_return_the_right_shape():
     from minflux_viewer import plugins
     from minflux_viewer.core import user_libs
 
     assert user_libs.install_paths({}) == []
-    assert plugins.discover({}) == []
+    assert isinstance(plugins.discover({}), list)
 
 
 def test_discovery_does_not_disturb_the_builtin_registry():

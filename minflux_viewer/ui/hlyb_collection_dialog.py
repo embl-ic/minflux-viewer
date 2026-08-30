@@ -267,7 +267,7 @@ class HlyBCollectionWindow(QDialog):
     # --------------------------------------------------------------- run
     def _run(self) -> None:
         from ..analysis.hlyb_staged import Staged3DConfig, analyze_hlyb_staged_pooled
-        from ..plugins.hlyb_pair_analysis.runner import PROJECT_Z_SCALING_FACTOR
+        from ..analysis.hlyb_reporting import PROJECT_Z_SCALING_FACTOR
         from .hlyb_staged_dialog import HlyBStagedDialog, HlyBStagedWindow
         from .modeless import show_modeless
 
@@ -303,7 +303,7 @@ class HlyBCollectionWindow(QDialog):
         self._log_result(cfg, result)
 
     def _log_result(self, cfg, result) -> None:
-        from ..plugins.hlyb_pair_analysis.runner import pooled_log_line, pooled_payload
+        from ..analysis.hlyb_reporting import pooled_log_line, pooled_payload
         log = getattr(self._state, "log", None)
         if not callable(log):
             return
