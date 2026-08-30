@@ -158,6 +158,14 @@ class MinfluxViewerFacade:
 
         self.viewer = ViewerFacade(self)
 
+        # Design §3.3: the published namespaces record themselves, so a script
+        # or plugin needs no recorder-specific code. Only mutating calls are
+        # wrapped -- see api/_recording.py::RECORDABLE.
+        from .api._recording import CallRecorder
+
+        self.calls = CallRecorder(self)
+        self.calls.install()
+
     # -- application access --------------------------------------------------
 
     @property

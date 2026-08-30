@@ -236,3 +236,73 @@ def test_the_command_hook_does_not_keep_its_window_alive(qapp) -> None:
     # ...and the now-ownerless connection is inert rather than a crash.
     action.trigger()
     assert recorder.steps() == []
+
+
+# ---------------------------------------------------------------------------
+# M2 — every command is classified
+# ---------------------------------------------------------------------------
+
+def test_every_command_declares_a_gui_class() -> None:
+    """
+    Silent mode is only meaningful if every command says whether it is
+    presentation. An unclassified command records as a TODO and is kept in the
+    silent script, which is safe but useless -- so adding a command means
+    adding its class.
+    """
+    from minflux_viewer.ui.command_meta import COMMAND_META
+
+    missing = sorted(k for k, m in COMMAND_META.items() if m.gui_class is None)
+    assert missing == [], (
+        "these commands have no gui_class; see the rule above CommandMeta: "
+        + ", ".join(missing)
+    )
+
+
+def test_the_classification_is_not_trivially_one_bucket() -> None:
+    """A guard against 'classified' meaning 'everything marked the same'."""
+    from collections import Counter
+
+    from minflux_viewer.ui.command_meta import COMMAND_META
+
+    spread = Counter(m.gui_class for m in COMMAND_META.values())
+    assert len(spread) == 3, spread
+    assert all(count >= 5 for count in spread.values()), spread
+
+
+def test_a_declared_record_call_is_a_published_namespace_call() -> None:
+    """
+    A record hint is emitted verbatim into a script, so it must name something
+    the API actually has.
+    """
+    from minflux_viewer.api import NAMESPACES
+    from minflux_viewer.ui.command_meta import COMMAND_META
+
+    for key, meta in COMMAND_META.items():
+        if not meta.record:
+            continue
+        assert meta.record.startswith("mfv."), f"{key}: {meta.record!r}"
+        namespace = meta.record.split(".")[1]
+        assert namespace in NAMESPACES, f"{key} names unknown namespace {namespace!r}"
+
+
+def test_silent_mode_drops_presentation_commands_and_keeps_the_rest(qapp) -> None:
+    """End to end over the real registry rather than hand-built steps."""
+    from minflux_viewer.ui.command_meta import COMMAND_META
+
+    recorder = Recorder(ProcessingJournal())
+    recorder.start()
+    for key in ("actionRender", "actionChannelFlatten", "actionAggregate"):
+        meta = COMMAND_META[key]
+        recorder.record_command(
+            key, summary=meta.summary, gui_class=meta.gui_class,
+            code=meta.record or None,
+        )
+    recorder.stop()
+
+    full = recorder.script(header=False)
+    silent = recorder.script(silent=True, header=False)
+
+    assert "mfv.view.render()" in full          # GUI_ONLY, with a runnable call
+    assert "mfv.view.render()" not in silent    # ...and dropped when silent
+    # the two data commands survive as TODOs until their handlers report params
+    assert silent.count("# TODO") == 2

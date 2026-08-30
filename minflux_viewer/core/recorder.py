@@ -120,8 +120,19 @@ def _deduplicate(steps: Iterable[RecordedStep]) -> list[RecordedStep]:
 
 def _todo_line(step: RecordedStep) -> str:
     label = " ".join(step.summary.split()) or "An undescribed command"
-    identity = f" ({step.command})" if step.command else ""
-    if step.gui_class is None:
+    # Do not repeat the identity when the summary already is it (a self-recorded
+    # API call is summarised by its own name).
+    identity = (
+        f" ({step.command})"
+        if step.command and step.command != step.summary
+        else ""
+    )
+    # A caller that knows *why* the call could not be written down says so; that
+    # is the difference between a gap somebody can fix and a mystery.
+    explicit = str(step.details.get("unrecordable", "")).strip()
+    if explicit:
+        reason = explicit
+    elif step.gui_class is None:
         reason = "its GUI class and runnable mfv call are not declared yet"
     else:
         reason = "no runnable mfv call was recorded"
