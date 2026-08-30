@@ -39,6 +39,7 @@ to look for a user's plugins and replaced on every update.
 
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 import os
 import sys
@@ -268,28 +269,77 @@ def _requirement_error(manifest: PluginManifest) -> str:
             return (
                 f"needs MINFLUX Viewer {manifest.requires_app}, this is {__version__}"
             )
-    missing = [name for name in manifest.requires_python if not _importable(name)]
-    if missing:
+    unmet = [
+        reason for reason in
+        (_requirement_unmet(name) for name in manifest.requires_python)
+        if reason
+    ]
+    if unmet:
         return (
-            "needs Python package(s) not installed: " + ", ".join(missing) +
+            "needs Python package(s): " + ", ".join(unmet) +
             " — see Preferences ▸ Plugin ▸ Python packages"
         )
     return ""
 
 
-def _importable(requirement: str) -> bool:
-    """Whether a ``requires.python`` entry resolves to an importable module."""
-    name = requirement
-    for op in ("!=", ">=", "<=", "==", ">", "<", "~=", "["):
-        if op in name:
-            name = name.split(op)[0]
-    name = name.strip().replace("-", "_")
+def _requirement_unmet(requirement: str) -> str:
+    """
+    Why a ``requires.python`` entry is not satisfied, or ``""`` if it is.
+
+    Two sources, in order, because neither alone is sufficient:
+
+    1. **Distribution metadata** (``importlib.metadata.version``) is
+       authoritative and is the only thing that can check a *version*. It is
+       also the only way a distribution whose import name differs from its
+       package name resolves at all -- ``Pillow`` installs ``PIL``.
+    2. **An import probe** for a name that is not an installed distribution.
+       Accepted with no version evidence rather than refused: a package the
+       user demonstrably has, vendored or on a path, should not be called
+       missing because it carries no ``.dist-info``. The version clause is then
+       reported as unverifiable rather than silently treated as satisfied.
+    """
+    name, _, specifier = _split_requirement(requirement)
     if not name:
-        return True
+        return ""
+
     try:
-        return importlib.util.find_spec(name) is not None
+        installed = importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        installed = None
+    except Exception:
+        installed = None
+
+    if installed is not None:
+        if not specifier:
+            return ""
+        try:
+            if version_satisfies(installed, specifier):
+                return ""
+        except ManifestError as exc:
+            return f"{name}: {exc}"
+        return f"{name} {specifier} (installed: {installed})"
+
+    module = name.replace("-", ".").split(".")[0].replace("-", "_")
+    try:
+        importable = importlib.util.find_spec(module) is not None
     except (ImportError, ValueError, AttributeError):
-        return False
+        importable = False
+    if importable:
+        return ""          # present, version not verifiable without metadata
+    return f"{name}{specifier}" if specifier else name
+
+
+def _split_requirement(requirement: str) -> tuple[str, str, str]:
+    """``"numpy>=2,<3"`` -> ``("numpy", "", ">=2,<3")``. Extras are dropped."""
+    text = str(requirement).strip()
+    if "[" in text:                       # numpy[extra]>=2 -- extras are pip's
+        head, _, rest = text.partition("[")
+        _, _, tail = rest.partition("]")
+        text = head + tail
+    for index, char in enumerate(text):
+        if char in "!=<>~ ":
+            return text[:index].strip(), "", text[index:].strip()
+    return text, "", ""
 
 
 def _safe_id(text: str) -> str:

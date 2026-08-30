@@ -145,7 +145,7 @@ class MinfluxViewerFacade:
     api_version = __api_version__
 
     def __init__(self, state: AppState) -> None:
-        self.state = state
+        self._state = state
         self._main_window = None
         self._windows: list[_AdHocPlotWindow] = []
         self._tasks: list = []
@@ -161,9 +161,21 @@ class MinfluxViewerFacade:
     # -- application access --------------------------------------------------
 
     @property
-    def _state(self) -> AppState:
-        """Compatibility alias; the namespaces read :attr:`state`."""
-        return self.state
+    def state(self):
+        """
+        Refused. ``AppState`` is not part of the published API.
+
+        The eight namespaces are the contract. Reaching past them into
+        application state would couple external code to internals this project
+        refactors freely -- exactly what the extension layer exists to prevent.
+        If something you need is genuinely missing from the namespaces, that is
+        an API gap worth reporting rather than routing around.
+        """
+        raise ApiError(
+            "mfv does not expose AppState. Use the published namespaces "
+            "(data, roi, results, plot, view, ui, run, journal); if what you "
+            "need is missing from them, that is an API gap to report."
+        )
 
     def bind_main_window(self, main_window) -> None:
         self._main_window = main_window
@@ -175,9 +187,9 @@ class MinfluxViewerFacade:
 
     def resolve_dataset(self, dataset: Any = None) -> MinfluxDataset:
         """``None`` / index / name / dataset -> dataset, or a readable error."""
-        datasets = list(self.state.datasets)
+        datasets = list(self._state.datasets)
         if dataset is None:
-            active = self.state.active_dataset
+            active = self._state.active_dataset
             if active is None:
                 raise ScriptError("No dataset is loaded.")
             return active
@@ -203,7 +215,7 @@ class MinfluxViewerFacade:
 
     def resolve_dataset_index(self, dataset: Any = None) -> int:
         ds = self.resolve_dataset(dataset)
-        for idx, candidate in enumerate(self.state.datasets):
+        for idx, candidate in enumerate(self._state.datasets):
             if candidate is ds:
                 return idx
         raise ScriptError("That dataset is not loaded in the current viewer.")

@@ -39,7 +39,7 @@ class Namespace:
 
     @property
     def _state(self) -> AppState:
-        return self._facade.state
+        return self._facade._state
 
     def _main_window(self):
         """

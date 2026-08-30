@@ -37,7 +37,7 @@ Usage from the main window
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -65,6 +65,11 @@ class PluginEntry:
     # Implementing file shown by the Command Finder. Discovered plugins set
     # this to their real entry file rather than the registry wrapper above it.
     source: str = ""
+    # Stable identity for a discovered plugin: the manifest id, or the file
+    # stem for Tier 1. Empty for a built-in, whose name IS its identity.
+    # ``discover`` de-duplicates on this rather than on the display name, so
+    # two vendors may publish the same leaf label under different submenus.
+    plugin_id: str = ""
 
 
 _REGISTRY: list[PluginEntry] = []
@@ -97,21 +102,33 @@ def discover(prefs: dict | None = None) -> list[PluginEntry]:
     first invoked. A plugin that cannot run is still registered, carrying the
     reason -- silently missing is a worse bug report than present-and-explained.
 
-    Registration is by display name, so calling this repeatedly (a rescan) does
-    not duplicate entries. To pick up an *edited* plugin, call
-    :func:`rediscover` instead.
+    **Identity is the plugin id, not the display name.** Rescanning is
+    idempotent because the same id is skipped, and two vendors may legitimately
+    publish the same leaf label under different submenus
+    (*Plugins ▸ Lab A ▸ Analyse* and *Plugins ▸ Lab B ▸ Analyse*). Since
+    :func:`register` de-duplicates on ``name`` -- it must, for built-ins, whose
+    name is all the identity they have -- a colliding label is **disambiguated**
+    rather than dropped: the second entry is renamed ``"Analyse (lab.b)"``. A
+    plugin that silently fails to appear is the failure this whole layer exists
+    to avoid. ``menu_path`` is untouched, so the submenu still groups it.
+
+    To pick up an *edited* plugin, call :func:`rediscover` instead.
     """
     from . import loader
 
     added: list[PluginEntry] = []
-    known = {entry.name for entry in _REGISTRY}
+    known_ids = {e.plugin_id for e in _REGISTRY if e.plugin_id}
+    used_names = {e.name for e in _REGISTRY}
     for root in loader.plugin_roots(prefs):
         for found in loader.scan_root(root):
-            entry = _entry_for(found, prefs)
-            if entry.name in known:
+            if found.id in known_ids:
                 continue
+            entry = _entry_for(found, prefs)
+            if entry.name in used_names:
+                entry = replace(entry, name=f"{entry.name} ({found.id})")
             register(entry)
-            known.add(entry.name)
+            known_ids.add(found.id)
+            used_names.add(entry.name)
             added.append(entry)
     return added
 
@@ -150,6 +167,7 @@ def _entry_for(found, prefs: dict | None) -> PluginEntry:
         error=found.error,
         discovered=True,
         source=str(found.entry_path),
+        plugin_id=found.id,
     )
 
 
