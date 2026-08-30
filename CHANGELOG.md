@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.5.0
+
+Opens the viewer to per-project code, so an analysis written for one dataset no
+longer has to be built into the application for everyone.
+
+- **Python scripting API `mfv` 1.0** — a published, versioned surface for
+  scripts and plugins: datasets and attributes, ROIs, results tables, plots,
+  the viewer windows, dialogs, background work and the processing journal.
+  Everything the old Script Editor API offered still works.
+- **Plugins from your own folder** — drop a `.py` file or a folder with a
+  `plugin.toml` into the plugin directory and it appears in the Plugins menu.
+  The folder is per-user, so your tools are yours.
+- **Results tables and plots for scripts** — a shared sortable table with Save
+  CSV, and plot windows with multiple series, labels, legends, log axes and
+  PNG export.
+- **Use libraries the viewer does not ship** — point Preferences at an existing
+  Python environment, or install a package into the application's own managed
+  folder. Preferences ▸ Plugin.
+- The bundled Python now carries its complete standard library, so plugin and
+  script code can rely on it.
+
 ## v0.4.2
 
 Settles the application file format and tidies the save paths around it.

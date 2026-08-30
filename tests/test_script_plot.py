@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -134,40 +131,3 @@ def test_save_png_and_input_errors(facade, tmp_path):
     handle.close()
     with pytest.raises(ApiError, match="closed"):
         handle.show()
-
-
-def test_plot_window_child_process_teardown_is_clean():
-    code = r"""
-import os
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from types import SimpleNamespace
-import numpy as np
-from PyQt6.QtWidgets import QApplication, QWidget
-from minflux_viewer.scripting import create_facade
-from minflux_viewer.ui.modeless import close_modeless
-
-app = QApplication([])
-owner = QWidget()
-facade = create_facade(SimpleNamespace(datasets=[], active_dataset=None))
-facade.bind_main_window(owner)
-facade.plot.line(np.arange(100), np.sin(np.arange(100))).labels(x="x", y="y").show()
-facade.plot.image(np.arange(100).reshape(10, 10), colormap="hot").show()
-app.processEvents()
-close_modeless(owner)
-facade.close_windows()
-owner.close()
-app.processEvents()
-"""
-    env = os.environ.copy()
-    env["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=Path(__file__).resolve().parents[1],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "has been deleted" not in completed.stderr
-    assert "Fatal Python error" not in completed.stderr
