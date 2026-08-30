@@ -38,6 +38,19 @@ class GuiClass(str, Enum):
         raise ValueError(f"Unknown GUI class {value!r}; expected one of: {choices}.")
 
 
+#: Journal categories that describe work a macro would have to reproduce.
+#:
+#: An entry in one of these surfaces in the recording even when nothing has
+#: instrumented it yet -- as a TODO naming what happened. That is deliberate and
+#: it is the difference between a recorder a user can act on and one that looks
+#: broken: loading a dataset, filtering it and running an analysis are exactly
+#: the things somebody records, and showing nothing at all for them is the worst
+#: possible feedback. ``other`` is the chatter category and stays out.
+MACRO_CATEGORIES = frozenset(
+    {"load", "filter", "transform", "analysis", "export", "plugin"}
+)
+
+
 @dataclass(frozen=True)
 class RecordedStep:
     """One structured, script-renderable event from the processing journal."""
@@ -101,6 +114,12 @@ def _deduplicate(steps: Iterable[RecordedStep]) -> list[RecordedStep]:
             continue
         previous = out[-1]
         same_command = bool(step.command and step.command == previous.command)
+        # A step that declares itself the newer state of the same command
+        # replaces its predecessor: tuning a filter re-applies on every edit,
+        # and a macro wants the setting the user settled on.
+        if same_command and step.details.get("supersedes_previous"):
+            out[-1] = step
+            continue
         if same_command and bool(step.code) != bool(previous.code):
             if step.code:
                 out[-1] = step
@@ -132,6 +151,10 @@ def _todo_line(step: RecordedStep) -> str:
     explicit = str(step.details.get("unrecordable", "")).strip()
     if explicit:
         reason = explicit
+    elif not step.command and not step.gui_class:
+        reason = (
+            f"this {step.category} step is not instrumented for recording yet"
+        )
     elif step.gui_class is None:
         reason = "its GUI class and runnable mfv call are not declared yet"
     else:
@@ -161,9 +184,14 @@ def emit_script(
 
     Silent mode drops only steps explicitly classified as :attr:`GUI_ONLY`.
     Unclassified commands remain visible as TODOs so an incomplete recording
-    can never masquerade as a complete silent workflow.
+    can never masquerade as a complete silent workflow -- and so does any
+    journal entry in a :data:`MACRO_CATEGORIES` category, because a recorder
+    that shows nothing for a dataset the user just loaded reads as broken.
     """
-    normalized = [step for step in map(_as_step, steps) if step.structured]
+    normalized = [
+        step for step in map(_as_step, steps)
+        if step.structured or step.category in MACRO_CATEGORIES
+    ]
     normalized = _deduplicate(normalized)
     if silent:
         normalized = [
@@ -265,7 +293,7 @@ class Recorder:
         return [
             step
             for step in (RecordedStep.from_entry(entry) for entry in entries[start:])
-            if step.structured
+            if step.structured or step.category in MACRO_CATEGORIES
         ]
 
     def script(self, *, silent: bool = False, header: bool | str = True) -> str:

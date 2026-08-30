@@ -41,7 +41,10 @@ def test_recorder_uses_the_journal_as_its_single_event_stream() -> None:
         gui_class=GuiClass.GUI_FREE,
         command="actionFilter",
     )
-    journal.add("analysis", "Ordinary prose-only journal entry")
+    # "other" is the chatter category and stays out of a recording. A
+    # macro-relevant category would surface as a TODO instead -- see
+    # test_a_macro_relevant_entry_is_never_silently_dropped.
+    journal.add("other", "Ordinary prose-only journal entry")
     recorder.stop()
 
     assert len(journal) == 2
@@ -306,3 +309,66 @@ def test_silent_mode_drops_presentation_commands_and_keeps_the_rest(qapp) -> Non
     assert "mfv.view.render()" not in silent    # ...and dropped when silent
     # the two data commands survive as TODOs until their handlers report params
     assert silent.count("# TODO") == 2
+
+
+# ---------------------------------------------------------------------------
+# a recording must never be mysteriously empty
+# ---------------------------------------------------------------------------
+
+def test_a_macro_relevant_entry_is_never_silently_dropped() -> None:
+    """
+    Reported from real use: open the recorder, drop a file, filter it — and the
+    window stayed empty. Loading and filtering are exactly what somebody
+    records, so showing nothing for them reads as a broken feature. An
+    uninstrumented step in a macro-relevant category surfaces as a TODO naming
+    what happened; only ``other`` is chatter.
+    """
+    journal = ProcessingJournal()
+    recorder = Recorder(journal)
+    recorder.start()
+    journal.add("load", "Loaded dataset 'demo'")
+    journal.add("other", "some incidental note")
+    recorder.stop()
+
+    script = recorder.script(header=False)
+    assert "# TODO" in script and "Loaded dataset 'demo'" in script
+    assert "not instrumented for recording yet" in script
+    assert "incidental note" not in script
+
+
+def test_a_superseding_step_collapses_to_the_state_the_user_settled_on() -> None:
+    """
+    Every checkbox toggle and bound edit re-applies the filter. A macro wants
+    the filter that was settled on, not each intermediate drag.
+    """
+    recorder = Recorder(ProcessingJournal())
+    recorder.start()
+    for hi in (30.0, 35.0, 40.0):
+        recorder.append(
+            "Filtered 'demo'",
+            code=f"mfv.data.set_filter([{{'hi': {hi}}}])",
+            gui_class=GuiClass.GUI_RESULT, command="actionFilter",
+            category="filter", supersedes_previous=True,
+        )
+    recorder.stop()
+
+    codes = [s.code for s in _dedup(recorder.steps())]
+    assert codes == ["mfv.data.set_filter([{'hi': 40.0}])"]
+
+
+def _dedup(steps):
+    from minflux_viewer.core.recorder import _deduplicate
+
+    return _deduplicate(steps)
+
+
+def test_two_different_analyses_are_both_kept() -> None:
+    """Superseding is opt-in: running two analyses is not one analysis."""
+    recorder = Recorder(ProcessingJournal())
+    recorder.start()
+    recorder.append("A", code="mfv.data.clear_filter()", command="actionA",
+                    gui_class=GuiClass.GUI_FREE)
+    recorder.append("B", code="mfv.data.clear_filter()", command="actionB",
+                    gui_class=GuiClass.GUI_FREE)
+    recorder.stop()
+    assert len(_dedup(recorder.steps())) == 2
