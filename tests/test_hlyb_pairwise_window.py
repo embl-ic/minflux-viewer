@@ -394,10 +394,10 @@ def test_the_plugin_command_is_traceable_to_its_source(_app):
     win = _main_window(_app)
     try:
         entries = command_finder.collect_commands(win.menuBar())
-        match = [e for e in entries if e.text == "HlyB/D subunit pair analysis"]
+        match = [e for e in entries if e.text == "Staged pair analysis"]
         assert match, "the plugin must appear in the command finder"
         assert "hlyb_pair_analysis" in (match[0].source or "")
-        assert match[0].path == "Plugins"
+        assert match[0].path == "Plugins › HlyB/D"
     finally:
         win.close()
         _app.processEvents()

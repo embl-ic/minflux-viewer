@@ -1,44 +1,19 @@
-"""Launch path for the HlyB/D subunit pair analysis plugin.
+"""Pure reporting helpers for the HlyB/D staged analysis.
 
-Pulls the raw last-valid localizations of the active dataset, collects
-parameters, runs :func:`minflux_viewer.analysis.hlyb_staged.analyze_hlyb_staged_3d`
-and opens the modeless result window.  The Log line it emits carries a
-``method_data`` payload consumed by *Plugins › Generate Method Text*.
+The customer-facing workflow lives in the external Tier 2 plugin.  These
+serialisers remain with the reusable numerical engine because the legacy
+collection window and method-text generator still consume their stable output
+schema.  This module deliberately has no Qt or viewer-state dependency.
 """
 
 from __future__ import annotations
 
 import numpy as np
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
-
-TITLE = "HlyB/D Subunit Pair Analysis"
 
 # This project analyses its MINFLUX measurements with a fixed Z scaling factor,
 # so the dialog opens on it rather than on the dataset's trace-anisotropy
 # estimate. The user can still override it per run.
 PROJECT_Z_SCALING_FACTOR = 0.67
-
-
-def _localization_columns(ds):
-    """Raw last-valid ``loc``/``tid``/``tim`` columns of *ds*, in metres."""
-    from ...core.loader import mfx_get
-
-    def column(attr):
-        value = mfx_get(ds, attr, itr="last", vld_only=True)
-        return None if value is None else np.asarray(value, dtype=float).ravel()
-
-    lx, ly, lz, tid = (column("loc_x"), column("loc_y"),
-                       column("loc_z"), column("tid"))
-    finite_z = np.empty(0) if lz is None else lz[np.isfinite(lz)]
-    if (lx is None or ly is None or lz is None or tid is None or lx.size < 3
-            or lz.size != lx.size or finite_z.size < 3
-            or np.ptp(finite_z) * 1e9 < 5.0):
-        return None
-    tim = column("tim")
-    if tim is not None and tim.size != lx.size:
-        tim = None
-    return np.column_stack([lx, ly, lz]), tid, tim
 
 
 def _method_payload(ds, cfg, result, *, n_localizations, has_time):
@@ -169,64 +144,6 @@ def _log_line(ds, cfg, result) -> str:
         f"(same-site diameter {cfg.site_merge_nm:g} nm, surface-null stratum "
         f"{cfg.null_stratum_sites} sites, {cfg.null_replicates} replicate(s), "
         f"z-scale {cfg.z_scaling_factor:g}, sensitivity {robustness}){extra}."
-    )
-
-
-def run_hlyb_pair_analysis(state, parent=None) -> None:
-    """Plugins › HlyB/D subunit pair analysis."""
-    from ...analysis.hlyb_staged import Staged3DConfig, analyze_hlyb_staged_3d
-    from ...ui.hlyb_staged_dialog import HlyBStagedDialog, HlyBStagedWindow
-    from ...ui.modeless import show_modeless
-
-    idx = state.active_idx
-    if idx is None or state.active_dataset is None:
-        QMessageBox.information(
-            parent, TITLE, "Open a dataset first — this analysis runs on the "
-                           "active dataset.")
-        return
-    ds = state.datasets[idx]
-
-    columns = _localization_columns(ds)
-    if columns is None:
-        QMessageBox.information(
-            parent, TITLE,
-            "The active dataset does not contain sufficient genuine 3-D "
-            "localizations with trace IDs.")
-        return
-    loc_m, tid, tim = columns
-
-    defaults = getattr(state, "_hlyb_staged_cfg", None)
-    if defaults is None:
-        defaults = Staged3DConfig(z_scaling_factor=PROJECT_Z_SCALING_FACTOR)
-    else:
-        defaults = Staged3DConfig(
-            **{**vars(defaults), "z_scaling_factor": PROJECT_Z_SCALING_FACTOR}
-        )
-    dlg = HlyBStagedDialog(parent, defaults=defaults)
-    if dlg.exec() != QDialog.DialogCode.Accepted:
-        return
-    cfg = dlg.config()
-    state._hlyb_staged_cfg = cfg
-
-    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-    try:
-        result = analyze_hlyb_staged_3d(loc_m, tid, tim, cfg)
-    except Exception as exc:                                  # noqa: BLE001
-        QMessageBox.warning(parent, TITLE, f"Analysis failed: {exc}")
-        return
-    finally:
-        if QApplication.overrideCursor() is not None:
-            QApplication.restoreOverrideCursor()
-
-    win = HlyBStagedWindow(result, title=ds.name, owner=parent, prefs=state.prefs)
-    show_modeless(win, parent)
-
-    state.log(
-        _log_line(ds, cfg, result),
-        dataset_idx=idx,
-        method_data=_method_payload(
-            ds, cfg, result,
-            n_localizations=loc_m.shape[0], has_time=tim is not None),
     )
 
 
@@ -362,12 +279,3 @@ def pooled_payload(cfg, result) -> dict:
         "calibrated_ratio_z": float(cfg.calibrated_ratio_z),
         "limitations": list(result.get("limitations") or []),
     }
-
-
-def run_hlyb_pooled_analysis(state, parent=None) -> None:
-    """Plugins > HlyB/D pooled pair analysis (multiple datasets)."""
-    from ...ui.hlyb_collection_dialog import HlyBCollectionWindow
-    from ...ui.modeless import show_modeless
-
-    win = HlyBCollectionWindow(state, owner=parent)
-    show_modeless(win, parent)

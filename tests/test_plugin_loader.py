@@ -53,10 +53,14 @@ def _tier2(root, folder: str, *, plugin_id: str, name: str = "Tool",
 
 
 @pytest.fixture
-def roots(tmp_path):
+def roots(tmp_path, monkeypatch):
     """A prefs dict pointing discovery at a temp folder and nowhere else."""
     root = tmp_path / "plugins"
     root.mkdir()
+    app_root = tmp_path / "app-plugins"
+    app_root.mkdir()
+    from minflux_viewer.plugins import loader
+    monkeypatch.setattr(loader, "app_plugin_dir", lambda: app_root)
     prefs = {"plugin": {
         "paths": [str(root)],
         "scan_user_dir": False,
@@ -188,18 +192,20 @@ def test_tier2_directory_uses_its_manifest(roots):
     assert found[0].label == "Dimer Distance"
 
 
-def test_a_nested_menu_path_is_flattened_into_the_label(roots):
+def test_a_nested_menu_path_is_kept_separate_from_the_leaf_label(roots):
     """
-    The Plugins menu is built as a flat list, so a nested path shows as a
-    trail. ``Plugins`` itself is dropped -- a manifest naming it is not asking
-    for a submenu called Plugins inside Plugins.
+    ``Plugins`` itself is dropped -- a manifest naming it is not asking for a
+    submenu called Plugins inside Plugins -- while every remaining component
+    is passed to the real menu builder.
     """
     from minflux_viewer.plugins import loader
 
     root, _ = roots
     _tier2(root, "d", plugin_id="a.b", name="Dimer",
            menu_path="Plugins > HlyB", body="def run(ctx): pass\n")
-    assert loader.scan_root(root)[0].label == "HlyB › Dimer"
+    found = loader.scan_root(root)[0]
+    assert found.label == "Dimer"
+    assert found.menu_path == ("HlyB",)
 
 
 def test_a_broken_plugin_is_listed_with_its_reason(roots):
@@ -394,6 +400,54 @@ def test_discover_is_idempotent(roots):
     assert sum(e.name == "Once" for e in plugins.available()) == 1
 
 
+def test_menu_builder_reuses_real_submenus_and_disables_broken_entries(
+        qapp, monkeypatch):
+    from types import SimpleNamespace
+
+    from PyQt6.QtWidgets import QMainWindow, QMenu
+
+    from minflux_viewer import plugins
+    from minflux_viewer.core import user_libs
+    from minflux_viewer.ui.main_window import MainWindow
+
+    entries = [
+        plugins.PluginEntry(
+            name="First", tooltip="one", launch=lambda *_: None,
+            menu_path=("Lab",), discovered=True,
+        ),
+        plugins.PluginEntry(
+            name="Second", tooltip="two", launch=lambda *_: None,
+            menu_path=("Lab",), discovered=True,
+        ),
+        plugins.PluginEntry(
+            name="Broken", tooltip="missing dependency", launch=lambda *_: None,
+            menu_path=("Lab", "Diagnostics"), error="missing dependency",
+            discovered=True,
+        ),
+    ]
+    monkeypatch.setattr(plugins, "ensure_loaded", lambda: None)
+    monkeypatch.setattr(plugins, "discover", lambda _prefs: [])
+    monkeypatch.setattr(plugins, "available", lambda: entries)
+    monkeypatch.setattr(user_libs, "install_paths", lambda _prefs: [])
+
+    window = QMainWindow()
+    window._ui = SimpleNamespace(menuPlugins=QMenu("Plugins", window))
+    window._state = SimpleNamespace(prefs={}, log=lambda *_args, **_kwargs: None)
+    window._mark_action_ai_unapproved = lambda _action: None
+
+    MainWindow._populate_plugins_menu(window)
+
+    top = window._ui.menuPlugins.actions()
+    assert len(top) == 1 and top[0].menu().title() == "Lab"
+    lab = top[0].menu()
+    leaves = {action.text(): action for action in lab.actions() if action.menu() is None}
+    assert set(leaves) == {"First", "Second"}
+    diagnostics = next(action.menu() for action in lab.actions() if action.menu())
+    broken = diagnostics.actions()[0]
+    assert broken.text() == "Broken"
+    assert broken.isEnabled() is False
+
+
 def test_rediscover_drops_only_discovered_entries(roots):
     from minflux_viewer import plugins
 
@@ -574,7 +628,8 @@ def test_a_plugin_can_use_the_real_mfv_api(roots, qapp):
         x_nm=np.arange(10.0), y_nm=np.arange(10.0), z_nm=np.zeros(10),
     ))
 
-    entry = [e for e in plugins.discover(state.prefs) if e.name == "Demo › Measure"][0]
+    entry = [e for e in plugins.discover(state.prefs) if e.name == "Measure"][0]
+    assert entry.menu_path == ("Demo",)
     assert entry.error == ""
     entry.launch(state, None)
 

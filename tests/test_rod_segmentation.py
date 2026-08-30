@@ -562,10 +562,12 @@ def test_method_text_describes_the_rod_segmentation_it_actually_used():
 def test_runner_log_line_and_payload_carry_the_rod_detection():
     from types import SimpleNamespace
 
+    from minflux_viewer.analysis.hlyb_reporting import (
+        _log_line,
+        _method_payload,
+    )
     from minflux_viewer.analysis.hlyb_staged import analyze_hlyb_staged_3d
     from minflux_viewer.analysis.method_text import generate_method_text
-    from minflux_viewer.plugins.hlyb_pair_analysis.runner import (
-        _log_line, _method_payload)
 
     rng = np.random.default_rng(23)
     loc, tid, tim = _rod_dataset(rng, centers=[(0.0, 0.0), (0.0, 4000.0)])

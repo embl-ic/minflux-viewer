@@ -52,13 +52,6 @@ from .manifest import MANIFEST_NAME, ManifestError, PluginManifest, read_manifes
 #: Package name every user plugin is imported under.
 NAMESPACE = "mfv_plugins"
 
-#: Separator used to flatten a nested menu path into the entry label.
-#: ``ui/main_window.py::_populate_plugins_menu`` builds a flat menu, so a
-#: nested ``menu.path`` is shown as a trail rather than a real submenu. The
-#: exact diff that would make it a real submenu is in
-#: ``docs/extension-layer/track-b-notes.md``.
-MENU_SEPARATOR = " › "          # ›
-
 #: Filenames skipped in a Tier 1 scan.
 _TIER1_SKIP_PREFIXES = ("_", ".")
 
@@ -69,7 +62,7 @@ class DiscoveredPlugin:
 
     #: Unique id; the module namespace. Tier 1 derives it from the filename.
     id: str
-    #: Menu label, already flattened (see :data:`MENU_SEPARATOR`).
+    #: Leaf label shown in the menu.
     label: str
     #: Directory the plugin lives in (Tier 1: the root it was found in).
     directory: Path
@@ -78,6 +71,8 @@ class DiscoveredPlugin:
     tier: int = 1
     manifest: PluginManifest | None = None
     root: Path = field(default_factory=Path)
+    #: Submenus beneath the application's top-level Plugins menu.
+    menu_path: tuple[str, ...] = ()
     #: Non-empty when the plugin cannot run; the reason is shown to the user.
     error: str = ""
 
@@ -228,14 +223,10 @@ def _tier2(directory: Path, root: Path) -> DiscoveredPlugin:
             entry_path=directory / MANIFEST_NAME, tier=2, root=root, error=str(exc),
         )
 
-    label = manifest.label
     trail = [p.strip() for p in manifest.menu_path.split(">") if p.strip()]
     # "Plugins" is where the menu already is; a manifest naming it is not asking
     # for a submenu called Plugins inside Plugins.
     trail = [p for p in trail if p.lower() != "plugins"]
-    if trail:
-        label = MENU_SEPARATOR.join([*trail, label])
-
     error = ""
     if not manifest.entry_path.is_file():
         error = (
@@ -246,9 +237,9 @@ def _tier2(directory: Path, root: Path) -> DiscoveredPlugin:
         error = _requirement_error(manifest)
 
     return DiscoveredPlugin(
-        id=manifest.id, label=label, directory=directory,
+        id=manifest.id, label=manifest.label, directory=directory,
         entry_path=manifest.entry_path, tier=2, manifest=manifest,
-        root=root, error=error,
+        root=root, menu_path=tuple(trail), error=error,
     )
 
 

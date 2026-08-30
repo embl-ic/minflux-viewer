@@ -258,7 +258,7 @@ COMMAND_META: dict[str, CommandMeta] = {
     # The HlyB/D subunit pair analysis is now a *plugin*, so its metadata lives
     # on the PluginEntry (name/tooltip/keywords) rather than here — this
     # registry is keyed by QAction attribute name, and a plugin action has
-    # none.  See plugins/hlyb_pair_analysis/.
+    # none.  The customer workflow now lives in plugins/hlyb_pair_analysis/.
 
     # ---- Analyze › Trace ------------------------------------------------------
     "actionTraceSize": CommandMeta(A + "trace_analysis.py",

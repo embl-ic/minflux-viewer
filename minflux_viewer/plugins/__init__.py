@@ -47,16 +47,10 @@ class PluginEntry:
     tooltip: str
     launch: Callable[..., None]   # launch(state, parent=None)
     # Nested menu placement, e.g. ``("HlyB",)`` for *Plugins ▸ HlyB ▸ …*.
-    # ``ui/main_window.py::_populate_plugins_menu`` currently builds a FLAT
-    # menu, so a user plugin's path is flattened into ``name`` instead (see
-    # ``plugins/loader.py::MENU_SEPARATOR``). The field is declared now so the
-    # menu builder can honour it without a second change to this dataclass;
-    # the diff it needs is in ``docs/extension-layer/track-b-notes.md``.
     menu_path: tuple[str, ...] = ()
     # Non-empty when the plugin was found but cannot run. The entry is still
     # listed — a plugin that silently fails to appear is a worse bug report
-    # than one that appears and explains itself — and ``launch`` reports the
-    # reason. A future menu builder should also disable the action.
+    # than one that appears and explains itself — and its action is disabled.
     error: str = ""
     # True for an entry created by ``discover()`` from a user folder, as
     # opposed to a built-in that registered itself at import time. ``rediscover``
@@ -68,6 +62,9 @@ class PluginEntry:
     # ``ui/command_meta.py``, which is keyed by QAction attribute name and so
     # cannot describe a plugin action (it has none).
     keywords: tuple[str, ...] = ()
+    # Implementing file shown by the Command Finder. Discovered plugins set
+    # this to their real entry file rather than the registry wrapper above it.
+    source: str = ""
 
 
 _REGISTRY: list[PluginEntry] = []
@@ -148,9 +145,11 @@ def _entry_for(found, prefs: dict | None) -> PluginEntry:
         name=found.label,
         tooltip=found.tooltip,
         launch=launch,
+        menu_path=found.menu_path,
         keywords=found.keywords,
         error=found.error,
         discovered=True,
+        source=str(found.entry_path),
     )
 
 
@@ -284,7 +283,6 @@ def ensure_loaded() -> None:
         data_simulator,  # noqa: F401  (immediately under ParaView)
         drift_correction,  # noqa: F401
         generate_method_text,  # noqa: F401
-        hlyb_pair_analysis,  # noqa: F401  (project-specific)
         msr_reader,  # noqa: F401
         paraview,  # noqa: F401
         script_editor,  # noqa: F401  (moved to the bottom of the list)

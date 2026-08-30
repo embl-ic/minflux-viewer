@@ -260,23 +260,34 @@ def test_save_and_load_round_trip_through_the_window(app, monkeypatch, tmp_path)
         other.close()
 
 
-def test_the_pooled_plugin_entry_is_registered():
+def test_the_pooled_scope_is_owned_by_the_external_tier2_plugin():
     from minflux_viewer import plugins
+    from minflux_viewer.plugins import loader
 
     plugins.ensure_loaded()
-    names = [entry.name for entry in plugins._REGISTRY]
-    assert "HlyB/D subunit pair analysis" in names          # unchanged
-    assert "HlyB/D pooled pair analysis (multi-dataset)" in names
-    pooled = next(e for e in plugins._REGISTRY if "pooled" in e.name)
-    assert "multiple datasets" in pooled.keywords
-    assert "pool" in pooled.keywords
+    assert not any(
+        "hlyb" in entry.name.lower() and not entry.discovered
+        for entry in plugins._REGISTRY
+    )
+    found = next(
+        plugin for plugin in loader.scan_root(loader.app_plugin_dir())
+        if plugin.id == "embl.hlyb_pair_analysis"
+    )
+    assert found.tier == 2
+    assert found.label == "Staged pair analysis..."
+    assert found.menu_path == ("HlyB/D",)
+    assert "pooled roi" in found.keywords
 
 
 def test_pooled_log_line_and_payload_describe_the_pool():
+    from minflux_viewer.analysis.hlyb_reporting import (
+        pooled_log_line,
+        pooled_payload,
+    )
     from minflux_viewer.analysis.hlyb_staged import (
-        Staged3DConfig, analyze_hlyb_staged_pooled)
-    from minflux_viewer.plugins.hlyb_pair_analysis.runner import (
-        pooled_log_line, pooled_payload)
+        Staged3DConfig,
+        analyze_hlyb_staged_pooled,
+    )
 
     cfg = Staged3DConfig(z_scaling_factor=1.0, null_replicates=19,
                          run_sensitivity=False, run_stratum_profile=False,
@@ -303,11 +314,15 @@ def test_pooled_log_line_and_payload_describe_the_pool():
 
 
 def test_method_text_generates_from_a_pooled_run():
+    from minflux_viewer.analysis.hlyb_reporting import (
+        pooled_log_line,
+        pooled_payload,
+    )
     from minflux_viewer.analysis.hlyb_staged import (
-        Staged3DConfig, analyze_hlyb_staged_pooled)
+        Staged3DConfig,
+        analyze_hlyb_staged_pooled,
+    )
     from minflux_viewer.analysis.method_text import generate_method_text
-    from minflux_viewer.plugins.hlyb_pair_analysis.runner import (
-        pooled_log_line, pooled_payload)
 
     cfg = Staged3DConfig(z_scaling_factor=1.0, null_replicates=19,
                          run_sensitivity=False, run_stratum_profile=False,
