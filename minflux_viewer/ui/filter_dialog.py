@@ -42,7 +42,11 @@ from ..core.app_state import AppState
 from ..core.attributes import is_trace_wise_attribute, plot_attribute_names
 from ..core.filter_io import (
     is_filter_json_file,
+)
+from ..core.filter_io import (
     load_filter_json as load_filter_json_file,
+)
+from ..core.filter_io import (
     save_filter_json as save_filter_json_file,
 )
 from ..core.iteration import (
@@ -865,10 +869,37 @@ class FilterDialog(QDialog):
         ds.filter_mask = mask
         self._state.notify_filter_changed(self._dataset_idx)
         self._applying = False
+        self._record_filter(ds, specs)
 
         n_pass = int(mask.sum())
         self._info.setText(
             f"{n_pass:,} / {ds.prop.num_loc:,} localisations pass all enabled filters."
+        )
+
+    def _record_filter(self, ds, specs: list[dict]) -> None:
+        """Write the applied filter into a macro recording, as runnable code.
+
+        GUI_RESULT: the bounds were chosen by eye against a histogram, but the
+        outcome is ordinary data, so the recorded call replays without a user.
+
+        ``supersedes_previous`` collapses a run of these into the last one --
+        every checkbox toggle and bound edit re-applies, and a macro wants the
+        filter the user settled on, not each intermediate drag.
+        """
+        recorder = getattr(self._state, "recorder", None)
+        if recorder is None or not recorder.enabled:
+            return
+        try:
+            code = f"mfv.data.set_filter({specs!r})"
+        except Exception:
+            return
+        recorder.append(
+            f"Filtered '{ds.name}'" if specs else f"Cleared the filter on '{ds.name}'",
+            code=code,
+            gui_class="gui_result",
+            command="actionFilter",
+            category="filter",
+            supersedes_previous=True,
         )
 
     def _update_info(self) -> None:

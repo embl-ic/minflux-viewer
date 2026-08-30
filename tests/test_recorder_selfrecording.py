@@ -50,7 +50,7 @@ def test_a_read_is_not_recorded(mfv):
     mfv.data.filter_specs()
     mfv.record.stop()
 
-    assert mfv.record.steps() == []
+    assert _codes(mfv) == []
 
 
 def test_a_mutating_call_records_itself_as_runnable_code(mfv):
@@ -222,7 +222,8 @@ def test_two_facades_record_independently(qapp):
     second.data.clear_filter()
     first.record.stop()
 
-    assert [s.code for s in first.record.steps() if s.code] == [
-        "mfv.data.clear_filter()"
-    ]
-    assert second.record.steps() == []
+    assert _codes(first) == ["mfv.data.clear_filter()"]
+    # The second session captured no call. (Its dataset load still appears as
+    # an uninstrumented TODO, which is why this checks recorded *calls* rather
+    # than the absence of any step at all.)
+    assert _codes(second) == []
