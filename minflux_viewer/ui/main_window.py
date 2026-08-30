@@ -15,10 +15,11 @@ Help    — About
 
 from __future__ import annotations
 
+import weakref
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QPoint, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
@@ -50,22 +51,21 @@ from PyQt6.QtWidgets import (
     QProxyStyle,
     QPushButton,
     QSizePolicy,
-    QStyle,
     QSpinBox,
+    QStyle,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import resource_path
-from ..core.app_state import AppState
-from .data_window import DataWindow
 
 # ---------------------------------------------------------------------------
 # Supported file extensions for drag-and-drop and open dialogs
 # ---------------------------------------------------------------------------
-
 from ..core import formats as _formats
+from ..core.app_state import AppState
+from .data_window import DataWindow
 
 #: Everything the application will attempt to open, from the one format
 #: registry (:mod:`minflux_viewer.core.formats`).
@@ -211,7 +211,7 @@ def _human_duration(seconds: float) -> str:
     return f"{minutes / 60.0:.1f} h"
 
 
-def _adaptive_toolbar_pixmap(path: str) -> "QPixmap | None":
+def _adaptive_toolbar_pixmap(path: str) -> QPixmap | None:
     """Load a toolbar icon without its baked-in white matte.
 
     The small ROI/LUT PNGs are opaque black-on-white images. Treating the white
@@ -303,6 +303,7 @@ class MainWindow(QMainWindow):
         self._task_monitor_win = None
         self._roi_manager_win = None
         self._script_editor_win = None
+        self._macro_recorder_win = None
         self._color_dialog = None
         self._shortcut_actions: dict[str, QAction] = {}
         self._roi_tool_actions: dict[str, QAction] = {}
@@ -2443,9 +2444,32 @@ class MainWindow(QMainWindow):
         """Open (or raise) the Console window."""
         return self._show_console()
 
-    def show_script_editor(self) -> None:
+    def show_script_editor(self):
         """Open (or raise) the Script Editor."""
         return self._show_script_editor()
+
+    def show_macro_recorder(self):
+        """Open (or raise) the modeless Macro Recorder plugin window."""
+        from .macro_recorder_window import MacroRecorderWindow
+        from .modeless import show_modeless
+
+        window = self._macro_recorder_win
+        if window is not None:
+            try:
+                window.show()
+                window.raise_()
+                window.activateWindow()
+                return window
+            except RuntimeError:
+                self._macro_recorder_win = None
+
+        window = MacroRecorderWindow(self._state, owner=self)
+        window.destroyed.connect(self._on_macro_recorder_destroyed)
+        self._macro_recorder_win = window
+        return show_modeless(window, self)
+
+    def _on_macro_recorder_destroyed(self, *_args) -> None:
+        self._macro_recorder_win = None
 
     def _bind_scripting_api(self) -> None:
         """Expose this viewer instance through the runtime ``mfv`` module."""
@@ -2524,7 +2548,7 @@ class MainWindow(QMainWindow):
             dataset_idx=dataset_idx,
         )
 
-    def _show_script_editor(self) -> None:
+    def _show_script_editor(self):
         from .script_editor_window import ScriptEditorWindow
 
         if self._script_editor_win is None:
@@ -2532,6 +2556,7 @@ class MainWindow(QMainWindow):
         self._script_editor_win.show()
         self._script_editor_win.raise_()
         self._script_editor_win.activateWindow()
+        return self._script_editor_win
 
     def _show_scatter(self, dataset_idx: int | None = None):
         if self._state.active_dataset is None:
@@ -2832,6 +2857,7 @@ class MainWindow(QMainWindow):
         """(M, 2) localizations the region *record* highlights, in the ROI's plane
         (display nm, filter applied)."""
         import numpy as np
+
         from ..core.roi_crop import display_xyz_filtered
         from ..core.roi_selection import roi_region_mask
 
@@ -2893,6 +2919,7 @@ class MainWindow(QMainWindow):
         """Process › ROI › Fit ▸ Interpolate — resample the active ROI outline at
         an even arc-length interval (nm), ImageJ-style."""
         from PyQt6.QtWidgets import QInputDialog
+
         from ..core.roi_fit import interpolate_outline
 
         record, kind, adapter = self._active_roi()
@@ -2991,6 +3018,7 @@ class MainWindow(QMainWindow):
         """
         dimensions = 2 if int(dimensions) == 2 else 3
         import numpy as np
+
         from ..core.loader import mfx_get
 
         idx = self._state.active_idx
@@ -3198,6 +3226,7 @@ class MainWindow(QMainWindow):
         border margin (where 2-D distances are unreliable). The template path
         accepts partial 3-D matches to the six-site HlyB distance model."""
         import numpy as np
+
         from ..core.loader import mfx_get
 
         mode_text = str(mode).upper()
@@ -3226,7 +3255,6 @@ class MainWindow(QMainWindow):
             lz = np.zeros_like(lx)
         loc_m = np.column_stack([lx, ly, lz])  # metres, raw z (z-scaling applied in analysis)
 
-        from .hlyb_clustering_dialog import HlyBClusteringDialog, HlyBResultWindow
         from ..analysis.hlyb_clustering import (
             HlyBConfig,
             analyze_hlyb,
@@ -3234,6 +3262,7 @@ class MainWindow(QMainWindow):
             analyze_hlyb_template2d,
             analyze_hlyb_template3d,
         )
+        from .hlyb_clustering_dialog import HlyBClusteringDialog, HlyBResultWindow
 
         # The analysis reads RAW z (never Z-scaling-baked) and applies this z-scaling
         # factor itself, so the dialog default must track the dataset's CURRENT
@@ -4059,7 +4088,7 @@ class MainWindow(QMainWindow):
         self._update_shape_button_icon(kind)
         self._activate_roi_tool(tool)
 
-    def _rotated_icon(self, path: str, rotate_deg: float) -> "QIcon":
+    def _rotated_icon(self, path: str, rotate_deg: float) -> QIcon:
         """A QIcon from *path*, optionally turned *rotate_deg*° (the rotated rectangle
         / ellipse variants reuse the base icon at 45°, no separate asset).
 
@@ -5004,10 +5033,10 @@ class MainWindow(QMainWindow):
         Reproduces Abberior Imspector's *Aggregation* to ≈99 %."""
         import uuid
 
+        from ..analysis.aggregation import raw_dict_from_dataset
         from ..core.dataset_kind import is_minflux
         from ..core.mfx_sequence import photon_iterations_for_dataset
         from ..core.overlay import dataset_group_id, overlay_members
-        from ..analysis.aggregation import raw_dict_from_dataset
 
         active_idx = self._state.active_idx
         if active_idx is None or not (0 <= active_idx < len(self._state.datasets)):
@@ -5125,9 +5154,9 @@ class MainWindow(QMainWindow):
 
         import numpy as np
 
+        from ..analysis.aggregation import aggregate_dataset, aggregation_time_mode
         from ..core.dataset import build_localization_dataset
         from ..core.mfx_sequence import photon_iterations_for_dataset
-        from ..analysis.aggregation import aggregate_dataset, aggregation_time_mode
 
         pit = photon_iterations_for_dataset(ds)
         time_mode = aggregation_time_mode(ds)
@@ -5191,10 +5220,10 @@ class MainWindow(QMainWindow):
             dataset_idx=dataset_idx,
         )
 
-    def _ask_aggregation_threshold(self, ds, pit, n_channels: int = 1) -> "int | None":
+    def _ask_aggregation_threshold(self, ds, pit, n_channels: int = 1) -> int | None:
         """Modal photon-threshold picker for aggregation (default 3000)."""
-        from PyQt6.QtWidgets import (
-            QDialog, QDialogButtonBox, QLabel, QSpinBox, QVBoxLayout)
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QSpinBox, QVBoxLayout
+
         from ..analysis.aggregation import aggregation_time_mode
 
         dlg = QDialog(self)
@@ -6241,9 +6270,10 @@ class MainWindow(QMainWindow):
         if len(self._state.datasets) < 2:
             QMessageBox.information(self, "Combine datasets", "Load at least two datasets before combining channels.")
             return
-        from .channel_combine_dialog import ChannelCombineDialog
-        from ..core.overlay import OverlayMemberSpec, build_overlay_transforms
         import uuid
+
+        from ..core.overlay import OverlayMemberSpec, build_overlay_transforms
+        from .channel_combine_dialog import ChannelCombineDialog
 
         dlg = ChannelCombineDialog(
             self._state,
@@ -6957,10 +6987,8 @@ class MainWindow(QMainWindow):
 
     def _zarr_save_context(self, ds) -> dict:
         """Overlay members, portable ROI geometry and linked MSR images."""
-        from dataclasses import asdict
 
         from ..core.overlay import overlay_members
-        from ..core.roi_selection import ROI_MASKS_STATE_KEY
 
         try:
             anchor_idx = next(i for i, item in enumerate(self._state.datasets) if item is ds)
@@ -7473,7 +7501,7 @@ class MainWindow(QMainWindow):
         )
         self._post_load_finalize(ds)
 
-    def _post_load_index(self, ds) -> "int | None":
+    def _post_load_index(self, ds) -> int | None:
         """Current index of *ds* by identity, or None if it was removed."""
         for i, d in enumerate(self._state.datasets):
             if d is ds:
@@ -7957,7 +7985,7 @@ class MainWindow(QMainWindow):
             pass
 
     @staticmethod
-    def _lut_view_shows_dataset(view, idx: "int | None") -> bool:
+    def _lut_view_shows_dataset(view, idx: int | None) -> bool:
         """True when *view* displays dataset *idx* (directly or as an overlay
         channel), so the LUT button targets the view of the active dataset."""
         if view is None or idx is None:
@@ -8042,7 +8070,7 @@ class MainWindow(QMainWindow):
         """
         del keep
 
-    def _open_lut_on_view(self, view, idx: "int | None") -> bool:
+    def _open_lut_on_view(self, view, idx: int | None) -> bool:
         """Open *view*'s LUT dialog if it is a live, visible LUT-capable view of
         dataset *idx*. Returns True once handled (or on failure, to stop trying)."""
         if view is None:
@@ -8072,7 +8100,7 @@ class MainWindow(QMainWindow):
             self._state.log(f"LUT failed for active view: {exc}", "ERROR")
             return True
 
-    def _image_viewer_for_lut(self, active) -> "object | None":
+    def _image_viewer_for_lut(self, active) -> object | None:
         """The image viewer the LUT button should act on, or ``None``.
 
         The focused window wins; failing that the last plot window, if it is one;
@@ -8454,6 +8482,11 @@ class MainWindow(QMainWindow):
                 act.setProperty("command_source", meta.source)
             if meta.keywords:
                 act.setProperty("command_keywords", " ".join(meta.keywords))
+            if meta.gui_class is not None:
+                act.setProperty("command_gui_class", meta.gui_class.value)
+            if meta.record:
+                act.setProperty("command_record", meta.record)
+            self._connect_command_recorder(act, key, meta)
         # ROI Convert sub-actions are created in a loop (no per-action attribute),
         # so tag the whole submenu's leaves as one group.
         for group_key, menu_attr in (("_roi_convert", "menuRoiConvert"),
@@ -8467,6 +8500,61 @@ class MainWindow(QMainWindow):
                     continue
                 act.setProperty("command_source", grp.source)
                 act.setProperty("command_keywords", " ".join(grp.keywords))
+                if grp.gui_class is not None:
+                    act.setProperty("command_gui_class", grp.gui_class.value)
+                if grp.record:
+                    act.setProperty("command_record", grp.record)
+                label = str(act.text()).replace("&", "").strip()
+                self._connect_command_recorder(act, f"{group_key}:{label}", grp)
+
+    def _connect_command_recorder(self, action, key: str, meta) -> None:
+        """Connect one QAction to the recorder exactly once.
+
+        The connection is intentionally inert while recording is disabled.
+        Command handlers will progressively add accepted parameters/runnable
+        calls; until then the identity event renders as an honest TODO.
+
+        ⚠ The slot holds **weak** references to this window and to the action.
+        A lambda capturing ``self`` and ``action`` strongly builds the cycle
+        ``window → action (its child) → connection → lambda → window``, on every
+        one of the ~68 command actions. Python's GC then breaks those cycles at
+        an arbitrary later moment, and collecting a QObject graph while Qt is
+        delivering queued events is the documented native-abort hazard in this
+        project -- Track C hit exactly this shape with its destroyed-signal
+        callbacks. Measured here: the strong form passed every test in
+        isolation and reproducibly aborted the mixed suite inside an unrelated
+        LUT-dialog test.
+        """
+        if bool(action.property("_mfv_macro_recorder_connected")):
+            return
+
+        window_ref = weakref.ref(self)
+        action_ref = weakref.ref(action)
+
+        def _record(_checked: bool = False, k: str = key, m=meta) -> None:
+            window = window_ref()
+            act = action_ref()
+            if window is None or act is None:
+                return
+            window._record_command_action(act, k, m)
+
+        action.triggered.connect(_record)
+        action.setProperty("_mfv_macro_recorder_connected", True)
+
+    def _record_command_action(self, action, key: str, meta) -> None:
+        recorder = getattr(self._state, "recorder", None)
+        if recorder is None or not recorder.enabled:
+            return
+        label = str(action.text()).replace("&", "").strip()
+        summary = meta.summary or label or key
+        recorder.record_command(
+            key,
+            summary=summary,
+            code=meta.record or None,
+            gui_class=meta.gui_class,
+            command_text=label,
+            command_category=meta.category,
+        )
 
     def _refresh_command_index(self) -> None:
         from PyQt6.QtCore import QStringListModel
@@ -8875,7 +8963,7 @@ class _WelcomeWidget(QWidget):
         hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         layout.addWidget(hint)
 
-    def dragEnterEvent(self, event: "QDragEnterEvent") -> None:  # type: ignore[override]
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # type: ignore[override]
         if self.parent() is not None:
             self.parent().dragEnterEvent(event)
         else:
@@ -8887,7 +8975,7 @@ class _WelcomeWidget(QWidget):
         else:
             event.ignore()
 
-    def dropEvent(self, event: "QDropEvent") -> None:  # type: ignore[override]
+    def dropEvent(self, event: QDropEvent) -> None:  # type: ignore[override]
         if self.parent() is not None:
             self.parent().dropEvent(event)
         else:

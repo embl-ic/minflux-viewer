@@ -756,6 +756,11 @@ class AppState(QObject):
         # Processing-history journal — used by the Generate Method Text plugin.
         from .processing_journal import ProcessingJournal
         self.journal = ProcessingJournal()
+        # Macro recording renders the same structured event stream as Python.
+        # It starts disabled; the recorder window/API will own the user-facing
+        # start/stop lifecycle in the next milestone.
+        from .recorder import Recorder
+        self.recorder = Recorder(self.journal)
         # Retained log history (used by Generate Method Text to let the user pick
         # the events relevant to a dataset). Each entry is tagged with the active
         # dataset at emit time, so multi-dataset sessions stay attributable.

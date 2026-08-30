@@ -445,7 +445,7 @@ def test_runtime_module_publishes_namespaces_and_legacy_names(mfv):
         assert hasattr(module, name), name
     for name in ("get_active_dataset", "get_loc", "log", "viewer", "ScriptError"):
         assert hasattr(module, name), name
-    assert module.__api_version__ == "1.0"
+    assert module.__api_version__ == "1.1"
 
 
 def test_script_error_is_the_api_error(mfv):

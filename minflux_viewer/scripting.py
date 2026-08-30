@@ -165,7 +165,7 @@ class MinfluxViewerFacade:
         """
         Refused. ``AppState`` is not part of the published API.
 
-        The eight namespaces are the contract. Reaching past them into
+        The nine namespaces are the contract. Reaching past them into
         application state would couple external code to internals this project
         refactors freely -- exactly what the extension layer exists to prevent.
         If something you need is genuinely missing from the namespaces, that is
@@ -173,7 +173,7 @@ class MinfluxViewerFacade:
         """
         raise ApiError(
             "mfv does not expose AppState. Use the published namespaces "
-            "(data, roi, results, plot, view, ui, run, journal); if what you "
+            "(data, roi, results, plot, view, ui, run, journal, record); if what you "
             "need is missing from them, that is an API gap to report."
         )
 
