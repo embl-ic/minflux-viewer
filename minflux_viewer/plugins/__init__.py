@@ -37,7 +37,6 @@ Usage from the main window
 from __future__ import annotations
 
 import contextlib
-
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
