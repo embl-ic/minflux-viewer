@@ -36,6 +36,8 @@ Usage from the main window
 
 from __future__ import annotations
 
+import contextlib
+
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
@@ -214,8 +216,15 @@ def _launch_discovered(found, state, parent, prefs: dict | None) -> None:
         return
 
     ctx = getattr(state, "mfv", None)
+    # A plugin is ONE logical step, not the API calls inside it: its own
+    # ctx.journal.record() is what belongs in a recorded macro. Suppress the
+    # per-call recording for the duration (design §3.3, and the plan's
+    # "does it record the plugin, or the plugin's actions?").
+    calls = getattr(ctx, "calls", None)
+    suppression = calls.suppress() if calls is not None else contextlib.nullcontext()
     try:
-        func(ctx)
+        with suppression:
+            func(ctx)
     except BaseException as exc:                # noqa: BLE001 - third-party code
         report(f"Plugin '{found.label}' failed: {exc!r}")
 
