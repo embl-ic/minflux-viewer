@@ -612,11 +612,10 @@ class PreferencesDialog(QDialog):
         root.addSpacing(6)
         root.addWidget(self._section_label("When saving / exporting data file:"))
 
-        # Each format with what it is for, rather than a row of bare extensions:
-        # this is where a user decides between them, so it is where the reasons
-        # belong. Names and blurbs both come from the format registry, so they
-        # cannot drift from the menus. Formats that share a recommendation are
-        # paired on one row and share the sentence under it.
+        # Each format with what it is for -- as hover help, not printed under
+        # every row: the page is a list of choices, and six paragraphs of prose
+        # buried the checkboxes they belong to. Names and blurbs both come from
+        # the format registry, so they cannot drift from the menus.
         label_row = QHBoxLayout()
         label_row.addSpacing(18)
         label_row.addWidget(QLabel("Enabled formats:"))
@@ -635,15 +634,6 @@ class PreferencesDialog(QDialog):
                 row.addSpacing(18)
             row.addStretch()
             root.addLayout(row)
-            blurb = _formats.spec_for(group[0]).blurb
-            if blurb:
-                note = QLabel(blurb)
-                note.setStyleSheet("color: gray; font-size: 11px;")
-                note.setWordWrap(True)
-                note_row = QHBoxLayout()
-                note_row.addSpacing(56)
-                note_row.addWidget(note, 1)
-                root.addLayout(note_row)
 
         content_row = QHBoxLayout()
         content_row.addSpacing(18)
