@@ -92,6 +92,124 @@ def test_fit_table_filter_and_rebuild(_qt_app):
     win.close()
 
 
+def _accepted_cell(win, orig, acc_col):
+    """The Accepted cell of the row showing original particle index *orig*."""
+    from PyQt6.QtCore import Qt
+    for tr in range(win._tbl.rowCount()):
+        if int(win._tbl.item(tr, 0).data(Qt.ItemDataRole.UserRole)) == orig:
+            return win._tbl.item(tr, acc_col)
+    raise AssertionError(f"no row for particle {orig}")
+
+
+def _dclick(win, item):
+    """A real double-click on a cell, so the wiring is exercised, not the handler.
+
+    Click first, exactly as a user does: QTest drops a bare ``mouseDClick`` that
+    is not preceded by a click on the view."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    pos = win._tbl.visualItemRect(item).center()
+    QTest.mouseClick(win._tbl.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, pos)
+    QTest.mouseDClick(win._tbl.viewport(), Qt.MouseButton.LeftButton,
+                      Qt.KeyboardModifier.NoModifier, pos)
+
+
+def test_fit_table_accepted_follows_the_filter_and_a_double_click(_qt_app):
+    from minflux_viewer.ui.particle_average_dialog import (
+        IMAGE_COLS,
+        ParticleFitTableWindow,
+    )
+
+    acc_col = [c[1] for c in IMAGE_COLS].index("accepted")
+    win = ParticleFitTableWindow(_image_rows(), columns=IMAGE_COLS, header="3 particles")
+    win.show()
+    cell = lambda i: _accepted_cell(win, i, acc_col)          # noqa: E731
+    assert [cell(i).text() for i in range(3)] == ["yes"] * 3
+    assert "3 / 3 particle(s) accepted" in win._pass_label.text()
+
+    # Filtering a particle out is a verdict: score >= 0.4 drops particle 3 (idx 2).
+    win._filters["score"] = (0.4, 1.0)
+    win._refresh_filter_state()
+    assert win.accepted_flags() == [True, True, False]
+    assert [cell(i).text() for i in range(3)] == ["yes", "yes", "no"]
+    assert "2 / 3 particle(s) accepted" in win._pass_label.text()
+    assert "1 excluded by the filter" in win._pass_label.text()
+
+    # A double-click on the Accepted cell rejects that particle by hand ...
+    _dclick(win, cell(0))
+    assert win.accepted_flags() == [False, True, False]
+    assert cell(0).text() == "no" and win._manual == {0: False}
+    assert "set by hand" in win._pass_label.text()
+
+    # ... it outranks the filter, so clearing the filter does not revive it ...
+    win._clear_filters()
+    assert win.accepted_flags() == [False, True, True]
+
+    # ... and toggling it back to what the fit + filter imply drops the override.
+    _dclick(win, cell(0))
+    assert win.accepted_flags() == [True, True, True] and win._manual == {}
+    assert not win._reset_acc.isEnabled()
+    win.close()
+
+
+def test_fit_table_accepts_a_particle_the_fit_rejected(_qt_app):
+    """A hand-set verdict also overrides the fit's own gate, in both directions."""
+    from minflux_viewer.ui.particle_average_dialog import (
+        IMAGE_COLS,
+        ParticleFitTableWindow,
+    )
+
+    rows = _image_rows()
+    rows[1]["accepted"] = False                       # e.g. below the GoF gate
+    acc_col = [c[1] for c in IMAGE_COLS].index("accepted")
+    win = ParticleFitTableWindow(rows, columns=IMAGE_COLS, header="3 particles")
+    win.show()
+    assert win.accepted_flags() == [True, False, True]
+    assert _accepted_cell(win, 1, acc_col).text() == "no"
+
+    _dclick(win, _accepted_cell(win, 1, acc_col))
+    assert win.accepted_flags() == [True, True, True]
+
+    win._reset_manual_accepted()                      # "Reset hand-set"
+    assert win.accepted_flags() == [True, False, True]
+    win.close()
+
+
+def test_fit_table_csv_and_rebuild_use_the_shown_accepted(_qt_app, tmp_path, monkeypatch):
+    import csv
+
+    from minflux_viewer.ui import particle_average_dialog as pad
+
+    got = []
+    win = pad.ParticleFitTableWindow(_image_rows(), columns=pad.IMAGE_COLS,
+                                     header="3 particles",
+                                     on_rebuild=lambda sel: got.append(list(sel)))
+    win.show()
+    acc_col = [c[1] for c in pad.IMAGE_COLS].index("accepted")
+    win._filters["score"] = (0.4, 1.0)                # rejects particle 3 (idx 2)
+    win._refresh_filter_state()
+    _dclick(win, _accepted_cell(win, 0, acc_col))     # reject particle 1 by hand
+
+    win._do_rebuild()
+    assert got == [[1]]                                # only the accepted particle
+
+    out = tmp_path / "fit.csv"
+
+    class _FakeDialog:
+        @staticmethod
+        def getSaveFileName(*_a, **_k):
+            return str(out), ""
+
+    monkeypatch.setattr(pad, "QFileDialog", _FakeDialog)
+    win._save_csv()
+    with open(out, newline="", encoding="utf-8") as f:
+        table = list(csv.DictReader(f))
+    assert [r["Particle"] for r in table] == ["1", "2", "3"]
+    assert [r["Accepted"] for r in table] == ["False", "True", "False"]
+    win.close()
+
+
 def test_inspector_window_builds_and_toggles(_qt_app):
     from minflux_viewer.ui.particle_inspector import ParticleInspectorWindow
 
