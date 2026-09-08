@@ -299,7 +299,6 @@ class MainWindow(QMainWindow):
         self._ds_manager    = None
         self._log_win       = None
         self._console_win   = None
-        self._memory_win    = None
         self._task_monitor_win = None
         self._roi_manager_win = None
         self._script_editor_win = None
@@ -736,13 +735,12 @@ class MainWindow(QMainWindow):
 
         # Help menu
         u.actionAbout.triggered.connect(self._show_about)
-        u.actionMemoryMonitor.triggered.connect(self._show_memory_monitor)
         self.actionCommandFinder = QAction("Command Finder…", self)
         self.actionCommandFinder.setStatusTip("Search all menu commands (Fiji-style)")
         self.actionCommandFinder.triggered.connect(lambda: self._open_command_finder(""))
-        self.actionTaskMonitor = QAction("Monitor Tasks...", self)
+        self.actionTaskMonitor = QAction("Task Monitor", self)
         self.actionTaskMonitor.setStatusTip(
-            "Background tasks and threads in flight; ask a task to stop")
+            "Background tasks, threads and memory; ask a task to stop")
         self.actionTaskMonitor.triggered.connect(self._show_task_monitor)
         self.actionCheckUpdates = QAction("Check for Updates…", self)
         self.actionCheckUpdates.triggered.connect(
@@ -843,7 +841,6 @@ class MainWindow(QMainWindow):
         u.actionRender.setText("Render")
         u.actionLog.setText("Log (Events)")
         u.actionConsole.setText("Console (stdout / stderr)")
-        u.actionMemoryMonitor.setText("Monitor Memory...")
         u.actionLocPrecisionFrc.setText("FRC (Fourier Ring Correlation)")
         u.actionLocPrecisionCrlb.setText("CRLB (Cramer-Rao Lower Bound)")
         u.actionLocPrecisionStdDev.setText("StdDev per Trace")
@@ -946,12 +943,11 @@ class MainWindow(QMainWindow):
 
         u.menuHelp.clear()
         u.menuHelp.addAction(u.actionConsole)
-        u.menuHelp.addAction(u.actionMemoryMonitor)
         task_monitor = getattr(self, "actionTaskMonitor", None)
-        if task_monitor is not None:                    # beside Monitor Memory
+        if task_monitor is not None:      # memory is its third tab, not an entry
             u.menuHelp.addAction(task_monitor)
         cf = getattr(self, "actionCommandFinder", None)
-        if cf is not None:                              # between Monitor Memory & Updates
+        if cf is not None:                              # between Tasks & Updates
             u.menuHelp.addAction(cf)
         check_updates = getattr(self, "actionCheckUpdates", None)
         if check_updates is not None:
@@ -1039,7 +1035,6 @@ class MainWindow(QMainWindow):
             u.menuTracking.menuAction(),
             #u.actionParticleTracking,
             u.actionMsdAnalysis,
-            u.actionMemoryMonitor,
         ]
         for action in actions:
             self._mark_action_ai_unapproved(action)
@@ -5307,22 +5302,17 @@ class MainWindow(QMainWindow):
         return {idx: lut for idx, lut in luts.items() if lut}
 
     def _show_task_monitor(self) -> None:
-        """Open (or raise) the background-task monitor (Help → Monitor Tasks…)."""
+        """Open (or raise) the Task Monitor (Help → Task Monitor).
+
+        Tasks, threads and memory are its three tabs; there is no separate
+        *Monitor Memory* entry any more.
+        """
         if getattr(self, "_task_monitor_win", None) is None:
             from .task_monitor import TaskMonitor
             self._task_monitor_win = TaskMonitor(self._state, parent=self)
         self._task_monitor_win.show()
         self._task_monitor_win.raise_()
         self._task_monitor_win.activateWindow()
-
-    def _show_memory_monitor(self) -> None:
-        """Open (or raise) the memory monitor (Help → Monitor memory…)."""
-        if getattr(self, "_memory_win", None) is None:
-            from .memory_monitor import MemoryMonitor
-            self._memory_win = MemoryMonitor(self._state, parent=self)
-        self._memory_win.show()
-        self._memory_win.raise_()
-        self._memory_win.activateWindow()
 
     def _close_active_dataset(self) -> None:
         # For multi-channel overlay views (render/scatter with multiple channels),
@@ -8826,7 +8816,7 @@ class MainWindow(QMainWindow):
         # Singleton tool windows
         singletons = [
             "_filter_dlg",  "_ds_manager",
-            "_log_win",     "_console_win", "_memory_win", "_task_monitor_win",
+            "_log_win",     "_console_win", "_task_monitor_win",
             "_roi_manager_win",
             "_script_editor_win",
         ]

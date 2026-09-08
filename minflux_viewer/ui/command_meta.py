@@ -371,12 +371,11 @@ COMMAND_META: dict[str, CommandMeta] = {
     # ---- Help -----------------------------------------------------------------
     "actionConsole": CommandMeta(U + "console_window.py", ("stdout", "stderr", "console", "output"),
                               "Console (raw stdout/stderr).", "help", gui_class=GuiClass.GUI_ONLY, record='mfv.view.console()'),
-    "actionMemoryMonitor": CommandMeta(U + "main_window.py", ("memory", "monitor", "ram"),
-                              "Monitor memory usage.", "help", gui_class=GuiClass.GUI_ONLY),
     "actionTaskMonitor": CommandMeta(U + "task_monitor.py",
                               ("thread", "task", "background", "job", "worker",
-                               "cancel", "stop", "kill", "monitor"),
-                              "Background tasks and threads in flight; ask a "
+                               "cancel", "stop", "kill", "monitor",
+                               "memory", "ram", "rss", "usage"),
+                              "Background tasks, threads and memory usage; ask a "
                               "running task to stop.", "help", gui_class=GuiClass.GUI_ONLY),
     "actionCommandFinder": CommandMeta(U + "command_finder.py", ("search", "commands", "finder", "palette"),
                               "Search all menu commands (Fiji-style).", "help", gui_class=GuiClass.GUI_ONLY),

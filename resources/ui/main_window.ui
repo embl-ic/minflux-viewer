@@ -122,7 +122,6 @@
    <widget class="QMenu" name="menuHelp">
     <property name="title"><string>&amp;Help</string></property>
     <addaction name="actionConsole"/>
-    <addaction name="actionMemoryMonitor"/>
     <addaction name="separator"/>
     <addaction name="actionAbout"/>
    </widget>
@@ -183,9 +182,6 @@
   <action name="actionPreferences">
    <property name="text"><string>&amp;Preferences…</string></property>
    <property name="shortcut"><string>Ctrl+,</string></property>
-  </action>
-  <action name="actionMemoryMonitor">
-   <property name="text"><string>Monitor &amp;memory…</string></property>
   </action>
 
   <!-- View menu -->

@@ -91,7 +91,14 @@ def summary_text(tasks, pool_active: int, pool_max: int, n_threads: int) -> str:
 
 
 class TaskMonitor(QWidget):
-    """Floating monitor of background tasks and threads — Help ▸ Monitor Tasks."""
+    """Floating monitor of background work — Help ▸ Task Monitor.
+
+    Tasks, threads and memory are three readings of the same question ("what is
+    this process doing, and what is it costing?"), so they are three tabs of one
+    window rather than two entries in the Help menu. The Memory tab embeds the
+    existing :class:`~minflux_viewer.ui.memory_monitor.MemoryMonitor` widget
+    unchanged; that class is still importable and usable on its own.
+    """
 
     TAG = "task_monitor"
 
@@ -101,7 +108,7 @@ class TaskMonitor(QWidget):
         self._state = state
         self._registry = registry if registry is not None else task_registry
 
-        self.setWindowTitle("Task monitor")
+        self.setWindowTitle("Task Monitor")
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.Tool)
         self.resize(760, 380)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
@@ -132,6 +139,8 @@ class TaskMonitor(QWidget):
         tabs.addTab(self._tasks_table, "Tasks")
         self._threads_table = self._make_table(_THREAD_COLUMNS)
         tabs.addTab(self._threads_table, "Threads")
+        self._memory = self._build_memory_tab(tabs)
+        self._tabs = tabs
         root.addWidget(tabs, 1)
 
         note = QLabel(
@@ -154,6 +163,25 @@ class TaskMonitor(QWidget):
         buttons.addStretch()
         root.addLayout(buttons)
         self._sync_buttons()
+
+    def _build_memory_tab(self, tabs: QTabWidget):
+        """Embed the memory monitor as a page, or say why it is unavailable.
+
+        Clearing ``Qt.Window`` is what turns a top-level widget into an ordinary
+        child; without it the tab would be an empty area and the monitor would
+        still float on its own (the same rule as ``mbm_info_window._as_page``).
+        """
+        try:
+            from .memory_monitor import MemoryMonitor
+        except Exception:                                       # noqa: BLE001
+            return None
+        try:
+            monitor = MemoryMonitor(self._state, parent=self)
+        except Exception:                                       # noqa: BLE001
+            return None
+        monitor.setWindowFlags(Qt.WindowType.Widget)
+        tabs.addTab(monitor, "Memory")
+        return monitor
 
     @staticmethod
     def _make_table(columns: tuple[str, ...]) -> QTableWidget:
@@ -294,6 +322,10 @@ class TaskMonitor(QWidget):
             self._timer.stop()
         except RuntimeError:
             pass
+        # The embedded monitor samples psutil every second; a closed window must
+        # not keep paying for that. It is a child widget, so its own closeEvent
+        # never runs here.
+        self._set_memory_polling(False)
         super().closeEvent(event)
 
     def showEvent(self, event) -> None:          # noqa: N802 - Qt API
@@ -303,4 +335,19 @@ class TaskMonitor(QWidget):
                 self._timer.start(_TICK_MS)
         except RuntimeError:
             pass
+        self._set_memory_polling(True)
         self.refresh()
+
+    def _set_memory_polling(self, active: bool) -> None:
+        """Start/stop the embedded memory monitor's own timer."""
+        timer = getattr(getattr(self, "_memory", None), "_timer", None)
+        if timer is None:
+            return
+        try:
+            if active:
+                if not timer.isActive():
+                    timer.start()
+            else:
+                timer.stop()
+        except RuntimeError:                            # pragma: no cover
+            pass
