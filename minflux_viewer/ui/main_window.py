@@ -1431,22 +1431,28 @@ class MainWindow(QMainWindow):
 
         def work(report):
             report(f"Reading {name}")
-            datasets = load_viewer_msr(msr_path, prefs=prefs)
+            # The worker must not touch Qt, so what the restore did is collected
+            # here and logged on the GUI thread; list.append is all this is.
+            messages: list[str] = []
+            datasets = load_viewer_msr(msr_path, prefs=prefs, log=messages.append)
             report(f"Read {name}")
-            return datasets
+            return datasets, messages
 
         task = BackgroundTask(work, description=f"Opening {name}", category="load")
         task.signals.stage.connect(lambda text: self._state.status_progress(text))
         task.signals.done.connect(
-            lambda datasets, _n=name, _p=msr_path: self._on_viewer_msr_loaded(
-                datasets, _n, _p))
+            lambda result, _n=name, _p=msr_path: self._on_viewer_msr_loaded(
+                result[0], _n, _p, messages=result[1]))
         task.signals.failed.connect(
             lambda message, _n=name: self._on_msr_open_failed(_n, message))
         self._begin_file_io(task)
 
-    def _on_viewer_msr_loaded(self, datasets, name: str, path: str) -> None:
+    def _on_viewer_msr_loaded(self, datasets, name: str, path: str,
+                              *, messages=None) -> None:
         if self._is_shutting_down:
             return
+        for message in messages or ():
+            self._state.log(message)
         if not datasets:
             self._state.log(f"'{name}' holds no MINFLUX datasets.", "WARN")
             return
@@ -1463,7 +1469,9 @@ class MainWindow(QMainWindow):
                 ds.state.setdefault("overlay_index", order)
                 ds.state.setdefault("overlay_order", order)
             self._state.add_dataset(ds)
-        self._record_recent(path)
+        # Open Recent is recorded by add_dataset from dataset.file.recent_path,
+        # which load_viewer_msr sets to the source .msr -- there is deliberately
+        # no second call here.
         self._status_label.setText(
             f"Opened {name}: {len(datasets)} dataset(s), saved state restored.")
 
