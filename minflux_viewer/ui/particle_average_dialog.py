@@ -874,7 +874,7 @@ class ParticleAverageWindow(QDialog):
         if method == "geomfit":
             columns = GEOM_COLS
             n_acc = sum(1 for r in table if r.get("accepted"))
-            header = f"{n_acc} / {len(table)} particle(s) accepted"
+            header = f"{len(table)} particle(s) fitted"
             if min_gof is not None:
                 header += f"   (min GoF = {min_gof:g})"
             log = (f"Particle fit table: {n_acc}/{len(table)} particle(s) passed the "
@@ -890,7 +890,8 @@ class ParticleAverageWindow(QDialog):
         show_modeless(win, owner)
         self._fit_table_win = win               # keep a reference
         self._state.log(log + "  Double-click a row (or 'Show selected particle') to "
-                        "inspect its point cloud + fitted model.")
+                        "inspect its point cloud + fitted model; double-click its "
+                        "Accepted cell to accept/reject that particle by hand.")
 
     def _show_particle(self, idx: int) -> None:
         """Open the per-particle inspector (point cloud + fitted model) for row *idx*."""
@@ -944,12 +945,13 @@ class ParticleAverageWindow(QDialog):
         show_modeless(win, self._owner if self._owner is not None else self)
 
     def _rebuild_average(self, selected: list) -> None:
-        """Re-pool only the user-selected (filtered) particles into a new averaged
-        view. Cheap: it re-applies the already-computed per-particle transforms
-        (image) / stacks the cached aligned points (geometry fit) — no re-fit."""
+        """Re-pool only the accepted particles (fit verdict + filter + any hand-set
+        ones) into a new averaged view. Cheap: it re-applies the already-computed
+        per-particle transforms (image) / stacks the cached aligned points
+        (geometry fit) — no re-fit."""
         ctx = getattr(self, "_insp", None)
         if not ctx or not selected:
-            self._status.setText("No particles selected to rebuild the average.")
+            self._status.setText("No accepted particles to rebuild the average.")
             return
         method = ctx["method"]
         try:
@@ -975,8 +977,8 @@ class ParticleAverageWindow(QDialog):
         if self._owner is None or not hasattr(self._owner, "add_particle_average_dataset"):
             return
         k, n = len(selected), len(ctx.get("table") or [])
-        name = f"Particle avg [{k}/{n} filtered, {method}]"
-        log = (f"Rebuilt particle average from {k}/{n} filtered particle(s) ({method}): "
+        name = f"Particle avg [{k}/{n} accepted, {method}]"
+        log = (f"Rebuilt particle average from {k}/{n} accepted particle(s) ({method}): "
                f"{pooled.shape[0]:,} localization(s).")
         try:
             self._owner.add_particle_average_dataset(pooled[:, :3], name=name, log_message=log)
@@ -985,7 +987,7 @@ class ParticleAverageWindow(QDialog):
             return
         self._state.log(log)
         self._status.setText(
-            f"Rebuilt average from {k}/{n} filtered particles ({pooled.shape[0]:,} locs) — "
+            f"Rebuilt average from {k}/{n} accepted particles ({pooled.shape[0]:,} locs) — "
             "opened a new view.")
 
     def _on_failed(self, msg: str) -> None:
@@ -1202,7 +1204,15 @@ class ParticleFitTableWindow(QWidget):
 
     Columns are **click-to-sort** (numeric-aware). Selecting a row and clicking
     *Show selected particle* (or double-clicking) calls ``on_show(orig_index)``
-    with the particle's original index (stable across sorting)."""
+    with the particle's original index (stable across sorting).
+
+    **Accepted is the single verdict on a particle**, and three things feed it:
+    the fit's own outcome (the GoF gate), the range filter below the table
+    (anything it excludes reads *no*), and a **double-click on the Accepted
+    cell**, which is an explicit per-particle verdict overriding both. Toggling a
+    row back to what the fit + filter already imply drops the manual verdict, so
+    it follows the filter again. What the column shows is what *Save CSV* writes
+    and what *Rebuild average* pools."""
 
     def __init__(self, table, *, columns=None, header=None, min_gof=None,
                  on_show=None, on_rebuild=None, owner=None) -> None:
@@ -1213,7 +1223,11 @@ class ParticleFitTableWindow(QWidget):
         self._on_rebuild = on_rebuild
         self._filters: dict = {}                # col_key -> (lo, hi) active ranges
         self._passing: set | None = None        # original indices passing the filters
-        self._accepted_by_index: dict = {}
+        # the fit's own verdict, the user's explicit one, and the effective result
+        self._base_accepted = {i: bool(r.get("accepted", True))
+                               for i, r in enumerate(self._rows)}
+        self._manual: dict = {}                 # orig index -> hand-set verdict
+        self._accepted_by_index: dict = {}      # orig index -> effective verdict
         self._updating_region = False
         self.setWindowTitle("Particle fit table")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -1222,13 +1236,18 @@ class ParticleFitTableWindow(QWidget):
         root = QVBoxLayout(self)
 
         if header is None:
-            n_acc = sum(1 for r in self._rows if r.get("accepted", True))
-            header = f"{n_acc} / {len(self._rows)} accepted"
+            header = f"{len(self._rows)} particle(s) fitted"
             if min_gof is not None:
                 header += f"   (min GoF = {min_gof:g})"
         lbl = QLabel(header)
         lbl.setStyleSheet("font-weight:bold;")
         root.addWidget(lbl)
+
+        # Live acceptance count: the header above is static context, this line
+        # follows the filter and any hand-set verdicts.
+        self._pass_label = QLabel("")
+        self._pass_label.setStyleSheet("font-weight:bold; color:#1a7;")
+        root.addWidget(self._pass_label)
 
         self._tbl = QTableWidget(len(self._rows), len(self._columns))
         self._tbl.setHorizontalHeaderLabels([c[0] for c in self._columns])
@@ -1237,7 +1256,7 @@ class ParticleFitTableWindow(QWidget):
         self._tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._tbl.verticalHeader().setVisible(False)
         self._tbl.setSortingEnabled(True)
-        self._tbl.itemDoubleClicked.connect(lambda *_a: self._activate())
+        self._tbl.itemDoubleClicked.connect(self._on_double_click)
         self._fill()
         root.addWidget(self._tbl, 1)
 
@@ -1249,8 +1268,15 @@ class ParticleFitTableWindow(QWidget):
 
         btns = QHBoxLayout()
         save = QPushButton("Save CSV…")
+        save.setToolTip("Write the table as CSV — the Accepted column exactly as "
+                        "shown here, filter and hand-set verdicts included.")
         save.clicked.connect(self._save_csv)
         btns.addWidget(save)
+        self._reset_acc = QPushButton("Reset hand-set")
+        self._reset_acc.setToolTip("Drop every hand-set Accepted verdict, so all "
+                                   "particles follow the fit and the filter again.")
+        self._reset_acc.clicked.connect(self._reset_manual_accepted)
+        btns.addWidget(self._reset_acc)
         if self._on_show is not None:
             show = QPushButton("Show selected particle")
             show.clicked.connect(self._activate)
@@ -1264,14 +1290,14 @@ class ParticleFitTableWindow(QWidget):
             self._tbl.selectRow(0)
         if self._filter_cols:
             self._draw_histogram()
-            self._refresh_filter_state()
+        self._refresh_filter_state()
 
     def _fill(self) -> None:
-        from PyQt6.QtGui import QColor
+        """Build the cells. The Accepted column + row colour are seeded from the
+        fit's own verdict here and owned by ``_apply_accepted`` from then on."""
         self._tbl.setSortingEnabled(False)                 # insert then re-enable
         for r, row in enumerate(self._rows):
-            accepted = bool(row.get("accepted", True))
-            self._accepted_by_index[r] = accepted
+            accepted = bool(self._base_accepted.get(r, True))
             for c, (_lbl, key, fmt) in enumerate(self._columns):
                 v = row.get(key)
                 if key == "accepted":
@@ -1290,10 +1316,108 @@ class ParticleFitTableWindow(QWidget):
                 item = _SortItem(text, sortk)
                 if c == 0:                                 # original index survives sorting
                     item.setData(Qt.ItemDataRole.UserRole, r)
-                if not accepted:
-                    item.setForeground(QColor("#999"))
                 self._tbl.setItem(r, c, item)
         self._tbl.setSortingEnabled(True)
+
+    # ------------------------------------------------------- accepted verdict
+    def _auto_accepted(self, orig: int, keep) -> bool:
+        """The verdict implied by the fit outcome plus the current range filter."""
+        return bool(self._base_accepted.get(orig, True)) and bool(keep[orig])
+
+    def accepted_flags(self) -> list:
+        """Effective per-particle verdict, in original row order.
+
+        A hand-set verdict wins; otherwise the fit's own outcome, minus anything
+        the range filter excludes."""
+        keep = self._passing_mask()
+        return [bool(self._manual[i]) if i in self._manual else self._auto_accepted(i, keep)
+                for i in range(len(self._rows))]
+
+    def _accepted_tip(self, orig: int, keep) -> str:
+        if orig in self._manual:
+            why = "set by hand"
+        elif not self._base_accepted.get(orig, True):
+            why = "rejected by the fit"
+        elif not keep[orig]:
+            why = "excluded by the filter"
+        else:
+            why = "accepted by the fit"
+        return f"{why} — double-click to accept/reject this particle"
+
+    def _apply_accepted(self) -> None:
+        """Repaint the Accepted column and row colour from the effective verdict."""
+        from PyQt6.QtGui import QColor
+        keep = self._passing_mask()
+        flags = self.accepted_flags()
+        self._accepted_by_index = {i: f for i, f in enumerate(flags)}
+        acc_col = next((c for c, (_l, k, _f) in enumerate(self._columns) if k == "accepted"), None)
+        default = self.palette().text().color()
+        grey = QColor("#aaaaaa")
+        was_sorting = self._tbl.isSortingEnabled()
+        self._tbl.setSortingEnabled(False)         # rows must not move mid-update
+        try:
+            for tr in range(self._tbl.rowCount()):
+                it0 = self._tbl.item(tr, 0)
+                if it0 is None:
+                    continue
+                orig = int(it0.data(Qt.ItemDataRole.UserRole))
+                ok = bool(flags[orig]) if orig < len(flags) else True
+                if acc_col is not None:
+                    it = self._tbl.item(tr, acc_col)
+                    if it is not None:
+                        it.setText("yes" if ok else "no")
+                        it._sort_value = 1.0 if ok else 0.0
+                        it.setToolTip(self._accepted_tip(orig, keep))
+                color = default if ok else grey
+                for c in range(self._tbl.columnCount()):
+                    it = self._tbl.item(tr, c)
+                    if it is not None:
+                        it.setForeground(color)
+        finally:
+            self._tbl.setSortingEnabled(was_sorting)
+        self._update_accepted_label(flags, keep)
+
+    def _update_accepted_label(self, flags, keep) -> None:
+        total = len(self._rows)
+        n_acc = sum(1 for f in flags if f)
+        n_filtered = sum(1 for i in range(total) if i not in self._manual
+                         and self._base_accepted.get(i, True) and not keep[i])
+        notes = []
+        if n_filtered:
+            notes.append(f"{n_filtered} excluded by the filter")
+        if self._manual:
+            notes.append(f"{len(self._manual)} set by hand")
+        text = f"{n_acc} / {total} particle(s) accepted"
+        if notes:
+            text += "   (" + ", ".join(notes) + ")"
+        self._pass_label.setText(text)
+        self._reset_acc.setEnabled(bool(self._manual))
+
+    def _on_double_click(self, item) -> None:
+        """Double-click: toggle the Accepted cell, inspect the particle elsewhere."""
+        if (item is not None and 0 <= item.column() < len(self._columns)
+                and self._columns[item.column()][1] == "accepted"):
+            self._toggle_accepted(item.row())
+            return
+        self._activate()
+
+    def _toggle_accepted(self, view_row: int) -> None:
+        it0 = self._tbl.item(view_row, 0)
+        if it0 is None:
+            return
+        orig = int(it0.data(Qt.ItemDataRole.UserRole))
+        new = not self._accepted_by_index.get(orig, True)
+        if new == self._auto_accepted(orig, self._passing_mask()):
+            self._manual.pop(orig, None)           # back in step with the filter
+        else:
+            self._manual[orig] = new
+        self._apply_accepted()
+
+    def _reset_manual_accepted(self) -> None:
+        if not self._manual:
+            return
+        self._manual.clear()
+        self._apply_accepted()
 
     def _activate(self, *_a) -> None:
         if self._on_show is None:
@@ -1315,11 +1439,12 @@ class ParticleFitTableWindow(QWidget):
             path += ".csv"
         import csv
         keys = [c[1] for c in self._columns]
+        flags = self.accepted_flags()              # filter + hand-set verdicts included
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow([c[0] for c in self._columns])
-            for row in self._rows:
-                writer.writerow([row.get(k) for k in keys])
+            for i, row in enumerate(self._rows):
+                writer.writerow([flags[i] if k == "accepted" else row.get(k) for k in keys])
 
     # ------------------------------------------------- histogram / range filter
     def _build_filter_panel(self):
@@ -1350,17 +1475,14 @@ class ParticleFitTableWindow(QWidget):
         v.addWidget(self._hist_plot)
 
         crow = QHBoxLayout()
-        self._pass_label = QLabel("")
-        self._pass_label.setStyleSheet("font-weight:bold; color:#1a7;")
-        crow.addWidget(self._pass_label)
         crow.addStretch(1)
         clear = QPushButton("Clear filters")
         clear.clicked.connect(self._clear_filters)
         crow.addWidget(clear)
         if self._on_rebuild is not None:
-            reb = QPushButton("Rebuild average from selection")
-            reb.setToolTip("Re-pool only the selected (filtered) particles into a new "
-                           "averaged view. Cheap — reuses the per-particle transforms; no re-fit.")
+            reb = QPushButton("Rebuild average from accepted")
+            reb.setToolTip("Re-pool only the accepted particles into a new averaged "
+                           "view. Cheap — reuses the per-particle transforms; no re-fit.")
             reb.clicked.connect(self._do_rebuild)
             crow.addWidget(reb)
         v.addLayout(crow)
@@ -1422,32 +1544,14 @@ class ParticleFitTableWindow(QWidget):
         return keep
 
     def _refresh_filter_state(self) -> None:
-        from PyQt6.QtGui import QColor
-        keep = self._passing_mask()
-        active = bool(self._filters)
-        self._passing = set(int(i) for i in np.nonzero(keep)[0])
-        n_pass = int(keep.sum())
-        suffix = "" if active else "   (no filter — all particles)"
-        self._pass_label.setText(f"{n_pass} / {len(self._rows)} particle(s) selected{suffix}")
-        default = self.palette().text().color()
-        grey = QColor("#aaaaaa")
-        for tr in range(self._tbl.rowCount()):
-            it0 = self._tbl.item(tr, 0)
-            if it0 is None:
-                continue
-            orig = int(it0.data(Qt.ItemDataRole.UserRole))
-            is_grey = (orig not in self._passing) if active else (not self._accepted_by_index.get(orig, True))
-            color = grey if is_grey else default
-            for c in range(self._tbl.columnCount()):
-                it = self._tbl.item(tr, c)
-                if it is not None:
-                    it.setForeground(color)
+        """The filter changed: it feeds the Accepted column, which owns the display."""
+        self._passing = set(int(i) for i in np.nonzero(self._passing_mask())[0])
+        self._apply_accepted()
 
     def _do_rebuild(self) -> None:
         if self._on_rebuild is None:
             return
-        sel = sorted(int(i) for i in np.nonzero(self._passing_mask())[0])
-        self._on_rebuild(sel)
+        self._on_rebuild([i for i, ok in enumerate(self.accepted_flags()) if ok])
 
 
 def _num(v) -> float:
