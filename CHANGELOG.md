@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.5.0
+## Unreleased
 
 Opens the viewer to per-project code, so an analysis written for one dataset no
 longer has to be built into the application for everyone.
