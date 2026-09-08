@@ -872,6 +872,7 @@ def save_processed(
     image_specs=None,
     project_name: str | None = None,
     zarr_overwrite: str = "replace",
+    log=None,
 ) -> list[Path]:
     """Save *ds* to file; returns the written paths.
 
@@ -894,6 +895,10 @@ def save_processed(
         Existing MINFLUX Viewer Zarr stores use ``"viewer"`` to update only
         processing/viewer groups after raw-data verification, ``"replace"`` to
         replace the complete store, or ``"error"`` to refuse overwriting.
+    log :
+        Optional ``log(message)``. Currently used by the ``.msr`` writer to say
+        which container it produced -- reusing the source measurement (opens in
+        Imspector) or the minimal one (this viewer only).
     """
     include = include or {}
     inc_attrs = bool(include.get("attrs", True))
@@ -955,10 +960,17 @@ def save_processed(
                 name=project_name,
             )
         elif fmt == "msr":
-            # Our custom OBF/MFXDTA writer: a round-trippable .msr that reopens in
-            # this viewer via the MSR reader (raw canonical mfx + any MBM beads).
+            # Our OBF/MFXDTA writer. When the datasets came from a .msr its
+            # container is reused so Imspector still opens the result; the
+            # processing state travels inside each channel's zarr store either
+            # way, making the file a complete MINFLUX Viewer document.
             from ..msr.writer import write_datasets_msr
-            write_datasets_msr(data_path, [ds])
+            members = list(related_datasets or [ds])
+            # ``log`` matters here: which container was used decides whether
+            # the file opens in Imspector, and a silent fallback would look
+            # like a successful Imspector-compatible save.
+            write_datasets_msr(data_path, members, roi_records=roi_records,
+                               log=log)
         elif content == "snapshot":
             columns, dropped = build_snapshot_table(
                 ds, include_attrs=inc_attrs, include_derived=inc_derived,

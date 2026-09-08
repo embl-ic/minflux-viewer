@@ -303,8 +303,13 @@ def channel_from_dataset(ds) -> MsrChannel:
         beads = ds.mbm.get_attr("points")
     return MsrChannel(
         mfx=mfx,
-        name=getattr(getattr(ds, "file", None), "name", None) or "minflux",
-        did=str(meta.get("did") or "") or None,
+        name=str(getattr(ds, "name", "") or "")
+             or getattr(getattr(ds, "file", None), "name", None) or "minflux",
+        # ⚠ The MSR reader stamps ``msr_dataset_did``; reading only ``did`` meant
+        # ``resolved_did`` minted a fresh UUID on every save, so a re-saved .msr
+        # lost the acquisition identity its sidecar matches on -- and the
+        # container transplant could never find the stack to replace.
+        did=str(meta.get("msr_dataset_did") or meta.get("did") or "") or None,
         beads=beads,
         points_by_gri=meta.get("mbm_points_by_gri"),
         used=meta.get("mbm_used"),
@@ -312,7 +317,92 @@ def channel_from_dataset(ds) -> MsrChannel:
     )
 
 
-def write_datasets_msr(path, datasets, *, timestamp: int | None = None) -> Path:
-    """Write one or more viewer datasets (e.g. an overlay group) to a ``.msr``."""
-    channels = [channel_from_dataset(ds) for ds in datasets]
-    return write_minflux_msr(path, channels, timestamp=timestamp)
+def write_datasets_msr(path, datasets, *, timestamp: int | None = None,
+                       viewer_state: bool = True, roi_records=None,
+                       app_version: str = "", log=None) -> Path:
+    """Write one or more viewer datasets (e.g. an overlay group) to a ``.msr``.
+
+    Two containers, chosen by whether a template is available:
+
+    * the datasets all came from one still-present ``.msr`` -> that file's
+      container is reused and only the MINFLUX payloads are swapped, so
+      **Imspector opens the result** (see :mod:`minflux_viewer.msr.transplant`);
+    * otherwise -> the minimal OBF this module writes, which this viewer reads
+      and Imspector refuses, because the measurement object it wants cannot be
+      synthesised.
+
+    Either way the processing state travels inside each channel's zarr store
+    (``viewer/``), so the file is a complete MINFLUX Viewer document.
+    """
+    from .transplant import TransplantError, template_for, transplant_payloads
+    from .viewer_state import build_project_manifest, dataset_viewer_state, write_viewer_state
+
+    datasets = list(datasets)
+    manifest = build_project_manifest(datasets) if viewer_state else {}
+    by_dataset = _roi_records_by_dataset(roi_records)
+
+    def _report(message: str) -> None:
+        if log is not None:
+            log(message)
+
+    channels, stores = [], {}
+    for index, ds in enumerate(datasets):
+        channel = channel_from_dataset(ds)
+        did = channel.resolved_did()
+        store = build_channel_store(channel, did)
+        if viewer_state:
+            write_viewer_state(store, dataset_viewer_state(
+                ds, manifest=manifest, app_version=app_version,
+                roi_records=by_dataset.get(index, by_dataset.get(id(ds), []))))
+        channels.append((channel, did))
+        stores[did] = store
+
+    template = template_for(datasets)
+    if template is not None:
+        payloads = {did: pack_mfxdta(store, timestamp=timestamp)
+                    for did, store in stores.items()}
+        try:
+            info = transplant_payloads(template, payloads, path)
+        except TransplantError as exc:
+            _report(f"[msr] {exc} Falling back to the minimal container, which "
+                    "this viewer reads but Imspector does not.")
+        else:
+            _report(f"[msr] wrote {info['path'].name} from the {template.name} "
+                    f"container ({info['stacks']} stacks, "
+                    f"{len(info['swapped'])} payload(s) replaced) — "
+                    "opens in Imspector.")
+            return info["path"]
+    else:
+        _report("[msr] no source .msr to reuse as a container, so the file "
+                "carries only the MINFLUX stacks: this viewer reads it, "
+                "Imspector does not.")
+
+    stacks = []
+    did_label = []
+    for channel, did in channels:
+        did_label.append({"did": did, "label": channel.name})
+        blob = pack_mfxdta(stores[did], timestamp=timestamp)
+        stacks.append(ObfStack(payload=blob, name=channel.name,
+                               description=channel.name))
+    data = obf_bytes(stacks, file_description=json.dumps(did_label))
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(data)
+    return out
+
+
+def _roi_records_by_dataset(roi_records) -> dict:
+    """Group flat ROI records by the dataset they belong to.
+
+    ``save_roi_records`` stamps ``dataset_id`` ("d000000") for a multi-member
+    save and omits it for a single one, so both shapes have to work.
+    """
+    grouped: dict = {}
+    for record in roi_records or []:
+        raw = str(record.get("dataset_id") or "d000000")
+        try:
+            index = int(raw.lstrip("d") or 0)
+        except ValueError:
+            index = 0
+        grouped.setdefault(index, []).append(record)
+    return grouped

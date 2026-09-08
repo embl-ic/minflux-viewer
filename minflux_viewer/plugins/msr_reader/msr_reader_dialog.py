@@ -6181,6 +6181,25 @@ class MsrReaderDialog(QWidget):
                                 f"[viewer confocal] '{result.attribute_name}' on '{key}': "
                                 f"{result.finite_count:,}/{result.total_count:,} localizations in bounds"
                             )
+                    # Processing state embedded in the file itself, by our own
+                    # .msr writer. Applied LAST of the in-file sources so a saved
+                    # overlay id, LUT or transform wins over the defaults the
+                    # import invents, and before add_dataset so a restored Z
+                    # scaling factor is in place before the post-load chain runs
+                    # its auto-estimate.
+                    try:
+                        from ...msr.viewer_state import (
+                            apply_viewer_state, read_viewer_state,
+                        )
+                        _vs = read_viewer_state(ds.get("zroot"))
+                        if _vs:
+                            _done = apply_viewer_state(dataset, _vs)
+                            if _done:
+                                self.log(f"[viewer] restored saved state for "
+                                         f"'{display_name}': {', '.join(_done)}")
+                    except Exception as _exc:                       # noqa: BLE001
+                        self.log(f"[warn] embedded viewer state in "
+                                 f"'{msr_path.name}' could not be applied: {_exc}")
                     # A recipe sidecar saved beside this .msr (File > Save As >
                     # .msr writes one) was previously written and never read:
                     # `apply_metadata_sidecar` is wired into the load_* functions,
