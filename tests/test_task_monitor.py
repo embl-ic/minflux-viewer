@@ -192,3 +192,77 @@ def test_elapsed_and_progress_are_formatted_readably():
     assert format_elapsed(4000) == "1 h 06 min"
     assert format_progress(None) == "—"            # not measurable, not "0%"
     assert format_progress(0.5) == "50%"
+
+
+def test_memory_monitor_is_a_tab_not_a_separate_window(qtbot):
+    """*Monitor Memory* was merged into the Task Monitor as a third tab.
+
+    Tasks, threads and memory answer the same question about the process, so
+    they are three tabs of one window rather than two Help entries. Clearing
+    ``Qt.Window`` is what makes the embedded monitor an ordinary child widget;
+    without it the tab would be empty and the monitor would still float.
+    """
+    from minflux_viewer.ui.memory_monitor import MemoryMonitor
+    from minflux_viewer.ui.task_monitor import TaskMonitor
+
+    window = TaskMonitor(None, registry=TaskRegistry())
+    qtbot.addWidget(window)
+
+    assert window.windowTitle() == "Task Monitor"
+    tabs = [window._tabs.tabText(i) for i in range(window._tabs.count())]
+    assert tabs == ["Tasks", "Threads", "Memory"]
+
+    memory = window._memory
+    assert isinstance(memory, MemoryMonitor)
+    assert not memory.isWindow()          # a page, not a floating window
+    assert memory.parent() is not None
+    # The class is still usable on its own; only the menu entry went away.
+    assert MemoryMonitor.TAG == "memory_monitor"
+
+
+def test_embedded_memory_polling_follows_the_window(qtbot):
+    """A closed monitor must not keep sampling psutil every second.
+
+    The embedded widget is a child, so its own ``closeEvent`` never runs when
+    the Task Monitor is closed — the parent has to stop its timer.
+    """
+    from minflux_viewer.ui.task_monitor import TaskMonitor
+
+    window = TaskMonitor(None, registry=TaskRegistry())
+    qtbot.addWidget(window)
+    timer = getattr(window._memory, "_timer", None)
+    if timer is None:
+        pytest.skip("psutil unavailable, so the memory tab has no timer")
+
+    window.show()
+    qtbot.waitExposed(window)
+    assert timer.isActive()
+
+    window.close()
+    assert not timer.isActive()
+
+    window.show()
+    qtbot.waitExposed(window)
+    assert timer.isActive()
+
+
+def test_help_menu_has_one_monitor_entry_named_task_monitor(qtbot):
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.main_window import MainWindow
+
+    state = AppState()
+    state.prefs.setdefault("file", {})["check_updates_on_startup"] = False
+    state.save_prefs = lambda: None
+    window = MainWindow(state)
+    qtbot.addWidget(window)
+    try:
+        texts = [
+            action.text()
+            for action in window._ui.menuHelp.actions()
+            if not action.isSeparator()
+        ]
+        assert "Task Monitor" in texts
+        assert not any("emory" in text for text in texts)
+        assert not hasattr(window, "_show_memory_monitor")
+    finally:
+        window.close()
