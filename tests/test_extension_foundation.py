@@ -22,7 +22,7 @@ import pytest
 def test_api_version_is_declared():
     from minflux_viewer import api
 
-    assert api.__api_version__ == "1.1"
+    assert api.__api_version__ == "1.2"
 
 
 def test_every_namespace_exists_and_is_importable():

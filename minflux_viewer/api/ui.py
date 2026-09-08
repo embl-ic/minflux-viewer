@@ -9,6 +9,7 @@ violate the project's window-ownership rules by accident.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -213,6 +214,45 @@ class Ui(Namespace):
             self._parent_widget(), caption, directory or self._default_folder(),
         )
         return path or None
+
+    def drop_files(self, paths: Any) -> None:
+        """Replay files/folders being dropped on the main viewer window.
+
+        This is the interactive routing primitive emitted by the Macro
+        Recorder for a physical OS drag-and-drop. It deliberately follows the
+        same broad route as the gesture: an MSR opens the MSR Reader, a filter
+        preset opens the Filter dialog, and an unsupported or unreadable path
+        is reported in the Log. Consequently this call is ``GUI_ONLY`` in a
+        recording and is omitted from Silent mode; a successful import's
+        resolved, batch-capable load is a separate semantic recorder step.
+
+        The drop attempt exists even when routing later fails. This is useful
+        both for diagnosing a recording and for faithfully replaying an
+        interactive session without synthesizing mouse events.
+        """
+        if isinstance(paths, (str, bytes, os.PathLike)):
+            raw_paths = [paths]
+        else:
+            try:
+                raw_paths = list(paths)
+            except TypeError:
+                raise ApiError(
+                    "drop_files() needs a path or an iterable of paths."
+                ) from None
+        normalized: list[str] = []
+        for index, path in enumerate(raw_paths):
+            try:
+                text = os.fsdecode(os.fspath(path))
+            except TypeError:
+                raise ApiError(
+                    f"drop_files() path {index + 1} is not path-like: "
+                    f"{type(path).__name__}."
+                ) from None
+            if text.strip():
+                normalized.append(text)
+        if not normalized:
+            raise ApiError("drop_files() needs at least one non-empty local path.")
+        self._main_window().route_paths(normalized)
 
     # -- internal ------------------------------------------------------------
 

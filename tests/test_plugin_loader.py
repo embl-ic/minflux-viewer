@@ -238,7 +238,7 @@ def test_a_plugin_needing_a_newer_api_is_refused_with_both_versions(roots):
            body="def run(ctx): pass\n",
            extra_manifest='\n[requires]\nmfv_api = ">=99.0"\n')
     found = loader.scan_root(root)[0]
-    assert "99.0" in found.error and "1.1" in found.error
+    assert "99.0" in found.error and "1.2" in found.error
 
 
 def test_a_plugin_needing_a_missing_package_says_where_to_get_it(roots):
