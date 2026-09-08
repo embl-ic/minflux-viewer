@@ -8,8 +8,8 @@ import traceback
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import QEvent, Qt, QStringListModel, QTimer
-from PyQt6.QtGui import QFont, QFontDatabase, QTextCursor, QTextOption
+from PyQt6.QtCore import QEvent, QRect, QSize, QStringListModel, Qt, QTimer
+from PyQt6.QtGui import QFont, QFontDatabase, QPainter, QPalette, QTextCursor, QTextOption
 from PyQt6.QtWidgets import (
     QCompleter,
     QDialog,
@@ -28,7 +28,6 @@ from PyQt6.QtWidgets import (
 from ..scripting import install_runtime_module
 from .console_window import ConsoleWindow
 
-
 _DEFAULT_SCRIPT = """import mfv
 import numpy as np
 
@@ -42,7 +41,7 @@ if ds is not None:
 """
 
 
-_API_HELP = """MINFLUX Viewer scripting API 1.1
+_API_HELP = """MINFLUX Viewer scripting API 1.2
 
 Scripts run inside the current viewer session. The runtime module `mfv` is
 bound to the live application state, and is the same object a plugin receives
@@ -97,6 +96,7 @@ mfv.ui
   log(msg, level) | status(text, fraction)
   ask({"radius_nm": 25.0}) -> dict or None if cancelled
   choose_file() | choose_files() | choose_dir()
+  drop_files(paths)  # replay an interactive OS file drop
   info(msg) | warn(msg) | error(msg) | confirm(msg) -> bool
 
 mfv.run   -- long work belongs here, not on the GUI thread
@@ -227,6 +227,7 @@ _COMPLETION_MAP = {
         "choose_file()",
         "choose_files()",
         "choose_dir()",
+        "drop_files()",
     ],
     "mfv.run": [
         "background()",
@@ -297,6 +298,32 @@ _COMPLETION_MAP = {
 }
 
 
+def _is_failure_exit(exc: SystemExit) -> bool:
+    """Whether a ``SystemExit`` means the script failed.
+
+    ``sys.exit()``, ``sys.exit(0)`` and ``raise SystemExit("reason")`` are all
+    ordinary early stops -- Python only treats a *non-zero integer* code as a
+    failing exit, and a string code is a message, not a status.
+    """
+    code = exc.code
+    return isinstance(code, int) and not isinstance(code, bool) and code != 0
+
+
+def _stopped_message(exc: SystemExit) -> str:
+    """The one line the output pane shows for a self-stopped script."""
+    code = exc.code
+    if code is None or code is False or code == 0:
+        return ">>> Stopped\n"
+    if _is_failure_exit(exc):
+        return f">>> Stopped with exit code {code}\n"
+    return f">>> Stopped: {code}\n"
+
+
+def _project_scripts_directory() -> Path:
+    """Return the ``scripts`` directory beside the application package."""
+    return Path(__file__).resolve().parents[2] / "scripts"
+
+
 class _ScriptOutputStream(io.TextIOBase):
     def __init__(self, callback, *, is_err: bool = False) -> None:
         self._callback = callback
@@ -309,6 +336,125 @@ class _ScriptOutputStream(io.TextIOBase):
 
     def flush(self) -> None:
         return None
+
+
+class _LineNumberArea(QWidget):
+    """Paint surface kept beside a :class:`_ScriptCodeEdit` viewport."""
+
+    def __init__(self, editor: _ScriptCodeEdit) -> None:
+        super().__init__(editor)
+        self._editor = editor
+        self.setObjectName("scriptLineNumberArea")
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        return QSize(self._editor.line_number_area_width(), 0)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        self._editor.paint_line_number_area(event)
+
+
+class _ScriptCodeEdit(QPlainTextEdit):
+    """Plain-text code editor with a scrolling, active-line-aware gutter."""
+
+    _RIGHT_PADDING = 7
+    _LEFT_PADDING = 5
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._line_number_area = _LineNumberArea(self)
+
+        self.blockCountChanged.connect(self._update_line_number_area_width)
+        self.updateRequest.connect(self._update_line_number_area)
+        self.cursorPositionChanged.connect(self._line_number_area.update)
+        self._update_line_number_area_width()
+
+    def line_number_area_width(self) -> int:
+        """Return the gutter width required for the largest visible number."""
+        digits = len(str(max(1, self.blockCount())))
+        return (
+            self._LEFT_PADDING
+            + self.fontMetrics().horizontalAdvance("9") * digits
+            + self._RIGHT_PADDING
+        )
+
+    def _update_line_number_area_width(self, _block_count: int = 0) -> None:
+        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+
+    def _update_line_number_area(self, rect: QRect, dy: int) -> None:
+        if dy:
+            self._line_number_area.scroll(0, dy)
+        else:
+            self._line_number_area.update(
+                0,
+                rect.y(),
+                self._line_number_area.width(),
+                rect.height(),
+            )
+
+        if rect.contains(self.viewport().rect()):
+            self._update_line_number_area_width()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        contents = self.contentsRect()
+        self._line_number_area.setGeometry(
+            QRect(
+                contents.left(),
+                contents.top(),
+                self.line_number_area_width(),
+                contents.height(),
+            )
+        )
+
+    def paint_line_number_area(self, event) -> None:
+        """Draw visible block numbers and emphasize the cursor's line."""
+        painter = QPainter(self._line_number_area)
+        palette = self.palette()
+        painter.fillRect(
+            event.rect(),
+            palette.color(QPalette.ColorRole.AlternateBase),
+        )
+
+        current_block = self.textCursor().blockNumber()
+        normal_font = self.font()
+        active_font = QFont(normal_font)
+        active_font.setBold(True)
+
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = round(
+            self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
+        )
+        bottom = top + round(self.blockBoundingRect(block).height())
+
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                is_current = block_number == current_block
+                painter.setFont(active_font if is_current else normal_font)
+                painter.setPen(
+                    palette.color(
+                        QPalette.ColorRole.Text
+                        if is_current
+                        else QPalette.ColorRole.PlaceholderText
+                    )
+                )
+                painter.drawText(
+                    QRect(
+                        self._LEFT_PADDING,
+                        top,
+                        self._line_number_area.width()
+                        - self._LEFT_PADDING
+                        - self._RIGHT_PADDING,
+                        max(1, bottom - top),
+                    ),
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    str(block_number + 1),
+                )
+
+            block = block.next()
+            top = bottom
+            bottom = top + round(self.blockBoundingRect(block).height())
+            block_number += 1
 
 
 class ScriptEditorWindow(QWidget):
@@ -356,11 +502,12 @@ class ScriptEditorWindow(QWidget):
         root.addLayout(toolbar)
 
         splitter = QSplitter(Qt.Orientation.Vertical, self)
-        self.editor = QPlainTextEdit(self)
+        self.editor = _ScriptCodeEdit(self)
         self.editor.setPlainText(_DEFAULT_SCRIPT)
         self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.editor.document().setDefaultTextOption(QTextOption(Qt.AlignmentFlag.AlignLeft))
         self.editor.setFont(self._mono_font(10))
+        self.editor._update_line_number_area_width()
         splitter.addWidget(self.editor)
 
         output_wrap = QWidget(self)
@@ -527,6 +674,14 @@ class ScriptEditorWindow(QWidget):
         try:
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 exec(compile(code, str(self._namespace["__file__"]), "exec"), self._namespace)
+        except SystemExit as exc:
+            # `sys.exit()` / `raise SystemExit` is the documented way for a
+            # script to stop itself early -- a cancelled parameter dialog is the
+            # usual reason. It is not a failure, so it must not be reported as a
+            # traceback: that reads as a crash for something the user asked for.
+            self._append_output(_stopped_message(exc), is_err=_is_failure_exit(exc))
+        except KeyboardInterrupt:
+            self._append_output(">>> Interrupted\n", is_err=False)
         except BaseException:
             self._append_output(traceback.format_exc(), is_err=True)
         else:
@@ -536,7 +691,7 @@ class ScriptEditorWindow(QWidget):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Python script",
-            str(self._path.parent if self._path else Path.home()),
+            str(self._path.parent if self._path else _project_scripts_directory()),
             "Python scripts (*.py);;All files (*)",
         )
         if not path:
