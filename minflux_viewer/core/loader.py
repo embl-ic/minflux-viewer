@@ -1895,6 +1895,16 @@ def apply_metadata_recipe(ds: "MinfluxDataset", meta: dict) -> list[str]:
     if did and not ds.metadata.get("msr_dataset_did"):
         ds.metadata["msr_dataset_did"] = did
 
+    # Overlay membership, recorded silently: it says this file is one of a set,
+    # which is provenance until something acts on it. Regrouping is a change to
+    # what the user sees, so the UI asks first -- applying it here would rebuild
+    # an overlay behind their back on every load.
+    from .overlay_save import DATASET_OVERLAY_KEY, overlay_from_metadata
+
+    block = overlay_from_metadata(meta)
+    if block:
+        ds.metadata[DATASET_OVERLAY_KEY] = block
+
     # Acquisition provenance: restored before anything else because it is a
     # plain recorded fact — nothing re-derives it, and a data file alone
     # (.csv/.mat/.npy) cannot carry it.

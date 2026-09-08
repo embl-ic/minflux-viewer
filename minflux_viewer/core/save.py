@@ -34,6 +34,7 @@ import numpy as np
 from .acquisition_time import acquisition_metadata
 
 from . import formats as _formats
+from . import overlay_save as _ov_save
 
 #: Tag identifying the metadata sidecar JSON (a dict; filter/data JSON are lists).
 METADATA_JSON_MARKER = "minflux_viewer_metadata"
@@ -420,7 +421,7 @@ def roi_records_to_json(records) -> list[dict]:
 
 def build_metadata(ds, *, data_filename: str | None = None,
                    content: str = "raw", snapshot: dict | None = None,
-                   roi_records=None) -> dict:
+                   roi_records=None, overlay: dict | None = None) -> dict:
     """Build the processing-recipe sidecar: source, gating, calibration, filters.
 
     For ``content="raw"`` (default) nothing is baked — ``z_scaling_factor``/``transform``/
@@ -469,6 +470,13 @@ def build_metadata(ds, *, data_filename: str | None = None,
             roi_records if roi_records is not None
             else ds.metadata.get("minflux_viewer_roi_records")),
     }
+    # One-dataset-per-file formats cannot hold an overlay, so a saved group is
+    # several files made a set again by this block: the siblings named by
+    # FILENAME, so the folder can be moved or renamed as a whole. An addition to
+    # the sidecar -- a reader that does not know the key ignores it, and
+    # identity still comes from the same three signals.
+    if overlay:
+        meta[_ov_save.OVERLAY_KEY] = overlay
     if content == "snapshot":
         # Everything is baked into the data; reload must NOT re-apply it.
         meta["calibration"]["z_scaling_factor"] = 1.0
@@ -914,6 +922,7 @@ def save_processed(
     image_specs=None,
     project_name: str | None = None,
     zarr_overwrite: str = "replace",
+    overlay: dict | None = None,
     log=None,
 ) -> list[Path]:
     """Save *ds* to file; returns the written paths.
@@ -937,6 +946,11 @@ def save_processed(
         Existing MINFLUX Viewer Zarr stores use ``"viewer"`` to update only
         processing/viewer groups after raw-data verification, ``"replace"`` to
         replace the complete store, or ``"error"`` to refuse overwriting.
+    overlay :
+        The ``overlay`` block for a member of a saved group
+        (:mod:`minflux_viewer.core.overlay_save`), recorded in the sidecar so
+        the set can be recognised again. Ignored by the self-contained formats,
+        which hold every channel themselves.
     log :
         Optional ``log(message)``. Currently used by the ``.msr`` writer to say
         which container it produced -- reusing the source measurement (opens in
@@ -1040,7 +1054,7 @@ def save_processed(
         sidecar.write_text(
             json.dumps(build_metadata(ds, data_filename=data_filename,
                                       content=content, snapshot=snapshot_meta,
-                                      roi_records=roi_records),
+                                      roi_records=roi_records, overlay=overlay),
                        indent=2, ensure_ascii=False),
             encoding="utf-8",
         )

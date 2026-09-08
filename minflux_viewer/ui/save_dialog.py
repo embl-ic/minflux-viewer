@@ -136,6 +136,7 @@ class SaveProcessedDataDialog(QDialog):
         self,
         dataset_name: str = "",
         *,
+        members=None,
         file_backed: bool = False,
         source_path: str | Path | None = None,
         default_dir: str | Path | None = None,
@@ -147,6 +148,11 @@ class SaveProcessedDataDialog(QDialog):
         self.setMinimumWidth(520)
 
         self._file_backed = bool(file_backed)
+        # Every channel of the overlay this dataset belongs to, or just it. The
+        # one-dataset-per-file formats write a group as several files, so the
+        # dialog has to name each of them and the folder they share.
+        self._members = [str(name or "") for name in (members or [])]
+        self._is_group = len(self._members) > 1
         self._chosen_path: Path | None = None
         # Zarr forces "derived" and "recipe" on (it stores both internally).
         # These remember what the user had, so switching away from Zarr restores
@@ -169,7 +175,14 @@ class SaveProcessedDataDialog(QDialog):
             ["raw", "snapshot"]
 
         root = QVBoxLayout(self)
-        if dataset_name:
+        if self._is_group:
+            root.addWidget(QLabel(
+                f"Dataset: <i>{len(self._members)} channels of one overlay</i>"))
+            for member in self._members:
+                item = QLabel(f"        <b>{member}</b>")
+                item.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                root.addWidget(item)
+        elif dataset_name:
             root.addWidget(QLabel(f"Dataset: <b>{dataset_name}</b>"))
 
         # ── content ──────────────────────────────────────────────────
@@ -211,7 +224,17 @@ class SaveProcessedDataDialog(QDialog):
         name_row.addWidget(QLabel("Name:"))
         stem = Path(dataset_name or "dataset").stem or "dataset"
         self._name = QLineEdit(f"{stem}_export")
-        name_row.addWidget(self._name, 1)
+        # A group writes one file per channel, so the single Name field becomes
+        # one per channel, pre-filled with the dataset's own name -- the file is
+        # then recognisable as that channel rather than as "…_export_2".
+        self._member_names: list[QLineEdit] = []
+        if self._is_group:
+            self._name.setVisible(False)
+            first = QLineEdit(self._members[0])
+            self._member_names.append(first)
+            name_row.addWidget(first, 1)
+        else:
+            name_row.addWidget(self._name, 1)
         self._format = QComboBox()
         for key in self._formats:
             self._format.addItem(_FORMAT_LABELS[key], key)
@@ -220,15 +243,34 @@ class SaveProcessedDataDialog(QDialog):
         self._format.currentIndexChanged.connect(lambda *_: self._sync_location())
         name_row.addWidget(self._format)
         pbox.addLayout(name_row)
+        for member in self._members[1:]:
+            extra_row = QHBoxLayout()
+            spacer = QLabel("")
+            spacer.setFixedWidth(self._name.fontMetrics().horizontalAdvance("Name:"))
+            extra_row.addWidget(spacer)
+            field = QLineEdit(member)
+            self._member_names.append(field)
+            extra_row.addWidget(field, 1)
+            pbox.addLayout(extra_row)
 
         browse_row = QHBoxLayout()
         self._loc_lbl = QLabel(f"Location: {self._default_dir}")
         self._loc_lbl.setWordWrap(True)
+        # A group goes into a folder of its own, and the folder is the user's to
+        # name -- there is no overlay "number" worth inventing one from.
+        self._folder_edit = QLineEdit(str(self._default_dir))
+        self._folder_edit.setToolTip(
+            "The folder the channels are written into. It is created if it does "
+            "not exist; each channel becomes one data file plus its metadata.")
+        browse_row.addWidget(QLabel("Location:"))
+        browse_row.addWidget(self._folder_edit, 1)
         browse_row.addWidget(self._loc_lbl, 1)
         browse = QPushButton("Save as…")
         browse.clicked.connect(self._on_browse)
         browse_row.addWidget(browse)
         pbox.addLayout(browse_row)
+        self._folder_edit.setVisible(self._is_group)
+        self._loc_lbl.setVisible(not self._is_group)
         self._msr_note = QLabel(
             "<span style='color:gray'>.msr uses a custom writer — reopens in this "
             "viewer via the MSR reader; may not open in Abberior Imspector. Saves "
@@ -468,6 +510,18 @@ class SaveProcessedDataDialog(QDialog):
         else:
             name = self._name.text().strip() or "dataset"
             data_path = self._default_dir / f"{name}{ext}"
+        if self._is_group:
+            # A group is a folder plus one stem per channel, not a single path;
+            # the caller writes it through core.overlay_save.save_overlay_group.
+            return {"data_path": None, "fmt": fmt, "content": content,
+                    "include": include, "filter_mode": filter_mode,
+                    "csv_mode": ("custom" if self.is_custom_csv()
+                                 else ("canonical" if fmt == "csv" else None)),
+                    "group_folder": Path(self._folder_edit.text().strip()
+                                         or self._default_dir),
+                    "group_names": [field.text().strip() or name
+                                    for field, name in zip(self._member_names,
+                                                           self._members)]}
         # ``csv_mode`` is the caller's cue to open the column picker instead of
         # calling save_processed: a custom table is written by a different
         # function (core.save.write_spreadsheet_csv) and takes no content /

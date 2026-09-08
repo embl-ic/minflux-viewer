@@ -7382,8 +7382,16 @@ class MainWindow(QMainWindow):
         file_backed = src.is_file() and src.suffix.lower() in (".mat", ".npy", ".json")
         default_dir = self._state.prefs["file"].get("default_folder", str(Path.home()))
 
+        # A one-dataset-per-file format cannot hold an overlay, so the dialog
+        # offers the whole group: one file per channel in a folder of its own.
+        members = self._overlay_members_for(ds)
+        if len(members) > 1:
+            from ..core.overlay_save import default_group_name
+
+            default_dir = str(Path(default_dir) / default_group_name(members))
         dlg = SaveProcessedDataDialog(
             getattr(ds, "name", ""),
+            members=[getattr(member, "name", "") for member in members],
             file_backed=file_backed,
             source_path=src if file_backed else None,
             default_dir=default_dir,
@@ -7396,6 +7404,9 @@ class MainWindow(QMainWindow):
         if opts.get("fmt") == save_dialog_module.METADATA_ONLY:
             # Not a data format: it writes the recipe alone, and asks where.
             self.save_metadata_only(ds)
+            return
+        if opts.get("group_folder") is not None:
+            self._save_overlay_group(members, opts)
             return
         if opts.get("csv_mode") == "custom":
             # A custom table is written by a different function that takes no
@@ -7450,6 +7461,147 @@ class MainWindow(QMainWindow):
             ),
         )
 
+    # ------------------------------------------------------------------
+    # Recognising a saved overlay again
+    # ------------------------------------------------------------------
+    def _schedule_overlay_regroup(self) -> None:
+        """Ask about regrouping once the batch has settled.
+
+        Loading is asynchronous, so the channels of a dropped folder arrive one
+        at a time; checking on each arrival would ask about the first two before
+        the third had landed. The timer coalesces the batch into one question.
+        """
+        timer = getattr(self, "_regroup_timer", None)
+        if timer is None:
+            from PyQt6.QtCore import QTimer
+
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._offer_overlay_regroup)
+            self._regroup_timer = timer
+        timer.start(400)
+
+    def _offer_overlay_regroup(self) -> None:
+        """Offer to rebuild an overlay whose channels are all loaded."""
+        if self._is_shutting_down:
+            return
+        from ..core.overlay_save import group_saved_datasets, resolve_siblings
+
+        for group_id, found in group_saved_datasets(self._state.datasets).items():
+            if len(found) < 2:
+                continue
+            if group_id in getattr(self, "_regroup_declined", set()):
+                continue
+            names = [str(getattr(ds, "name", "") or "") for _i, ds, _b in found]
+            block = found[0][2]
+            total = int(block.get("member_count") or len(found))
+            listing = "\n".join(f"    • {name}" for name in names)
+            missing = total - len(found)
+            tail = (f"\n\n{missing} further channel(s) of this set are not open."
+                    if missing > 0 else "")
+            answer = QMessageBox.question(
+                self, "Overlay found",
+                f"These {len(found)} datasets were saved together as one "
+                f"overlay:\n\n{listing}{tail}\n\nCombine them as a "
+                "multi-channel overlay again?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                # Remembered for the session: asking again on the next load of
+                # the same set would be nagging about a settled decision.
+                self._regroup_declined = getattr(self, "_regroup_declined", set())
+                self._regroup_declined.add(group_id)
+                self._state.log(
+                    f"Kept {len(found)} datasets separate; they were saved as "
+                    "one overlay.")
+                continue
+            self._regroup_saved_overlay(found)
+
+    def _regroup_saved_overlay(self, found) -> None:
+        """Put the loaded members back into one overlay, in their saved order."""
+        import uuid
+
+        from ..core.overlay import overlay_color_cycle
+        from ..core.overlay_save import DATASET_OVERLAY_KEY
+
+        # A fresh id per session: the saved one identified the set inside the
+        # folder it was written to, not across sessions or against whatever else
+        # is already loaded.
+        group = f"saved:{uuid.uuid4()}"
+        ordered = sorted(found, key=lambda item: int(item[2].get("member_index") or 0))
+        luts = overlay_color_cycle(self._state.prefs)
+        for position, (_index, ds, block) in enumerate(ordered):
+            member = None
+            members = block.get("members") or []
+            at = int(block.get("member_index") or position)
+            if 0 <= at < len(members):
+                member = members[at]
+            ds.state["overlay_id"] = group
+            ds.state["render_group_id"] = group
+            ds.state["overlay_index"] = position
+            ds.state["overlay_order"] = position
+            lut = (member or {}).get("lut") or luts[position % len(luts)]
+            ds.state.setdefault("overlay_lut", lut)
+            ds.state.setdefault("render_channel_lut", lut)
+            # The block has done its job; leaving it would offer the same
+            # regrouping again after any later load.
+            ds.metadata.pop(DATASET_OVERLAY_KEY, None)
+        names = ", ".join(str(getattr(ds, "name", "")) for _i, ds, _b in ordered)
+        self._state.log(f"Combined {len(ordered)} saved channels as an overlay: {names}")
+        self._refresh_overlay_windows()
+        anchor = ordered[0][0]
+        self._show_render(anchor)
+
+    def _save_overlay_group(self, members, opts) -> None:
+        """Write every channel of an overlay into one folder, off the UI thread.
+
+        Each channel becomes a data file plus its own metadata sidecar, and each
+        sidecar names the siblings, so dropping the folder back on the window
+        can recognise the set.
+        """
+        from ..core.overlay_save import save_overlay_group
+
+        folder = Path(opts["group_folder"])
+        fmt = opts["fmt"]
+        if fmt == "csv" and opts.get("csv_mode") == "custom":
+            # The custom table asks its own per-column questions, which cannot
+            # be answered once for several channels.
+            QMessageBox.information(
+                self, "Save / export data",
+                "A custom .csv table chooses its columns per dataset, so it "
+                "cannot write a whole overlay at once.\n\nTick 'Write the "
+                "canonical table instead' under More options, or save each "
+                "channel on its own.")
+            return
+        rois = {index: self.save_roi_records(member)
+                for index, member in enumerate(members)}
+        names, content = list(opts["group_names"]), opts.get("content", "raw")
+        include, filter_mode = opts.get("include"), opts.get("filter_mode", "flag")
+
+        def work(report):
+            report(f"Writing {len(members)} channel(s) to {folder.name}")
+            written = save_overlay_group(
+                members, folder, fmt, names=names, content=content,
+                include=include, filter_mode=filter_mode,
+                roi_records_for=rois.get)
+            report(f"Wrote {folder.name}")
+            return written
+
+        self._start_file_save(
+            work, name=folder.name,
+            on_done=lambda written, _f=folder, _n=len(members): self._on_group_saved(
+                written, _f, _n))
+
+    def _on_group_saved(self, written, folder, channels: int) -> None:
+        if self._is_shutting_down:
+            return
+        self._state.log(
+            f"Saved {channels} overlay channel(s) to {folder}: "
+            + ", ".join(sorted(p.name for p in written)))
+        self._status_label.setText(
+            f"Saved {channels} channels to {folder.name}.")
+
     def _on_processed_saved(self, written, action: str, name: str, ds) -> None:
         if self._is_shutting_down:
             return
@@ -7469,8 +7621,21 @@ class MainWindow(QMainWindow):
     # AppState signal handlers
     # ------------------------------------------------------------------
 
+    def _maybe_offer_regroup(self, idx: int) -> None:
+        from ..core.overlay_save import dataset_overlay_block
+
+        try:
+            ds = self._state.datasets[idx]
+        except (IndexError, TypeError):
+            return
+        if dataset_overlay_block(ds):
+            self._schedule_overlay_regroup()
+
     def _on_dataset_added(self, idx: int) -> None:
         ds  = self._state.datasets[idx]
+        # A file saved as part of an overlay says so in its recipe; offering to
+        # rebuild the set waits for the rest of the batch to arrive.
+        self._maybe_offer_regroup(idx)
         # A recipe loaded while its data was not yet open applies here, or is
         # discarded -- its lifetime is exactly one dataset load.
         pending = self._take_pending_metadata(ds)
@@ -8951,6 +9116,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._state.save_prefs()
+        # A pending regroup question would fire into a closing window.
+        regroup = getattr(self, "_regroup_timer", None)
+        if regroup is not None:
+            regroup.stop()
         self._close_all_child_windows()
         self._drain_background_tasks()
         close_paraview = bool(
