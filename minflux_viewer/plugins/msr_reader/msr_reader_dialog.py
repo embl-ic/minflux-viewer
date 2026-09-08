@@ -5982,6 +5982,7 @@ class MsrReaderDialog(QWidget):
     def _on_open_in_viewer(self):
         MFSTATE = self._msr_state()
         from ...core.loader import load_from_mfx_array
+        from ...msr.import_stamp import stamp_msr_dataset
         from ...core.overlay import overlay_color_cycle
 
         if self._state is None:
@@ -6093,7 +6094,6 @@ class MsrReaderDialog(QWidget):
                         recent_path=str(msr_path),
                         prefs=self._state.prefs,
                     )
-                    from ...core.dataset import AttributeComponent
                     if not individual:
                         dataset.state["overlay_id"] = render_group_id
                         dataset.state["render_group_id"] = render_group_id
@@ -6101,64 +6101,18 @@ class MsrReaderDialog(QWidget):
                         dataset.state["overlay_order"] = len(imported_indices) + 1
                         dataset.state["overlay_lut"] = overlay_cycle[len(imported_indices) % len(overlay_cycle)]
                         dataset.state["render_channel_lut"] = dataset.state["overlay_lut"]
-                    dataset.metadata["msr_source_path"] = str(msr_path)
-                    dataset.metadata["msr_dataset_key"] = key
-                    dataset.metadata["msr_dataset_name"] = key
-                    dataset.metadata["msr_dataset_did"] = str(ds.get("did") or "")
-                    # Record the acquisition sequence so the photon-bearing
-                    # iterations (used by aggregation and per-dimension CRLB) can
-                    # be detected from the beam scale rather than a heuristic.
-                    try:
-                        from ...msr.io import read_zarr_attrs
-                        from ...core.mfx_sequence import extract_sequence_from_zattrs
-                        from ...core.acquisition_time import (
-                            acquisition_date_from_zattrs, stamp_dataset_acquisition,
-                        )
-                        _zroot = ds.get("zroot")
-                        if _zroot is not None:
-                            from ...core.minflux_zarr import capture_native_zarr_metadata
-
-                            # Retain the small native attrs + search-grid payload
-                            # needed by the self-contained Zarr v2 writer. Do not
-                            # retain the full in-memory source store (hundreds of MB).
-                            capture_native_zarr_metadata(dataset, _zroot)
-                            _mfx_attrs = read_zarr_attrs(_zroot, "mfx")
-                            _seq = extract_sequence_from_zattrs(_mfx_attrs)
-                            if _seq:
-                                dataset.metadata["mfx_sequence"] = _seq
-                            # The instrument's own acquisition timestamp: m2410
-                            # 'acquisition_date' (ISO 8601 + offset) or the m2205
-                            # 'tms' epoch. NOT the MFXDTA container timestamp,
-                            # which is the file's save time.
-                            stamp_dataset_acquisition(
-                                dataset, acquisition_date_from_zattrs(_mfx_attrs))
-                    except Exception:
-                        pass
+                    # Provenance + the small native payloads that travel with a
+                    # dataset. Shared with the direct open of a .msr we wrote
+                    # (msr/quick_open.py), so the two import routes cannot drift.
+                    _pbg, _used = (self._mbm_naming_metadata(key, ds.get("zroot"))
+                                   if key in MFSTATE.mbm_map else ({}, []))
+                    stamp_msr_dataset(
+                        dataset, entry=ds, msr_path=msr_path, key=key,
+                        mbm_points=MFSTATE.mbm_map.get(key),
+                        mbm_points_by_gri=_pbg, mbm_used=_used, log=self.log)
                     if not individual:
                         dataset.metadata["overlay_id"] = render_group_id
                         dataset.metadata["overlay_index"] = overlay_index
-                    # The data version (m2410/m2205/legacy) is detected from the
-                    # mfx structure by load_from_mfx_array — keep it. Record the
-                    # obf/mfxdta CONTAINER separately (it's the transport, not the
-                    # data version), and ensure the dataset reads as MINFLUX.
-                    src_fmt = ds.get("source_format")
-                    if src_fmt:
-                        dataset.metadata["source_format"] = src_fmt
-                        dataset.metadata["is_minflux"] = True
-                        dataset.metadata["has_real_tid"] = True
-                        if ds.get("mfxdta_version") is not None:
-                            dataset.metadata["mfxdta_version"] = ds.get("mfxdta_version")
-                    if key in MFSTATE.mbm_map:
-                        dataset.mbm = AttributeComponent({"points": MFSTATE.mbm_map[key]})
-                        dataset.metadata["mbm_points"] = MFSTATE.mbm_map[key]
-                        # Carry the bead NAMING/selection metadata too, not just the
-                        # points: without it a loaded dataset can only fall back to
-                        # bare gri ids, losing the R-IDs and which beads were used.
-                        pbg, used = self._mbm_naming_metadata(key, ds.get("zroot"))
-                        if pbg:
-                            dataset.metadata["mbm_points_by_gri"] = pbg
-                        if used:
-                            dataset.metadata["mbm_used"] = used
                     if key in viewer_transforms:
                         transform = viewer_transforms[key]
                         dataset.state["overlay_transform"] = transform

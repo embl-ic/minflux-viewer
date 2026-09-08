@@ -1407,8 +1407,71 @@ class MainWindow(QMainWindow):
         *Datasets / Fields included…* and *Open in MINFLUX viewer*)."""
         if not msr_path:
             return
+        # ...except one we wrote ourselves. The reader exists to ask which
+        # datasets to import, how to align the channels and whether to map a
+        # confocal image; our own file already answers all three, and the saved
+        # state would override the answers anyway. The reader stays reachable
+        # from the Plugins menu for these files.
+        from ..msr.quick_open import is_viewer_msr
+
+        if is_viewer_msr(msr_path):
+            self._open_viewer_msr(msr_path)
+            return
         from .msr_import_dialog import open_msr
         open_msr(msr_path, self._state, parent=self)
+
+    def _open_viewer_msr(self, msr_path: str) -> None:
+        """Open a ``.msr`` this application wrote, restoring its session."""
+        from ..msr.quick_open import load_viewer_msr
+
+        name = Path(msr_path).name
+        self._state.log(f"Opening '{name}': MINFLUX Viewer .msr, "
+                        "restoring its saved processing state.")
+        prefs = self._state.prefs
+
+        def work(report):
+            report(f"Reading {name}")
+            datasets = load_viewer_msr(msr_path, prefs=prefs)
+            report(f"Read {name}")
+            return datasets
+
+        task = BackgroundTask(work, description=f"Opening {name}", category="load")
+        task.signals.stage.connect(lambda text: self._state.status_progress(text))
+        task.signals.done.connect(
+            lambda datasets, _n=name, _p=msr_path: self._on_viewer_msr_loaded(
+                datasets, _n, _p))
+        task.signals.failed.connect(
+            lambda message, _n=name: self._on_msr_open_failed(_n, message))
+        self._begin_file_io(task)
+
+    def _on_viewer_msr_loaded(self, datasets, name: str, path: str) -> None:
+        if self._is_shutting_down:
+            return
+        if not datasets:
+            self._state.log(f"'{name}' holds no MINFLUX datasets.", "WARN")
+            return
+        # An overlay saved to .msr keeps every channel in the one file, so the
+        # group is rebuilt here rather than left as unrelated datasets. The ids
+        # are re-minted per open: the saved one identified the group inside the
+        # file, not across sessions.
+        group = f"msr:{Path(path).resolve()}"
+        multi = len(datasets) > 1
+        for order, ds in enumerate(datasets):
+            if multi and ds.state.get("overlay_id"):
+                ds.state["overlay_id"] = group
+                ds.state["render_group_id"] = group
+                ds.state.setdefault("overlay_index", order)
+                ds.state.setdefault("overlay_order", order)
+            self._state.add_dataset(ds)
+        self._record_recent(path)
+        self._status_label.setText(
+            f"Opened {name}: {len(datasets)} dataset(s), saved state restored.")
+
+    def _on_msr_open_failed(self, name: str, message: str) -> None:
+        self._state.log(f"Failed to open '{name}': {message}", "ERROR")
+        if not self._is_shutting_down:
+            QMessageBox.critical(self, "Open failed",
+                                 f"Could not open {name}:\n{message}")
 
     # ------------------------------------------------------------------
     # Sample data (Data Simulator) — File › Open Sample Data presets

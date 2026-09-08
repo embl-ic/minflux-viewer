@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 
+#: The one group in a .msr that is ours rather than Abberior's.
+VIEWER_PATH = "viewer"
+
 PATH_DESCRIPTIONS = {
     "mfx": {
         "dtype": "Structured MINFLUX raw localization table",
@@ -15,6 +18,21 @@ PATH_DESCRIPTIONS = {
     "grd/search_0/points": {
         "dtype": "Structured grid-search point table",
         "description": "Grid-search point table describing the searched grid positions used during MINFLUX search grid acquisition.",
+    },
+    # Written by THIS application, not by Imspector -- a .msr we saved carries
+    # its processing state here so the file is a complete viewer document as
+    # well as a measurement. Described so it does not read as an unknown
+    # Abberior parameter in the reader tree.
+    "viewer": {
+        "dtype": "MINFLUX Viewer processing state",
+        "description": (
+            "MINFLUX Viewer processing state, written by this application when "
+            "the file was saved, not part of the Abberior format. Holds this "
+            "channel's view and processing settings (filters, ROIs, overlay "
+            "membership and LUT, transform, Z scaling factor) plus the manifest "
+            "of the channels it was saved with, so re-opening restores the "
+            "session. Imspector ignores it."
+        ),
     },
     "grd/mbm/points/gri": {"description": "Grid reference."},
     "grd/mbm/points/xyz": {"description": "Bead position in metres."},
@@ -89,6 +107,10 @@ def describe_path(path: str, *, is_array: bool = False, dtype: Any = None) -> st
     field_desc = FIELD_DESCRIPTIONS.get(leaf)
     if field_desc:
         return field_desc
+    if path == VIEWER_PATH or path.startswith(VIEWER_PATH + "/"):
+        # Anything under our own group is ours, whatever it is called; pointing
+        # the user at Abberior documentation for it would be actively wrong.
+        return PATH_DESCRIPTIONS[VIEWER_PATH]["description"]
     if path:
         return "Unknown parameter, consider checking Abberior documentation."
     if is_array:
