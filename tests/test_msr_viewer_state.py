@@ -203,3 +203,80 @@ def test_identity_transplant_reproduces_the_source_byte_for_byte(tmp_path):
     out = tmp_path / "identity.msr"
     transplant_payloads(SAMPLE, {}, out)
     assert out.read_bytes() == SAMPLE.read_bytes()
+
+
+# ------------------------------------------------------- opening our own .msr
+def test_the_viewer_group_is_described_rather_than_called_unknown():
+    """It is ours, so pointing the user at Abberior documentation is wrong."""
+    from minflux_viewer.msr.descriptions import VIEWER_PATH, describe_dtype, describe_path
+
+    text = describe_path(VIEWER_PATH)
+    assert "MINFLUX Viewer" in text and "Abberior documentation" not in text
+    assert describe_dtype(VIEWER_PATH, None) == "MINFLUX Viewer processing state"
+    # anything below it is ours too, whatever it is called
+    assert describe_path(VIEWER_PATH + "/state/anything") == text
+    assert "Abberior documentation" in describe_path("something_else")
+
+
+def test_detection_is_a_scan_not_a_parse(tmp_path):
+    """Deciding the route must not cost a full parse of a multi-GB acquisition."""
+    from minflux_viewer.msr.quick_open import is_viewer_msr
+    from minflux_viewer.msr.viewer_state import STATE_FORMAT
+
+    plain = tmp_path / "plain.msr"
+    plain.write_bytes(b"OMAS_BF\n\xff\xff" + b"\x00" * 4096)
+    assert not is_viewer_msr(plain)
+
+    ours = tmp_path / "ours.msr"
+    ours.write_bytes(b"\x00" * 1024 + STATE_FORMAT.encode() + b"\x00" * 1024)
+    assert is_viewer_msr(ours)
+
+    assert not is_viewer_msr(tmp_path / "absent.msr")       # unreadable is not ours
+    empty = tmp_path / "empty.msr"
+    empty.write_bytes(b"")
+    assert not is_viewer_msr(empty)                          # mmap of 0 bytes
+
+
+@pytest.mark.skipif(not SAMPLE.is_file(), reason="reference .msr not present")
+def test_a_vendor_msr_still_goes_to_the_reader():
+    """Only a file carrying our own marker may bypass the import dialog."""
+    from minflux_viewer.msr.quick_open import is_viewer_msr
+
+    assert not is_viewer_msr(SAMPLE)
+
+
+@pytest.mark.skipif(not SAMPLE.is_file(), reason="reference .msr not present")
+def test_direct_open_restores_the_session(tmp_path):
+    from minflux_viewer.core.loader import load_from_mfx_array
+    from minflux_viewer.core.save import save_processed
+    from minflux_viewer.msr.msr_parser import parse_general
+    from minflux_viewer.msr.quick_open import is_viewer_msr, load_viewer_msr
+
+    parsed = parse_general(str(SAMPLE), str(tmp_path), log=lambda *_a: None)
+    datasets = []
+    for i, entry in enumerate(parsed["datasets"]):
+        ds = load_from_mfx_array(entry["_mfx"], name=entry["display_name"],
+                                 prefs={"data": {}})
+        ds.metadata["msr_source_path"] = str(SAMPLE)
+        ds.metadata["msr_dataset_did"] = entry.get("did")
+        ds.state.update({"overlay_id": "g", "overlay_index": i,
+                         "overlay_lut": ["Red", "Green", "Blue"][i]})
+        ds.set_z_scaling_factor(0.67, source="test")
+        datasets.append(ds)
+
+    out = tmp_path / "session.msr"
+    save_processed(datasets[0], data_path=out, fmt="msr", content="raw",
+                   include={"attrs": True, "derived": False, "recipe": False},
+                   related_datasets=datasets)
+    assert is_viewer_msr(out)
+
+    back = load_viewer_msr(out, prefs={"data": {}})
+    assert len(back) == 3
+    for i, ds in enumerate(back):
+        assert ds.state["overlay_index"] == i
+        assert ds.state["overlay_lut"] == ["Red", "Green", "Blue"][i]
+        assert abs(ds.cali.z_scaling_factor - 0.67) < 1e-9
+        # provenance the shared stamper records
+        assert ds.metadata["msr_source_path"] == str(out)
+        assert ds.metadata["msr_dataset_did"] == datasets[i].metadata["msr_dataset_did"]
+        assert ds.metadata.get("is_minflux") is True
