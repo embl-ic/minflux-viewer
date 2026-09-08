@@ -6922,10 +6922,18 @@ class MainWindow(QMainWindow):
         zarr_overwrite = self._zarr_overwrite_mode(path) if fmt == "zarr" else "replace"
         if zarr_overwrite is None:
             return
+        # An overlay saved to .msr writes every channel into the one file, and
+        # the writer reuses the source measurement's container when it can --
+        # which is what makes the result open in Imspector.
+        if fmt == "msr":
+            zarr_context = dict(zarr_context)
+            zarr_context.setdefault("related_datasets",
+                                    self._overlay_members_for(ds))
         kwargs = dict(
             data_path=path, fmt=fmt, content="raw",
             include={"attrs": True, "derived": False, "recipe": True},
-            filter_mode="flag", zarr_overwrite=zarr_overwrite, **zarr_context,
+            filter_mode="flag", zarr_overwrite=zarr_overwrite,
+            log=self._state.log, **zarr_context,
         )
         action = "Updated processing in " if zarr_overwrite == "viewer" else "Saved "
         name = Path(path).name
@@ -7012,6 +7020,22 @@ class MainWindow(QMainWindow):
             }
             records.append(payload)
         return records
+
+    def _overlay_members_for(self, ds) -> list:
+        """Every channel of *ds*'s overlay, in order, or just *ds*.
+
+        A ``.msr`` holds all channels in one file, so saving one channel of an
+        overlay has to write the group -- otherwise re-opening it would silently
+        give back a single channel.
+        """
+        from ..core.overlay import overlay_members
+
+        try:
+            idx = next(i for i, item in enumerate(self._state.datasets) if item is ds)
+        except StopIteration:
+            return [ds]
+        pairs = overlay_members(self._state, idx)
+        return [member for _i, member in pairs] if len(pairs) > 1 else [ds]
 
     def _zarr_save_context(self, ds) -> dict:
         """Overlay members, portable ROI geometry and linked MSR images."""
@@ -7252,6 +7276,8 @@ class MainWindow(QMainWindow):
         zarr_context = (self._zarr_save_context(ds)
                         if opts.get("fmt") in {"zarr", "zarr_zip"}
                         else {"roi_records": self.save_roi_records(ds)})
+        if opts.get("fmt") == "msr":
+            zarr_context.setdefault("related_datasets", self._overlay_members_for(ds))
         zarr_overwrite = (
             self._zarr_overwrite_mode(opts["data_path"])
             if opts.get("fmt") == "zarr"
@@ -7276,6 +7302,7 @@ class MainWindow(QMainWindow):
                 include=opts.get("include"),
                 filter_mode=opts.get("filter_mode", "flag"),
                 zarr_overwrite=zarr_overwrite,
+                log=self._state.log,
                 **zarr_context,
             )
             report(f"Wrote {name}")
