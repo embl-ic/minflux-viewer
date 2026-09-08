@@ -173,9 +173,13 @@ class BeadsDriftDialog(QDialog):
     """
 
     def __init__(self, datasets: list[dict], *, unchecked_gris=None, parent=None,
-                 info_mode: bool = False) -> None:
+                 info_mode: bool = False, drift_correction=None) -> None:
         super().__init__(parent)
         self._info_mode = bool(info_mode)
+        # Callback(selected_gris) run by the "Drift correction..." button. The
+        # dialog only knows the bead traces it plots; the owner holds the mfx
+        # arrays the correction rewrites, so it owns the action.
+        self._drift_correction = drift_correction
         self.setWindowTitle(
             "Bead drift" if self._info_mode else "Beads drift — manual selection")
         self.setModal(False)
@@ -263,6 +267,19 @@ class BeadsDriftDialog(QDialog):
                 "Reset to the default selection (common beads checked, single-dataset "
                 "beads unchecked) and restore all plot views.")
             reset_btn.clicked.connect(self._reset)
+            self._drift_btn = buttons.addButton(
+                "Drift correction with selected beads",
+                QDialogButtonBox.ButtonRole.ActionRole)
+            self._drift_btn.setToolTip(
+                "Recompute the drift from the checked beads alone and preview it.\n"
+                "Corrected positions are the uncorrected 'lnc' minus that drift;\n"
+                "nothing is written until you confirm in the preview.")
+            self._drift_btn.clicked.connect(self._run_drift_correction)
+            if self._drift_correction is None:
+                self._drift_btn.setEnabled(False)
+                self._drift_btn.setToolTip(
+                    "Drift correction is only available from the MSR reader, "
+                    "which holds the localization data this would rewrite.")
             apply_btn = buttons.addButton("Apply", QDialogButtonBox.ButtonRole.AcceptRole)
             apply_btn.setToolTip("Use the checked beads for alignment and close.")
             cancel_btn = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
@@ -502,6 +519,22 @@ class BeadsDriftDialog(QDialog):
         sel = sorted(self.selected_gris())
         ids = ", ".join(str(g) for g in sel) if sel else "(none)"
         self._selection_label.setText(f"Selected bead IDs: {ids}  —  {len(sel)} bead(s)")
+        btn = getattr(self, "_drift_btn", None)
+        if btn is not None and self._drift_correction is not None:
+            # One bead defines a drift trace perfectly well (it is just noisier);
+            # zero does not.
+            btn.setEnabled(bool(sel))
+
+    def _run_drift_correction(self) -> None:
+        """Hand the current selection to the owner's drift-correction flow.
+
+        This dialog stays open: the correction is a separate decision made in the
+        preview, and the user will often want to come back and try another set.
+        """
+        selected = sorted(self.selected_gris())
+        if not selected or self._drift_correction is None:
+            return
+        self._drift_correction(selected)
 
     # ------------------------------------------------------------------
     def selected_gris(self) -> set[int]:
