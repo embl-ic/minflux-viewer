@@ -795,6 +795,36 @@ class _AnisotropyDialog(QDialog):
         super().closeEvent(event)
 
 
+def _plot_color(color) -> "QColor":
+    """Normalize any colour spec these plot helpers are handed to a ``QColor``.
+
+    ⚠ They used to build their translucent fill by **string concatenation**
+    (``color + "66"``), which silently required every caller to pass a hex
+    string. When ``localization_precision._precision_color`` moved to the global
+    colour registry it began returning a ``QColor``, so ``QColor + str`` raised
+    ``TypeError`` and the CRLB / StdDev histogram groups were replaced by their
+    "Histogram report could not be created" fallback label. Accepting the three
+    forms that actually occur — hex string, ``QColor``, RGB(A) tuple — is what
+    stops the alpha from being a property of the caller's colour *encoding*.
+    """
+    from PyQt6.QtGui import QColor
+
+    if isinstance(color, QColor):
+        return QColor(color)
+    if isinstance(color, (tuple, list)):
+        return QColor(*color)
+    return QColor(str(color))
+
+
+def _fill_brush(color, alpha: int):
+    """A translucent fill brush of *color* at *alpha* (0-255)."""
+    import pyqtgraph as pg
+
+    c = _plot_color(color)
+    c.setAlpha(int(alpha))
+    return pg.mkBrush(c)
+
+
 def _anisotropy_hist_plot(axis: str, fit: SizeFitResult, color: str, mode: int):
     import pyqtgraph as pg
 
@@ -812,8 +842,8 @@ def _anisotropy_hist_plot(axis: str, fit: SizeFitResult, color: str, mode: int):
         fit.counts,
         stepMode=False,
         fillLevel=0,
-        brush=pg.mkBrush(color + "66"),
-        pen=pg.mkPen(color, width=1.2),
+        brush=_fill_brush(color, 0x66),
+        pen=pg.mkPen(_plot_color(color), width=1.2),
     )
     _plot_gaussian_fit(pw, fit, color)
     _plot_size_marker(pw, fit, mode, color, axis)
@@ -911,9 +941,9 @@ def _plot_gaussian_fit(pw, fit: SizeFitResult, color: str, *, name: str | None =
     y = _gauss1(x, *fit.fit_params)
     pw.plot(
         x, y,
-        pen=pg.mkPen(color, width=2.0),
+        pen=pg.mkPen(_plot_color(color), width=2.0),
         fillLevel=0.0 if fill else None,
-        brush=pg.mkBrush(color + "22") if fill else None,
+        brush=_fill_brush(color, 0x22) if fill else None,
         name=name,
     )
 
@@ -981,7 +1011,7 @@ def _value_hist_plot(
     pw.plot(
         centers, counts,
         stepMode=False, fillLevel=0,
-        brush=pg.mkBrush(color + "66"), pen=pg.mkPen(color, width=1.2),
+        brush=_fill_brush(color, 0x66), pen=pg.mkPen(_plot_color(color), width=1.2),
     )
     if marker is not None and np.isfinite(marker):
         line = pg.InfiniteLine(
