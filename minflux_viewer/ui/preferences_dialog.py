@@ -126,6 +126,18 @@ from . import save_dialog as _save_dialog
 # appear: ticking one here could not put it back in any menu.
 _EXPORT_FORMATS = [(spec.extensions[0], spec.key)
                    for spec in _formats.offered_save_formats() if spec.key != "msr"]
+
+#: How the Preferences page groups the offered formats: one row per
+#: recommendation, sharing the sentence beneath it. ``.zarr`` and ``.msr`` stand
+#: alone because each says something the others do not.
+_EXPORT_FORMAT_ROWS = (("zarr",), ("mat", "npy"), ("json", "csv"), ("msr",))
+#: Preferences is the one place that spells out the storage library and the
+#: vendor; the menus keep the shorter names.
+_PREF_FORMAT_NAMES = {
+    "zarr": "Zarr v2 (.zarr)",
+    "csv": "Spreadsheet (.csv)",
+    "msr": "Abberior Imspector (.msr)",
+}
 #: A fresh installation's ticked set. ``msr`` is absent: the writer is
 #: reverse-engineered, so it is opt-in.
 _EXPORT_FORMAT_DEFAULTS = _formats.default_save_formats()
@@ -598,33 +610,40 @@ class PreferencesDialog(QDialog):
         # "When saving/exporting data file:" section — defaults that shrink the
         # per-save dialog.
         root.addSpacing(6)
-        root.addWidget(self._section_label("When saving/exporting data file:"))
+        root.addWidget(self._section_label("When saving / exporting data file:"))
 
-        fmt_row = QHBoxLayout()
-        fmt_row.addSpacing(18)
-        fmt_row.addWidget(QLabel("Enabled formats:"))
+        # Each format with what it is for, rather than a row of bare extensions:
+        # this is where a user decides between them, so it is where the reasons
+        # belong. Names and blurbs both come from the format registry, so they
+        # cannot drift from the menus. Formats that share a recommendation are
+        # paired on one row and share the sentence under it.
+        label_row = QHBoxLayout()
+        label_row.addSpacing(18)
+        label_row.addWidget(QLabel("Enabled formats:"))
+        label_row.addStretch()
+        root.addLayout(label_row)
         self._export_format_checks: dict[str, QCheckBox] = {}
-        for label, key in _EXPORT_FORMATS:
-            cb = QCheckBox(label)
-            self._export_format_checks[key] = cb
-            fmt_row.addWidget(cb)
-        fmt_row.addStretch()
-        root.addLayout(fmt_row)
-
-        # .msr on its own row (custom writer) with a disclaimer.
-        msr_row = QHBoxLayout()
-        msr_row.addSpacing(18)
-        msr_cb = QCheckBox(".msr")
-        self._export_format_checks["msr"] = msr_cb
-        msr_row.addWidget(msr_cb)
-        msr_note = QLabel(
-            "(off by default: our .msr writer is reverse-engineered, so the "
-            "container details are not authoritative. It reopens in this viewer "
-            "but may not open in Abberior Imspector.)")
-        msr_note.setStyleSheet("color: gray; font-size: 11px;")
-        msr_note.setWordWrap(True)
-        msr_row.addWidget(msr_note, 1)
-        root.addLayout(msr_row)
+        for group in _EXPORT_FORMAT_ROWS:
+            row = QHBoxLayout()
+            row.addSpacing(36)
+            for key in group:
+                spec = _formats.spec_for(key)
+                cb = QCheckBox(_PREF_FORMAT_NAMES.get(key, spec.label))
+                cb.setToolTip(spec.blurb or spec.label)
+                self._export_format_checks[key] = cb
+                row.addWidget(cb)
+                row.addSpacing(18)
+            row.addStretch()
+            root.addLayout(row)
+            blurb = _formats.spec_for(group[0]).blurb
+            if blurb:
+                note = QLabel(blurb)
+                note.setStyleSheet("color: gray; font-size: 11px;")
+                note.setWordWrap(True)
+                note_row = QHBoxLayout()
+                note_row.addSpacing(56)
+                note_row.addWidget(note, 1)
+                root.addLayout(note_row)
 
         content_row = QHBoxLayout()
         content_row.addSpacing(18)

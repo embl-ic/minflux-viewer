@@ -457,7 +457,15 @@ class MainWindow(QMainWindow):
         self.menuSaveAs = QMenu("Save As", self)
         self.actionSaveAsMinflux = QAction("MINFLUX data formats (.mat; .npy; .json)", self)
         self.actionSaveAsMinflux.triggered.connect(self._save_as_minflux_formats)
-        self.actionSaveAsMsr = QAction("MINFLUX .msr file (experimental)", self)
+        self.actionSaveAsMsr = QAction("Imspector file (.msr)", self)
+        self.actionSaveAsMsr.setToolTip(
+            "Save as an Abberior .msr.\n\n"
+            "When this data came from a .msr, that file's container is reused, "
+            "so the result opens in Imspector and carries this application's "
+            "processing inside it.\n\n"
+            "Data with no .msr origin is still written, but only this "
+            "application can open it — the Log says which was produced."
+        )
         self.actionSaveAsMsr.triggered.connect(
             lambda _checked=False: self._save_as_format("msr", "MINFLUX .msr file")
         )
@@ -471,7 +479,7 @@ class MainWindow(QMainWindow):
             "and by Save / export data > More options."
         )
         self.actionSaveAsSpreadsheet.triggered.connect(self._save_as_spreadsheet)
-        self.actionSaveAsZarr = QAction("Zarr (.zarr v2) format", self)
+        self.actionSaveAsZarr = QAction("Viewer format (.zarr)", self)
         self.actionSaveAsZarr.setToolTip(
             "Save a self-contained MINFLUX Viewer Zarr v2 dataset. If the active "
             "dataset is an overlay, every channel, transform and LUT is bundled; "
@@ -878,9 +886,9 @@ class MainWindow(QMainWindow):
         u.menuOpenRecent.setTitle("Open Recent")
         self.menuSaveAs.setTitle("Save As")
         self.actionSaveAsMinflux.setText("MINFLUX data formats (.mat; .npy; .json)")
-        self.actionSaveAsMsr.setText("MINFLUX .msr file (experimental)")
+        self.actionSaveAsMsr.setText("Imspector file (.msr)")
         self.actionSaveAsSpreadsheet.setText("Custom table (.csv)...")
-        self.actionSaveAsZarr.setText("Zarr (.zarr v2) format")
+        self.actionSaveAsZarr.setText("Viewer format (.zarr)")
         self.actionSaveAsZarrZip.setText("Zarr (.zarr.zip v2) single file")
         self.actionSaveAsHdf5.setText("HDF5...")
         self.actionSaveAsOmeTiff.setText("OME-TIFF...")
