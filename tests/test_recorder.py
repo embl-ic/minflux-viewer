@@ -372,3 +372,105 @@ def test_two_different_analyses_are_both_kept() -> None:
                     gui_class=GuiClass.GUI_FREE)
     recorder.stop()
     assert len(_dedup(recorder.steps())) == 2
+
+
+# ---------------------------------------------------------------------------
+# physical file drops -- attempt and semantic outcome are separate events
+# ---------------------------------------------------------------------------
+
+def test_physical_drop_is_recorded_before_even_an_invalid_path_is_routed() -> None:
+    from minflux_viewer.ui.main_window import MainWindow
+
+    recorder = Recorder(ProcessingJournal())
+    recorder.start()
+    routed = []
+
+    class Url:
+        def toLocalFile(self):
+            return r"Z:\missing\broken.unsupported"
+
+    class Mime:
+        def urls(self):
+            return [Url()]
+
+    class Event:
+        accepted = False
+
+        def mimeData(self):
+            return Mime()
+
+        def acceptProposedAction(self):
+            self.accepted = True
+
+        def ignore(self):
+            raise AssertionError("a local drop must reach the router")
+
+    class Window:
+        _state = SimpleNamespace(recorder=recorder)
+        _record_file_drop = MainWindow._record_file_drop
+
+        def route_paths(self, paths):
+            # The attempt is durable before format detection or parsing begins.
+            assert len(recorder.steps()) == 1
+            routed.extend(paths)
+
+    event = Event()
+    MainWindow.dropEvent(Window(), event)
+
+    assert event.accepted is True
+    assert routed == [r"Z:\missing\broken.unsupported"]
+    step = recorder.steps()[0]
+    assert step.command == "fileDrop"
+    assert step.gui_class is GuiClass.GUI_ONLY
+    assert step.details["origin"] == "os_drag_drop"
+    full = recorder.script(header=False)
+    assert "mfv.ui.drop_files(" in full and "broken.unsupported" in full
+    assert "broken.unsupported" not in recorder.script(silent=True, header=False)
+
+
+def test_drag_entry_accepts_an_unsupported_local_file_for_reporting() -> None:
+    from minflux_viewer.ui.main_window import MainWindow
+
+    class Url:
+        def toLocalFile(self):
+            return r"C:\data\unknown.blob"
+
+    class Mime:
+        def hasUrls(self):
+            return True
+
+        def urls(self):
+            return [Url()]
+
+    class Event:
+        accepted = False
+        ignored = False
+
+        def mimeData(self):
+            return Mime()
+
+        def acceptProposedAction(self):
+            self.accepted = True
+
+        def ignore(self):
+            self.ignored = True
+
+    event = Event()
+    MainWindow.dragEnterEvent(object(), event)
+    assert event.accepted is True and event.ignored is False
+
+
+def test_ui_drop_files_replays_through_the_public_batch_router(qapp, tmp_path) -> None:
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.scripting import ScriptError
+
+    state = AppState()
+    routed = []
+    state.mfv.bind_main_window(SimpleNamespace(route_paths=routed.extend))
+
+    path = tmp_path / "not-necessarily-readable.msr"
+    state.mfv.ui.drop_files(path)
+    assert routed == [str(path)]
+
+    with pytest.raises(ScriptError, match="at least one"):
+        state.mfv.ui.drop_files([])

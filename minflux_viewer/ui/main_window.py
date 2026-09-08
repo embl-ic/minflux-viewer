@@ -7884,10 +7884,11 @@ class MainWindow(QMainWindow):
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
-            # Accept if at least one URL is a supported file or a directory
+            # Accept every local path, not only a known suffix. The router can
+            # content-sniff mislabeled files and, importantly, reports an
+            # unsupported/unreadable drop instead of making the gesture vanish.
             for url in event.mimeData().urls():
-                p = Path(url.toLocalFile())
-                if p.is_dir() or p.suffix.lower() in _SUPPORTED_EXTS:
+                if url.toLocalFile():
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -7896,15 +7897,47 @@ class MainWindow(QMainWindow):
         # Must accept dragMoveEvent too, or Qt cancels the drop mid-drag
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                p = Path(url.toLocalFile())
-                if p.is_dir() or p.suffix.lower() in _SUPPORTED_EXTS:
+                if url.toLocalFile():
                     event.acceptProposedAction()
                     return
         event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:
-        self.route_paths([url.toLocalFile() for url in event.mimeData().urls()])
+        paths = []
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path:
+                paths.append(path)
+        if not paths:
+            event.ignore()
+            return
+        self._record_file_drop(paths)
+        self.route_paths(paths)
         event.acceptProposedAction()
+
+    def _record_file_drop(self, paths) -> None:
+        """Record the OS drop attempt before parsing/routing can fail.
+
+        A literal drop is interactive rather than a semantic data load. The
+        generated call replays the same router and is therefore GUI_ONLY; a
+        successful loader separately records the normalized load outcome.
+        """
+        recorder = getattr(self._state, "recorder", None)
+        if recorder is None or not recorder.enabled:
+            return
+        normalized = [str(path) for path in paths if str(path or "").strip()]
+        if not normalized:
+            return
+        noun = "path" if len(normalized) == 1 else "paths"
+        recorder.append(
+            f"Dropped {len(normalized)} local {noun} on the main window",
+            code=f"mfv.ui.drop_files({normalized!r})",
+            gui_class="gui_only",
+            command="fileDrop",
+            category="other",
+            paths=normalized,
+            origin="os_drag_drop",
+        )
 
     def route_paths(self, paths) -> None:
         """Open a whole batch of paths — a multi-file drop, or the command line.

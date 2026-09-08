@@ -44,7 +44,7 @@ from __future__ import annotations
 #:   major — a signature was removed or changed incompatibly
 #:   minor — a namespace, function or defaulted keyword was added
 #: Declared by plugins as ``requires.mfv_api = ">=1.0,<2.0"``.
-__api_version__ = "1.1"
+__api_version__ = "1.2"
 
 #: Namespace module names, in documentation order. The facade builds one bound
 #: instance of each; the plugin loader and the API reference both read this.
