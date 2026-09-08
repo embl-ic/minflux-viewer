@@ -5332,9 +5332,69 @@ class MsrReaderDialog(QWidget):
                 "The currently parsed .msr file has no MBM/bead data to display.\n\n"
                 "Parse a modern multi-channel .msr that contains 'grd/mbm/points'.")
             return
-        dlg = BeadsDriftDialog(bead_data, unchecked_gris=self._bead_unchecked_gris, parent=self)
+        dlg = BeadsDriftDialog(bead_data, unchecked_gris=self._bead_unchecked_gris, parent=self,
+                               drift_correction=self._run_bead_drift_correction)
         dlg.accepted.connect(lambda d=dlg, data=bead_data: self._apply_beads_drift_selection(d, data))
         self._show_child_dialog(dlg)
+
+    def _drift_correction_entries(self) -> list[dict]:
+        """``{"name", "mfx", "points"}`` per parsed dataset that has bead data.
+
+        Both arrays are the **live** parsed objects, not copies: ``mfx_map``
+        values and the dataset entries' ``_mfx`` are the same array, so an
+        in-place correction reaches everything downstream, including
+        "Open in MINFLUX viewer".
+        """
+        MFSTATE = self._msr_state()
+        mfx_map = getattr(MFSTATE, "mfx_map", {}) or {}
+        mbm_map = getattr(MFSTATE, "mbm_map", {}) or {}
+        entries = []
+        for d in (self.parsed or {}).get("datasets") or []:
+            name = d.get("display_name") or d.get("did") or "dataset"
+            mfx, points = mfx_map.get(name), mbm_map.get(name)
+            if mfx is None or points is None or not getattr(points, "size", 0):
+                continue
+            entries.append({"name": name, "mfx": mfx, "points": points})
+        return entries
+
+    def _run_bead_drift_correction(self, gris) -> None:
+        """Preview, and on confirmation apply, a drift correction from *gris*.
+
+        Rewrites ``loc`` from the preserved ``lnc``, so it is idempotent and can
+        be re-run with a different bead selection without reloading the file.
+        """
+        from .drift_correction_dialog import DriftCorrectionDialog
+
+        entries = self._drift_correction_entries()
+        if not entries:
+            QMessageBox.information(
+                self, "Drift correction",
+                "No parsed dataset has both localization and MBM bead data, so "
+                "there is nothing to correct.")
+            return
+        dlg = DriftCorrectionDialog(entries, gris, parent=self)
+        try:
+            accepted = dlg.exec() == QDialog.DialogCode.Accepted
+            applied = list(dlg.applied)
+        finally:
+            # Parented to the reader, so without this it would linger (with its
+            # plots) for as long as the reader is open.
+            dlg.deleteLater()
+        if not accepted:
+            self.log("[drift] correction cancelled — no coordinates changed.")
+            return
+        ids = ", ".join(str(int(g)) for g in sorted(gris))
+        self.log(f"[drift] correction applied from {len(list(gris))} bead(s): {ids}")
+        for res in applied:
+            if res.get("error"):
+                self.log(f"[drift] {res.get('name')}: FAILED — {res['error']}")
+            else:
+                self.log(
+                    f"[drift] {res.get('name')}: 'loc' rewritten for "
+                    f"{res['n_rows']:,} localizations "
+                    f"(median shift {res['median_shift_nm']:.2f} nm, "
+                    f"max {res['max_shift_nm']:.2f} nm)")
+        self.log("[drift] 'Open in MINFLUX viewer' will now load the corrected coordinates.")
 
     def _apply_beads_drift_selection(self, dlg, bead_data) -> None:
         try:
