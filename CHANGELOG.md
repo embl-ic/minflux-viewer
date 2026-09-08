@@ -1,52 +1,43 @@
 # Changelog
 
-## Unreleased
+## v0.4.3
 
-Opens the viewer to per-project code, so an analysis written for one dataset no
-longer has to be built into the application for everyone.
+Adds a scripting and plugin layer, post-hoc drift correction, and simplifies
+saving.
 
-- **Python scripting API `mfv` 1.0** — a published, versioned surface for
-  scripts and plugins: datasets and attributes, ROIs, results tables, plots,
-  the viewer windows, dialogs, background work and the processing journal.
-  Everything the old Script Editor API offered still works.
-- **Plugins from your own folder** — drop a `.py` file or a folder with a
-  `plugin.toml` into the plugin directory and it appears in the Plugins menu.
-  The folder is per-user, so your tools are yours.
-- **Results tables and plots for scripts** — a shared sortable table with Save
-  CSV, and plot windows with multiple series, labels, legends, log axes and
-  PNG export.
-- **Use libraries the viewer does not ship** — point Preferences at an existing
-  Python environment, or install a package into the application's own managed
-  folder. Preferences ▸ Plugin.
-- The bundled Python now carries its complete standard library, so plugin and
-  script code can rely on it.
+### Scripting and plugins
+
+- **Python scripting API `mfv`** — datasets and attributes, ROIs, results
+  tables, plots, the viewer windows, dialogs and background work, for your own
+  scripts and plugins.
+- **Plugins from your own folder** — drop a `.py` file, or a folder with a
+  `plugin.toml`, into the per-user plugin directory and it appears in the
+  Plugins menu.
 - **Macro Recorder** (*Plugins > Macro Recorder*) — records what you do in the
   viewer and turns it into a Python script you can edit and re-run.
+- **Results tables and plots** for scripts, with CSV and PNG export.
+- **Use libraries the viewer does not ship** — Preferences ▸ Plugin.
 
 ### Data
 
-- **Post-hoc drift correction from MBM beads** — pick the beads you trust in
+- **Post-hoc drift correction from MBM beads** — choose the beads you trust in
   the MSR reader's *Show beads drift* and re-derive the correction from them.
-  Re-runnable: it always starts from the uncorrected positions the file keeps.
-- **Particle fit table: the *Accepted* column is editable.** Double-click a
-  cell to accept or reject that particle; anything the range filter excludes
-  now reads *no* as well. What the column shows is what *Save CSV* writes and
-  what *Rebuild average* pools.
+- **Particle fit table: the *Accepted* column is editable**, and anything the
+  range filter excludes now reads *no*. What the column shows is what *Save
+  CSV* writes and what *Rebuild average* pools.
 
 ### Saving
 
-- **File > Save is one step**: it always writes the MINFLUX Viewer Zarr v2
-  store and asks only where. Other formats live under *File > Save As* and in
-  the Dataset Manager's right-click *Save / export data*.
-- ***Save As* tidied** — Zarr, MINFLUX data formats, custom table, `.msr`. The
-  `.zarr.zip` and OME-TIFF entries were withdrawn; TIFF export stays in the
-  render view's own *Export to TIFF…*.
-- **Clearer wording** for the save options, and the same words in Preferences.
+- **File > Save always writes the MINFLUX Viewer Zarr v2 store** and asks only
+  where. Other formats are under *File > Save As* and the Dataset Manager's
+  right-click *Save / export data*.
+- *Save As* tidied, and clearer wording for the save options.
 
 ### Other
 
-- **Task Monitor** now shows memory usage as a third tab, replacing the
-  separate *Monitor Memory* window.
+- **Task Monitor** now shows memory usage, replacing the separate *Monitor
+  Memory* window.
+- macOS builds get a real application icon.
 - Various bug fixes.
 
 ## v0.4.2
