@@ -319,9 +319,15 @@ def test_zarr_rejects_baked_snapshot_mode(tmp_path):
 
 
 def test_file_menu_zarr_action_uses_new_save_backend():
+    """The menu says "Viewer format" -- which storage library is underneath is
+    not something a user has to care about, and Preferences is the one place
+    that spells out Zarr v2."""
+    from minflux_viewer.core import formats as F
+
     source = Path("minflux_viewer/ui/main_window.py").read_text(encoding="utf-8")
-    assert 'QAction("Zarr (.zarr v2) format"' in source
+    assert 'QAction("Viewer format (.zarr)"' in source
     assert 'self._save_as_format("zarr", "Zarr v2")' in source
+    assert F.spec_for("zarr").label == "Viewer format (.zarr)"
 
 
 def test_existing_zarr_prompt_offers_processing_replace_and_cancel(tmp_path, monkeypatch):

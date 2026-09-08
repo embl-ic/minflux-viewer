@@ -48,10 +48,10 @@ def test_save_as_lists_the_offered_formats_in_registry_order(_app):
     try:
         texts = [a.text() for a in win.menuSaveAs.actions() if not a.isSeparator()]
         assert texts == [
-            "Zarr (.zarr v2) format",
+            "Viewer format (.zarr)",
             "MINFLUX data formats (.mat; .npy; .json)",
             "Custom table (.csv)...",
-            "MINFLUX .msr file (experimental)",
+            "Imspector file (.msr)",
         ]
     finally:
         win.close()
@@ -169,12 +169,12 @@ def test_export_dropdown_is_the_registry_order_and_csv_is_the_custom_table(_app)
     labels = [dlg._format.itemText(i) for i in range(dlg._format.count())]
     assert keys == ["zarr", "npy", "mat", "json", "csv", "msr"]
     assert labels == [
-        "MINFLUX Viewer Zarr v2 (.zarr)",
+        "Viewer format (.zarr)",
         "NumPy (.npy)",
         "MATLAB (.mat)",
         "JSON (.json)",
         "Custom table (.csv)",
-        "MINFLUX (.msr)",
+        "Imspector file (.msr)",
     ]
     assert "zarr_zip" not in keys
     dlg.close()
@@ -290,3 +290,42 @@ def test_preferences_offers_only_formats_that_have_a_menu_entry(_app):
     keys = [key for _label, key in _EXPORT_FORMATS]
     assert keys == ["zarr", "npy", "mat", "json", "csv"]     # .msr has its own row
     assert "zarr_zip" not in keys
+
+
+def test_preferences_explains_each_format_from_the_registry(_app):
+    """This is where a user chooses between formats, so it is where the reasons
+    belong -- and the names and blurbs both come from the one registry, so the
+    page cannot drift from the menus."""
+    from minflux_viewer.core import formats as F
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui import preferences_dialog as P
+
+    dlg = P.PreferencesDialog(AppState())
+    try:
+        # every offered format has a checkbox, and .msr is no longer a special
+        # hand-written row with its own disclaimer
+        assert set(dlg._export_format_checks) == {
+            s.key for s in F.offered_save_formats()}
+        # Preferences is the one place that names the storage library
+        assert dlg._export_format_checks["zarr"].text() == "Zarr v2 (.zarr)"
+        assert F.spec_for("zarr").label == "Viewer format (.zarr)"
+        assert dlg._export_format_checks["msr"].text() == "Abberior Imspector (.msr)"
+        # each carries its explanation as hover help
+        for key, check in dlg._export_format_checks.items():
+            assert check.toolTip(), key
+            assert F.spec_for(key).blurb, key
+    finally:
+        dlg.close()
+
+
+def test_the_msr_entry_states_when_it_opens_in_imspector(_app):
+    """It is Imspector-compatible only when there is a source .msr to reuse as
+    a container; the plain name must not over-promise on its own."""
+    win = _real_window(_app)
+    try:
+        assert win.actionSaveAsMsr.text() == "Imspector file (.msr)"
+        tip = win.actionSaveAsMsr.toolTip()
+        assert "came from a .msr" in tip and "only this" in tip
+    finally:
+        win.close()
+        _app.processEvents()

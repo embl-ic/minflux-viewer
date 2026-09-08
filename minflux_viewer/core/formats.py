@@ -43,6 +43,7 @@ __all__ = [
     "raw_only_formats",
     "extension_for",
     "label_for",
+    "spec_for",
     "supported_extensions",
     "roi_extensions",
     "drop_on_dataset_extensions",
@@ -88,6 +89,10 @@ class FormatSpec:
     sniff_key: str | None = None
     #: Dotted ``module:function`` content predicate for an ambiguous extension.
     detect: str | None = None
+    #: One or two sentences for Preferences > Data: what the format is for and
+    #: when to prefer it. Here rather than in the dialog so the name and its
+    #: explanation cannot drift apart.
+    blurb: str = ""
     #: Lower is probed first when several formats share an extension.
     detect_order: int = 100
     #: May be dropped **onto a dataset row** to act on that dataset.
@@ -98,9 +103,17 @@ class FormatSpec:
 FORMATS: tuple[FormatSpec, ...] = (
     # --- this application's own format ------------------------------------
     FormatSpec(
-        "zarr", "MINFLUX Viewer Zarr v2 (.zarr)", (".zarr",), OpenAction.DATASET,
+        # The menus say "Viewer format": which storage library is underneath is
+        # not something a user has to care about. Preferences is the one place
+        # that spells out Zarr v2, for anyone who does.
+        "zarr", "Viewer format (.zarr)", (".zarr",), OpenAction.DATASET,
         writable=True, raw_only=True, default_offered=True, sniff_key="zarr",
         notes="Self-contained: raw canonical data plus processing state, no sidecar.",
+        blurb="Zarr v2 (.zarr) — the application's own format, and the "
+              "recommended default. One self-contained store holding the raw "
+              "acquisition, every channel of an overlay, and all processing "
+              "(filters, ROIs, transforms, alignment), with no separate file to "
+              "keep alongside it. Re-saving can update just the processing.",
     ),
     FormatSpec(
         "zarr_zip", "MINFLUX Viewer Zarr v2, single file (.zarr.zip)",
@@ -123,14 +136,26 @@ FORMATS: tuple[FormatSpec, ...] = (
     FormatSpec(
         "npy", "NumPy (.npy)", (".npy",), OpenAction.DATASET,
         writable=True, default_offered=True, sniff_key="npy",
+        blurb="One dataset per file in the canonical MINFLUX layout, for "
+              "analysis elsewhere. Compact and quick. Processing travels in a "
+              "…_viewer_metadata.json beside the data, so keep the pair together.",
     ),
     FormatSpec(
         "mat", "MATLAB (.mat)", (".mat",), OpenAction.DATASET,
         writable=True, default_offered=True, sniff_key="mat",
+        blurb="One dataset per file in the canonical MINFLUX layout, for "
+              "analysis elsewhere. Compact and quick. Processing travels in a "
+              "…_viewer_metadata.json beside the data, so keep the pair together.",
     ),
     FormatSpec(
         "json", "JSON (.json)", (".json",), OpenAction.DATASET,
         writable=True, default_offered=True, sniff_key="json",
+        # First in its Preferences row, so this sentence has to speak for .csv
+        # as well; .csv keeps its own for the hover tooltip.
+        blurb="Text, for tools that read nothing else. Many times larger and "
+              "slower to write and read than .mat or .npy — a large acquisition "
+              "can take minutes and gigabytes — and .csv is not a MINFLUX "
+              "format, so reopening one goes through column mapping.",
         # Probed last: the other .json kinds carry positive markers, plain
         # localization data does not.
         detect_order=900,
@@ -139,6 +164,9 @@ FORMATS: tuple[FormatSpec, ...] = (
     FormatSpec(
         "csv", "Canonical table (.csv)", (".csv",), OpenAction.SPREADSHEET_DIALOG,
         writable=True, default_offered=True, sniff_key="spreadsheet",
+        blurb="Text, for tools that read nothing else. Not a MINFLUX format, so "
+              "reopening one goes through column mapping, and it is far larger "
+              "and slower than .mat or .npy.",
         notes="Not a MINFLUX format: the interchange path for arbitrary "
               "localization tables (ThunderSTORM/SMAP/Picasso column "
               "conventions). This label is the ALL-ITERATION canonical writer, "
@@ -147,10 +175,16 @@ FORMATS: tuple[FormatSpec, ...] = (
               "custom column picker under the same .csv extension.",
     ),
     FormatSpec(
-        "msr", "MINFLUX (.msr)", (".msr",), OpenAction.MSR_READER,
+        "msr", "Imspector file (.msr)", (".msr",), OpenAction.MSR_READER,
         writable=True, raw_only=True, default_offered=False, sniff_key="msr",
-        notes="Opening always goes through the MSR reader. The writer is "
-              "reverse-engineered, so it is available but off by default.",
+        notes="Opening goes through the MSR reader, unless the file carries our "
+              "own processing state, which opens directly. The writer reuses the "
+              "source measurement's container when there is one.",
+        blurb="Abberior Imspector (.msr) — our own writer. When the data came "
+              "from a .msr, that file's container is reused, so the result opens "
+              "in Imspector and carries this application's processing inside it. "
+              "Data with no .msr origin is still written, but only this "
+              "application can open it.",
     ),
     FormatSpec(
         "spreadsheet", "Spreadsheet table",
@@ -263,6 +297,11 @@ def extension_for(key: str) -> str:
 
 def label_for(key: str) -> str:
     return _BY_KEY[key].label
+
+
+def spec_for(key: str) -> FormatSpec:
+    """The whole spec, for a caller that needs more than one field of it."""
+    return _BY_KEY[key]
 
 
 def supported_extensions() -> tuple[str, ...]:
