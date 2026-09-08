@@ -96,6 +96,48 @@ def is_metadata_json_file(path) -> bool:
         return False
 
 
+def dataset_data_filename(ds) -> str | None:
+    """The data file *ds* was loaded from, if it is still on disk.
+
+    ``None`` for a dataset that has no file behind it -- a simulated one, a
+    duplicate, an ``.msr`` extract, an analysis result. A sidecar then records
+    no ``data_file``, which is honest: pairing falls back to the DID and the
+    acquisition time, and claiming a filename that does not exist would make a
+    later match point at nothing.
+    """
+    handle = getattr(ds, "file", None)
+    name = str(getattr(handle, "name", "") or "")
+    folder = str(getattr(handle, "folder", "") or "")
+    if not name or not folder:
+        # ⚠ No folder means the name cannot be verified, and an unverifiable
+        # name must not be claimed: ``data_file`` is one of the three signals a
+        # sidecar is matched on, so a name that is really just the dataset's
+        # label would pair this recipe with any dataset that happens to share
+        # it. A simulated dataset has file.name set and folder empty.
+        return None
+    return name if (Path(folder) / name).is_file() else None
+
+
+def write_metadata_sidecar(ds, path, *, data_filename: str | None = None,
+                           roi_records=None) -> Path:
+    """Write only the processing recipe, to an explicit path.
+
+    Separate from :func:`save_processed`'s metadata-only branch, which derives
+    the path from the dataset's own folder -- that is right when a sidecar
+    accompanies a file already on disk, and wrong when there is no such file:
+    it would land in whatever the working directory happens to be.
+    """
+    output = Path(path)
+    if output.suffix.lower() != ".json":
+        output = output.with_suffix(".json")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload = build_metadata(ds, data_filename=data_filename, content="raw",
+                             roi_records=roi_records)
+    output.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                      encoding="utf-8")
+    return output
+
+
 def metadata_sidecar_path(data_path, *, suffix: str | None = None) -> Path:
     """The ``<stem>_viewer_metadata.json`` path that accompanies *data_path*.
 

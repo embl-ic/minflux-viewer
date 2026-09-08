@@ -102,6 +102,12 @@ COMMAND_META: dict[str, CommandMeta] = {
                               ".zarr.zip file (no in-place processing updates).", "file", gui_class=GuiClass.GUI_RESULT),
     "actionSaveAsZarr": CommandMeta(C + "save.py", ("save as", "zarr", "v2"),
                               "Save raw canonical MINFLUX data as a Zarr v2 directory.", "file", gui_class=GuiClass.GUI_RESULT),
+    "actionSaveAsMetadata": CommandMeta(C + "save.py",
+                              ("save as", "metadata", "recipe", "sidecar", "json",
+                               "processing", "filters", "rois", "provenance"),
+                              "Write only the processing metadata (Z scaling factor, transform, "
+                              "filters, ROIs, acquisition time) as a JSON file.",
+                              "file", gui_class=GuiClass.GUI_RESULT),
     "actionSaveAsHdf5": CommandMeta(C + "save.py", ("save as", "hdf5", "picasso", "render"),
                               "Export the active dataset as Picasso-compatible HDF5 + YAML.", "file", gui_class=GuiClass.GUI_RESULT),
     "actionSaveAsOmeTiff": CommandMeta(C + "tiff_export.py", ("save as", "ome", "tiff", "render", "imagej"),

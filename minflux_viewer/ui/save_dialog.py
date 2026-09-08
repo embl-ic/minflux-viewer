@@ -67,6 +67,13 @@ _FILTERS = {key: label.replace("(.", "(*.")
 _ALL_FORMATS = [spec.key for spec in _formats.save_formats()]
 _OFFERED_FORMATS = [spec.key for spec in _formats.offered_save_formats()]
 
+#: Not a data format, and deliberately not a :class:`FormatSpec`: it writes the
+#: processing *about* a dataset, so content / attribute / filter choices do not
+#: apply to it and ``save_processed`` never sees it. The dialog offers it last
+#: and the caller routes it to ``MainWindow.save_metadata_only``.
+METADATA_ONLY = "metadata_only"
+_METADATA_ONLY_LABEL = "Viewer metadata only (.json)"
+
 # --- option wording --------------------------------------------------------
 # Plain English, because these are questions about the user's data, not about
 # the implementation. Kept as constants so _sync_location (which rewrites two of
@@ -208,6 +215,8 @@ class SaveProcessedDataDialog(QDialog):
         self._format = QComboBox()
         for key in self._formats:
             self._format.addItem(_FORMAT_LABELS[key], key)
+        self._format.insertSeparator(self._format.count())
+        self._format.addItem(_METADATA_ONLY_LABEL, METADATA_ONLY)
         self._format.currentIndexChanged.connect(lambda *_: self._sync_location())
         name_row.addWidget(self._format)
         pbox.addLayout(name_row)
@@ -304,6 +313,10 @@ class SaveProcessedDataDialog(QDialog):
         self._sync_csv_options()
         self.adjustSize()
 
+    def is_metadata_only(self) -> bool:
+        """True when the dialog will write the recipe and no data file."""
+        return self._format.currentData() == METADATA_ONLY
+
     def _sync_csv_options(self) -> None:
         """A custom table decides its own columns, so the snapshot options that
         would otherwise describe them do not apply."""
@@ -312,6 +325,15 @@ class SaveProcessedDataDialog(QDialog):
             return
         fmt = self._format.currentData()
         canonical.setVisible(fmt == "csv")
+        if fmt == METADATA_ONLY:
+            # No data file is written, so none of these describe anything.
+            for widget in (self._inc_attrs, self._inc_derived, self._filter_mode,
+                           self._filter_lbl, self._content_combo, self._name):
+                widget.setEnabled(False)
+            self._inc_recipe.setChecked(True)
+            self._inc_recipe.setEnabled(False)
+            return
+        self._name.setEnabled(True)
         custom = self.is_custom_csv()
         self._inc_attrs.setEnabled(not custom)
         self._filter_mode.setEnabled(not custom)
@@ -332,6 +354,11 @@ class SaveProcessedDataDialog(QDialog):
 
     def _sync_location(self) -> None:
         fmt = self._format.currentData()
+        if fmt is None or fmt == METADATA_ONLY:
+            # No data file, so nothing here has an extension or a location; the
+            # separator row (data None) lands here too when Qt walks the list.
+            self._sync_csv_options()
+            return
         ext = _EXT[fmt]
         if self._chosen_path is not None:
             self._loc_lbl.setText(f"Location: {self._chosen_path.with_suffix(ext).parent}")
@@ -426,6 +453,13 @@ class SaveProcessedDataDialog(QDialog):
             return {"data_path": None, "fmt": None, "content": "raw",
                     "include": {**include, "recipe": True}, "filter_mode": filter_mode}
         fmt = self._format.currentData()
+        if fmt == METADATA_ONLY:
+            # The path is asked for separately: a dataset with no file behind it
+            # has no folder to be beside, and this dialog's Name/Location row is
+            # about a data file that will not be written.
+            return {"data_path": None, "fmt": METADATA_ONLY, "content": "raw",
+                    "include": include, "filter_mode": filter_mode,
+                    "csv_mode": None}
         if fmt in _RAW_ONLY_FORMATS:
             content = "raw"
         ext = _EXT[fmt]

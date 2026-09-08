@@ -469,6 +469,17 @@ class MainWindow(QMainWindow):
         self.actionSaveAsMsr.triggered.connect(
             lambda _checked=False: self._save_as_format("msr", "MINFLUX .msr file")
         )
+        self.actionSaveAsMetadata = QAction("Viewer metadata only (.json)...", self)
+        self.actionSaveAsMetadata.setToolTip(
+            "Write only the processing metadata: Z scaling factor, transform, "
+            "filters, ROIs and acquisition time.\n\n"
+            "Useful to inspect what the current processing amounts to before "
+            "committing it to a data format, or to get hold of it when the "
+            "format in use keeps it inside the file (.zarr and .msr do)."
+        )
+        self.actionSaveAsMetadata.triggered.connect(
+            lambda _checked=False: self.save_metadata_only(
+                self._active_dataset_for_save()))
         self.actionSaveAsSpreadsheet = QAction("Custom table (.csv)...", self)
         self.actionSaveAsSpreadsheet.setToolTip(
             "Choose which attributes to write and what to call each column. "
@@ -888,6 +899,7 @@ class MainWindow(QMainWindow):
         self.actionSaveAsMinflux.setText("MINFLUX data formats (.mat; .npy; .json)")
         self.actionSaveAsMsr.setText("Imspector file (.msr)")
         self.actionSaveAsSpreadsheet.setText("Custom table (.csv)...")
+        self.actionSaveAsMetadata.setText("Viewer metadata only (.json)...")
         self.actionSaveAsZarr.setText("Viewer format (.zarr)")
         self.actionSaveAsZarrZip.setText("Zarr (.zarr.zip v2) single file")
         self.actionSaveAsHdf5.setText("HDF5...")
@@ -919,6 +931,10 @@ class MainWindow(QMainWindow):
         self.menuSaveAs.addAction(self.actionSaveAsMinflux)
         self.menuSaveAs.addAction(self.actionSaveAsSpreadsheet)
         self.menuSaveAs.addAction(self.actionSaveAsMsr)
+        self.menuSaveAs.addSeparator()
+        # Not a data format, so it sits below the separator: it saves the
+        # processing *about* a dataset, not the dataset.
+        self.menuSaveAs.addAction(self.actionSaveAsMetadata)
         u.menuFile.addAction(self.menuSaveAs.menuAction())
         u.menuFile.addSeparator()
         u.menuFile.addAction(u.actionQuit)
@@ -7221,6 +7237,40 @@ class MainWindow(QMainWindow):
             ),
         )
 
+    def save_metadata_only(self, ds) -> None:
+        """Write just the processing recipe, to a path the user chooses.
+
+        Shared by *File › Save As › Viewer metadata only* and the Save / export
+        dialog's entry for it. The path is asked for rather than derived: a
+        dataset with no file behind it has no folder to be beside, and writing
+        into the working directory would be a file the user never chose.
+        """
+        if ds is None:
+            return
+        from ..core.save import dataset_data_filename, write_metadata_sidecar
+        from .metadata_save_dialog import ask_metadata_save_path
+
+        data_filename = dataset_data_filename(ds)
+        default_dir = self._state.prefs["file"].get("default_folder", str(Path.home()))
+        target = ask_metadata_save_path(self, ds, default_dir,
+                                        data_filename=data_filename)
+        if target is None:
+            return
+        try:
+            written = write_metadata_sidecar(
+                ds, target, data_filename=data_filename,
+                roi_records=self.save_roi_records(ds))
+        except Exception as exc:                                # noqa: BLE001
+            self._state.log(f"Failed to write viewer metadata: {exc}", "ERROR")
+            QMessageBox.critical(self, "Save viewer metadata",
+                                 f"Could not write the metadata:\n{exc}")
+            return
+        note = (f" (accompanies {data_filename})" if data_filename
+                else " (no data file on disk; it names none)")
+        self._state.log(f"Saved viewer metadata: {written}{note}",
+                        dataset_idx=self._post_load_index(ds))
+        self._status_label.setText(f"Saved {written.name}.")
+
     def _save_as_picasso_hdf5(self) -> None:
         ds = self._active_dataset_for_save()
         if ds is None:
@@ -7322,6 +7372,7 @@ class MainWindow(QMainWindow):
     def save_dataset(self, ds) -> None:
         """Open the Save / Export dialog for *ds* (the active dataset from File ›
         Save Processed Data, or a right-clicked one from the Dataset Manager)."""
+        from . import save_dialog as save_dialog_module
         from .save_dialog import SaveProcessedDataDialog
 
         # A dataset is "file-backed" when it has a physical data file that, when
@@ -7342,6 +7393,10 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         opts = dlg.options()
+        if opts.get("fmt") == save_dialog_module.METADATA_ONLY:
+            # Not a data format: it writes the recipe alone, and asks where.
+            self.save_metadata_only(ds)
+            return
         if opts.get("csv_mode") == "custom":
             # A custom table is written by a different function that takes no
             # content/include/filter arguments, so it leaves this path entirely.

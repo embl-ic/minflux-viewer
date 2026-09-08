@@ -52,6 +52,8 @@ def test_save_as_lists_the_offered_formats_in_registry_order(_app):
             "MINFLUX data formats (.mat; .npy; .json)",
             "Custom table (.csv)...",
             "Imspector file (.msr)",
+            # below a separator: it saves the processing, not the dataset
+            "Viewer metadata only (.json)...",
         ]
     finally:
         win.close()
@@ -165,8 +167,9 @@ def test_export_dropdown_is_the_registry_order_and_csv_is_the_custom_table(_app)
     from minflux_viewer.ui.save_dialog import SaveProcessedDataDialog
 
     dlg = SaveProcessedDataDialog("ds1", prefs={"data": {}, "file": {}})
-    keys = [dlg._format.itemData(i) for i in range(dlg._format.count())]
-    labels = [dlg._format.itemText(i) for i in range(dlg._format.count())]
+    # the separator and the metadata-only entry sit after the data formats
+    keys = [dlg._format.itemData(i) for i in range(dlg._format.count())][:6]
+    labels = [dlg._format.itemText(i) for i in range(dlg._format.count())][:6]
     assert keys == ["zarr", "npy", "mat", "json", "csv", "msr"]
     assert labels == [
         "Viewer format (.zarr)",
@@ -326,6 +329,101 @@ def test_the_msr_entry_states_when_it_opens_in_imspector(_app):
         assert win.actionSaveAsMsr.text() == "Imspector file (.msr)"
         tip = win.actionSaveAsMsr.toolTip()
         assert "came from a .msr" in tip and "only this" in tip
+    finally:
+        win.close()
+        _app.processEvents()
+
+
+# ------------------------------------------------- viewer metadata on its own
+def test_a_dataset_with_no_file_claims_no_data_file():
+    """``data_file`` is one of the three signals a sidecar is matched on, so an
+    unverifiable name must not be claimed: build_localization_dataset sets
+    file.name and leaves folder empty, and returning that name would pair the
+    recipe with any dataset that happens to share the label."""
+    import numpy as np
+
+    from minflux_viewer.core.loader import build_localization_dataset
+    from minflux_viewer.core.save import dataset_data_filename, save_processed
+
+    rng = np.random.default_rng(0)
+    ds = build_localization_dataset(name="run1", x_nm=rng.normal(0, 100, 20),
+                                    y_nm=rng.normal(0, 100, 20))
+    assert dataset_data_filename(ds) is None
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        from minflux_viewer.core.loader import load_npy
+
+        save_processed(ds, data_path=pathlib.Path(tmp) / "real.npy", fmt="npy",
+                       content="raw",
+                       include={"attrs": True, "derived": False, "recipe": False})
+        back = load_npy(str(pathlib.Path(tmp) / "real.npy"), prefs={"data": {}})
+        assert dataset_data_filename(back) == "real.npy"
+
+
+def test_metadata_only_writes_a_matchable_sidecar(tmp_path):
+    import json
+
+    import numpy as np
+
+    from minflux_viewer.core.loader import build_localization_dataset
+    from minflux_viewer.core.metadata_match import is_snapshot_recipe, sidecar_identity
+    from minflux_viewer.core.save import is_metadata_json_file, write_metadata_sidecar
+
+    rng = np.random.default_rng(0)
+    ds = build_localization_dataset(name="run1", x_nm=rng.normal(0, 100, 20),
+                                    y_nm=rng.normal(0, 100, 20))
+    ds.metadata["msr_dataset_did"] = "did-abc"
+    ds.set_z_scaling_factor(0.67, source="test")
+    ds.state["filter_specs"] = [{"attribute": "efo", "mode": "per loc",
+                                 "itr": "last", "lo": 1.0, "hi": 9.0,
+                                 "lo_inc": True, "hi_inc": True}]
+    out = write_metadata_sidecar(
+        ds, tmp_path / "run1_viewer_metadata.json", data_filename=None,
+        roi_records=[{"id": "r1", "type": "rectangle", "name": "rect",
+                      "geometry": {"bounds": [0, 0, 10, 10], "angle": 0.0}}])
+
+    assert is_metadata_json_file(out)
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    # findable by DID even with no data file to name
+    assert sidecar_identity(payload)["did"] == "did-abc"
+    assert payload["data_file"] is None
+    assert not is_snapshot_recipe(payload)
+    assert payload["calibration"]["z_scaling_factor"] == 0.67
+    assert len(payload["filters"]) == 1 and len(payload["rois"]) == 1
+
+
+def test_metadata_only_is_offered_and_writes_no_data_file(_app):
+    """It is not a data format, so the content/attribute/filter choices are all
+    inapplicable and options() names no data path -- the caller asks where."""
+    from minflux_viewer.ui.save_dialog import METADATA_ONLY, SaveProcessedDataDialog
+
+    dlg = SaveProcessedDataDialog("ds1", prefs={"data": {}, "file": {}})
+    index = dlg._format.findData(METADATA_ONLY)
+    assert index > 0, "not offered"
+    dlg._format.setCurrentIndex(index)
+    assert dlg.is_metadata_only()
+    opts = dlg.options()
+    assert opts["fmt"] == METADATA_ONLY and opts["data_path"] is None
+    for widget in (dlg._content_combo, dlg._inc_attrs, dlg._inc_derived,
+                   dlg._filter_mode, dlg._name):
+        assert not widget.isEnabled()
+    assert dlg._inc_recipe.isChecked() and not dlg._inc_recipe.isEnabled()
+
+    # ...and every other format is unaffected by having visited it
+    dlg._format.setCurrentIndex(dlg._format.findData("mat"))
+    assert dlg.options()["fmt"] == "mat"
+    assert dlg._content_combo.isEnabled() and dlg._name.isEnabled()
+    dlg.close()
+
+
+def test_the_save_as_menu_offers_metadata_only_below_the_data_formats(_app):
+    win = _real_window(_app)
+    try:
+        texts = [a.text() for a in win.menuSaveAs.actions() if not a.isSeparator()]
+        assert texts[-1] == "Viewer metadata only (.json)..."
+        assert any(a.isSeparator() for a in win.menuSaveAs.actions())
     finally:
         win.close()
         _app.processEvents()

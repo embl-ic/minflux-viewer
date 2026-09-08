@@ -89,9 +89,10 @@ class FormatSpec:
     sniff_key: str | None = None
     #: Dotted ``module:function`` content predicate for an ambiguous extension.
     detect: str | None = None
-    #: One or two sentences for Preferences > Data: what the format is for and
-    #: when to prefer it. Here rather than in the dialog so the name and its
-    #: explanation cannot drift apart.
+    #: Hover help in Preferences > Data: what the format is for, in a sentence
+    #: or two. Here rather than in the dialog so the name and its explanation
+    #: cannot drift apart. Kept short deliberately -- it is a tooltip, and
+    #: naming the *kind* of thing stored beats listing every instance of it.
     blurb: str = ""
     #: Lower is probed first when several formats share an extension.
     detect_order: int = 100
@@ -109,11 +110,9 @@ FORMATS: tuple[FormatSpec, ...] = (
         "zarr", "Viewer format (.zarr)", (".zarr",), OpenAction.DATASET,
         writable=True, raw_only=True, default_offered=True, sniff_key="zarr",
         notes="Self-contained: raw canonical data plus processing state, no sidecar.",
-        blurb="Zarr v2 (.zarr) — the application's own format, and the "
-              "recommended default. One self-contained store holding the raw "
-              "acquisition, every channel of an overlay, and all processing "
-              "(filters, ROIs, transforms, alignment), with no separate file to "
-              "keep alongside it. Re-saving can update just the processing.",
+        blurb="The application's own format, and the recommended default. "
+              "Data and processing metadata are stored in the same file, with "
+              "nothing to keep alongside it. An overlay saves every channel.",
     ),
     FormatSpec(
         "zarr_zip", "MINFLUX Viewer Zarr v2, single file (.zarr.zip)",
@@ -136,26 +135,23 @@ FORMATS: tuple[FormatSpec, ...] = (
     FormatSpec(
         "npy", "NumPy (.npy)", (".npy",), OpenAction.DATASET,
         writable=True, default_offered=True, sniff_key="npy",
-        blurb="One dataset per file in the canonical MINFLUX layout, for "
-              "analysis elsewhere. Compact and quick. Processing travels in a "
-              "…_viewer_metadata.json beside the data, so keep the pair together.",
+        blurb="One dataset per file, for analysis elsewhere. Compact and quick. "
+              "Processing metadata goes in a JSON file beside the data, so keep "
+              "the pair together.",
     ),
     FormatSpec(
         "mat", "MATLAB (.mat)", (".mat",), OpenAction.DATASET,
         writable=True, default_offered=True, sniff_key="mat",
-        blurb="One dataset per file in the canonical MINFLUX layout, for "
-              "analysis elsewhere. Compact and quick. Processing travels in a "
-              "…_viewer_metadata.json beside the data, so keep the pair together.",
+        blurb="One dataset per file, for analysis elsewhere. Compact and quick. "
+              "Processing metadata goes in a JSON file beside the data, so keep "
+              "the pair together.",
     ),
     FormatSpec(
         "json", "JSON (.json)", (".json",), OpenAction.DATASET,
         writable=True, default_offered=True, sniff_key="json",
-        # First in its Preferences row, so this sentence has to speak for .csv
-        # as well; .csv keeps its own for the hover tooltip.
         blurb="Text, for tools that read nothing else. Many times larger and "
-              "slower to write and read than .mat or .npy — a large acquisition "
-              "can take minutes and gigabytes — and .csv is not a MINFLUX "
-              "format, so reopening one goes through column mapping.",
+              "slower than .mat or .npy — a large acquisition can take minutes "
+              "and gigabytes.",
         # Probed last: the other .json kinds carry positive markers, plain
         # localization data does not.
         detect_order=900,
@@ -164,9 +160,8 @@ FORMATS: tuple[FormatSpec, ...] = (
     FormatSpec(
         "csv", "Canonical table (.csv)", (".csv",), OpenAction.SPREADSHEET_DIALOG,
         writable=True, default_offered=True, sniff_key="spreadsheet",
-        blurb="Text, for tools that read nothing else. Not a MINFLUX format, so "
-              "reopening one goes through column mapping, and it is far larger "
-              "and slower than .mat or .npy.",
+        blurb="Text, and not a MINFLUX format: reopening one goes through "
+              "column mapping. Far larger and slower than .mat or .npy.",
         notes="Not a MINFLUX format: the interchange path for arbitrary "
               "localization tables (ThunderSTORM/SMAP/Picasso column "
               "conventions). This label is the ALL-ITERATION canonical writer, "
@@ -180,10 +175,9 @@ FORMATS: tuple[FormatSpec, ...] = (
         notes="Opening goes through the MSR reader, unless the file carries our "
               "own processing state, which opens directly. The writer reuses the "
               "source measurement's container when there is one.",
-        blurb="Abberior Imspector (.msr) — our own writer. When the data came "
-              "from a .msr, that file's container is reused, so the result opens "
-              "in Imspector and carries this application's processing inside it. "
-              "Data with no .msr origin is still written, but only this "
+        blurb="Reuses the source measurement's container, so the result opens "
+              "in Imspector with the processing metadata stored inside it. Data "
+              "that did not come from a .msr is still written, but only this "
               "application can open it.",
     ),
     FormatSpec(
