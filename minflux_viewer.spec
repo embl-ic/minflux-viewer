@@ -1,13 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
-# PyInstaller spec for MINFLUX Viewer — Windows one-directory build.
+# PyInstaller spec for MINFLUX Viewer — one-directory build.
 #
-# Build:
+# Cross-platform: Windows and Linux ship the COLLECT folder, macOS wraps it in
+# a .app. Build on the platform you are shipping for; there is no cross-build.
+#
+# Build (Windows):
+#   .\.venv\Scripts\python.exe tools\vendor_pip.py
 #   .\.venv\Scripts\python.exe -m pip install pyinstaller==6.19.0
 #   .\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm minflux_viewer.spec
-# Do not use a global ``pyinstaller`` command; it cannot see project packages.
 #
-# Output:  dist\minflux_viewer\minflux_viewer.exe
+# Build (macOS / Linux):
+#   .venv/bin/python tools/vendor_pip.py
+#   .venv/bin/python -m pip install pyinstaller==6.19.0
+#   .venv/bin/python -m PyInstaller --clean --noconfirm minflux_viewer.spec
+#
+# The vendor_pip step is required and is NOT optional on a fresh clone -- see
+# the resources/pip guard below. Do not use a global ``pyinstaller`` command;
+# it cannot see project packages.
+#
+# Output:  dist/minflux_viewer/  (dist/MINFLUX Viewer.app on macOS)
 
 from pathlib import Path
 import importlib.util
@@ -42,15 +54,35 @@ missing_build_packages = [
     for package, module in REQUIRED_BUILD_MODULES.items()
     if importlib.util.find_spec(module) is None
 ]
+# The interpreter to name in build instructions: the project venv on *this*
+# platform. These messages used to hand a macOS or Linux user Windows commands.
+VENV_PYTHON = (
+    ".\\.venv\\Scripts\\python.exe" if sys.platform == "win32" else ".venv/bin/python"
+)
 if missing_build_packages:
     raise SystemExit(
         "Cannot build MINFLUX Viewer: the build interpreter is missing "
         f"{', '.join(missing_build_packages)}.\n"
         f"Build interpreter: {sys.executable}\n"
         "Run `poetry sync`, then use the project interpreter: "
-        "`.\\.venv\\Scripts\\python.exe -m pip install pyinstaller==6.19.0` and "
-        "`.\\.venv\\Scripts\\python.exe -m PyInstaller --clean --noconfirm "
-        "minflux_viewer.spec`."
+        f"`{VENV_PYTHON} -m pip install pyinstaller==6.19.0` and "
+        f"`{VENV_PYTHON} -m PyInstaller --clean --noconfirm minflux_viewer.spec`."
+    )
+
+# pip is a GENERATED build input (tools/vendor_pip.py) and is deliberately not
+# committed, so a fresh clone does not have it. Without this guard PyInstaller
+# dies inside Analysis with "Unable to find '...resources/pip' when adding
+# binary and data files", which says nothing about how to fix it.
+PIP_PAYLOAD = ROOT / "resources" / "pip"
+if not (PIP_PAYLOAD / "pip").is_dir():
+    raise SystemExit(
+        "Cannot build MINFLUX Viewer: resources/pip is missing.\n"
+        "It is generated rather than committed, so a fresh clone must create "
+        "it first:\n"
+        f"    {VENV_PYTHON} tools/vendor_pip.py\n"
+        "That vendors the pinned pip wheel the managed package installer needs "
+        "(Preferences > Plugin). pip has to ship as ordinary files on disk -- "
+        "frozen into the module archive it fails in its own vendored distlib."
     )
 
 # App version, parsed from the package without importing it.
