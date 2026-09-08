@@ -280,3 +280,64 @@ def test_direct_open_restores_the_session(tmp_path):
         assert ds.metadata["msr_source_path"] == str(out)
         assert ds.metadata["msr_dataset_did"] == datasets[i].metadata["msr_dataset_did"]
         assert ds.metadata.get("is_minflux") is True
+
+
+# ------------------------------------------------- the MainWindow route itself
+@pytest.fixture
+def _app():
+    pytest.importorskip("PyQt6")
+    import sys
+    from PyQt6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication(sys.argv)
+
+
+@pytest.mark.skipif(not SAMPLE.is_file(), reason="reference .msr not present")
+def test_dropping_our_msr_adds_the_datasets_and_records_it_as_recent(_app, tmp_path):
+    """Exercises MainWindow, not just the loader.
+
+    The loader-level tests all passed while the drop handler raised
+    ``AttributeError: 'MainWindow' object has no attribute '_record_recent'`` --
+    that method is on AppState, and add_dataset already calls it from
+    ``dataset.file.recent_path``. Nothing below MainWindow could catch it.
+    """
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.core.loader import load_from_mfx_array
+    from minflux_viewer.core.save import save_processed
+    from minflux_viewer.msr.msr_parser import parse_general
+    from minflux_viewer.ui.main_window import MainWindow
+
+    parsed = parse_general(str(SAMPLE), str(tmp_path), log=lambda *_a: None)
+    datasets = []
+    for i, entry in enumerate(parsed["datasets"]):
+        ds = load_from_mfx_array(entry["_mfx"], name=entry["display_name"],
+                                 prefs={"data": {}})
+        ds.metadata["msr_source_path"] = str(SAMPLE)
+        ds.metadata["msr_dataset_did"] = entry.get("did")
+        ds.state.update({"overlay_id": "g", "overlay_index": i})
+        datasets.append(ds)
+    out = tmp_path / "dropped.msr"
+    save_processed(datasets[0], data_path=out, fmt="msr", content="raw",
+                   include={"attrs": True, "derived": False, "recipe": False},
+                   related_datasets=datasets)
+
+    state = AppState()
+    state.prefs.setdefault("data", {}).update({"show_data_info": False,
+                                               "show_render": False})
+    win = MainWindow(state)
+    try:
+        seen = []
+        state.log_message.connect(lambda m, *_a: seen.append(m))
+        win._on_viewer_msr_loaded(
+            [load_from_mfx_array(e["_mfx"], name=e["display_name"],
+                                 recent_path=str(out), prefs={"data": {}})
+             for e in parse_general(str(out), str(tmp_path), log=lambda *_a: None)["datasets"]],
+            out.name, str(out), messages=["[viewer] restored state for 'x'"])
+        assert len(state.datasets) == 3
+        # what the restore did is collected in the worker and logged here,
+        # because a worker must not touch Qt
+        assert any("restored state" in m for m in seen), seen
+        recent = [str(p) for p in state.prefs.get("file", {}).get("recent_files", [])]
+        assert any(out.name in r for r in recent), recent
+    finally:
+        win.close()
+        _app.processEvents()
