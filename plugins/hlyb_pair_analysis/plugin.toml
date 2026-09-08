@@ -26,5 +26,5 @@ callable = "run"
 
 [requires]
 mfv_api = ">=1.0,<2.0"
-app = ">=0.5,<0.6"
+app = ">=0.4.2"
 python = ["numpy", "scipy"]
