@@ -38,6 +38,7 @@ __all__ = [
     "FORMATS",
     "normalize_path",
     "save_formats",
+    "offered_save_formats",
     "default_save_formats",
     "raw_only_formats",
     "extension_for",
@@ -70,8 +71,12 @@ class FormatSpec:
     action: OpenAction = OpenAction.DATASET
 
     # --- write side -------------------------------------------------------
-    #: Offered in File > Save / Save As at all.
+    #: A writer exists: ``core.save.save_processed`` accepts this key.
     writable: bool = False
+    #: Listed in the Save UI (File > Save As, the Save/Export dropdown, the
+    #: Preferences checkboxes). Separate from ``writable`` so a writer can be
+    #: kept and reachable from scripting while its menu entry is withdrawn.
+    offered: bool = True
     #: Can carry only canonical raw data, never a baked snapshot.
     raw_only: bool = False
     #: Ticked in a fresh installation's Preferences.
@@ -100,7 +105,11 @@ FORMATS: tuple[FormatSpec, ...] = (
     FormatSpec(
         "zarr_zip", "MINFLUX Viewer Zarr v2, single file (.zarr.zip)",
         (".zarr.zip",), OpenAction.DATASET,
-        writable=True, raw_only=True, default_offered=True, sniff_key="zarr",
+        # Withdrawn from the Save UI (2026-09-08) while the writer, the reader
+        # and every test are kept: one Zarr form in the menus is enough, and the
+        # directory store is the one that takes a processing-only update.
+        writable=True, offered=False, raw_only=True, default_offered=True,
+        sniff_key="zarr",
         notes="The same store sealed into one file: raw data plus processing "
               "state, opens without unpacking. It cannot take a "
               "processing-only update -- a zip appends rather than replaces a "
@@ -108,19 +117,16 @@ FORMATS: tuple[FormatSpec, ...] = (
               "directory when you want in-place processing updates.",
     ),
     # --- MINFLUX defaults --------------------------------------------------
+    # Declaration order IS menu order: save_formats() and offered_save_formats()
+    # preserve it, so the Save As menu, the Save/Export dropdown and the
+    # Preferences checkboxes cannot disagree about how the formats are listed.
     FormatSpec(
-        "msr", "MINFLUX (.msr)", (".msr",), OpenAction.MSR_READER,
-        writable=True, raw_only=True, default_offered=False, sniff_key="msr",
-        notes="Opening always goes through the MSR reader. The writer is "
-              "reverse-engineered, so it is available but off by default.",
+        "npy", "NumPy (.npy)", (".npy",), OpenAction.DATASET,
+        writable=True, default_offered=True, sniff_key="npy",
     ),
     FormatSpec(
         "mat", "MATLAB (.mat)", (".mat",), OpenAction.DATASET,
         writable=True, default_offered=True, sniff_key="mat",
-    ),
-    FormatSpec(
-        "npy", "NumPy (.npy)", (".npy",), OpenAction.DATASET,
-        writable=True, default_offered=True, sniff_key="npy",
     ),
     FormatSpec(
         "json", "JSON (.json)", (".json",), OpenAction.DATASET,
@@ -134,7 +140,17 @@ FORMATS: tuple[FormatSpec, ...] = (
         "csv", "Canonical table (.csv)", (".csv",), OpenAction.SPREADSHEET_DIALOG,
         writable=True, default_offered=True, sniff_key="spreadsheet",
         notes="Not a MINFLUX format: the interchange path for arbitrary "
-              "localization tables (ThunderSTORM/SMAP/Picasso column conventions).",
+              "localization tables (ThunderSTORM/SMAP/Picasso column "
+              "conventions). This label is the ALL-ITERATION canonical writer, "
+              "which is what the MSR reader exports and what the Save/Export "
+              "dialog reaches under More options; the viewer's menus offer the "
+              "custom column picker under the same .csv extension.",
+    ),
+    FormatSpec(
+        "msr", "MINFLUX (.msr)", (".msr",), OpenAction.MSR_READER,
+        writable=True, raw_only=True, default_offered=False, sniff_key="msr",
+        notes="Opening always goes through the MSR reader. The writer is "
+              "reverse-engineered, so it is available but off by default.",
     ),
     FormatSpec(
         "spreadsheet", "Spreadsheet table",
@@ -218,13 +234,23 @@ def normalize_path(key: str, path) -> Path:
 
 
 def save_formats() -> tuple[FormatSpec, ...]:
-    """Formats File > Save can write, in menu order."""
+    """Every format a writer exists for, in declaration order.
+
+    Includes formats withdrawn from the menus (``offered=False``), because
+    ``core.save`` must still accept them from scripting and the MSR reader.
+    """
     return tuple(spec for spec in FORMATS if spec.writable)
+
+
+def offered_save_formats() -> tuple[FormatSpec, ...]:
+    """The formats the Save UI lists, in menu order."""
+    return tuple(spec for spec in FORMATS if spec.writable and spec.offered)
 
 
 def default_save_formats() -> list[str]:
     """Format keys ticked in a fresh installation."""
-    return [spec.key for spec in FORMATS if spec.writable and spec.default_offered]
+    return [spec.key for spec in FORMATS
+            if spec.writable and spec.offered and spec.default_offered]
 
 
 def raw_only_formats() -> set[str]:

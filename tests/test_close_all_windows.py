@@ -57,19 +57,12 @@ def test_file_menu_save_as_layout(_app):
     ]
     assert texts[6:8] == ["Save...", "Save As"]
 
-    save_as = w.menuSaveAs
-    # This application's own format plus the MINFLUX defaults. Picasso HDF5 is
-    # deliberately absent: the writer is kept and callable, but application-
-    # specific formats are not offered here (BACKLOG.md > Nice to have).
-    assert [a.text() for a in save_as.actions()] == [
-        "MINFLUX data formats (.mat; .npy; .json)",
-        "MINFLUX .msr file (experimental)",
-        "Custom table (.csv)...",
-        "Zarr (.zarr v2) format",
-        "Zarr (.zarr.zip v2) single file",
-        "OME-TIFF...",
-    ]
-    assert hasattr(w, "actionSaveAsHdf5"), "the Picasso writer stays reachable"
+    # What Save As lists, and in what order, is pinned in test_save_targets.py
+    # (it follows the format registry). Here we only care that the submenu is
+    # in the File menu and that the withdrawn writers are still reachable.
+    assert w.menuSaveAs.actions()
+    for name in ("actionSaveAsHdf5", "actionSaveAsZarrZip", "actionSaveAsOmeTiff"):
+        assert hasattr(w, name), f"{name} stays reachable"
     w.close()
 
 

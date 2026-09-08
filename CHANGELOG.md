@@ -20,6 +20,34 @@ longer has to be built into the application for everyone.
   folder. Preferences ▸ Plugin.
 - The bundled Python now carries its complete standard library, so plugin and
   script code can rely on it.
+- **Macro Recorder** (*Plugins > Macro Recorder*) — records what you do in the
+  viewer and turns it into a Python script you can edit and re-run.
+
+### Data
+
+- **Post-hoc drift correction from MBM beads** — pick the beads you trust in
+  the MSR reader's *Show beads drift* and re-derive the correction from them.
+  Re-runnable: it always starts from the uncorrected positions the file keeps.
+- **Particle fit table: the *Accepted* column is editable.** Double-click a
+  cell to accept or reject that particle; anything the range filter excludes
+  now reads *no* as well. What the column shows is what *Save CSV* writes and
+  what *Rebuild average* pools.
+
+### Saving
+
+- **File > Save is one step**: it always writes the MINFLUX Viewer Zarr v2
+  store and asks only where. Other formats live under *File > Save As* and in
+  the Dataset Manager's right-click *Save / export data*.
+- ***Save As* tidied** — Zarr, MINFLUX data formats, custom table, `.msr`. The
+  `.zarr.zip` and OME-TIFF entries were withdrawn; TIFF export stays in the
+  render view's own *Export to TIFF…*.
+- **Clearer wording** for the save options, and the same words in Preferences.
+
+### Other
+
+- **Task Monitor** now shows memory usage as a third tab, replacing the
+  separate *Monitor Memory* window.
+- Various bug fixes.
 
 ## v0.4.2
 

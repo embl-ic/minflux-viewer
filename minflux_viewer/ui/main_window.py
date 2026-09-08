@@ -462,6 +462,14 @@ class MainWindow(QMainWindow):
             lambda _checked=False: self._save_as_format("msr", "MINFLUX .msr file")
         )
         self.actionSaveAsSpreadsheet = QAction("Custom table (.csv)...", self)
+        self.actionSaveAsSpreadsheet.setToolTip(
+            "Choose which attributes to write and what to call each column. "
+            "The table is the current view: filtered, last valid iteration, "
+            "with xnm/ynm/znm as displayed.\n\n"
+            "The all-iteration canonical table (which reloads without the "
+            "column-mapping dialog) is written by the MSR reader's .csv export "
+            "and by Save / export data > More options."
+        )
         self.actionSaveAsSpreadsheet.triggered.connect(self._save_as_spreadsheet)
         self.actionSaveAsZarr = QAction("Zarr (.zarr v2) format", self)
         self.actionSaveAsZarr.setToolTip(
@@ -892,13 +900,17 @@ class MainWindow(QMainWindow):
         u.menuFile.addAction(self.actionCloseAllWindows)
         u.menuFile.addSeparator()
         u.menuFile.addAction(u.actionSave)
+        # Order = the format registry's own order (formats.offered_save_formats).
+        # actionSaveAsZarrZip / actionSaveAsHdf5 / actionSaveAsOmeTiff are built
+        # and still work, but are deliberately NOT listed: one Zarr form is
+        # enough in the menus, Picasso HDF5 is application-specific, and the
+        # OME-TIFF entry only forwarded to the render view's own
+        # "Export to TIFF...", which is where that export belongs.
         self.menuSaveAs.clear()
-        self.menuSaveAs.addAction(self.actionSaveAsMinflux)
-        self.menuSaveAs.addAction(self.actionSaveAsMsr)
-        self.menuSaveAs.addAction(self.actionSaveAsSpreadsheet)
         self.menuSaveAs.addAction(self.actionSaveAsZarr)
-        self.menuSaveAs.addAction(self.actionSaveAsZarrZip)
-        self.menuSaveAs.addAction(self.actionSaveAsOmeTiff)
+        self.menuSaveAs.addAction(self.actionSaveAsMinflux)
+        self.menuSaveAs.addAction(self.actionSaveAsSpreadsheet)
+        self.menuSaveAs.addAction(self.actionSaveAsMsr)
         u.menuFile.addAction(self.menuSaveAs.menuAction())
         u.menuFile.addSeparator()
         u.menuFile.addAction(u.actionQuit)
@@ -6738,14 +6750,40 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _save_data(self, *args) -> None:
-        """File › Save — save/export the **active** dataset."""
-        ds = self._state.active_dataset
+        """File › Save (Ctrl+S) — save the active dataset as MINFLUX Viewer Zarr v2.
+
+        The format is fixed, so the dialog asks only where. Zarr is the
+        application's own self-contained store -- raw canonical data plus
+        processing state, ROIs, overlay channels and linked images, no sidecar --
+        which is why it needs none of the content/attribute/sidecar choices the
+        Save / export dialog carries. Those live in *Save As* and in the Dataset
+        Manager's *Save / export data*.
+        """
+        ds = self._active_dataset_for_save()
         if ds is None:
-            QMessageBox.information(
-                self, "Save", "No active dataset to save."
-            )
             return
-        self.save_dataset(ds)
+        from .zarr_save_dialog import ask_zarr_save_path
+
+        chosen = ask_zarr_save_path(
+            self, self._zarr_save_suggestion(ds),
+            dataset_name=str(getattr(ds, "name", "") or ""),
+        )
+        if chosen is None:
+            return
+        self._save_as_format("zarr", "Zarr v2", path=str(chosen))
+
+    def _zarr_save_suggestion(self, ds) -> Path:
+        """Where File › Save proposes to write *ds*.
+
+        A dataset opened from an application store saves back over it, so
+        Ctrl+S on work in progress is a genuine "save", not "save a copy
+        somewhere else". Anything else is proposed beside its source file.
+        """
+        store = str(ds.metadata.get("minflux_viewer_zarr_path")
+                    or ds.metadata.get("minflux_viewer_project_path") or "")
+        if store and Path(store).suffix.lower() == ".zarr":
+            return Path(store)
+        return self._default_save_path(ds, ".zarr")
 
     def _active_dataset_for_save(self):
         ds = self._state.active_dataset
@@ -7028,6 +7066,17 @@ class MainWindow(QMainWindow):
         ds = self._active_dataset_for_save()
         if ds is None:
             return
+        self.export_custom_csv(ds)
+
+    def export_custom_csv(self, ds, suggested: str | Path | None = None) -> None:
+        """The custom column table: pick the attributes, name the columns.
+
+        Shared by *File › Save As › Custom table* and the Save / export
+        dialog's ``.csv`` entry, so the two cannot drift into different CSVs.
+        The table is the current view (filtered, last valid iteration) with
+        ``xnm/ynm/znm`` as displayed; the all-iteration canonical table is a
+        different writer, reached from that dialog's More options.
+        """
         from ..core.save import spreadsheet_export_columns, write_spreadsheet_csv
         from .export_dialogs import CsvExportDialog
 
@@ -7040,7 +7089,7 @@ class MainWindow(QMainWindow):
             return
         dialog = CsvExportDialog(
             list(columns),
-            self._default_save_path(ds, ".csv"),
+            Path(suggested) if suggested else self._default_save_path(ds, ".csv"),
             self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -7190,6 +7239,11 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         opts = dlg.options()
+        if opts.get("csv_mode") == "custom":
+            # A custom table is written by a different function that takes no
+            # content/include/filter arguments, so it leaves this path entirely.
+            self.export_custom_csv(ds, opts.get("data_path"))
+            return
         from ..core.save import save_processed
 
         # Overlay members and linked images travel with BOTH Zarr forms; only the
