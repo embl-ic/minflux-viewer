@@ -209,13 +209,30 @@ def test_sealed_zarr_package_is_not_mistaken_for_a_roiset(tmp_path):
     assert resolve_open(roiset).action is OpenAction.ROI_MANAGER
 
 
-def test_sealed_package_is_offered_for_saving():
-    """It saves the same content as the directory store, in one file."""
+def test_sealed_package_keeps_its_writer_but_has_left_the_save_ui():
+    """It saves the same content as the directory store, in one file.
+
+    Its menu entry was withdrawn (2026-09-08) -- one Zarr form is enough in the
+    menus, and the directory store is the one that can take a processing-only
+    update -- but the writer, the reader and every caller are kept, which is the
+    distinction ``offered`` exists to express: ``writable`` says a writer exists,
+    ``offered`` says the UI lists it.
+    """
     spec = next(s for s in F.FORMATS if s.key == "zarr_zip")
     assert spec.readable and spec.writable and spec.default_offered
+    assert not spec.offered
     assert "zarr_zip" in {s.key for s in F.save_formats()}
+    assert "zarr_zip" not in {s.key for s in F.offered_save_formats()}
+    assert "zarr_zip" not in F.default_save_formats()
     # Raw-canonical plus separate processing state, never a baked snapshot.
     assert spec.raw_only and "zarr_zip" in F.raw_only_formats()
+
+
+def test_offered_order_is_the_save_menu_order():
+    """Declaration order IS menu order, so the Save As menu, the Save/Export
+    dropdown and the Preferences checkboxes cannot list formats differently."""
+    assert [s.key for s in F.offered_save_formats()] == [
+        "zarr", "npy", "mat", "json", "csv", "msr"]
 
 
 def test_only_the_directory_store_takes_a_processing_only_update():

@@ -117,12 +117,15 @@ _XY_ORIGIN_OPTIONS = [
 ]
 
 from ..core import formats as _formats
+from . import save_dialog as _save_dialog
 
 # Save/Export — file formats offered (Preferences > Data, and the Save dialog).
-# From the one registry; ``.msr`` gets its own row below with a disclaimer, so
-# it is excluded from the inline checkbox row here.
+# From the one registry, in its order; ``.msr`` gets its own row below with a
+# disclaimer, so it is excluded from the inline checkbox row here. Formats whose
+# writer is kept but whose menu entry was withdrawn (``offered=False``) must not
+# appear: ticking one here could not put it back in any menu.
 _EXPORT_FORMATS = [(spec.extensions[0], spec.key)
-                   for spec in _formats.save_formats() if spec.key != "msr"]
+                   for spec in _formats.offered_save_formats() if spec.key != "msr"]
 #: A fresh installation's ticked set. ``msr`` is absent: the writer is
 #: reverse-engineered, so it is opt-in.
 _EXPORT_FORMAT_DEFAULTS = _formats.default_save_formats()
@@ -170,7 +173,7 @@ _SHORTCUT_LABELS = {
     "next_dataset": "Next dataset",
     "previous_dataset": "Previous dataset",
     "open": "Open",
-    "save": "Save processed data",
+    "save": "Save (MINFLUX Viewer Zarr v2)",
     "render": "Render",
     "brightness_contrast": "Brightness / Contrast",
     "attribute_plot": "Attribute Plot",
@@ -638,29 +641,35 @@ class PreferencesDialog(QDialog):
         content_row.addStretch()
         root.addLayout(content_row)
 
+        # Wording and tooltips come from the Save / export dialog, which shows
+        # the same three options -- they must read identically in both places.
+        # They are full sentences, so this is a stacked block, not a row.
         inc_row = QHBoxLayout()
         inc_row.addSpacing(18)
         inc_row.addWidget(QLabel("Include:"))
-        self._export_inc_attrs = QCheckBox("properties & attributes")
-        self._export_inc_derived = QCheckBox("derived attributes (freeze)")
-        self._export_inc_recipe = QCheckBox("recipe sidecar (reproduce later)")
-        inc_row.addWidget(self._export_inc_attrs)
-        inc_row.addSpacing(14)
-        inc_row.addWidget(self._export_inc_derived)
-        inc_row.addSpacing(14)
-        inc_row.addWidget(self._export_inc_recipe)
         inc_row.addStretch()
         root.addLayout(inc_row)
+        self._export_inc_attrs = QCheckBox(_save_dialog.LBL_ATTRS)
+        self._export_inc_attrs.setToolTip(_save_dialog.TIP_ATTRS)
+        self._export_inc_derived = QCheckBox(_save_dialog.LBL_DERIVED)
+        self._export_inc_derived.setToolTip(_save_dialog.TIP_DERIVED)
+        self._export_inc_recipe = QCheckBox(_save_dialog.LBL_RECIPE)
+        self._export_inc_recipe.setToolTip(_save_dialog.TIP_RECIPE)
+        for check in (self._export_inc_attrs, self._export_inc_derived,
+                      self._export_inc_recipe):
+            check_row = QHBoxLayout()
+            check_row.addSpacing(36)
+            check_row.addWidget(check)
+            check_row.addStretch()
+            root.addLayout(check_row)
 
         filt_row = QHBoxLayout()
         filt_row.addSpacing(18)
-        filt_row.addWidget(QLabel("Filter handling:"))
+        filt_row.addWidget(QLabel(_save_dialog.LBL_FILTER))
         self._export_filter_mode = QComboBox()
-        self._export_filter_mode.addItem("flag rows (ftr column, keep all)", "flag")
-        self._export_filter_mode.addItem("apply (drop filtered rows)", "apply")
-        self._export_filter_mode.setToolTip(
-            "Processed snapshot only: keep every row with a boolean 'ftr' column, "
-            "or physically drop the filtered-out rows.")
+        self._export_filter_mode.addItem(_save_dialog.LBL_FILTER_FLAG, "flag")
+        self._export_filter_mode.addItem(_save_dialog.LBL_FILTER_APPLY, "apply")
+        self._export_filter_mode.setToolTip(_save_dialog.TIP_FILTER)
         filt_row.addWidget(self._export_filter_mode)
         filt_row.addStretch()
         root.addLayout(filt_row)

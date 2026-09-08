@@ -80,18 +80,21 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "Open a MINFLUX/localization dataset.", "file", gui_class=GuiClass.GUI_RESULT),
     # Spreadsheet (.csv/.xlsx) and TIFF (.tif) files open by drag-and-drop only —
     # no dedicated File-menu commands, so no command-finder entries.
-    "actionSave": CommandMeta(C + "save.py",
-                              ("export", "write", "processed", "snapshot", "mat", "npy", "csv", "zarr", "msr"),
-                              "Save/export the active dataset (raw canonical or snapshot; any "
-                              "enabled format incl. a custom .msr writer).", "file", gui_class=GuiClass.GUI_RESULT),
+    "actionSave": CommandMeta(C + "minflux_zarr.py",
+                              ("save", "write", "zarr", "store", "self-contained"),
+                              "Save the active dataset as a MINFLUX Viewer Zarr v2 store "
+                              "(the format is fixed; the dialog asks only where).",
+                              "file", gui_class=GuiClass.GUI_RESULT),
     "actionSaveAsMinflux": CommandMeta(C + "save.py", ("save as", "mat", "npy", "json", "minflux"),
                               "Save raw canonical MINFLUX data as .mat, .npy, or .json.", "file", gui_class=GuiClass.GUI_RESULT),
     "actionSaveAsMsr": CommandMeta(C + "save.py", ("save as", "msr", "experimental", "minflux"),
                               "Save raw canonical MINFLUX data as an experimental .msr file.", "file", gui_class=GuiClass.GUI_RESULT),
     "actionSaveAsSpreadsheet": CommandMeta(C + "save.py",
-                              ("save as", "spreadsheet", "csv", "delimiter", "columns"),
+                              ("save as", "spreadsheet", "csv", "delimiter", "columns", "table"),
                               "Export chosen attributes as a custom CSV table for another tool "
-                              "(the canonical round-tripping table is File > Save).", "file", gui_class=GuiClass.GUI_RESULT),
+                              "(the all-iteration canonical table is written by the MSR reader "
+                              "and by Save / export data > More options).",
+                              "file", gui_class=GuiClass.GUI_RESULT),
     "actionSaveAsZarrZip": CommandMeta(C + "minflux_zarr.py",
                               ("save as", "zarr", "zip", "single file", "sealed",
                                "package", "archive", "portable"),

@@ -13,6 +13,17 @@ Data content:
   "recipe sidecar only" shortcut.
 - **Processed snapshot** — the current view with Z scaling factor/transform/filter baked in.
 
+**.csv means the custom column table here**, matching *File > Save As > Custom
+table*: choose the attributes and name the columns. The canonical all-iteration
+table -- the one the MSR reader writes and the one that reloads without the
+column-mapping dialog -- is still reachable, as a checkbox under *More options*,
+because it is the only CSV that can carry the iteration axis and the validity
+mask. See :func:`options` (``csv_mode``).
+
+The wording of the option labels is deliberately plain English rather than the
+internal vocabulary; :mod:`minflux_viewer.ui.preferences_dialog` shows the same
+options and must use the same words.
+
 The writing is done by :func:`minflux_viewer.core.save.save_processed`.
 """
 
@@ -37,16 +48,74 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core import formats as _formats
+from ..core.save import METADATA_SUFFIX
 
 # All derived from the one registry (:mod:`minflux_viewer.core.formats`); this
 # dialog used to keep its own copy of every table, which had to be hand-synced
 # with core.save, Preferences and the router each time a format changed.
 _FORMAT_LABELS = {spec.key: spec.label for spec in _formats.save_formats()}
+#: ``.csv`` in THIS dialog is the custom column picker, not the canonical
+#: writer the registry label names (which the MSR reader and the More-options
+#: checkbox use). Overridden here only, so the registry stays truthful for them.
+_FORMAT_LABELS["csv"] = "Custom table (.csv)"
 _EXT = {spec.key: spec.extensions[0] for spec in _formats.save_formats()}
 #: A Qt name filter is the label with a glob, e.g. "NumPy (*.npy)".
 _FILTERS = {key: label.replace("(.", "(*.")
             for key, label in _FORMAT_LABELS.items()}
+#: Every writable key (scripting, tests). The dropdown lists only the offered
+#: ones -- ``zarr_zip`` keeps its writer but has left the menus.
 _ALL_FORMATS = [spec.key for spec in _formats.save_formats()]
+_OFFERED_FORMATS = [spec.key for spec in _formats.offered_save_formats()]
+
+# --- option wording --------------------------------------------------------
+# Plain English, because these are questions about the user's data, not about
+# the implementation. Kept as constants so _sync_location (which rewrites two of
+# them for Zarr) and Preferences cannot drift from the dialog.
+LBL_ATTRS = "Include attribute columns (efo, cfr, dcr, tid, tim …), not only coordinates"
+TIP_ATTRS = (
+    "The measured per-localization values written beside the x/y/z coordinates: "
+    "efo, cfr, dcr, eco, ecc, efc, fbg, tid, tim and the rest.\n\n"
+    "Unticked, a processed snapshot holds coordinates only. This affects the "
+    "processed snapshot alone — original acquisition data always carries "
+    "everything the file contained."
+)
+LBL_DERIVED = ("Also save viewer-computed attributes "
+               "(density, trace size, speed …) as fixed values")
+TIP_DERIVED = (
+    "Values this application computed rather than the microscope measuring "
+    "them: den (local density — which depends on the radius and method you "
+    "chose), siz, dst, spd, dt, dur, len, tim_trace.\n\n"
+    "They are normally recomputed when the file is reopened, so they can come "
+    "back different. Tick this to write today's numbers as data."
+)
+LBL_RECIPE = ("Save processing metadata beside the data file "
+              f"(…_{METADATA_SUFFIX}.json)")
+TIP_RECIPE = (
+    "A small JSON file written next to the data, recording the processing this "
+    "dataset carries: Z scaling factor, transforms, filters, ROIs and "
+    "acquisition time.\n\n"
+    "Opening the data file again offers to restore them. Without it the data "
+    "loads exactly as saved, with no record of how it was produced."
+)
+LBL_FILTER = "Filtered-out localizations:"
+LBL_FILTER_FLAG = "keep, marked in an 'ftr' column"
+LBL_FILTER_APPLY = "remove from the file"
+TIP_FILTER = (
+    "What happens to localizations the active filter hides. Keeping them adds "
+    "a boolean 'ftr' column so the filter can be undone later; removing them "
+    "makes the file smaller and final.\n\n"
+    "Processed snapshot only."
+)
+LBL_CSV_CANONICAL = "Write the canonical table instead (all iterations, reloads directly)"
+TIP_CSV_CANONICAL = (
+    "The custom table is the current view: filtered, last valid iteration, one "
+    "row per localization, with the columns and headers you choose.\n\n"
+    "The canonical table is the whole mfx node — every iteration and every "
+    "validity state, with fixed column names (loc_x/loc_y/loc_z, itr, vld, "
+    "dcr_0/dcr_1 …). It is the only CSV that can carry the iteration axis, and "
+    "it reopens without the column-mapping dialog. This is what the MSR "
+    "reader's .csv export writes."
+)
 #: Formats that only carry the canonical raw data (no processed snapshot).
 _RAW_ONLY_FORMATS = _formats.raw_only_formats()
 # A file-backed dataset can skip re-writing raw only for reloadable raw formats.
@@ -72,13 +141,20 @@ class SaveProcessedDataDialog(QDialog):
 
         self._file_backed = bool(file_backed)
         self._chosen_path: Path | None = None
+        # Zarr forces "derived" and "recipe" on (it stores both internally).
+        # These remember what the user had, so switching away from Zarr restores
+        # it instead of silently leaving the forced values behind.
+        self._zarr_forced = False
+        self._pref_derived = True
+        self._pref_recipe = True
         self._default_dir = Path(default_dir or Path.home())
         data_prefs = (prefs or {}).get("data", {}) if prefs else {}
 
-        # enabled formats (fall back to all so saving is never locked out)
-        enabled = [k for k in _ALL_FORMATS
-                   if k in set(data_prefs.get("export_formats", _ALL_FORMATS))]
-        self._formats = enabled or list(_ALL_FORMATS)
+        # Enabled formats, in registry order (fall back to every offered one so
+        # saving is never locked out by a stale preference).
+        enabled = [k for k in _OFFERED_FORMATS
+                   if k in set(data_prefs.get("export_formats", _OFFERED_FORMATS))]
+        self._formats = enabled or list(_OFFERED_FORMATS)
         # content choices
         content = list(data_prefs.get("export_content", ["raw", "snapshot"])) or \
             ["raw", "snapshot"]
@@ -162,20 +238,31 @@ class SaveProcessedDataDialog(QDialog):
 
         self._more_box = QGroupBox()
         more = QVBoxLayout(self._more_box)
-        self._inc_attrs = QCheckBox("include properties & attributes")
+        self._inc_attrs = QCheckBox(LBL_ATTRS)
+        self._inc_attrs.setToolTip(TIP_ATTRS)
         self._inc_attrs.setChecked(bool(data_prefs.get("export_include_attrs", True)))
-        self._inc_derived = QCheckBox("freeze derived attributes")
+        self._inc_derived = QCheckBox(LBL_DERIVED)
+        self._inc_derived.setToolTip(TIP_DERIVED)
         self._inc_derived.setChecked(bool(data_prefs.get("export_include_derived", False)))
-        self._inc_recipe = QCheckBox("write recipe sidecar")
+        self._inc_recipe = QCheckBox(LBL_RECIPE)
+        self._inc_recipe.setToolTip(TIP_RECIPE)
         self._inc_recipe.setChecked(bool(data_prefs.get("export_include_recipe", True)))
         more.addWidget(self._inc_attrs)
         more.addWidget(self._inc_derived)
         more.addWidget(self._inc_recipe)
+        # The one way to the all-iteration canonical CSV from the viewer; the
+        # menus offer only the custom column picker under this extension.
+        self._csv_canonical = QCheckBox(LBL_CSV_CANONICAL)
+        self._csv_canonical.setToolTip(TIP_CSV_CANONICAL)
+        self._csv_canonical.toggled.connect(lambda *_: self._refresh())
+        more.addWidget(self._csv_canonical)
         filt_row = QHBoxLayout()
-        filt_row.addWidget(QLabel("Filter handling:"))
+        self._filter_lbl = QLabel(LBL_FILTER)
+        filt_row.addWidget(self._filter_lbl)
         self._filter_mode = QComboBox()
-        self._filter_mode.addItem("flag rows (ftr column, keep all)", "flag")
-        self._filter_mode.addItem("apply (drop filtered rows)", "apply")
+        self._filter_mode.setToolTip(TIP_FILTER)
+        self._filter_mode.addItem(LBL_FILTER_FLAG, "flag")
+        self._filter_mode.addItem(LBL_FILTER_APPLY, "apply")
         i = self._filter_mode.findData(data_prefs.get("export_filter_mode", "flag"))
         if i >= 0:
             self._filter_mode.setCurrentIndex(i)
@@ -203,12 +290,40 @@ class SaveProcessedDataDialog(QDialog):
         return (self._file_backed and self._current_content() == "raw"
                 and self._recipe_only.isChecked())
 
+    def is_custom_csv(self) -> bool:
+        """True when .csv means "pick the columns" rather than the canonical table."""
+        canonical = getattr(self, "_csv_canonical", None)
+        return (self._format.currentData() == "csv"
+                and canonical is not None and not canonical.isChecked())
+
     def _refresh(self) -> None:
         # The recipe-only shortcut only applies to raw content on a file-backed ds.
         show_shortcut = self._file_backed and self._current_content() == "raw"
         self._recipe_only.setVisible(show_shortcut)
         self._path_box.setVisible(not self._is_recipe_only())
+        self._sync_csv_options()
         self.adjustSize()
+
+    def _sync_csv_options(self) -> None:
+        """A custom table decides its own columns, so the snapshot options that
+        would otherwise describe them do not apply."""
+        canonical = getattr(self, "_csv_canonical", None)
+        if canonical is None:                      # still constructing
+            return
+        fmt = self._format.currentData()
+        canonical.setVisible(fmt == "csv")
+        custom = self.is_custom_csv()
+        self._inc_attrs.setEnabled(not custom)
+        self._filter_mode.setEnabled(not custom)
+        self._filter_lbl.setEnabled(not custom)
+        # ``derived`` belongs to _sync_location while Zarr is selected (it is
+        # stored inside the store, so it is forced on there); this must not undo
+        # that. Zarr is never .csv, so ``custom`` is False in that branch anyway.
+        if fmt != "zarr":
+            self._inc_derived.setEnabled(not custom)
+        if fmt == "csv":
+            self._content_combo.setEnabled(
+                not custom and self._content_combo.count() > 1)
 
     def _toggle_more(self, on: bool) -> None:
         self._more_btn.setText("More options ▾" if on else "More options ▸")
@@ -249,22 +364,28 @@ class SaveProcessedDataDialog(QDialog):
                 self._content_combo.setEnabled(self._content_combo.count() > 1)
         recipe = getattr(self, "_inc_recipe", None)
         derived = getattr(self, "_inc_derived", None)
-        if recipe is not None:
+        if recipe is not None and derived is not None:
             if fmt == "zarr":
-                recipe.setText("processing metadata is stored inside the Zarr dataset")
+                if not self._zarr_forced:          # remember before overriding
+                    self._pref_recipe = recipe.isChecked()
+                    self._pref_derived = derived.isChecked()
+                    self._zarr_forced = True
+                recipe.setText("Processing metadata is stored inside the Zarr dataset")
                 recipe.setChecked(True)
                 recipe.setEnabled(False)
-            else:
-                recipe.setText("write recipe sidecar")
-                recipe.setEnabled(True)
-        if derived is not None:
-            if fmt == "zarr":
-                derived.setText("derived arrays are stored inside the Zarr dataset")
+                derived.setText("Derived attributes are stored inside the Zarr dataset")
                 derived.setChecked(True)
                 derived.setEnabled(False)
             else:
-                derived.setText("freeze derived attributes")
+                if self._zarr_forced:
+                    recipe.setChecked(self._pref_recipe)
+                    derived.setChecked(self._pref_derived)
+                    self._zarr_forced = False
+                recipe.setText(LBL_RECIPE)
+                recipe.setEnabled(True)
+                derived.setText(LBL_DERIVED)
                 derived.setEnabled(True)
+        self._sync_csv_options()
 
     def _on_browse(self) -> None:
         fmt = self._format.currentData()
@@ -313,5 +434,12 @@ class SaveProcessedDataDialog(QDialog):
         else:
             name = self._name.text().strip() or "dataset"
             data_path = self._default_dir / f"{name}{ext}"
+        # ``csv_mode`` is the caller's cue to open the column picker instead of
+        # calling save_processed: a custom table is written by a different
+        # function (core.save.write_spreadsheet_csv) and takes no content /
+        # include / filter arguments.
+        csv_mode = ("custom" if self.is_custom_csv()
+                    else ("canonical" if fmt == "csv" else None))
         return {"data_path": data_path, "fmt": fmt, "content": content,
-                "include": include, "filter_mode": filter_mode}
+                "include": include, "filter_mode": filter_mode,
+                "csv_mode": csv_mode}
