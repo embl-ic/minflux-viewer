@@ -17,6 +17,7 @@ import pytest
 from minflux_viewer.core import loader
 from minflux_viewer.core.save import save_processed
 from minflux_viewer.core.spreadsheet_loader import (
+    EXTRA_ATTR_ROLES,
     ROLES,
     build_dataset_from_mapping,
     guess_mapping,
@@ -149,6 +150,33 @@ def test_itr_and_vld_are_offered_as_roles_and_auto_detected(canonical_csv):
     assert mapping["vld"] == "vld"
     # 'eco' is the MINFLUX photon count and must be recognised as one.
     assert mapping["photons"] == "eco"
+
+
+def test_efo_and_cfr_are_recognised_whatever_their_capitalisation(tmp_path):
+    """``EFO`` / ``Cfr`` are the MINFLUX quality attributes the filters read, so
+    they are parameters in their own right rather than passed-through columns —
+    matched on the normalised (lower-cased) header, and imported under the
+    canonical name."""
+    path = tmp_path / "quality.csv"
+    n = 20
+    lines = ["X_nm,Y_nm,EFO,Cfr,DCR"]
+    lines += [f"{100 + i},{200 + i},{1000 * i},{0.01 * i},{0.4 + 0.01 * i}"
+              for i in range(n)]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+    table = read_table(path)
+    mapping = guess_mapping(table)
+    assert mapping["efo"] == "EFO" and mapping["cfr"] == "Cfr"
+    assert mapping["dcr"] == "DCR"
+    # They are added parameters, not standing rows of the dialog.
+    for role in ("cfr", "efo", "dcr"):
+        assert role in EXTRA_ATTR_ROLES and role not in ROLES
+
+    ds = build_dataset_from_mapping(table, mapping,
+                                    units={"x": "nm", "y": "nm", "z": "nm"})
+    for key in ("efo", "cfr", "dcr"):
+        assert key in ds.attr and np.asarray(ds.attr[key]).size == n
+    assert np.allclose(np.asarray(ds.attr["cfr"]), 0.01 * np.arange(n))
 
 
 def test_mapping_itr_and_vld_reduces_rows_to_the_last_valid_iteration(canonical_csv):
