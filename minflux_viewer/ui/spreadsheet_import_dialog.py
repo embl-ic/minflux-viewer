@@ -3,16 +3,22 @@ Spreadsheet column-mapping dialog.
 
 Shown when :func:`minflux_viewer.core.spreadsheet_loader.auto_import` can't load
 a table unattended (ambiguous columns, or camera-pixel coordinates without a
-pixel size). The role combos, per-coordinate units, and pixel-size field are
-**pre-filled** from the loader's best guess, and the preview shows a handful of
-representative rows spanning the whole file.
+pixel size). The parameter combos, per-coordinate units, and pixel-size field
+are **pre-filled** from the loader's best guess, and the preview shows a handful
+of representative rows spanning the whole file.
+
+The mapping area is progressive. It opens *simple* — the four parameters every
+localization table needs (x, y, z, time/frame) — and *expands* to the rest:
+precision, trace id, photons, iteration, valid mask, plus one row per raw
+MINFLUX attribute (cfr, efo, dcr, …) added with *+ add parameter*. A parameter
+the fold is hiding is counted in the group title, never silently dropped.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -23,15 +29,21 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
+    QWidget,
 )
 
+from ..core.attributes import RAW_ATTRIBUTE_DESCRIPTIONS
 from ..core.export_size import format_file_size
 from ..core.spreadsheet_loader import (
     COORD_ROLES,
     DEFAULT_PIXEL_SIZE_NM,
+    EXTRA_ATTR_ROLES,
+    PREC_ROLES,
     ROLES,
     AutoImportAmbiguity,
     SpreadsheetTable,
@@ -48,7 +60,7 @@ from ..core.spreadsheet_loader import (
     table_stats,
 )
 
-# Role → (display label, required?)
+# Parameter → (display label, required?)
 _ROLE_LABELS: dict[str, tuple[str, bool]] = {
     "x": ("x (→ xnm)", True),
     "y": ("y (→ ynm)", True),
@@ -61,8 +73,12 @@ _ROLE_LABELS: dict[str, tuple[str, bool]] = {
     "itr": ("iteration (itr)", False),
     "vld": ("valid mask (vld)", False),
 }
-# Hover help for the two MINFLUX-only roles: they SELECT rows rather than adding
-# an attribute, which is not guessable from the label alone.
+#: Shown before the mapping is expanded: what a plain localization table needs.
+#: Everything else in :data:`ROLES` appears once the user expands.
+SIMPLE_ROLES: tuple[str, ...] = ("x", "y", "z", "frame")
+# Hover help where the label alone does not say what mapping the parameter does
+# — itr / vld SELECT rows rather than adding an attribute, and a precision has a
+# unit of its own. Every other parameter falls back to its attribute description.
 _ROLE_TIPS: dict[str, str] = {
     "itr": ("MINFLUX iteration index. One row of a raw export is one "
             "(localization × iteration) event, so mapping this keeps only the "
@@ -73,21 +89,71 @@ _ROLE_TIPS: dict[str, str] = {
     "photons": ("Photon count per localization. In a MINFLUX export this is "
                 "'eco'; it is stored under that name so the CRLB precision "
                 "estimate finds it."),
+    "prec_xy": ("Lateral localization precision. Its unit follows x / y unless "
+                "you pick one here."),
+    "prec_z": ("Axial localization precision. Its unit follows z unless you "
+               "pick one here."),
 }
 # Display unit ↔ internal unit token.
-_UNIT_CHOICES = (("nm", "nm"), ("µm", "um"), ("mm", "mm"), ("m", "m"), ("pixel", "px"))
+_UNIT_CHOICES = (("nm", "nm"), ("µm", "um"), ("mm", "mm"), ("metre", "m"),
+                 ("pixel", "px"))
+# A precision is a length in the coordinate system, so it inherits the
+# coordinate unit by default — an explicit choice overrides that.
+_PREC_UNIT_CHOICES = {"prec_xy": (("as x / y", None),) + _UNIT_CHOICES,
+                      "prec_z": (("as z", None),) + _UNIT_CHOICES}
 # Time unit for the frame → tim column (None = frame index, kept as-is).
-_TIME_CHOICES = (("frames", None), ("s", "s"), ("ms", "ms"))
+_TIME_CHOICES = (("frames", None), ("second", "s"), ("ms", "ms"))
 _NONE = "<none>"
+#: Rows of the preview the dialog opens tall enough to show. The preview holds
+#: more (the head, a logarithmic spread and the last row); this is what fits
+#: without scrolling, and what the dialog's opening height is measured from.
+PREVIEW_ROWS = 10
+
+
+def _role_label(role: str) -> str:
+    """Display label for *role* — an added raw attribute is its own label."""
+    return _ROLE_LABELS.get(role, (role, False))[0]
+
+
+def _role_tip(role: str) -> str:
+    """Hover help: the role-specific note, else the attribute's description."""
+    return _ROLE_TIPS.get(role) or RAW_ATTRIBUTE_DESCRIPTIONS.get(role, "")
+
+
+class _PreviewTable(QTableWidget):
+    """The preview grid, asking to be :data:`PREVIEW_ROWS` rows tall.
+
+    A scroll area's size hint is a fixed default whatever it holds, so a dialog
+    sized from it opens on an arbitrary number of rows. This pins the opening
+    height to a readable sample; the table still shrinks and grows with the
+    dialog, and still holds more rows than it shows.
+    """
+
+    def _chrome(self) -> int:
+        return (self.horizontalHeader().sizeHint().height()
+                + 2 * self.frameWidth()
+                + self.horizontalScrollBar().sizeHint().height())
+
+    def sizeHint(self) -> QSize:
+        row = self.verticalHeader().defaultSectionSize()
+        return QSize(super().sizeHint().width(), self._chrome() + PREVIEW_ROWS * row)
+
+    def minimumSizeHint(self) -> QSize:
+        row = self.verticalHeader().defaultSectionSize()
+        return QSize(super().minimumSizeHint().width(), self._chrome() + 3 * row)
 
 
 class SpreadsheetMappingDialog(QDialog):
-    """Map spreadsheet columns to localization roles and build a dataset.
+    """Map spreadsheet columns to localization parameters and build a dataset.
 
-    Roles, coordinate/time units, and the pixel size are **pre-filled** from the
-    loader's value-based best guess (headers first, then column statistics), so
-    a headerless MINFLUX-like table opens with x/y/z/tid/tim already populated —
-    the user only confirms or corrects, then imports.
+    Parameters, coordinate/time units, and the pixel size are **pre-filled** from
+    the loader's value-based best guess (headers first, then column statistics),
+    so a headerless MINFLUX-like table opens with x/y/z/tid/tim already populated
+    — the user only confirms or corrects, then imports.
+
+    The mapping grid has two depths (see :data:`SIMPLE_ROLES`) and grows by one
+    row per *+ add parameter*, each row mapping a column to a further raw MINFLUX
+    attribute (:data:`~minflux_viewer.core.spreadsheet_loader.EXTRA_ATTR_ROLES`).
     """
 
     def __init__(self, table: SpreadsheetTable,
@@ -108,12 +174,23 @@ class SpreadsheetMappingDialog(QDialog):
         self._prefs = prefs
         self._role_combos: dict[str, QComboBox] = {}
         self._unit_combos: dict[str, QComboBox] = {}
+        self._row_widgets: dict[str, list[QWidget]] = {}
+        self._extra_rows: list[dict] = []
         self._time_combo: QComboBox | None = None
+        # Opens folded: the four parameters that carry a localization table. A
+        # guess the fold hides is counted in the group title (see _map_title),
+        # so a pre-filled parameter is out of sight but never out of mind.
+        self._advanced = False
+        self._built = False
 
         self.setWindowTitle(f"Open spreadsheet — {Path(table.path).name}")
-        self.resize(940, 620)
         self._build_ui()
+        self._built = True
         self._update_pixel_enabled()
+        # Exactly tall enough for the folded mapping and PREVIEW_ROWS of table.
+        # The hints are measured after the rows this view hides are hidden.
+        self._measure()
+        self.resize(940, self.sizeHint().height())
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
@@ -121,7 +198,7 @@ class SpreadsheetMappingDialog(QDialog):
         count_prefix = "approximately " if self._table.n_rows_is_estimate else ""
         root.addWidget(QLabel(
             f"<b>{count_prefix}{self._table.n_rows:,}</b> rows · detected tool: "
-            f"<b>{self._table.detected_tool}</b>. Assign columns to roles "
+            f"<b>{self._table.detected_tool}</b>. Assign columns to parameters "
             "(<b>x</b> and <b>y</b> are required); coordinate units are pre-filled."))
         if self._table.preview_only:
             size = format_file_size(Path(self._table.path).stat().st_size)
@@ -140,52 +217,8 @@ class SpreadsheetMappingDialog(QDialog):
             )
             root.addWidget(warning)
 
-        col_names = [c.name for c in self._table.numeric_columns()]
-        grp = QGroupBox("Column mapping")
-        grid = QGridLayout(grp)
-        grid.addWidget(QLabel("<b>role</b>"), 0, 0)
-        grid.addWidget(QLabel("<b>column</b>"), 0, 1)
-        grid.addWidget(QLabel("<b>unit</b>"), 0, 2)
-        for r, role in enumerate(ROLES, start=1):
-            label, required = _ROLE_LABELS[role]
-            grid.addWidget(QLabel(label + (" *" if required else "")), r, 0)
-
-            combo = QComboBox()
-            combo.addItem(_NONE, None)
-            for i, name in enumerate(col_names, start=1):
-                combo.addItem(name, name)
-                combo.setItemData(i, self._stats_tooltip(name), Qt.ItemDataRole.ToolTipRole)
-            chosen = self._mapping0.get(role)
-            idx = combo.findData(chosen) if chosen else 0
-            combo.setCurrentIndex(max(0, idx))
-            combo.currentIndexChanged.connect(lambda _i, cb=combo: self._sync_combo_tooltip(cb))
-            self._sync_combo_tooltip(combo)
-            if role in _ROLE_TIPS:
-                grid.itemAtPosition(r, 0).widget().setToolTip(_ROLE_TIPS[role])
-            grid.addWidget(combo, r, 1)
-            self._role_combos[role] = combo
-
-            if role in COORD_ROLES:
-                ucombo = QComboBox()
-                for disp, tok in _UNIT_CHOICES:
-                    ucombo.addItem(disp, tok)
-                uidx = ucombo.findData(self._units0.get(role, "nm"))
-                ucombo.setCurrentIndex(max(0, uidx))
-                ucombo.currentIndexChanged.connect(self._update_pixel_enabled)
-                grid.addWidget(ucombo, r, 2)
-                self._unit_combos[role] = ucombo
-            elif role == "frame":
-                tcombo = QComboBox()
-                tcombo.setToolTip("Unit of the time column — 'ms' is rescaled to "
-                                  "seconds; 'frames' keeps the raw index.")
-                for disp, tok in _TIME_CHOICES:
-                    tcombo.addItem(disp, tok)
-                tidx = tcombo.findData(self._time_unit0)
-                tcombo.setCurrentIndex(max(0, tidx))
-                grid.addWidget(tcombo, r, 2)
-                self._time_combo = tcombo
-        grid.setColumnStretch(1, 1)
-        root.addWidget(grp)
+        self._col_names = [c.name for c in self._table.numeric_columns()]
+        root.addWidget(self._build_mapping_group())
 
         # Pixel size (only relevant when a coordinate unit is 'pixel').
         px_row = QHBoxLayout()
@@ -200,7 +233,8 @@ class SpreadsheetMappingDialog(QDialog):
         root.addLayout(px_row)
 
         root.addWidget(QLabel("Preview (representative rows across the file):"))
-        root.addWidget(self._build_preview(), stretch=1)
+        self._preview = self._build_preview()
+        root.addWidget(self._preview, stretch=1)
 
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                               | QDialogButtonBox.StandardButton.Cancel)
@@ -208,6 +242,233 @@ class SpreadsheetMappingDialog(QDialog):
         bb.rejected.connect(self.reject)
         self._buttons = bb
         root.addWidget(bb)
+
+    def _build_mapping_group(self) -> QGroupBox:
+        """The mapping grid plus its *+ add parameter* / expand-fold controls."""
+        self._map_group = QGroupBox("Column mapping")
+        outer = QVBoxLayout(self._map_group)
+        self._grid = QGridLayout()
+        outer.addLayout(self._grid)
+        self._grid.addWidget(QLabel("<b>parameter</b>"), 0, 0)
+        self._grid.addWidget(QLabel("<b>column</b>"), 0, 1)
+        self._grid.addWidget(QLabel("<b>unit</b>"), 0, 2)
+        # The controls exist before the rows do: adding a row re-reads them.
+        self._add_btn = QPushButton("+ add parameter")
+        self._add_btn.setToolTip(
+            "Map a column to a further raw MINFLUX attribute, imported under "
+            "its canonical name.")
+        self._add_btn.clicked.connect(lambda: self._add_extra_row())
+        self._toggle_btn = QToolButton()
+        self._toggle_btn.setAutoRaise(True)
+        self._toggle_btn.clicked.connect(self._toggle_advanced)
+
+        self._grid_row = 1
+        for role in ROLES:
+            self._add_role_row(role)
+        # A raw attribute the guess already matched (a 'dcr' column, say) gets a
+        # row of its own, so the import is never silently richer than the dialog.
+        for role in EXTRA_ATTR_ROLES:
+            if self._mapping0.get(role):
+                self._add_extra_row(role)
+        self._grid.setColumnStretch(1, 1)
+
+        controls = QHBoxLayout()
+        controls.addWidget(self._add_btn)
+        controls.addStretch()
+        controls.addWidget(self._toggle_btn)
+        outer.addLayout(controls)
+        self._apply_mode()
+        return self._map_group
+
+    def _column_combo(self, chosen: str | None) -> QComboBox:
+        """A column dropdown over the numeric columns, pre-set to *chosen*."""
+        combo = QComboBox()
+        combo.addItem(_NONE, None)
+        for i, name in enumerate(self._col_names, start=1):
+            combo.addItem(name, name)
+            combo.setItemData(i, self._stats_tooltip(name), Qt.ItemDataRole.ToolTipRole)
+        idx = combo.findData(chosen) if chosen else 0
+        combo.setCurrentIndex(max(0, idx))
+        combo.currentIndexChanged.connect(lambda _i, cb=combo: self._sync_combo_tooltip(cb))
+        self._sync_combo_tooltip(combo)
+        return combo
+
+    def _add_role_row(self, role: str) -> None:
+        """One fixed row of the grid: label · column · unit (where it has one)."""
+        r, self._grid_row = self._grid_row, self._grid_row + 1
+        label, required = _ROLE_LABELS[role]
+        name = QLabel(label + (" *" if required else ""))
+        if _role_tip(role):
+            name.setToolTip(_role_tip(role))
+        self._grid.addWidget(name, r, 0)
+
+        combo = self._column_combo(self._mapping0.get(role))
+        self._grid.addWidget(combo, r, 1)
+        self._role_combos[role] = combo
+        widgets: list[QWidget] = [name, combo]
+
+        unit: QComboBox | None = None
+        if role in COORD_ROLES:
+            unit = QComboBox()
+            for disp, tok in _UNIT_CHOICES:
+                unit.addItem(disp, tok)
+            unit.setCurrentIndex(max(0, unit.findData(self._units0.get(role, "nm"))))
+            unit.currentIndexChanged.connect(self._update_pixel_enabled)
+            self._unit_combos[role] = unit
+        elif role in PREC_ROLES:
+            unit = QComboBox()
+            choices = _PREC_UNIT_CHOICES[role]
+            unit.setToolTip(f"Unit of the precision column — '{choices[0][0]}' "
+                            "takes the coordinate unit, which is what most "
+                            "tools export.")
+            for disp, tok in choices:
+                unit.addItem(disp, tok)
+            unit.currentIndexChanged.connect(self._update_pixel_enabled)
+            self._unit_combos[role] = unit
+        elif role == "frame":
+            unit = QComboBox()
+            unit.setToolTip("Unit of the time column — 'ms' is rescaled to "
+                            "seconds; 'frames' keeps the raw index.")
+            for disp, tok in _TIME_CHOICES:
+                unit.addItem(disp, tok)
+            unit.setCurrentIndex(max(0, unit.findData(self._time_unit0)))
+            self._time_combo = unit
+        if unit is not None:
+            self._grid.addWidget(unit, r, 2)
+            widgets.append(unit)
+        self._row_widgets[role] = widgets
+
+    # ------------------------------------------------- added parameter rows
+    def _available_extra_roles(self, exclude: dict | None = None) -> list[str]:
+        """Raw attributes not already in the mapping, in canonical order."""
+        taken = {e["role"] for e in self._extra_rows if e is not exclude}
+        return [role for role in EXTRA_ATTR_ROLES if role not in taken]
+
+    def _add_extra_row(self, role: str | None = None) -> None:
+        """Append a row mapping a column to a further raw MINFLUX attribute."""
+        available = self._available_extra_roles()
+        role = role or (available[0] if available else None)
+        if role is None:
+            return
+        before = self._measure()
+        r, self._grid_row = self._grid_row, self._grid_row + 1
+        param = QComboBox()
+        column = self._column_combo(self._mapping0.get(role))
+        remove = QToolButton()
+        remove.setText("✕")
+        remove.setAutoRaise(True)
+        remove.setToolTip("Remove this parameter from the mapping.")
+        entry = {"role": role, "param": param, "column": column,
+                 "widgets": [param, column, remove]}
+        self._extra_rows.append(entry)
+        self._role_combos[role] = column
+        self._grid.addWidget(param, r, 0)
+        self._grid.addWidget(column, r, 1)
+        self._grid.addWidget(remove, r, 3)
+        param.currentIndexChanged.connect(
+            lambda _i, e=entry: self._on_extra_role_changed(e))
+        remove.clicked.connect(lambda _c=False, e=entry: self._remove_extra_row(e))
+        self._refresh_extra_choices()
+        for widget in entry["widgets"]:
+            widget.setVisible(self._advanced)
+        self._grow(before)
+
+    def _refresh_extra_choices(self) -> None:
+        """Re-fill every added row's parameter dropdown with what is still free
+        (its own choice included), and disable *+ add* once nothing is."""
+        for entry in self._extra_rows:
+            param: QComboBox = entry["param"]
+            choices = self._available_extra_roles(exclude=entry)
+            blocked = param.blockSignals(True)
+            param.clear()
+            for role in choices:
+                param.addItem(_role_label(role), role)
+                if _role_tip(role):
+                    param.setItemData(param.count() - 1, _role_tip(role),
+                                      Qt.ItemDataRole.ToolTipRole)
+            param.setCurrentIndex(max(0, param.findData(entry["role"])))
+            param.blockSignals(blocked)
+            param.setToolTip(_role_tip(entry["role"]))
+        self._add_btn.setEnabled(bool(self._available_extra_roles()))
+
+    def _on_extra_role_changed(self, entry: dict) -> None:
+        role = entry["param"].currentData()
+        if role is None or role == entry["role"]:
+            return
+        self._role_combos.pop(entry["role"], None)
+        entry["role"] = role
+        self._role_combos[role] = entry["column"]
+        self._refresh_extra_choices()
+
+    def _remove_extra_row(self, entry: dict) -> None:
+        before = self._measure()
+        self._extra_rows.remove(entry)
+        self._role_combos.pop(entry["role"], None)
+        for widget in entry["widgets"]:
+            self._grid.removeWidget(widget)
+            widget.setParent(None)
+            widget.deleteLater()
+        self._refresh_extra_choices()
+        self._grow(before)
+
+    # ------------------------------------------------------- simple / expanded
+    def _apply_mode(self) -> None:
+        """Show the rows the current depth calls for, and label the toggle."""
+        for role, widgets in self._row_widgets.items():
+            visible = self._advanced or role in SIMPLE_ROLES
+            for widget in widgets:
+                widget.setVisible(visible)
+        for entry in self._extra_rows:
+            for widget in entry["widgets"]:
+                widget.setVisible(self._advanced)
+        self._add_btn.setVisible(self._advanced)
+        self._toggle_btn.setText("▲ fold" if self._advanced else "▼ expand")
+        self._toggle_btn.setToolTip(
+            "Hide the parameters beyond x / y / z / time."
+            if self._advanced else
+            "Show precision, trace id, photons, iteration, the valid mask and "
+            "any added attribute.")
+        self._map_group.setTitle(self._map_title())
+
+    def _map_title(self) -> str:
+        """Title that owns up to mappings the folded view is hiding."""
+        if self._advanced:
+            return "Column mapping"
+        hidden = sum(1 for role, combo in self._role_combos.items()
+                     if role not in SIMPLE_ROLES and combo.currentData())
+        return ("Column mapping" if not hidden else
+                f"Column mapping — {hidden} more mapped, expand to see")
+
+    def _toggle_advanced(self) -> None:
+        before = self._measure()
+        self._advanced = not self._advanced
+        self._apply_mode()
+        self._grow(before)
+
+    def _measure(self) -> tuple[int, int]:
+        """``(mapping-group height, dialog height)`` with the layouts re-measured.
+
+        The cached hints are stale the instant a row is shown, hidden or added,
+        and re-activating the dialog layout can already have resized the window
+        to its new minimum — so both numbers must be read together.
+        """
+        for layout in (self._map_group.layout(), self.layout()):
+            if layout is not None:
+                layout.invalidate()
+                layout.activate()
+        return self._map_group.sizeHint().height(), self.height()
+
+    def _grow(self, before: tuple[int, int]) -> None:
+        """Give the mapping group the height it just gained (or hand it back),
+        so expanding never eats the preview and folding never leaves a gap."""
+        if not self._built:
+            return
+        map_before, dialog_before = before
+        delta = self._measure()[0] - map_before
+        if delta:
+            # resize() is clamped by the layout's own minimum for a top-level
+            # window, so this only ever asks; Qt keeps the dialog usable.
+            self.resize(self.width(), dialog_before + delta)
 
     def _build_preview(self) -> QTableWidget:
         headers = self._table.headers
@@ -218,7 +479,7 @@ class SpreadsheetMappingDialog(QDialog):
         else:
             rows = representative_row_indices(self._table.n_rows)
             displayed_rows = rows
-        table = QTableWidget(len(rows), len(headers) + 1)
+        table = _PreviewTable(len(rows), len(headers) + 1)
         table.setHorizontalHeaderLabels(["row"] + headers)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         col_by_name = {c.name: c for c in self._table.columns}
@@ -244,7 +505,7 @@ class SpreadsheetMappingDialog(QDialog):
 
     def _stats_tooltip(self, name: str | None) -> str:
         """Human-readable value statistics for column *name* (dtype · range ·
-        median step · unique count), used as a hover hint on the role dropdowns."""
+        median step · unique count), used as a hover hint on the column dropdowns."""
         st = self._stats.get(name) if name else None
         if st is None or st.n_finite == 0:
             return ""
@@ -278,9 +539,11 @@ class SpreadsheetMappingDialog(QDialog):
     def dataset_build_spec(self) -> dict:
         """Capture widget choices as plain data safe to use on a worker thread."""
         mapping = self._current_mapping()
-        units = {
-            role: combo.currentData() for role, combo in self._unit_combos.items()
-        }
+        # A precision left on 'as x / y' contributes no unit: the build inherits
+        # the coordinate unit, which is what the loader did before this control.
+        units = {role: combo.currentData()
+                 for role, combo in self._unit_combos.items()
+                 if combo.currentData() is not None}
         pixel = float(self._px_spin.value()) if self._px_spin.isEnabled() else None
         time_unit = (
             self._time_combo.currentData() if self._time_combo is not None else None
@@ -289,10 +552,14 @@ class SpreadsheetMappingDialog(QDialog):
         # spreadsheet: one row is an iteration event, and every raw field must
         # survive.  When the user accepted the untouched canonical mapping, use
         # its dedicated loader instead of reducing it to x/y/z/tid/tim.
+        def mapped(m: dict) -> dict:
+            return {role: name for role, name in m.items() if name}
+
         canonical = (
             is_canonical_minflux_table(self._table)
-            and mapping == self._mapping0
-            and units == self._units0
+            and mapped(mapping) == mapped(self._mapping0)
+            and all(units.get(a) == self._units0.get(a) for a in COORD_ROLES)
+            and not any(role in units for role in PREC_ROLES)
             and time_unit == self._time_unit0
         )
         return {
