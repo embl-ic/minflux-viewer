@@ -6184,32 +6184,16 @@ class MsrReaderDialog(QWidget):
                     except Exception as _exc:
                         self.log(f"[warn] recipe sidecar beside '{msr_path.name}' "
                                  f"could not be applied: {_exc}")
+                    # Everything above was written onto `dataset` itself, and
+                    # add_dataset appends that same object -- so nothing may be
+                    # re-stamped here. A second pass used to repeat the overlay
+                    # assignment, the provenance and the MBM points, which
+                    # (a) referenced a name this module no longer imports and
+                    # (b) overwrote whatever the embedded viewer state or the
+                    # recipe sidecar had just restored, with the defaults the
+                    # import invents.
                     idx = self._state.add_dataset(dataset)
                     loaded = self._state.datasets[idx]
-                    if not individual:
-                        loaded.state["overlay_id"] = render_group_id
-                        loaded.state["render_group_id"] = render_group_id
-                        loaded.state["overlay_index"] = overlay_index
-                        loaded.state["overlay_order"] = len(imported_indices) + 1
-                        loaded.state["overlay_lut"] = dataset.state.get("overlay_lut")
-                        loaded.state["render_channel_lut"] = loaded.state["overlay_lut"]
-                    loaded.metadata["msr_source_path"] = str(msr_path)
-                    loaded.metadata["msr_dataset_key"] = key
-                    loaded.metadata["msr_dataset_name"] = key
-                    loaded.metadata["msr_dataset_did"] = str(ds.get("did") or "")
-                    if not individual:
-                        loaded.metadata["overlay_id"] = render_group_id
-                        loaded.metadata["overlay_index"] = overlay_index
-                    if key in MFSTATE.mbm_map:
-                        loaded.mbm = AttributeComponent({"points": MFSTATE.mbm_map[key]})
-                        loaded.metadata["mbm_points"] = MFSTATE.mbm_map[key]
-                    if key in viewer_transforms:
-                        transform = viewer_transforms[key]
-                        loaded.state["overlay_transform"] = transform
-                        loaded.state["render_transform_2d"] = transform
-                        loaded.metadata["overlay_transform"] = transform
-                        loaded.metadata["render_transform_2d"] = transform
-                        loaded.metadata["transformed"] = bool(transform.get("moving_channel") != transform.get("reference_channel"))
                     imported_indices.append(idx)
                     imported.append(key)
                     self.log(f"[viewer] '{key}' → {loaded.prop.num_loc:,} loc")
