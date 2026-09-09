@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from PyQt6.QtCore import QObject, QRunnable, Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication,
@@ -2923,6 +2923,12 @@ class _ParseWorker(QThread):
         except Exception as exc:
             handle.finish("failed", detail=str(exc))
             self.failed.emit(str(exc))
+
+
+#: How long after the reader closes its windows are restacked. Zero would
+#: race the window manager's own post-close activation, which is the thing the
+#: restack exists to undo; a few frames is imperceptible and reliably after it.
+RESTACK_DELAY_MS = 60
 
 
 class MsrReaderDialog(QWidget):
@@ -6243,6 +6249,17 @@ class MsrReaderDialog(QWidget):
                 if existing is not None and hasattr(existing, "_refresh_from_dataset"):
                     existing._refresh_from_dataset()
                 parent._show_render(imported_indices[0])
+            # Give the windows the order this reader lists the file's contents
+            # in -- mfx, then mbm, then image series -- and do it *after* this
+            # dialog is gone, because closing a window hands activation to
+            # whatever the window manager picks next. On Windows that was often
+            # the image viewer, which is why the render view appeared and then
+            # disappeared behind it.
+            if parent is not None and hasattr(parent, "restack_import_windows"):
+                QTimer.singleShot(
+                    RESTACK_DELAY_MS,
+                    lambda p=parent, i=list(imported_indices): p.restack_import_windows(i),
+                )
             self.close()
 
     def _record_overlay_load_event(self, msr_path, imported, imported_indices,

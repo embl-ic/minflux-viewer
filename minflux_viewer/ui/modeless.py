@@ -183,6 +183,202 @@ def place_beside(window: QWidget, anchor: QWidget | None, *, margin: int = 12,
         pass
 
 
+def _overlap_area(a, b) -> int:
+    """Area shared by two exclusive ``(left, top, right, bottom)`` rects."""
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    return w * h if w > 0 and h > 0 else 0
+
+
+def open_position(avail, size, occupied, *, margin: int = 12, step: int = 28,
+                  cascade: int = 6,
+                  prefer: tuple[str, ...] = ("right", "below", "left", "above")):
+    """Pure geometry: where to open a new ``size=(w, h)`` window so it does not
+    cover the ones already open.
+
+    ``avail`` and each rect in ``occupied`` are exclusive
+    ``(left, top, right, bottom)``. Candidates are tried in order -- beside the
+    **most recently opened** occupied window on each preferred side, then beside
+    each earlier one, then a cascade stepping down-right from the most recent --
+    and the first that overlaps nothing wins. When every candidate overlaps
+    something (a crowded or small screen) the least-overlapping one is returned,
+    so the result degrades to "as visible as possible" rather than to a
+    coin toss. Every candidate is clamped inside *avail* first, so the answer is
+    always fully on-screen.
+
+    Returns ``None`` when there is nothing to avoid -- the caller should then
+    leave placement to Qt rather than invent one.
+    """
+    occupied = [tuple(int(v) for v in rect) for rect in occupied]
+    if not occupied:
+        return None
+    vl, vt, vr, vb = avail
+    w, h = size
+
+    candidates = []
+    for left, top, right, bottom in reversed(occupied):     # most recent first
+        beside = {
+            "right": (right + margin, top),
+            "left": (left - margin - w, top),
+            "below": (left, bottom + margin),
+            "above": (left, top - margin - h),
+        }
+        candidates.extend(beside[side] for side in prefer if side in beside)
+    last_left, last_top = occupied[-1][0], occupied[-1][1]
+    candidates.extend((last_left + k * step, last_top + k * step)
+                      for k in range(1, cascade + 1))
+
+    best, best_cost = None, None
+    for x, y in candidates:
+        # ⚠ Judge the candidate where it was ASKED for, not where it would be
+        # clamped to. Clamping a "to the right" that runs off the monitor slides
+        # the window back over the very thing it was meant to clear -- so a
+        # clamp-then-measure order reports a clean placement and delivers an
+        # overlapping one.
+        if (x >= vl and y >= vt and x + w <= vr and y + h <= vb
+                and not any(_overlap_area((x, y, x + w, y + h), other)
+                            for other in occupied)):
+            return (x, y)
+        # It did not fit as asked; keep its on-screen form as a fallback, for
+        # the case where nothing fits and "least covered" is the best on offer.
+        cx = min(max(x, vl), max(vl, vr - w))
+        cy = min(max(y, vt), max(vt, vb - h))
+        rect = (cx, cy, cx + w, cy + h)
+        cost = sum(_overlap_area(rect, other) for other in occupied)
+        if best_cost is None or cost < best_cost:
+            best, best_cost = (cx, cy), cost
+    return best
+
+
+#: How far from dead centre a window may sit and still count as one nobody has
+#: placed. Qt centres a top-level it was given no position for, and frame
+#: margins / DPI rounding move that by a few pixels, not by fifty.
+UNPLACED_TOLERANCE = 48
+
+
+def looks_unplaced(rect, avail, *, tolerance: int = UNPLACED_TOLERANCE) -> bool:
+    """Whether *rect* is still where Qt puts a window nobody has positioned.
+
+    ⚠ This is what keeps tiling from yanking a window the user arranged: it is
+    fair to move a neighbour that only just appeared at the default spot, and
+    not fair to move one somebody dragged where they wanted it.
+    """
+    vl, vt, vr, vb = avail
+    w, h = rect[2] - rect[0], rect[3] - rect[1]
+    return (abs(rect[0] - (vl + ((vr - vl) - w) // 2)) <= tolerance
+            and abs(rect[1] - (vt + ((vb - vt) - h) // 2)) <= tolerance)
+
+
+def tile_pair(avail, size_a, size_b, *, margin: int = 12, anchor=None):
+    """Pure geometry: top-lefts that put two windows beside or below each other.
+
+    Side by side is tried first -- two views of the same data read better that
+    way -- then stacked, which is what a **portrait** monitor has room for: two
+    880x920 windows do not fit across a 1440-wide screen but do fit down a
+    2560-tall one. The pair is centred on the axis it is tiled along, so it
+    reads as a deliberate layout rather than a shove against one edge, and keeps
+    *anchor*'s coordinate (clamped) on the other axis so it stays where the eye
+    already is.
+
+    Returns ``None`` when neither axis fits the pair; the caller then keeps its
+    single-window placement rather than shuffling two windows for no gain.
+    """
+    vl, vt, vr, vb = avail
+    (wa, ha), (wb, hb) = size_a, size_b
+
+    def clamped(value, low, high):
+        return min(max(value, low), max(low, high))
+
+    if wa + margin + wb <= vr - vl:
+        x = vl + ((vr - vl) - (wa + margin + wb)) // 2
+        top = vt if anchor is None else anchor[1]
+        return ((x, clamped(top, vt, vb - ha)),
+                (x + wa + margin, clamped(top, vt, vb - hb)))
+    if ha + margin + hb <= vb - vt:
+        y = vt + ((vb - vt) - (ha + margin + hb)) // 2
+        left = vl if anchor is None else anchor[0]
+        return ((clamped(left, vl, vr - wa), y),
+                (clamped(left, vl, vr - wb), y + ha + margin))
+    return None
+
+
+def place_clear_of(window: QWidget, occupied, *, margin: int = 12,
+                   step: int = 28,
+                   prefer: tuple[str, ...] = ("right", "below", "left", "above")
+                   ) -> bool:
+    """Move *window* so it does not cover the widgets in *occupied* (best effort).
+
+    Thin Qt wrapper over :func:`open_position`. Dead C++ wrappers and hidden
+    windows are skipped, so the caller may hand over whole registries. Returns
+    whether the window was moved; never throws.
+    """
+    try:
+        from PyQt6.QtGui import QCursor, QGuiApplication
+
+        rects, anchors, screen = [], [], None
+        for other in occupied:
+            try:
+                if other is window or other is None or not other.isVisible():
+                    continue
+                geometry = other.frameGeometry()
+                if screen is None:
+                    screen = other.window().screen()
+            except RuntimeError:                    # C++ object already deleted
+                continue
+            except Exception:
+                continue
+            rect = (geometry.left(), geometry.top(),
+                    geometry.left() + geometry.width(),
+                    geometry.top() + geometry.height())
+            rects.append(rect)
+            anchors.append((other, rect))
+        if not rects:
+            return False
+        if screen is None:
+            screen = (QGuiApplication.screenAt(QCursor.pos())
+                      or QGuiApplication.primaryScreen())
+        if screen is None:
+            return False
+
+        av = screen.availableGeometry()
+        avail = (av.left(), av.top(), av.left() + av.width(), av.top() + av.height())
+        frame = window.frameGeometry()
+        size = (frame.width(), frame.height())
+        placed = open_position(avail, size, rects,
+                               margin=margin, step=step, prefer=prefer)
+        if placed is None:
+            return False
+
+        def _move(widget, xy):
+            f = widget.frameGeometry()
+            widget.move(xy[0] + (widget.x() - f.x()), xy[1] + (widget.y() - f.y()))
+
+        # ⚠ Two 880x920 windows do fit on a 1920x1040 screen -- but not if the
+        # first one is sitting in the middle, which is exactly where Qt centres
+        # a window it was given no position for. Placing only the newcomer then
+        # leaves it half over its neighbour with nowhere better to go. So when
+        # there is exactly ONE window in the way and the pair would fit tiled,
+        # both are moved. One window, deliberately: re-arranging a busy desktop
+        # because a new plot opened would be worse than the overlap.
+        clear = not any(_overlap_area((placed[0], placed[1],
+                                       placed[0] + size[0], placed[1] + size[1]),
+                                      other) for other in rects)
+        if (not clear and len(rects) == 1 and anchors
+                and looks_unplaced(anchors[0][1], avail)):
+            other, rect = anchors[0]
+            pair = tile_pair(avail, (rect[2] - rect[0], rect[3] - rect[1]),
+                             size, margin=margin, anchor=(rect[0], rect[1]))
+            if pair is not None:
+                _move(other, pair[0])
+                _move(window, pair[1])
+                return True
+
+        _move(window, placed)
+        return True
+    except Exception:
+        return False
+
+
 def show_modeless(window: QWidget, owner: QWidget | None = None) -> QWidget:
     """Show *window* as a modeless, non-owned top-level window.
 
