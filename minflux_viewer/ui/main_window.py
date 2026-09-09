@@ -2185,6 +2185,118 @@ class MainWindow(QMainWindow):
         )
         self._begin_file_io(task)
 
+    # ------------------------------------------------------------------
+    # Where a new window opens, and what covers what
+    # ------------------------------------------------------------------
+    #: Z-order for the windows one import produces, **bottom to top**. It is the
+    #: order the MSR reader lists a file's contents in -- mfx, then mbm, then the
+    #: image series -- so the MINFLUX data ends up in front of the images it was
+    #: acquired on.
+    IMPORT_STACK_ORDER = ("image", "mbm", "data")
+
+    #: What answers the "mbm" tier. These come from three different modules and
+    #: share no base class, so they are recognised by name; none of them is
+    #: opened by an import, so the tier is usually empty.
+    MBM_WINDOW_CLASSES = ("MbmInfoWindow", "AlignmentPlotWindow", "BeadsDriftDialog")
+
+    def _place_new_window(self, win, dataset_idx: int | None = None) -> None:
+        """Open *win* clear of the windows it would otherwise hide.
+
+        A render view and an image viewer are both 880x920 and **neither
+        positions itself**, so Qt opens them at the same spot and the second
+        covers the first completely -- which is exactly what opening a ``.msr``
+        carrying image series looked like: the render view appeared and was gone
+        again before it could be read.
+
+        What it avoids: every open coordinate view and image viewer (one view of
+        the data must never hide another), plus this dataset's own plots. Other
+        datasets' histograms and attribute plots are deliberately left out -- in
+        a busy session avoiding everything would push each new window into a
+        corner, and ``modeless.open_position`` would be choosing between bad
+        options rather than good ones.
+        """
+        from .modeless import place_clear_of
+
+        # Insertion order == opening order, and open_position prefers a side of
+        # the most recent window, so the newest view is what a new one sits
+        # beside. Registries are dicts, which preserve it.
+        occupied = list(self._tiff_windows.values())
+        occupied += list(self._render_windows.values())
+        if dataset_idx is not None:
+            for registry in (self._scatter_windows, self._histogram_windows,
+                             self._attr_windows, self._data_windows):
+                other = registry.get(dataset_idx)
+                if other is not None:
+                    occupied.append(other)
+        place_clear_of(win, occupied)
+
+    def _mbm_windows(self) -> list:
+        """Every visible bead-info window, whichever module it came from."""
+        found = []
+        for widget in QApplication.topLevelWidgets():
+            try:
+                if type(widget).__name__ not in self.MBM_WINDOW_CLASSES:
+                    continue
+                if not widget.isVisible():
+                    continue
+            except RuntimeError:        # its C++ object is already gone
+                continue
+            found.append(widget)
+        return found
+
+    def _dataset_windows(self, dataset_indices) -> list:
+        """The plot/info windows of *dataset_indices*, render view last.
+
+        Last because the caller raises in order, so the render view -- the view
+        of the localizations themselves -- ends up in front of the plots derived
+        from them.
+        """
+        windows: list = []
+        registries = (self._data_windows, self._attr_windows,
+                      self._histogram_windows, self._scatter_windows,
+                      self._render_windows)
+        for registry in registries:
+            for idx in dataset_indices or ():
+                win = registry.get(idx)
+                if win is not None and win not in windows:
+                    windows.append(win)
+        return windows
+
+    def restack_import_windows(self, dataset_indices=()) -> None:
+        """Stack an import's windows the way the MSR reader lists its contents.
+
+        The reader shows a file as mfx, then mbm, then image series, so that is
+        the order they are given on screen: the MINFLUX data views in front, the
+        bead info behind them, the image viewer behind that. Raising runs
+        **bottom-up**, because ``raise_()`` puts a window on top of its siblings,
+        and only the topmost is activated so focus lands on the data.
+
+        ⚠ Call it *after* the reader has closed. Closing a window hands
+        activation to whatever the window manager picks next -- on Windows often
+        the image viewer, which is why the render view appeared and then
+        vanished behind it without anything in this application asking for that.
+        """
+        tiers = {
+            "image": list(self._tiff_windows.values()),
+            "mbm": self._mbm_windows(),
+            "data": self._dataset_windows(dataset_indices),
+        }
+        topmost = None
+        for tier in self.IMPORT_STACK_ORDER:
+            for win in tiers.get(tier, ()):
+                try:
+                    if not win.isVisible():
+                        continue
+                    win.raise_()
+                except RuntimeError:
+                    continue
+                topmost = win
+        if topmost is not None:
+            try:
+                topmost.activateWindow()
+            except RuntimeError:
+                pass
+
     def _open_image_viewer(self, source, key: str, *, initial_series_index: int | None = None) -> None:
         """Show *source* (a TIFF or OBF image source) in a TIFF viewer window,
         de-duplicated by *key* (normally one key per file). The window owns /
@@ -2211,6 +2323,7 @@ class MainWindow(QMainWindow):
         win.destroyed.connect(lambda _=None, k=key: self._tiff_windows.pop(k, None))
         self._tiff_windows[key] = win
         win.show()
+        self._place_new_window(win)
         win.raise_()
         win.activateWindow()
         meta = source.metadata
@@ -2668,13 +2781,17 @@ class MainWindow(QMainWindow):
         if idx is None:
             return None
         win = self._scatter_windows.get(idx)
-        if win is None:
+        fresh = win is None
+        if fresh:
             win = ScatterWindow(self._state, dataset_idx=idx)
             win.destroyed.connect(lambda _=None, i=idx: self._scatter_windows.pop(i, None))
             self._scatter_windows[idx] = win
         self._scatter_win = win
         self._install_window_shortcuts(win)
-        win.show(); win.raise_(); win.activateWindow()
+        win.show()
+        if fresh:
+            self._place_new_window(win, idx)
+        win.raise_(); win.activateWindow()
         self._notify_view_state_changed()
         return win
 
@@ -2686,13 +2803,17 @@ class MainWindow(QMainWindow):
         if idx is None:
             return None
         win = self._histogram_windows.get(idx)
-        if win is None:
+        fresh = win is None
+        if fresh:
             win = HistogramWindow(self._state, dataset_idx=idx)
             win.destroyed.connect(lambda _=None, i=idx: self._histogram_windows.pop(i, None))
             self._histogram_windows[idx] = win
         self._histogram_win = win
         self._install_window_shortcuts(win)
-        win.show(); win.raise_(); win.activateWindow()
+        win.show()
+        if fresh:
+            self._place_new_window(win, idx)
+        win.raise_(); win.activateWindow()
         self._notify_view_state_changed()
         return win
 
@@ -2704,13 +2825,17 @@ class MainWindow(QMainWindow):
         if idx is None:
             return None
         win = self._attr_windows.get(idx)
-        if win is None:
+        fresh = win is None
+        if fresh:
             win = AttributeWindow(self._state, dataset_idx=idx)
             win.destroyed.connect(lambda _=None, i=idx: self._attr_windows.pop(i, None))
             self._attr_windows[idx] = win
         self._attr_win = win
         self._install_window_shortcuts(win)
-        win.show(); win.raise_(); win.activateWindow()
+        win.show()
+        if fresh:
+            self._place_new_window(win, idx)
+        win.raise_(); win.activateWindow()
         self._notify_view_state_changed()
         return win
 
@@ -6837,6 +6962,7 @@ class MainWindow(QMainWindow):
         )
         self._render_windows[idx] = win
         win.show()
+        self._place_new_window(win, idx)
         self._notify_view_state_changed()
         return win
 
