@@ -41,6 +41,20 @@ ROLES: tuple[str, ...] = ("x", "y", "z", "prec_xy", "prec_z", "id", "frame",
                           "photons", "itr", "vld")
 REQUIRED_ROLES: tuple[str, ...] = ("x", "y")
 COORD_ROLES: tuple[str, ...] = ("x", "y", "z")
+#: Localization-precision roles. Their unit follows the coordinate unit unless
+#: the mapping overrides it (``units["prec_xy"]``) or the header carries one.
+PREC_ROLES: tuple[str, ...] = ("prec_xy", "prec_z")
+
+#: Raw MINFLUX attributes a column can also be mapped to, imported verbatim
+#: under the same name. They are not standing parameters of the dialog — it
+#: offers them on demand, one row per "+ add parameter" — but a column that
+#: names one is still recognised automatically, ``cfr`` and ``efo`` first
+#: because they are the quality attributes the filters and plots look for.
+EXTRA_ATTR_ROLES: tuple[str, ...] = ("cfr", "efo", "dcr", "ecc", "efc", "fbg",
+                                     "sta", "fnl", "bot", "eot", "gri", "thi",
+                                     "sqi")
+#: Every role a mapping may carry: the standing ones plus the on-demand extras.
+ALL_ROLES: tuple[str, ...] = ROLES + EXTRA_ATTR_ROLES
 
 #: Length-unit → nanometre factor (``px`` handled separately via pixel size).
 _UNIT_TO_NM: dict[str, float] = {"nm": 1.0, "um": 1_000.0, "mm": 1.0e6, "m": 1.0e9}
@@ -75,6 +89,23 @@ _ROLE_SYNONYMS: dict[str, set[str]] = {
     # iteration a row is and whether the localization was valid.
     "itr": {"itr", "iter", "iteration"},
     "vld": {"vld", "valid", "isvalid"},
+    # MINFLUX quality / raw attributes, imported under their canonical names.
+    # Matching is on the normalised key, so "EFO", "Efo" and "efo [Hz]" all land
+    # on the same role; nothing but the canonical spelling matches, because a
+    # looser synonym would silently rename an unrelated column.
+    "cfr": {"cfr"},
+    "efo": {"efo"},
+    "dcr": {"dcr"},
+    "ecc": {"ecc"},
+    "efc": {"efc"},
+    "fbg": {"fbg"},
+    "sta": {"sta"},
+    "fnl": {"fnl"},
+    "bot": {"bot"},
+    "eot": {"eot"},
+    "gri": {"gri"},
+    "thi": {"thi"},
+    "sqi": {"sqi"},
 }
 
 
@@ -721,7 +752,10 @@ def guess_mapping(table: SpreadsheetTable, *, use_values: bool = False,
 
     Matches each numeric column's normalised key against the per-role synonym
     sets. The first numeric column matching a role wins; a column is assigned to
-    at most one role (earlier roles in :data:`ROLES` take priority).
+    at most one role (earlier roles in :data:`ALL_ROLES` take priority). The raw
+    MINFLUX attribute roles (:data:`EXTRA_ATTR_ROLES`) match on the canonical
+    name alone, case-insensitively, so an ``EFO`` or ``CFR`` column is
+    recognised whatever its capitalisation.
 
     With ``use_values=True`` (the interactive dialog path), any **required
     localization role still unfilled after header matching** — ``x``/``y``/``z``
@@ -730,9 +764,9 @@ def guess_mapping(table: SpreadsheetTable, *, use_values: bool = False,
     integer repeating trace id, and a millisecond-scale time step. Header matches
     always win over value guesses.
     """
-    mapping: dict[str, str | None] = {role: None for role in ROLES}
+    mapping: dict[str, str | None] = {role: None for role in ALL_ROLES}
     used: set[str] = set()
-    for role in ROLES:
+    for role in ALL_ROLES:
         syn = _ROLE_SYNONYMS[role]
         for col in table.columns:
             if not col.numeric or col.name in used:
@@ -989,8 +1023,14 @@ def build_dataset_from_mapping(
     Coordinates are converted to **metres** and stored as canonical
     ``loc_x``/``loc_y``/``loc_z`` (run through the same property/derived pipeline
     as the native loaders) so render, scatter, filters, and the precision
-    analyses all work. Precision/id/frame/photons map to attributes; remaining
-    numeric columns are carried through under sanitised names.
+    analyses all work. Precision/id/frame/photons map to attributes, the raw
+    MINFLUX attribute roles (:data:`EXTRA_ATTR_ROLES`) are imported under their
+    canonical names, and remaining numeric columns are carried through under
+    sanitised names.
+
+    ``units`` carries the per-coordinate length unit and, optionally, an explicit
+    ``prec_xy`` / ``prec_z`` override; a precision mapped without one inherits
+    the lateral coordinate unit as before.
 
     ``time_unit`` (``"s"`` / ``"ms"`` / ``None``) rescales the ``frame`` column to
     the canonical ``tim`` in **seconds** (``"ms"`` → ÷1000; ``"s"``/``None`` kept),
@@ -1070,17 +1110,19 @@ def build_dataset_from_mapping(
         if time_unit == "ms":                       # → canonical seconds
             tim = tim / 1000.0
 
-    # Precision is in the lateral coordinate unit unless it carries an explicit
-    # bracket unit (e.g. ThunderSTORM "uncertainty_xy [nm]").
+    # Precision unit: an explicit choice from the mapping wins, else an explicit
+    # bracket unit (e.g. ThunderSTORM "uncertainty_xy [nm]"), else the lateral
+    # coordinate unit — a precision is a length in the coordinate system.
     extra: dict[str, np.ndarray] = {}
     cpxy = col("prec_xy")
     loc_prec_xy = None
     if cpxy is not None:
-        unit = bracket_unit(cpxy.name) or units.get("x")
+        unit = units.get("prec_xy") or bracket_unit(cpxy.name) or units.get("x")
         loc_prec_xy = _to_nm(take(cpxy.values), unit, pixel_size_nm)
     cpz = col("prec_z")
     if cpz is not None:
-        unit = bracket_unit(cpz.name) or units.get("z", units.get("x"))
+        unit = (units.get("prec_z") or bracket_unit(cpz.name)
+                or units.get("z", units.get("x")))
         extra["loc_precision_z"] = _to_nm(take(cpz.values), unit, pixel_size_nm)
     cphot = col("photons")
     if cphot is not None:
@@ -1089,10 +1131,19 @@ def build_dataset_from_mapping(
         key = "eco" if cphot.key == "eco" else "photons"
         extra[key] = np.asarray(take(cphot.values), dtype=float)
 
+    # Raw MINFLUX attribute roles: the column is imported verbatim under the
+    # canonical attribute name, so a "CFR" or "EFO" column drives the quality
+    # filters whatever the spreadsheet called it.
+    for role in EXTRA_ATTR_ROLES:
+        attr_col = col(role)
+        if attr_col is not None:
+            extra[role] = np.asarray(take(attr_col.values), dtype=float)
+
     # Carry through any remaining numeric columns under sanitised keys.
-    mapped_names = {mapping.get(r) for r in ROLES}
+    mapped_names = {name for name in mapping.values() if name}
     reserved = {"loc_x", "loc_y", "loc_z", "tid", "tim",
-                "loc_precision_xy", "loc_precision_z", "photons", "eco"}
+                "loc_precision_xy", "loc_precision_z", "photons", "eco",
+                *EXTRA_ATTR_ROLES}
     taken = set(reserved) | set(extra)
     for c in table.columns:
         if not c.numeric or c.name in mapped_names:

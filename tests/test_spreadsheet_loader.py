@@ -152,6 +152,25 @@ def test_build_requires_x_y(tmp_path):
         build_dataset_from_mapping(t, m)
 
 
+def test_precision_unit_follows_the_coordinate_unit_unless_overridden(tmp_path):
+    """A precision is a length in the coordinate system, so it inherits x / y's
+    unit — but a table whose precision is in different units can say so."""
+    n = 12
+    hdr = ["x [nm]", "y [nm]", "precision_xy"]
+    rows = [[100.0 + i, 200.0 + i, 0.005 + 0.001 * i] for i in range(n)]
+    t = read_table(_write(tmp_path / "prec.csv", hdr, rows))
+    m = guess_mapping(t)
+    assert m["prec_xy"] == "precision_xy"
+    coords = {"x": "nm", "y": "nm", "z": "nm"}
+    prec = np.array([0.005 + 0.001 * i for i in range(n)])
+
+    inherited = build_dataset_from_mapping(t, m, units=coords)
+    assert np.allclose(np.asarray(inherited.attr.get("loc_precision_xy")), prec)
+    overridden = build_dataset_from_mapping(t, m, units=dict(coords, prec_xy="um"))
+    assert np.allclose(np.asarray(overridden.attr.get("loc_precision_xy")),
+                       prec * 1000.0)
+
+
 def test_passthrough_extra_numeric_columns(tmp_path):
     # Picasso has unmapped columns (sx, sy, bg, net_gradient) → carried through.
     t = read_table(_picasso(tmp_path))

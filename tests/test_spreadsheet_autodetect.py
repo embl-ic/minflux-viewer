@@ -249,3 +249,137 @@ def test_dialog_prefills_roles_units_and_builds(tmp_path):
     assert ds.prop.num_dim == 3 and ds.prop.num_loc == tid.size
     dlg.close()
     app.processEvents()
+
+
+# --------------------------------------------- the dialog's progressive depth
+
+def _open_dialog(path):
+    """``(app, dialog)`` for *path* — the dialog is never shown, so visibility is
+    asserted with ``isHidden()`` (explicit hide) rather than ``isVisible()``."""
+    from PyQt6.QtWidgets import QApplication
+
+    from minflux_viewer.ui.spreadsheet_import_dialog import SpreadsheetMappingDialog
+
+    app = QApplication.instance() or QApplication([])
+    return app, SpreadsheetMappingDialog(read_table(path))
+
+
+def _plain_xy(tmp_path):
+    """A table whose guess fills nothing beyond the simple parameters."""
+    n = 40
+    return _write_cols(tmp_path / "xy.csv", ["x [nm]", "y [nm]"],
+                       [np.linspace(0.0, 500.0, n), np.linspace(0.0, 900.0, n)])
+
+
+def test_dialog_opens_simple_and_expands_to_the_full_parameter_set(tmp_path):
+    pytest.importorskip("PyQt6")
+    app, dlg = _open_dialog(_plain_xy(tmp_path))
+
+    assert not dlg._advanced
+    for role in ("x", "y", "z", "frame"):                 # the simple four
+        assert not dlg._row_widgets[role][0].isHidden()
+    for role in ("prec_xy", "prec_z", "id", "photons", "itr", "vld"):
+        assert dlg._row_widgets[role][0].isHidden()
+    assert dlg._add_btn.isHidden()                        # only offered expanded
+    assert "expand" in dlg._toggle_btn.text()
+
+    dlg._toggle_advanced()
+    assert dlg._advanced
+    assert all(not w.isHidden()
+               for widgets in dlg._row_widgets.values() for w in widgets)
+    assert not dlg._add_btn.isHidden() and "fold" in dlg._toggle_btn.text()
+
+    dlg._toggle_advanced()                                # …and back to simple
+    assert dlg._row_widgets["vld"][0].isHidden()
+    dlg.close()
+    app.processEvents()
+
+
+def test_the_folded_view_owns_up_to_the_parameters_it_hides(tmp_path):
+    """The dialog opens folded, so a guessed parameter the simple view does not
+    show (here the trace id) is counted in the group title rather than lost."""
+    pytest.importorskip("PyQt6")
+    rng = np.random.default_rng(0)
+    tid, x, y, z, tim, ph = _minflux_like(rng)
+    app, dlg = _open_dialog(_write_cols(
+        tmp_path / "raw.csv",
+        ["col_a", "col_b", "col_c", "group_no", "stamp", "signal"],
+        [x, y, z, tid, tim, ph]))
+
+    assert not dlg._advanced
+    assert dlg._current_mapping()["id"] == "group_no"     # guessed, and hidden
+    assert dlg._row_widgets["id"][0].isHidden()
+    assert "more mapped" in dlg._map_group.title()
+
+    dlg._toggle_advanced()
+    assert dlg._map_group.title() == "Column mapping"
+    assert not dlg._row_widgets["id"][0].isHidden()
+    dlg.close()
+    app.processEvents()
+
+
+def test_the_dialog_opens_on_the_folded_mapping_and_ten_preview_rows(tmp_path):
+    pytest.importorskip("PyQt6")
+    from minflux_viewer.ui.spreadsheet_import_dialog import PREVIEW_ROWS
+
+    app, dlg = _open_dialog(_plain_xy(tmp_path))
+    preview = dlg._preview
+    row = preview.verticalHeader().defaultSectionSize()
+    # The preview holds more rows than that; PREVIEW_ROWS is what it shows.
+    assert preview.rowCount() > PREVIEW_ROWS
+    assert preview.sizeHint().height() == preview._chrome() + PREVIEW_ROWS * row
+    # …and the dialog opened at exactly the height those two parts want.
+    assert dlg.height() == dlg.sizeHint().height()
+    dlg.close()
+    app.processEvents()
+
+
+def test_add_parameter_offers_only_free_attributes_and_imports_the_column(tmp_path):
+    pytest.importorskip("PyQt6")
+    rng = np.random.default_rng(0)
+    tid, x, y, z, tim, ph = _minflux_like(rng)
+    app, dlg = _open_dialog(_write_cols(
+        tmp_path / "raw.csv",
+        ["col_a", "col_b", "col_c", "group_no", "stamp", "signal"],
+        [x, y, z, tid, tim, ph]))
+
+    dlg._toggle_advanced()
+    dlg._add_extra_row()
+    row = dlg._extra_rows[-1]
+    choices = [row["param"].itemData(i) for i in range(row["param"].count())]
+    assert "x" not in choices and "itr" not in choices    # standing parameters
+    assert choices[0] == "cfr" and row["column"].currentData() is None
+
+    row["column"].setCurrentIndex(row["column"].findData("signal"))
+    assert dlg._current_mapping()["cfr"] == "signal"
+
+    # A second row cannot claim the attribute the first one holds.
+    dlg._add_extra_row()
+    second = dlg._extra_rows[-1]
+    assert "cfr" not in [second["param"].itemData(i)
+                         for i in range(second["param"].count())]
+    # …and changing the first row's parameter moves the column mapping with it.
+    row["param"].setCurrentIndex(row["param"].findData("fbg"))
+    mapping = dlg._current_mapping()
+    assert mapping.get("fbg") == "signal" and "cfr" not in mapping
+
+    dlg._remove_extra_row(second)
+    assert len(dlg._extra_rows) == 1
+    ds = dlg.build_dataset()
+    assert "fbg" in ds.attr and np.allclose(np.asarray(ds.attr["fbg"]), ph)
+    dlg.close()
+    app.processEvents()
+
+
+def test_a_removed_parameter_leaves_the_mapping(tmp_path):
+    pytest.importorskip("PyQt6")
+    app, dlg = _open_dialog(_plain_xy(tmp_path))
+    dlg._toggle_advanced()
+    dlg._add_extra_row()
+    row = dlg._extra_rows[-1]
+    assert row["role"] in dlg._current_mapping()
+    dlg._remove_extra_row(row)
+    assert row["role"] not in dlg._current_mapping()
+    assert not dlg._extra_rows
+    dlg.close()
+    app.processEvents()
