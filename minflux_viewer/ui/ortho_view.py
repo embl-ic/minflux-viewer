@@ -735,7 +735,6 @@ class OrthoPanes(QObject):
         if not (hi > lo):
             centre = 0.5 * (lo + hi)
             lo, hi = centre - 0.5, centre + 0.5
-        span = (hi - lo) * (1.0 + 2.0 * self.DEPTH_PADDING_FRAC)
         # The crosshair is the view's anchor when there is one: zooming should
         # close in on the marked point, not drift back to the middle of the
         # data. Falls back to the data centre before one is placed.
@@ -743,7 +742,21 @@ class OrthoPanes(QObject):
         if centre is None:
             centre = 0.5 * (lo + hi)
 
-        self._syncing = True
+        return self._set_depth_about(
+            centre, scale, pixels, guard=True, request=(lo, hi))
+
+    def _set_depth_about(self, centre, scale, pixels, *, guard, request=None) -> bool:
+        """Give each side pane the Z range its own pixel extent earns at
+        *scale*, about a common *centre*, and record what that implies.
+
+        The one implementation shared by :meth:`apply_depth_range` and
+        :meth:`_share_depth_from_gesture`; they differ only in which centre they
+        choose. ⚠ Keeping two copies is what let the clipped flag go stale --
+        the gesture path set the scale and the request and silently left
+        ``_depth_clipped`` reporting a previous view's verdict.
+        """
+        if guard:
+            self._syncing = True
         try:
             half = 0.5 * scale * pixels["XZ"]
             self.view_box("XZ").setYRange(centre - half, centre + half, padding=0)
@@ -752,10 +765,20 @@ class OrthoPanes(QObject):
         except Exception:
             return False
         finally:
-            self._syncing = False
+            if guard:
+                self._syncing = False
         self._depth_scale = scale
-        self._depth_request = (lo, hi)
-        self._depth_clipped = span > scale * min(pixels["XZ"], pixels["YZ"])
+        if request is not None:
+            self._depth_request = (float(request[0]), float(request[1]))
+        # ⚠ "Clipped" is a verdict on the DATA's Z ask, never on a view range.
+        # A gesture's range is by construction what already fits in the pane it
+        # came from, so scoring that against the *other* pane's capacity reports
+        # clipping for almost every pan -- which is what it did. The request
+        # survives a gesture; only the scale it is judged at changes.
+        request = self._depth_request
+        if request is not None:
+            span = (request[1] - request[0]) * (1.0 + 2.0 * self.DEPTH_PADDING_FRAC)
+            self._depth_clipped = span > scale * min(pixels["XZ"], pixels["YZ"])
         return True
 
     def set_depth_centre(self, centre: float | None) -> None:
@@ -843,12 +866,18 @@ class OrthoPanes(QObject):
             (h0, h1), (v0, v1) = side.viewRange()
             if plane == "XZ":
                 primary.setXRange(h0, h1, padding=0)      # shared X
-                other_box.setXRange(v0, v1, padding=0)    # its Z -> YZ's Z
                 z_range = (float(v0), float(v1))
             else:
                 primary.setYRange(v0, v1, padding=0)      # shared Y
-                other_box.setYRange(h0, h1, padding=0)    # its Z -> XZ's Z
                 z_range = (float(h0), float(h1))
+            # ⚠ Carry Z to the other pane as a SCALE, never as a range. The two
+            # side panes have different pixel extents (0.6x0.4 against 0.4x0.6
+            # embedded), so copying the range verbatim gives them different
+            # nm/px -- the exact anisotropy apply_depth_range exists to prevent,
+            # and it reappeared the moment scatter's side panes took the mouse.
+            # Each pane gets the range its own extent earns about the gesture's
+            # own centre.
+            self._share_depth_from_gesture(*z_range)
         except Exception:
             pass
         finally:
@@ -865,6 +894,24 @@ class OrthoPanes(QObject):
                 pass
             finally:
                 self._syncing = False
+
+    def _share_depth_from_gesture(self, lo: float, hi: float) -> None:
+        """Give both side panes the Z their own pixel extents earn, about the
+        centre of an explicit user gesture.
+
+        Deliberately ignores :attr:`_depth_centre`: that anchor exists so a
+        *zoom* closes in on the marked point, but here the user has just panned
+        or zoomed Z themselves, and snapping back to the marker would make the
+        gesture look ineffective. The owner updates the marker afterwards
+        through ``_side_range_callback``.
+        """
+        pixels = self.depth_pixels()
+        scale = self.primary_scale_nm_per_px()
+        if len(pixels) < 2 or scale is None:
+            return
+        centre = 0.5 * (float(lo) + float(hi))
+        # The caller already holds _syncing raised around the whole gesture.
+        self._set_depth_about(centre, scale, pixels, guard=False)
 
     def _on_primary_range_changed(self, *_args) -> None:
         """Re-apply Z at the XY pane's new scale."""

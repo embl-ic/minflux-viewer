@@ -331,8 +331,16 @@ def test_side_panes_take_the_mouse_and_drive_the_others(_qt_app):
 
         win._ortho.view_box("XZ").setYRange(-150.0, 150.0, padding=0)
         _settle(_qt_app)
+        # ⚠ Z reaches YZ as a SCALE, not as a range. The two panes have
+        # different pixel extents, so copying the range verbatim would give
+        # them different nm/px -- the anisotropy the whole mode exists to
+        # avoid. What must match is the centre and the scale.
         (zx0, zx1), _ = win._ortho.view_box("YZ").viewRange()
-        assert (zx0, zx1) == pytest.approx((-150.0, 150.0), abs=40.0)   # Z reached YZ
+        _, (zy0, zy1) = win._ortho.view_box("XZ").viewRange()
+        assert 0.5 * (zx0 + zx1) == pytest.approx(0.5 * (zy0 + zy1), abs=20.0)
+        pixels = win._ortho.depth_pixels()
+        assert (zx1 - zx0) / pixels["YZ"] == pytest.approx(
+            (zy1 - zy0) / pixels["XZ"], rel=1e-3)
     finally:
         win.close()
 
