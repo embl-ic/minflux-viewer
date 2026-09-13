@@ -2626,6 +2626,25 @@ class ScatterWindow(QWidget):
             return None
         return 0.5 * (float(col.min()) + float(col.max()))
 
+    def roi_depth_range(self):
+        """Visible range of the out-of-plane axis. The scatter view has no depth
+        slider, so the data extent of that axis is its viewing range -- the same
+        reasoning ``roi_depth_center`` already uses for the centre."""
+        depth_map = {"XY": 2, "XZ": 1, "YZ": 0}
+        axis = self._active_plane()
+        ds = self._dataset()
+        if axis not in depth_map or ds is None:
+            return None
+        locs = self._current_locs(ds)
+        k = depth_map[axis]
+        if locs.ndim != 2 or locs.shape[1] <= k:
+            return None
+        col = locs[:, k]
+        col = col[np.isfinite(col)]
+        if col.size == 0:
+            return None
+        return float(col.min()), float(col.max())
+
     def roi_depths_at(self, points):
         """Data-aware out-of-plane value per drawn vertex (weighted median of the
         depth axis among localizations near that in-plane location); ``None`` per
@@ -2662,6 +2681,15 @@ class ScatterWindow(QWidget):
         ctx = dict(record.context)
         ctx.setdefault("view_plane", plane)
         ctx.setdefault("depth_axis", {"XY": "Z", "XZ": "Y", "YZ": "X"}[plane])
+        # The Z scaling factor a ROI was DRAWN at. Recorded, never auto-applied:
+        # a ROI's Z is frozen when drawn, and this is what makes it possible to
+        # report one as stale and to pre-fill the exact ratio for the Manager's
+        # Scale Z. Without it, "update with the Z scaling factor" is not
+        # computable at all -- the old value cannot be recovered afterwards.
+        _ds = self._dataset()
+        _factor = getattr(getattr(_ds, "cali", None), "z_scaling_factor", None)
+        if isinstance(_factor, (int, float)):
+            ctx.setdefault("z_scaling_factor", float(_factor))
         if record.type != "point":
             center = self.roi_depth_center()
             if center is not None:
@@ -2670,7 +2698,10 @@ class ScatterWindow(QWidget):
         return record
 
     def compute_roi_selection(self, record):
-        if record.type not in REGION_ROI_TYPES or self._axis_combo.currentText() == "3D":
+        from ..core.roi_selection import VOLUME_ROI_TYPES
+
+        if (record.type not in REGION_ROI_TYPES | VOLUME_ROI_TYPES
+                or self._axis_combo.currentText() == "3D"):
             return None
         ds = self._dataset()
         if ds is None:
@@ -2689,7 +2720,12 @@ class ScatterWindow(QWidget):
         if base.shape[0] != locs.shape[0]:
             base = np.ones(locs.shape[0], dtype=bool)
         base &= np.all(np.isfinite(locs[:, :3]), axis=1)
-        mask = roi_region_mask(locs[:, ci], locs[:, cj], record, base_mask=base)
+        if record.type in VOLUME_ROI_TYPES:
+            from ..core.roi_volume import roi_volume_mask
+            mask = roi_volume_mask(locs[:, 0], locs[:, 1], locs[:, 2],
+                                   record, base_mask=base)
+        else:
+            mask = roi_region_mask(locs[:, ci], locs[:, cj], record, base_mask=base)
         context = {
             "source_view": "scatter",
             "dataset_idx": self._dataset_idx,

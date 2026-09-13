@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import copy
 import html
 
 from PyQt6.QtCore import QEvent, Qt
@@ -101,6 +102,7 @@ class RoiManagerWindow(QWidget):
             ("Property", self._property),
             ("Combine", self._combine),
             ("Convert", self._convert),
+            ("Scale Z", self._scale_z),
             ("Move Up", lambda: self._move(-1)),
             ("Move Down", lambda: self._move(1)),
             ("Select All", self._select_all),
@@ -310,6 +312,83 @@ class RoiManagerWindow(QWidget):
     def _notify_roi_changed(self, record) -> None:
         idx = record.context.get("dataset_idx") if isinstance(record.context, dict) else None
         self._state.notify_roi_selection_changed(idx if isinstance(idx, int) else None)
+
+    def _scale_z(self) -> None:
+        """Rescale the selected ROIs' Z by a factor (multi-select supported).
+
+        A ROI's Z is captured when it is drawn and deliberately does **not**
+        follow ``cali.z_scaling_factor`` afterwards -- so this is the explicit
+        command that brings a set back into step after the calibration changes.
+        The ratio is pre-filled from the ROI's recorded draw-time factor against
+        the dataset's current one, so the common case is one click rather than
+        arithmetic.
+        """
+        from PyQt6.QtWidgets import QInputDialog
+
+        from ..core.roi_volume import scale_z
+
+        selected = self._store.selected_records()
+        if not selected:
+            QMessageBox.information(self, "Scale Z", "Select one or more ROIs first.")
+            return
+
+        suggested = self._suggested_z_factor(selected)
+        factor, ok = QInputDialog.getDouble(
+            self, "Scale Z",
+            "Multiply every selected ROI's Z by "
+            "(scaling is about z = 0, matching how the data itself is scaled):",
+            suggested, 0.0001, 10000.0, 4)
+        if not ok or abs(float(factor) - 1.0) < 1e-12:
+            return
+
+        changed, skipped = 0, 0
+        last = None
+        for record in selected:
+            geometry = scale_z(record, factor)
+            if geometry is None:
+                skipped += 1
+                continue
+            updated = copy.deepcopy(record)
+            updated.geometry = geometry
+            updated.selection_dirty = True
+            context = dict(updated.context) if isinstance(updated.context, dict) else {}
+            context["z_scaling_factor"] = context.get("z_scaling_factor")
+            if isinstance(context.get("z_scaling_factor"), (int, float)):
+                context["z_scaling_factor"] = float(context["z_scaling_factor"]) * factor
+            updated.context = context
+            self._store.update(record.id, updated)
+            last = updated
+            changed += 1
+        if last is not None:
+            self._notify_roi_changed(last)
+        self._state.log(
+            f"Scale Z by {factor:g}: {changed} ROI(s) scaled, {skipped} skipped "
+            f"(no Z to scale).")
+        if not changed:
+            QMessageBox.information(
+                self, "Scale Z", "None of the selected ROIs carry a Z coordinate.")
+
+    def _suggested_z_factor(self, records) -> float:
+        """The ratio that would bring these ROIs back into step with the data.
+
+        ``context["z_scaling_factor"]`` is what the ROI was drawn at; the dataset
+        carries what it is now. Recording the draw-time value is not there to
+        auto-correct anything -- it is what makes this ratio computable at all,
+        and what lets a stale ROI be reported as stale.
+        """
+        for record in records:
+            context = record.context if isinstance(record.context, dict) else {}
+            drawn_at = context.get("z_scaling_factor")
+            idx = context.get("dataset_idx")
+            if not isinstance(drawn_at, (int, float)) or not isinstance(idx, int):
+                continue
+            if not (0 <= idx < len(self._state.datasets)):
+                continue
+            current = getattr(
+                getattr(self._state.datasets[idx], "cali", None), "z_scaling_factor", None)
+            if isinstance(current, (int, float)) and float(drawn_at) != 0.0:
+                return float(current) / float(drawn_at)
+        return 1.0
 
     def _property(self) -> None:
         from .roi_convert_dialog import EDITABLE_PROPERTY_TYPES, RoiPropertyDialog, roi_property_text

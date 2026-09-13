@@ -4142,10 +4142,37 @@ class MainWindow(QMainWindow):
             self._state.rois.set_tool(None)
 
     def _activate_roi_tool(self, tool: str) -> None:
+        if not self._volume_tool_allowed(tool):
+            return
         self._state.rois.set_tool(tool)
         self._sync_roi_tool_actions(tool)
         if self._state.rois.active_adapter is None:
             self._state.log("Select a render, histogram, scatter, or attribute plot window before drawing ROIs.", "WARN")
+
+    def _volume_tool_allowed(self, tool: str) -> bool:
+        """Refuse a 3-D drawing tool on a 2-D dataset, before anything is drawn.
+
+        Refusing the *gesture* after the fact -- letting the user draw and then
+        reverting it -- is the worse experience, and the project's convention is
+        to say why rather than to fail silently. The tool simply does not arm,
+        and the reason goes to the status bar and the Log.
+        """
+        from ..core.roi_selection import VOLUME_ROI_TYPES
+
+        if tool not in VOLUME_ROI_TYPES:
+            return True
+        idx = self._state.active_idx
+        ds = (self._state.datasets[idx]
+              if isinstance(idx, int) and 0 <= idx < len(self._state.datasets) else None)
+        from ..core.dataset_kind import is_3d
+        if ds is not None and is_3d(ds):
+            return True
+        reason = (f"{tool} needs a 3-D dataset"
+                  if ds is not None else f"{tool} needs an active 3-D dataset")
+        self._state.status_message.emit(reason)
+        self._state.log(reason, "WARN")
+        self._sync_roi_tool_actions(self._state.rois.active_tool or "")
+        return False
 
     def _sync_roi_tool_actions(self, tool: str = "") -> None:
         active_tool = tool or self._state.rois.active_tool or ""
@@ -6196,6 +6223,13 @@ class MainWindow(QMainWindow):
         (the duplicate then ignores the ROI and copies the whole dataset).
         """
         from ..core.roi_convert import REGION_TYPES
+        from ..core.roi_selection import VOLUME_ROI_TYPES
+
+        # A volume ROI encloses a region too, so Shift+D crops to a cuboid /
+        # sphere / polyhedron exactly as it does to a rectangle -- and it is the
+        # 3-D case that makes the crop dialog's separate Z slab redundant
+        # (compute_crop_mask intersects the two rather than picking one).
+        region_types = REGION_TYPES | VOLUME_ROI_TYPES
 
         # 1) a selected, persisted region ROI
         try:
@@ -6204,7 +6238,7 @@ class MainWindow(QMainWindow):
             wanted = set()
         try:
             for record in self._state.rois.records:
-                if record.id in wanted and record.type in REGION_TYPES:
+                if record.id in wanted and record.type in region_types:
                     return record
         except Exception:
             pass
@@ -6220,7 +6254,7 @@ class MainWindow(QMainWindow):
                 draft = ctrl.current_record()
             except Exception:
                 draft = getattr(ctrl, "draft", None)
-            if draft is not None and getattr(draft, "type", None) in REGION_TYPES:
+            if draft is not None and getattr(draft, "type", None) in region_types:
                 return draft
         return None
 

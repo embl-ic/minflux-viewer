@@ -4993,6 +4993,15 @@ class RenderWindow(QWidget):
         lo, hi = self._depth_range
         return 0.5 * (float(lo) + float(hi))
 
+    def roi_depth_range(self) -> "tuple[float, float] | None":
+        """Visible range of the out-of-plane axis — what a volume ROI's third
+        dimension is seeded from and clamped to. The depth slider *is* that
+        range here. ``None`` for 2-D datasets."""
+        if not self._has_depth:
+            return None
+        lo, hi = self._depth_range
+        return float(lo), float(hi)
+
     def roi_depths_at(self, points):
         """Data-aware out-of-plane value for each drawn in-plane vertex.
 
@@ -5096,6 +5105,15 @@ class RenderWindow(QWidget):
         ctx = dict(record.context)
         ctx.setdefault("view_plane", plane)
         ctx.setdefault("depth_axis", {"XY": "Z", "XZ": "Y", "YZ": "X"}[plane])
+        # The Z scaling factor a ROI was DRAWN at. Recorded, never auto-applied:
+        # a ROI's Z is frozen when drawn, and this is what makes it possible to
+        # report one as stale and to pre-fill the exact ratio for the Manager's
+        # Scale Z. Without it, "update with the Z scaling factor" is not
+        # computable at all -- the old value cannot be recovered afterwards.
+        _ds = self._state.datasets[self._idx] if self._idx is not None and 0 <= self._idx < len(self._state.datasets) else None
+        _factor = getattr(getattr(_ds, "cali", None), "z_scaling_factor", None)
+        if isinstance(_factor, (int, float)):
+            ctx.setdefault("z_scaling_factor", float(_factor))
         if record.type != "point":
             center = self.roi_depth_center()
             if center is not None:
@@ -5104,7 +5122,9 @@ class RenderWindow(QWidget):
         return record
 
     def compute_roi_selection(self, record):
-        if record.type not in REGION_ROI_TYPES or self._idx is None:
+        from ..core.roi_selection import VOLUME_ROI_TYPES
+
+        if record.type not in REGION_ROI_TYPES | VOLUME_ROI_TYPES or self._idx is None:
             return None
         if not (0 <= self._idx < len(self._state.datasets)):
             return None
@@ -5134,7 +5154,15 @@ class RenderWindow(QWidget):
         # *highlight* to the current slice (see _redraw_roi_highlight), and the
         # range is recorded below as provenance. So a 2-D ROI spans the whole
         # depth axis — which is exactly what a future 3-D ROI will narrow.
-        mask = roi_region_mask(locs[:, axes[0]], locs[:, axes[1]], record, base_mask=base)
+        # A volume ROI is the case that comment anticipates: it narrows the depth
+        # axis itself, from its own geometry, so the mask is still "these
+        # localizations" in every view -- just a 3-D question instead of a 2-D one.
+        if record.type in VOLUME_ROI_TYPES:
+            from ..core.roi_volume import roi_volume_mask
+            mask = roi_volume_mask(locs[:, 0], locs[:, 1], locs[:, 2],
+                                   record, base_mask=base)
+        else:
+            mask = roi_region_mask(locs[:, axes[0]], locs[:, axes[1]], record, base_mask=base)
         context = {
             "source_view": "render",
             "dataset_idx": self._idx,
