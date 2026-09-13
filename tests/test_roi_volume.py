@@ -330,3 +330,238 @@ def test_polyhedron_silhouette_across_the_stack_spans_the_levels():
 
 def test_silhouette_returns_none_for_a_two_d_record():
     assert volume_silhouette(Rec("rectangle", {"bounds": [0, 0, 1, 1]}), 0, 1) is None
+
+
+# ------------------------------------------------- lifting a 2-D draw into 3-D
+def test_the_registries_agree_on_what_a_volume_roi_is():
+    """core/roi.py lists them literally to stay free of the roi_selection
+    import; this is what stops the two drifting."""
+    from minflux_viewer.core.roi import ROI_TOOLS, ROI_TYPES
+
+    assert VOLUME_ROI_TYPES <= ROI_TYPES
+    assert VOLUME_ROI_TYPES <= ROI_TOOLS
+
+
+def test_a_projections_in_plane_axes_are_exactly_its_non_normal_axes():
+    """The invariant that lets a 2-D drawing be lifted with no convention to
+    choose: a view shows everything except its normal axis, in ascending order."""
+    from minflux_viewer.core.roi_volume import (
+        PLANE_NORMAL_AXIS,
+        plane_in_plane_axes,
+    )
+
+    for plane in ("XY", "XZ", "YZ"):
+        assert plane_in_plane_axes(plane) == cross_axes(PLANE_NORMAL_AXIS[plane])
+
+
+def test_a_rectangle_drawn_in_any_plane_becomes_the_right_cuboid():
+    from minflux_viewer.core.roi_volume import volume_from_flat
+
+    geom = {"bounds": [10.0, 20.0, 30.0, 40.0]}     # in-plane (u, v) = (10..40, 20..60)
+    kind, g = volume_from_flat("rectangle", geom, "XY", (5.0, 15.0))
+    assert kind == "cuboid"
+    assert (g["x"], g["y"], g["z"]) == ([10.0, 40.0], [20.0, 60.0], [5.0, 15.0])
+
+    # Drawn in XZ, the same numbers bound X and Z, and the seed bounds Y.
+    _k, g = volume_from_flat("rectangle", geom, "XZ", (5.0, 15.0))
+    assert (g["x"], g["z"], g["y"]) == ([10.0, 40.0], [20.0, 60.0], [5.0, 15.0])
+
+    # Drawn in YZ, they bound Y and Z, and the seed bounds X.
+    _k, g = volume_from_flat("rectangle", geom, "YZ", (5.0, 15.0))
+    assert (g["y"], g["z"], g["x"]) == ([10.0, 40.0], [20.0, 60.0], [5.0, 15.0])
+
+
+def test_an_oval_becomes_an_ellipsoid_with_the_drawn_radii():
+    from minflux_viewer.core.roi_volume import volume_from_flat
+
+    kind, g = volume_from_flat("oval", {"bounds": [0.0, 0.0, 100.0, 50.0]}, "XY", (-10.0, 30.0))
+    assert kind == "sphere"
+    assert g["center"] == [50.0, 25.0, 10.0]
+    assert g["radii"] == [50.0, 25.0, 20.0]         # the seed is a DIAMETER
+
+
+def test_a_polygon_becomes_a_prism_whose_cross_section_is_the_drawing():
+    from minflux_viewer.core.roi_volume import volume_from_flat
+
+    poly = [[0.0, 0.0], [100.0, 0.0], [100.0, 80.0], [0.0, 80.0]]
+    kind, g = volume_from_flat("polygon", {"points": poly}, "XZ", (-20.0, 20.0))
+    assert kind == "polyhedron"
+    assert g["axis"] == "Y"                          # normal to the XZ view
+    assert g["thickness"] == 40.0
+    assert len(g["levels"]) == 1                     # a prism is one level
+    assert g["levels"][0]["at"] == 0.0
+    assert g["levels"][0]["polygon"] == poly
+
+
+def test_the_lifted_shape_selects_what_was_drawn_over():
+    """End to end: the numbers the lift produces are the ones the mask uses."""
+    from minflux_viewer.core.roi_volume import volume_from_flat
+
+    kind, g = volume_from_flat("rectangle", {"bounds": [0.0, 0.0, 100.0, 100.0]},
+                               "XY", (-5.0, 5.0))
+    rec = Rec(kind, g)
+    assert roi_volume_mask([50.0], [50.0], [0.0], rec)[0]      # inside
+    assert not roi_volume_mask([50.0], [50.0], [9.0], rec).any()   # outside the seed
+    assert not roi_volume_mask([150.0], [50.0], [0.0], rec).any()  # outside the draw
+
+
+def test_a_shape_with_no_volume_counterpart_is_refused():
+    from minflux_viewer.core.roi_volume import volume_from_flat
+
+    with pytest.raises(ValueError, match="no volume counterpart"):
+        volume_from_flat("line", {"points": [[0, 0], [1, 1]]}, "XY", (0.0, 1.0))
+
+
+def test_an_unknown_plane_is_refused_rather_than_guessed():
+    from minflux_viewer.core.roi_volume import volume_from_flat
+
+    with pytest.raises(ValueError, match="unknown plane"):
+        volume_from_flat("rectangle", {"bounds": [0, 0, 1, 1]}, "ZZ", (0.0, 1.0))
+
+
+# ------------------------------------------------------------------- Scale Z
+def test_scale_z_is_about_the_origin_not_the_roi_centre():
+    """⚠ The data rescales as loc_z * 1e9 * factor -- about zero. Scaling about
+    the ROI's own centre keeps the thickness plausible and leaves every
+    off-centre ROI in the wrong place; it is correct only for a dataset centred
+    near z = 0, which is exactly what synthetic test data looks like."""
+    from minflux_viewer.core.roi_volume import scale_z
+
+    g = scale_z(Rec("cuboid", {"x": [0, 1], "y": [0, 1], "z": [100.0, 200.0]}), 0.5)
+    assert g["z"] == [50.0, 100.0]          # NOT [125, 175], which centring gives
+
+
+def test_scale_z_halves_an_ellipsoid_centre_and_radius_together():
+    from minflux_viewer.core.roi_volume import scale_z
+
+    g = scale_z(Rec("sphere", {"center": [0.0, 0.0, 100.0], "radii": [5.0, 5.0, 20.0]}), 0.5)
+    assert g["center"][2] == 50.0 and g["radii"][2] == 10.0
+    assert g["center"][:2] == [0.0, 0.0] and g["radii"][:2] == [5.0, 5.0]   # X/Y untouched
+
+
+def test_scale_z_moves_a_prisms_levels_when_it_stacks_along_z():
+    from minflux_viewer.core.roi_volume import scale_z
+
+    rec = Rec("polyhedron", {"axis": "Z", "thickness": 40.0,
+                             "levels": [{"at": 100.0, "polygon": _circle(50.0).tolist()}]})
+    g = scale_z(rec, 2.0)
+    assert g["levels"][0]["at"] == 200.0
+    assert g["thickness"] == 80.0
+
+
+def test_scale_z_touches_the_polygon_when_z_is_a_cross_section_axis():
+    """Stacked along Y, Z is one of the cross-section's own columns -- not the
+    stacking coordinate -- so the polygon is what carries it."""
+    from minflux_viewer.core.roi_volume import scale_z
+
+    poly = [[0.0, 10.0], [100.0, 10.0], [100.0, 30.0]]      # (X, Z) for axis Y
+    rec = Rec("polyhedron", {"axis": "Y", "thickness": 10.0,
+                             "levels": [{"at": 0.0, "polygon": poly}]})
+    g = scale_z(rec, 3.0)
+    assert [pt[1] for pt in g["levels"][0]["polygon"]] == [30.0, 30.0, 90.0]
+    assert [pt[0] for pt in g["levels"][0]["polygon"]] == [0.0, 100.0, 100.0]   # X untouched
+    assert g["thickness"] == 10.0                            # Y thickness untouched
+
+
+def test_scale_z_also_serves_the_two_d_types_that_carry_a_z():
+    from minflux_viewer.core.roi_volume import scale_z
+
+    assert scale_z(Rec("point", {"point": [1.0, 2.0, 300.0]}), 0.5)["point"] == [1.0, 2.0, 150.0]
+    g = scale_z(Rec("points", {"points": [[0.0, 0.0, 10.0], [1.0, 1.0, 20.0]]}), 2.0)
+    assert [p[2] for p in g["points"]] == [20.0, 40.0]
+
+
+def test_scale_z_reports_nothing_to_do_rather_than_inventing_a_z():
+    from minflux_viewer.core.roi_volume import scale_z
+
+    assert scale_z(Rec("rectangle", {"bounds": [0, 0, 1, 1]}), 2.0) is None
+    assert scale_z(Rec("point", {"point": [1.0, 2.0]}), 2.0) is None      # 2-D point
+    assert scale_z(Rec("cuboid", {"x": [0, 1], "y": [0, 1], "z": [0, 1]}), 0.0) is None
+
+
+def test_scale_z_round_trips():
+    from minflux_viewer.core.roi_volume import scale_z
+
+    start = {"x": [0, 1], "y": [0, 1], "z": [37.0, 91.0]}
+    there = scale_z(Rec("cuboid", start), 0.67)
+    back = scale_z(Rec("cuboid", there), 1.0 / 0.67)
+    assert back["z"] == pytest.approx(start["z"])
+
+
+# ------------------------------------------------------ the downstream consumers
+def _ds_with(xyz):
+    """A minimal dataset stand-in for the pure crop/label helpers."""
+    import types
+
+    import numpy as _np
+
+    arr = _np.asarray(xyz, dtype=float)
+    ds = types.SimpleNamespace()
+    ds.prop = types.SimpleNamespace(num_loc=arr.shape[0])
+    ds.state = {}
+    ds.derived = {}
+    ds.attr = {"xnm": arr[:, 0], "ynm": arr[:, 1], "znm": arr[:, 2],
+               "tid": _np.arange(arr.shape[0])}
+    ds.cali = types.SimpleNamespace(z_scaling_factor=1.0)
+    ds.filter_mask = _np.ones(arr.shape[0], dtype=bool)
+    return ds, arr
+
+
+def test_crop_accepts_a_volume_roi(monkeypatch):
+    """It used to gate on REGION_ROI_TYPES, so a volume ROI cropped nothing."""
+    from minflux_viewer.core import roi_crop
+
+    ds, arr = _ds_with([[0, 0, 0], [50, 50, 0], [50, 50, 500], [500, 500, 0]])
+    monkeypatch.setattr(roi_crop, "display_coords", lambda _ds: arr)
+    rec = Rec("cuboid", {"x": [-10, 100], "y": [-10, 100], "z": [-10, 100]})
+    mask = roi_crop.compute_crop_mask(ds, rec)
+    assert list(mask) == [True, True, False, False]
+
+
+def test_crop_intersects_the_roi_with_an_explicit_z_slab(monkeypatch):
+    """⚠ Both constraints apply. Letting either win silently would make a crop
+    depend on which one the reader happened to think of."""
+    from minflux_viewer.core import roi_crop
+
+    ds, arr = _ds_with([[0, 0, -50], [0, 0, 0], [0, 0, 50]])
+    monkeypatch.setattr(roi_crop, "display_coords", lambda _ds: arr)
+    rec = Rec("cuboid", {"x": [-10, 10], "y": [-10, 10], "z": [-100, 100]})
+    assert list(roi_crop.compute_crop_mask(ds, rec)) == [True, True, True]
+    assert list(roi_crop.compute_crop_mask(ds, rec, z_range=(-10, 10))) == [False, True, False]
+
+
+def test_crop_keeps_whole_traces_by_their_centroid(monkeypatch):
+    """The 3-D rule matches the 2-D one rather than inventing a second."""
+    import numpy as _np
+
+    from minflux_viewer.core import roi_crop
+
+    ds, arr = _ds_with([[0, 0, 0], [0, 0, 400], [900, 900, 900]])
+    ds.attr["tid"] = _np.array([1, 1, 2])
+    monkeypatch.setattr(roi_crop, "display_coords", lambda _ds: arr)
+    monkeypatch.setattr(roi_crop, "_trace_ids", lambda _ds, _n: ds.attr["tid"])
+    rec = Rec("cuboid", {"x": [-10, 10], "y": [-10, 10], "z": [-10, 250]})
+    # Trace 1's centroid is (0, 0, 200) -- inside; both its rows come along.
+    assert list(roi_crop.compute_crop_mask(ds, rec, trace_complete=True)) == [True, True, False]
+
+
+def test_channel_from_roi_accepts_a_volume_roi(monkeypatch):
+    from minflux_viewer.core import channel_labels, roi_crop
+
+    ds, arr = _ds_with([[0, 0, 0], [500, 500, 500]])
+    monkeypatch.setattr(roi_crop, "display_coords", lambda _ds: arr)
+    rec = Rec("cuboid", {"x": [-10, 10], "y": [-10, 10], "z": [-10, 10]})
+    rec.id = "r1"
+    rec.selection_dirty = True
+    mask = channel_labels.roi_mask_for_record(ds, rec)
+    assert mask is not None and list(mask) == [True, False]
+
+
+def test_channel_from_roi_still_refuses_a_shape_with_no_area(monkeypatch):
+    from minflux_viewer.core import channel_labels
+
+    ds, _arr = _ds_with([[0, 0, 0]])
+    rec = Rec("line", {"points": [[0, 0], [1, 1]]})
+    rec.id = "r2"
+    rec.selection_dirty = True
+    assert channel_labels.roi_mask_for_record(ds, rec) is None

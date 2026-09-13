@@ -22,7 +22,7 @@ from ..colors import (
 )
 from ..core import roi_scope
 from ..core.roi import RoiRecord, RoiStore
-from ..core.roi_selection import ROI_MASKS_STATE_KEY, store_roi_mask
+from ..core.roi_selection import ROI_MASKS_STATE_KEY, VOLUME_ROI_TYPES, store_roi_mask
 
 # Polyline-family shapes whose vertices can be added/deleted via the right-click
 # menu (rectangle/oval/point/line/angle have fixed or handle-defined geometry).
@@ -35,6 +35,11 @@ _VERTEX_EDIT_TYPES = {"polygon", "freehand", "polyline", "freehand_line", "magne
 _PLANE_PLOT_AXES = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
 _PLANE_DEPTH_AXIS = {"XY": 2, "XZ": 1, "YZ": 0}
 _PLANE_DEPTH_NAME = {"XY": "Z", "XZ": "Y", "YZ": "X"}
+
+
+#: While drawing, a volume tool behaves as its 2-D counterpart; the lift into
+#: three dimensions happens on the finishing gesture (see _promote_draft_to_volume).
+_FLAT_TOOL_FOR_VOLUME = {"cuboid": "rectangle", "sphere": "oval", "polyhedron": "polygon"}
 
 
 def point_to_3d(pos, plane: str | None, depth: float | None) -> list[float]:
@@ -810,6 +815,7 @@ class RoiOverlayController(QObject):
                 and (
                     record_replaced
                     or (plane_changed and record.type in {"line", "polyline", "freehand_line"})
+                    or (plane_changed and record.type in VOLUME_ROI_TYPES)
                     or (y_orientation_changed and record.type in {"rectangle", "oval"})
                 )
             ):
@@ -884,7 +890,7 @@ class RoiOverlayController(QObject):
             # Fiji-style: a right-click finishes an in-progress polygon. The click
             # location is only a signal (not a vertex); the loop closes from the
             # last left-click point back to the first.
-            if self.store.active_tool == "polygon" and self._polygon_points:
+            if self.store.active_tool in {"polygon", "polyhedron"} and self._polygon_points:
                 self._finish_polygon()
                 return True
             if self.store.active_tool == "polyline" and self._polyline_points:
@@ -928,7 +934,7 @@ class RoiOverlayController(QObject):
             # Accumulating multi-vertex tools register EVERY left click as a new
             # vertex in draw order — so an existing ROI (or the in-progress draft)
             # under the cursor must NOT swallow the click via _record_at below.
-            if tool == "polygon":
+            if tool in {"polygon", "polyhedron"}:
                 if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                     self._finish_polygon()
                 else:
@@ -997,7 +1003,10 @@ class RoiOverlayController(QObject):
             if pos is not None:
                 self._update_drag_draft(pos)
             self._drag_start = None
-            if tool in {"rectangle", "oval", "freehand", "rotated_rectangle", "ellipse"}:
+            if tool in {"cuboid", "sphere"}:
+                self._promote_draft_to_volume(tool)
+                self._finalize_draft_selection(update_item=True)
+            elif tool in {"rectangle", "oval", "freehand", "rotated_rectangle", "ellipse"}:
                 self._finalize_draft_selection(update_item=True)
             elif tool == "line":
                 self._finish_line()
@@ -1006,7 +1015,7 @@ class RoiOverlayController(QObject):
             self._maybe_release_tool(event.modifiers())
             return True
         if event.type() == QEvent.Type.MouseButtonDblClick:
-            if tool == "polygon":
+            if tool in {"polygon", "polyhedron"}:
                 self._finish_polygon()
                 return True
             if tool == "polyline":
@@ -1016,7 +1025,8 @@ class RoiOverlayController(QObject):
                 self._finish_lasso()
                 return True
         if event.type() == QEvent.Type.KeyPress:
-            finisher = {"polygon": self._finish_polygon, "polyline": self._finish_polyline,
+            finisher = {"polygon": self._finish_polygon, "polyhedron": self._finish_polygon,
+                        "polyline": self._finish_polyline,
                         "magnetic_lasso": self._finish_lasso}.get(tool)
             if finisher is not None:
                 if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -1673,6 +1683,10 @@ class RoiOverlayController(QObject):
         x0, y0 = self._drag_start
         x1, y1 = pos
         tool = self.store.active_tool
+        # A volume tool draws its 2-D counterpart during the drag: the user sees
+        # a familiar rubber band, and the third dimension is seeded only once the
+        # shape is finished and there is something to measure it against.
+        tool = _FLAT_TOOL_FOR_VOLUME.get(tool, tool)
         if tool in {"rectangle", "oval"}:
             x, y = min(x0, x1), min(y0, y1)
             w, h = abs(x1 - x0), abs(y1 - y0)
@@ -1692,6 +1706,94 @@ class RoiOverlayController(QObject):
             self._set_draft(RoiRecord.create("freehand", {"points": self._freehand_points, "closed": True}, **self._record_kwargs()))
         elif tool == "freehand_line":
             self._set_draft(RoiRecord.create("freehand_line", {"points": self._freehand_points, "closed": False}, **self._record_kwargs()))
+
+    def _volume_outline(self, record) -> list:
+        """The volume ROI's outline in this view, as ``[[h, v], ...]``.
+
+        ⚠ ``volume_silhouette`` is asked in **data-axis columns**, never a plane
+        name. A standalone YZ projection shows Y horizontally while an ortho YZ
+        pane shows Z horizontally, and a plane name cannot tell them apart --
+        naming the columns is what makes one stored geometry correct in both.
+        """
+        from ..core.roi_volume import volume_silhouette
+
+        plane = self._view_plane()
+        columns = _PLANE_PLOT_AXES.get(plane)
+        if columns is None:
+            return [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]
+        outline = volume_silhouette(record, columns[0], columns[1])
+        if outline is None or len(outline) < 3:
+            return [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]
+        return [[float(a), float(b)] for a, b in outline]
+
+    def _seed_depth_interval(self, flat_record):
+        """``(lo, hi)`` on the axis normal to the drawing plane, or ``None``.
+
+        The depths come from the localizations the drawn 2-D shape already
+        selects -- ``compute_roi_selection`` is exactly that question, so the
+        seed reuses the view's own selection path rather than a second one that
+        could disagree about which rows are in view, filtered or visible.
+        """
+        from ..core.roi_crop import display_coords
+        from ..core.roi_volume import PLANE_NORMAL_AXIS, AXIS_INDEX, seed_interval
+
+        plane = self._view_plane()
+        if plane not in PLANE_NORMAL_AXIS:
+            return None
+        visible = None
+        getter = getattr(self.owner, "roi_depth_range", None)
+        if callable(getter):
+            visible = getter()
+        if visible is None:
+            return None
+
+        depths = []
+        try:
+            selection = self.owner.compute_roi_selection(flat_record)
+        except Exception:
+            selection = None
+        if selection is not None:
+            ds, mask, _ctx = selection
+            coords = display_coords(ds)
+            column = AXIS_INDEX[PLANE_NORMAL_AXIS[plane]]
+            mask = np.asarray(mask, dtype=bool)
+            if coords.ndim == 2 and coords.shape[1] > column and mask.size == coords.shape[0]:
+                depths = coords[mask, column]
+
+        crosshair = None
+        centre_getter = getattr(self.owner, "roi_depth_center", None)
+        if callable(centre_getter):
+            crosshair = centre_getter()
+        return seed_interval(depths, visible[0], visible[1], crosshair=crosshair)
+
+    def _promote_draft_to_volume(self, tool: str) -> bool:
+        """Lift the finished 2-D draft into the volume ROI *tool* asks for.
+
+        Returns False when the third dimension cannot be defined -- a 2-D
+        dataset, or a view with no out-of-plane range. The caller then leaves the
+        2-D draft alone and says why, rather than filing a volume ROI whose depth
+        is invented.
+        """
+        from ..core.roi_volume import volume_from_flat
+
+        draft = self.draft
+        if draft is None:
+            return False
+        interval = self._seed_depth_interval(draft)
+        if interval is None:
+            self._emit_status(
+                f"{tool} needs a 3-D dataset — kept the 2-D {draft.type}")
+            return False
+        try:
+            kind, geometry = volume_from_flat(
+                draft.type, draft.geometry, self._view_plane(), interval)
+        except ValueError:
+            return False
+        record = RoiRecord.create(kind, geometry, **self._record_kwargs())
+        record = self._normalize_record(record)
+        self._set_draft(record)
+        self._emit_status(self._roi_status_text(kind, geometry))
+        return True
 
     def _update_polygon_draft(self) -> None:
         if len(self._polygon_points) >= 1:
@@ -1769,6 +1871,8 @@ class RoiOverlayController(QObject):
         completed = len(self._polygon_points) >= 3
         if completed:
             self._set_draft(RoiRecord.create("polygon", {"points": self._polygon_points, "closed": True}, **self._record_kwargs()))
+            if self.store.active_tool == "polyhedron":
+                self._promote_draft_to_volume("polyhedron")
             self._finalize_draft_selection(update_item=False)
         self._polygon_points = []
         if completed:
@@ -2001,6 +2105,13 @@ class RoiOverlayController(QObject):
         if record.type == "points":
             return MultiPointItem(self._project_points(record),
                                   color=record.stroke_color)
+        if record.type in VOLUME_ROI_TYPES:
+            # A volume ROI is drawn as its SILHOUETTE in whichever plane this
+            # view shows, asked for by data-axis columns rather than a plane
+            # name -- so no view can read the geometry in the wrong convention.
+            outline = self._volume_outline(record)
+            return FilledPolyLineROI(outline, closed=True, movable=False,
+                                     fill_color=record.stroke_color)
         if record.type == "angle":
             pts = g.get("points", [[0, 0], [1, 0], [2, 1]])
             item = pg.PolyLineROI([p[:2] for p in pts[:3]], closed=False, movable=True)

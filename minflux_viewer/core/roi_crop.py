@@ -220,6 +220,41 @@ def compute_crop_mask(
     if n == 0:
         return np.zeros(0, dtype=bool)
     x, y, z = coords[:, 0], coords[:, 1], coords[:, 2]
+
+    from .roi_selection import VOLUME_ROI_TYPES
+
+    if getattr(record, "type", None) in VOLUME_ROI_TYPES:
+        # A volume ROI bounds all three axes from its own geometry, so there is
+        # no 2-D region to project and `exact_shape` has nothing to choose
+        # between -- a bounding box would be a different ROI, not a coarser read
+        # of this one.
+        from .roi_volume import roi_volume_mask
+
+        inside = roi_volume_mask(x, y, z, record)
+        if z_range is not None:
+            # ⚠ Both constraints apply: the ROI's Z and the caller's slab
+            # INTERSECT. Letting either win silently would make a crop depend on
+            # which one the reader happened to think of.
+            lo, hi = sorted(float(v) for v in z_range)
+            inside &= np.isfinite(z) & (z >= lo) & (z <= hi)
+        if not trace_complete:
+            return inside
+        tid = _trace_ids(ds, n)
+        _uniq, inv = np.unique(tid, return_inverse=True)
+        # A trace is kept when its centroid is inside, matching the 2-D rule.
+        cnt = np.bincount(inv).astype(float)
+        centroid = np.column_stack([
+            np.bincount(inv, weights=x) / cnt,
+            np.bincount(inv, weights=y) / cnt,
+            np.bincount(inv, weights=z) / cnt,
+        ])
+        trace_in = roi_volume_mask(
+            centroid[:, 0], centroid[:, 1], centroid[:, 2], record)
+        if z_range is not None:
+            lo, hi = sorted(float(v) for v in z_range)
+            trace_in &= (centroid[:, 2] >= lo) & (centroid[:, 2] <= hi)
+        return trace_in[inv]
+
     bbox = None if exact_shape else _region_bbox(record)
 
     def region_in(px: np.ndarray, py: np.ndarray) -> np.ndarray:

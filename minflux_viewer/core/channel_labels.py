@@ -151,9 +151,10 @@ def roi_mask_for_record(ds, record, *, exact_shape: bool = True) -> np.ndarray |
     Returns ``None`` for a ROI that encloses no area (line, point, angle).
     """
     from .roi_crop import compute_crop_mask
-    from .roi_selection import REGION_ROI_TYPES, ROI_MASKS_STATE_KEY
+    from .roi_selection import REGION_ROI_TYPES, ROI_MASKS_STATE_KEY, VOLUME_ROI_TYPES
 
-    if str(getattr(record, "type", "")) not in REGION_ROI_TYPES:
+    # A volume ROI encloses a region too -- it just answers in three dimensions.
+    if str(getattr(record, "type", "")) not in REGION_ROI_TYPES | VOLUME_ROI_TYPES:
         return None
     n = int(getattr(getattr(ds, "prop", None), "num_loc", 0) or 0)
     if n == 0:

@@ -66,7 +66,24 @@ __all__ = [
     "volume_bounds",
     "volume_silhouette",
     "NotStarShaped",
+    "PLANE_NORMAL_AXIS",
+    "FLAT_TO_VOLUME",
+    "plane_in_plane_axes",
+    "volume_from_flat",
+    "scale_z",
 ]
+
+
+#: The data axis a standalone 2-D projection does NOT show.
+PLANE_NORMAL_AXIS: dict[str, str] = {"XY": "Z", "XZ": "Y", "YZ": "X"}
+
+#: Which volume type a 2-D drawing tool's shape becomes.
+FLAT_TO_VOLUME: dict[str, str] = {
+    "rectangle": "cuboid",
+    "oval": "sphere",
+    "polygon": "polyhedron",
+    "freehand": "polyhedron",
+}
 
 
 #: Data-axis name -> column of an ``(N, 3)`` display-nm array.
@@ -511,3 +528,144 @@ def volume_silhouette(record, h_axis: int, v_axis: int,
     side_b = np.column_stack([lo[::-1], at_values[::-1]])
     outline = np.vstack([side_a, side_b])                 # (other, stack) order
     return outline if other == h_axis else outline[:, ::-1]
+
+
+def plane_in_plane_axes(plane: str) -> tuple[int, int]:
+    """The two data-axis columns a standalone projection shows.
+
+    ⚠ Identical to ``cross_axes(PLANE_NORMAL_AXIS[plane])`` by construction, and
+    the test asserts it: a projection shows everything except its normal axis,
+    in ascending order. That is what lets a 2-D drawing be lifted into a volume
+    without anyone choosing a convention -- the axes fall out of the plane.
+    """
+    return cross_axes(PLANE_NORMAL_AXIS[str(plane).upper()])
+
+
+def volume_from_flat(flat_type: str, geometry: dict, plane: str,
+                     interval: tuple[float, float]) -> tuple[str, dict]:
+    """Lift a 2-D shape drawn in *plane* into a volume record.
+
+    *interval* is the extent on the axis normal to *plane* -- what
+    :func:`seed_interval` derived from the data under the drawing. Returns
+    ``(volume_type, geometry)`` in named data axes, so nothing downstream has to
+    know which view drew it.
+
+    The in-plane shape is carried across unchanged: a rectangle becomes the two
+    in-plane sides of a cuboid, an oval the two in-plane radii of an ellipsoid,
+    a polygon the cross-section of a prism. Only the third axis is new.
+    """
+    volume_type = FLAT_TO_VOLUME.get(flat_type)
+    if volume_type is None:
+        raise ValueError(f"{flat_type!r} has no volume counterpart")
+    plane = str(plane).upper()
+    if plane not in PLANE_NORMAL_AXIS:
+        raise ValueError(f"unknown plane {plane!r}; expected one of {sorted(PLANE_NORMAL_AXIS)}")
+    normal = PLANE_NORMAL_AXIS[plane]
+    ui, vi = plane_in_plane_axes(plane)
+    lo, hi = (float(interval[0]), float(interval[1]))
+    if hi < lo:
+        lo, hi = hi, lo
+    g = geometry or {}
+
+    if volume_type == "cuboid":
+        x, y, w, h = (float(v) for v in (g.get("bounds") or [0.0, 0.0, 0.0, 0.0]))
+        spans = [None, None, None]
+        spans[ui] = [x, x + w]
+        spans[vi] = [y, y + h]
+        spans[AXIS_INDEX[normal]] = [lo, hi]
+        return volume_type, {name.lower(): spans[AXIS_INDEX[name]] for name in AXIS_NAMES}
+
+    if volume_type == "sphere":
+        x, y, w, h = (float(v) for v in (g.get("bounds") or [0.0, 0.0, 0.0, 0.0]))
+        centre = [0.0, 0.0, 0.0]
+        radii = [0.0, 0.0, 0.0]
+        centre[ui], radii[ui] = x + 0.5 * w, 0.5 * abs(w)
+        centre[vi], radii[vi] = y + 0.5 * h, 0.5 * abs(h)
+        k = AXIS_INDEX[normal]
+        centre[k], radii[k] = 0.5 * (lo + hi), 0.5 * abs(hi - lo)
+        return volume_type, {"center": centre, "radii": radii}
+
+    # polyhedron: a prism -- one cross-section plus a thickness. The polygon is
+    # already in (ui, vi) order, which cross_axes(normal) reproduces exactly.
+    points = [[float(pt[0]), float(pt[1])] for pt in (g.get("points") or [])]
+    return volume_type, {
+        "axis": normal,
+        "thickness": abs(hi - lo),
+        "levels": [{"at": 0.5 * (lo + hi), "polygon": points}],
+    }
+
+
+def scale_z(record, factor: float):
+    """Rescale a ROI's Z about **z = 0**, returning new geometry (or ``None``).
+
+    ⚠ About the origin, never about the ROI's own centre. The data rescales as
+    ``z_calibrated = loc_z * 1e9 * cali.z_scaling_factor`` -- about zero -- so
+    centre-anchored scaling would keep the ROI's thickness plausible and leave
+    every off-centre ROI in the wrong place. It reads as the natural
+    implementation and is correct only for a dataset centred near z = 0, which
+    is exactly the case a test on synthetic data would have.
+
+    A volume ROI's Z is captured when it is drawn and deliberately does **not**
+    follow the Z scaling factor on its own; this is the explicit command that
+    brings one back into step.
+    """
+    factor = float(factor)
+    kind = getattr(record, "type", None)
+    g = dict(getattr(record, "geometry", None) or {})
+    if not np.isfinite(factor) or factor == 0.0:
+        return None
+
+    if kind == "cuboid":
+        if "z" not in g:
+            return None
+        lo, hi = _as_interval(g["z"])
+        g["z"] = [lo * factor, hi * factor]
+        return g
+    if kind == "sphere":
+        centre = list(g.get("center") or [])
+        radii = list(g.get("radii") or [])
+        if len(centre) < 3 or len(radii) < 3:
+            return None
+        centre[2] = float(centre[2]) * factor
+        radii[2] = abs(float(radii[2]) * factor)
+        g["center"], g["radii"] = centre, radii
+        return g
+    if kind == "polyhedron":
+        axis = str(g.get("axis", "Z")).upper()
+        levels = [dict(lv) for lv in (g.get("levels") or [])]
+        if not levels:
+            return None
+        if axis == "Z":
+            for lv in levels:
+                lv["at"] = float(lv["at"]) * factor
+            if "thickness" in g:
+                g["thickness"] = abs(float(g["thickness"]) * factor)
+        else:
+            # Z is one of the cross-section's own axes here, so it is a polygon
+            # column rather than the stacking coordinate.
+            column = 0 if cross_axes(axis)[0] == AXIS_INDEX["Z"] else 1
+            for lv in levels:
+                poly = [[float(v) for v in pt[:2]] for pt in lv.get("polygon") or []]
+                for pt in poly:
+                    pt[column] *= factor
+                lv["polygon"] = poly
+        g["levels"] = levels
+        return g
+
+    # 2-D types: only a point or a vertex list carries a Z to scale.
+    if kind == "point":
+        pt = list(g.get("point") or [])
+        if len(pt) < 3:
+            return None
+        pt[2] = float(pt[2]) * factor
+        g["point"] = pt
+        return g
+    pts = g.get("points")
+    if pts and any(len(p) >= 3 for p in pts):
+        g["points"] = [
+            ([float(p[0]), float(p[1]), float(p[2]) * factor] if len(p) >= 3
+             else [float(p[0]), float(p[1])])
+            for p in pts
+        ]
+        return g
+    return None

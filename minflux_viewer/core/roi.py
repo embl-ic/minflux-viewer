@@ -20,6 +20,10 @@ from PyQt6.QtGui import QPainterPath, QPolygonF
 ROI_TYPES = {
     "rectangle", "oval", "polygon", "freehand", "line", "point", "points", "angle",
     "polyline", "freehand_line", "magnetic_lasso",
+    # Volume (3-D) shapes. Listed literally rather than imported from
+    # roi_selection.VOLUME_ROI_TYPES to keep this module free of that import;
+    # tests/test_roi_volume.py asserts the two agree.
+    "cuboid", "sphere", "polyhedron",
 }
 
 #: A ``points`` record is ImageJ's **multi-point**: one ROI holding N markers,
