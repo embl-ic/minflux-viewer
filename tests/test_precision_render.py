@@ -454,6 +454,174 @@ def test_precision_render_window_smoke(qtbot):
     assert np.allclose(channel.sigma_y_nm, sz * 0.7)
 
 
+def test_precision_render_ortho_side_panes_follow_selected_method(qtbot, monkeypatch):
+    """Changing the XY reconstruction must rebuild XZ and YZ the same way.
+
+    This specifically exercises ``PrecisionRenderWindow``.  A base
+    ``RenderWindow`` equality test did not cover the selectable scientific
+    methods and allowed both side panes to remain smoothed Gaussians.
+    """
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.ortho_view import ORTHO_AXIS
+    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+
+    rng = np.random.default_rng(73)
+    n = 80
+    state = AppState()
+    state.add_dataset(
+        build_localization_dataset(
+            name="precision-ortho-method-link-test",
+            x_nm=rng.uniform(-100.0, 100.0, n),
+            y_nm=rng.uniform(-100.0, 100.0, n),
+            z_nm=rng.uniform(-80.0, 80.0, n),
+            tid=np.arange(n),
+            attrs={
+                "sx_nm": np.full(n, 4.0),
+                "sy_nm": np.full(n, 6.0),
+                "sz_nm": np.full(n, 12.0),
+            },
+        )
+    )
+    window = PrecisionRenderWindow(state, dataset_idx=0)
+    qtbot.addWidget(window)
+    window.resize(620, 620)
+    window.show()
+    assert window._ortho_precision_scheduler is None
+    assert window._ortho_voronoi_scheduler is None
+    window._set_orientation(ORTHO_AXIS)
+    qtbot.waitUntil(window._ortho_built, timeout=5000)
+
+    captured: list[np.ndarray] = []
+    compose = window._compose_rgba_for
+
+    def capture_scalar(scalar, channels, *, auto=False):
+        captured.append(np.array(scalar, copy=True))
+        return compose(scalar, channels, auto=auto)
+
+    monkeypatch.setattr(window, "_compose_rgba_for", capture_scalar)
+    window._fixed_sigma_xy_nm = 24.0
+    window._fixed_sigma_z_nm = 36.0
+
+    side_scalars = {}
+    side_images = {}
+    for method in (
+        RENDER_METHOD_HISTOGRAM,
+        RENDER_METHOD_BILINEAR,
+        RENDER_METHOD_BASIC,
+        RENDER_METHOD_FIXED_GAUSSIAN,
+        RENDER_METHOD_PRECISION_GAUSSIAN,
+        RENDER_METHOD_VORONOI,
+    ):
+        window._ortho_timer.stop()
+        window._set_render_method(method)
+        assert window._ortho_timer.isActive(), "method change must invalidate side panes"
+        window._redraw_timer.stop()
+        window._ortho_timer.stop()
+        captured.clear()
+        window._render_ortho_sides()
+        qtbot.waitUntil(lambda: len(captured) >= 2, timeout=10000)
+        window._ortho_timer.stop()
+        completed = captured[-2:]
+        assert all(np.all(np.isfinite(value)) for value in completed)
+        side_scalars[method] = [np.array(value, copy=True) for value in completed]
+        side_images[method] = [
+            np.array(window._pane_images[plane].image, copy=True)
+            for plane in ("YZ", "XZ")
+        ]
+
+    for histogram, gaussian in zip(
+        side_scalars[RENDER_METHOD_HISTOGRAM],
+        side_scalars[RENDER_METHOD_FIXED_GAUSSIAN],
+        strict=True,
+    ):
+        assert histogram.shape == gaussian.shape
+        assert not np.allclose(histogram, gaussian)
+        assert np.count_nonzero(gaussian) > np.count_nonzero(histogram)
+    assert any(
+        not np.allclose(histogram, gaussian)
+        for histogram, gaussian in zip(
+            side_images[RENDER_METHOD_HISTOGRAM],
+            side_images[RENDER_METHOD_FIXED_GAUSSIAN],
+            strict=True,
+        )
+    )
+
+    # Ortho keeps XY as the primary plane: its fixed Gaussian must use lateral
+    # sigma on both axes, not axial sigma on Y just because the mode is named
+    # ``Ortho-View`` rather than ``XY``.
+    assert window._fixed_sigma_for_orientation() == (24.0, 24.0)
+
+    window._ortho._depth_clipped = True
+    assert "Z clipped" in window.ortho_info_suffix()
+    window._set_render_method(RENDER_METHOD_HISTOGRAM)
+    window._redraw_timer.stop()
+    window._render()
+    assert "Z clipped" in window._info_label.text()
+
+    # Display-only changes (LUT, B&C, visibility, inversion) recompose the
+    # cached primary frame and must also recolor/re-expose the side panes.
+    window._ortho_timer.stop()
+    window._compose_from_cache()
+    assert window._ortho_timer.isActive()
+    window._ortho_timer.stop()
+
+
+def test_ortho_render_jobs_have_isolated_cancellable_generations(qtbot):
+    """Cancelling side work must suppress stale results without clearing XY."""
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.ortho_view import ORTHO_AXIS
+    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+
+    rng = np.random.default_rng(97)
+    n = 180
+    state = AppState()
+    state.add_dataset(build_localization_dataset(
+        name="ortho-cancellation-test",
+        x_nm=rng.normal(0.0, 120.0, n),
+        y_nm=rng.normal(0.0, 120.0, n),
+        z_nm=rng.normal(0.0, 80.0, n),
+        tid=np.arange(n),
+        attrs={
+            "sx_nm": np.full(n, 4.0),
+            "sy_nm": np.full(n, 5.0),
+            "sz_nm": np.full(n, 11.0),
+        },
+    ))
+    window = PrecisionRenderWindow(state, dataset_idx=0)
+    qtbot.addWidget(window)
+    window.resize(620, 620)
+    window.show()
+    window._set_orientation(ORTHO_AXIS)
+    qtbot.waitUntil(window._ortho_built, timeout=5000)
+    window._ortho_timer.stop()
+    window._render_ortho_sides()
+
+    assert window._precision_scheduler._pool is not window._ortho_precision_scheduler._pool
+    assert window._voronoi_scheduler._pool is not window._ortho_voronoi_scheduler._pool
+    assert not window._ortho_precision_scheduler._clear_pool_on_cancel
+    assert not window._ortho_voronoi_scheduler._clear_pool_on_cancel
+
+    for method, scheduler_name in (
+        (RENDER_METHOD_PRECISION_GAUSSIAN, "_ortho_precision_scheduler"),
+        (RENDER_METHOD_VORONOI, "_ortho_voronoi_scheduler"),
+    ):
+        window._set_render_method(method)
+        window._redraw_timer.stop()
+        window._ortho_timer.stop()
+        window._ortho_precision_cache.clear()
+        window._ortho_voronoi_cache.clear()
+        window._render_ortho_sides()
+        scheduler = getattr(window, scheduler_name)
+        generation = scheduler.generation
+        assert window._ortho_render_batch is not None
+
+        window._on_ortho_view_changed()
+
+        assert scheduler.generation > generation
+        assert window._ortho_render_batch is None
+        window._ortho_timer.stop()
+
+
 def test_precision_render_window_voronoi_supports_xy_xz_yz(qtbot):
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow

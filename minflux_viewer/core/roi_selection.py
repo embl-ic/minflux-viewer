@@ -147,6 +147,12 @@ def polygon_mask(x, y, record, *, base_mask=None) -> np.ndarray:
     return out
 
 
+#: ROI types that enclose an area, so they can select localizations. Line, point
+#: and angle ROIs have no interior. Every view that turns a ROI into a row
+#: selection gates on this set, so they agree on what "a region" is.
+REGION_ROI_TYPES = frozenset({"rectangle", "oval", "polygon", "freehand"})
+
+
 def roi_region_mask(x, y, record, *, base_mask=None) -> np.ndarray:
     """Enclosed-region mask for any 2-D ROI shape (rectangle/oval/polygon/freehand).
 
