@@ -6621,7 +6621,7 @@ class MainWindow(QMainWindow):
         from .modeless import show_modeless
         win = AttributeSeparationDialog(
             self._state, idx, attribute="dcr",
-            title="Separate Channel by DCR", allow_photon_weight=True, owner=self)
+            title="Separate Channel by DCR", owner=self)
         show_modeless(win, self)
 
     def _show_attribute_separation(self) -> None:
@@ -6640,7 +6640,7 @@ class MainWindow(QMainWindow):
         win = AttributeSeparationDialog(
             self._state, idx, attribute=default,
             title="Convert to Multi-Channel Overlay (by attribute)",
-            allow_photon_weight=True, pick_attribute=True, owner=self)
+            pick_attribute=True, owner=self)
         show_modeless(win, self)
 
     def _show_time_channel_separation(self) -> None:
@@ -6840,12 +6840,20 @@ class MainWindow(QMainWindow):
         return True
 
     def apply_channel_separation(self, src_idx: int, labels, channels, *,
-                                 attribute: str = "", method_label: str = "channel separation") -> bool:
-        """Build one truncated dataset per channel (+ a hidden *unassigned*) from
-        per-localization channel *labels* (0..N-1, or -1 = unassigned) and combine
-        them as a render overlay. *channels* is a list of carriers exposing
+                                 attribute: str = "", method_label: str = "channel separation",
+                                 masks=None, include_unassigned: bool = True) -> bool:
+        """Build one truncated dataset per channel (+ a hidden *unassigned*) and
+        combine them as a render overlay. *channels* is a list of carriers exposing
         ``.name`` and ``.lut`` (see :class:`analysis.attribute_channels.Channel`).
-        Attribute-agnostic — DCR is one instance. Returns True on success."""
+        Attribute-agnostic — DCR is one instance. Returns True on success.
+
+        Membership comes either from *labels* — the exclusive per-localization
+        label array (0..N-1, -1 = unassigned) — or from *masks*, one boolean mask
+        per channel. Masks are the general form: they can **overlap**, which is
+        how "keep a contested localization in both channels" is expressed, and a
+        label array cannot say that. ``include_unassigned=False`` drops the rows
+        no channel claims instead of keeping them as a hidden channel.
+        """
         import uuid
 
         import numpy as np
@@ -6856,18 +6864,28 @@ class MainWindow(QMainWindow):
         if not (0 <= src_idx < len(self._state.datasets)):
             return False
         src = self._state.datasets[src_idx]
-        labels = np.asarray(labels).ravel()
-        n = int(getattr(src.prop, "num_loc", labels.size))
-        if labels.size != n:
-            return False
+        n = int(getattr(src.prop, "num_loc", 0) or 0)
+        if masks is not None:
+            channel_masks = [np.asarray(m, dtype=bool).ravel() for m in masks]
+            if len(channel_masks) != len(channels) or any(m.size != n for m in channel_masks):
+                return False
+        else:
+            labels = np.asarray(labels).ravel()
+            if labels.size != n:
+                return False
+            channel_masks = [labels == k for k in range(len(channels))]
         base_name = src.name
         # (mask, LUT, dataset name, hidden-by-default), one per channel + unassigned.
         plan = [
-            (labels == k, getattr(ch, "lut", "Gray") or "Gray",
+            (channel_masks[k], getattr(ch, "lut", "Gray") or "Gray",
              getattr(ch, "name", None) or f"{base_name} [ch {k + 1}]", False)
             for k, ch in enumerate(channels)
         ]
-        plan.append((labels == -1, "Gray", f"{base_name} [unassigned]", True))
+        if include_unassigned:
+            claimed = np.zeros(n, dtype=bool)
+            for mask in channel_masks:
+                claimed |= mask
+            plan.append((~claimed, "Gray", f"{base_name} [unassigned]", True))
 
         overlay_index = self._next_overlay_index
         self._next_overlay_index += 1

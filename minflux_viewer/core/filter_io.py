@@ -76,3 +76,63 @@ def is_filter_json_payload(payload: Any) -> bool:
         if not keys & FILTER_KEYS:
             return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Preset rows  <->  internal filter specs
+# ---------------------------------------------------------------------------
+# The preset file and the dataset speak different key names for the same thing:
+# a row is the saved JSON schema above, while ``ds.state["filter_specs"]`` uses
+# the internal spec keys the evaluators take. The translation used to live only
+# inside the Filter dialog's table, so nothing headless could read a preset; it
+# belongs here, beside the schema it translates.
+def filter_specs_from_rows(rows, *, only_enabled: bool = True) -> list[dict[str, Any]]:
+    """Preset JSON rows -> internal filter specs.
+
+    ``only_enabled`` keeps just the rows whose ``apply`` is set, matching what the
+    Filter dialog applies (it skips unticked rows). A missing ``iteration`` stays
+    missing rather than being guessed, so ``resolve_spec_iteration`` can apply its
+    own backward-compatible default (effective for cfr/efc, else last).
+    """
+    specs: list[dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if only_enabled and not bool(row.get("apply", False)):
+            continue
+        attribute = str(row.get("attribute", "") or "")
+        if not attribute:
+            continue
+        spec: dict[str, Any] = {
+            "attribute": attribute,
+            "mode": str(row.get("value_as", "per loc") or "per loc"),
+            "lo": float(row.get("min", 0.0)),
+            "hi": float(row.get("max", 1.0)),
+            "lo_inc": bool(row.get("min_inclusive", True)),
+            "hi_inc": bool(row.get("max_inclusive", True)),
+        }
+        if row.get("iteration", None) is not None:
+            spec["itr"] = row["iteration"]
+        specs.append(spec)
+    return specs
+
+
+def rows_from_filter_specs(specs, *, apply: bool = True) -> list[dict[str, Any]]:
+    """Internal filter specs -> preset JSON rows (the inverse of the above)."""
+    rows: list[dict[str, Any]] = []
+    for spec in specs or []:
+        if not isinstance(spec, dict):
+            continue
+        row: dict[str, Any] = {
+            "apply": bool(apply),
+            "attribute": str(spec.get("attribute", "") or ""),
+            "value_as": str(spec.get("mode", "per loc") or "per loc"),
+            "min": float(spec.get("lo", 0.0)),
+            "max": float(spec.get("hi", 1.0)),
+            "min_inclusive": bool(spec.get("lo_inc", True)),
+            "max_inclusive": bool(spec.get("hi_inc", True)),
+        }
+        if spec.get("itr", None) is not None:
+            row["iteration"] = spec["itr"]
+        rows.append(row)
+    return rows
