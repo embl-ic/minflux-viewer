@@ -1,33 +1,36 @@
 """
 minflux_viewer.ui.attribute_separation_dialog
 ==============================================
-Attribute-agnostic **channel separation** dialog — the redesigned tool behind
-*Process › Channel › Separate Channel by DCR* and the foundation of the future
-generic *Convert Dataset to Multi-Channel Overlay*.
+Attribute-agnostic **channel separation** dialog — *Process › Channel › Separate
+Channel by DCR* and *Convert to Multi-Channel Overlay (by attribute)*.
 
-It shows the distribution of a chosen MINFLUX attribute (DCR is the first
-instance), lets you place **channel windows** on that axis three ways —
+It shows the distribution of a chosen MINFLUX attribute and builds channels four
+ways:
 
-* fit a mixture distribution (:mod:`analysis.distribution_fit`) and split at the
-  Bayes boundaries (*Fit* / *Auto*),
-* *Place evenly*,
-* drag the LUT-colored region on the histogram / edit start–end in the table,
+* **Place evenly** — equal windows across the value range,
+* **Detect peak** — the N most prominent peaks, cut at the valleys between them
+  (:mod:`analysis.peak_channels`), which also reports when the data supports
+  fewer peaks than asked for,
+* **Fit** / **Auto** — a mixture fit split at its Bayes boundaries
+  (:mod:`analysis.distribution_fit`; *Auto* picks distribution + count by BIC),
+* **add channel from ROI / from filter** — a channel whose membership is a
+  *selection* rather than a value window, via :mod:`core.channel_labels`.
 
-— and assigns each **trace** to a channel by mean / median / majority vote
-(optionally on photon-weighted DCR). *Apply* builds one dataset per channel plus
-a hidden *unassigned* channel and combines them as a render overlay via
-``main_window.apply_channel_separation``.
+A channel is therefore one of two kinds, and the dialog keeps both in one list:
+a **window** channel (start–end on the attribute axis, draggable on the
+histogram) or a **mask** channel (a ROI's in-region rows, or a filter row's
+passing rows). Assignment is **per localization**; two policies settle the rest —
+what to do where channels overlap, and what to do with rows no channel claims.
 
-Borrowed from the Histogram/Filter UI (row 1): iteration selector, aggregation,
-bin size, Log(data), Reset. The draggable regions are **bounded** to a 5%-padded
-view so they can't be dragged off-screen (the reported run-away-drag issue).
+*Apply* hands one mask per channel to ``main_window.apply_channel_separation``,
+which builds a dataset per channel and combines them as a render overlay.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -38,8 +41,11 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
+    QSpinBox,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -47,10 +53,9 @@ from PyQt6.QtWidgets import (
 
 from ..analysis.attribute_channels import (
     Channel,
-    assign_traces,
+    channels_from_boundaries,
     channels_from_fit,
     place_evenly,
-    pooled_dcr_per_loc,
 )
 from ..analysis.distribution_fit import (
     DISTRIBUTION_LABELS,
@@ -59,20 +64,48 @@ from ..analysis.distribution_fit import (
     fit_mixture,
 )
 from ..colormaps import channel_colormap_names, representative_rgb
-from ..colors import is_solid_color, solid_color_rgb
+from ..colors import is_solid_color, rgba_hex, solid_color_rgb
 from ..core.iteration import FLATTEN_LABEL, iteration_labels, ordinal, parse_iteration_label
 from ..core.loader import attr_values_1d, is_value_pool_selector, mfx_get
 from ..utils.filters import raw_trace_aggregate
 from .attribute_help import apply_attribute_tooltips
 
 _DISPLAY_AGG = ["per loc", "trace mean", "trace median"]
-_DECISION_MODES = ["trace mean", "trace median", "trace majority vote"]
-_CHANNEL_COUNTS = [str(n) for n in range(2, 8)]        # 2..7
+
+#: Channel colours, in the order channels are created: R, G, B, M, C, Y. Solid
+#: colours rather than colormaps — a channel is one population, so one hue reads
+#: better in an overlay than a gradient — and they are applied with transparency
+#: (see :data:`CHANNEL_ALPHA`) so overlapping channels stay legible.
+_CHANNEL_SOLIDS = ("Red", "Green", "Blue", "Magenta", "Cyan", "Yellow")
+CHANNEL_ALPHA = 200
+
+_MAX_CHANNELS = 12
+
+#: Where channels claim the same localization.
+OVERLAP_KEEP_BOTH = "keep in both channels"
+OVERLAP_BY_WEIGHT = "force assign to one channel by weight"
+OVERLAP_DISCARD = "discard"
+_OVERLAP_MODES = (OVERLAP_KEEP_BOTH, OVERLAP_BY_WEIGHT, OVERLAP_DISCARD)
+
+#: Where no channel claims a localization.
+UNASSIGNED_KEEP = "keep in an additional channel"
+UNASSIGNED_DISCARD = "discard"
+_UNASSIGNED_MODES = (UNASSIGNED_KEEP, UNASSIGNED_DISCARD)
+
+#: Paint budget for the separation preview (it is a thumbnail, not a view).
+_PREVIEW_MAX_POINTS = 20_000
+_PREVIEW_DELAY_MS = 120
 
 
 def _rgb_for_lut(lut: str) -> tuple[int, int, int]:
     if is_solid_color(lut):
         return solid_color_rgb(lut)
+    if str(lut).startswith("solid:custom:"):
+        text = str(lut).split(":")[-1].lstrip("#")
+        try:
+            return tuple(int(text[i:i + 2], 16) for i in (0, 2, 4))
+        except ValueError:
+            return 120, 120, 120
     try:
         return tuple(
             int(round(channel * 255.0)) for channel in representative_rgb(lut)
@@ -81,14 +114,44 @@ def _rgb_for_lut(lut: str) -> tuple[int, int, int]:
         return 120, 120, 120
 
 
+def encoded_channel_lut(lut: str, *, alpha: int = CHANNEL_ALPHA) -> str:
+    """A channel's LUT as the overlay stores it.
+
+    A solid colour becomes ``solid:custom:#RRGGBBAA`` — the encoding render and
+    scatter read the alpha from — so the channel is a transparent solid colour
+    rather than an opaque one. Anything else (a colormap a user picked) is kept.
+    """
+    if is_solid_color(lut):
+        return f"solid:custom:{rgba_hex((*solid_color_rgb(lut), int(alpha)))}"
+    return lut
+
+
+class _ChannelRegion(pg.LinearRegionItem):
+    """A channel's window on the histogram, with a right-click menu.
+
+    pyqtgraph's region has no context menu of its own, and the channel it stands
+    for has to be deletable where the user is looking at it.
+    """
+
+    def __init__(self, *args, on_context=None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_context = on_context
+
+    def mouseClickEvent(self, ev) -> None:                     # noqa: N802 - pyqtgraph API
+        if ev.button() == Qt.MouseButton.RightButton and self._on_context is not None:
+            ev.accept()
+            self._on_context(ev)
+            return
+        super().mouseClickEvent(ev)
+
+
 class AttributeSeparationDialog(QDialog):
     """Separate one dataset into a multi-channel overlay by an attribute's
-    distribution. Modeless; one instance per (dataset, attribute)."""
+    distribution, by ROIs, or by filters. Modeless; one instance per dataset."""
 
     def __init__(self, state, dataset_idx: int, *, attribute: str = "dcr",
                  title: str | None = None, default_distribution: str = "gaussian",
-                 allow_photon_weight: bool = False, pick_attribute: bool = False,
-                 owner=None) -> None:
+                 pick_attribute: bool = False, owner=None) -> None:
         super().__init__(None)
         self._state = state
         self._idx = dataset_idx
@@ -96,27 +159,24 @@ class AttributeSeparationDialog(QDialog):
         self._owner = owner
         self._pick_attribute = bool(pick_attribute)
         self._default_distribution = default_distribution if default_distribution in DISTRIBUTIONS else "gaussian"
-        self._allow_photon_weight = bool(allow_photon_weight)
         self.setWindowTitle(title or f"Separate Channels by {attribute.upper()}")
-        self.resize(1160, 680)                              # wide, normal height (3.1)
+        self.resize(1160, 720)
 
         self._values = np.empty(0)                          # transformed display values (fit basis)
         self._bin_width = 0.01
-        self._rows: list[dict] = []                         # channel table rows
-        self._fit_result = None                             # last MixtureResult (for overlay)
-        self._fit_channel_luts: list[str] = []              # LUT per fit component (overlay color)
+        self._rows: list[dict] = []                          # channel rows (window or mask)
+        self._fit_result = None                              # last MixtureResult (for overlay + weights)
+        self._fit_channel_luts: list[str] = []
         self._synchronizing = False
         self._suspend = False
-
         self._closing = False
+
         self._build_ui()
         self._recompute_values(reset_bin=True)
         # Seed instantly with evenly-placed channels (no heavy fit on the
         # construction path), then refine with the default distribution fit once
-        # the event loop is running — keeps the dialog snappy and off the
-        # sklearn call during construction.
+        # the event loop is running — keeps the dialog snappy.
         self._seed_default_channels()
-        from PyQt6.QtCore import QTimer
         QTimer.singleShot(0, self._initial_fit)
 
     # ------------------------------------------------------------------ UI
@@ -127,11 +187,10 @@ class AttributeSeparationDialog(QDialog):
         self._title.setWordWrap(True)
         root.addWidget(self._title)
 
-        # Attribute picker (generic "by attribute" mode). Hidden for the fixed
-        # single-attribute entries (e.g. by-DCR), which lock to their attribute.
+        # --- Row 1: attribute + "add channel from" sources -----------------
+        r1 = QHBoxLayout()
         if self._pick_attribute:
-            arow = QHBoxLayout()
-            arow.addWidget(QLabel("Separate by attribute:"))
+            r1.addWidget(QLabel("Separate by attribute:"))
             self._attr_combo = QComboBox()
             self._attr_combo.addItems(self._attribute_candidates())
             apply_attribute_tooltips(self._attr_combo)
@@ -140,129 +199,157 @@ class AttributeSeparationDialog(QDialog):
             elif self._attr_combo.count():
                 self._attribute = self._attr_combo.currentText()
             self._attr_combo.currentTextChanged.connect(self._on_attribute_changed)
-            arow.addWidget(self._attr_combo)
-            arow.addStretch(1)
-            root.addLayout(arow)
+            r1.addWidget(self._attr_combo)
         else:
             self._attr_combo = None
+        r1.addSpacing(12)
+        r1.addWidget(QLabel("add channel from ROI"))
+        self._roi_combo = QComboBox()
+        self._roi_combo.setMinimumWidth(150)
+        self._roi_combo.setToolTip(
+            "ROIs of this dataset in the ROI Manager. The channel is the "
+            "localizations inside the ROI, not a value window.")
+        self._roi_combo.activated.connect(self._on_roi_source_picked)
+        r1.addWidget(self._roi_combo)
+        r1.addWidget(QLabel(", from filter"))
+        self._filter_combo = QComboBox()
+        self._filter_combo.setMinimumWidth(150)
+        self._filter_combo.setToolTip(
+            "Rows of this dataset's current filter. The channel is the "
+            "localizations that row keeps.")
+        self._filter_combo.activated.connect(self._on_filter_source_picked)
+        r1.addWidget(self._filter_combo)
+        r1.addStretch(1)
+        root.addLayout(r1)
         self._update_title()
 
+        # --- Histogram + separation preview --------------------------------
+        split = QSplitter(Qt.Orientation.Horizontal)
         self._plot = pg.PlotWidget()
         self._plot.setLabel("bottom", self._attribute.upper())
         self._plot.setLabel("left", "count")
         self._plot.showGrid(x=True, y=True, alpha=0.15)
         self._plot.setMinimumHeight(240)
-        root.addWidget(self._plot, 1)
+        split.addWidget(self._plot)
 
-        # --- Row 1: borrowed histogram/filter controls ---------------------
-        r1 = QHBoxLayout()
-        r1.addWidget(QLabel("Iteration:"))
-        self._iter_combo = QComboBox()
-        self._iter_combo.currentTextChanged.connect(lambda *_: self._on_basis_changed())
-        r1.addWidget(self._iter_combo)
-        r1.addWidget(QLabel("Values:"))
-        self._agg_combo = QComboBox()
-        self._agg_combo.addItems(_DISPLAY_AGG)
-        self._agg_combo.currentTextChanged.connect(lambda *_: self._on_basis_changed())
-        r1.addWidget(self._agg_combo)
-        self._photon_chk = QCheckBox("Photon-weighted DCR")
-        self._photon_chk.setToolTip(
-            "Pool DCR over the final-scale iterations weighted by photons (eco): "
-            "Σ dcr·eco / Σ eco. Averages out DCR fluctuations for cleaner peaks.")
-        self._photon_chk.toggled.connect(lambda *_: self._on_photon_toggled())
-        self._photon_chk.setVisible(self._allow_photon_weight and self._attribute == "dcr")
-        r1.addWidget(self._photon_chk)
-        r1.addWidget(QLabel("Bin size:"))
-        self._bin_spin = QDoubleSpinBox()
-        self._bin_spin.setDecimals(4)
-        self._bin_spin.setRange(1e-4, 1e9)
-        self._bin_spin.valueChanged.connect(self._on_bin_changed)
-        r1.addWidget(self._bin_spin)
-        self._log_chk = QCheckBox("Log(data)")
-        self._log_chk.toggled.connect(lambda *_: self._on_basis_changed(reset_bin=True))
-        r1.addWidget(self._log_chk)
-        reset_btn = QPushButton("Reset")
-        reset_btn.clicked.connect(self._reset)
-        r1.addWidget(reset_btn)
-        r1.addStretch(1)
-        root.addLayout(r1)
+        self._preview = pg.PlotWidget()
+        self._preview.setMinimumWidth(220)
+        self._preview.setAspectLocked(True)
+        self._preview.hideAxis("left")
+        self._preview.hideAxis("bottom")
+        self._preview.setMouseEnabled(x=False, y=False)
+        self._preview.setMenuEnabled(False)
+        self._preview.setToolTip(
+            "Separation preview: the localizations coloured by channel "
+            "(downsampled). Unassigned rows are grey.")
+        split.addWidget(self._preview)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 1)
+        root.addWidget(split, 1)
 
-        # --- Row 2: channel ops + trace decision --------------------------
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(_PREVIEW_DELAY_MS)
+        self._preview_timer.timeout.connect(self._refresh_preview)
+
+        # --- Row 2: channels + how to place them ---------------------------
         r2 = QHBoxLayout()
         r2.addWidget(QLabel("Channels:"))
-        self._nch_combo = QComboBox()
-        self._nch_combo.addItems(_CHANNEL_COUNTS)
-        r2.addWidget(self._nch_combo)
+        self._nch_spin = QSpinBox()
+        self._nch_spin.setRange(1, _MAX_CHANNELS)
+        self._nch_spin.setValue(2)
+        r2.addWidget(self._nch_spin)
         even_btn = QPushButton("Place evenly")
         even_btn.clicked.connect(self._place_evenly)
         r2.addWidget(even_btn)
-        add_btn = QPushButton("Add channel")
-        add_btn.clicked.connect(self._add_channel)
-        r2.addWidget(add_btn)
-        rm_btn = QPushButton("Remove selected")
-        rm_btn.clicked.connect(self._remove_selected)
-        r2.addWidget(rm_btn)
-        r2.addStretch(1)
-        r2.addWidget(QLabel("Decide trace by:"))
-        self._decision_combo = QComboBox()
-        self._decision_combo.addItems(_DECISION_MODES)
-        self._decision_combo.currentTextChanged.connect(lambda *_: self._refresh_counts())
-        r2.addWidget(self._decision_combo)
-        r2.addWidget(QLabel("Min %:"))
-        self._conf_spin = QDoubleSpinBox()
-        self._conf_spin.setDecimals(0)
-        self._conf_spin.setRange(50, 100)
-        self._conf_spin.setValue(50)
-        self._conf_spin.setToolTip(
-            "Majority vote only: required agreement fraction of a trace's per-loc "
-            "votes; below it the trace is unassigned.")
-        self._conf_spin.valueChanged.connect(lambda *_: self._refresh_counts())
-        r2.addWidget(self._conf_spin)
-        root.addLayout(r2)
-
-        # --- Row 3: fit + residual ----------------------------------------
-        r3 = QHBoxLayout()
-        r3.addWidget(QLabel("Fit:"))
+        peak_btn = QPushButton("Detect peak")
+        peak_btn.setToolTip(
+            "Keep the most prominent peaks of the distribution and cut at the "
+            "valleys between them. Says so when the data supports fewer peaks "
+            "than the channel count.")
+        peak_btn.clicked.connect(self._detect_peaks)
+        r2.addWidget(peak_btn)
+        fit_btn = QPushButton("Fit")
+        fit_btn.setToolTip("Fit the selected distribution with one component per channel.")
+        fit_btn.clicked.connect(self._run_fit)
+        r2.addWidget(fit_btn)
         self._fit_combo = QComboBox()
         for key in DISTRIBUTIONS:
             self._fit_combo.addItem(DISTRIBUTION_LABELS[key], key)
         self._fit_combo.setCurrentIndex(DISTRIBUTIONS.index(self._default_distribution))
-        r3.addWidget(self._fit_combo)
-        r3.addWidget(QLabel("Components:"))
-        self._comp_combo = QComboBox()
-        self._comp_combo.addItems(_CHANNEL_COUNTS)
-        r3.addWidget(self._comp_combo)
-        fit_btn = QPushButton("Fit")
-        fit_btn.clicked.connect(self._run_fit)
-        r3.addWidget(fit_btn)
+        r2.addWidget(self._fit_combo)
         auto_btn = QPushButton("Auto")
-        auto_btn.setToolTip("Pick the best distribution + component count by BIC.")
+        auto_btn.setToolTip(
+            "Suggest the separation: best distribution and channel count by BIC, "
+            "then update the channels on the histogram.")
         auto_btn.clicked.connect(self._auto_fit)
-        r3.addWidget(auto_btn)
+        r2.addWidget(auto_btn)
+        r2.addStretch(1)
+        root.addLayout(r2)
+
+        # --- Row 3: distribution display controls --------------------------
+        r3 = QHBoxLayout()
+        r3.addWidget(QLabel("Iteration:"))
+        self._iter_combo = QComboBox()
+        self._iter_combo.currentTextChanged.connect(lambda *_: self._on_basis_changed())
+        r3.addWidget(self._iter_combo)
+        r3.addWidget(QLabel("Values:"))
+        self._agg_combo = QComboBox()
+        self._agg_combo.addItems(_DISPLAY_AGG)
+        self._agg_combo.currentTextChanged.connect(lambda *_: self._on_basis_changed())
+        r3.addWidget(self._agg_combo)
+        r3.addWidget(QLabel("Bin size:"))
+        self._bin_spin = QDoubleSpinBox()
+        self._bin_spin.setDecimals(4)
+        self._bin_spin.setRange(1e-4, 1e9)
+        self._bin_spin.valueChanged.connect(self._on_bin_changed)
+        r3.addWidget(self._bin_spin)
+        self._log_chk = QCheckBox("Log(data)")
+        self._log_chk.toggled.connect(lambda *_: self._on_basis_changed(reset_bin=True))
+        r3.addWidget(self._log_chk)
+        reset_btn = QPushButton("Reset")
+        reset_btn.clicked.connect(self._reset)
+        r3.addWidget(reset_btn)
         r3.addStretch(1)
-        self._residual_label = QLabel("residual: —")
-        r3.addWidget(self._residual_label)
-        r3.addWidget(QLabel("Fit residual:"))
-        self._res_fit_combo = QComboBox()
-        for key in DISTRIBUTIONS:
-            self._res_fit_combo.addItem(DISTRIBUTION_LABELS[key], key)
-        r3.addWidget(self._res_fit_combo)
-        res_fit_btn = QPushButton("Fit")
-        res_fit_btn.setToolTip("Fit the chosen distribution to the currently-unassigned "
-                               "localizations and add channels for it.")
-        res_fit_btn.clicked.connect(self._fit_residual)
-        r3.addWidget(res_fit_btn)
-        res_auto_btn = QPushButton("Auto")
-        res_auto_btn.clicked.connect(lambda: self._fit_residual(auto=True))
-        r3.addWidget(res_auto_btn)
         root.addLayout(r3)
+
+        # --- Row 4: what to do with contested and unclaimed rows -----------
+        r4 = QHBoxLayout()
+        r4.addWidget(QLabel("Overlapped region:"))
+        self._overlap_combo = QComboBox()
+        self._overlap_combo.addItems(_OVERLAP_MODES)
+        self._overlap_combo.setToolTip(
+            "Localizations claimed by more than one channel.\n"
+            "• keep in both channels — the row goes into every channel that claims it\n"
+            "• force assign by weight — the fitted component with the highest "
+            "posterior wins; without a matching fit (e.g. ROI/filter channels) the "
+            "earlier channel wins\n"
+            "• discard — the row is left unassigned")
+        self._overlap_combo.currentTextChanged.connect(lambda *_: self._refresh_counts())
+        r4.addWidget(self._overlap_combo)
+        r4.addSpacing(16)
+        r4.addWidget(QLabel("Data without assigned channel:"))
+        self._unassigned_combo = QComboBox()
+        self._unassigned_combo.addItems(_UNASSIGNED_MODES)
+        self._unassigned_combo.setToolTip(
+            "Localizations no channel claims: keep them as an extra (hidden) "
+            "channel so nothing is lost, or leave them out of the overlay.")
+        self._unassigned_combo.currentTextChanged.connect(lambda *_: self._refresh_counts())
+        r4.addWidget(self._unassigned_combo)
+        r4.addStretch(1)
+        self._status_label = QLabel("—")
+        r4.addWidget(self._status_label)
+        root.addLayout(r4)
 
         # --- Channel table -------------------------------------------------
         self._table = QTableWidget(0, 5, self)
-        self._table.setHorizontalHeaderLabels(["Channel name", "Start", "End", "LUT / color", "Locs"])
+        self._table.setHorizontalHeaderLabels(
+            ["Channel name", "Start", "End", "Color", "Locs"])
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_table_menu)
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -291,6 +378,15 @@ class AttributeSeparationDialog(QDialog):
         else:
             self._iter_combo.setVisible(False)
         self._iter_combo.blockSignals(False)
+
+        self._populate_sources()
+        # A ROI added or a filter applied while this dialog is open must show up
+        # in the dropdowns.
+        try:
+            self._state.rois.changed.connect(self._populate_sources)
+            self._state.filter_changed.connect(lambda *_: self._populate_sources())
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ data path
     def _dataset(self):
@@ -329,9 +425,6 @@ class AttributeSeparationDialog(QDialog):
         if self._suspend or not name:
             return
         self._attribute = name
-        self._photon_chk.setVisible(self._allow_photon_weight and name == "dcr")
-        if name != "dcr":
-            self._photon_chk.setChecked(False)
         self._plot.setLabel("bottom", name.upper())
         self._update_title()
         self._fit_result = None
@@ -341,9 +434,6 @@ class AttributeSeparationDialog(QDialog):
 
     def _selection(self):
         return parse_iteration_label(self._iter_combo.currentText())
-
-    def _photon_weight_on(self) -> bool:
-        return self._allow_photon_weight and self._attribute == "dcr" and self._photon_chk.isChecked()
 
     def _log_on(self) -> bool:
         return self._log_chk.isChecked()
@@ -359,7 +449,7 @@ class AttributeSeparationDialog(QDialog):
 
     def _transform_keep(self, vals) -> np.ndarray:
         """Same transform but length-preserving (NaN where dropped) — for
-        assignment, so labels stay aligned to num_loc rows."""
+        assignment, so masks stay aligned to num_loc rows."""
         vals = np.asarray(vals, dtype=float).ravel()
         if self._log_on():
             return np.where(vals > 0.0, np.log(vals), np.nan)
@@ -370,10 +460,6 @@ class AttributeSeparationDialog(QDialog):
         ds = self._dataset()
         if ds is None:
             return None
-        if self._photon_weight_on():
-            v = pooled_dcr_per_loc(ds)
-            if v is not None:
-                return np.asarray(v, dtype=float).ravel()
         v = attr_values_1d(ds, self._attribute)
         return None if v is None else np.asarray(v, dtype=float).ravel()
 
@@ -382,8 +468,6 @@ class AttributeSeparationDialog(QDialog):
         ds = self._dataset()
         if ds is None:
             return np.empty(0)
-        if self._photon_weight_on():
-            return self._transform_drop(self._per_loc_raw())
         itr_sel, _ = self._selection()
         vals = mfx_get(ds, self._attribute, itr=itr_sel, vld_only=True)
         if vals is None:
@@ -410,6 +494,10 @@ class AttributeSeparationDialog(QDialog):
         tid = np.arange(v.size) if tid is None else np.asarray(tid).ravel()
         return v, tid
 
+    def _num_loc(self) -> int:
+        ds = self._dataset()
+        return int(getattr(getattr(ds, "prop", None), "num_loc", 0) or 0)
+
     def _data_range(self):
         """(lo, hi) padded 5% on each side of the display data (view + region bounds)."""
         v = self._values
@@ -430,6 +518,25 @@ class AttributeSeparationDialog(QDialog):
         self._apply_region_bounds()
         self._redraw()
 
+    def _tune_bin_spin(self, span: float) -> None:
+        """Step / decimals / range from the data being plotted.
+
+        A fixed 0.01 step is unusable on an attribute spanning 10^5 (efo) and far
+        too coarse on one spanning 0.01, so the step is a power of ten two orders
+        below the span — the same rule the Filter dialog's bounds spinners use.
+        """
+        if not np.isfinite(span) or span <= 0:
+            return
+        step = 10.0 ** (np.floor(np.log10(span)) - 2.0)
+        decimals = int(np.clip(-np.floor(np.log10(step)) + 1, 0, 8))
+        self._suspend = True
+        try:
+            self._bin_spin.setDecimals(decimals)
+            self._bin_spin.setRange(step / 100.0, max(span * 2.0, step * 10.0))
+            self._bin_spin.setSingleStep(step)
+        finally:
+            self._suspend = False
+
     def _auto_bin(self) -> None:
         v = self._values
         if v.size < 2:
@@ -444,6 +551,7 @@ class AttributeSeparationDialog(QDialog):
             bw = span / 60.0
         bw = float(np.clip(bw, span / 250.0, span / 15.0))
         self._bin_width = bw
+        self._tune_bin_spin(span)
         self._suspend = True
         self._bin_spin.setValue(bw)
         self._suspend = False
@@ -455,13 +563,6 @@ class AttributeSeparationDialog(QDialog):
         self._recompute_values(reset_bin=reset_bin)
         self._refresh_counts()
 
-    def _on_photon_toggled(self) -> None:
-        on = self._photon_weight_on()
-        # eco-weighted DCR is inherently per-loc; iteration/aggregation don't apply.
-        self._iter_combo.setEnabled(not on)
-        self._agg_combo.setEnabled(not on)
-        self._on_basis_changed(reset_bin=True)
-
     def _on_bin_changed(self, value: float) -> None:
         if self._suspend:
             return
@@ -472,14 +573,10 @@ class AttributeSeparationDialog(QDialog):
         self._suspend = True
         self._log_chk.setChecked(False)
         self._agg_combo.setCurrentText("per loc")
-        if self._photon_chk.isVisible():
-            self._photon_chk.setChecked(False)
         if self._iter_combo.isVisible():
             self._iter_combo.setCurrentText(FLATTEN_LABEL)
-        self._iter_combo.setEnabled(True)
-        self._agg_combo.setEnabled(True)
-        self._conf_spin.setValue(50)
-        self._decision_combo.setCurrentText("trace mean")
+        self._overlap_combo.setCurrentText(OVERLAP_KEEP_BOTH)
+        self._unassigned_combo.setCurrentText(UNASSIGNED_KEEP)
         self._suspend = False
         self._recompute_values(reset_bin=True)
         self._run_fit()
@@ -503,7 +600,7 @@ class AttributeSeparationDialog(QDialog):
         edges = lo + bw * np.arange(nbins + 1)
 
         _, render = self._selection()
-        if render == "stacked" and not self._photon_weight_on() and self._num_itr() > 1:
+        if render == "stacked" and self._num_itr() > 1:
             # all [stacked]: one translucent series per iteration + legend (like the
             # Histogram window). The fit / channels stay on the pooled distribution;
             # the per-iteration series are a display aid, so the fit curve is omitted
@@ -610,8 +707,11 @@ class AttributeSeparationDialog(QDialog):
 
     def _readd_regions(self, plo: float, phi: float) -> None:
         for row in self._rows:
-            self._plot.addItem(row["region"])
-            row["region"].setBounds((plo, phi))
+            region = row.get("region")
+            if region is None:
+                continue
+            self._plot.addItem(region)
+            region.setBounds((plo, phi))
         try:
             self._plot.getViewBox().setXRange(plo, phi, padding=0)
         except Exception:
@@ -620,34 +720,194 @@ class AttributeSeparationDialog(QDialog):
     def _apply_region_bounds(self) -> None:
         plo, phi = self._data_range()
         for row in self._rows:
-            row["region"].setBounds((plo, phi))
+            region = row.get("region")
+            if region is not None:
+                region.setBounds((plo, phi))
+
+    # ----------------------------------------------------- preview (scatter)
+    def _queue_preview(self) -> None:
+        if not self._closing:
+            self._preview_timer.start()
+
+    def _refresh_preview(self) -> None:
+        """A downsampled scatter of the localizations coloured by channel.
+
+        Cheap by construction: the thumbnail is capped at
+        :data:`_PREVIEW_MAX_POINTS` points *per channel share*, and it is redrawn
+        on a coalescing timer, so dragging a region does not re-render the cloud
+        on every mouse move.
+        """
+        if self._closing:
+            return
+        from ..core.roi_crop import display_coords
+
+        self._preview.clear()
+        ds = self._dataset()
+        masks, _overlap, unassigned = self._resolve_assignment()
+        if ds is None or masks is None:
+            return
+        xy = display_coords(ds)
+        if xy.ndim != 2 or xy.shape[0] == 0:
+            return
+        n = min(xy.shape[0], self._num_loc() or xy.shape[0])
+        budget = max(1, _PREVIEW_MAX_POINTS // max(len(masks) + 1, 1))
+
+        def draw(mask: np.ndarray, rgb, alpha: int) -> int:
+            idx = np.flatnonzero(mask[:n])
+            if idx.size == 0:
+                return 0
+            kept = idx[::int(np.ceil(idx.size / budget))] if idx.size > budget else idx
+            finite = np.all(np.isfinite(xy[kept, :2]), axis=1)
+            kept = kept[finite]
+            if kept.size == 0:
+                return 0
+            self._preview.addItem(pg.ScatterPlotItem(
+                x=xy[kept, 0], y=xy[kept, 1], size=2.5, pen=None,
+                brush=pg.mkBrush(*rgb, alpha)))
+            return int(idx.size)
+
+        if unassigned is not None and self._unassigned_combo.currentText() == UNASSIGNED_KEEP:
+            draw(unassigned, (130, 130, 130), 90)
+        for row, mask in zip(self._rows, masks):
+            draw(mask, _rgb_for_lut(row["lut"].currentText()), 170)
+        try:
+            self._preview.getViewBox().autoRange()
+        except Exception:
+            pass
+
+    # ------------------------------------------------- channel sources (row 1)
+    def _roi_candidates(self) -> list:
+        """Region ROIs of this dataset that are in the ROI Manager."""
+        from ..core.roi_scope import roi_dataset_indices
+        from ..core.roi_selection import REGION_ROI_TYPES
+
+        out = []
+        for record in getattr(self._state.rois, "records", []) or []:
+            if str(getattr(record, "type", "")) not in REGION_ROI_TYPES:
+                continue
+            indices = roi_dataset_indices(record)
+            if indices is None or self._idx in indices:
+                out.append(record)
+        return out
+
+    def _filter_candidates(self) -> list[dict]:
+        """This dataset's current filter rows."""
+        ds = self._dataset()
+        if ds is None:
+            return []
+        specs = ds.state.get("filter_specs") or []
+        return [spec for spec in specs if isinstance(spec, dict) and spec.get("attribute")]
+
+    @staticmethod
+    def _filter_label(spec: dict) -> str:
+        return (f"{spec.get('attribute', '?')} [{float(spec.get('lo', 0.0)):g}, "
+                f"{float(spec.get('hi', 0.0)):g}]")
+
+    def _populate_sources(self, *_args) -> None:
+        """Fill the ROI / filter dropdowns; an empty one reads ``-``."""
+        for combo, items in (
+            (self._roi_combo, [str(getattr(r, "name", "") or r.id[:8]) for r in self._roi_candidates()]),
+            (self._filter_combo, [self._filter_label(s) for s in self._filter_candidates()]),
+        ):
+            blocked = combo.blockSignals(True)
+            try:
+                combo.clear()
+                if items:
+                    combo.addItem("—")              # placeholder, index 0
+                    combo.addItems(items)
+                    combo.setEnabled(True)
+                else:
+                    combo.addItem("-")
+                    combo.setEnabled(False)
+                combo.setCurrentIndex(0)
+            finally:
+                combo.blockSignals(blocked)
+
+    def _on_roi_source_picked(self, index: int) -> None:
+        if index <= 0:
+            return
+        records = self._roi_candidates()
+        self._roi_combo.setCurrentIndex(0)
+        if not (0 <= index - 1 < len(records)):
+            return
+        record = records[index - 1]
+        from ..core.channel_labels import roi_mask_for_record
+
+        ds = self._dataset()
+        mask = roi_mask_for_record(ds, record) if ds is not None else None
+        if mask is None or not mask.any():
+            self._state.log(
+                f"ROI '{getattr(record, 'name', '?')}' selects no localization of "
+                f"this dataset, so no channel was added.", "WARN")
+            return
+        self._add_mask_channel(mask, f"ROI {getattr(record, 'name', '?')}", kind="roi")
+
+    def _on_filter_source_picked(self, index: int) -> None:
+        if index <= 0:
+            return
+        specs = self._filter_candidates()
+        self._filter_combo.setCurrentIndex(0)
+        if not (0 <= index - 1 < len(specs)):
+            return
+        spec = specs[index - 1]
+        from ..core.channel_labels import mask_from_filter_specs
+
+        ds = self._dataset()
+        if ds is None:
+            return
+        mask, skipped = mask_from_filter_specs(ds, [spec])
+        for reason in skipped:
+            self._state.log(f"Filter channel: {reason}", "WARN")
+        if not mask.any():
+            self._state.log("That filter row keeps no localization, so no channel "
+                            "was added.", "WARN")
+            return
+        self._add_mask_channel(mask, f"filter {self._filter_label(spec)}", kind="filter")
+
+    def _add_mask_channel(self, mask: np.ndarray, label: str, *, kind: str) -> None:
+        luts = self._lut_cycle()
+        index = len(self._rows)
+        self._append_row(
+            Channel(name=f"{self._base_name()} [{label}]", lo=float("nan"),
+                    hi=float("nan"), lut=luts[index % len(luts)]),
+            kind=kind, mask=np.asarray(mask, dtype=bool).ravel())
+        self._refresh_counts()
 
     # ------------------------------------------------------- channel table
     def _clear_rows(self) -> None:
         for row in self._rows:
+            region = row.get("region")
+            if region is None:
+                continue
             try:
-                self._plot.removeItem(row["region"])
+                self._plot.removeItem(region)
             except Exception:
                 pass
         self._rows.clear()
         self._table.setRowCount(0)
 
     def _set_channels(self, channels: list[Channel]) -> None:
+        """Replace the **window** channels; mask channels (ROI/filter) survive."""
+        kept = [row for row in self._rows if row["kind"] != "window"]
+        kept_specs = [(row["kind"], row["mask"], row["name"].text(), row["lut"].currentText())
+                      for row in kept]
         self._clear_rows()
         for ch in channels:
             self._append_row(ch)
+        for kind, mask, name, lut in kept_specs:
+            self._append_row(Channel(name=name, lo=float("nan"), hi=float("nan"), lut=lut),
+                             kind=kind, mask=mask)
         if channels:
-            self._nch_combo.blockSignals(True)
-            self._nch_combo.setCurrentText(str(min(max(len(channels), 2), 7)))
-            self._nch_combo.blockSignals(False)
+            self._nch_spin.blockSignals(True)
+            self._nch_spin.setValue(int(np.clip(len(channels), 1, _MAX_CHANNELS)))
+            self._nch_spin.blockSignals(False)
         self._refresh_counts()
 
-    def _append_row(self, ch: Channel) -> None:
+    def _append_row(self, ch: Channel, *, kind: str = "window",
+                    mask: np.ndarray | None = None) -> None:
         r = self._table.rowCount()
         self._table.insertRow(r)
         name_edit = QLineEdit(ch.name)
-        start_spin = self._spin(ch.lo)
-        end_spin = self._spin(ch.hi)
         lut_combo = QComboBox()
         lut_combo.addItems(channel_colormap_names())
         if lut_combo.findText(ch.lut) < 0:
@@ -658,28 +918,42 @@ class AttributeSeparationDialog(QDialog):
         count_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         self._table.setCellWidget(r, 0, name_edit)
-        self._table.setCellWidget(r, 1, start_spin)
-        self._table.setCellWidget(r, 2, end_spin)
         self._table.setCellWidget(r, 3, lut_combo)
         self._table.setItem(r, 4, count_item)
 
-        rgb = _rgb_for_lut(ch.lut)
-        plo, phi = self._data_range()
-        region = pg.LinearRegionItem(
-            values=(ch.lo, ch.hi), orientation=pg.LinearRegionItem.Vertical, movable=True,
-            brush=(*rgb, 45), pen=pg.mkPen(rgb, width=2), hoverPen=pg.mkPen(rgb, width=3),
-            bounds=(plo, phi))
-        region.setZValue(10 + r)
-        self._plot.addItem(region)
+        row = {"kind": kind, "mask": mask, "name": name_edit, "lut": lut_combo,
+               "count": count_item, "start": None, "end": None, "region": None}
 
-        row = {"name": name_edit, "start": start_spin, "end": end_spin,
-               "lut": lut_combo, "count": count_item, "region": region}
+        if kind == "window":
+            start_spin = self._spin(ch.lo)
+            end_spin = self._spin(ch.hi)
+            self._table.setCellWidget(r, 1, start_spin)
+            self._table.setCellWidget(r, 2, end_spin)
+            rgb = _rgb_for_lut(ch.lut)
+            plo, phi = self._data_range()
+            region = _ChannelRegion(
+                values=(ch.lo, ch.hi), orientation=pg.LinearRegionItem.Vertical,
+                movable=True, brush=(*rgb, 45), pen=pg.mkPen(rgb, width=2),
+                hoverPen=pg.mkPen(rgb, width=3), bounds=(plo, phi),
+                on_context=lambda _ev, item=row: self._show_region_menu(item))
+            region.setZValue(10 + r)
+            self._plot.addItem(region)
+            row.update(start=start_spin, end=end_spin, region=region)
+            start_spin.valueChanged.connect(lambda _v, item=row: self._spin_changed(item))
+            end_spin.valueChanged.connect(lambda _v, item=row: self._spin_changed(item))
+            region.sigRegionChanged.connect(lambda _r, item=row: self._region_changed(item))
+        else:
+            # A selection has no start/end on this axis; say so rather than
+            # showing numbers that do not mean anything.
+            for column in (1, 2):
+                item = QTableWidgetItem("—")
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._table.setItem(r, column, item)
+
         self._rows.append(row)
         name_edit.textChanged.connect(self._refresh_counts)
-        start_spin.valueChanged.connect(lambda _v, item=row: self._spin_changed(item))
-        end_spin.valueChanged.connect(lambda _v, item=row: self._spin_changed(item))
         lut_combo.currentTextChanged.connect(lambda _v, item=row: self._lut_changed(item))
-        region.sigRegionChanged.connect(lambda _r, item=row: self._region_changed(item))
 
     @staticmethod
     def _spin(value: float) -> QDoubleSpinBox:
@@ -692,7 +966,7 @@ class AttributeSeparationDialog(QDialog):
         return spin
 
     def _spin_changed(self, row: dict) -> None:
-        if self._synchronizing:
+        if self._synchronizing or row.get("region") is None:
             return
         self._synchronizing = True
         row["region"].setRegion((row["start"].value(), row["end"].value()))
@@ -701,7 +975,7 @@ class AttributeSeparationDialog(QDialog):
         self._refresh_counts()
 
     def _region_changed(self, row: dict) -> None:
-        if self._synchronizing:
+        if self._synchronizing or row.get("region") is None:
             return
         lo, hi = sorted(float(v) for v in row["region"].getRegion())
         self._synchronizing = True
@@ -712,17 +986,92 @@ class AttributeSeparationDialog(QDialog):
         self._refresh_counts()
 
     def _lut_changed(self, row: dict) -> None:
-        rgb = _rgb_for_lut(row["lut"].currentText())
-        row["region"].setBrush((*rgb, 45))
-        row["region"].setPen(pg.mkPen(rgb, width=2))
-        row["region"].setHoverPen(pg.mkPen(rgb, width=3))
+        region = row.get("region")
+        if region is not None:
+            rgb = _rgb_for_lut(row["lut"].currentText())
+            region.setBrush((*rgb, 45))
+            region.setPen(pg.mkPen(rgb, width=2))
+            region.setHoverPen(pg.mkPen(rgb, width=3))
+        self._queue_preview()
+
+    def _row_index(self, row: dict) -> int:
+        try:
+            return self._rows.index(row)
+        except ValueError:
+            return -1
+
+    def _show_region_menu(self, row: dict) -> None:
+        """Right-click on a channel's window: act on that channel."""
+        index = self._row_index(row)
+        if index < 0:
+            return
+        menu = QMenu(self)
+        menu.addAction(f"Delete channel '{row['name'].text()}'",
+                       lambda: self._delete_rows([index]))
+        menu.addAction("Split channel here", lambda: self._split_row(index))
+        menu.exec(self.cursor().pos())
+
+    def _show_table_menu(self, pos) -> None:
+        selected = sorted({i.row() for i in self._table.selectionModel().selectedRows()})
+        clicked = self._table.indexAt(pos).row()
+        if clicked >= 0 and clicked not in selected:
+            selected = [clicked]
+        menu = QMenu(self)
+        if selected:
+            menu.addAction(f"Delete {len(selected)} channel(s)",
+                           lambda: self._delete_rows(selected))
+        menu.addAction("Add channel", self._add_channel)
+        menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _delete_rows(self, indices) -> None:
+        indices = sorted({int(i) for i in indices if 0 <= int(i) < len(self._rows)})
+        if not indices:
+            return
+        if len(self._rows) - len(indices) < 1:
+            QMessageBox.information(self, "Channels", "At least one channel is required.")
+            return
+        for i in reversed(indices):
+            region = self._rows[i].get("region")
+            if region is not None:
+                try:
+                    self._plot.removeItem(region)
+                except Exception:
+                    pass
+            self._rows.pop(i)
+            self._table.removeRow(i)
+        self._fit_result = None
+        self._refresh_counts()
+
+    def _split_row(self, index: int) -> None:
+        """Halve a window channel, the other half becoming a new channel."""
+        if not (0 <= index < len(self._rows)) or self._rows[index]["kind"] != "window":
+            return
+        row = self._rows[index]
+        lo, hi = row["start"].value(), row["end"].value()
+        mid = 0.5 * (lo + hi)
+        self._synchronizing = True
+        row["end"].setValue(mid)
+        row["region"].setRegion((lo, mid))
+        self._synchronizing = False
+        luts = self._lut_cycle()
+        new_i = len(self._rows)
+        self._append_row(Channel(
+            name=f"{self._base_name()} [{self._attribute} {new_i + 1}]",
+            lo=float(mid), hi=float(hi), lut=luts[new_i % len(luts)]))
+        self._fit_result = None
+        self._refresh_counts()
 
     def _current_channels(self) -> list[Channel]:
+        """Carriers for the overlay: name + LUT (encoded with transparency)."""
         out = []
         for row in self._rows:
-            lo, hi = sorted((row["start"].value(), row["end"].value()))
+            if row["kind"] == "window":
+                lo, hi = sorted((row["start"].value(), row["end"].value()))
+            else:
+                lo, hi = float("nan"), float("nan")
             out.append(Channel(name=row["name"].text().strip() or "channel",
-                               lo=float(lo), hi=float(hi), lut=row["lut"].currentText()))
+                               lo=float(lo), hi=float(hi),
+                               lut=encoded_channel_lut(row["lut"].currentText())))
         return out
 
     # ------------------------------------------------------------- actions
@@ -730,20 +1079,49 @@ class AttributeSeparationDialog(QDialog):
         ds = self._dataset()
         return ds.name if ds else "channel"
 
+    def _lut_cycle(self):
+        """R, G, B, M, C, Y — solid colours, cycled."""
+        return list(_CHANNEL_SOLIDS)
+
+    def _window_span(self):
+        if self._values.size:
+            return float(self._values.min()), float(self._values.max())
+        return 0.0, 1.0
+
     def _place_evenly(self) -> None:
-        n = int(self._nch_combo.currentText())
-        lo, hi = (float(self._values.min()), float(self._values.max())) if self._values.size else (0.0, 1.0)
+        lo, hi = self._window_span()
         self._fit_result = None
-        self._set_channels(place_evenly(lo, hi, n, base_name=self._base_name(),
+        self._set_channels(place_evenly(lo, hi, int(self._nch_spin.value()),
+                                        base_name=self._base_name(),
                                         attribute=self._attribute, luts=self._lut_cycle()))
         self._redraw()
 
-    def _lut_cycle(self):
-        return channel_colormap_names()
+    def _detect_peaks(self) -> None:
+        """Channels from the most prominent peaks, cut at the valleys between."""
+        from ..analysis.peak_channels import peak_channel_boundaries
+
+        wanted = int(self._nch_spin.value())
+        if self._values.size < 2:
+            return
+        bounds, found = peak_channel_boundaries(self._values, wanted)
+        if found == 0:
+            self._state.log(
+                f"Detect peak: no peak stands out in {self._attribute}.", "WARN")
+            return
+        lo, hi = self._window_span()
+        self._fit_result = None
+        self._set_channels(channels_from_boundaries(
+            bounds, lo, hi, base_name=self._base_name(),
+            attribute=self._attribute, luts=self._lut_cycle()))
+        if found < wanted:
+            self._state.log(
+                f"Detect peak: {self._attribute} supports {found} peak(s), not "
+                f"{wanted} — placed {found} channel(s).", "INFO")
+        self._redraw()
 
     def _seed_default_channels(self) -> None:
         """Place evenly (no fit) so the dialog opens with channels immediately."""
-        lo, hi = (float(self._values.min()), float(self._values.max())) if self._values.size else (0.0, 1.0)
+        lo, hi = self._window_span()
         self._set_channels(place_evenly(lo, hi, 2, base_name=self._base_name(),
                                         attribute=self._attribute, luts=self._lut_cycle()))
         self._redraw()
@@ -759,6 +1137,7 @@ class AttributeSeparationDialog(QDialog):
         self._closing = True
         from .qt_lifecycle import dispose_plot_widgets
 
+        self._preview_timer.stop()
         # Retire the pyqtgraph plots last, after this window's own
         # teardown, so nothing here touches an already-inert plot.
         dispose_plot_widgets(self)
@@ -768,7 +1147,7 @@ class AttributeSeparationDialog(QDialog):
         if self._closing:
             return
         dist = self._fit_combo.currentData()
-        n_comp = int(self._comp_combo.currentText())
+        n_comp = int(self._nch_spin.value())
         if self._values.size < max(2, n_comp):
             return
         try:
@@ -779,6 +1158,7 @@ class AttributeSeparationDialog(QDialog):
         self._apply_fit_result(res)
 
     def _auto_fit(self) -> None:
+        """Suggest the separation: best distribution + channel count by BIC."""
         if self._values.size < 2:
             return
         try:
@@ -786,138 +1166,144 @@ class AttributeSeparationDialog(QDialog):
         except Exception as exc:
             self._state.log(f"Auto fit failed: {exc}", "WARN")
             return
-        # reflect the winner in the Fit / Components pickers
         self._suspend = True
         i = self._fit_combo.findData(res.distribution)
         if i >= 0:
             self._fit_combo.setCurrentIndex(i)
-        self._comp_combo.setCurrentText(str(min(max(res.n_components, 2), 7)))
         self._suspend = False
+        self._state.log(
+            f"Auto: {res.n_components} x {DISTRIBUTION_LABELS.get(res.distribution, res.distribution)} "
+            f"fits {self._attribute} best (BIC {res.bic:.0f}).", "INFO")
         self._apply_fit_result(res)
 
     def _apply_fit_result(self, res) -> None:
-        lo, hi = (float(self._values.min()), float(self._values.max())) if self._values.size else res.domain
+        lo, hi = (self._window_span() if self._values.size else res.domain)
         channels = channels_from_fit(res, data_range=(lo, hi), base_name=self._base_name(),
                                      attribute=self._attribute, luts=self._lut_cycle())
         self._fit_result = res
         self._fit_channel_luts = [c.lut for c in channels]
         self._set_channels(channels)
-        self._comp_combo.blockSignals(True)
-        self._comp_combo.setCurrentText(str(min(max(res.n_components, 2), 7)))
-        self._comp_combo.blockSignals(False)
         self._redraw()
 
     def _add_channel(self) -> None:
         if not self._rows:
             self._place_evenly()
             return
-        sel = self._table.currentRow()
-        index = sel if 0 <= sel < len(self._rows) else len(self._rows) - 1
-        row = self._rows[index]
-        lo = row["start"].value()
-        hi = row["end"].value()
-        mid = 0.5 * (lo + hi)
-        self._synchronizing = True
-        row["end"].setValue(mid)
-        row["region"].setRegion((lo, mid))
-        self._synchronizing = False
-        new_i = len(self._rows)
-        luts = self._lut_cycle()
-        self._append_row(Channel(
-            name=f"{self._base_name()} [{self._attribute} {new_i + 1}]",
-            lo=float(mid), hi=float(hi), lut=luts[new_i % len(luts)]))
-        self._fit_result = None
-        self._refresh_counts()
+        index = self._table.currentRow()
+        windows = [i for i, row in enumerate(self._rows) if row["kind"] == "window"]
+        if not windows:
+            self._place_evenly()
+            return
+        self._split_row(index if index in windows else windows[-1])
 
-    def _remove_selected(self) -> None:
-        selected = sorted({i.row() for i in self._table.selectionModel().selectedRows()})
-        if not selected and self._table.currentRow() >= 0:
-            selected = [self._table.currentRow()]
-        if len(self._rows) - len(selected) < 1:
-            QMessageBox.information(self, "Channels", "At least one channel is required.")
-            return
-        for i in reversed(selected):
-            try:
-                self._plot.removeItem(self._rows[i]["region"])
-            except Exception:
-                pass
-            self._rows.pop(i)
-            self._table.removeRow(i)
-        self._fit_result = None
-        self._refresh_counts()
-
-    def _fit_residual(self, auto: bool = False) -> None:
-        """Fit the (currently unassigned) residual and append channels for it."""
-        labels = self._current_labels()
-        v, _tid = self._assign_basis()
-        if labels is None or v is None:
-            return
-        res_vals = v[labels == -1]
-        res_vals = res_vals[np.isfinite(res_vals)]
-        if res_vals.size < 2:
-            self._state.log("No residual localizations to fit.", "INFO")
-            return
-        try:
-            if auto:
-                res = auto_fit(res_vals, max_components=3)
-                i = self._res_fit_combo.findData(res.distribution)
-                if i >= 0:
-                    self._res_fit_combo.setCurrentIndex(i)
-            else:
-                res = fit_mixture(res_vals, self._res_fit_combo.currentData(), 2)
-        except Exception as exc:
-            self._state.log(f"Residual fit failed: {exc}", "WARN")
-            return
-        luts = self._lut_cycle()
-        extra = channels_from_fit(res, data_range=(float(res_vals.min()), float(res_vals.max())),
-                                  base_name=self._base_name(), attribute=f"{self._attribute} residual",
-                                  luts=luts[len(self._rows):] + luts)
-        for ch in extra:
-            self._append_row(ch)
-        self._fit_result = None
-        self._refresh_counts()
-
-    # ------------------------------------------------------------- counts
-    def _current_labels(self):
-        v, tid = self._assign_basis()
-        channels = self._current_channels()
-        if v is None or not channels:
+    # --------------------------------------------------- assignment + counts
+    def _channel_masks(self):
+        """One boolean mask per channel row, before the overlap policy."""
+        n = self._num_loc()
+        if n == 0 or not self._rows:
             return None
-        mode = self._decision_combo.currentText()
-        conf = float(self._conf_spin.value()) / 100.0
-        return assign_traces(v, tid, channels, mode=mode, min_confidence=conf)
+        v, _tid = self._assign_basis()
+        masks: list[np.ndarray] = []
+        for row in self._rows:
+            if row["kind"] == "window":
+                if v is None:
+                    masks.append(np.zeros(n, dtype=bool))
+                    continue
+                lo, hi = sorted((row["start"].value(), row["end"].value()))
+                value = v[:n] if v.size >= n else np.full(n, np.nan)
+                mask = np.isfinite(value) & (value >= lo) & (value <= hi)
+            else:
+                raw = np.asarray(row["mask"], dtype=bool).ravel()
+                mask = np.zeros(n, dtype=bool)
+                keep = min(n, raw.size)
+                mask[:keep] = raw[:keep]
+            masks.append(mask)
+        return masks
+
+    def _component_posteriors(self, values: np.ndarray):
+        """Per-channel posterior of the current fit, or ``None``.
+
+        Only meaningful while the channels still *are* the fit's components: one
+        window channel per component, in order. After an edit, or with ROI/filter
+        channels in the list, there is no component to weigh a row against.
+        """
+        res = self._fit_result
+        if res is None or len(self._rows) != res.n_components:
+            return None
+        if any(row["kind"] != "window" for row in self._rows):
+            return None
+        try:
+            return res.responsibilities(np.nan_to_num(values, nan=0.0))
+        except Exception:
+            return None
+
+    def _resolve_assignment(self):
+        """``(masks, overlap_count, unassigned_mask)`` after both policies."""
+        masks = self._channel_masks()
+        if masks is None:
+            return None, 0, None
+        n = masks[0].size
+        stack = np.vstack(masks) if masks else np.zeros((0, n), dtype=bool)
+        claims = stack.sum(axis=0)
+        contested = claims > 1
+        overlap_count = int(np.count_nonzero(contested))
+        mode = self._overlap_combo.currentText()
+        if overlap_count and mode != OVERLAP_KEEP_BOTH:
+            if mode == OVERLAP_DISCARD:
+                stack[:, contested] = False
+            else:                                   # force assign by weight
+                columns = np.flatnonzero(contested)
+                v, _tid = self._assign_basis()
+                posteriors = self._component_posteriors(
+                    v[:n] if v is not None and v.size >= n else np.zeros(n))
+                if posteriors is not None:
+                    weights = posteriors[columns].T.copy()          # (k, m)
+                    weights[~stack[:, columns]] = -np.inf           # only claiming channels
+                    winners = np.argmax(weights, axis=0)
+                else:
+                    winners = np.argmax(stack[:, columns], axis=0)   # earlier channel wins
+                stack[:, columns] = False
+                stack[winners, columns] = True
+            masks = [stack[k] for k in range(stack.shape[0])]
+        union = stack.any(axis=0) if stack.size else np.zeros(n, dtype=bool)
+        return masks, overlap_count, ~union
 
     def _refresh_counts(self) -> None:
-        labels = self._current_labels()
-        if labels is None:
-            self._residual_label.setText("residual: —")
+        masks, overlap, unassigned = self._resolve_assignment()
+        if masks is None:
+            self._status_label.setText("—")
             self._apply_btn.setEnabled(False)
             return
         ds = self._dataset()
-        tid = attr_values_1d(ds, "tid")
-        tid = np.arange(labels.size) if tid is None else np.asarray(tid).ravel()
+        tid = attr_values_1d(ds, "tid") if ds is not None else None
+        tid = (np.arange(masks[0].size) if tid is None
+               else np.asarray(tid).ravel()[:masks[0].size])
 
         def n_traces(mask):
-            return int(np.unique(tid[mask]).size) if mask.any() else 0
+            return int(np.unique(tid[mask[:tid.size]]).size) if mask.any() else 0
 
-        for k, row in enumerate(self._rows):
-            m = labels == k
-            row["count"].setText(f"{int(m.sum()):,} / {n_traces(m)} tr")
-        res = labels == -1
-        self._residual_label.setText(
-            f"residual: {int(res.sum()):,} locs / {n_traces(res)} traces")
-        assigned = int((labels >= 0).sum())
+        assigned = 0
+        for row, mask in zip(self._rows, masks):
+            count = int(mask.sum())
+            assigned += count
+            row["count"].setText(f"{count:,} / {n_traces(mask)} tr")
+        n_unassigned = int(unassigned.sum()) if unassigned is not None else 0
+        self._status_label.setText(
+            f"unassigned: {n_unassigned:,} locs  |  overlapped: {overlap:,} locs")
         self._apply_btn.setEnabled(assigned > 0)
+        self._queue_preview()
 
     def _apply(self) -> None:
-        labels = self._current_labels()
+        masks, _overlap, _unassigned = self._resolve_assignment()
         channels = self._current_channels()
-        if labels is None or not channels:
+        if masks is None or not channels:
             return
         if self._owner is None or not hasattr(self._owner, "apply_channel_separation"):
             return
+        keep_unassigned = self._unassigned_combo.currentText() == UNASSIGNED_KEEP
         ok = self._owner.apply_channel_separation(
-            self._idx, labels, channels, attribute=self._attribute,
-            method_label=f"{self._attribute} channel separation")
+            self._idx, None, channels, attribute=self._attribute,
+            method_label=f"{self._attribute} channel separation",
+            masks=masks, include_unassigned=keep_unassigned)
         if ok:
             self.close()

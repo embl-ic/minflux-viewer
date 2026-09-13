@@ -175,10 +175,10 @@ COMMAND_META: dict[str, CommandMeta] = {
                               outputs=("single flattened dataset (hot LUT)",), gui_class=GuiClass.GUI_FREE),
     "actionChannelSeparateDcr": CommandMeta(U + "attribute_separation_dialog.py",
                               ("dcr", "two color", "2 color", "spectral", "em", "gaussian mixture", "unmix",
-                               "photon weighted", "majority vote", "channel"),
-                              "Separate colors by a mixture fit of the DCR distribution into "
-                              "value-window channels; each trace is assigned by mean/median/majority vote "
-                              "(optionally photon-weighted DCR).", "process",
+                               "peak", "roi", "filter", "channel"),
+                              "Separate colors by the DCR distribution: value-window channels from a "
+                              "mixture fit, detected peaks or even placement, plus channels from a ROI or "
+                              "a filter row; assignment is per localization.", "process",
                               params=(ParamMeta("n_components", "int", 2, "", "mixture components"),),
                               inputs=("active dataset with dcr",),
                               outputs=("per-channel (+unassigned) overlay datasets",), gui_class=GuiClass.GUI_RESULT),
@@ -191,9 +191,11 @@ COMMAND_META: dict[str, CommandMeta] = {
                               outputs=("time-window overlay datasets",), gui_class=GuiClass.GUI_RESULT),
     "actionChannelSeparateAttribute": CommandMeta(U + "attribute_separation_dialog.py",
                               ("attribute", "distribution", "mixture", "gaussian", "log-normal",
-                               "gamma", "poisson", "convert overlay", "channel", "unmix", "efo", "cfr"),
-                              "Convert a dataset to a multi-channel overlay by any MINFLUX "
-                              "attribute's distribution (mixture fit → value-window channels).",
+                               "gamma", "poisson", "convert overlay", "channel", "unmix", "efo", "cfr",
+                               "peak", "roi", "filter"),
+                              "Convert a dataset to a multi-channel overlay by any MINFLUX attribute's "
+                              "distribution (mixture fit, detected peaks or even placement), or from a "
+                              "ROI or a filter row.",
                               "process",
                               params=(ParamMeta("n_components", "int", 2, "", "mixture components"),),
                               inputs=("active MINFLUX dataset",),
