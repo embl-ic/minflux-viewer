@@ -392,6 +392,36 @@ class FilledPolyLineROI(pg.PolyLineROI):
             pass
 
 
+class MultiPointItem(pg.ScatterPlotItem):
+    """Every marker of a ``points`` (multi-point) ROI, as ONE plot item.
+
+    The controller keys exactly one item per record id (``self.items[id]``), so
+    a multi-point cannot be N ``PointMarkerItem``s; it is a single scatter whose
+    spots are the projected markers. Size is in pixels, so the markers stay the
+    same on screen at any zoom -- the property that makes ``PointMarkerItem``
+    usable as a marker rather than a shape.
+
+    It is deliberately not a pyqtgraph ROI: a set of points has no single
+    position, so there is nothing for ROI handles to move. Editing a member is
+    done through the record (arrow keys / Properties), not by dragging the item.
+    """
+
+    def __init__(self, points=(), *, color="#ffff00", size: int = 11) -> None:
+        super().__init__(size=size, symbol="+", pxMode=True,
+                         pen=pg.mkPen(color, width=1.6), brush=pg.mkBrush(None))
+        self.set_points(points)
+
+    def set_points(self, points) -> None:
+        pts = [(float(p[0]), float(p[1])) for p in (points or [])]
+        if pts:
+            self.setData([p[0] for p in pts], [p[1] for p in pts])
+        else:
+            self.setData([], [])
+
+    def setFillColor(self, *args, **kwargs) -> None:   # markers have no fill
+        pass
+
+
 class PointMarkerItem(pg.TargetItem):
     """Fixed-size, draggable point marker (ilastik density-count style).
 
@@ -797,6 +827,9 @@ class RoiOverlayController(QObject):
                 # XZ/YZ, instead of reusing its in-plane coordinate).
                 px, py = self._project_point(record)
                 self.items[record.id].setPos(pg.Point(px, py))
+            elif record.type == "points":
+                # Same, for every marker of a multi-point at once.
+                self.items[record.id].set_points(self._project_points(record))
             self._style_item(self.items[record.id], record, record.id in selected,
                              manager_highlight=record.id in selected)
             self._sync_label(record)
@@ -860,6 +893,12 @@ class RoiOverlayController(QObject):
             if self.store.active_tool == "magnetic_lasso" and self._lasso_points:
                 self._finish_lasso()
                 return True
+            if self.store.active_tool == "multi_point" and self._session_points:
+                # Right-click finishes the set, the same gesture that closes a
+                # polygon or a polyline, and releases the tool with it.
+                self._add_session_points_as_multi_point()
+                self._maybe_release_tool(event.modifiers())
+                return True
             pos = self._event_to_view(event)
             hit = self._record_at(pos) if pos is not None else None
             if hit is not None:
@@ -921,10 +960,13 @@ class RoiOverlayController(QObject):
                 return True
             if self._record_at(pos) is not None:
                 return False
-            if tool == "point":
+            if tool in {"point", "multi_point"}:
                 # Each click drops a persistent point; the tool stays pressed so
                 # the user can keep marking points until the toolbar button is
-                # clicked again (no auto-release).
+                # clicked again (no auto-release). The two tools place markers
+                # identically and differ only in how they are FILED: `point`
+                # leaves each as its own record, `multi_point` groups them into
+                # one on the finishing right-click (Fiji's multi-point).
                 self._commit_point(pos)
                 return True
             self._drag_start = pos
@@ -1395,10 +1437,13 @@ class RoiOverlayController(QObject):
             except Exception:
                 pass
 
-    def _add_all_session_points_to_manager(self) -> None:
+    def _take_session_points(self) -> list:
+        """Remove every pending marker from the view and return its record.
+
+        Shared by both filing routes so they cannot disagree about what "all the
+        session points" means or leave an orphan item behind.
+        """
         records = list(self._session_points)
-        if not records:
-            return
         for rec in records:
             item = self._session_items.pop(rec.id, None)
             if item is not None:
@@ -1408,6 +1453,31 @@ class RoiOverlayController(QObject):
                     pass
         self._session_points = []
         self._active_session_point_id = None
+        return records
+
+    def _add_session_points_as_multi_point(self) -> None:
+        """File every pending marker as ONE ``points`` ROI (ImageJ multi-point).
+
+        The grouping is the whole point: a screenful of picks becomes one entry
+        that is named, saved, selected and deleted together, instead of N the
+        user has to manage individually. Each marker keeps its own full 3-D
+        coordinate, so the record is exactly the set that was placed.
+        """
+        records = self._take_session_points()
+        if not records:
+            return
+        marks = [list(rec.geometry.get("point") or [0.0, 0.0, 0.0]) for rec in records]
+        grouped = RoiRecord.create("points", {"points": marks}, **self._record_kwargs())
+        grouped = self._normalize_record(grouped)
+        self._show_manager_if_needed()
+        self.store.add(grouped)
+        self.store.deselect()
+        self._emit_status(self._roi_status_text("points", grouped.geometry))
+
+    def _add_all_session_points_to_manager(self) -> None:
+        records = self._take_session_points()
+        if not records:
+            return
         self._show_manager_if_needed()
         for rec in records:
             self.store.add(rec)
@@ -1792,6 +1862,15 @@ class RoiOverlayController(QObject):
         if roi_type == "point":
             p = g.get("point") or [0.0, 0.0, 0.0]
             return f"Point X={float(p[0]):.0f}, Y={float(p[1]):.0f}"
+        if roi_type == "points":
+            marks = g.get("points") or []
+            if not marks:
+                return "Points  (empty)"
+            arr = np.array([[float(m[0]), float(m[1])] for m in marks], dtype=float)
+            x0, y0 = arr.min(axis=0)
+            x1, y1 = arr.max(axis=0)
+            return (f"Points  {len(marks)} points  Bounding Box "
+                    f"X={x0:.0f}, Y={y0:.0f}, W={x1 - x0:.0f}, H={y1 - y0:.0f}")
         pts = g.get("points") or []                     # line/polyline/polygon/freehand…
         if roi_type == "line" and len(pts) >= 2:
             # Straight line: start point, length, and the vector's angle from the
@@ -1919,6 +1998,9 @@ class RoiOverlayController(QObject):
         if record.type == "point":
             x, y = self._project_point(record)
             return PointMarkerItem((x, y))
+        if record.type == "points":
+            return MultiPointItem(self._project_points(record),
+                                  color=record.stroke_color)
         if record.type == "angle":
             pts = g.get("points", [[0, 0], [1, 0], [2, 1]])
             item = pg.PolyLineROI([p[:2] for p in pts[:3]], closed=False, movable=True)
@@ -2196,6 +2278,12 @@ class RoiOverlayController(QObject):
         if record.type == "point":
             px, py = self._project_point(record)
             return abs(pos[0] - px) <= tolerance and abs(pos[1] - py) <= tolerance
+        if record.type == "points":
+            # Near ANY marker, not near the bounding box: a multi-point's box is
+            # mostly empty space, and clicking in the middle of a scattered set
+            # would otherwise select it.
+            return any(abs(pos[0] - px) <= tolerance and abs(pos[1] - py) <= tolerance
+                       for px, py in self._project_points(record))
         if record.type not in {"rectangle", "oval"}:
             x, y, w, h = _bounds(record.geometry)
             return x - tolerance <= pos[0] <= x + w + tolerance and y - tolerance <= pos[1] <= y + h + tolerance
@@ -2241,9 +2329,16 @@ class RoiOverlayController(QObject):
         add_action = menu.addAction("Add to Manager")
         add_action.setEnabled(kind in {"draft", "session"})
         add_all_action = None
+        add_grouped_action = None
         if kind == "session":
             add_all_action = menu.addAction("Add all session points to Manager")
             add_all_action.setEnabled(len(self._session_points) > 0)
+            # Kept separate from "Add all" rather than replacing it: one files N
+            # independent markers, the other one multi-point ROI. Both are things
+            # a user wants, and silently changing what the existing entry
+            # produces would be worse than offering the choice.
+            add_grouped_action = menu.addAction("Add all as one multi-point")
+            add_grouped_action.setEnabled(len(self._session_points) > 0)
         # Vertex editing for polyline-family shapes: add a point on the nearest
         # edge, or delete the vertex nearest the right-click.
         add_point_action = delete_point_action = None
@@ -2275,6 +2370,8 @@ class RoiOverlayController(QObject):
             self._add_hit_to_manager(kind, record)
         elif add_all_action is not None and chosen is add_all_action:
             self._add_all_session_points_to_manager()
+        elif add_grouped_action is not None and chosen is add_grouped_action:
+            self._add_session_points_as_multi_point()
         elif add_point_action is not None and chosen is add_point_action:
             self._add_vertex_hit(kind, record, view_pos)
         elif delete_point_action is not None and chosen is delete_point_action:
