@@ -87,6 +87,7 @@ def test_scatter_view_menu_order(monkeypatch, _qt_app):
             "XZ",
             "YZ",
             "3D",
+            "Ortho-View",
             "---",
             "Black background",
             "Axis",

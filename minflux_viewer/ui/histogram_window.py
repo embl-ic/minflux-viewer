@@ -135,6 +135,10 @@ class HistogramWindow(QWidget):
         self._view_state_key = "histogram_plot_state"
         self._filter_edit: dict | None = None
         self._last_histogram_bounds: tuple[float, float, float, float] | None = None
+        # Bin edges of the drawn histogram, so the in-ROI highlight can be
+        # histogrammed on exactly the same bins.
+        self._last_bin_edges: np.ndarray | None = None
+        self._roi_highlight_item = None
         # Right-click Zoom tool: None = off, else the armed drag mode.
         self._zoom_mode: str | None = None
         self._zoom_drag_start = None
@@ -159,6 +163,10 @@ class HistogramWindow(QWidget):
 
         state.filter_changed.connect(self._on_filter_changed)
         state.attributes_changed.connect(self._on_attributes_changed)
+        # The in-ROI highlight is per-row, so a ROI from any view of this
+        # dataset (render included) can be shown on this attribute's bins.
+        state.roi_selection_changed.connect(self._on_roi_selection_changed)
+        state.rois.selection_changed.connect(self._redraw_roi_highlight)
 
     @property
     def dataset_idx(self) -> int | None:
@@ -268,6 +276,14 @@ class HistogramWindow(QWidget):
             brush=pg.mkBrush(*viewer_color(self._state.prefs, "histogram_data")),
         )
         self._plot.addItem(self._hist_item)
+        # A second histogram of the in-ROI rows, on the same bins, narrower so
+        # both are readable. ignoreBounds: the main histogram owns the frame.
+        self._roi_highlight_item = pg.BarGraphItem(
+            x=[], height=[], width=1,
+            brush=pg.mkBrush(*viewer_color(self._state.prefs, "roi_highlight")),
+            pen=None,
+        )
+        self._plot.addItem(self._roi_highlight_item, ignoreBounds=True)
         # Per-iteration overlay curves for the raw "all iterations" view.
         self._raw_items: list = []
         self._raw_legend = None
@@ -851,6 +867,12 @@ class HistogramWindow(QWidget):
         if ds is None or self._attr_combo.count() == 0:
             return
 
+        # Dropped here and re-established only by the default path below, so a
+        # raw-mode view (where a mask cannot be mapped onto these rows) leaves
+        # no stale highlight behind.
+        self._last_bin_edges = None
+        self._clear_roi_highlight()
+
         # Raw-mode selection (non-final iteration or invalid included) takes a
         # separate, additive path. The default (last + valid) path below is
         # left byte-for-byte unchanged so filter-edit and ROI keep working.
@@ -934,6 +956,7 @@ class HistogramWindow(QWidget):
         centers = 0.5 * (edges[:-1] + edges[1:])
         width = edges[1] - edges[0]
 
+        self._last_bin_edges = np.asarray(edges, dtype=float)
         self._hist_item.setOpts(x=centers, height=counts, width=width * 0.95)
         max_count = float(np.max(counts)) if counts.size else 1.0
         if preserve_histogram_frame and previous_bounds is not None:
@@ -960,6 +983,7 @@ class HistogramWindow(QWidget):
         self._remember_histogram_controls()
         self._fit_histogram_view()
         self._update_filter_edit_labels()
+        self._redraw_roi_highlight()
 
     def _fit_histogram_view(self) -> None:
         """Show the complete histogram and any active filter bounds."""
@@ -1973,6 +1997,90 @@ class HistogramWindow(QWidget):
     def _on_attributes_changed(self, idx: int) -> None:
         if idx == self._dataset_idx:
             self._refresh()
+
+    def _clear_roi_highlight(self) -> None:
+        if getattr(self, "_roi_highlight_item", None) is not None:
+            self._roi_highlight_item.setOpts(x=[], height=[], width=1)
+
+    def _on_roi_selection_changed(self, idx) -> None:
+        if idx is None or idx == self._dataset_idx:
+            self._redraw_roi_highlight()
+
+    def _redraw_roi_highlight(self) -> None:
+        """A second histogram of the localizations inside the active ROIs.
+
+        Drawn on the **same bin edges** as the histogram it sits in, so each bar
+        is the true selected count within that bin rather than a whole bin lit up
+        as "touched". The ROI may come from any view: a region drawn in render
+        shows where its localizations sit in this attribute's distribution.
+
+        One colour for every ROI (the masks are unioned), because bars cannot be
+        attributed per ROI without stacking them.
+        """
+        from .roi_highlight import (
+            highlight_color,
+            highlight_masks,
+            owns_active_draft,
+            roi_highlight_enabled,
+            union_mask,
+        )
+
+        item = getattr(self, "_roi_highlight_item", None)
+        if item is None:
+            return
+        ds = self._dataset()
+        edges = self._last_bin_edges
+        if ds is None or edges is None or edges.size < 2 or self._is_raw_mode():
+            self._clear_roi_highlight()
+            return
+        if not roi_highlight_enabled(
+                self._state.prefs, is_source=owns_active_draft(self._roi_overlay)):
+            self._clear_roi_highlight()
+            return
+        n = int(ds.prop.num_loc)
+        mask = union_mask(highlight_masks(self._state, ds), n)
+        if mask is None or not mask.any():
+            self._clear_roi_highlight()
+            return
+        attr_name = self._attr_combo.currentText()
+        agg_mode = self._agg_combo.currentText()
+        raw = self._materialized_values(ds, attr_name)
+        if raw is None:
+            self._clear_roi_highlight()
+            return
+        raw = np.asarray(raw, dtype=float).ravel()
+        if agg_mode == "per loc":
+            keep = mask[:raw.size]
+            ftr = np.asarray(ds.filter_mask, dtype=bool).ravel()
+            if ftr.size == raw.size:
+                keep = keep & ftr[:keep.size]
+            values = raw[:keep.size][keep]
+        else:
+            # A trace read-out is one value per trace, so a trace counts as
+            # selected when any of its localizations is inside the ROI.
+            per_trace = np.asarray(
+                self._aggregate(raw, ds.filter_mask, agg_mode, ds), dtype=float
+            ).ravel()
+            ti = np.asarray(ds.prop.trace_idx, dtype=int)
+            cum = np.concatenate([[0], np.cumsum(mask.astype(np.int64))])
+            starts = np.clip(ti[:, 0], 0, mask.size)
+            stops = np.clip(ti[:, 1] + 1, 0, mask.size)
+            touched = (cum[stops] - cum[starts]) > 0
+            keep_n = min(per_trace.size, touched.size)
+            values = per_trace[:keep_n][touched[:keep_n]]
+        values = self._transform_hist_values(values)
+        if values.size == 0:
+            self._clear_roi_highlight()
+            return
+        counts, _ = np.histogram(values, bins=edges)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        width = float(edges[1] - edges[0])
+        color = highlight_color(self._state.prefs)
+        color.setAlpha(210)
+        item.setOpts(
+            x=centers, height=counts, width=width * 0.55,
+            brush=pg.mkBrush(color), pen=None,
+        )
 
     def closeEvent(self, event) -> None:
         from .qt_lifecycle import close_plot_widgets

@@ -902,11 +902,19 @@ class PrecisionRenderScheduler(QObject):
 
     result_ready = pyqtSignal(object)
 
-    def __init__(self, parent: QObject | None = None, max_threads: int = 4) -> None:
+    def __init__(
+        self,
+        parent: QObject | None = None,
+        max_threads: int = 4,
+        *,
+        pool_name: str = "precision-render",
+        clear_pool_on_cancel: bool = True,
+    ) -> None:
         super().__init__(parent)
         self._generation = 0
+        self._clear_pool_on_cancel = bool(clear_pool_on_cancel)
         self._pool = shared_thread_pool(
-            "precision-render", max_threads=max(int(max_threads), 1)
+            str(pool_name), max_threads=max(int(max_threads), 1)
         )
 
     @property
@@ -915,7 +923,8 @@ class PrecisionRenderScheduler(QObject):
 
     def cancel(self) -> None:
         self._generation += 1
-        clear_pool_nonblocking(self._pool)
+        if self._clear_pool_on_cancel:
+            clear_pool_nonblocking(self._pool)
 
     def request(self, requests: list[PrecisionTileRequest]) -> int:
         self.cancel()
@@ -983,11 +992,18 @@ class VoronoiFieldScheduler(QObject):
 
     result_ready = pyqtSignal(object)
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        parent: QObject | None = None,
+        *,
+        pool_name: str = "voronoi-field",
+        clear_pool_on_cancel: bool = True,
+    ) -> None:
         super().__init__(parent)
         self._generation = 0
+        self._clear_pool_on_cancel = bool(clear_pool_on_cancel)
         # Overlay channels run serially to avoid simultaneous Qhull memory peaks.
-        self._pool = shared_thread_pool("voronoi-field", max_threads=1)
+        self._pool = shared_thread_pool(str(pool_name), max_threads=1)
 
     @property
     def generation(self) -> int:
@@ -995,7 +1011,8 @@ class VoronoiFieldScheduler(QObject):
 
     def cancel(self) -> None:
         self._generation += 1
-        clear_pool_nonblocking(self._pool)
+        if self._clear_pool_on_cancel:
+            clear_pool_nonblocking(self._pool)
 
     def shutdown(self, timeout_ms: int = 5_000) -> bool:
         """Cancel queued work without waiting for a non-interruptible Qhull task."""

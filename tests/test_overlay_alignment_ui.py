@@ -162,6 +162,7 @@ def test_alignment_panel_uses_owner_units_persists_steps_and_drags(qtbot):
 
 
 def test_overlay_rotation_sign_tracks_displayed_y_direction():
+    from minflux_viewer.ui.ortho_view import ORTHO_AXIS
     from minflux_viewer.ui.render_window import RenderWindow
     from minflux_viewer.ui.scatter_window import ScatterWindow
 
@@ -170,14 +171,22 @@ def test_overlay_rotation_sign_tracks_displayed_y_direction():
     render._should_invert_y_axis = lambda: False
     assert RenderWindow._overlay_alignment_rotation_sign(render) == 1.0
 
+    # The sign follows the *interactive* pane, so it reads the projection
+    # through _active_plane (which resolves Ortho to its XY primary pane).
     axis = SimpleNamespace(currentText=lambda: "XY")
-    scatter = SimpleNamespace(_axis_combo=axis, _xy_origin_top_left=lambda: True)
+    scatter = SimpleNamespace(
+        _axis_combo=axis,
+        _xy_origin_top_left=lambda: True,
+        _active_plane=lambda: ScatterWindow._active_plane(scatter),
+    )
     assert ScatterWindow._overlay_alignment_rotation_sign(scatter) == -1.0
     scatter._xy_origin_top_left = lambda: False
     assert ScatterWindow._overlay_alignment_rotation_sign(scatter) == 1.0
     axis.currentText = lambda: "XZ"
     scatter._xy_origin_top_left = lambda: True
     assert ScatterWindow._overlay_alignment_rotation_sign(scatter) == 1.0
+    axis.currentText = lambda: ORTHO_AXIS
+    assert ScatterWindow._overlay_alignment_rotation_sign(scatter) == -1.0
 
 
 def test_dataset_information_manual_align_routes_to_existing_overlay_view():

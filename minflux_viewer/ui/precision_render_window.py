@@ -12,6 +12,7 @@ from collections import OrderedDict
 import numpy as np
 from PyQt6.QtCore import QTimer
 
+from .ortho_view import ORTHO_AXIS_COLUMNS, SIDE_PLANES
 from .precision_render import (
     RENDER_METHOD_DEFAULT,
     RENDER_METHOD_LABELS,
@@ -31,6 +32,21 @@ from .precision_render import (
 from .render_window import RenderWindow
 
 
+class _SelectedRowsGrid:
+    """Spatial-grid adapter for an already cropped orthoview selection.
+
+    ``render_advanced_tile`` still performs the method-specific halo and exact
+    bounds checks.  The XY grid has already chosen the rows that are allowed to
+    contribute to a side projection, so its query result must stay fixed.
+    """
+
+    def __init__(self, indices: np.ndarray) -> None:
+        self._indices = np.asarray(indices, dtype=np.int64)
+
+    def query(self, _x0: float, _x1: float, _y0: float, _y1: float) -> np.ndarray:
+        return self._indices
+
+
 class PrecisionRenderWindow(RenderWindow):
     """Unified render window with selectable scientific reconstruction."""
 
@@ -41,6 +57,9 @@ class PrecisionRenderWindow(RenderWindow):
     _CACHE_BYTES = 192 * 1024 * 1024
     _VORONOI_FIELD_CACHE_ITEMS = 4
     _VORONOI_FAILURE_CACHE_ITEMS = 8
+    _ORTHO_CACHE_BYTES = 64 * 1024 * 1024
+    _ORTHO_CACHE_ITEMS = 48
+    _ORTHO_VORONOI_FIELD_CACHE_ITEMS = 8
     _INTERACTION_DEBOUNCE_MS = 45
     _PROGRESSIVE_COALESCE_MS = 20
 
@@ -62,6 +81,7 @@ class PrecisionRenderWindow(RenderWindow):
         self._fixed_sigma_nm = 5.0
         self._sigma_nm_xyz = (5.0, 5.0, 5.0)
         self._precision_channels: dict[int, PrecisionChannelData] = {}
+        self._precision_channel_versions: dict[int, int] = {}
         self._precision_cache = ViewportScalarCache(
             max_bytes=self._CACHE_BYTES, max_items=2048
         )
@@ -71,6 +91,17 @@ class PrecisionRenderWindow(RenderWindow):
         self._voronoi_failures: OrderedDict[tuple, str] = OrderedDict()
         self._precision_scheduler: PrecisionRenderScheduler | None = None
         self._voronoi_scheduler: VoronoiFieldScheduler | None = None
+        self._ortho_precision_scheduler: PrecisionRenderScheduler | None = None
+        self._ortho_voronoi_scheduler: VoronoiFieldScheduler | None = None
+        self._ortho_precision_cache = ViewportScalarCache(
+            max_bytes=self._ORTHO_CACHE_BYTES,
+            max_items=self._ORTHO_CACHE_ITEMS,
+        )
+        self._ortho_voronoi_cache = VoronoiFieldCache(
+            max_items=self._ORTHO_VORONOI_FIELD_CACHE_ITEMS
+        )
+        self._ortho_voronoi_failures: OrderedDict[tuple, str] = OrderedDict()
+        self._ortho_render_batch: dict | None = None
         self._active_tile_generation = -1
         self._active_voronoi_generation = -1
         self._pending_voronoi_keys: set[tuple] = set()
@@ -113,6 +144,10 @@ class PrecisionRenderWindow(RenderWindow):
             self._precision_scheduler.cancel()
         if self._voronoi_scheduler is not None:
             self._voronoi_scheduler.cancel()
+        self._cancel_ortho_render_work()
+        self._ortho_precision_cache.clear()
+        self._ortho_voronoi_cache.clear()
+        self._ortho_voronoi_failures.clear()
         self._pending_voronoi_keys.clear()
         self._schedule_render()
 
@@ -130,9 +165,358 @@ class PrecisionRenderWindow(RenderWindow):
             )
 
     def _fixed_sigma_for_orientation(self) -> tuple[float, float]:
-        if self._orientation == "XY":
+        # Ortho's primary pane is XY even though ``_orientation`` carries the
+        # layout mode name rather than a standalone plane name.
+        if self._active_plane() == "XY":
             return self._fixed_sigma_xy_nm, self._fixed_sigma_xy_nm
         return self._fixed_sigma_xy_nm, self._fixed_sigma_z_nm
+
+    def _fixed_sigma_for_ortho_plane(self, plane: str) -> tuple[float, float]:
+        """Return ``(horizontal, vertical)`` fixed sigmas for a side pane."""
+        horizontal, vertical = ORTHO_AXIS_COLUMNS[plane]
+        sigma_xyz = (
+            self._fixed_sigma_xy_nm,
+            self._fixed_sigma_xy_nm,
+            self._fixed_sigma_z_nm,
+        )
+        return sigma_xyz[horizontal], sigma_xyz[vertical]
+
+    @staticmethod
+    def _ortho_float_key(*ranges: tuple[float, float]) -> tuple[float, ...]:
+        return tuple(round(float(value), 6) for pair in ranges for value in pair)
+
+    def _projected_ortho_channel(
+        self,
+        ch: dict,
+        xyz: tuple[np.ndarray, np.ndarray, np.ndarray],
+        indices: np.ndarray,
+        plane: str,
+    ) -> PrecisionChannelData | None:
+        channel = self._precision_channels.get(ch["dataset_idx"])
+        if channel is None or len(channel.x_nm) != len(xyz[0]):
+            return None
+        horizontal, vertical = ORTHO_AXIS_COLUMNS[plane]
+        sigma_xyz = (
+            channel.sigma_x_nm,
+            channel.sigma_y_nm,
+            channel.sigma_depth_nm,
+        )
+        return PrecisionChannelData(
+            dataset_idx=channel.dataset_idx,
+            x_nm=xyz[horizontal],
+            y_nm=xyz[vertical],
+            depth_nm=channel.depth_nm,
+            sigma_x_nm=sigma_xyz[horizontal],
+            sigma_y_nm=sigma_xyz[vertical],
+            sigma_depth_nm=channel.sigma_depth_nm,
+            grid=_SelectedRowsGrid(indices),
+            source=channel.source,
+        )
+
+    def _ortho_scalar_key(
+        self,
+        ch: dict,
+        indices: np.ndarray,
+        plane: str,
+        h_range: tuple[float, float],
+        v_range: tuple[float, float],
+        shape: tuple[int, int],
+    ) -> tuple:
+        try:
+            primary_ranges = self._view_box.viewRange()
+            primary_key = self._ortho_float_key(
+                tuple(primary_ranges[0]), tuple(primary_ranges[1])
+            )
+        except Exception:
+            primary_key = ()
+        transform_key = self._channel_loc_transform_key(ch)
+        return (
+            "ortho-scalar",
+            ch["dataset_idx"],
+            self._precision_channel_versions.get(ch["dataset_idx"], 0),
+            self._mask_versions.get(ch["dataset_idx"], 0),
+            plane,
+            self._advanced_render_method,
+            tuple(round(float(v), 6) for v in self._fixed_sigma_for_ortho_plane(plane)),
+            transform_key,
+            int(indices.size),
+            primary_key,
+            self._ortho_float_key(h_range, v_range),
+            tuple(int(value) for value in shape),
+        )
+
+    def _ortho_voronoi_field_key(self, scalar_key: tuple) -> tuple:
+        # The raster bounds/shape do not affect a Voronoi field; the projected
+        # source selection does. Keep the field reusable across a side zoom.
+        return (
+            "ortho-voronoi-field",
+            scalar_key[1],
+            scalar_key[2],
+            scalar_key[3],
+            scalar_key[4],
+            scalar_key[7],
+            scalar_key[8],
+            scalar_key[9],
+        )
+
+    def _cancel_ortho_render_work(self) -> None:
+        """Cancel queued side rasters and suppress stale worker results."""
+        self._ortho_render_batch = None
+        if self._ortho_precision_scheduler is not None:
+            self._ortho_precision_scheduler.cancel()
+        if self._ortho_voronoi_scheduler is not None:
+            self._ortho_voronoi_scheduler.cancel()
+
+    def _ensure_ortho_schedulers(self) -> bool:
+        """Create side workers only after the user first enters Ortho-View."""
+        if self._ortho_precision_scheduler is None:
+            # Side projections have their own pool. Sharing the primary pool
+            # would make cancelling a side pan clear queued XY tiles as well.
+            self._ortho_precision_scheduler = PrecisionRenderScheduler(
+                parent=self,
+                max_threads=2,
+                pool_name="precision-render-ortho",
+                clear_pool_on_cancel=False,
+            )
+            self._ortho_precision_scheduler.result_ready.connect(
+                self._on_ortho_precision_result
+            )
+        if self._ortho_voronoi_scheduler is None:
+            self._ortho_voronoi_scheduler = VoronoiFieldScheduler(
+                parent=self,
+                pool_name="voronoi-field-ortho",
+                clear_pool_on_cancel=False,
+            )
+            self._ortho_voronoi_scheduler.result_ready.connect(
+                self._on_ortho_voronoi_result
+            )
+        return True
+
+    def _render_ortho_panes(self, picked) -> None:
+        """Build both scientific side projections away from the GUI thread."""
+        if not self._ensure_ortho_schedulers() or (
+            self._ortho_precision_scheduler is None
+            or self._ortho_voronoi_scheduler is None
+        ):
+            super()._render_ortho_panes(picked)
+            return
+
+        self._cancel_ortho_render_work()
+        batch: dict = {
+            "planes": {},
+            "entries": {},
+            "results": {},
+            "pending_fields": set(),
+            "scalar_generation": None,
+            "voronoi_generation": None,
+        }
+        self._ortho_render_batch = batch
+        field_requests: dict[tuple, VoronoiFieldRequest] = {}
+
+        for plane in SIDE_PLANES:
+            geometry = self._ortho_pane_geometry(plane)
+            if geometry is None:
+                continue
+            _image, h_range, v_range, _px, sigma_vh, n_h, n_v = geometry
+            bounds = (h_range[0], h_range[1], v_range[0], v_range[1])
+            shape = (n_v, n_h)
+            plane_record = {
+                "keys": [],
+                "channels": [],
+                "h_range": h_range,
+                "v_range": v_range,
+            }
+            batch["planes"][plane] = plane_record
+
+            for ch, xyz, indices in picked:
+                key = self._ortho_scalar_key(
+                    ch, indices, plane, h_range, v_range, shape
+                )
+                plane_record["keys"].append(key)
+                plane_record["channels"].append(ch)
+                cached = self._ortho_precision_cache.get(key)
+                if cached is not None:
+                    batch["results"][key] = cached
+                    continue
+
+                projected = self._projected_ortho_channel(ch, xyz, indices, plane)
+                if projected is None:
+                    # Malformed precision metadata already falls back to a
+                    # safe 5 nm model in normal construction. Keep a final
+                    # synchronous basic-render escape hatch for partial test
+                    # doubles and corrupted live state.
+                    batch["results"][key] = super()._render_ortho_channel_scalar(
+                        ch,
+                        xyz,
+                        indices,
+                        plane,
+                        h_range,
+                        v_range,
+                        _px,
+                        sigma_vh,
+                        n_h,
+                        n_v,
+                    )
+                    continue
+
+                entry = {
+                    "key": key,
+                    "plane": plane,
+                    "projected": projected,
+                    "indices": indices,
+                    "bounds": bounds,
+                    "shape": shape,
+                    "field_key": None,
+                }
+                batch["entries"][key] = entry
+                if self._advanced_render_method != RENDER_METHOD_VORONOI:
+                    continue
+
+                field_key = self._ortho_voronoi_field_key(key)
+                entry["field_key"] = field_key
+                if self._ortho_voronoi_cache.get(field_key) is not None:
+                    continue
+                failure = self._ortho_voronoi_failures.get(field_key)
+                if failure is not None:
+                    batch["results"][key] = np.zeros(shape, dtype=np.float32)
+                    continue
+                if field_key not in field_requests:
+                    field_requests[field_key] = VoronoiFieldRequest(
+                        key=field_key,
+                        x_nm=np.ascontiguousarray(
+                            projected.x_nm[indices], dtype=np.float64
+                        ),
+                        y_nm=np.ascontiguousarray(
+                            projected.y_nm[indices], dtype=np.float64
+                        ),
+                    )
+
+        for plane in SIDE_PLANES:
+            record = batch["planes"].get(plane)
+            if record is not None and not record["keys"]:
+                image = self._pane_images.get(plane)
+                if image is not None:
+                    image.clear()
+
+        if field_requests:
+            # Every field in the current two-plane overlay must survive until
+            # the last one finishes; raster dispatch happens as one batch.
+            # A fixed-size LRU would otherwise evict early channels and turn
+            # them into false zero images on overlays with >4 channels.
+            self._ortho_voronoi_cache.max_items = max(
+                self._ORTHO_VORONOI_FIELD_CACHE_ITEMS,
+                len({
+                    entry["field_key"]
+                    for entry in batch["entries"].values()
+                    if entry["field_key"] is not None
+                }),
+            )
+            requests = list(field_requests.values())
+            batch["pending_fields"] = set(field_requests)
+            batch["voronoi_generation"] = self._ortho_voronoi_scheduler.request(
+                requests
+            )
+            return
+        self._dispatch_ortho_scalar_requests(batch)
+
+    def _dispatch_ortho_scalar_requests(self, batch: dict) -> None:
+        if batch is not self._ortho_render_batch:
+            return
+        requests: list[PrecisionTileRequest] = []
+        for key, entry in batch["entries"].items():
+            if key in batch["results"]:
+                continue
+            voronoi_field = None
+            field_key = entry["field_key"]
+            if field_key is not None:
+                voronoi_field = self._ortho_voronoi_cache.get(field_key)
+                if voronoi_field is None:
+                    batch["results"][key] = np.zeros(
+                        entry["shape"], dtype=np.float32
+                    )
+                    continue
+            requests.append(PrecisionTileRequest(
+                key=key,
+                channel=entry["projected"],
+                bounds=entry["bounds"],
+                shape=entry["shape"],
+                depth_range=None,
+                render_method=self._advanced_render_method,
+                fixed_sigma_nm=self._fixed_sigma_for_ortho_plane(entry["plane"]),
+                voronoi_field=voronoi_field,
+            ))
+        if requests:
+            batch["scalar_generation"] = self._ortho_precision_scheduler.request(
+                requests
+            )
+        self._compose_ready_ortho_planes(batch)
+
+    def _compose_ready_ortho_planes(self, batch: dict) -> None:
+        if batch is not self._ortho_render_batch:
+            return
+        for plane, record in batch["planes"].items():
+            keys = record["keys"]
+            if not keys or not all(key in batch["results"] for key in keys):
+                continue
+            self._set_ortho_pane_tiles(
+                plane,
+                [batch["results"][key] for key in keys],
+                record["channels"],
+                record["h_range"],
+                record["v_range"],
+            )
+        self._refresh_ortho_info()
+
+    def _on_ortho_precision_result(self, result: PrecisionTileResult) -> None:
+        batch = self._ortho_render_batch
+        scheduler = self._ortho_precision_scheduler
+        if batch is None or scheduler is None:
+            return
+        if (
+            result.generation != scheduler.generation
+            or result.generation != batch["scalar_generation"]
+            or result.key not in batch["entries"]
+        ):
+            return
+        self._ortho_precision_cache.put(result.key, result.array)
+        batch["results"][result.key] = result.array
+        self._compose_ready_ortho_planes(batch)
+
+    def _remember_ortho_voronoi_failure(self, key: tuple, error: str) -> None:
+        self._ortho_voronoi_failures.pop(key, None)
+        self._ortho_voronoi_failures[key] = str(error)
+        while len(self._ortho_voronoi_failures) > self._VORONOI_FAILURE_CACHE_ITEMS:
+            self._ortho_voronoi_failures.popitem(last=False)
+
+    def _on_ortho_voronoi_result(self, result: VoronoiFieldResult) -> None:
+        batch = self._ortho_render_batch
+        scheduler = self._ortho_voronoi_scheduler
+        if batch is None or scheduler is None:
+            return
+        if (
+            result.generation != scheduler.generation
+            or result.generation != batch["voronoi_generation"]
+            or result.key not in batch["pending_fields"]
+        ):
+            return
+        if result.field is not None:
+            self._ortho_voronoi_cache.put(result.key, result.field)
+            self._ortho_voronoi_failures.pop(result.key, None)
+        else:
+            error = result.error or "The projected field could not be constructed."
+            self._remember_ortho_voronoi_failure(result.key, error)
+            for key, entry in batch["entries"].items():
+                if entry["field_key"] == result.key:
+                    batch["results"][key] = np.zeros(
+                        entry["shape"], dtype=np.float32
+                    )
+            self._info_label.setText(
+                f"{self._dataset_dim_label}  |  Orthoview Voronoi density "
+                f"unavailable: {error}{self.ortho_info_suffix()}"
+            )
+        batch["pending_fields"].discard(result.key)
+        if not batch["pending_fields"]:
+            self._dispatch_ortho_scalar_requests(batch)
 
     def _apply_fixed_sigma_values(self, xy_nm: float, z_nm: float) -> None:
         xy, z = max(float(xy_nm), 0.1), max(float(z_nm), 0.1)
@@ -229,7 +613,15 @@ class PrecisionRenderWindow(RenderWindow):
             grid=self._channel_grids.get(ds_idx),
             source=source,
         )
+        self._precision_channel_versions[ds_idx] = (
+            self._precision_channel_versions.get(ds_idx, 0) + 1
+        )
         self._precision_cache.remove_dataset(ds_idx)
+        self._ortho_precision_cache.remove_dataset(ds_idx)
+        self._ortho_voronoi_cache.remove_dataset(ds_idx)
+        for key in list(self._ortho_voronoi_failures):
+            if isinstance(key, tuple) and len(key) > 1 and key[1] == ds_idx:
+                self._ortho_voronoi_failures.pop(key, None)
         self._preview_scalar = None
         self._preview_geometry = None
 
@@ -638,6 +1030,8 @@ class PrecisionRenderWindow(RenderWindow):
 
         self._set_composited_image(scalar)
         self._redraw_roi_highlight()
+        if final and self._ortho_active():
+            self._ortho_timer.start()
 
         cache_mb = self._precision_cache.nbytes / (1024.0 * 1024.0)
         visible_channels = sum(
@@ -649,13 +1043,14 @@ class PrecisionRenderWindow(RenderWindow):
                 f"{self._render_method_label()} ({stage})  |  "
                 f"LOD {self._last_lod}  |  px={self._active_tile_pixel_nm:.3g} nm  |  "
                 f"{total} tile(s)  |  cache {cache_mb:.1f} MB"
+                f"{self.ortho_info_suffix()}"
             )
         else:
             self._info_label.setText(
                 f"{self._dataset_dim_label}  |  {visible_channels} ch  |  "
                 f"{self._render_method_label()}  |  LOD {self._last_lod}  |  "
                 f"px={self._active_tile_pixel_nm:.3g} nm  |  "
-                f"{ready}/{total} tile(s)…"
+                f"{ready}/{total} tile(s)…{self.ortho_info_suffix()}"
             )
         if final and self._bc_dialog is not None and self._bc_dialog.isVisible():
             self._bc_dialog.set_data(scalar[self._active_channel_index()])
@@ -683,6 +1078,8 @@ class PrecisionRenderWindow(RenderWindow):
             return
         self._set_composited_image(self._last_scalar_tile)
         self._redraw_roi_highlight()
+        if self._ortho_active():
+            self._ortho_timer.start()
 
     def _on_precision_tile_result(self, result: PrecisionTileResult) -> None:
         if self._precision_scheduler is None:
@@ -837,4 +1234,7 @@ class PrecisionRenderWindow(RenderWindow):
             self._precision_scheduler.cancel()
         if self._voronoi_scheduler is not None:
             self._voronoi_scheduler.shutdown()
+        self._cancel_ortho_render_work()
+        if self._ortho_voronoi_scheduler is not None:
+            self._ortho_voronoi_scheduler.shutdown()
         super().closeEvent(event)

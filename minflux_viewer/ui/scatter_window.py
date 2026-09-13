@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QPoint, QRect, Qt
+from PyQt6.QtCore import QPoint, QRect, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -44,10 +44,8 @@ from ..colormaps import (
 )
 from ..colors import (
     is_solid_color,
-    rgba_hex,
     solid_color_names,
     solid_color_rgba,
-    viewer_color,
 )
 from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
@@ -61,9 +59,18 @@ from ..core.overlay import (
     transform_key,
     transform_to_matrix4,
 )
-from ..core.roi_selection import active_roi_mask, roi_region_mask
+from ..core.roi_selection import REGION_ROI_TYPES, roi_region_mask
 from .attribute_help import apply_attribute_menu_tooltips, apply_attribute_tooltips
 from .gl_3d_reference import nice_step, three_plane_grid_positions, tick_values
+from .ortho_view import (
+    AXIS_COLUMNS,
+    ORTHO_AXIS,
+    OrthoPanes,
+    SIDE_PLANES,
+    axis_columns,
+    axis_labels,
+    ortho_pane_labels,
+)
 from .plot_format import plot_widget
 
 # ---------------------------------------------------------------------------
@@ -79,8 +86,10 @@ def _load_cmap(name: str) -> pg.ColorMap:
 # ScatterWindow
 # ---------------------------------------------------------------------------
 
-_AXIS_OPTIONS = ["XY", "XZ", "YZ", "3D"]
+_AXIS_OPTIONS = ["XY", "XZ", "YZ", "3D", ORTHO_AXIS]
 _MAX_DISPLAY_POINTS_2D = 100_000
+#: Settle delay before the ortho side panes are re-projected after a pan/zoom.
+_ORTHO_REDRAW_MS = 110
 _MAX_DISPLAY_POINTS_3D = 150_000
 
 _NAMED_CMAPS = list(BUILTIN_COLORMAP_NAMES)
@@ -137,11 +146,21 @@ class ScatterWindow(QWidget):
         self._overlay_alignment_original_visibility: list[bool] | None = None
         self._roi_highlight_2d = None
         self._roi_highlight_3d = None
+        self._ortho_redrawing = False
+        # Whether the colorbar was on when ortho took its gutter, so leaving
+        # the mode gives it back rather than silently dropping it.
+        self._ortho_colorbar_restore: bool | None = None
+        self._ortho_colorbar_syncing = False
 
         self.setWindowTitle("Scatter Plot")
         self.setWindowFlags(Qt.WindowType.Window)
         self.resize(720, 680)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+        self._ortho_timer = QTimer(self)
+        self._ortho_timer.setSingleShot(True)
+        self._ortho_timer.setInterval(_ORTHO_REDRAW_MS)
+        self._ortho_timer.timeout.connect(self._redraw_ortho_projection)
 
         self._build_ui()
         self._refresh()
@@ -255,7 +274,11 @@ class ScatterWindow(QWidget):
         self._plot_2d.addItem(self._roi_highlight_2d)
 
         self._cmap = _load_cmap("jet")
-        self._stack.addWidget(self._plot_2d)
+        # The 2-D page is the orthogonal pane grid with the side panes hidden,
+        # so entering ortho mode never reparents _plot_2d: it stays the same
+        # object, in the same cell, and everything keyed to it is unaffected.
+        self._build_ortho_panes()
+        self._stack.addWidget(self._plot_page)
         from .roi_overlay import RoiOverlayController
         self._roi_overlay = RoiOverlayController(
             self._state.rois,
@@ -288,9 +311,13 @@ class ScatterWindow(QWidget):
         # A docked bar aligns its gradient with the ViewBox, so repaint it
         # whenever that geometry changes (resize, axis shown/hidden).
         try:
-            self._plot_2d.getPlotItem().getViewBox().sigResized.connect(
-                lambda *_: self._colorbar.update()
-            )
+            view_box = self._plot_2d.getPlotItem().getViewBox()
+            view_box.sigResized.connect(lambda *_: self._colorbar.update())
+            # The ortho crop and the shared Z scale both follow the XY view, so
+            # they have to be refreshed when it moves and when it is resized
+            # (the Z scale is derived from the side panes' pixel extents).
+            view_box.sigRangeChanged.connect(self._on_ortho_view_changed)
+            view_box.sigResized.connect(self._on_ortho_view_changed)
         except Exception:
             pass
 
@@ -314,6 +341,271 @@ class ScatterWindow(QWidget):
         self.customContextMenuRequested.connect(self._show_context_menu)
         self._stack.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._stack.customContextMenuRequested.connect(self._show_context_menu)
+
+    # ------------------------------------------------------------------
+    # Orthogonal panes
+    # ------------------------------------------------------------------
+
+    def _build_ortho_panes(self) -> None:
+        """Build the 2x2 pane grid holding XY plus the two side projections.
+
+        The side panes are created up front but stay hidden until the user
+        picks ``Ortho``; building them lazily would save a couple of empty
+        pyqtgraph items and cost the mode a rebuild path.
+        """
+        self._plot_page = QWidget()
+        self._pane_plots: dict[str, object] = {"XY": self._plot_2d}
+        self._pane_scatters: dict[str, object] = {"XY": self._scatter_2d}
+        self._pane_highlights: dict[str, object] = {"XY": self._roi_highlight_2d}
+
+        for plane in SIDE_PLANES:
+            plot = plot_widget(background="w")
+            plot.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            plot.customContextMenuRequested.connect(self._show_context_menu)
+            # Aspect is deliberately NOT locked on a side pane: Z is stretched
+            # to fill the panel, as in the MATLAB interactive render this mode
+            # reproduces. Positions along the axis shared with XY stay exact;
+            # only the Z direction is scaled, which is why it stays ticked.
+            plot.showGrid(x=self._show_2d_grid, y=self._show_2d_grid, alpha=0.2)
+            scatter = pg.ScatterPlotItem(
+                size=self._point_size,
+                symbol=self._point_symbol,
+                pen=None,
+                brush=pg.mkBrush(200, 200, 200, 180),
+            )
+            plot.addItem(scatter)
+            highlight = pg.ScatterPlotItem(
+                size=7,
+                pen=pg.mkPen(255, 210, 0, 230, width=1.5),
+                brush=pg.mkBrush(255, 230, 0, 70),
+            )
+            plot.addItem(highlight)
+            self._pane_plots[plane] = plot
+            self._pane_scatters[plane] = scatter
+            self._pane_highlights[plane] = highlight
+
+        self._plot_page.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._plot_page.customContextMenuRequested.connect(self._show_context_menu)
+        self._ortho = OrthoPanes(self._plot_page, self._pane_plots, parent=self)
+
+    def _apply_page_background(self, black: bool) -> None:
+        """Paint the pane page itself, so the empty bottom-right cell and the
+        gaps between panes read as part of the plot rather than as a hole.
+
+        A palette, not a stylesheet: a stylesheet cascades to every descendant,
+        including the ROI controller's context menu, which is parented to the
+        view widget.
+        """
+        page = getattr(self, "_plot_page", None)
+        if page is None:
+            return
+        color = QColor(0, 0, 0) if black else QColor(255, 255, 255)
+        palette = page.palette()
+        palette.setColor(page.backgroundRole(), color)
+        page.setAutoFillBackground(True)
+        page.setPalette(palette)
+
+    def _pane_labels(self, plane: str) -> tuple[str, str]:
+        """``(bottom, left)`` for one pane, shared axes named once in ortho."""
+        if self._ortho_active():
+            return ortho_pane_labels(plane)
+        return axis_labels(plane)
+
+    def _ortho_active(self) -> bool:
+        return self._axis_combo.currentText() == ORTHO_AXIS
+
+    def _active_plane(self) -> str:
+        """The plane the *interactive* 2-D pane shows.
+
+        In orthogonal mode the primary pane is XY and is the only pane that
+        takes ROI drawing, manual alignment or a scale bar, so every consumer
+        of "which projection is this" resolves ``Ortho`` to ``XY``.
+        """
+        axis = self._axis_combo.currentText()
+        return "XY" if axis == ORTHO_AXIS else axis
+
+    def _drawn_planes(self) -> list[str]:
+        """The planes to draw into for the current mode, primary first."""
+        if self._ortho_active():
+            return ["XY", *SIDE_PLANES]
+        axis = self._axis_combo.currentText()
+        return [axis] if axis in AXIS_COLUMNS else []
+
+    def _pane_targets(self) -> list[tuple[str, object, object, object, tuple[int, int]]]:
+        """``(plane, plot, scatter, highlight, columns)`` for each pane drawn.
+
+        Outside ortho mode there is one entry, and it is the primary pane
+        showing whichever projection the user selected — so the single-pane
+        and three-pane paths are the same loop. The columns are resolved here
+        so one place decides which pair a pane plots (the ortho YZ pane is
+        transposed against the standalone YZ projection).
+        """
+        ortho = self._ortho_active()
+        targets = []
+        for plane in self._drawn_planes():
+            key = plane if ortho else "XY"
+            targets.append((
+                plane,
+                self._pane_plots[key],
+                self._pane_scatters[key],
+                self._pane_highlights[key],
+                axis_columns(plane, ortho=ortho),
+            ))
+        return targets
+
+    def _sync_ortho_colorbar(self, active: bool) -> None:
+        """Hand the colorbar's gutter to the panes while ortho is on.
+
+        A docked bar reserves a strip at the right of the stack, flush against
+        the YZ pane -- 84 px, which at the default window size is most of a
+        92 px-wide YZ plot area. Since the panes are isotropic, that strip *is*
+        Z range, so the bar steps aside and the previous state is restored on
+        the way out. Turning it back on while in ortho drops the memory, so an
+        explicit choice is not overridden later.
+        """
+        if self._colorbar is None:
+            return
+        self._ortho_colorbar_syncing = True
+        try:
+            if active:
+                if self._ortho_colorbar_restore is None and self._show_colorbar:
+                    self._ortho_colorbar_restore = True
+                    self._set_colorbar_visible(False)
+            elif self._ortho_colorbar_restore:
+                self._ortho_colorbar_restore = None
+                self._set_colorbar_visible(True)
+            else:
+                self._ortho_colorbar_restore = None
+        finally:
+            self._ortho_colorbar_syncing = False
+
+    def _ortho_available(self) -> bool:
+        """Ortho is offered only for a 3-D dataset — two of its three panes
+        would otherwise be an empty line."""
+        ds = self._dataset()
+        return ds is not None and getattr(ds.prop, "num_dim", 2) == 3
+
+    def _clear_2d_panes(self) -> None:
+        for scatter in self._pane_scatters.values():
+            scatter.setData([], [])
+
+    def _ortho_view_rect(self) -> tuple[float, float, float, float] | None:
+        """The XY pane's current data rectangle, or ``None`` while it auto-ranges.
+
+        ``None`` means "showing everything", which is exactly the state after a
+        fit or a Reset View — pyqtgraph keeps auto-range enabled until the user
+        actually interacts. Cropping to a range that is still being fitted would
+        blank the side panes on the first draw.
+        """
+        view_box = self._pane_plots["XY"].getPlotItem().getViewBox()
+        try:
+            if any(view_box.autoRangeEnabled()):
+                return None
+            (x0, x1), (y0, y1) = view_box.viewRange()
+        except Exception:
+            return None
+        if not (x1 > x0 and y1 > y0):
+            return None
+        return float(x0), float(x1), float(y0), float(y1)
+
+    def _ortho_visible_mask(self, locs: np.ndarray) -> np.ndarray | None:
+        """Rows inside the XY viewport, so a side pane projects only what the
+        XY pane is actually showing.
+
+        Without this the XZ pane pools every localization at a given X, whatever
+        its Y — so zooming onto one structure still showed the Z of everything
+        behind and in front of it, which is the opposite of what an orthogonal
+        view is for.
+        """
+        rect = self._ortho_view_rect()
+        if rect is None or locs.ndim != 2 or locs.shape[1] < 2:
+            return None
+        x0, x1, y0, y1 = rect
+        return (
+            (locs[:, 0] >= x0) & (locs[:, 0] <= x1)
+            & (locs[:, 1] >= y0) & (locs[:, 1] <= y1)
+        )
+
+    def _ortho_row_filter(self, locs: np.ndarray, ftr: np.ndarray) -> np.ndarray:
+        """``ftr`` narrowed to the XY viewport while ortho is active.
+
+        Applied **before** decimation, not after: the display budget must be
+        spent on rows that are actually in view, or zooming into a sparse
+        region would thin away the few points it contains.
+        """
+        if not self._ortho_active():
+            return ftr
+        mask = self._ortho_visible_mask(locs)
+        if mask is None:
+            return ftr
+        ftr = np.asarray(ftr, dtype=bool)
+        if mask.shape[0] != ftr.shape[0]:
+            return ftr
+        return ftr & mask
+
+    def _ortho_axis_note(self, *, cropped: bool) -> str:
+        """Status text for the ortho panes.
+
+        It names the two things the picture cannot say for itself: that a
+        clipped Z is not the whole projection, and which Z scaling factor the
+        geometry on screen was computed with — isotropic panes are only worth
+        reading as geometry when that number is known.
+        """
+        note = "XY · YZ · XZ"
+        note += " (visible region" if cropped else " (full range"
+        if self._ortho.depth_clipped:
+            note += ", Z clipped"
+        note += ")"
+        ds = self._dataset()
+        factor = float(getattr(getattr(ds, "cali", None), "z_scaling_factor", 1.0) or 1.0)
+        if abs(factor - 1.0) > 1e-9:
+            from .z_scaling_widgets import format_z_scaling_factor
+            note += f"  |  Z scaling {format_z_scaling_factor(factor)}"
+        return note
+
+    def _sync_ortho_depth(self, locs_and_rows) -> None:
+        """Centre both side panes on the Z of what is drawn, at the XY scale.
+
+        ``locs_and_rows`` is the ``(locs, indices)`` actually plotted, so the Z
+        follows the cropped projection: zoom onto a flat structure and the side
+        panes centre on its Z rather than the whole stack's. The panes are
+        isotropic, so the *range* they show is set by the XY zoom, not by the
+        data — which is what makes the Z scaling factor visible.
+        """
+        if not self._ortho_active():
+            return
+        lows, highs = [], []
+        for locs, indices in locs_and_rows:
+            if locs.ndim != 2 or locs.shape[1] < 3 or indices.size == 0:
+                continue
+            z = locs[indices, 2]
+            z = z[np.isfinite(z)]
+            if z.size:
+                lows.append(float(z.min()))
+                highs.append(float(z.max()))
+        if not lows:
+            return
+        self._ortho.apply_depth_range(min(lows), max(highs))
+
+    def _on_ortho_view_changed(self, *_args) -> None:
+        """Re-project the side panes after the XY view settles.
+
+        Debounced rather than immediate: the crop changes on every step of a
+        drag, and re-running two ``setData`` calls per step would make panning
+        the cost of redrawing the whole plot twice.
+        """
+        if not self._ortho_active() or self._ortho_redrawing:
+            return
+        self._ortho_timer.start()
+
+    def _redraw_ortho_projection(self) -> None:
+        if not self._ortho_active() or self._dataset() is None:
+            return
+        self._ortho_redrawing = True
+        try:
+            self._redraw_current(save_state=False)
+        finally:
+            self._ortho_redrawing = False
 
     def _set_info_text(self, text: str, ds=None) -> None:
         """Prefix Scatter status with the source dataset dimensionality."""
@@ -442,7 +734,9 @@ class ScatterWindow(QWidget):
         self._redraw_current(save_state=True)
 
     def _apply_background(self, black: bool) -> None:
-        self._plot_2d.setBackground("k" if black else "w")
+        for plot in getattr(self, "_pane_plots", {"XY": self._plot_2d}).values():
+            plot.setBackground("k" if black else "w")
+        self._apply_page_background(black)
         if self._3d_view is not None:
             self._3d_view.setBackgroundColor("k" if black else "w")
             self._refresh_3d_reference_items()
@@ -473,8 +767,19 @@ class ScatterWindow(QWidget):
 
     def _apply_y_axis_direction(self) -> None:
         try:
-            invert = self._axis_combo.currentText() == "XY" and self._xy_origin_top_left()
+            invert = self._active_plane() == "XY" and self._xy_origin_top_left()
             self._plot_2d.getPlotItem().getViewBox().invertY(invert)
+            if getattr(self, "_ortho", None) is not None and self._ortho.active:
+                # YZ shares the vertical Y axis with XY, so it must be inverted
+                # the same way: the link carries the range, not the direction,
+                # and a mismatch would put the top of one pane at the bottom of
+                # the other. XZ's vertical is Z, which is always natural (up).
+                yz = self._ortho.view_box("YZ")
+                if yz is not None:
+                    yz.invertY(invert)
+                xz = self._ortho.view_box("XZ")
+                if xz is not None:
+                    xz.invertY(False)
         except Exception:
             pass
 
@@ -482,10 +787,19 @@ class ScatterWindow(QWidget):
         menu = QMenu(self)
 
         view_menu = menu.addMenu("View")
+        view_menu.setToolTipsVisible(True)
         for axis in _AXIS_OPTIONS:
             action = view_menu.addAction(axis)
             action.setCheckable(True)
             action.setChecked(axis == self._axis_combo.currentText())
+            if axis == ORTHO_AXIS:
+                action.setEnabled(self._ortho_available())
+                action.setToolTip(
+                    "XY, YZ and XZ at once, each a projection over the axis it "
+                    "does not show"
+                    if self._ortho_available()
+                    else "Orthogonal views need a 3-D dataset"
+                )
             action.triggered.connect(lambda _checked=False, value=axis: self._axis_combo.setCurrentText(value))
         view_menu.addSeparator()
 
@@ -604,6 +918,11 @@ class ScatterWindow(QWidget):
         """
         axis_text = self._axis_combo.currentText()
         is_3d = axis_text == "3D"
+        # Leaving ortho must also drop the side panes' grid weight, or the
+        # primary pane keeps only its share of the window (see grid_stretch).
+        ortho_on = axis_text == ORTHO_AXIS and not is_3d
+        self._ortho.set_active(ortho_on)
+        self._sync_ortho_colorbar(ortho_on)
         if is_3d:
             self._ensure_3d_built()
             self._apply_background(self._black_bg_check.isChecked())
@@ -612,8 +931,9 @@ class ScatterWindow(QWidget):
                     self._3d_grid.setVisible(self._show_3d_grid)
                 self._stack.setCurrentWidget(self._3d_view)
         else:
-            self._stack.setCurrentWidget(self._plot_2d)
+            self._stack.setCurrentWidget(self._plot_page)
             self._apply_2d_reference_visibility()
+            self._apply_background(self._black_bg_check.isChecked())
         self._apply_y_axis_direction()
         self._update_colorbar_visibility()
         self._last_axis_text = axis_text
@@ -685,7 +1005,7 @@ class ScatterWindow(QWidget):
         height.
         """
         plot = getattr(self, "_plot_2d", None)
-        if plot is None or self._stack.currentWidget() is not plot:
+        if plot is None or self._stack.currentWidget() is not self._plot_page:
             return None
         try:
             scene_rect = plot.getPlotItem().getViewBox().sceneBoundingRect()
@@ -702,6 +1022,11 @@ class ScatterWindow(QWidget):
 
     def _set_colorbar_visible(self, visible: bool) -> None:
         self._show_colorbar = bool(visible)
+        # A choice the user makes while ortho holds the bar's gutter is theirs
+        # to keep: forget what the mode was going to restore, so leaving it
+        # does not undo them.
+        if self._ortho_active() and not self._ortho_colorbar_syncing:
+            self._ortho_colorbar_restore = None
         self._update_colorbar_visibility()
         self._save_view_state()
 
@@ -812,15 +1137,24 @@ class ScatterWindow(QWidget):
             self._reset_3d_camera()
         else:
             self._apply_y_axis_direction()
+            if self._ortho.active:
+                # ⚠ Lift the crop BEFORE fitting. A fit ranges to the items in
+                # the view, and those are the cropped subset — so fitting first
+                # re-fits to the very region the crop came from and Reset View
+                # cannot escape it. Re-enabling auto-range makes
+                # _ortho_view_rect report "showing everything", the redraw then
+                # puts every point back, and auto-range fits to all of them.
+                self._plot_2d.getPlotItem().getViewBox().enableAutoRange(enable=True)
+                self._redraw_ortho_projection()
+                return
             self._plot_2d.autoRange()
 
     def _apply_2d_reference_visibility(self) -> None:
-        plot_item = self._plot_2d.getPlotItem()
-        for axis_name in ("left", "bottom"):
-            plot_item.showAxis(axis_name, show=self._show_2d_axis)
-        self._plot_2d.showGrid(
-            x=self._show_2d_grid, y=self._show_2d_grid, alpha=0.2
-        )
+        for plot in getattr(self, "_pane_plots", {"XY": self._plot_2d}).values():
+            plot_item = plot.getPlotItem()
+            for axis_name in ("left", "bottom"):
+                plot_item.showAxis(axis_name, show=self._show_2d_axis)
+            plot.showGrid(x=self._show_2d_grid, y=self._show_2d_grid, alpha=0.2)
 
     def _current_axis_visible(self) -> bool:
         if self._axis_combo.currentText() == "3D":
@@ -1211,13 +1545,13 @@ class ScatterWindow(QWidget):
 
     def _overlay_alignment_rotation_sign(self) -> float:
         """Stored-angle sign that appears counter-clockwise in the current view."""
-        invert_y = self._axis_combo.currentText() == "XY" and self._xy_origin_top_left()
+        invert_y = self._active_plane() == "XY" and self._xy_origin_top_left()
         return -1.0 if invert_y else 1.0
 
     def _ensure_channel_world_transform(self, ch: dict) -> None:
         transform = ch.setdefault("transform", {})
         if "anchor_x_nm" not in transform or "anchor_y_nm" not in transform:
-            axis = self._axis_combo.currentText()
+            axis = self._active_plane()
             axes = (0, 2) if axis == "XZ" else (1, 2) if axis == "YZ" else (0, 1)
             if axis == "3D":
                 ds_idx = ch.get("dataset_idx")
@@ -1302,14 +1636,14 @@ class ScatterWindow(QWidget):
             base = transform_to_matrix4(base_transform)
             if base is None:
                 base = identity_matrix4()
-            matrix = manual_alignment_matrix4(transform, self._axis_combo.currentText()) @ base
+            matrix = manual_alignment_matrix4(transform, self._active_plane()) @ base
             record = dict(base_transform or {})
             record["matrix_4x4"] = matrix.tolist()
             record["matrix_3x3"] = matrix4_to_xy3(matrix).tolist()
             record["alignment_mode"] = "manual"
             provenance = dict(record.get("provenance") or {})
             provenance["manual_alignment"] = {
-                "orientation": self._axis_combo.currentText(),
+                "orientation": self._active_plane(),
                 "method": "keyboard/drag translation and keyboard rotation",
             }
             record["provenance"] = provenance
@@ -1426,7 +1760,7 @@ class ScatterWindow(QWidget):
             self._overlay_alignment_cancel()
         ds = self._dataset()
         if ds is None:
-            self._scatter_2d.setData([], [])
+            self._clear_2d_panes()
             if self._3d_view is not None:
                 self._3d_scatter.setData(pos=np.empty((0, 3)))
                 self._refresh_3d_reference_items()
@@ -1473,11 +1807,17 @@ class ScatterWindow(QWidget):
 
         self._axis_combo.blockSignals(True)
         axis_default = saved.get("axis", "XY")
+        # A saved ortho state must not resurrect on a 2-D dataset, whose YZ/XZ
+        # panes would be a line.
+        if axis_default == ORTHO_AXIS and not self._ortho_available():
+            axis_default = "XY"
         if self._axis_combo.findText(axis_default) >= 0:
             self._axis_combo.setCurrentText(axis_default)
         self._axis_combo.blockSignals(False)
         self._last_axis_text = self._axis_combo.currentText()
         self._apply_y_axis_direction()
+        self._ortho.set_active(self._ortho_active())
+        self._sync_ortho_colorbar(self._ortho_active())
         if self._axis_combo.currentText() == "3D":
             self._ensure_3d_built()
             if self._3d_view is not None:
@@ -1485,7 +1825,7 @@ class ScatterWindow(QWidget):
                     self._3d_grid.setVisible(self._show_3d_grid)
                 self._stack.setCurrentWidget(self._3d_view)
         else:
-            self._stack.setCurrentWidget(self._plot_2d)
+            self._stack.setCurrentWidget(self._plot_page)
         self._apply_2d_reference_visibility()
         self._update_colorbar_visibility()
 
@@ -1566,72 +1906,40 @@ class ScatterWindow(QWidget):
                 base = transform_to_matrix4(transform)
                 if base is None:
                     base = identity_matrix4()
-                matrix = manual_alignment_matrix4(preview, self._axis_combo.currentText()) @ base
+                matrix = manual_alignment_matrix4(preview, self._active_plane()) @ base
                 transform = {"matrix_4x4": matrix.tolist()}
         return apply_display_transform_nm(locs, transform)
 
     def _roi_masks_for_dataset(self, ds) -> list[tuple[object, np.ndarray]]:
-        records = [r for r in self._state.rois.records if r.id in set(self._state.rois.selected_ids)]
-        draft_id = ds.state.get("active_roi_draft_id")
-        if draft_id:
-            draft_meta = ds.state.get("roi_masks", {}).get(draft_id, {})
-            draft_record = next((r for r in records if r.id == draft_id), None)
-            if draft_record is None and isinstance(draft_meta, dict):
-                draft_record = type("_RoiHighlight", (), {
-                    "id": draft_id,
-                    "stroke_color": draft_meta.get("stroke_color", "#ffff00"),
-                })()
-            if draft_record is not None and all(r.id != draft_id for r in records):
-                records.append(draft_record)
-        out: list[tuple[object, np.ndarray]] = []
-        ftr = np.asarray(ds.filter_mask, dtype=bool).ravel()
-        for record in records:
-            mask = active_roi_mask(ds, selected_ids=[record.id], include_active_draft=False)
-            if mask is None and record.id == draft_id:
-                mask = active_roi_mask(ds, selected_ids=[], include_active_draft=True)
-            if mask is None:
-                continue
-            mask = np.asarray(mask, dtype=bool).ravel()
-            if ftr.size == mask.size:
-                mask &= ftr
-            out.append((record, mask))
-        return out
+        from .roi_highlight import highlight_masks
+        return highlight_masks(self._state, ds)
 
     def _highlight_color(self):
         """COLOR ▸ ROI ▸ highlight data in ROI (one color for every ROI)."""
-        return pg.mkColor(rgba_hex(viewer_color(self._state.prefs, "roi_highlight")))
+        from .roi_highlight import highlight_color
+        return highlight_color(self._state.prefs)
 
     def _roi_highlight_brushes(self, record, count: int) -> list:
-        fill = self._highlight_color()
-        fill.setAlpha(75)
-        return [pg.mkBrush(fill)] * int(count)
+        from .roi_highlight import highlight_brushes
+        return highlight_brushes(self._state.prefs, count)
 
     def _roi_highlight_rgba(self, record, count: int, alpha: float = 0.95) -> np.ndarray:
-        color = self._highlight_color()
-        rgba = np.array(
-            [[color.redF(), color.greenF(), color.blueF(), float(alpha)]],
-            dtype=np.float32,
-        )
-        return np.tile(rgba, (int(count), 1))
+        from .roi_highlight import highlight_rgba
+        return highlight_rgba(self._state.prefs, count, alpha)
 
     def _clear_roi_highlight(self) -> None:
-        if self._roi_highlight_2d is not None:
-            self._roi_highlight_2d.setData([], [])
+        for highlight in getattr(self, "_pane_highlights", {}).values():
+            highlight.setData([], [])
         if self._roi_highlight_3d is not None:
             self._roi_highlight_3d.setData(pos=np.empty((0, 3), dtype=np.float32))
 
     def _owns_active_roi_draft(self) -> bool:
         """True when an ROI is currently being drawn in *this* scatter view."""
-        ctrl = getattr(self, "_roi_overlay", None)
-        if ctrl is None:
-            return False
-        try:
-            return ctrl.current_record() is not None
-        except Exception:
-            return getattr(ctrl, "draft", None) is not None
+        from .roi_highlight import owns_active_draft
+        return owns_active_draft(getattr(self, "_roi_overlay", None))
 
     def _roi_highlight_enabled(self) -> bool:
-        from ..core.roi_selection import roi_highlight_enabled
+        from .roi_highlight import roi_highlight_enabled
         return roi_highlight_enabled(
             self._state.prefs, is_source=self._owns_active_roi_draft())
 
@@ -1647,14 +1955,15 @@ class ScatterWindow(QWidget):
     def _redraw_roi_highlight_2d(self) -> None:
         if self._roi_highlight_2d is None:
             return
-        axis = self._axis_combo.currentText()
-        col_map = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
-        if axis not in col_map:
+        targets = self._pane_targets()
+        if not targets:
             self._clear_roi_highlight()
             return
-        ci, cj = col_map[axis]
-        xs: list[np.ndarray] = []
-        ys: list[np.ndarray] = []
+        # The highlight is "these localizations", which projects truthfully into
+        # any plane — unlike a ROI *shape*, whose in-plane geometry means nothing
+        # in the other two panes. So the highlight is drawn in all three; only
+        # the drawn ROI itself stays on the XY pane.
+        picked: list[tuple[np.ndarray, np.ndarray]] = []   # (locs, indices)
         brushes: list = []
         channels = self._channels or [{"dataset_idx": self._dataset_idx, "visible": True}]
         per_channel_max = max(1, _MAX_DISPLAY_POINTS_2D // max(len(channels), 1))
@@ -1675,19 +1984,20 @@ class ScatterWindow(QWidget):
                 visible = mask[:n] & np.all(np.isfinite(locs[:n, :3]), axis=1)
                 indices = self._visible_indices(visible, n, per_channel_max)
                 if indices.size:
-                    xs.append(locs[indices, ci])
-                    ys.append(locs[indices, cj])
+                    picked.append((locs, indices))
                     brushes.extend(self._roi_highlight_brushes(record, indices.size))
-        if not xs:
-            self._roi_highlight_2d.setData([], [])
+        if not picked:
+            for *_head, highlight, _cols in targets:
+                highlight.setData([], [])
             return
-        self._roi_highlight_2d.setData(
-            x=np.concatenate(xs),
-            y=np.concatenate(ys),
-            brush=brushes,
-            pen=None,
-            size=7,
-        )
+        for _plane, _plot, _scatter, highlight, (ci, cj) in targets:
+            highlight.setData(
+                x=np.concatenate([locs[idx, ci] for locs, idx in picked]),
+                y=np.concatenate([locs[idx, cj] for locs, idx in picked]),
+                brush=brushes,
+                pen=None,
+                size=7,
+            )
 
     def _redraw_roi_highlight_3d(self) -> None:
         if self._roi_highlight_3d is None:
@@ -1741,13 +2051,16 @@ class ScatterWindow(QWidget):
             self._save_view_state(ds_active)
         axis = self._axis_combo.currentText()
         self._apply_y_axis_direction()
-        col_map = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
         if axis == "3D":
             self._draw_overlay_3d()
             return
-        ci, cj = col_map.get(axis, (0, 1))
-        xs: list[np.ndarray] = []
-        ys: list[np.ndarray] = []
+        targets = self._pane_targets()
+        if not targets:
+            return
+        primary_ci, primary_cj = targets[0][4]
+        # Gather each channel's rows and brushes once; the panes differ only in
+        # which two columns of the same rows they plot.
+        picked: list[tuple[np.ndarray, np.ndarray]] = []   # (locs, indices)
         brushes: list = []
         total = 0
         for ch in self._channels:
@@ -1761,38 +2074,40 @@ class ScatterWindow(QWidget):
             if mask.shape[0] != locs.shape[0]:
                 mask = np.ones(locs.shape[0], dtype=bool)
             mask &= np.all(np.isfinite(locs[:, :3]), axis=1)
+            mask = self._ortho_row_filter(locs, mask)
             indices = self._visible_indices(mask, locs.shape[0], max(1, _MAX_DISPLAY_POINTS_2D // max(len(self._channels), 1)))
             if indices.size == 0:
                 continue
-            x = locs[indices, ci]
-            y = locs[indices, cj]
-            xs.append(x)
-            ys.append(y)
+            picked.append((locs, indices))
             color_by = ch.get("color_by")
             if color_by:
                 _v, bins, _lbl, _lo, _hi = self._color_bins_for_points(
-                    x, y, None, ds, indices, attr=color_by)
+                    locs[indices, primary_ci], locs[indices, primary_cj],
+                    None, ds, indices, attr=color_by)
                 brushes.extend(self._brushes_for_bins(bins))
             else:
                 color = self._lut_color(str(ch.get("lut", "Gray")))
                 brushes.extend([pg.mkBrush(*color)] * indices.size)
             total += int(np.count_nonzero(mask))
-        if not xs:
-            self._scatter_2d.setData([], [])
+        if not picked:
+            self._clear_2d_panes()
             self._last_color_values = np.empty(0, dtype=float)
             self._update_colorbar_visibility()
             self._set_info_text("No localisations pass the current filters.")
             return
-        self._scatter_2d.setData(
-            x=np.concatenate(xs),
-            y=np.concatenate(ys),
-            brush=brushes,
-            pen=None,
-            size=self._point_size,
-            symbol=self._point_symbol,
-        )
-        self._plot_2d.setLabel("bottom", "XYZ"[ci] + " (nm)")
-        self._plot_2d.setLabel("left", "XYZ"[cj] + " (nm)")
+        for plane, plot, scatter, _highlight, (ci, cj) in targets:
+            scatter.setData(
+                x=np.concatenate([locs[idx, ci] for locs, idx in picked]),
+                y=np.concatenate([locs[idx, cj] for locs, idx in picked]),
+                brush=brushes,
+                pen=None,
+                size=self._point_size,
+                symbol=self._point_symbol,
+            )
+            ax_x, ax_y = self._pane_labels(plane)
+            plot.setLabel("bottom", ax_x)
+            plot.setLabel("left", ax_y)
+        self._sync_ortho_depth(picked)
         self._update_colorbar_visibility()
         self._set_info_text(f"{total:,} filtered localisations across {len([c for c in self._channels if c.get('visible', True)])} channel(s)")
 
@@ -1883,50 +2198,60 @@ class ScatterWindow(QWidget):
     def _draw_2d(self, locs: np.ndarray, ftr: np.ndarray, ds) -> None:
         axis = self._axis_combo.currentText()
         self._apply_y_axis_direction()
-        col_map  = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
-        ax_text  = {"XY": ("X (nm)", "Y (nm)"),
-                    "XZ": ("X (nm)", "Z (nm)"),
-                    "YZ": ("Y (nm)", "Z (nm)")}
-        ci, cj = col_map[axis]
+        targets = self._pane_targets()
+        if not targets:
+            return
 
+        # One thinned index set for every pane, so the three projections show
+        # the same localizations rather than three independent samples, and the
+        # side panes project only what the XY pane is showing.
+        n_passing = int(np.count_nonzero(np.asarray(ftr, dtype=bool)))
+        ftr = self._ortho_row_filter(locs, ftr)
         indices = self._visible_indices(ftr, locs.shape[0], _MAX_DISPLAY_POINTS_2D)
         n_visible = int(np.count_nonzero(np.asarray(ftr, dtype=bool)))
         n_display = indices.size
         if n_display == 0:
-            self._scatter_2d.setData([], [])
+            self._clear_2d_panes()
             self._last_color_values = np.empty(0, dtype=float)
             self._update_colorbar_visibility()
             self._set_info_text("No localisations pass the current filter.", ds)
             return
 
-        x = locs[indices, ci]
-        y = locs[indices, cj]
-        c_vals, color_bins, c_label, vmin, vmax = self._color_bins_for_points(x, y, None, ds, indices)
+        # The colour bins depend only on the row indices, not on the projection,
+        # so they are resolved once and the brushes reused across the panes.
+        primary_ci, primary_cj = targets[0][4]
+        c_vals, color_bins, c_label, vmin, vmax = self._color_bins_for_points(
+            locs[indices, primary_ci], locs[indices, primary_cj], None, ds, indices
+        )
         self._last_color_values = np.asarray(c_vals, dtype=float)
         brushes = self._brushes_for_bins(color_bins)
 
-        self._scatter_2d.setData(
-            x=x, y=y,
-            brush=brushes,
-            pen=None,
-            size=self._point_size,
-            symbol=self._point_symbol,
-        )
+        for plane, plot, scatter, _highlight, (ci, cj) in targets:
+            scatter.setData(
+                x=locs[indices, ci], y=locs[indices, cj],
+                brush=brushes,
+                pen=None,
+                size=self._point_size,
+                symbol=self._point_symbol,
+            )
+            ax_x, ax_y = self._pane_labels(plane)
+            plot.setLabel("bottom", ax_x)
+            plot.setLabel("left", ax_y)
 
+        self._sync_ortho_depth([(locs, indices)])
         self._update_colorbar_visibility()
-
-        ax_x, ax_y = ax_text[axis]
-        self._plot_2d.setLabel("bottom", ax_x)
-        self._plot_2d.setLabel("left", ax_y)
 
         display_note = (
             f"showing {n_display:,} / {n_visible:,} passing"
             if n_display < n_visible
             else f"{n_visible:,}"
         )
+        axis_note = axis
+        if self._ortho_active():
+            axis_note = self._ortho_axis_note(cropped=n_visible < n_passing)
         self._set_info_text(
             f"{display_note} / {ds.prop.num_loc:,} localisations  "
-            f"({100*n_visible/ds.prop.num_loc:.1f} %)  |  axis: {axis}  |  "
+            f"({100*n_visible/ds.prop.num_loc:.1f} %)  |  axis: {axis_note}  |  "
             f"color: {c_label}",
             ds,
         )
@@ -1996,14 +2321,8 @@ class ScatterWindow(QWidget):
 
     @staticmethod
     def _visible_indices(ftr: np.ndarray, total: int, max_points: int) -> np.ndarray:
-        mask = np.asarray(ftr, dtype=bool).ravel()
-        if mask.size != total:
-            mask = np.ones(total, dtype=bool)
-        indices = np.flatnonzero(mask)
-        if indices.size > max_points:
-            step = int(np.ceil(indices.size / max_points))
-            indices = indices[::step]
-        return indices
+        from .roi_highlight import decimate
+        return decimate(ftr, total, max_points)
 
     # -- shared color helpers --------------------------------------
 
@@ -2202,7 +2521,7 @@ class ScatterWindow(QWidget):
     def roi_view_plane(self) -> str | None:
         """Current scatter projection for ROI 3-D placement (XY/XZ/YZ); ``None``
         in 3-D mode (ROIs are not drawn there)."""
-        axis = self._axis_combo.currentText()
+        axis = self._active_plane()
         return axis if axis in {"XY", "XZ", "YZ"} else None
 
     def coordinate_view_box(self):
@@ -2239,7 +2558,7 @@ class ScatterWindow(QWidget):
         The scatter view has no depth slider, so the data extent is the natural
         'current viewing range' of that axis."""
         depth_map = {"XY": 2, "XZ": 1, "YZ": 0}
-        axis = self._axis_combo.currentText()
+        axis = self._active_plane()
         if axis not in depth_map:
             return None
         ds = self._dataset()
@@ -2259,7 +2578,7 @@ class ScatterWindow(QWidget):
         """Data-aware out-of-plane value per drawn vertex (weighted median of the
         depth axis among localizations near that in-plane location); ``None`` per
         empty column so the caller falls back to ``roi_depth_center``."""
-        axis = self._axis_combo.currentText()
+        axis = self._active_plane()
         if axis not in {"XY", "XZ", "YZ"} or not points:
             return [None] * len(points)
         ds = self._dataset()
@@ -2299,7 +2618,7 @@ class ScatterWindow(QWidget):
         return record
 
     def compute_roi_selection(self, record):
-        if record.type not in {"rectangle", "oval", "polygon", "freehand"} or self._axis_combo.currentText() == "3D":
+        if record.type not in REGION_ROI_TYPES or self._axis_combo.currentText() == "3D":
             return None
         ds = self._dataset()
         if ds is None:
@@ -2310,11 +2629,10 @@ class ScatterWindow(QWidget):
         if locs.shape[1] == 2:
             locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
 
-        axis = self._axis_combo.currentText()
-        col_map = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
-        if axis not in col_map:
+        axis = self._active_plane()
+        if axis not in AXIS_COLUMNS:
             return None
-        ci, cj = col_map[axis]
+        ci, cj = AXIS_COLUMNS[axis]
         base = np.asarray(ds.filter_mask, dtype=bool)
         if base.shape[0] != locs.shape[0]:
             base = np.ones(locs.shape[0], dtype=bool)
@@ -2360,6 +2678,17 @@ class ScatterWindow(QWidget):
             self._roi_overlay.dispose()
             self._roi_overlay = None
         release_shared_lut_owner(self)
+        # Drop the inter-pane links before the plots go inert: a queued range
+        # change must not reach a half-torn-down pane.
+        self._ortho.dispose()
+        # ⚠ The side panes take the SAFE tier: they are children of _plot_page
+        # and Qt deletes them with it, whereas close_plot_widgets also
+        # reparents and deleteLater()s, leaving an orphan that outlives its
+        # page — which reproduced as a Qt abort inside a later, unrelated test.
+        # _plot_2d keeps the aggressive tier it has always had.
+        from .qt_lifecycle import dispose_plot_widgets
+        for _plane in SIDE_PLANES:
+            dispose_plot_widgets(self._pane_plots[_plane])
         close_plot_widgets(self._plot_2d)
         super().closeEvent(event)
 

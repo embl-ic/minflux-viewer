@@ -53,7 +53,7 @@ from ..core.loader import (
     mfx_filter_mask,
     mfx_get,
 )
-from ..core.roi_selection import rectangle_mask
+from ..core.roi_selection import REGION_ROI_TYPES, roi_region_mask
 from .attribute_cpu import (
     BulkScatterItem,
     aggregate_screen_points,
@@ -260,12 +260,18 @@ class AttributeWindow(QWidget):
         self.resize(780, 400)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._roi_overlay = None
+        self._roi_highlight_item = None
 
         self._build_ui()
         self._refresh()
 
         state.filter_changed.connect(self._on_filter_changed)
         state.attributes_changed.connect(self._on_attributes_changed)
+        # "Data in active ROI" is per-row, so it syncs across every view of the
+        # dataset: a ROI drawn here highlights in render/scatter and one drawn
+        # there highlights here.
+        state.roi_selection_changed.connect(self._on_roi_selection_changed)
+        state.rois.selection_changed.connect(self._redraw_roi_highlight)
 
     @property
     def dataset_idx(self) -> int | None:
@@ -394,6 +400,15 @@ class AttributeWindow(QWidget):
         # "all iterations" overlay can show one colored series per iteration.
         self._series_items: list[tuple] = []
         self._legend = None
+        # The in-ROI data highlight, the same one render and scatter paint, on
+        # the attribute axes. ignoreBounds: it must never feed the auto-range
+        # (the A button / _DataBoundsItem trap).
+        self._roi_highlight_item = pg.ScatterPlotItem(
+            size=7,
+            pen=pg.mkPen(255, 210, 0, 230, width=1.5),
+            brush=pg.mkBrush(255, 230, 0, 70),
+        )
+        self._plot.addItem(self._roi_highlight_item, ignoreBounds=True)
         from .roi_overlay import RoiOverlayController
         self._roi_overlay = RoiOverlayController(
             self._state.rois,
@@ -3321,6 +3336,7 @@ class AttributeWindow(QWidget):
             note += f"  |  {self._gpu_fallback_note}"
         self._info.setText(note)
         self._update_colorbar(color_lo, color_hi)
+        self._redraw_roi_highlight()
 
     def open_lut_dialog(self) -> None:
         """Open the shared LUT editor for the fourth (C) dimension."""
@@ -3406,18 +3422,18 @@ class AttributeWindow(QWidget):
         self._draw()
 
     def compute_roi_selection(self, record):
-        if record.type != "rectangle" or self._view_mode == "3D":
+        # Every enclosing shape, not just a box: an oval / polygon / freehand
+        # outline on attribute axes selects rows exactly as it does on spatial
+        # ones, and roi_region_mask is the one dispatcher for all of them.
+        if record.type not in REGION_ROI_TYPES or self._view_mode == "3D":
             return None
         ds = self._dataset()
         if ds is None:
             return None
         # ROI selection maps back onto the materialized (last-iteration, valid)
-        # store. It cannot be mapped when the view shows a different iteration
-        # or includes invalid localizations.
-        itr_sel, render = self._selection()
-        if (itr_sel != "last" or render != "single"
-                or not attr_matches_selection(
-                    ds, itr="last", vld_only=self._valid_chk.isChecked())):
+        # store -- the same condition the highlight checks before painting a
+        # mask, so producing and showing a selection agree.
+        if not self._roi_rows_aligned(ds):
             return None
         x_dimension, y_dimension = self._visible_dimensions()
         x_name = self._dimension_attrs[x_dimension]
@@ -3438,7 +3454,7 @@ class AttributeWindow(QWidget):
             ftr = np.asarray(ds.filter_mask, dtype=bool).ravel()
             if ftr.size == n:
                 base = ftr.copy()
-        mask = rectangle_mask(x[:n], y[:n], record, base_mask=base)
+        mask = roi_region_mask(x[:n], y[:n], record, base_mask=base)
         if mask.size != ds.prop.num_loc:
             full = np.zeros(ds.prop.num_loc, dtype=bool)
             full[:mask.size] = mask
@@ -3452,6 +3468,103 @@ class AttributeWindow(QWidget):
             "filtered_only": self._filter_chk.isChecked(),
         }
         return ds, mask, context
+
+    # ------------------------------------------------------------------
+    # In-ROI data highlight
+    # ------------------------------------------------------------------
+
+    def _roi_rows_aligned(self, ds) -> bool:
+        """Whether the plotted rows ARE the rows a ROI mask is aligned to.
+
+        A ROI mask is one boolean per materialized (last-valid) localization, so
+        it can only be mapped -- produced here, or painted from another view --
+        while this plot shows exactly those rows. Browsing another iteration or
+        including invalid localizations changes which row is which, and a mask
+        applied there would mark the wrong points.
+        """
+        if ds is None or self._view_mode == "3D":
+            return False
+        itr_sel, render = self._selection()
+        return (
+            itr_sel == "last"
+            and render == "single"
+            and attr_matches_selection(
+                ds, itr="last", vld_only=self._valid_chk.isChecked())
+        )
+
+    def _clear_roi_highlight(self) -> None:
+        if self._roi_highlight_item is not None:
+            self._roi_highlight_item.setData([], [])
+
+    def _on_roi_selection_changed(self, idx) -> None:
+        if idx is None or idx == self._dataset_idx:
+            self._redraw_roi_highlight()
+
+    def _redraw_roi_highlight(self) -> None:
+        """Paint the localizations inside the active / Manager-selected ROIs.
+
+        Works in both directions: a rectangle drawn here highlights its rows in
+        render and scatter, and a region drawn in render highlights its rows on
+        these attribute axes -- it is the same per-row mask either way.
+        """
+        from .roi_highlight import (
+            MAX_HIGHLIGHT_POINTS,
+            decimate,
+            highlight_brushes,
+            highlight_masks,
+            owns_active_draft,
+            roi_highlight_enabled,
+        )
+
+        item = self._roi_highlight_item
+        if item is None:
+            return
+        ds = self._dataset()
+        if not self._roi_rows_aligned(ds):
+            self._clear_roi_highlight()
+            return
+        if not roi_highlight_enabled(
+                self._state.prefs, is_source=owns_active_draft(self._roi_overlay)):
+            self._clear_roi_highlight()
+            return
+        x_dimension, y_dimension = self._visible_dimensions()
+        x_name = self._dimension_attrs[x_dimension]
+        y_name = self._dimension_attrs[y_dimension]
+        x = attr_values_1d(ds, x_name) if x_name else None
+        y = attr_values_1d(ds, y_name) if y_name else None
+        if x is None or y is None:
+            self._clear_roi_highlight()
+            return
+        x = np.asarray(x, dtype=float).ravel()
+        y = np.asarray(y, dtype=float).ravel()
+        n = min(x.size, y.size, int(ds.prop.num_loc))
+        if n == 0:
+            self._clear_roi_highlight()
+            return
+        drawable = np.isfinite(x[:n]) & np.isfinite(y[:n])
+        # Filtered only unchecked draws unfiltered rows, so the highlight must
+        # not be narrowed by the filter either -- it would hide highlights on
+        # points that are plainly on screen.
+        pairs = highlight_masks(
+            self._state, ds, apply_filter=self._filter_chk.isChecked())
+        budget = max(1, MAX_HIGHLIGHT_POINTS // max(len(pairs), 1))
+        xs: list[np.ndarray] = []
+        ys: list[np.ndarray] = []
+        brushes: list = []
+        for _record, mask in pairs:
+            visible = mask[:n] & drawable
+            indices = decimate(visible, n, budget)
+            if indices.size:
+                xs.append(x[indices])
+                ys.append(y[indices])
+                brushes.extend(highlight_brushes(self._state.prefs, indices.size))
+        if not xs:
+            self._clear_roi_highlight()
+            return
+        item.setData(
+            x=np.concatenate(xs), y=np.concatenate(ys),
+            brush=brushes, pen=None, size=7,
+        )
 
     # ------------------------------------------------------------------
     # Slots

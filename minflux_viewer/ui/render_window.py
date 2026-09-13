@@ -40,9 +40,10 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QSignalBlocker, Qt, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QRectF, QSignalBlocker, Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtWidgets import (
+    QGridLayout,
     QApplication,
     QCheckBox,
     QDialog,
@@ -73,10 +74,8 @@ from ..colormaps import (
 from ..colors import (
     is_solid_color,
     normalize_rgba,
-    rgba_hex,
     solid_color_names,
     solid_color_rgba,
-    viewer_color,
 )
 from ..core.app_state import AppState
 from ..core.overlay import (
@@ -87,7 +86,7 @@ from ..core.overlay import (
     matrix4_to_xy3,
     transform_key,
 )
-from ..core.roi_selection import active_roi_mask, roi_region_mask
+from ..core.roi_selection import REGION_ROI_TYPES, roi_region_mask
 from ..core.spatial_grid import SpatialGrid
 from .render_config import (
     DIRECT_RENDER_THRESHOLD_NM,
@@ -97,6 +96,15 @@ from .render_config import (
     lod_for_pixel_size,
     render_tile_px,
 )
+from .ortho_view import (
+    ORTHO_AXIS,
+    ORTHO_AXIS_COLUMNS,
+    SIDE_PLANES,
+    OrthoCrosshair,
+    OrthoPanes,
+    ortho_pane_labels,
+)
+from .plot_format import plot_widget
 from .render_scheduler import RenderScheduler
 from .tile_cache import PhysicalTileCache, TileKey
 from .precision_render import (
@@ -114,8 +122,10 @@ from .precision_render import (
 _RENDER_SIZE   = 800     # fallback target image dimension for image-mode render
 _DEBOUNCE_MS   = 25      # delay between view change and re-render
 _COLORMAPS     = list(BUILTIN_COLORMAP_NAMES)
-_ORIENTATIONS  = ["XY", "XZ", "YZ", "3D"]
+_ORIENTATIONS  = ["XY", "XZ", "YZ", "3D", ORTHO_AXIS]
 _RENDER_ORIENTATIONS = {"XY", "XZ", "YZ"}
+#: Settle delay before the ortho side panes are re-projected after a pan/zoom.
+_ORTHO_REDRAW_MS = 110
 _IMAGEJ_AUTO_THRESHOLD = 5000
 _IMAGEJ_AUTO_RESET_THRESHOLD = 10
 _IMAGEJ_AUTO_HIST_BINS = 256
@@ -987,6 +997,7 @@ class RenderWindow(QWidget):
         self._axis_visible: bool = False
         self._grid_visible: bool = False
         self._grid_item = None
+        self._pane_grids: dict[str, object] = {}
         self._sigma_nm_xyz: tuple[float, float, float] = tuple(
             getattr(self, "_sigma_nm_xyz", (5.0, 5.0, 5.0))
         )
@@ -1033,6 +1044,16 @@ class RenderWindow(QWidget):
         self._roi_overlay = None
         self._roi_highlight_item = None
         self._volume_window = None
+        self._ortho_redrawing = False
+        self._ortho_crosshair = None
+        self._show_crosshair = False
+        # The render view has one arrangement: the side panes in their own
+        # windows. (OrthoPanes still supports the embedded grid -- the scatter
+        # view uses it.)
+        self._ortho_placement_pref = "floating"
+        self._ortho_sticky = True
+        self._raising_group = False
+        self._last_ortho_range = None
 
         self.setWindowTitle("Render")
         self.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
@@ -1046,6 +1067,11 @@ class RenderWindow(QWidget):
         self._redraw_timer.setSingleShot(True)
         self._redraw_timer.setInterval(_DEBOUNCE_MS)
         self._redraw_timer.timeout.connect(self._render)
+
+        self._ortho_timer = QTimer(self)
+        self._ortho_timer.setSingleShot(True)
+        self._ortho_timer.setInterval(_ORTHO_REDRAW_MS)
+        self._ortho_timer.timeout.connect(self._render_ortho_sides)
 
         self._build_ui()
         self._info_shortcut = QShortcut(QKeySequence("I"), self)
@@ -1127,7 +1153,18 @@ class RenderWindow(QWidget):
         self._set_axes_visible(False)
         self._set_grid_visible(False)
 
-        root.addWidget(self._image_view, stretch=1)
+        # The image view becomes the primary pane of the ortho grid, with the
+        # side panes hidden until the mode is picked. It is never reparented
+        # out of its cell, so everything keyed to it -- the ROI controller, B&C,
+        # the volume window, TIFF export, the LUT dialog -- is untouched.
+        self._plot_page = QWidget()
+        page_grid = QGridLayout(self._plot_page)
+        page_grid.setContentsMargins(0, 0, 0, 0)
+        page_grid.setSpacing(0)
+        page_grid.addWidget(self._image_view, 0, 0)
+        page_grid.setRowStretch(0, 1)
+        page_grid.setColumnStretch(0, 1)
+        root.addWidget(self._plot_page, stretch=1)
         self._roi_highlight_item = pg.ScatterPlotItem(
             size=7,
             pen=pg.mkPen(255, 210, 0, 235, width=1.6),
@@ -1193,6 +1230,782 @@ class RenderWindow(QWidget):
         root.addWidget(self._info_label)
 
     # ------------------------------------------------------------------
+    # Orthogonal panes
+    # ------------------------------------------------------------------
+
+    def _ensure_ortho_panes(self) -> bool:
+        """Build the side panes and their wiring on first use.
+
+        Lazy on purpose: the two extra PlotWidgets, their scene/range
+        connections and their teardown are pure cost for a render window that
+        never enters the mode, and adding them unconditionally measurably
+        destabilised Qt teardown elsewhere (the lifecycle suite went from 6/6
+        clean to 4/6 with them always built).
+        """
+        if getattr(self, "_ortho", None) is not None:
+            return True
+        self._build_ortho_panes()
+        return True
+
+    def _build_ortho_panes(self) -> None:
+        """Build the 2x2 pane grid: the image view plus two side projections.
+
+        The side panes are plain ``PlotWidget`` + ``ImageItem`` rather than
+        further ``RenderWindow``s. Three render windows for one dataset would
+        each bring their own 512-tile cache, 4 worker threads, ROI controller
+        and volume window, and would break the one-window-per-dataset invariant
+        that 32 call sites in ``main_window`` rely on.  The side panes only need
+        the already selected localization rows and the concrete viewer's scalar
+        reconstruction hook; they do not need another complete viewer pipeline.
+        """
+        self._pane_widgets: dict[str, QWidget] = {"XY": self._image_view}
+        self._pane_images: dict[str, object] = {}
+        self._pane_grids = {}
+        # Kept so closeEvent can disconnect exactly what was connected.
+        self._ortho_click_handlers: list = []
+        self._ortho_range_sources: list = []
+
+        for plane in SIDE_PLANES:
+            plot = plot_widget(background="k")
+            plot.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            plot.customContextMenuRequested.connect(self._show_context_menu)
+            plot.getPlotItem().getViewBox().setMenuEnabled(False)
+            image = pg.ImageItem()
+            image.setZValue(-10)
+            plot.addItem(image)
+            grid = pg.GridItem(textPen=None)
+            grid.setZValue(-5)
+            plot.addItem(grid, ignoreBounds=True)
+            self._pane_widgets[plane] = plot
+            self._pane_images[plane] = image
+            self._pane_grids[plane] = grid
+
+        self._ortho = OrthoPanes(
+            self._plot_page, self._pane_widgets, parent=self,
+            on_pane_closed=self._on_ortho_pane_closed,
+            on_activated=self.raise_ortho_group,
+            on_side_range_changed=self._on_ortho_side_range_changed,
+            interactive_sides=True,
+        )
+        self._update_grid_pen()
+        self._set_grid_visible(self._grid_visible)
+        self._ortho.set_placement(self._ortho_placement_pref)
+        self._ortho.set_sticky(self._ortho_sticky)
+        self._ortho_crosshair = OrthoCrosshair(self._pane_widgets)
+        self._ortho.set_active(False)
+        self._apply_ortho_page_background()
+
+        # The crosshair is placed by clicking any pane; the scene signal is used
+        # rather than a ViewBox override so ROI drawing keeps its own handlers.
+        for plane, widget in self._pane_widgets.items():
+            item = self._ortho_plot_item(widget)
+            if item is None:
+                continue
+            try:
+                handler = (lambda ev, p=plane: self._on_ortho_click(p, ev))
+                item.scene().sigMouseClicked.connect(handler)
+                self._ortho_click_handlers.append((item, handler))
+            except Exception:
+                pass
+            try:
+                item.vb.sigRangeChanged.connect(self._on_ortho_view_changed)
+                item.vb.sigResized.connect(self._on_ortho_view_changed)
+                self._ortho_range_sources.append(item.vb)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _ortho_plot_item(widget):
+        from .ortho_view import plot_item_of
+        return plot_item_of(widget)
+
+    def _apply_ortho_page_background(self) -> None:
+        """Paint the page so the empty bottom-right cell and the gaps between
+        panes read as part of the render rather than as a hole.
+
+        A palette, not a stylesheet: a stylesheet cascades to every descendant,
+        including the ROI controller's context menu, which is parented to the
+        view widget.
+        """
+        page = getattr(self, "_plot_page", None)
+        if page is None or getattr(self, "_ortho", None) is None:
+            return
+        color = QColor(255, 255, 255) if self._white_bg else QColor(0, 0, 0)
+        palette = page.palette()
+        palette.setColor(page.backgroundRole(), color)
+        page.setAutoFillBackground(True)
+        page.setPalette(palette)
+        for plane in SIDE_PLANES:
+            widget = self._pane_widgets.get(plane)
+            if widget is not None:
+                widget.setBackground("w" if self._white_bg else "k")
+
+    #: Which XYZ axes each projection has on screen, as
+    #: ``plane -> (horizontal, vertical, out-of-plane)``.
+    _PLANE_AXES = {"XY": (0, 1, 2), "XZ": (0, 2, 1), "YZ": (1, 2, 0)}
+
+    def _capture_axis_ranges(self) -> dict[int, tuple[float, float]]:
+        """The X/Y/Z ranges the current projection is showing.
+
+        The two in-plane axes come from the view, the third from the depth
+        slider (or the data extent when it is off), so switching projection can
+        carry the whole 3-D region the user was looking at rather than only the
+        part that happens to survive.
+        """
+        plane = self._active_plane()
+        axes = self._PLANE_AXES.get(plane)
+        if axes is None:
+            return {}
+        try:
+            (h0, h1), (v0, v1) = self._view_box.viewRange()
+        except Exception:
+            return {}
+        horizontal, vertical, depth = axes
+        ranges = {horizontal: (float(h0), float(h1)),
+                  vertical: (float(v0), float(v1))}
+        if self._has_depth and not self._all_depth_check.isChecked():
+            ranges[depth] = tuple(float(v) for v in self._depth_range)
+        elif self._bounds_depth[1] > self._bounds_depth[0]:
+            ranges[depth] = tuple(float(v) for v in self._bounds_depth)
+        return ranges
+
+    def _apply_axis_ranges(
+        self,
+        ranges: dict[int, tuple[float, float]],
+        *,
+        source_plane: str = "XY",
+    ) -> None:
+        """Restore captured X/Y/Z onto the ortho panes.
+
+        The XY pane is aspect locked, so an XZ/YZ source contributes one
+        authoritative in-plane range and only the *centre* of its old depth
+        gate for the other XY axis.  Asking PyQtGraph to preserve both spans
+        makes it expand the authoritative range to satisfy the aspect ratio;
+        entering Ortho from XZ then jumped from a 1,200 nm X span to 2,752 nm.
+        """
+        if not ranges:
+            return
+        x = ranges.get(0)
+        y = ranges.get(1)
+        if x and y:
+            try:
+                if source_plane == "XZ":
+                    current_x, current_y = self._view_box.viewRange()
+                    view_ratio = max(
+                        (current_x[1] - current_x[0])
+                        / max(current_y[1] - current_y[0], 1.0e-12),
+                        1.0e-12,
+                    )
+                    y_half = 0.5 * (x[1] - x[0]) / view_ratio
+                    y_centre = 0.5 * sum(y)
+                    self._view_box.setRange(
+                        xRange=x,
+                        yRange=(y_centre - y_half, y_centre + y_half),
+                        padding=0,
+                    )
+                elif source_plane == "YZ":
+                    current_x, current_y = self._view_box.viewRange()
+                    view_ratio = max(
+                        (current_x[1] - current_x[0])
+                        / max(current_y[1] - current_y[0], 1.0e-12),
+                        1.0e-12,
+                    )
+                    x_half = 0.5 * (y[1] - y[0]) * view_ratio
+                    x_centre = 0.5 * sum(x)
+                    self._view_box.setRange(
+                        xRange=(x_centre - x_half, x_centre + x_half),
+                        yRange=y,
+                        padding=0,
+                    )
+                else:
+                    self._view_box.setRange(xRange=x, yRange=y, padding=0)
+            except Exception:
+                pass
+        z = ranges.get(2)
+        if z and self._ortho_built():
+            self._ortho.apply_depth_range(*z)
+
+    def _ortho_placement(self) -> str:
+        ortho = getattr(self, "_ortho", None)
+        return ortho.placement if ortho is not None else self._ortho_placement_pref
+
+    def _on_ortho_pane_closed(self, _plane: str) -> None:
+        """A side window was closed: leave the mode and go back to plain XY.
+
+        Fiji's Orthogonal_Views behaves the same way -- closing one of the
+        extra views ends the arrangement rather than leaving a partial one.
+        XY is the render view's default, and the one the primary pane is
+        already showing.
+        """
+        QTimer.singleShot(0, lambda: self._set_orientation("XY"))
+
+    def _set_ortho_placement(self, placement: str) -> None:
+        """Move the side panes between this window and their own windows."""
+        self._ortho_placement_pref = placement
+        if not self._ortho_built():
+            return
+        self._ortho.set_placement(placement)
+        self._set_side_axes_visible(self._axis_visible)
+        self._apply_ortho_labels()
+        self._render_ortho_sides()
+        if self._ortho_crosshair is not None:
+            self._ortho_crosshair.refresh()
+
+    def _set_ortho_sticky(self, checked: bool) -> None:
+        self._ortho_sticky = bool(checked)
+        if self._ortho_built():
+            self._ortho.set_sticky(self._ortho_sticky)
+
+    def raise_ortho_group(self) -> None:
+        """Bring the render window and its floating panes to the front together.
+
+        Three windows that belong to one view should never be separated by
+        another window landing between them; the primary is raised last so it
+        keeps focus.
+        """
+        if not (self._ortho_active() and self._ortho_built()):
+            return
+        if getattr(self, "_raising_group", False):
+            return
+        self._raising_group = True
+        try:
+            for host in self._ortho.hosts():
+                try:
+                    host.raise_()
+                except Exception:
+                    pass
+            self.raise_()
+        finally:
+            self._raising_group = False
+
+    def _ortho_built(self) -> bool:
+        return getattr(self, "_ortho", None) is not None
+
+    def _apply_ortho_labels(self) -> None:
+        """Name each shared axis once: X under the XZ pane, Y beside XY.
+
+        Only while the axes are shown -- the render view hides them by default,
+        and setting a label on a hidden axis would make it appear.
+        """
+        if not self._axis_visible or not self._ortho_built():
+            return
+        for plane, widget in self._pane_widgets.items():
+            item = self._ortho_plot_item(widget)
+            if item is None:
+                continue
+            bottom, left = ortho_pane_labels(plane)
+            item.setLabel("bottom", bottom)
+            item.setLabel("left", left)
+
+    def _ortho_active(self) -> bool:
+        return self._orientation == ORTHO_AXIS
+
+    def _active_plane(self) -> str:
+        """The plane the *interactive* pane shows.
+
+        In ortho the primary pane is XY and is the only one that takes ROI
+        drawing, a scale bar or manual alignment, so every consumer of "which
+        projection is this" resolves ``Ortho`` to ``XY``.
+        """
+        return "XY" if self._orientation == ORTHO_AXIS else self._orientation
+
+    def _ortho_available(self) -> bool:
+        """Offered only for 3-D localization data — two of the three panes
+        would otherwise be an empty line."""
+        if self._render_mode != "localizations" or self._idx is None:
+            return False
+        if not (0 <= self._idx < len(self._state.datasets)):
+            return False
+        return getattr(self._state.datasets[self._idx].prop, "num_dim", 2) == 3
+
+    def _sync_depth_row(self) -> None:
+        """The depth slider is meaningless in ortho, so it is hidden there.
+
+        Each pane is a projection over the axis it does not show, and zoom now
+        sets how much of that axis is in view -- a slab control for one of the
+        three would only disagree with the other two. Entering the mode forces
+        "All" so no gate survives invisibly.
+        """
+        ortho = self._ortho_active()
+        if ortho and not self._all_depth_check.isChecked():
+            self._all_depth_check.setChecked(True)
+        dataset_is_3d = (
+            self._idx is not None
+            and 0 <= self._idx < len(self._state.datasets)
+            and self._state.datasets[self._idx].prop.num_dim == 3
+        )
+        self._depth_row.setVisible(dataset_is_3d and not ortho)
+
+    def _set_ortho_active(self, active: bool) -> None:
+        if active:
+            self._ensure_ortho_panes()
+            if self._ortho_crosshair is not None and not self._show_crosshair:
+                self._show_crosshair = True
+            # The panes did not exist when the direction was last applied.
+            self._apply_y_axis_direction()
+        elif getattr(self, "_ortho", None) is None:
+            self._sync_depth_row()
+            return          # never entered the mode; nothing to take down
+        self._sync_depth_row()
+        self._ortho.set_active(active)
+        if active:
+            self._apply_ortho_page_background()
+            self._set_side_axes_visible(self._axis_visible)
+            self._apply_ortho_labels()
+        else:
+            self._cancel_ortho_render_work()
+            for image in self._pane_images.values():
+                image.clear()
+        if self._ortho_crosshair is not None:
+            self._ortho_crosshair.set_visible(active and self._show_crosshair)
+
+    # -- side-pane projection -------------------------------------------
+
+    def _ortho_viewport_indices(self, ds_idx: int):
+        """Row indices of one channel inside the XY viewport.
+
+        The channel grid is built on ``(x, y)`` for the XY orientation, so this
+        one index answers both side panes: an XZ projection wants the locs whose
+        X *and* Y are on screen, which is exactly the XY viewport query. No
+        per-orientation grid is needed.
+        """
+        xyz = self._channel_locs_xyz.get(ds_idx)
+        grid = self._channel_grids.get(ds_idx)
+        if xyz is None or grid is None or len(xyz[0]) == 0:
+            return None, None
+        (x0, x1), (y0, y1) = self._view_box.viewRange()
+        xnm, ynm, znm = xyz
+        indices = grid.query(x0, x1, y0, y1)
+        if len(indices) == 0:
+            return xyz, np.empty(0, dtype=np.int64)
+        xv, yv = xnm[indices], ynm[indices]
+        keep = (xv >= x0) & (xv <= x1) & (yv >= y0) & (yv <= y1)
+        return xyz, indices[keep]
+
+    def _on_ortho_view_changed(self, *_args) -> None:
+        """Re-project the side panes once the view settles.
+
+        Debounced because the projection depends on the XY viewport, which
+        changes on every step of a drag.
+        """
+        if not self._ortho_active() or self._ortho_redrawing:
+            return
+        self._cancel_ortho_render_work()
+        self._ortho_timer.start()
+
+    def _cancel_ortho_render_work(self) -> None:
+        """Cancel an in-flight concrete side renderer, if it has one."""
+
+    def _on_ortho_side_range_changed(
+        self, _plane: str, z_range: tuple[float, float]
+    ) -> None:
+        """Make an explicit side-pane move the new semantic Z anchor.
+
+        Side interaction previously propagated its visible range correctly,
+        but the next render immediately restored the old crosshair depth.  The
+        crosshair is the durable 3-D location, so update its Z coordinate at
+        the controller boundary before the debounced render runs.
+        """
+        if not (self._ortho_active() and self._ortho_built()):
+            return
+        z0, z1 = sorted(float(value) for value in z_range)
+        z_centre = 0.5 * (z0 + z1)
+        if not np.isfinite(z_centre):
+            return
+        crosshair = getattr(self, "_ortho_crosshair", None)
+        if crosshair is not None:
+            point = crosshair.point
+            if point is None:
+                try:
+                    (x0, x1), (y0, y1) = self._view_box.viewRange()
+                    point = (0.5 * (x0 + x1), 0.5 * (y0 + y1), z_centre)
+                except Exception:
+                    point = (0.0, 0.0, z_centre)
+            crosshair.set_point((float(point[0]), float(point[1]), z_centre))
+        self._ortho.set_depth_centre(z_centre)
+        # The primary range change already schedules a render, which refreshes
+        # the info line. Changing this QLabel inline relayouts the plot grid
+        # mid-gesture; its resize handler then reapplies the pre-gesture range
+        # and effectively undoes the side pan.
+        self._update_crosshair_label()
+
+    def _render_ortho_sides(self) -> None:
+        """Draw both side panes: a projection of the locs inside the XY viewport."""
+        if not (self._ortho_active() and self._ortho_built()):
+            return
+        if self._render_mode != "localizations":
+            return
+        self._ortho_redrawing = True
+        try:
+            self._render_ortho_sides_now()
+        finally:
+            self._ortho_redrawing = False
+
+    def _render_ortho_sides_now(self) -> None:
+        channels = [
+            ch for ch in self._channels
+            if ch.get("visible") and ch.get("kind") == "localizations"
+        ]
+        picked: list[tuple[dict, tuple, np.ndarray]] = []
+        z_lo, z_hi = None, None
+        depth_range = None
+        if self._has_depth and not self._all_depth_check.isChecked():
+            depth_range = self._depth_range
+        for ch in channels:
+            xyz, indices = self._ortho_viewport_indices(ch["dataset_idx"])
+            if xyz is None or indices is None or indices.size == 0:
+                continue
+            if depth_range is not None:
+                z = xyz[2][indices]
+                indices = indices[(z >= depth_range[0]) & (z <= depth_range[1])]
+                if indices.size == 0:
+                    continue
+            picked.append((ch, xyz, indices))
+            z = xyz[2][indices]
+            z = z[np.isfinite(z)]
+            if z.size:
+                lo, hi = float(z.min()), float(z.max())
+                z_lo = lo if z_lo is None else min(z_lo, lo)
+                z_hi = hi if z_hi is None else max(z_hi, hi)
+
+        # Anchor Z on the marker *before* the depth range is applied, then
+        # re-centre the marker *after* the panes have settled: the ranges move
+        # while they render, and a marker placed first ends up a few nm behind
+        # the view it is supposed to sit in the middle of.
+        self._anchor_depth_on_crosshair()
+        if z_lo is not None:
+            self._ortho.apply_depth_range(z_lo, z_hi)
+
+        self._render_ortho_panes(picked)
+        self._centre_crosshair_on_view()
+        if self._ortho_crosshair is not None:
+            self._ortho_crosshair.refresh()
+
+    def _render_ortho_panes(self, picked) -> None:
+        """Render both projections; advanced viewers may dispatch this async."""
+        for plane in SIDE_PLANES:
+            self._render_ortho_pane(plane, picked)
+
+    def _ortho_pane_geometry(self, plane: str):
+        """Return the current side raster geometry, or ``None`` if invalid."""
+        image = self._pane_images.get(plane)
+        view_box = self._ortho.view_box(plane)
+        if image is None or view_box is None:
+            return None
+        (h0, h1), (v0, v1) = view_box.viewRange()
+        if h1 <= h0 or v1 <= v0:
+            return None
+        # ⚠ The pane's OWN viewport resolution, by the same rule the primary
+        # uses (`max(span) / _RENDER_SIZE`) -- not the primary's last value.
+        px_nm = max(h1 - h0, v1 - v0) / float(_RENDER_SIZE)
+        if px_nm <= 0.0:
+            return None
+        n_h = min(max(int(round((h1 - h0) / px_nm)), 1), self._MAX_CANVAS_PX)
+        n_v = min(max(int(round((v1 - v0) / px_nm)), 1), self._MAX_CANVAS_PX)
+        sigma_vh = self._sigma_for_plane(plane, px_nm)
+        return image, (h0, h1), (v0, v1), px_nm, sigma_vh, n_h, n_v
+
+    def _render_ortho_pane(self, plane: str, picked) -> None:
+        geometry = self._ortho_pane_geometry(plane)
+        if geometry is None:
+            return
+        image, h_range, v_range, px_nm, sigma_vh, n_h, n_v = geometry
+        h0, h1 = h_range
+        v0, v1 = v_range
+
+        tiles = []
+        for ch, xyz, indices in picked:
+            tiles.append(self._render_ortho_channel_scalar(
+                ch,
+                xyz,
+                indices,
+                plane,
+                (h0, h1),
+                (v0, v1),
+                px_nm,
+                sigma_vh,
+                n_h,
+                n_v,
+            ))
+        if not tiles:
+            image.clear()
+            return
+        visible = [ch for ch, _x, _i in picked]
+        self._set_ortho_pane_tiles(plane, tiles, visible, h_range, v_range)
+
+    def _set_ortho_pane_tiles(
+        self,
+        plane: str,
+        tiles: list[np.ndarray],
+        visible: list[dict],
+        h_range: tuple[float, float],
+        v_range: tuple[float, float],
+    ) -> None:
+        """Composite completed scalar channels into one side ImageItem."""
+        image = self._pane_images.get(plane)
+        if image is None:
+            return
+        if not tiles:
+            image.clear()
+            return
+        # Composed by the same function as the XY pane, so a channel's colour,
+        # levels, LUT, inversion and the white/black background model are
+        # shared rather than reimplemented.
+        scalar = np.stack(tiles, axis=0).astype(np.float32, copy=False)
+        rgba = self._compose_rgba_for(scalar, visible, auto=self._auto_bc)
+        # ⚠ Explicit levels: pyqtgraph refuses float input to a bare ImageItem
+        # without them ("levels argument is required for float input types").
+        # The XY pane does not hit this because pg.ImageView supplies its own.
+        image.setImage(rgba, levels=(0.0, 1.0), autoLevels=False)
+        h0, h1 = h_range
+        v0, v1 = v_range
+        image.setRect(QRectF(h0, v0, h1 - h0, v1 - v0))
+
+    def _render_ortho_channel_scalar(
+        self,
+        ch: dict,
+        xyz: tuple[np.ndarray, np.ndarray, np.ndarray],
+        indices: np.ndarray,
+        plane: str,
+        h_range: tuple[float, float],
+        v_range: tuple[float, float],
+        px_nm: float,
+        sigma_vh_nm: tuple[float, float],
+        n_h: int,
+        n_v: int,
+    ) -> np.ndarray:
+        """Render one side-pane channel with this viewer's reconstruction.
+
+        ``PrecisionRenderWindow`` replaces this hook with its selectable
+        scientific renderer.  Keeping the dispatch here is important: calling
+        the base ``render_scalar`` directly made every advanced side pane use
+        the production smoothed reconstruction, regardless of the method used
+        by the primary XY pane.
+        """
+        del ch
+        horizontal, vertical = ORTHO_AXIS_COLUMNS[plane]
+        return self.render_scalar(
+            xyz[horizontal][indices],
+            xyz[vertical][indices],
+            h_range,
+            v_range,
+            px_nm,
+            sigma_vh_nm,
+            n_h,
+            n_v,
+        )
+
+    def _compose_rgba_for(
+        self, scalar: np.ndarray, channels: list[dict], *, auto: bool = False,
+    ) -> np.ndarray:
+        """``_compose_rgba`` against an explicit channel list.
+
+        The side panes skip image channels (a TIFF plane has no Z to project),
+        so their scalar stack is not index-aligned with ``self._channels`` and
+        the shared composer has to be told which channels these planes are.
+
+        ``auto`` links the primary pane's black/white clipping percentiles to
+        each projection.  Raw count limits cannot be copied safely: a side
+        pane collapses a different axis and therefore has a different number
+        of localizations per bin.  Percentile transfer preserves the same
+        exposure policy without turning a projection flat white. Levels the
+        user set by hand remain exact numeric limits in all three panes.
+        """
+        saved_channels = self._channels
+        saved_manual = self._manual_levels
+        try:
+            if auto:
+                channels = [
+                    dict(
+                        ch,
+                        levels=self._linked_ortho_auto_levels(scalar[index], ch),
+                    )
+                    for index, ch in enumerate(channels)
+                ]
+                # Each copied channel now carries its projection-specific
+                # levels. Do not let the single-channel fallback replace them
+                # with the primary pane's raw scalar limits.
+                self._manual_levels = None
+            self._channels = channels
+            return self._compose_rgba(scalar)
+        finally:
+            self._channels = saved_channels
+            self._manual_levels = saved_manual
+
+    def _linked_ortho_auto_levels(
+        self, side_tile: np.ndarray, channel: dict
+    ) -> tuple[float, float] | None:
+        """Transfer one XY channel's clipping percentiles to a side raster."""
+        primary = self._last_scalar_tile
+        if primary is None:
+            return self._compute_render_auto_levels(side_tile)
+        try:
+            primary_index = next(
+                index
+                for index, item in enumerate(self._channels)
+                if item.get("dataset_idx") == channel.get("dataset_idx")
+            )
+        except StopIteration:
+            return self._compute_render_auto_levels(side_tile)
+        if not (0 <= primary_index < primary.shape[0]):
+            return self._compute_render_auto_levels(side_tile)
+
+        primary_tile = np.asarray(primary[primary_index], dtype=np.float64)
+        primary_values = primary_tile[
+            np.isfinite(primary_tile) & (primary_tile > 0.0)
+        ]
+        side_values = np.asarray(side_tile, dtype=np.float64)
+        side_values = side_values[np.isfinite(side_values) & (side_values > 0.0)]
+        if primary_values.size == 0 or side_values.size == 0:
+            return self._compute_render_auto_levels(side_tile)
+
+        levels = channel.get("levels")
+        if levels is None:
+            levels = (
+                self._manual_levels
+                if len(self._channels) == 1 and self._manual_levels is not None
+                else self._compute_render_auto_levels(primary_tile)
+            )
+        if levels is None:
+            return self._compute_render_auto_levels(side_tile)
+        lo, hi = (float(levels[0]), float(levels[1]))
+        black_pct = float(np.mean(primary_values < lo) * 100.0)
+        white_pct = float(np.mean(primary_values < hi) * 100.0)
+        if white_pct <= black_pct:
+            white_pct = min(black_pct + 1.0, 100.0)
+        side_lo, side_hi = np.percentile(
+            side_values,
+            (np.clip(black_pct, 0.0, 100.0), np.clip(white_pct, 0.0, 100.0)),
+        )
+        if not np.isfinite(side_lo) or not np.isfinite(side_hi):
+            return self._compute_render_auto_levels(side_tile)
+        if side_hi <= side_lo:
+            side_hi = side_lo + max(abs(float(side_lo)) * 1e-6, 1e-6)
+        return float(side_lo), float(side_hi)
+
+    # -- crosshair -------------------------------------------------------
+
+    def ortho_info_suffix(self) -> str:
+        """The 3-D point the ortho panes are centred on, for the status line.
+
+        The crosshair when there is one, else the single 3-D centre of the
+        three views -- which is one coordinate, not three, because the panes
+        share their axes pairwise.
+        """
+        if not self._ortho_active():
+            return ""
+        point = None
+        crosshair = getattr(self, "_ortho_crosshair", None)
+        if crosshair is not None and crosshair.visible and crosshair.point is not None:
+            point = crosshair.point
+            label = "crosshair"
+        else:
+            try:
+                (x0, x1), (y0, y1) = self._view_box.viewRange()
+            except Exception:
+                return ""
+            z = self._ortho.depth_centre if self._ortho_built() else None
+            if z is None:
+                z = 0.5 * sum(self._bounds_depth)
+            point = (0.5 * (x0 + x1), 0.5 * (y0 + y1), float(z))
+            label = "centre"
+        suffix = (f"  |  {label} X={point[0]:,.1f}  Y={point[1]:,.1f}  "
+                  f"Z={point[2]:,.1f} nm")
+        if self._ortho_built() and self._ortho.depth_clipped:
+            suffix += "  |  Z clipped"
+        return suffix
+
+    def _anchor_depth_on_crosshair(self) -> None:
+        """Point the side panes' Z at the marker before their range is set."""
+        crosshair = getattr(self, "_ortho_crosshair", None)
+        if crosshair is None or not self._ortho_active():
+            return
+        point = crosshair.point
+        self._ortho.set_depth_centre(point[2] if point is not None else None)
+
+    def _centre_crosshair_on_view(self) -> None:
+        """Place the marker at the view centre **only if it has none yet**.
+
+        ⚠ It is never moved afterwards. ImageJ's ``Orthogonal_Views`` assigns
+        ``crossLoc`` in exactly four places -- ``run()`` (initial),
+        ``mouseDragged``, ``mouseWheelMoved``, ``keyPressed`` and the
+        ``setCrossLoc`` setter -- and nothing repositions it on zoom, pan,
+        scroll, magnification change or resize. A marker that re-centres itself
+        is not a marker; it is a readout of the view, and the view already
+        shows that.
+        """
+        crosshair = getattr(self, "_ortho_crosshair", None)
+        if crosshair is None or not self._ortho_active():
+            return
+        if crosshair.point is not None:
+            return
+        try:
+            (x0, x1), (y0, y1) = self._view_box.viewRange()
+        except Exception:
+            return
+        crosshair.set_point((0.5 * (x0 + x1), 0.5 * (y0 + y1),
+                             0.5 * sum(self._bounds_depth)))
+
+    def _on_ortho_click(self, plane: str, event) -> None:
+        """Place the crosshair, unless a ROI tool has claimed the click."""
+        if not (self._ortho_active() and self._show_crosshair):
+            return
+        if getattr(self, "_ortho_crosshair", None) is None:
+            return
+        try:
+            if event.button() != Qt.MouseButton.LeftButton:
+                return
+            if getattr(self._state.rois, "active_tool", None) is not None:
+                return          # drawing a ROI wins
+            view_box = self._ortho.view_box(plane)
+            point = view_box.mapSceneToView(event.scenePos())
+        except Exception:
+            return
+        self._ortho_crosshair.update_from_pane(plane, float(point.x()), float(point.y()))
+        marker = self._ortho_crosshair.point
+        if marker is not None:
+            # A click is how Z is chosen, so the side panes re-anchor on it.
+            self._ortho.set_depth_centre(marker[2])
+            self._render_ortho_sides()
+        self._refresh_ortho_info()
+        self._update_crosshair_label()
+
+    def _refresh_ortho_info(self) -> None:
+        """Re-stamp the coordinate on the existing status line."""
+        if not self._ortho_active():
+            return
+        text = self._info_label.text()
+        for marker in ("  |  crosshair X=", "  |  centre X="):
+            if marker in text:
+                text = text[:text.index(marker)]
+                break
+        self._info_label.setText(text + self.ortho_info_suffix())
+
+    def _set_crosshair_visible(self, checked: bool) -> None:
+        self._show_crosshair = bool(checked)
+        if getattr(self, "_ortho_crosshair", None) is None:
+            return
+        if self._show_crosshair and self._ortho_crosshair.point is None:
+            # Start at the centre of the current view, at the middle of the
+            # depth range, so it is somewhere meaningful rather than at 0.
+            (x0, x1), (y0, y1) = self._view_box.viewRange()
+            z0, z1 = self._bounds_depth
+            self._ortho_crosshair.set_point(
+                (0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1)))
+        self._ortho_crosshair.set_visible(self._ortho_active() and self._show_crosshair)
+        self._refresh_ortho_info()
+        self._update_crosshair_label()
+
+    def _update_crosshair_label(self) -> None:
+        if not (self._ortho_active() and self._show_crosshair):
+            return
+        point = self._ortho_crosshair.point if self._ortho_crosshair else None
+        if point is None:
+            return
+        self._state.status_message.emit(
+            f"Crosshair  X={point[0]:,.0f}  Y={point[1]:,.0f}  Z={point[2]:,.0f} nm")
+
+    # ------------------------------------------------------------------
     # Dataset binding
     # ------------------------------------------------------------------
 
@@ -1226,6 +2039,10 @@ class RenderWindow(QWidget):
 
         self._render_mode = "localizations"
         self._image_data = None
+        if self._ortho_active() and not self._ortho_available():
+            # A 2-D dataset (or an image) has nothing for the side panes.
+            self._orientation = "XY"
+            self._set_ortho_active(False)
         self._locs_nm = self._channel_locs(self._channels[0]) if self._channels else np.empty((0, 3))
 
         if self._locs_nm.shape[0] == 0:
@@ -1489,7 +2306,7 @@ class RenderWindow(QWidget):
         self._state.notify_overlay_transform_changed(ds_idx)
 
     def _manual_transform_matrix(self, transform: dict) -> np.ndarray:
-        return manual_alignment_matrix4(transform, self._orientation)
+        return manual_alignment_matrix4(transform, self._active_plane())
 
     def _transform_matrix4(self, transform: dict | None) -> np.ndarray:
         if isinstance(transform, dict):
@@ -1515,7 +2332,7 @@ class RenderWindow(QWidget):
         record["alignment_mode"] = "manual"
         provenance = dict(record.get("provenance") or {})
         provenance["manual_alignment"] = {
-            "orientation": self._orientation,
+            "orientation": self._active_plane(),
             "method": "keyboard/drag translation and keyboard rotation",
         }
         record["provenance"] = provenance
@@ -1659,11 +2476,11 @@ class RenderWindow(QWidget):
         locs = self._dataset_locs(ds)
         if locs.shape[0] == 0:
             return locs
-        if self._orientation == "XY":
+        if self._active_plane() == "XY":
             return locs[:, [0, 1, 2]]
-        if self._orientation == "XZ":
+        if self._active_plane() == "XZ":
             return locs[:, [0, 2, 1]]
-        if self._orientation == "YZ":
+        if self._active_plane() == "YZ":
             return locs[:, [1, 2, 0]]
         return locs
 
@@ -1733,11 +2550,26 @@ class RenderWindow(QWidget):
     def _should_invert_y_axis(self) -> bool:
         if self._render_mode == "image":
             return self._xy_origin_top_left()
-        return self._orientation == "XY" and self._xy_origin_top_left()
+        return self._active_plane() == "XY" and self._xy_origin_top_left()
 
     def _apply_y_axis_direction(self) -> None:
         try:
-            self._view_box.invertY(self._should_invert_y_axis())
+            inverted = self._should_invert_y_axis()
+            self._view_box.invertY(inverted)
+            # ⚠ A shared axis has a DIRECTION as well as a range, and the link
+            # carries only the range. The YZ pane shares XY's vertical Y, so
+            # with XY on a top-left origin (Y down) and YZ left at the default
+            # (Y up) the same point sat 51 px apart vertically — the ranges
+            # agreed exactly the whole time, which is why only looking at the
+            # picture catches it. XZ's vertical is Z, which is nobody else's
+            # axis and stays natural (+Z up), matching the scatter window.
+            if self._ortho_built():
+                yz = self._ortho.view_box("YZ")
+                if yz is not None:
+                    yz.invertY(inverted)
+                xz = self._ortho.view_box("XZ")
+                if xz is not None:
+                    xz.invertY(False)
         except Exception:
             pass
 
@@ -1804,7 +2636,7 @@ class RenderWindow(QWidget):
             return
         self._apply_y_axis_direction()
 
-        o = self._orientation
+        o = self._active_plane()
         if o == "XY":
             xy_idx, depth_idx, depth_name = (0, 1), 2, "Z"
         elif o == "XZ":
@@ -1862,7 +2694,7 @@ class RenderWindow(QWidget):
 
         ds = self._state.datasets[self._idx]
         dataset_is_3d = ds.prop.num_dim == 3
-        self._depth_row.setVisible(dataset_is_3d)
+        self._depth_row.setVisible(dataset_is_3d and not self._ortho_active())
         self._depth_axis_label.setText(f"{depth_name}:")
         self._depth_slider.setEnabled(
             self._has_depth and not self._all_depth_check.isChecked()
@@ -1943,7 +2775,9 @@ class RenderWindow(QWidget):
         self._depth_slider.set_range(*self._bounds_depth)
         self._update_depth_label()
         self._scheduler.cancel()
-        if self._orientation != "XY":
+        # Ortho is a mode, not a projection: resetting the view inside it must
+        # re-fit the panes, not drop back to a single XY view.
+        if self._orientation not in ("XY", ORTHO_AXIS):
             self._set_orientation("XY")
         else:
             self._apply_orientation()
@@ -1956,6 +2790,9 @@ class RenderWindow(QWidget):
 
     def _schedule_render(self) -> None:
         self._redraw_timer.start()
+        if self._ortho_active():
+            self._cancel_ortho_render_work()
+            self._ortho_timer.start()
 
     def _render(self) -> None:
         """Timer callback: dispatch to tiled or direct render based on zoom."""
@@ -2006,7 +2843,7 @@ class RenderWindow(QWidget):
                 tr_key = self._channel_loc_transform_key(ch)
                 depth_key = (round(depth_range_active[0], 1), round(depth_range_active[1], 1)) if depth_range_active else None
                 canvas, missing = self._composite_loc_channel(
-                    ds_idx, mask_ver, self._orientation, tr_key, depth_key,
+                    ds_idx, mask_ver, self._active_plane(), tr_key, depth_key,
                     x0, x1, y0, y1, lod, px_nm,
                 )
                 tiles.append(canvas)
@@ -2074,6 +2911,7 @@ class RenderWindow(QWidget):
         self._info_label.setText(
             f"{self._dataset_dim_label}  |  {n_vis} ch  |  "
             f"LOD {lod}  |  px={px_nm:.1f} nm{suffix}"
+            f"{self.ortho_info_suffix()}"
         )
 
         if self._bc_dialog is not None and self._bc_dialog.isVisible():
@@ -2158,53 +2996,10 @@ class RenderWindow(QWidget):
 
             count = len(xv)
             total_count += count
-
-            if count == 0:
-                canvas = np.zeros((n_bins_y, n_bins_x), dtype=np.float32)
-
-            elif count < PER_LOC_SWITCH_COUNT:
-                # Per-localization Gaussian — accurate at any pixel size
-                canvas = np.zeros((n_bins_y, n_bins_x), dtype=np.float32)
-                sigma_y_px = max(sigma_yx_nm[0] / px_nm, 0.3)
-                sigma_x_px = max(sigma_yx_nm[1] / px_nm, 0.3)
-                r_y = int(np.ceil(3.0 * sigma_y_px))
-                r_x = int(np.ceil(3.0 * sigma_x_px))
-                px_col = (xv - x0) / px_nm
-                px_row = (yv - y0) / px_nm
-                for cx, cy in zip(px_col, px_row):
-                    c0 = int(round(cx)) - r_x
-                    c1 = int(round(cx)) + r_x + 1
-                    r0 = int(round(cy)) - r_y
-                    r1 = int(round(cy)) + r_y + 1
-                    dc0 = max(0, c0);  dc1 = min(n_bins_x, c1)
-                    dr0 = max(0, r0);  dr1 = min(n_bins_y, r1)
-                    if dc1 > dc0 and dr1 > dr0:
-                        kc = np.arange(dc0, dc1, dtype=np.float32) - cx
-                        kr = np.arange(dr0, dr1, dtype=np.float32) - cy
-                        gauss = np.exp(
-                            -0.5 * (
-                                kr[:, None] ** 2 / sigma_y_px ** 2
-                                + kc[None, :] ** 2 / sigma_x_px ** 2
-                            )
-                        )
-                        canvas[dr0:dr1, dc0:dc1] += gauss
-
-            else:
-                # Histogram render at viewport resolution
-                hist, _, _ = np.histogram2d(
-                    yv, xv,
-                    bins=[n_bins_y, n_bins_x],
-                    range=[[y0, y1], [x0, x1]],
-                )
-                sig_y_px = sigma_yx_nm[0] / px_nm
-                sig_x_px = sigma_yx_nm[1] / px_nm
-                if max(sig_y_px, sig_x_px) >= 0.3:
-                    hist = gaussian_filter(
-                        hist.astype(np.float32),
-                        sigma=(max(sig_y_px, 0.3), max(sig_x_px, 0.3)),
-                        mode="constant",
-                    )
-                canvas = hist.astype(np.float32, copy=False)
+            canvas = self.render_scalar(
+                xv, yv, (x0, x1), (y0, y1), px_nm, sigma_yx_nm,
+                n_bins_x, n_bins_y,
+            )
 
             tiles.append(canvas)
 
@@ -2237,11 +3032,80 @@ class RenderWindow(QWidget):
         n_vis = len([c for c in self._channels if c["visible"]])
         self._info_label.setText(
             f"{self._dataset_dim_label}  |  {total_count:,} locs in view  |  {n_vis} ch  |  "
-            f"direct {px_nm:.2f} nm/px"
+            f"direct {px_nm:.2f} nm/px{self.ortho_info_suffix()}"
         )
         if self._bc_dialog is not None and self._bc_dialog.isVisible():
             first = scalar[0] if scalar.size else np.zeros((1, 1))
             self._bc_dialog.set_data(first)
+
+    @staticmethod
+    def render_scalar(
+        h_vals: np.ndarray,
+        v_vals: np.ndarray,
+        h_range: tuple[float, float],
+        v_range: tuple[float, float],
+        px_nm: float,
+        sigma_vh_nm: tuple[float, float],
+        n_h: int,
+        n_v: int,
+    ) -> np.ndarray:
+        """Rasterise one channel's localizations into a scalar image.
+
+        **The one reconstruction in this window**: the XY pane and both ortho
+        side panes call it, so they cannot take different methods. That is not
+        tidiness -- they visibly diverged before, because XY switches to a
+        per-localization Gaussian below ``PER_LOC_SWITCH_COUNT`` while the side
+        panes always histogrammed, so a zoom past 500 visible locs made the
+        primary go smooth and the side panes stay blocky.
+
+        Sparse: a pixel-integrated Gaussian per localization, accurate at any
+        pixel size. Dense: a histogram at the given resolution, blurred by the
+        same sigma. Axes are named ``h``/``v`` rather than x/y because a side
+        pane's are not X and Y.
+        """
+        from scipy.ndimage import gaussian_filter
+
+        h0, h1 = h_range
+        v0, v1 = v_range
+        n_h = max(int(n_h), 1)
+        n_v = max(int(n_v), 1)
+        count = len(h_vals)
+        if count == 0 or px_nm <= 0.0 or h1 <= h0 or v1 <= v0:
+            return np.zeros((n_v, n_h), dtype=np.float32)
+
+        sigma_v_px = max(sigma_vh_nm[0] / px_nm, 0.3)
+        sigma_h_px = max(sigma_vh_nm[1] / px_nm, 0.3)
+
+        if count < PER_LOC_SWITCH_COUNT:
+            canvas = np.zeros((n_v, n_h), dtype=np.float32)
+            r_v = int(np.ceil(3.0 * sigma_v_px))
+            r_h = int(np.ceil(3.0 * sigma_h_px))
+            px_col = (h_vals - h0) / px_nm
+            px_row = (v_vals - v0) / px_nm
+            for ch_, cv in zip(px_col, px_row):
+                c0 = int(round(ch_)) - r_h
+                c1 = int(round(ch_)) + r_h + 1
+                r0 = int(round(cv)) - r_v
+                r1 = int(round(cv)) + r_v + 1
+                dc0 = max(0, c0);  dc1 = min(n_h, c1)
+                dr0 = max(0, r0);  dr1 = min(n_v, r1)
+                if dc1 > dc0 and dr1 > dr0:
+                    kc = np.arange(dc0, dc1, dtype=np.float32) - ch_
+                    kr = np.arange(dr0, dr1, dtype=np.float32) - cv
+                    canvas[dr0:dr1, dc0:dc1] += np.exp(
+                        -0.5 * (kr[:, None] ** 2 / sigma_v_px ** 2
+                                + kc[None, :] ** 2 / sigma_h_px ** 2)
+                    )
+            return canvas
+
+        hist, _, _ = np.histogram2d(
+            v_vals, h_vals, bins=[n_v, n_h], range=[[v0, v1], [h0, h1]],
+        )
+        hist = hist.astype(np.float32, copy=False)
+        if max(sigma_v_px, sigma_h_px) >= 0.3:
+            hist = gaussian_filter(hist, sigma=(sigma_v_px, sigma_h_px),
+                                   mode="constant")
+        return hist
 
     # Maximum canvas edge in pixels — prevents OOM when zoom limits are
     # bypassed mid-scroll before pyqtgraph can enforce them.
@@ -2339,7 +3203,7 @@ class RenderWindow(QWidget):
 
         # Re-composite only if the tile is still relevant
         if (
-            key.orientation == self._orientation
+            key.orientation == self._active_plane()
             and key.mask_version == self._mask_versions.get(key.dataset_id, 0)
             and self._last_tile_geometry is not None
         ):
@@ -2370,7 +3234,7 @@ class RenderWindow(QWidget):
                 tr_key = self._channel_loc_transform_key(ch)
                 depth_key = (round(depth_range_active[0], 1), round(depth_range_active[1], 1)) if depth_range_active else None
                 canvas, _ = self._composite_loc_channel(
-                    ds_idx, mask_ver, self._orientation, tr_key, depth_key,
+                    ds_idx, mask_ver, self._active_plane(), tr_key, depth_key,
                     x0, x1, y0, y1, lod, px_nm,
                 )
             tiles.append(canvas)
@@ -2456,7 +3320,7 @@ class RenderWindow(QWidget):
         """
         if self._locs_nm is None or self._locs_nm.shape[0] == 0:
             return
-        o = self._orientation
+        o = self._active_plane()
         if o == "XY":
             xy_idx, depth_idx = [0, 1], 2
         elif o == "XZ":
@@ -2623,6 +3487,12 @@ class RenderWindow(QWidget):
             self._request_overlay_alignment_preview()
             return
         self._compose_from_cache_exact()
+        # One hook for the whole display state: brightness/contrast, colormap,
+        # invert, per-channel LUT, channel visibility and the white background
+        # all end here, so routing it on is what keeps the three panes showing
+        # the same thing. Debounced, because a B/C drag lands here per step.
+        if self._ortho_active():
+            self._ortho_timer.start()
 
     def _compose_from_cache_exact(self) -> None:
         """Recompose full-resolution float RGBA from the last scalar tile."""
@@ -2809,6 +3679,10 @@ class RenderWindow(QWidget):
         except Exception:
             pass
         self._update_grid_pen()
+        # The side panes and the page behind them share the background model.
+        self._apply_ortho_page_background()
+        if self._ortho_active():
+            self._render_ortho_sides()
         # Recompose from the cached scalar tiles (falls back to a full re-render).
         self._compose_from_cache()
 
@@ -3336,6 +4210,7 @@ class RenderWindow(QWidget):
         menu = QMenu(self)
 
         view_menu = menu.addMenu("View")
+        view_menu.setToolTipsVisible(True)
         for orientation in _ORIENTATIONS:
             action = view_menu.addAction(orientation)
             action.setCheckable(True)
@@ -3350,12 +4225,41 @@ class RenderWindow(QWidget):
                     action.triggered.connect(self._show_3d_volume_window)
                 else:
                     action.setToolTip("3D volume rendering is not part of this test view")
+            elif orientation == ORTHO_AXIS:
+                action.setChecked(self._ortho_active())
+                action.setEnabled(self._ortho_available())
+                action.setToolTip(
+                    "XY, YZ and XZ at once, each a projection over the axis it "
+                    "does not show"
+                    if self._ortho_available()
+                    else "Orthogonal views need 3-D localization data"
+                )
+                action.triggered.connect(
+                    lambda _checked=False: self._set_orientation(ORTHO_AXIS))
             else:
                 action.setChecked(self._orientation == orientation)
                 action.setEnabled(orientation in _RENDER_ORIENTATIONS)
                 action.triggered.connect(
                     lambda _checked=False, value=orientation: self._set_orientation(value)
                 )
+        if self._ortho_active():
+            sticky = view_menu.addAction("Keep aligned")
+            sticky.setCheckable(True)
+            sticky.setChecked(self._ortho_sticky)
+            sticky.setToolTip(
+                "Re-align the side windows whenever this one moves or "
+                "resizes. Turn off to place them by hand.")
+            sticky.triggered.connect(self._set_ortho_sticky)
+
+            cross = view_menu.addAction("Crosshair")
+            cross.setCheckable(True)
+            cross.setChecked(self._show_crosshair)
+            cross.setToolTip(
+                "A 3-D position marker shown in all three panes. The side panes "
+                "are projections, so it reports where a feature sits along the "
+                "collapsed axis — it does not select a slice."
+            )
+            cross.triggered.connect(self._set_crosshair_visible)
         view_menu.addSeparator()
         wb_action = view_menu.addAction("White background")
         wb_action.setCheckable(True)
@@ -3445,9 +4349,22 @@ class RenderWindow(QWidget):
 
 
     def _set_orientation(self, text: str) -> None:
-        if text not in _RENDER_ORIENTATIONS:
+        if text not in _RENDER_ORIENTATIONS and text != ORTHO_AXIS:
             return
+        if text == ORTHO_AXIS and not self._ortho_available():
+            return
+        # Entering ortho from XZ/YZ must land on the same region: the panes
+        # are always XY/YZ/XZ in the same places, so the view is carried across
+        # as X/Y/Z rather than as "whatever this projection happened to show".
+        source_plane = self._active_plane()
+        carried = (self._capture_axis_ranges()
+                   if text == ORTHO_AXIS and self._orientation != ORTHO_AXIS
+                   else {})
         self._orientation = text
+        # Ortho pins the primary pane to XY and adds the two side projections;
+        # _apply_orientation is driven by _active_plane so it builds the XY
+        # grids either way.
+        self._set_ortho_active(text == ORTHO_AXIS)
         self._apply_y_axis_direction()
         self._apply_orientation()
         self._rebuild_all_grids()
@@ -3458,6 +4375,16 @@ class RenderWindow(QWidget):
         # Re-project point markers onto the new view plane.
         if self._roi_overlay is not None:
             self._roi_overlay.refresh()
+        if self._ortho_active():
+            if carried:
+                # After _apply_orientation, which re-fits the view.
+                QTimer.singleShot(
+                    0,
+                    lambda r=carried, p=source_plane: self._apply_axis_ranges(
+                        r, source_plane=p
+                    ),
+                )
+            self._render_ortho_sides()
 
     def _set_axis_visible_from_menu(self, checked: bool) -> None:
         self._set_axes_visible(bool(checked))
@@ -3555,7 +4482,7 @@ class RenderWindow(QWidget):
         for rec in candidates:
             if getattr(rec, "type", None) != "rectangle":
                 continue
-            plane = (getattr(rec, "context", {}) or {}).get("view_plane") or self._orientation
+            plane = (getattr(rec, "context", {}) or {}).get("view_plane") or self._active_plane()
             if plane != "XY":
                 continue
             bounds = rectangle_bounds(rec)
@@ -3743,9 +4670,10 @@ class RenderWindow(QWidget):
 
     def _sigma_yx_for_orientation(self, pixel_size_nm: float) -> tuple[float, float]:
         sx, sy, sz = self._sigma_nm_xyz
-        if self._orientation == "XZ":
+        plane = self._active_plane()
+        if plane == "XZ":
             display_x, display_y = sx, sz
-        elif self._orientation == "YZ":
+        elif plane == "YZ":
             display_x, display_y = sy, sz
         else:
             display_x, display_y = sx, sy
@@ -3755,6 +4683,21 @@ class RenderWindow(QWidget):
         sigma_x = display_x if display_x > 0.0 else auto_sigma
         sigma_y = display_y if display_y > 0.0 else auto_sigma
         return float(sigma_y), float(sigma_x)
+
+    def _sigma_for_plane(self, plane: str, px_nm: float) -> tuple[float, float]:
+        """``(sigma_vertical, sigma_horizontal)`` in nm for one ortho pane.
+
+        The same rule the primary pane uses, resolved for that pane's own two
+        axes: a per-axis sigma when one is set, else the 0.5 px anti-alias
+        default. Without it the side panes drew a raw histogram next to a
+        smoothed one and looked speckled at a fine zoom while XY looked solid.
+        """
+        sigma_xyz = self._sigma_nm_xyz
+        horizontal, vertical = ORTHO_AXIS_COLUMNS.get(plane, (0, 1))
+        auto = px_nm * 0.5
+        h = sigma_xyz[horizontal] if sigma_xyz[horizontal] > 0.0 else auto
+        v = sigma_xyz[vertical] if sigma_xyz[vertical] > 0.0 else auto
+        return float(v), float(h)
 
     def _on_range_changed(self, *_args) -> None:
         if self._suppress_zoom_limit:
@@ -3804,11 +4747,30 @@ class RenderWindow(QWidget):
         self._schedule_render()
         return True
 
+    def _set_side_axes_visible(self, visible: bool) -> None:
+        # _build_ui hides the axes before the panes exist.
+        panes = getattr(self, "_pane_widgets", None)
+        if not panes:
+            return
+        for plane in SIDE_PLANES:
+            item = self._ortho_plot_item(panes.get(plane))
+            if item is None:
+                continue
+            for axis in ("left", "bottom"):
+                item.showAxis(axis, show=visible)
+        if visible:
+            self._apply_ortho_labels()
+
     def _set_axes_visible(self, visible: bool) -> None:
         self._axis_visible = bool(visible)
         plot_item = self._image_view.view
         for axis_name in ("left", "bottom"):
             plot_item.showAxis(axis_name, show=visible)
+        # ⚠ Every pane must agree, or their plot rectangles differ and the
+        # linked axes no longer line up — a hidden axis occupies no space
+        # whatever setWidth/setHeight say, so pinning the metrics is not
+        # enough on its own.
+        self._set_side_axes_visible(self._axis_visible)
         if visible:
             self._update_axis_labels()
 
@@ -3816,21 +4778,30 @@ class RenderWindow(QWidget):
         self._grid_visible = bool(visible)
         if self._grid_item is not None:
             self._grid_item.setVisible(self._grid_visible)
+        for grid in getattr(self, "_pane_grids", {}).values():
+            grid.setVisible(self._grid_visible)
 
     def _update_grid_pen(self) -> None:
-        if self._grid_item is None:
-            return
         color = (35, 35, 35) if self._white_bg else (225, 225, 225)
-        self._grid_item.setPen(pg.mkPen(color))
+        pen = pg.mkPen(color)
+        if self._grid_item is not None:
+            self._grid_item.setPen(pen)
+        for grid in getattr(self, "_pane_grids", {}).values():
+            grid.setPen(pen)
 
     def _axis_label_names(self) -> tuple[str, str]:
         """Bottom/left axis labels for the current orientation, so the user can
         tell which axis is which."""
         unit = "px" if self._image_data is not None else "nm"
-        names = {"XY": ("X", "Y"), "XZ": ("X", "Z"), "YZ": ("Y", "Z")}.get(self._orientation, ("X", "Y"))
+        names = {"XY": ("X", "Y"), "XZ": ("X", "Z"), "YZ": ("Y", "Z")}.get(self._active_plane(), ("X", "Y"))
         return f"{names[0]} ({unit})", f"{names[1]} ({unit})"
 
     def _update_axis_labels(self) -> None:
+        if self._ortho_active():
+            # In ortho each shared axis is named once, and X belongs to the XZ
+            # pane — so the primary pane must not re-assert its own label here.
+            self._apply_ortho_labels()
+            return
         bottom, left = self._axis_label_names()
         view = self._image_view.view
         view.setLabel("bottom", bottom)
@@ -3924,52 +4895,20 @@ class RenderWindow(QWidget):
             self._roi_highlight_item.setData([], [])
 
     def _roi_masks_for_dataset(self, ds) -> list[tuple[object, np.ndarray]]:
-        records = [r for r in self._state.rois.records if r.id in set(self._state.rois.selected_ids)]
-        draft_id = ds.state.get("active_roi_draft_id")
-        if draft_id:
-            draft_meta = ds.state.get("roi_masks", {}).get(draft_id, {})
-            draft_record = next((r for r in records if r.id == draft_id), None)
-            if draft_record is None and isinstance(draft_meta, dict):
-                draft_record = type("_RoiHighlight", (), {
-                    "id": draft_id,
-                    "stroke_color": draft_meta.get("stroke_color", "#ffff00"),
-                })()
-            if draft_record is not None and all(r.id != draft_id for r in records):
-                records.append(draft_record)
-        out: list[tuple[object, np.ndarray]] = []
-        ftr = np.asarray(ds.filter_mask, dtype=bool).ravel()
-        for record in records:
-            mask = active_roi_mask(ds, selected_ids=[record.id], include_active_draft=False)
-            if mask is None and record.id == draft_id:
-                mask = active_roi_mask(ds, selected_ids=[], include_active_draft=True)
-            if mask is None:
-                continue
-            mask = np.asarray(mask, dtype=bool).ravel()
-            if ftr.size == mask.size:
-                mask &= ftr
-            out.append((record, mask))
-        return out
+        from .roi_highlight import highlight_masks
+        return highlight_masks(self._state, ds)
 
     def _roi_highlight_brushes(self, record, count: int) -> list:
-        # One configurable color (COLOR ▸ ROI ▸ highlight data in ROI) rather
-        # than each ROI's own stroke.  Trade-off: with several ROIs shown the
-        # highlighted points are no longer attributable to a particular one.
-        fill = pg.mkColor(rgba_hex(viewer_color(self._state.prefs, "roi_highlight")))
-        fill.setAlpha(75)
-        return [pg.mkBrush(fill)] * int(count)
+        from .roi_highlight import highlight_brushes
+        return highlight_brushes(self._state.prefs, count)
 
     def _owns_active_roi_draft(self) -> bool:
         """True when an ROI is currently being drawn in *this* render view."""
-        ctrl = getattr(self, "_roi_overlay", None)
-        if ctrl is None:
-            return False
-        try:
-            return ctrl.current_record() is not None
-        except Exception:
-            return getattr(ctrl, "draft", None) is not None
+        from .roi_highlight import owns_active_draft
+        return owns_active_draft(getattr(self, "_roi_overlay", None))
 
     def _roi_highlight_enabled(self) -> bool:
-        from ..core.roi_selection import roi_highlight_enabled
+        from .roi_highlight import roi_highlight_enabled
         return roi_highlight_enabled(
             self._state.prefs, is_source=self._owns_active_roi_draft())
 
@@ -3980,11 +4919,12 @@ class RenderWindow(QWidget):
         if self._roi_highlight_item is None or self._render_mode == "image":
             self._clear_roi_highlight()
             return
-        if self._orientation == "XY":
+        plane = self._active_plane()
+        if plane == "XY":
             axes, depth_axis = (0, 1), 2
-        elif self._orientation == "XZ":
+        elif plane == "XZ":
             axes, depth_axis = (0, 2), 1
-        elif self._orientation == "YZ":
+        elif plane == "YZ":
             axes, depth_axis = (1, 2), 0
         else:
             self._clear_roi_highlight()
@@ -4036,7 +4976,8 @@ class RenderWindow(QWidget):
 
     def roi_view_plane(self) -> str | None:
         """Current view orientation for ROI 3-D placement (XY/XZ/YZ)."""
-        return self._orientation if self._orientation in {"XY", "XZ", "YZ"} else None
+        plane = self._active_plane()
+        return plane if plane in {"XY", "XZ", "YZ"} else None
 
     def coordinate_view_box(self):
         """The 2-D coordinate ViewBox for overlays (e.g. a scale bar), or None
@@ -4163,7 +5104,7 @@ class RenderWindow(QWidget):
         return record
 
     def compute_roi_selection(self, record):
-        if record.type not in {"rectangle", "oval", "polygon", "freehand"} or self._idx is None:
+        if record.type not in REGION_ROI_TYPES or self._idx is None:
             return None
         if not (0 <= self._idx < len(self._state.datasets)):
             return None
@@ -4172,11 +5113,11 @@ class RenderWindow(QWidget):
         if locs.shape[0] == 0:
             return None
 
-        if self._orientation == "XY":
+        if self._active_plane() == "XY":
             axes, depth_axis, depth_name = (0, 1), 2, "Z"
-        elif self._orientation == "XZ":
+        elif self._active_plane() == "XZ":
             axes, depth_axis, depth_name = (0, 2), 1, "Y"
-        elif self._orientation == "YZ":
+        elif self._active_plane() == "YZ":
             axes, depth_axis, depth_name = (1, 2), 0, "X"
         else:
             return None
@@ -4185,19 +5126,19 @@ class RenderWindow(QWidget):
         if base.shape[0] != locs.shape[0]:
             base = np.ones(locs.shape[0], dtype=bool)
         base &= np.all(np.isfinite(locs[:, :3]), axis=1)
-        if self._has_depth and not self._all_depth_check.isChecked():
-            lo, hi = self._depth_range
-            left_inc, right_inc = self._depth_inclusive
-            depth = locs[:, depth_axis]
-            lo_mask = depth >= lo if left_inc else depth > lo
-            hi_mask = depth <= hi if right_inc else depth < hi
-            base &= lo_mask & hi_mask
-
+        # The depth slider is deliberately NOT part of the mask. A ROI means
+        # "these localizations", identically in every view of the dataset, so a
+        # mask baked at one slider position would disagree with the views that
+        # have no depth slider, go stale the moment the slider moves, and make a
+        # ROI-derived channel depend on a view setting. Render still limits the
+        # *highlight* to the current slice (see _redraw_roi_highlight), and the
+        # range is recorded below as provenance. So a 2-D ROI spans the whole
+        # depth axis — which is exactly what a future 3-D ROI will narrow.
         mask = roi_region_mask(locs[:, axes[0]], locs[:, axes[1]], record, base_mask=base)
         context = {
             "source_view": "render",
             "dataset_idx": self._idx,
-            "orientation": self._orientation,
+            "orientation": self._active_plane(),
             "x_axis": "XYZ"[axes[0]],
             "y_axis": "XYZ"[axes[1]],
             "depth_axis": depth_name,
@@ -4243,6 +5184,31 @@ class RenderWindow(QWidget):
         from .qt_lifecycle import close_image_views
 
         self._redraw_timer.stop()
+        self._ortho_timer.stop()
+        if getattr(self, "_ortho_crosshair", None) is not None:
+            self._ortho_crosshair.dispose()
+            self._ortho_crosshair = None
+        # Disconnect everything this window wired onto the panes, then drop the
+        # inter-pane links, so no queued range/resize/click can reach a
+        # half-torn-down pane.
+        for item, handler in getattr(self, "_ortho_click_handlers", []):
+            try:
+                item.scene().sigMouseClicked.disconnect(handler)
+            except (TypeError, RuntimeError, AttributeError):
+                pass
+        self._ortho_click_handlers = []
+        for view_box in getattr(self, "_ortho_range_sources", []):
+            for signal in ("sigRangeChanged", "sigResized"):
+                try:
+                    getattr(view_box, signal).disconnect(self._on_ortho_view_changed)
+                except (TypeError, RuntimeError, AttributeError):
+                    pass
+        self._ortho_range_sources = []
+        if getattr(self, "_ortho", None) is not None:
+            self._ortho.dispose()
+            from .qt_lifecycle import dispose_plot_widgets
+            for _plane in SIDE_PLANES:
+                dispose_plot_widgets(self._pane_widgets[_plane])
         self._clear_overlay_alignment_preview()
         if self._roi_overlay is not None:
             self._roi_overlay.dispose()
@@ -4294,6 +5260,9 @@ class RenderWindow(QWidget):
                 self._state.set_active(self._idx)
             if self._roi_overlay is not None:
                 self._roi_overlay.activate()
+            # The floating panes belong to this view: bring them with it,
+            # so another window cannot land between the three.
+            self.raise_ortho_group()
         super().changeEvent(event)
 
     # NOTE: the render window used to adopt (and close) any other view's LUT
