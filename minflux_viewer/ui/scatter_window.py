@@ -147,6 +147,14 @@ class ScatterWindow(QWidget):
         self._roi_highlight_2d = None
         self._roi_highlight_3d = None
         self._ortho_redrawing = False
+        # ⚠ "The XY pane is showing everything, so do not crop" is an
+        # EXPLICIT flag, not pyqtgraph's auto-range state. Inferring it was
+        # what kept the side panes read-only: a side pane pushes its pan
+        # back to the primary with setXRange, which *disables* auto-range,
+        # so merely touching a side pane made the crop engage as though the
+        # user had zoomed XY -- and the narrowed crop moved the shared Z,
+        # which moved the side pane again. Ranges ran to +-100 um.
+        self._ortho_show_all = True
         # Whether the colorbar was on when ortho took its gutter, so leaving
         # the mode gives it back rather than silently dropping it.
         self._ortho_colorbar_restore: bool | None = None
@@ -386,7 +394,36 @@ class ScatterWindow(QWidget):
 
         self._plot_page.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._plot_page.customContextMenuRequested.connect(self._show_context_menu)
-        self._ortho = OrthoPanes(self._plot_page, self._pane_plots, parent=self)
+        self._ortho = OrthoPanes(
+            self._plot_page, self._pane_plots, parent=self, interactive_sides=True)
+        self._wire_manual_range_gestures()
+
+    def _wire_manual_range_gestures(self) -> None:
+        """Clear the show-all flag on a real mouse gesture in any pane.
+
+        ``sigRangeChangedManually`` is pyqtgraph's own answer to "did the *user*
+        do this?" — a ViewBox emits it from ``mouseDragEvent`` and ``wheelEvent``
+        and from nowhere else, so it distinguishes a pan or a zoom from every
+        programmatic ``setXRange`` this window makes. All three panes are wired:
+        zooming a side pane genuinely narrows what the primary shows (it owns
+        one of XY's axes), so the crop should engage for that too.
+        """
+        for plane in ("XY", *SIDE_PLANES):
+            plot = self._pane_plots.get(plane)
+            if plot is None:
+                continue
+            try:
+                view_box = plot.getPlotItem().getViewBox()
+                view_box.sigRangeChangedManually.connect(self._on_manual_range_gesture)
+            except Exception:
+                pass
+
+    def _on_manual_range_gesture(self, *_args) -> None:
+        """The user panned or zoomed: stop showing everything and re-project."""
+        if not self._ortho_active() or not self._ortho_show_all:
+            return
+        self._ortho_show_all = False
+        self._on_ortho_view_changed()
 
     def _apply_page_background(self, black: bool) -> None:
         """Paint the pane page itself, so the empty bottom-right cell and the
@@ -490,17 +527,26 @@ class ScatterWindow(QWidget):
             scatter.setData([], [])
 
     def _ortho_view_rect(self) -> tuple[float, float, float, float] | None:
-        """The XY pane's current data rectangle, or ``None`` while it auto-ranges.
+        """The XY pane's current data rectangle, or ``None`` while showing all.
 
-        ``None`` means "showing everything", which is exactly the state after a
-        fit or a Reset View — pyqtgraph keeps auto-range enabled until the user
-        actually interacts. Cropping to a range that is still being fitted would
-        blank the side panes on the first draw.
+        ``None`` means "showing everything" — the state after a fit or a Reset
+        View — and cropping to a range still being fitted would blank the side
+        panes on the first draw.
+
+        ⚠ That state is read from :attr:`_ortho_show_all`, **not** from
+        ``autoRangeEnabled()``. Auto-range is pyqtgraph's own bookkeeping and any
+        programmatic ``setXRange`` clears it, including the one a side pane makes
+        when it pushes its pan onto the primary — so the inferred version turned
+        the crop on for a gesture the user never made in this pane, and the
+        narrowed crop then moved the shared Z, which moved the side pane again.
+        The flag is cleared only by a genuine mouse gesture
+        (``sigRangeChangedManually``), which is the thing actually being asked
+        about.
         """
+        if self._ortho_show_all:
+            return None
         view_box = self._pane_plots["XY"].getPlotItem().getViewBox()
         try:
-            if any(view_box.autoRangeEnabled()):
-                return None
             (x0, x1), (y0, y1) = view_box.viewRange()
         except Exception:
             return None
@@ -921,6 +967,11 @@ class ScatterWindow(QWidget):
         # Leaving ortho must also drop the side panes' grid weight, or the
         # primary pane keeps only its share of the window (see grid_stretch).
         ortho_on = axis_text == ORTHO_AXIS and not is_3d
+        if ortho_on and not self._ortho.active:
+            # Entering the mode starts uncropped, whatever the previous
+            # projection's zoom left behind: the side panes should open on the
+            # whole dataset rather than on a rectangle the user set elsewhere.
+            self._ortho_show_all = True
         self._ortho.set_active(ortho_on)
         self._sync_ortho_colorbar(ortho_on)
         if is_3d:
@@ -1141,9 +1192,10 @@ class ScatterWindow(QWidget):
                 # ⚠ Lift the crop BEFORE fitting. A fit ranges to the items in
                 # the view, and those are the cropped subset — so fitting first
                 # re-fits to the very region the crop came from and Reset View
-                # cannot escape it. Re-enabling auto-range makes
-                # _ortho_view_rect report "showing everything", the redraw then
-                # puts every point back, and auto-range fits to all of them.
+                # cannot escape it. Raising the flag makes _ortho_view_rect
+                # report "showing everything", the redraw then puts every point
+                # back, and auto-range fits to all of them.
+                self._ortho_show_all = True
                 self._plot_2d.getPlotItem().getViewBox().enableAutoRange(enable=True)
                 self._redraw_ortho_projection()
                 return

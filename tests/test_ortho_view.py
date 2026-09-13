@@ -563,9 +563,17 @@ def _depth_scales(win) -> dict[str, float]:
 
 
 def _zoom_xy(win, app, x_range, y_range) -> None:
+    """Stand in for a user zoom of the XY pane.
+
+    The manual signal is part of the gesture, not decoration: the crop engages
+    on ``sigRangeChangedManually`` (what a mouse drag or wheel emits), never on
+    a bare ``setXRange`` -- which this window also makes programmatically, e.g.
+    when a side pane pushes its own pan onto the primary.
+    """
     view = win._plot_2d.getPlotItem().getViewBox()
     view.setXRange(*x_range, padding=0)
     view.setYRange(*y_range, padding=0)
+    view.sigRangeChangedManually.emit(view.state["mouseEnabled"][:])
     _settle(app)
     win._ortho_timer.stop()          # the debounce, driven directly in tests
     win._redraw_ortho_projection()
@@ -629,10 +637,10 @@ def test_side_panes_project_only_the_visible_xy_region(_qt_app):
         win.close()
 
 
-def test_the_crop_lifts_while_the_view_is_auto_ranging(_qt_app):
-    """Auto-range enabled *is* "showing everything" — pyqtgraph keeps it on
-    until the user interacts, so cropping to a range still being fitted would
-    blank the side panes on the first draw and after a Reset View."""
+def test_the_crop_lifts_while_showing_everything(_qt_app):
+    """"Showing everything" is the state after a fit or a Reset View, and
+    cropping to a range still being fitted would blank the side panes on the
+    first draw."""
     win = _window(_qt_app, _slab_state())
     try:
         win._axis_combo.setCurrentText(ORTHO_AXIS)
@@ -809,5 +817,139 @@ def test_scatter_shared_axes_match_in_direction(_qt_app):
         assert win._ortho.view_box("YZ").yInverted() is (
             win._ortho.view_box("XY").yInverted())
         assert win._ortho.view_box("XZ").yInverted() is False
+    finally:
+        win.close()
+
+
+# ---------------------------------------------------------------------------
+# Interactive side panes (the prerequisite for drawing 3-D ROIs in them)
+# ---------------------------------------------------------------------------
+
+def test_the_side_panes_take_the_mouse(_qt_app):
+    """They were read-only until the crop stopped being inferred from
+    auto-range; a 3-D ROI cannot be drawn in a pane that ignores the mouse."""
+    win = _window(_qt_app, _slab_state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+        for plane in ("XZ", "YZ"):
+            assert all(win._ortho.view_box(plane).state["mouseEnabled"]), plane
+    finally:
+        win.close()
+
+
+def test_a_programmatic_range_push_does_not_engage_the_crop(_qt_app):
+    """The whole reason the side panes were read-only.
+
+    A side pane pushes its pan onto the primary with ``setXRange``, which
+    *disables* pyqtgraph's auto-range -- so the old inferred rule read that as
+    "the user zoomed XY" and cropped, for a gesture never made in that pane.
+    """
+    win = _window(_qt_app, _slab_state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+        assert win._ortho_view_rect() is None
+
+        view = win._plot_2d.getPlotItem().getViewBox()
+        view.setXRange(-4000.0, -2000.0, padding=0)      # no manual signal
+        _settle(_qt_app)
+
+        # The old inference would now report a rect: auto-range is off.
+        assert not any(view.autoRangeEnabled())
+        assert win._ortho_view_rect() is None            # ...the flag does not
+    finally:
+        win.close()
+
+
+def test_a_real_mouse_gesture_engages_the_crop(_qt_app):
+    win = _window(_qt_app, _slab_state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+        assert win._ortho_view_rect() is None
+
+        view = win._plot_2d.getPlotItem().getViewBox()
+        view.setXRange(-4000.0, -2000.0, padding=0)
+        view.setYRange(-4000.0, -2000.0, padding=0)
+        view.sigRangeChangedManually.emit(view.state["mouseEnabled"][:])
+        _settle(_qt_app)
+
+        assert win._ortho_view_rect() is not None
+    finally:
+        win.close()
+
+
+def test_a_gesture_in_a_side_pane_also_engages_the_crop(_qt_app):
+    """A side pane owns one of XY's axes, so zooming it genuinely narrows what
+    the primary shows -- the crop must follow that too, not only an XY drag."""
+    win = _window(_qt_app, _slab_state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+        assert win._ortho_view_rect() is None
+
+        xz = win._ortho.view_box("XZ")
+        xz.setXRange(-4000.0, -2000.0, padding=0)        # XZ owns X
+        xz.sigRangeChangedManually.emit(xz.state["mouseEnabled"][:])
+        _settle(_qt_app)
+
+        assert win._ortho_view_rect() is not None
+    finally:
+        win.close()
+
+
+def test_repeated_side_pane_panning_does_not_grow_the_view(_qt_app):
+    """Interaction must be range-preserving: panning moves the window onto the
+    data, it never widens it.
+
+    ⚠ This is an invariant check, not a reproduction of the reported runaway
+    (ranges reaching +-100 um once ``interactive_sides`` was on in scatter).
+    That needed a real drag through ``mouseDragEvent`` on a laid-out window and
+    a crop tight enough to actually exclude points; offscreen the view opens far
+    wider than the data, every point stays inside, and the feedback path the
+    explosion travelled is never taken. The tests either side of this one are
+    what carry the fix.
+    """
+    win = _window(_qt_app, _slab_state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+        _zoom_xy(win, _qt_app, (-4000, -2000), (-4000, -2000))   # crop engaged
+        before = [_ranges(win, p) for p in ("XY", "XZ", "YZ")]
+        spans_before = [max(r[1] - r[0], r[3] - r[2]) for r in before]
+
+        xz = win._ortho.view_box("XZ")
+        for step in range(12):
+            (x0, x1), _ = xz.viewRange()
+            shift = 40.0 * (1 if step % 2 == 0 else -1)
+            xz.setXRange(x0 + shift, x1 + shift, padding=0)
+            _settle(_qt_app)
+            win._ortho_timer.stop()
+            win._redraw_ortho_projection()
+            _settle(_qt_app)
+
+        after = [_ranges(win, p) for p in ("XY", "XZ", "YZ")]
+        spans_after = [max(r[1] - r[0], r[3] - r[2]) for r in after]
+        for plane, a, b in zip(("XY", "XZ", "YZ"), spans_before, spans_after):
+            assert b == pytest.approx(a, rel=0.05), (plane, a, b)
+    finally:
+        win.close()
+
+
+def test_entering_ortho_starts_uncropped(_qt_app):
+    """Whatever rectangle the previous projection was zoomed to, the mode opens
+    on the whole dataset rather than on a region set somewhere else."""
+    win = _window(_qt_app, _slab_state())
+    try:
+        view = win._plot_2d.getPlotItem().getViewBox()
+        view.setXRange(-4000.0, -2000.0, padding=0)
+        view.sigRangeChangedManually.emit(view.state["mouseEnabled"][:])
+        _settle(_qt_app)
+
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+        assert win._ortho_view_rect() is None
+        assert "full range" in win._info_label.text()
     finally:
         win.close()
