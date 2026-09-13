@@ -18,15 +18,21 @@ from PyQt6.QtCore import QObject, QPointF, pyqtSignal
 from PyQt6.QtGui import QPainterPath, QPolygonF
 
 ROI_TYPES = {
-    "rectangle", "oval", "polygon", "freehand", "line", "point", "angle",
+    "rectangle", "oval", "polygon", "freehand", "line", "point", "points", "angle",
     "polyline", "freehand_line", "magnetic_lasso",
 }
+
+#: A ``points`` record is ImageJ's **multi-point**: one ROI holding N markers,
+#: so a set of picks is added, named, saved, selected and deleted as one entry
+#: instead of N. Its geometry uses the same ``{"points": [[x, y, z], ...]}`` key
+#: as the vertex types, and each marker carries a full 3-D coordinate.
+MULTI_POINT_TYPES = {"points"}
 
 #: Drawing-tool names accepted by ``set_tool``. Superset of ``ROI_TYPES`` with the
 #: variant tools that produce an existing record type (a rotated rectangle is a
 #: ``rectangle`` record + ``geometry["variant"]``; an ellipse is a rotated ``oval``),
 #: so they are valid *tools* but never record *types*.
-ROI_TOOLS = ROI_TYPES | {"rotated_rectangle", "ellipse"}
+ROI_TOOLS = ROI_TYPES | {"rotated_rectangle", "ellipse", "multi_point"}
 
 #: Open multi-vertex curve types (no enclosed area; drawn as open polylines).
 OPEN_LINE_TYPES = {"polyline", "freehand_line"}
@@ -380,6 +386,9 @@ def record_to_imagej(record: RoiRecord):
         "polygon": ROI_TYPE.POLYGON,
         "freehand": ROI_TYPE.FREEHAND,
         "point": ROI_TYPE.POINT,
+        # ImageJ's POINT already holds N coordinates, so a multi-point ROI
+        # round-trips exactly rather than being flattened to one marker.
+        "points": ROI_TYPE.POINT,
         "polyline": ROI_TYPE.POLYLINE,
         "freehand_line": ROI_TYPE.FREELINE,
         "magnetic_lasso": ROI_TYPE.POLYLINE,

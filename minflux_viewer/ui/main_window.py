@@ -145,6 +145,14 @@ _POLY_FAMILY: tuple[tuple[str, str, str, float], ...] = (
     ("Polygon", "polygon", "polygon.png", 0.0),
     ("Polyhedron (3D)", "polyhedron", "polyhedron.png", 0.0),
 )
+#: The point family. Both members place markers identically -- they differ only
+#: in how the set is FILED: ``point`` leaves each pick as its own record,
+#: ``multi_point`` groups them into one ``points`` ROI (ImageJ's Multi-point) so
+#: a screenful of picks is named, saved, selected and deleted together.
+_POINT_FAMILY: tuple[tuple[str, str, str, float], ...] = (
+    ("Point", "point", "point.png", 0.0),
+    ("Multi-point", "multi_point", "multipoint.png", 0.0),
+)
 
 class _ScrollableMenuStyle(QProxyStyle):
     """Make an over-tall menu scroll (arrows at the top/bottom edges, which
@@ -787,11 +795,13 @@ class MainWindow(QMainWindow):
         self._rect_variant = "rectangle"
         self._oval_variant = "oval"
         self._poly_variant = "polygon"
+        self._point_variant = "point"
         _variant_getters = {
             "line": lambda: self._line_variant,
             "rectangle": lambda: self._rect_variant,
             "oval": lambda: self._oval_variant,
             "polygon": lambda: self._poly_variant,
+            "point": lambda: self._point_variant,
         }
         for _label, tool, attr in _ROI_TOOL_DEFS:
             action = getattr(u, attr)
@@ -4142,6 +4152,7 @@ class MainWindow(QMainWindow):
         rect_family = {t for _l, t, _ic, _r in _RECT_FAMILY}
         oval_family = {t for _l, t, _ic, _r in _OVAL_FAMILY}
         poly_family = {t for _l, t, _ic, _r in _POLY_FAMILY}
+        point_family = {t for _l, t, _ic, _r in _POINT_FAMILY}
         line_family = {t for _l, t, _ic in _LINE_FAMILY}
         # Track the active family member + refresh that button's variant icon.
         if active_tool in line_family:
@@ -4156,6 +4167,9 @@ class MainWindow(QMainWindow):
         elif active_tool in poly_family:
             self._poly_variant = active_tool
             self._update_shape_button_icon("polygon")
+        elif active_tool in point_family:
+            self._point_variant = active_tool
+            self._update_shape_button_icon("point")
         for name, action in self._roi_tool_actions.items():
             blocked = action.blockSignals(True)
             # A family button stays checked for any of its variants.
@@ -4167,6 +4181,8 @@ class MainWindow(QMainWindow):
                 checked = active_tool in oval_family
             elif name == "polygon":
                 checked = active_tool in poly_family
+            elif name == "point":
+                checked = active_tool in point_family
             else:
                 checked = name == active_tool
             action.setChecked(checked)
@@ -4193,6 +4209,7 @@ class MainWindow(QMainWindow):
             ("toolRect", "rectangle"),
             ("toolOval", "oval"),
             ("toolPolygon", "polygon"),
+            ("toolPoint", "point"),
         ):
             action = getattr(self._ui, attr, None)
             button = self._ui.toolbar.widgetForAction(action) if action is not None else None
@@ -4224,6 +4241,8 @@ class MainWindow(QMainWindow):
             return _OVAL_FAMILY
         if kind == "polygon":
             return _POLY_FAMILY
+        if kind == "point":
+            return _POINT_FAMILY
         return ()
 
     def _shape_variant(self, kind: str) -> str:
@@ -4233,6 +4252,8 @@ class MainWindow(QMainWindow):
             return self._oval_variant
         if kind == "polygon":
             return self._poly_variant
+        if kind == "point":
+            return self._point_variant
         return kind
 
     def _show_shape_family_menu(self, widget: QWidget, pos, kind: str) -> None:
@@ -4255,6 +4276,8 @@ class MainWindow(QMainWindow):
             self._oval_variant = tool
         elif kind == "polygon":
             self._poly_variant = tool
+        elif kind == "point":
+            self._point_variant = tool
         self._update_shape_button_icon(kind)
         self._activate_roi_tool(tool)
 
@@ -4285,6 +4308,7 @@ class MainWindow(QMainWindow):
             "rectangle": "toolRect",
             "oval": "toolOval",
             "polygon": "toolPolygon",
+            "point": "toolPoint",
         }.get(kind)
         action = getattr(self._ui, action_name, None) if action_name else None
         if action is None:
