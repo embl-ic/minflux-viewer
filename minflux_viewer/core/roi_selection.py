@@ -152,13 +152,30 @@ def polygon_mask(x, y, record, *, base_mask=None) -> np.ndarray:
 #: selection gates on this set, so they agree on what "a region" is.
 REGION_ROI_TYPES = frozenset({"rectangle", "oval", "polygon", "freehand"})
 
+#: Volume (3-D) ROI types. Their membership needs all three coordinates, so they
+#: are deliberately NOT in ``REGION_ROI_TYPES`` -- every 2-D consumer gates on
+#: that set and would otherwise take a volume ROI and quietly select nothing.
+#: See :mod:`minflux_viewer.core.roi_volume`.
+VOLUME_ROI_TYPES = frozenset({"cuboid", "sphere", "polyhedron"})
+
 
 def roi_region_mask(x, y, record, *, base_mask=None) -> np.ndarray:
     """Enclosed-region mask for any 2-D ROI shape (rectangle/oval/polygon/freehand).
 
     Line/point ROIs have no enclosed area → all-False.
+
+    ⚠ A **volume** ROI raises instead. All-False is right for a shape that
+    encloses no area, and a trap for one that encloses a volume: every 2-D
+    consumer gates on ``REGION_ROI_TYPES``, so a silently empty selection would
+    be indistinguishable from a correct one. Failing loudly makes an
+    unconverted consumer obvious while it is being written.
     """
     kind = getattr(record, "type", None)
+    if kind in VOLUME_ROI_TYPES:
+        raise ValueError(
+            f"{kind!r} is a volume ROI and has no 2-D region mask; call "
+            "roi_volume.roi_volume_mask(x, y, z, record) instead"
+        )
     if kind == "rectangle":
         return rectangle_mask(x, y, record, base_mask=base_mask)
     if kind == "oval":
