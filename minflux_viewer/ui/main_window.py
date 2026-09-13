@@ -612,9 +612,6 @@ class MainWindow(QMainWindow):
         self.actionSegConvolution = QAction("Convolution…", self)
         self.actionSegConvolution.triggered.connect(self._show_conv_segmentation)
         self.menuAnalyzeSegmentation.addAction(self.actionSegConvolution)
-        self.actionSegConvolution3D = QAction("Convolution (3D)…", self)
-        self.actionSegConvolution3D.triggered.connect(self._show_conv_segmentation_3d)
-        self.menuAnalyzeSegmentation.addAction(self.actionSegConvolution3D)
         # Named for the method (a known shape model is fitted), not for one
         # geometry, so new geometries arrive as entries in the tool's Shape
         # dropdown rather than as new menu items.
@@ -751,10 +748,6 @@ class MainWindow(QMainWindow):
         self.actionRoiRestore = QAction("Restore ROI", self)
         self.actionRoiRestore.triggered.connect(self._restore_roi)
         self.menuProcessRoi.addAction(self.actionRoiRestore)
-        self.menuProcessRoi.addSeparator()
-        self.actionRoi3D = QAction("3D ROI", self)
-        self.actionRoi3D.triggered.connect(self._show_roi_3d)
-        self.menuProcessRoi.addAction(self.actionRoi3D)
 
         # Aggregate localizations (Imspector-style per-trace photon binning).
         self.actionAggregate = QAction("Aggregate Localizations…", self)
@@ -1054,7 +1047,6 @@ class MainWindow(QMainWindow):
             #self.actionRoiResize,
             #self.actionRoiSkeletonize,
             #self.actionRoiConvexHull,
-            self.actionRoi3D,
             u.menuBatchProcessing.menuAction(),
             u.actionBatchRender,
             u.actionBatchExport,
@@ -3735,55 +3727,6 @@ class MainWindow(QMainWindow):
         from .modeless import show_modeless
         from .shape_segmentation_dialog import ShapeSegmentationWindow
         win = ShapeSegmentationWindow(self._state, idx, owner=self)
-        show_modeless(win, self)
-
-    def _show_conv_segmentation_3d(self) -> None:
-        """Analyze › Segmentation › Convolution (3D)… — open the interactive
-        3-D geometry-kernel convolution segmentation tool for the active dataset.
-
-        Requires a 3-D dataset; the data and kernel are convolved in full 3-D and
-        viewed as an orthogonal (XY/XZ/YZ) slice viewer."""
-        import numpy as np
-
-        idx = self._state.active_idx
-        if idx is None or not (0 <= idx < len(self._state.datasets)):
-            self._no_data_warning()
-            return
-        ds = self._state.datasets[idx]
-        try:
-            loc = np.asarray(ds.loc_nm, dtype=float)
-        except Exception:
-            loc = np.empty((0, 2))
-        if loc.ndim != 2 or loc.shape[1] < 3:
-            QMessageBox.information(
-                self, "Convolution Segmentation (3D)",
-                "The active dataset is 2-D. Use 'Convolution…' for 2-D data; the 3-D "
-                "tool needs localizations with a Z coordinate.")
-            return
-        from .conv_segmentation_3d_dialog import ConvSegmentation3DWindow
-        from .modeless import show_modeless
-        win = ConvSegmentation3DWindow(self._state, idx, owner=self)
-        show_modeless(win, self)
-
-    def _show_roi_3d(self) -> None:
-        """Process › ROI › 3D ROI — draw a 3-D ROI by intersecting 2-D shapes
-        extruded from the XY / XZ / YZ ortho views, and crop the active dataset
-        to the selected localizations."""
-        idx = self._state.active_idx
-        if idx is None or not (0 <= idx < len(self._state.datasets)):
-            self._no_data_warning()
-            return
-        ds = self._state.datasets[idx]
-        from ..core.dataset_kind import is_3d
-        if not is_3d(ds):
-            QMessageBox.information(
-                self, "3-D ROI",
-                "The active dataset is 2-D and has no non-degenerate Z coordinate.",
-            )
-            return
-        from .modeless import show_modeless
-        from .roi_3d_dialog import Roi3DWindow
-        win = Roi3DWindow(self._state, idx, owner=self)
         show_modeless(win, self)
 
     def _show_curvilinear_segmentation(self) -> None:
