@@ -10,6 +10,15 @@ vendor/*.whl filter=lfs diff=lfs merge=lfs -text
 *.txt   text eol=lf
 
 # Binaries — no line-ending conversion
+# ⚠ Images MUST be marked binary. Without a rule here autocrlf treats a PNG as
+# text and strips its  bytes on checkout, silently corrupting the file -- which
+# is what happened to resources/icons/multipoint.png (560 -> 116 bytes).
+*.png   binary
+*.ico   binary
+*.icns  binary
+*.tif   binary
+*.tiff  binary
+
 *.whl   binary
 *.pyd   binary
 *.dll   binary
