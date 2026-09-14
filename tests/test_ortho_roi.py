@@ -526,3 +526,35 @@ def test_a_point_drawn_in_an_ortho_yz_pane_lands_where_it_was_clicked():
     # Read with the STANDALONE convention it would be wrong -- which is the
     # whole reason the columns are passed rather than a plane name.
     assert project_point(xyz, "YZ") == (20.0, 300.0)
+
+
+# --- a volume ROI selects rows, so every "selects rows" gate must include it ---
+# ⚠ A volume type is NOT in `_REGION_TYPES`, and three gates spelled that set
+# literally: the "Localizations within" line, its pending-selection recompute,
+# and the rule that drops a stale highlight when a selecting draft is replaced
+# by a line. `_SELECTING_TYPES` is the set those three mean.
+
+def test_the_selecting_type_gates_include_the_volume_shapes():
+    from minflux_viewer.core.roi_selection import VOLUME_ROI_TYPES
+    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+
+    selecting = RoiOverlayController._SELECTING_TYPES
+    assert VOLUME_ROI_TYPES <= selecting
+    assert RoiOverlayController._REGION_TYPES <= selecting
+    for line_type in ("line", "polyline", "point", "angle"):
+        assert line_type not in selecting          # these enclose nothing
+
+
+def test_the_properties_read_out_describes_a_volume_roi_in_three_dimensions():
+    from minflux_viewer.core.roi import RoiRecord
+    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+
+    class _Formatter:                    # _geometry_text reads only self._fmt
+        # staticmethod(): a plain function assigned in a class body would bind,
+        # and _fmt takes the value, not a self.
+        _fmt = staticmethod(RoiOverlayController._fmt)
+
+    rec = RoiRecord.create("cuboid", {"x": [0, 100], "y": [10, 30], "z": [-20, 60]})
+    text = RoiOverlayController._geometry_text(_Formatter(), rec)
+    assert text == "X=0, Y=10, Z=-20, W=100, H=20, D=80"
+    assert "0 points" not in text                  # what it used to say

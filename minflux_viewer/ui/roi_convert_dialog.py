@@ -274,9 +274,14 @@ def roi_property_text(record: RoiRecord) -> str:
     def f(v):
         return f"{int(round(float(v)))}" if np.isfinite(float(v)) else ""
 
+    from ..core.roi_selection import VOLUME_ROI_TYPES
+    from ..core.roi_volume import volume_geometry_text
+
     lines = [f"Name: {record.name}", f"Type: {record.type}"]
     g = record.geometry
-    if record.type in {"rectangle", "oval"}:
+    if record.type in VOLUME_ROI_TYPES:
+        lines.append("Geometry: " + volume_geometry_text(record, f))
+    elif record.type in {"rectangle", "oval"}:
         x, y, w, h = _bounds(g)
         geo = f"X={f(x)}, Y={f(y)}, W={f(w)}, H={f(h)}"
         if float(g.get("angle", 0.0) or 0.0):

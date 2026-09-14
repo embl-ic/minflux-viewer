@@ -23,6 +23,7 @@ from ..colors import (
 from ..core import roi_scope
 from ..core.roi import RoiRecord, RoiStore
 from ..core.roi_selection import ROI_MASKS_STATE_KEY, VOLUME_ROI_TYPES, store_roi_mask
+from ..core.roi_volume import volume_geometry_text
 
 # Polyline-family shapes whose vertices can be added/deleted via the right-click
 # menu (rectangle/oval/point/line/angle have fixed or handle-defined geometry).
@@ -2095,8 +2096,8 @@ class RoiOverlayController(QObject):
         # new region is being drag-drawn.)
         old = self.draft
         if (old is not None and old is not record and old.id != record.id
-                and old.type in self._REGION_TYPES
-                and record.type not in self._REGION_TYPES
+                and old.type in self._SELECTING_TYPES
+                and record.type not in self._SELECTING_TYPES
                 and old.id not in {r.id for r in self.store.records}):
             self._delete_mask_for_record(old)
         self.draft = record
@@ -2915,13 +2916,19 @@ class RoiOverlayController(QObject):
         return getattr(getattr(self.owner, "_state", None), "active_dataset", None)
 
     _REGION_TYPES = {"rectangle", "oval", "polygon", "freehand"}
+    #: Every shape that encloses localizations, so has a selection and a count.
+    #: ⚠ A volume ROI is NOT in _REGION_TYPES, so any gate meaning "this shape
+    #: selects rows" has to be this set instead -- three of them missed volume
+    #: ROIs: the properties count, its pending-selection recompute, and the rule
+    #: that drops a stale highlight when a selecting draft is replaced by a line.
+    _SELECTING_TYPES = _REGION_TYPES | set(VOLUME_ROI_TYPES)
 
     def _show_roi_properties(self, record: RoiRecord) -> None:
         import html
 
         from PyQt6.QtWidgets import QMessageBox
 
-        if record.type in self._REGION_TYPES and record.selection_dirty:
+        if record.type in self._SELECTING_TYPES and record.selection_dirty:
             self._pending_selection_record = record
             self._compute_pending_selection()
         name = record.name or f"{record.type}-{self.store.next_type_index(record.type)}"
@@ -2930,7 +2937,7 @@ class RoiOverlayController(QObject):
             f"Type: {record.type}",
             f"Geometry: {self._geometry_text(record)}",
         ]
-        if record.type in self._REGION_TYPES:
+        if record.type in self._SELECTING_TYPES:
             count = "pending" if record.selected_count is None else f"{record.selected_count:,}"
             lines.append(f"Localizations within: {count}")
         # Monospace so the polygon vertex columns line up.
@@ -2964,6 +2971,8 @@ class RoiOverlayController(QObject):
         if t == "point":
             pt = g.get("point", [0.0, 0.0])
             return "(" + ", ".join(f(c) for c in pt[:3]) + ")"
+        if t in VOLUME_ROI_TYPES:
+            return volume_geometry_text(record, f)
         pts = g.get("points", [])
         if t in {"freehand", "freehand_line"} and len(pts) > 24:
             x, y, w, h = _bounds(g)
