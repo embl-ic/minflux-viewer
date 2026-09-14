@@ -179,6 +179,11 @@ class ScatterWindow(QWidget):
         state.overlay_transform_changed.connect(self._on_overlay_transform_changed)
         state.roi_selection_changed.connect(self._on_roi_selection_changed)
         state.rois.selection_changed.connect(self._redraw_roi_highlight)
+        # The side panes' outlines follow the store, not the redraw debounce:
+        # adding, deleting or re-selecting a ROI must show there immediately,
+        # the same as it does in the primary pane.
+        state.rois.changed.connect(self._refresh_ortho_roi_outlines)
+        state.rois.selection_changed.connect(self._refresh_ortho_roi_outlines)
 
     def refresh_preferences(self) -> None:
         self._apply_y_axis_direction()
@@ -396,6 +401,12 @@ class ScatterWindow(QWidget):
         self._plot_page.customContextMenuRequested.connect(self._show_context_menu)
         self._ortho = OrthoPanes(
             self._plot_page, self._pane_plots, parent=self, interactive_sides=True)
+        from .ortho_roi import OrthoRoiOutlines
+        # The primary pane keeps the real ROI controller (drawing, hit-testing,
+        # editing); the side panes show where each ROI lies on their own axes,
+        # so a ROI is visible in all three views rather than only the one it was
+        # drawn in.
+        self._ortho_roi_outlines = OrthoRoiOutlines(self._pane_plots)
         self._wire_manual_range_gestures()
 
     def _wire_manual_range_gestures(self) -> None:
@@ -447,6 +458,19 @@ class ScatterWindow(QWidget):
         if self._ortho_active():
             return ortho_pane_labels(plane)
         return axis_labels(plane)
+
+    def enter_ortho_mode(self) -> bool:
+        """Switch this view to the orthogonal mode. True if it is now on.
+
+        Public because selecting a 3-D ROI tool turns it on: a volume shape is
+        drawn in one plane and bounded in the other two, so a single projection
+        cannot show what is being made.
+        """
+        if not self._ortho_available():
+            return False
+        if not self._ortho_active():
+            self._axis_combo.setCurrentText(ORTHO_AXIS)
+        return self._ortho_active()
 
     def _ortho_active(self) -> bool:
         return self._axis_combo.currentText() == ORTHO_AXIS
@@ -652,6 +676,33 @@ class ScatterWindow(QWidget):
             self._redraw_current(save_state=False)
         finally:
             self._ortho_redrawing = False
+        self._refresh_ortho_roi_outlines()
+
+    def _refresh_ortho_roi_outlines(self) -> None:
+        """Show every in-scope ROI in the two side panes as well.
+
+        Includes the uncommitted draft, so a shape being drawn is visible in all
+        three panes as it is made -- which is the whole point while a volume ROI
+        is being seeded.
+        """
+        drawer = getattr(self, "_ortho_roi_outlines", None)
+        if drawer is None:
+            return
+        if not self._ortho_active():
+            drawer.clear()
+            return
+        controller = getattr(self, "_roi_overlay", None)
+        records = []
+        try:
+            for record in self._state.rois.records:
+                if controller is None or controller._record_in_scope(record):
+                    records.append(record)
+            draft = getattr(controller, "draft", None) if controller else None
+            if draft is not None:
+                records.append(draft)
+        except Exception:
+            return
+        drawer.refresh(records, color_of=lambda rec: rec.stroke_color)
 
     def _set_info_text(self, text: str, ds=None) -> None:
         """Prefix Scatter status with the source dataset dimensionality."""

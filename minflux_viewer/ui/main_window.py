@@ -4144,10 +4144,49 @@ class MainWindow(QMainWindow):
     def _activate_roi_tool(self, tool: str) -> None:
         if not self._volume_tool_allowed(tool):
             return
+        self._enter_ortho_for_volume_tool(tool)
         self._state.rois.set_tool(tool)
         self._sync_roi_tool_actions(tool)
         if self._state.rois.active_adapter is None:
             self._state.log("Select a render, histogram, scatter, or attribute plot window before drawing ROIs.", "WARN")
+
+    def _enter_ortho_for_volume_tool(self, tool: str) -> None:
+        """Selecting a 3-D ROI tool turns the orthogonal view on.
+
+        A volume shape is drawn in one plane and *bounded* in the other two, so a
+        single projection cannot show what is being made: the seeded depth would
+        be invisible until the ROI was filed. The mode is turned on, never off --
+        leaving it when the tool is deselected would yank the layout out from
+        under someone who had arranged it.
+
+        Preference order is the focused coordinate view, then this dataset's
+        render or scatter; with neither open a scatter is opened, because it is
+        the cheaper surface (its ortho mode is an embedded 2x2 grid, where
+        render's opens two more top-level windows).
+        """
+        from ..core.roi_selection import VOLUME_ROI_TYPES
+
+        if tool not in VOLUME_ROI_TYPES:
+            return
+        idx = self._state.active_idx
+        if not isinstance(idx, int) or not (0 <= idx < len(self._state.datasets)):
+            return
+        view = self._active_coordinate_view()
+        if view is None:
+            view = self._render_windows.get(idx) or self._scatter_windows.get(idx)
+        if view is None:
+            self._show_scatter(idx)
+            view = self._scatter_windows.get(idx)
+        entered = False
+        try:
+            if view is not None and hasattr(view, "enter_ortho_mode"):
+                entered = bool(view.enter_ortho_mode())
+        except Exception:
+            entered = False
+        if entered:
+            self._state.status_message.emit(
+                f"{tool}: orthogonal view on — draw in any pane; "
+                "the remaining axis is taken from the data under the shape")
 
     def _volume_tool_allowed(self, tool: str) -> bool:
         """Refuse a 3-D drawing tool on a 2-D dataset, before anything is drawn.
