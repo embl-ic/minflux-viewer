@@ -1087,6 +1087,10 @@ class RenderWindow(QWidget):
         state.overlay_transform_changed.connect(self._on_overlay_transform_changed)
         state.roi_selection_changed.connect(self._on_roi_selection_changed)
         state.rois.selection_changed.connect(self._redraw_roi_highlight)
+        # The side panes' outlines follow the store, not the render debounce:
+        # adding, deleting or re-selecting a ROI must show there immediately.
+        state.rois.changed.connect(self._refresh_ortho_roi_outlines)
+        state.rois.selection_changed.connect(self._refresh_ortho_roi_outlines)
         self._scheduler.tile_ready.connect(self._on_tile_ready)
 
     def refresh_preferences(self) -> None:
@@ -1293,6 +1297,11 @@ class RenderWindow(QWidget):
         self._ortho.set_placement(self._ortho_placement_pref)
         self._ortho.set_sticky(self._ortho_sticky)
         self._ortho_crosshair = OrthoCrosshair(self._pane_widgets)
+        from .ortho_roi import OrthoRoiOutlines
+        # The primary pane keeps the real ROI controller; the side panes show
+        # where each ROI lies on their own axes, so a ROI is visible in all
+        # three views rather than only the one it was drawn in.
+        self._ortho_roi_outlines = OrthoRoiOutlines(self._pane_widgets)
         self._ortho.set_active(False)
         self._apply_ortho_page_background()
 
@@ -1650,6 +1659,36 @@ class RenderWindow(QWidget):
         finally:
             self._ortho_redrawing = False
 
+    def on_roi_overlay_changed(self) -> None:
+        """The ROI controller's hook: the drawn set changed, draft included."""
+        self._refresh_ortho_roi_outlines()
+
+    def _refresh_ortho_roi_outlines(self) -> None:
+        """Show every in-scope ROI in the two side panes as well.
+
+        Includes the uncommitted draft -- a draft is not in the store, so no
+        store signal fires for it, and without this a shape being drawn would
+        reach the side panes only when something unrelated refreshed them.
+        """
+        drawer = getattr(self, "_ortho_roi_outlines", None)
+        if drawer is None:
+            return
+        if not self._ortho_active():
+            drawer.clear()
+            return
+        controller = getattr(self, "_roi_overlay", None)
+        records = []
+        try:
+            for record in self._state.rois.records:
+                if controller is None or controller._record_in_scope(record):
+                    records.append(record)
+            draft = getattr(controller, "draft", None) if controller else None
+            if draft is not None:
+                records.append(draft)
+        except Exception:
+            return
+        drawer.refresh(records, color_of=lambda rec: rec.stroke_color)
+
     def _render_ortho_sides_now(self) -> None:
         channels = [
             ch for ch in self._channels
@@ -1689,6 +1728,8 @@ class RenderWindow(QWidget):
         self._centre_crosshair_on_view()
         if self._ortho_crosshair is not None:
             self._ortho_crosshair.refresh()
+
+        self._refresh_ortho_roi_outlines()
 
     def _render_ortho_panes(self, picked) -> None:
         """Render both projections; advanced viewers may dispatch this async."""

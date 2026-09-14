@@ -72,6 +72,7 @@ __all__ = [
     "volume_from_flat",
     "scale_z",
     "translate_volume",
+    "set_volume_extent",
 ]
 
 
@@ -506,9 +507,14 @@ def volume_silhouette(record, h_axis: int, v_axis: int,
     polys = [np.asarray(lv["polygon"], dtype=float)[:, :2] for lv in levels]
 
     if stack_col not in (h_axis, v_axis):
-        # Looking down the stack: the silhouette is the union of the
-        # cross-sections, which for star-shaped outlines is the per-angle max
-        # radius about the mean centroid.
+        # Looking down the stack. ⚠ With ONE level there is nothing to union, and
+        # the polygon the user drew is the answer -- resampling it radially
+        # rounds off every corner of their own shape.
+        if len(polys) == 1:
+            outline = polys[0]
+            return outline if (ui, vi) == (h_axis, v_axis) else outline[:, ::-1]
+        # Several levels: the union, which for star-shaped outlines is the
+        # per-angle max radius about the mean centroid.
         profiles = [radial_profile(p, n_angles=n_angles, strict=False) for p in polys]
         centre = np.mean([c for c, _ in profiles], axis=0)
         radii = np.max([r + np.hypot(*(c - centre)) for c, r in profiles], axis=0)
@@ -724,5 +730,44 @@ def translate_volume(record, deltas: dict) -> dict | None:
                     pt[1] += moves.get(vi, 0.0)
             lv["polygon"] = poly
         g["levels"] = levels
+        return g
+    return None
+
+
+def set_volume_extent(record, columns, bounds) -> dict | None:
+    """Resize a volume ROI on the two axes a view shows; new geometry or ``None``.
+
+    *columns* are the data-axis columns the view is showing and *bounds* is the
+    ``(x, y, w, h)`` its item now occupies. The axis the view does **not** show
+    is left exactly as it was -- a projection has nothing to say about it, and
+    recomputing it would let an XY resize silently change a Z extent.
+
+    Only ``cuboid`` and ``sphere`` have an extent expressible this way; a
+    polyhedron's cross-section is a polygon and is edited vertex-wise.
+    """
+    kind = getattr(record, "type", None)
+    g = dict(getattr(record, "geometry", None) or {})
+    try:
+        h_axis, v_axis = int(columns[0]), int(columns[1])
+        x, y, w, h = (float(v) for v in bounds)
+    except Exception:
+        return None
+    if not all(np.isfinite(v) for v in (x, y, w, h)):
+        return None
+    spans = {h_axis: (x, x + w), v_axis: (y, y + h)}
+
+    if kind == "cuboid":
+        for column, (lo, hi) in spans.items():
+            g[AXIS_NAMES[column].lower()] = [min(lo, hi), max(lo, hi)]
+        return g
+    if kind == "sphere":
+        centre = list(g.get("center") or [])
+        radii = list(g.get("radii") or [])
+        if len(centre) < 3 or len(radii) < 3:
+            return None
+        for column, (lo, hi) in spans.items():
+            centre[column] = 0.5 * (lo + hi)
+            radii[column] = 0.5 * abs(hi - lo)
+        g["center"], g["radii"] = centre, radii
         return g
     return None

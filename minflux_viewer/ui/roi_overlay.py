@@ -2130,6 +2130,23 @@ class RoiOverlayController(QObject):
             # A volume ROI is drawn as its SILHOUETTE in whichever plane this
             # view shows, asked for by data-axis columns rather than a plane
             # name -- so no view can read the geometry in the wrong convention.
+            #
+            # ⚠ The ITEM KIND has to match the shape, not just the outline. A
+            # cuboid drawn as a PolyLineROI is a polygon on screen: its handles
+            # move single vertices, so dragging a corner deformed the box into
+            # an arbitrary polygon and the record could no longer be a cuboid.
+            # An axis-aligned box and ellipsoid are a rectangle and an oval in
+            # every plane, so those are the items -- and their bounding-box
+            # handles resize rather than deform.
+            box = self._volume_view_bounds(record)
+            if record.type in {"cuboid", "sphere"} and box is not None:
+                x, y, w, h = box
+                size = [max(w, 1e-9), max(h, 1e-9)]
+                cls = FilledRectROI if record.type == "cuboid" else FilledEllipseROI
+                return cls([x, y], size, angle=0.0,
+                           fill_color=record.stroke_color,
+                           y_axis_inverted=self._view_y_inverted(),
+                           variant="", movable=True)
             outline = self._volume_outline(record)
             return FilledPolyLineROI(outline, closed=True, movable=True,
                                      fill_color=record.stroke_color)
@@ -2264,6 +2281,28 @@ class RoiOverlayController(QObject):
             item.sigRegionChanged.connect(lambda _item=item: self._report_status_from_item(_item))
 
     def _volume_geometry_from_item(self, item, record):
+        """New geometry after the item was dragged or resized, or ``None``.
+
+        A cuboid / sphere is a rectangle / oval item, so its box *is* the extent
+        on the two visible axes and the edit is read straight off it. A
+        polyhedron is a polygon item with no such box, so only its translation
+        is taken.
+        """
+        from ..core.roi_volume import set_volume_extent
+
+        columns = _PLANE_PLOT_AXES.get(self._view_plane())
+        if columns is None:
+            return None
+        if record.type in {"cuboid", "sphere"}:
+            try:
+                bounds = item_to_geometry("rectangle", item).get("bounds")
+            except Exception:
+                bounds = None
+            if bounds is not None:
+                return set_volume_extent(record, columns, bounds)
+        return self._volume_translation_from_item(item, record)
+
+    def _volume_translation_from_item(self, item, record):
         """Translate a volume ROI by however far its silhouette was dragged.
 
         A view can only move a shape on the two axes it shows, so the drag is
