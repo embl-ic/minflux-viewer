@@ -368,6 +368,36 @@ def test_floating_geometry_matches_the_embedded_arrangement():
         floating_geometry(plot, "XY", thickness=240)
 
 
+def test_floating_geometry_keeps_decorated_frames_apart():
+    """Plot alignment must leave room for the windows around those plots."""
+    from minflux_viewer.ui.ortho_view import floating_geometry
+
+    plot = (100, 100, 600, 500)
+    owner_chrome = (7, 31, 7, 52)
+    side_chrome = (2, 31, 2, 28)
+    yz = floating_geometry(
+        plot,
+        "YZ",
+        thickness=240,
+        gap=8,
+        owner_chrome=owner_chrome,
+        side_chrome=side_chrome,
+    )
+    xz = floating_geometry(
+        plot,
+        "XZ",
+        thickness=240,
+        gap=8,
+        owner_chrome=owner_chrome,
+        side_chrome=side_chrome,
+    )
+
+    # Subtracting the side window's leading chrome gives its frame origin;
+    # adding the owner's trailing chrome gives its frame edge.
+    assert yz[0] - side_chrome[0] == plot[0] + plot[2] + owner_chrome[2] + 8
+    assert xz[1] - side_chrome[1] == plot[1] + plot[3] + owner_chrome[3] + 8
+
+
 def _float(win, app):
     win._set_ortho_placement("floating")
     _settle(app, turns=12)

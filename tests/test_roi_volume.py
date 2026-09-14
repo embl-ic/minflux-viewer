@@ -565,3 +565,87 @@ def test_channel_from_roi_still_refuses_a_shape_with_no_area(monkeypatch):
     rec.id = "r2"
     rec.selection_dirty = True
     assert channel_labels.roi_mask_for_record(ds, rec) is None
+
+
+# --------------------------------------------------- multi-slice + hull + I/O
+def test_adding_a_second_cross_section_supersedes_the_thickness():
+    """With one level the thickness IS the extent; with several the outermost
+    levels are, so keeping both would be two answers to one question."""
+    from minflux_viewer.core.roi_volume import add_cross_section
+
+    rec = Rec("polyhedron", {"axis": "Z", "thickness": 40.0,
+                             "levels": [{"at": 0.0, "polygon": _circle(100.0).tolist()}]})
+    g = add_cross_section(rec, 200.0, _circle(20.0).tolist())
+    assert len(g["levels"]) == 2
+    assert "thickness" not in g
+    assert [lv["at"] for lv in g["levels"]] == [0.0, 200.0]      # kept sorted
+
+
+def test_re_adding_at_the_same_level_replaces_it():
+    """Nudging a slice is an edit, not an accumulation of near-identical ones."""
+    from minflux_viewer.core.roi_volume import add_cross_section
+
+    rec = Rec("polyhedron", {"axis": "Z",
+                             "levels": [{"at": 0.0, "polygon": _circle(100.0).tolist()},
+                                        {"at": 50.0, "polygon": _circle(60.0).tolist()}]})
+    g = add_cross_section(rec, 50.0, _circle(10.0).tolist())
+    assert len(g["levels"]) == 2
+    at50 = [lv for lv in g["levels"] if lv["at"] == 50.0][0]
+    assert max(abs(p[0]) for p in at50["polygon"]) == pytest.approx(10.0, rel=1e-6)
+
+
+def test_a_multi_slice_shape_interpolates_between_the_drawn_levels():
+    """The whole point of a second level: the shape between follows the
+    structure instead of extruding one outline through it."""
+    from minflux_viewer.core.roi_volume import add_cross_section
+
+    rec = Rec("polyhedron", {"axis": "Z", "thickness": 10.0,
+                             "levels": [{"at": 0.0, "polygon": _circle(100.0).tolist()}]})
+    rec.geometry = add_cross_section(rec, 200.0, _circle(20.0).tolist())
+    # Halfway the radius is halfway: a prism would still be 100 everywhere.
+    outline = cross_section_at(rec.geometry, 100.0, n_angles=32)
+    assert np.hypot(outline[:, 0], outline[:, 1]).mean() == pytest.approx(60.0, rel=2e-2)
+    assert roi_volume_mask([55.0], [0.0], [100.0], rec)[0]
+    assert not roi_volume_mask([65.0], [0.0], [100.0], rec).any()
+
+
+def test_a_prism_is_left_alone_by_a_no_op_add():
+    from minflux_viewer.core.roi_volume import add_cross_section
+
+    rec = Rec("cuboid", {"x": [0, 1], "y": [0, 1], "z": [0, 1]})
+    assert add_cross_section(rec, 0.0, _circle(5.0).tolist()) is None      # wrong type
+    poly = Rec("polyhedron", {"axis": "Z", "levels": []})
+    assert add_cross_section(poly, 0.0, [[0.0, 0.0], [1.0, 1.0]]) is None  # <3 vertices
+
+
+def test_the_convex_hull_encloses_its_own_points():
+    from minflux_viewer.core.roi_volume import convex_hull_polyhedron
+
+    rng = np.random.default_rng(0)
+    pts = rng.normal(0.0, 100.0, (3000, 3))
+    g = convex_hull_polyhedron(pts)
+    assert g is not None and len(g["levels"]) > 1
+    rec = Rec("polyhedron", g)
+    inside = roi_volume_mask(pts[:, 0], pts[:, 1], pts[:, 2], rec)
+    # ⚠ Sampled cross-sections, not an exact face list: a little tighter than
+    # the true hull between levels. Stated rather than hidden.
+    assert inside.mean() > 0.95
+    assert not roi_volume_mask([1e4], [1e4], [0.0], rec).any()
+
+
+def test_the_hull_needs_enough_points_to_be_a_solid():
+    from minflux_viewer.core.roi_volume import convex_hull_polyhedron
+
+    assert convex_hull_polyhedron(np.zeros((3, 3))) is None
+    assert convex_hull_polyhedron(np.zeros((0, 3))) is None
+
+
+def test_imagej_export_refuses_a_volume_roi_by_name():
+    """⚠ Silently writing an XY silhouette would put a flat rectangle in the
+    file under the name of a cuboid, and nothing downstream could tell."""
+    pytest.importorskip("roifile")
+    from minflux_viewer.core.roi import RoiRecord, record_to_imagej
+
+    rec = RoiRecord.create("cuboid", {"x": [0, 1], "y": [0, 1], "z": [0, 1]}, name="box-1")
+    with pytest.raises(ValueError, match="3-D ROI"):
+        record_to_imagej(rec)

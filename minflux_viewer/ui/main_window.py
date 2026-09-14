@@ -751,6 +751,14 @@ class MainWindow(QMainWindow):
         self.actionRoiConvexHull = QAction("Convex Hull", self)
         self.actionRoiConvexHull.triggered.connect(self._convex_hull_active_roi)
         self.menuProcessRoi.addAction(self.actionRoiConvexHull)
+        # Multi-slice polyhedron: draw the outline again at another Z and the
+        # shape between is interpolated rather than extruded.
+        self.actionRoiAddSlice = QAction("Add Cross-Section…", self)
+        self.actionRoiAddSlice.setToolTip(
+            "Add the drawn polygon to the selected polyhedron as a cross-section "
+            "at another Z, turning a prism into a multi-slice shape")
+        self.actionRoiAddSlice.triggered.connect(self._add_cross_section_to_roi)
+        self.menuProcessRoi.addAction(self.actionRoiAddSlice)
         self.menuProcessRoi.addSeparator()
         # Restore ROI: bring the active ROI back on another view / after a delete.
         self.actionRoiRestore = QAction("Restore ROI", self)
@@ -6253,6 +6261,73 @@ class MainWindow(QMainWindow):
         self._execute_crop(src_idx, src, record, members, opts)
 
     # ------------------------------------------------------------------
+    def _add_cross_section_to_roi(self) -> None:
+        """Process › ROI › Add Cross-Section… — make a polyhedron multi-slice.
+
+        The gesture is: select the polyhedron, draw the outline again where it
+        should be at another Z, then invoke this. The drawn polygon becomes a
+        level and everything between the levels is *interpolated* (angular
+        resampling), so the shape follows the structure instead of extruding one
+        outline through it.
+
+        ⚠ The Z is asked for rather than taken from the view. Render has a
+        crosshair to read, scatter does not, and a level placed at a depth the
+        user never chose is worse than one typed in.
+        """
+        from PyQt6.QtWidgets import QInputDialog
+
+        from ..core.roi_volume import add_cross_section
+
+        idx = self._state.active_idx
+        if not isinstance(idx, int) or not (0 <= idx < len(self._state.datasets)):
+            self._no_data_warning()
+            return
+        selected = [r for r in self._state.rois.records
+                    if r.id in set(self._state.rois.selected_ids or [])
+                    and r.type == "polyhedron"]
+        if len(selected) != 1:
+            QMessageBox.information(
+                self, "Add Cross-Section",
+                "Select exactly one polyhedron ROI in the ROI Manager first.")
+            return
+        target = selected[0]
+
+        polygon = None
+        view = self._active_coordinate_view()
+        for win in (view, self._render_windows.get(idx), self._scatter_windows.get(idx)):
+            controller = getattr(win, "_roi_overlay", None)
+            draft = getattr(controller, "draft", None) if controller else None
+            if draft is not None and draft.type in {"polygon", "freehand"}:
+                polygon = (draft.geometry or {}).get("points")
+                break
+        if not polygon or len(polygon) < 3:
+            QMessageBox.information(
+                self, "Add Cross-Section",
+                "Draw a polygon where the new cross-section should be, then run "
+                "this again. It becomes a level of the selected polyhedron.")
+            return
+
+        levels = (target.geometry or {}).get("levels") or []
+        default = float(levels[-1]["at"]) if levels else 0.0
+        at, ok = QInputDialog.getDouble(
+            self, "Add Cross-Section", "Place this cross-section at Z (nm):",
+            default, -1e9, 1e9, 1)
+        if not ok:
+            return
+        geometry = add_cross_section(target, at, [[p[0], p[1]] for p in polygon])
+        if geometry is None:
+            QMessageBox.information(self, "Add Cross-Section",
+                                    "That outline cannot be used as a cross-section.")
+            return
+        import copy as _copy
+        updated = _copy.deepcopy(target)
+        updated.geometry = geometry
+        updated.selection_dirty = True
+        self._state.rois.update(target.id, updated)
+        self._state.log(
+            f"Add cross-section at Z={at:g} nm: '{target.name}' now has "
+            f"{len(geometry['levels'])} level(s).")
+
     def _active_region_record(self, ds, ds_idx):
         """The active **region** ROI (rectangle/oval/polygon/freehand) for *ds*.
 

@@ -73,6 +73,8 @@ __all__ = [
     "scale_z",
     "translate_volume",
     "set_volume_extent",
+    "add_cross_section",
+    "convex_hull_polyhedron",
 ]
 
 
@@ -771,3 +773,87 @@ def set_volume_extent(record, columns, bounds) -> dict | None:
         g["center"], g["radii"] = centre, radii
         return g
     return None
+
+
+def add_cross_section(record, at: float, polygon) -> dict | None:
+    """Add (or replace) a polyhedron's cross-section at stacking coordinate *at*.
+
+    This is what turns a prism into a genuine multi-slice polyhedron: draw the
+    outline again at another Z and the shape between the two is interpolated by
+    :func:`cross_section_at`, rather than being an extrusion of one outline.
+
+    A second level supersedes ``thickness``: with one level the thickness *is*
+    the extent, with several the outermost levels are. Re-adding at an existing
+    level replaces it, so nudging a slice is an edit rather than an accumulation
+    of near-identical cross-sections.
+    """
+    if getattr(record, "type", None) != "polyhedron":
+        return None
+    g = dict(getattr(record, "geometry", None) or {})
+    points = [[float(p[0]), float(p[1])] for p in (polygon or [])]
+    if len(points) < 3:
+        return None
+    at = float(at)
+    levels = [dict(lv) for lv in (g.get("levels") or [])
+              if abs(float(lv.get("at", 0.0)) - at) > 1e-9]
+    levels.append({"at": at, "polygon": points})
+    levels.sort(key=lambda lv: float(lv["at"]))
+    g["levels"] = levels
+    if len(levels) > 1:
+        g.pop("thickness", None)
+    return g
+
+
+def convex_hull_polyhedron(points, *, axis: str = "Z", levels: int = 9) -> dict | None:
+    """A ``polyhedron`` enclosing *points*, as cross-sections of their 3-D hull.
+
+    ``scipy.spatial.ConvexHull`` gives the exact enclosing solid, but this
+    application's volume ROI is a stack of cross-sections rather than a face
+    list -- so the hull is *sampled*: at each of ``levels`` evenly spaced
+    positions along *axis*, the convex hull of the points near that level
+    becomes one cross-section, and the interpolation between them reproduces the
+    solid.
+
+    ⚠ Sampling, not an exact face list, and it says so: the reconstruction is a
+    little tighter than the true hull between levels. That is the price of one
+    representation serving both a drawn prism and a fitted hull, and it keeps
+    every consumer -- mask, silhouette, Scale Z, the editor -- working unchanged.
+    """
+    from scipy.spatial import ConvexHull, QhullError
+
+    pts = np.asarray(points, dtype=float)
+    pts = pts[np.all(np.isfinite(pts), axis=1)] if pts.ndim == 2 else pts
+    if pts.ndim != 2 or pts.shape[1] < 3 or pts.shape[0] < 4:
+        return None
+    key = str(axis).upper()
+    if key not in AXIS_INDEX:
+        return None
+    stack = AXIS_INDEX[key]
+    ui, vi = cross_axes(key)
+
+    lo, hi = float(pts[:, stack].min()), float(pts[:, stack].max())
+    if hi - lo < MIN_SEED_THICKNESS_NM:
+        mid = 0.5 * (lo + hi)
+        lo, hi = mid - 0.5 * MIN_SEED_THICKNESS_NM, mid + 0.5 * MIN_SEED_THICKNESS_NM
+    positions = np.linspace(lo, hi, max(2, int(levels)))
+    half = 0.5 * (positions[1] - positions[0]) if len(positions) > 1 else 1.0
+
+    out = []
+    for at in positions:
+        near = pts[np.abs(pts[:, stack] - at) <= half * 1.5]
+        if near.shape[0] < 3:
+            continue
+        plane_pts = np.column_stack([near[:, ui], near[:, vi]])
+        try:
+            hull = ConvexHull(plane_pts)
+        except (QhullError, ValueError):
+            continue
+        polygon = [[float(plane_pts[i, 0]), float(plane_pts[i, 1])]
+                   for i in hull.vertices]
+        if len(polygon) >= 3:
+            out.append({"at": float(at), "polygon": polygon})
+    if not out:
+        return None
+    if len(out) == 1:
+        return {"axis": key, "thickness": float(hi - lo), "levels": out}
+    return {"axis": key, "levels": out}

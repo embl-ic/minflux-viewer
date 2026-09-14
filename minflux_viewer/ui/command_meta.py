@@ -218,6 +218,17 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "Skeletonize a region ROI to its centreline.", "process", gui_class=GuiClass.GUI_FREE),
     "actionRoiConvexHull": CommandMeta(C + "roi_convert.py", ("roi", "hull", "convex"),
                               "Convex hull of a polygon/freehand ROI.", "process", gui_class=GuiClass.GUI_FREE),
+    "actionRoiAddSlice": CommandMeta(C + "roi_volume.py",
+                              ("roi", "3d", "polyhedron", "cross-section", "slice", "level",
+                               "multi-slice", "interpolate", "volume"),
+                              "Add the drawn polygon to the selected polyhedron as a "
+                              "cross-section at another Z, so the shape between levels is "
+                              "interpolated rather than extruded.", "process",
+                              params=(ParamMeta("at", "nm", 0.0, "nm",
+                                                "stacking coordinate of the new cross-section"),),
+                              inputs=("selected polyhedron ROI", "a drawn polygon"),
+                              outputs=("multi-slice polyhedron ROI",),
+                              gui_class=GuiClass.GUI_FREE),
     "actionRoiRestore": CommandMeta(U + "main_window.py",
                               ("roi", "restore", "recover", "undo delete", "bring back", "sync", "views"),
                               "Restore the active ROI onto another view (render ↔ scatter), "

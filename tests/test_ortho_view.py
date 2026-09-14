@@ -855,8 +855,9 @@ def test_a_programmatic_range_push_does_not_engage_the_crop(_qt_app):
         view.setXRange(-4000.0, -2000.0, padding=0)      # no manual signal
         _settle(_qt_app)
 
-        # The old inference would now report a rect: auto-range is off.
-        assert not any(view.autoRangeEnabled())
+        # The old inference would now report a rect: X auto-range is off.
+        # Y may remain automatic because setXRange only owns one axis.
+        assert not view.autoRangeEnabled()[0]
         assert win._ortho_view_rect() is None            # ...the flag does not
     finally:
         win.close()

@@ -42,12 +42,41 @@ _PLANE_DEPTH_NAME = {"XY": "Z", "XZ": "Y", "YZ": "X"}
 _FLAT_TOOL_FOR_VOLUME = {"cuboid": "rectangle", "sphere": "oval", "polyhedron": "polygon"}
 
 
+def resolve_axes(plane_or_columns):
+    """``(i, j, k)`` -- the two plotted data-axis columns and the third.
+
+    Accepts a **plane name** (the standalone convention, ``_PLANE_PLOT_AXES``)
+    or an explicit ``(h, v)`` **column pair**. ⚠ The column form is what lets a
+    ROI be drawn in an ortho side pane at all: an ortho YZ pane plots ``(2, 1)``
+    -- Z horizontally -- while a standalone YZ projection plots ``(1, 2)``. Both
+    are right for their own view, and a plane *name* cannot say which, so a
+    controller attached to a side pane would silently write Z data into a Y
+    coordinate. Naming the columns removes the question.
+    """
+    if isinstance(plane_or_columns, (tuple, list)) and len(plane_or_columns) == 2:
+        try:
+            i, j = int(plane_or_columns[0]), int(plane_or_columns[1])
+        except (TypeError, ValueError):
+            return None
+        if i == j or not {i, j} <= {0, 1, 2}:
+            return None
+        return i, j, ({0, 1, 2} - {i, j}).pop()
+    if plane_or_columns not in _PLANE_PLOT_AXES:
+        return None
+    i, j = _PLANE_PLOT_AXES[plane_or_columns]
+    return i, j, _PLANE_DEPTH_AXIS[plane_or_columns]
+
+
 def point_to_3d(pos, plane: str | None, depth: float | None) -> list[float]:
-    """Full XYZ for an in-plane click at *pos*; the out-of-plane axis = *depth*."""
-    if plane not in _PLANE_PLOT_AXES:
+    """Full XYZ for an in-plane click at *pos*; the out-of-plane axis = *depth*.
+
+    *plane* may be a plane name or an ``(h, v)`` column pair -- see
+    :func:`resolve_axes`.
+    """
+    axes = resolve_axes(plane)
+    if axes is None:
         return [float(pos[0]), float(pos[1])]
-    i, j = _PLANE_PLOT_AXES[plane]
-    k = _PLANE_DEPTH_AXIS[plane]
+    i, j, k = axes
     out = [0.0, 0.0, 0.0]
     out[i] = float(pos[0])
     out[j] = float(pos[1])
@@ -56,18 +85,20 @@ def point_to_3d(pos, plane: str | None, depth: float | None) -> list[float]:
 
 
 def project_point(point, plane: str | None) -> tuple[float, float]:
-    """Project a (possibly 3-D) point into *plane*'s two on-screen axes."""
-    if plane in _PLANE_PLOT_AXES and len(point) >= 3:
-        i, j = _PLANE_PLOT_AXES[plane]
+    """Project a (possibly 3-D) point onto the view's two axes."""
+    axes = resolve_axes(plane)
+    if axes is not None and len(point) >= 3:
+        i, j, _k = axes
         return float(point[i]), float(point[j])
     return float(point[0]), float(point[1])
 
 
 def update_point_in_plane(new_xy, old_point, plane: str | None) -> list[float]:
     """Apply an in-plane drag to *old_point*, preserving its out-of-plane axis."""
-    if plane not in _PLANE_PLOT_AXES or len(old_point) < 3:
+    axes = resolve_axes(plane)
+    if axes is None or len(old_point) < 3:
         return [float(new_xy[0]), float(new_xy[1])]
-    i, j = _PLANE_PLOT_AXES[plane]
+    i, j, _k = axes
     out = [float(v) for v in old_point]
     out[i] = float(new_xy[0])
     out[j] = float(new_xy[1])
@@ -720,7 +751,7 @@ class RoiOverlayController(QObject):
                     return [[float(p[0]), float(p[1])] for p in pts]
             except Exception:
                 pass
-        return project_points(record.geometry.get("points", []), self._view_plane())
+        return project_points(record.geometry.get("points", []), self._view_axes())
 
     def consume_draft(self) -> RoiRecord | None:
         record = self.draft
@@ -1502,6 +1533,26 @@ class RoiOverlayController(QObject):
     # 2-D view <-> 3-D coordinate helpers (out-of-plane = depth)
     # ------------------------------------------------------------------
 
+    def _view_axes(self):
+        """The data-axis columns this view plots -- an ``(h, v)`` pair, or the
+        plane name when the owner does not say.
+
+        ⚠ Everything that PROJECTS geometry must go through this rather than
+        ``_view_plane()``: an ortho YZ pane plots ``(2, 1)`` while a standalone
+        YZ projection plots ``(1, 2)``, and a plane name cannot distinguish
+        them. Plane names are still right for the *semantic* questions (which
+        axis is the depth, what to stamp in ``context["view_plane"]``).
+        """
+        getter = getattr(self.owner, "roi_view_columns", None)
+        if callable(getter):
+            try:
+                columns = getter()
+            except Exception:
+                columns = None
+            if columns is not None and resolve_axes(columns) is not None:
+                return tuple(columns)
+        return self._view_plane()
+
     def _view_plane(self) -> str | None:
         """Current view plane (``"XY"``/``"XZ"``/``"YZ"``) from the owner, or
         ``None`` for owners without an orientation (e.g. histogram)."""
@@ -1547,7 +1598,7 @@ class RoiOverlayController(QObject):
 
     def _project_point(self, record: RoiRecord) -> tuple[float, float]:
         """Project a (possibly 3-D) point geometry into the current view plane."""
-        return project_point(record.geometry.get("point", [0.0, 0.0]), self._view_plane())
+        return project_point(record.geometry.get("point", [0.0, 0.0]), self._view_axes())
 
     def _point_geometry_from_item(self, item, old_geometry: dict[str, Any]) -> dict[str, Any]:
         """Rebuild a point's 3-D geometry after a drag in the current plane,
@@ -1556,14 +1607,14 @@ class RoiOverlayController(QObject):
         disturbing the value set when it was drawn in another view."""
         pos = item.pos()
         old = old_geometry.get("point", [0.0, 0.0])
-        return {"point": update_point_in_plane((pos.x(), pos.y()), old, self._view_plane())}
+        return {"point": update_point_in_plane((pos.x(), pos.y()), old, self._view_axes())}
 
     def _points_to_3d(self, pts_2d) -> list[list[float]]:
         """Lift a 2-D draw (point / line / polyline / freehand line) to full XYZ,
         giving each vertex a data-aware out-of-plane (depth) value."""
-        plane = self._view_plane()
+        axes = self._view_axes()
         depths = self._depths_at(pts_2d)
-        return [point_to_3d(p, plane, d) for p, d in zip(pts_2d, depths)]
+        return [point_to_3d(p, axes, d) for p, d in zip(pts_2d, depths)]
 
     def _project_points(self, record: RoiRecord) -> list[list[float]]:
         """Project a (possibly 3-D) vertex-list geometry into the current plane."""
@@ -1576,7 +1627,7 @@ class RoiOverlayController(QObject):
         old = old_geometry.get("points", [])
         if len(new_xy) == len(old):
             # A pure move / reshape: pair 1:1 and keep each vertex's depth.
-            pts = update_points_in_plane(new_xy, old, self._view_plane())
+            pts = update_points_in_plane(new_xy, old, self._view_axes())
         else:
             # A vertex was added or removed (e.g. pyqtgraph's segment-click adds a
             # vertex when the line is clicked): the index pairing is invalid, so
@@ -1737,8 +1788,7 @@ class RoiOverlayController(QObject):
         """
         from ..core.roi_volume import volume_silhouette
 
-        plane = self._view_plane()
-        columns = _PLANE_PLOT_AXES.get(plane)
+        columns = resolve_axes(self._view_axes())
         if columns is None:
             return [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]
         outline = volume_silhouette(record, columns[0], columns[1])
@@ -2290,7 +2340,7 @@ class RoiOverlayController(QObject):
         """
         from ..core.roi_volume import set_volume_extent
 
-        columns = _PLANE_PLOT_AXES.get(self._view_plane())
+        columns = resolve_axes(self._view_axes())
         if columns is None:
             return None
         if record.type in {"cuboid", "sphere"}:
@@ -2312,7 +2362,7 @@ class RoiOverlayController(QObject):
         """
         from ..core.roi_volume import translate_volume
 
-        columns = _PLANE_PLOT_AXES.get(self._view_plane())
+        columns = resolve_axes(self._view_axes())
         if columns is None:
             return None
         try:

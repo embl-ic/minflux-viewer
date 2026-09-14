@@ -450,3 +450,79 @@ def test_a_polyhedron_shows_a_band_across_the_stack():
     assert xz is not None and len(xz) >= 4
     assert float(min(p[1] for p in xz)) == -20.0     # thickness/2 either side
     assert float(max(p[1] for p in xz)) == 20.0
+
+
+# ------------------------------------------------- drawing in the side panes
+def test_each_side_pane_gets_its_own_controller_reading_its_own_axes(_qt_app):
+    """⚠ The columns are the load-bearing part: an ortho YZ pane plots (2, 1)
+    -- Z horizontally -- where a standalone YZ projection plots (1, 2). A
+    controller that used the plane name would write Z into a Y coordinate,
+    silently, and past every range-based test."""
+    state = _state()
+    win = _scatter(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        for _ in range(4):
+            _qt_app.processEvents()
+        controllers = win._pane_roi_controllers
+        assert sorted(controllers) == ["XZ", "YZ"]
+        assert controllers["XZ"]._view_axes() == (0, 2)
+        assert controllers["YZ"]._view_axes() == (2, 1)
+    finally:
+        win.close()
+
+
+def test_a_cuboid_drawn_in_xz_takes_x_and_z_from_the_drag_and_seeds_y(_qt_app):
+    """The rule is plane-agnostic: the derived axis is the one normal to the
+    pane that was drawn in."""
+    from minflux_viewer.core.roi import RoiRecord
+
+    state = _state()
+    win = _scatter(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        for _ in range(4):
+            _qt_app.processEvents()
+        xz = win._pane_roi_controllers["XZ"]
+        state.rois.set_tool("cuboid")
+        xz._set_draft(RoiRecord.create(
+            "rectangle", {"bounds": [-500.0, -100.0, 1000.0, 200.0]},
+            **xz._record_kwargs()))
+        assert xz._promote_draft_to_volume("cuboid") is True
+
+        g = xz.draft.geometry
+        assert xz.draft.type == "cuboid"
+        assert g["x"] == [-500.0, 500.0]          # the drag's horizontal axis
+        assert g["z"] == [-100.0, 100.0]          # the drag's vertical axis
+        assert g["y"][0] < g["y"][1]              # Y came from the data
+    finally:
+        win.close()
+
+
+def test_the_pane_controllers_share_the_store(_qt_app):
+    """A ROI drawn in any pane is the same record everywhere; the panes differ
+    only in the axes they read it through."""
+    state = _state()
+    win = _scatter(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        for _ in range(4):
+            _qt_app.processEvents()
+        primary = win._roi_overlay
+        for controller in win._pane_roi_controllers.values():
+            assert controller.store is primary.store
+    finally:
+        win.close()
+
+
+def test_a_point_drawn_in_an_ortho_yz_pane_lands_where_it_was_clicked():
+    """The transposition, end to end: in an ortho YZ pane the horizontal
+    coordinate is Z and the vertical is Y."""
+    from minflux_viewer.ui.roi_overlay import point_to_3d, project_point
+
+    xyz = point_to_3d((300.0, 20.0), (2, 1), depth=7.0)    # h=Z, v=Y, depth=X
+    assert xyz == [7.0, 20.0, 300.0]
+    assert project_point(xyz, (2, 1)) == (300.0, 20.0)     # and back again
+    # Read with the STANDALONE convention it would be wrong -- which is the
+    # whole reason the columns are passed rather than a plane name.
+    assert project_point(xyz, "YZ") == (20.0, 300.0)

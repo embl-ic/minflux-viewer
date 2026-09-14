@@ -5184,7 +5184,9 @@ class RenderWindow(QWidget):
         record.context = ctx
         return record
 
-    def compute_roi_selection(self, record):
+    def compute_roi_selection(self, record, *, columns=None):
+        """Rows inside *record*. ``columns`` names the axes a 2-D shape was
+        measured on, so an ortho side pane can ask about its own plane."""
         from ..core.roi_selection import VOLUME_ROI_TYPES
 
         if record.type not in REGION_ROI_TYPES | VOLUME_ROI_TYPES or self._idx is None:
@@ -5196,7 +5198,11 @@ class RenderWindow(QWidget):
         if locs.shape[0] == 0:
             return None
 
-        if self._active_plane() == "XY":
+        if columns is not None:
+            axes = (int(columns[0]), int(columns[1]))
+            depth_axis = ({0, 1, 2} - set(axes)).pop()
+            depth_name = "XYZ"[depth_axis]
+        elif self._active_plane() == "XY":
             axes, depth_axis, depth_name = (0, 1), 2, "Z"
         elif self._active_plane() == "XZ":
             axes, depth_axis, depth_name = (0, 2), 1, "Y"

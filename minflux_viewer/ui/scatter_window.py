@@ -407,6 +407,11 @@ class ScatterWindow(QWidget):
         # so a ROI is visible in all three views rather than only the one it was
         # drawn in.
         self._ortho_roi_outlines = OrthoRoiOutlines(self._pane_plots)
+        # Real controllers on the side panes: they share the store, so a ROI
+        # drawn in any pane is the same record everywhere and the panes differ
+        # only in the axes they read it through.
+        self._pane_roi_controllers: dict = {}
+        self._build_rotation_pane()
         self._wire_manual_range_gestures()
 
     def _wire_manual_range_gestures(self) -> None:
@@ -435,6 +440,78 @@ class ScatterWindow(QWidget):
             return
         self._ortho_show_all = False
         self._on_ortho_view_changed()
+
+    def _build_rotation_pane(self) -> None:
+        """Fill the grid's empty fourth cell with a rotating projection.
+
+        One matrix multiply on the localizations already in hand, then the same
+        2-D scatter the other panes use -- no OpenGL and no second rendering
+        path. It answers what three fixed projections cannot: three orthogonal
+        silhouettes are ambiguous about depth ordering, and a few degrees of
+        rotation resolves it at once.
+        """
+        from PyQt6.QtWidgets import QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget
+
+        holder = QWidget()
+        column = QVBoxLayout(holder)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(2)
+
+        self._rotation_plot = plot_widget(background="w")
+        self._rotation_plot.showGrid(x=self._show_2d_grid, y=self._show_2d_grid, alpha=0.2)
+        self._rotation_scatter = pg.ScatterPlotItem(
+            size=self._point_size, symbol=self._point_symbol, pen=None,
+            brush=pg.mkBrush(200, 200, 200, 180))
+        self._rotation_plot.addItem(self._rotation_scatter)
+        column.addWidget(self._rotation_plot, 1)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(2, 0, 2, 0)
+        self._rotation_slider = QSlider(Qt.Orientation.Horizontal)
+        self._rotation_slider.setRange(0, 360)
+        self._rotation_slider.setValue(0)
+        self._rotation_slider.setToolTip(
+            "Spin the projection about the vertical screen axis. At 0° this is "
+            "the XY view, so the rotation reads as a departure from a known "
+            "picture rather than a new one.")
+        self._rotation_label = QLabel("0°")
+        self._rotation_label.setMinimumWidth(34)
+        self._rotation_slider.valueChanged.connect(self._on_rotation_changed)
+        row.addWidget(self._rotation_slider, 1)
+        row.addWidget(self._rotation_label)
+        column.addLayout(row)
+
+        self._rotation_holder = holder
+        self._ortho.set_extra_pane(holder)
+
+    def _on_rotation_changed(self, value: int) -> None:
+        self._rotation_label.setText(f"{int(value)}°")
+        self._refresh_rotation_pane()
+
+    def _refresh_rotation_pane(self, locs=None, rows=None) -> None:
+        """Redraw the rotating projection from whatever the panes are showing."""
+        scatter = getattr(self, "_rotation_scatter", None)
+        if scatter is None or not self._ortho_active():
+            return
+        ds = self._dataset()
+        if ds is None:
+            scatter.setData([], [])
+            return
+        if locs is None:
+            locs = self._current_locs(ds)
+            rows = None
+        if locs is None or getattr(locs, "ndim", 0) != 2 or locs.shape[1] < 3:
+            scatter.setData([], [])
+            return
+        picked = locs if rows is None else locs[rows]
+        from .ortho_rotation import rotated_projection
+        result = rotated_projection(picked, float(self._rotation_slider.value()))
+        if result is None:
+            scatter.setData([], [])
+            return
+        h, v = result
+        finite = np.isfinite(h) & np.isfinite(v)
+        scatter.setData(h[finite], v[finite])
 
     def _apply_page_background(self, black: bool) -> None:
         """Paint the pane page itself, so the empty bottom-right cell and the
@@ -678,9 +755,26 @@ class ScatterWindow(QWidget):
             self._ortho_redrawing = False
         self._refresh_ortho_roi_outlines()
 
+    def roi_pane_coords(self):
+        """Display-nm coordinates a side pane measures its depth from."""
+        ds = self._dataset()
+        return None if ds is None else self._current_locs(ds)
+
+    def _ensure_pane_roi_controllers(self) -> None:
+        """Attach a controller to each side pane the first time ortho is used."""
+        if self._pane_roi_controllers:
+            return
+        from .ortho_roi import attach_pane_controllers
+        try:
+            self._pane_roi_controllers = attach_pane_controllers(
+                self, self._pane_plots, source_view="scatter")
+        except Exception:
+            self._pane_roi_controllers = {}
+
     def on_roi_overlay_changed(self) -> None:
         """The ROI controller's hook: the drawn set changed, draft included."""
         self._refresh_ortho_roi_outlines()
+        self._refresh_rotation_pane()
 
     def _refresh_ortho_roi_outlines(self) -> None:
         """Show every in-scope ROI in the two side panes as well.
@@ -1022,6 +1116,8 @@ class ScatterWindow(QWidget):
         # Leaving ortho must also drop the side panes' grid weight, or the
         # primary pane keeps only its share of the window (see grid_stretch).
         ortho_on = axis_text == ORTHO_AXIS and not is_3d
+        if ortho_on:
+            self._ensure_pane_roi_controllers()
         if ortho_on and not self._ortho.active:
             # Entering the mode starts uncropped, whatever the previous
             # projection's zoom left behind: the side panes should open on the
@@ -2752,7 +2848,10 @@ class ScatterWindow(QWidget):
         record.context = ctx
         return record
 
-    def compute_roi_selection(self, record):
+    def compute_roi_selection(self, record, *, columns=None):
+        """Rows inside *record*. ``columns`` names the axes a 2-D shape was
+        measured on, so an ortho side pane can ask about its own plane rather
+        than the primary's."""
         from ..core.roi_selection import VOLUME_ROI_TYPES
 
         if (record.type not in REGION_ROI_TYPES | VOLUME_ROI_TYPES
@@ -2768,9 +2867,12 @@ class ScatterWindow(QWidget):
             locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
 
         axis = self._active_plane()
-        if axis not in AXIS_COLUMNS:
+        if columns is not None:
+            ci, cj = int(columns[0]), int(columns[1])
+        elif axis in AXIS_COLUMNS:
+            ci, cj = AXIS_COLUMNS[axis]
+        else:
             return None
-        ci, cj = AXIS_COLUMNS[axis]
         base = np.asarray(ds.filter_mask, dtype=bool)
         if base.shape[0] != locs.shape[0]:
             base = np.ones(locs.shape[0], dtype=bool)

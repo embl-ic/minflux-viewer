@@ -82,7 +82,7 @@ def test_fit_plan_shrinks_until_the_whole_set_fits():
     primary rather than inside it. Left alone the arrangement runs off the
     bottom of the monitor."""
     # (left, top, right, bottom) per window. The side windows carry a title
-    # bar above the plot and their out-of-plane slider below it.
+    # bar above the plot, while the owner has controls below it.
     chrome = {"XY": (7, 31, 7, 52), "YZ": (2, 31, 2, 28), "XZ": (2, 31, 2, 28)}
     plan = fit_ortho_plot_rects(
         (0, 0, 1920, 1032), (600, 150, 900, 880), ratio=2 / 3, gap=8, chrome=chrome)
@@ -107,7 +107,7 @@ def test_fit_plan_only_ever_shrinks():
 
 def test_entering_floating_fits_on_the_current_screen(_qt_app):
     """⚠ Best effort, not a guarantee. Three windows have three sets of
-    minimum sizes (the channel area, the depth row, each side slider), so on a
+    minimum sizes (the channel area, the depth row, and pane axes), so on a
     screen too small for them the fit shrinks as far as it can and the set
     still overflows — an inherent cost of the floating arrangement that the
     embedded grid does not pay. Under pytest Qt can report an ~800x800 stub
@@ -131,6 +131,32 @@ def test_entering_floating_fits_on_the_current_screen(_qt_app):
         frames = _frames(win)
         assert max(g.x() + g.width() for g in frames) <= available.x() + available.width()
         assert max(g.y() + g.height() for g in frames) <= available.y() + available.height()
+    finally:
+        win.close()
+
+
+def test_initial_floating_windows_clear_the_primary_frame(_qt_app):
+    """The side plots align to XY, but their decorated windows must not overlap.
+
+    In particular, positioning the XZ *plot* immediately below the XY plot
+    ignores both XY's bottom chrome and XZ's title bar.  That makes the owner
+    window cover the top of XZ even though the two data rectangles look
+    geometrically adjacent.
+    """
+    win = _window(_qt_app, size=(980, 920))
+    try:
+        win._set_orientation(ORTHO_AXIS)
+        # Exercise the deferred entry path itself; an explicit later fit or
+        # sticky move must not be needed to repair the initial arrangement.
+        _settle(_qt_app, turns=24)
+
+        xy_frame = win.frameGeometry()
+        xz_frame = win._ortho._hosts["XZ"].frameGeometry()
+        yz_frame = win._ortho._hosts["YZ"].frameGeometry()
+        gap = 8
+
+        assert xz_frame.y() >= xy_frame.y() + xy_frame.height() + gap
+        assert yz_frame.x() >= xy_frame.x() + xy_frame.width() + gap
     finally:
         win.close()
 
@@ -324,12 +350,15 @@ def test_side_panes_take_the_mouse_and_drive_the_others(_qt_app):
         win._view_box.setYRange(-1000.0, 1000.0, padding=0)
         _settle(_qt_app)
 
-        win._ortho.view_box("XZ").setXRange(-400.0, 400.0, padding=0)
+        xz = win._ortho.view_box("XZ")
+        xz.setXRange(-400.0, 400.0, padding=0)
+        xz.sigRangeChangedManually.emit([True, False])
         _settle(_qt_app)
         (ax0, ax1), _ = win._view_box.viewRange()
         assert (ax0, ax1) == pytest.approx((-400.0, 400.0), abs=30.0)   # X reached XY
 
-        win._ortho.view_box("XZ").setYRange(-150.0, 150.0, padding=0)
+        xz.setYRange(-150.0, 150.0, padding=0)
+        xz.sigRangeChangedManually.emit([False, True])
         _settle(_qt_app)
         # ⚠ Z reaches YZ as a SCALE, not as a range. The two panes have
         # different pixel extents, so copying the range verbatim would give
@@ -341,6 +370,98 @@ def test_side_panes_take_the_mouse_and_drive_the_others(_qt_app):
         pixels = win._ortho.depth_pixels()
         assert (zx1 - zx0) / pixels["YZ"] == pytest.approx(
             (zy1 - zy0) / pixels["XZ"], rel=1e-3)
+    finally:
+        win.close()
+
+
+@pytest.mark.parametrize(("plane", "missing_axis"), (("XZ", 1), ("YZ", 0)))
+@pytest.mark.parametrize("factor", (0.5, 1.8), ids=("in", "out"))
+def test_side_zoom_couples_the_missing_axis_about_the_crosshair(
+    _qt_app, plane, missing_axis, factor
+):
+    """A two-axis side zoom is a three-axis ortho zoom.
+
+    XZ cannot choose a Y centre and YZ cannot choose an X centre.  The visible
+    crosshair supplies that missing coordinate, while the source pane keeps
+    control of the two coordinates it actually shows.
+    """
+    win = _window(_qt_app)
+    try:
+        win._set_orientation(ORTHO_AXIS)
+        _settle(_qt_app, turns=18)
+
+        before = [tuple(r) for r in win._view_box.viewRange()]
+        centres = [0.5 * (r[0] + r[1]) for r in before]
+        spans = [r[1] - r[0] for r in before]
+        marker = list(win._ortho_crosshair.point)
+        marker[0], marker[1] = centres
+        # Inside the old range but outside a 2x zoom centred where it is now.
+        # The missing-axis policy must therefore rescue it to the new centre.
+        marker[missing_axis] += 0.4 * spans[missing_axis]
+        win._ortho_crosshair.set_point(marker)
+        win._ortho.set_depth_centre(marker[2])
+
+        side = win._ortho.view_box(plane)
+        (h0, h1), (v0, v1) = side.viewRange()
+        side.scaleBy(
+            (factor, factor),
+            center=(0.5 * (h0 + h1), 0.5 * (v0 + v1)),
+        )
+        side.sigRangeChangedManually.emit([True, True])
+        _settle(_qt_app)
+
+        after = [tuple(r) for r in win._view_box.viewRange()]
+        missing = after[missing_axis]
+        assert missing[1] - missing[0] == pytest.approx(
+            factor * spans[missing_axis], rel=0.02
+        )
+
+        # Every pane must still use one physical scale. Previously the primary
+        # aspect lock changed its missing axis while _syncing suppressed the
+        # copy to the opposite side pane, stretching that pane by ~2x.
+        scale = win._ortho.primary_scale_nm_per_px()
+        depth_pixels = win._ortho.depth_pixels()
+        for side_plane, shared_vertical in (("XZ", False), ("YZ", True)):
+            box = win._ortho.view_box(side_plane)
+            (sx0, sx1), (sy0, sy1) = box.viewRange()
+            rect = box.sceneBoundingRect()
+            shared_scale = ((sy1 - sy0) / rect.height() if shared_vertical
+                            else (sx1 - sx0) / rect.width())
+            depth_span = (sx1 - sx0) if shared_vertical else (sy1 - sy0)
+            assert shared_scale == pytest.approx(scale, rel=0.02)
+            assert depth_span / depth_pixels[side_plane] == pytest.approx(
+                scale, rel=1e-3
+            )
+        assert 0.5 * (missing[0] + missing[1]) == pytest.approx(
+            marker[missing_axis], abs=2.0
+        )
+    finally:
+        win.close()
+
+
+def test_side_zoom_without_a_visible_crosshair_keeps_the_missing_centre(_qt_app):
+    win = _window(_qt_app)
+    try:
+        win._set_orientation(ORTHO_AXIS)
+        _settle(_qt_app, turns=18)
+        win._ortho_crosshair.set_point((0.0, 100000.0, 0.0))
+        win._set_crosshair_visible(False)
+
+        before = [tuple(r) for r in win._view_box.viewRange()]
+        old_y_centre = 0.5 * sum(before[1])
+        side = win._ortho.view_box("XZ")
+        (x0, x1), (z0, z1) = side.viewRange()
+        side.scaleBy(
+            (0.5, 0.5),
+            center=(0.5 * (x0 + x1), 0.5 * (z0 + z1)),
+        )
+        side.sigRangeChangedManually.emit([True, True])
+        _settle(_qt_app)
+
+        _x, y = win._view_box.viewRange()
+        assert 0.5 * sum(y) == pytest.approx(old_y_centre, abs=2.0)
+        assert y[1] - y[0] == pytest.approx(0.5 * (before[1][1] - before[1][0]),
+                                             rel=0.02)
     finally:
         win.close()
 
@@ -357,9 +478,11 @@ def test_side_depth_interaction_moves_the_anchor_and_crosshair(_qt_app):
         assert placed is not None
 
         target_z = placed[2] + 240.0
-        win._ortho.view_box("XZ").setYRange(
+        xz = win._ortho.view_box("XZ")
+        xz.setYRange(
             target_z - 100.0, target_z + 100.0, padding=0
         )
+        xz.sigRangeChangedManually.emit([False, True])
         _settle(_qt_app)
         assert win._ortho_crosshair.point[2] == pytest.approx(target_z, abs=1.0)
         assert win._ortho.depth_centre == pytest.approx(target_z, abs=1.0)
