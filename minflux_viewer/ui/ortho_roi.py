@@ -35,10 +35,33 @@ from ..core.roi_selection import VOLUME_ROI_TYPES
 from ..core.roi_volume import volume_silhouette
 from .ortho_view import ORTHO_AXIS_COLUMNS, SIDE_PLANES
 
-__all__ = ["pane_outline", "OrthoRoiOutlines", "OrthoPaneOwner", "attach_pane_controllers"]
+__all__ = ["pane_outline", "pane_owns_record", "OrthoRoiOutlines", "OrthoPaneOwner",
+           "attach_pane_controllers"]
 
 #: Drawn above the projected scatter but below the primary pane's ROI handles.
 _Z_VALUE = 6
+
+
+def pane_owns_record(record, plane: str) -> bool:
+    """Whether *plane*'s own controller draws and edits *record*.
+
+    ⚠ This is the rule that keeps a ROI from being read through the wrong two
+    axes. ``roi_visible_in`` gates on family + dataset, **not plane**, so a
+    controller on a side pane would otherwise draw a rectangle drawn in XY
+    verbatim -- putting its Y coordinate on the pane's Z axis, off in a range
+    the data never occupies, and making it draggable there so the next drag
+    writes that nonsense back into the record.
+
+    A **volume** ROI is safe in any pane: its geometry is in named data axes,
+    so the pane reads it through its own columns. A **flat** ROI is only safe
+    in the plane it was drawn in; elsewhere it is edge-on, and the display-only
+    dashed outline is the honest way to show it.
+    """
+    kind = getattr(record, "type", None)
+    if kind in VOLUME_ROI_TYPES:
+        return True
+    context = getattr(record, "context", None) or {}
+    return str(context.get("view_plane") or "").upper() == str(plane).upper()
 
 
 def pane_outline(record, plane: str):
@@ -79,9 +102,19 @@ class OrthoRoiOutlines:
     items each time is what makes a drag feel heavy.
     """
 
-    def __init__(self, panes: dict) -> None:
+    def __init__(self, panes: dict, *, has_controller=None) -> None:
         self._panes = panes                       # plane -> PlotWidget
         self._items: dict[tuple[str, str], pg.PlotCurveItem] = {}
+        # Callable(plane) -> bool: does that pane have its own ROI controller?
+        # Asked per refresh rather than captured, because the controllers are
+        # attached lazily when the mode is first entered.
+        self._has_controller = has_controller
+
+    def _owned_here(self, plane: str) -> bool:
+        try:
+            return bool(self._has_controller(plane)) if callable(self._has_controller) else False
+        except Exception:
+            return False
 
     def clear(self) -> None:
         for (plane, _rid), item in list(self._items.items()):
@@ -93,8 +126,17 @@ class OrthoRoiOutlines:
                     pass
         self._items.clear()
 
-    def refresh(self, records, *, color_of=None, visible: bool = True) -> None:
-        """Draw *records* into every side pane; drop the items of any that went."""
+    def refresh(self, records, *, color_of=None, visible: bool = True,
+                drafts=()) -> None:
+        """Draw *records* into every side pane; drop the items of any that went.
+
+        A record a pane's **own** controller draws is skipped there, or it would
+        appear twice -- once as a grabbable item and once as this decoration,
+        which is a confusing picture even when the two agree. *drafts* are drawn
+        regardless: a draft belongs to the controller that is drawing it and no
+        other pane's controller holds it, so this layer is the only thing that
+        can show it while a volume ROI is being seeded.
+        """
         if not visible:
             self.clear()
             return
@@ -103,7 +145,10 @@ class OrthoRoiOutlines:
             plot = self._panes.get(plane)
             if plot is None:
                 continue
-            for record in records or []:
+            owned = self._owned_here(plane)
+            for record in list(records or []) + list(drafts or []):
+                if owned and record not in (drafts or ()) and pane_owns_record(record, plane):
+                    continue
                 result = pane_outline(record, plane)
                 if result is None:
                     continue
@@ -188,6 +233,24 @@ class OrthoPaneOwner(QObject):
     def compute_roi_selection(self, record):
         """Rows inside *record*, measured on THIS pane's axes."""
         return self._owner.compute_roi_selection(record, columns=self.roi_view_columns())
+
+    def roi_displays_record(self, record) -> bool:
+        """Narrows the controller's scope to what this pane's axes can express."""
+        return pane_owns_record(record, self._plane)
+
+    def normalize_roi_record(self, record):
+        """Stamp the plane/depth of THIS pane, not the window's primary one.
+
+        ⚠ The owner's implementation reads ``self.roi_view_plane()``, and
+        reaching it through ``__getattr__`` binds it to the *window* -- which
+        answers "XY" for the whole ortho mode. A shape drawn in the XZ pane was
+        therefore filed as an XY shape. Binding the same function to this
+        adapter instead makes every ``self.`` in it resolve to the pane.
+        """
+        function = getattr(type(self._owner), "normalize_roi_record", None)
+        if function is None:
+            return record
+        return function(self, record)
 
     def roi_depth_center(self):
         return _depth_of(self._owner, self._plane, centre=True)

@@ -1301,7 +1301,10 @@ class RenderWindow(QWidget):
         # The primary pane keeps the real ROI controller; the side panes show
         # where each ROI lies on their own axes, so a ROI is visible in all
         # three views rather than only the one it was drawn in.
-        self._ortho_roi_outlines = OrthoRoiOutlines(self._pane_widgets)
+        self._ortho_roi_outlines = OrthoRoiOutlines(
+            self._pane_widgets,
+            has_controller=lambda plane: plane in (
+                getattr(self, "_pane_roi_controllers", None) or {}))
         self._ortho.set_active(False)
         self._apply_ortho_page_background()
 
@@ -1549,6 +1552,7 @@ class RenderWindow(QWidget):
     def _set_ortho_active(self, active: bool) -> None:
         if active:
             self._ensure_ortho_panes()
+            self._ensure_pane_roi_controllers()
             if self._ortho_crosshair is not None and not self._show_crosshair:
                 self._show_crosshair = True
             # The panes did not exist when the direction was last applied.
@@ -1677,17 +1681,21 @@ class RenderWindow(QWidget):
             drawer.clear()
             return
         controller = getattr(self, "_roi_overlay", None)
-        records = []
+        records, drafts = [], []
         try:
             for record in self._state.rois.records:
                 if controller is None or controller._record_in_scope(record):
                     records.append(record)
-            draft = getattr(controller, "draft", None) if controller else None
-            if draft is not None:
-                records.append(draft)
+            # Drafts are passed apart: a draft belongs to the controller drawing
+            # it, so no side pane's controller holds it and this layer is the
+            # only thing that can show it while the shape is being made.
+            for source in (controller, *(getattr(self, "_pane_roi_controllers", None) or {}).values()):
+                draft = getattr(source, "draft", None) if source is not None else None
+                if draft is not None:
+                    drafts.append(draft)
         except Exception:
             return
-        drawer.refresh(records, color_of=lambda rec: rec.stroke_color)
+        drawer.refresh(records, drafts=drafts, color_of=lambda rec: rec.stroke_color)
 
     def _render_ortho_sides_now(self) -> None:
         channels = [
@@ -5244,6 +5252,37 @@ class RenderWindow(QWidget):
         }
         return ds, mask, context
 
+    def roi_pane_coords(self):
+        """Display-nm coordinates a side pane measures its out-of-plane range from.
+
+        The same array ``compute_roi_selection`` measures against, so the depth
+        a side pane seeds from cannot disagree with the rows the ROI then
+        selects.
+        """
+        if self._idx is None or not (0 <= self._idx < len(self._state.datasets)):
+            return None
+        return self._raw_render_locs(self._state.datasets[self._idx])
+
+    def _ensure_pane_roi_controllers(self) -> None:
+        """Give each side pane its own ROI controller, once.
+
+        ⚠ Without this the side panes are display-only: the volume tools turn
+        the mode on and say "draw in any pane", and a drag in XZ or YZ does
+        nothing at all. The panes are `PlotWidget`s wherever they currently sit,
+        so this works in the floating arrangement as well as the embedded one --
+        a controller filters events on its pane's viewport, not on the window
+        that happens to host it.
+        """
+        if getattr(self, "_pane_roi_controllers", None):
+            return
+        from .ortho_roi import attach_pane_controllers
+
+        try:
+            self._pane_roi_controllers = attach_pane_controllers(
+                self, self._pane_widgets, source_view="render")
+        except Exception:
+            self._pane_roi_controllers = {}
+
     def _raw_render_locs(self, ds) -> np.ndarray:
         try:
             locs = np.asarray(ds.loc_nm, dtype=np.float64)
@@ -5302,6 +5341,16 @@ class RenderWindow(QWidget):
                     pass
         self._ortho_range_sources = []
         if getattr(self, "_ortho", None) is not None:
+            # The side panes carry their own ROI controllers; each holds an event
+            # filter on its pane's viewport and three store connections, so it must
+            # go before the panes do -- a store change arriving at a controller whose
+            # plot is half torn down is the documented route to a Qt abort.
+            for _controller in (getattr(self, "_pane_roi_controllers", None) or {}).values():
+                try:
+                    _controller.dispose()
+                except Exception:
+                    pass
+            self._pane_roi_controllers = {}
             self._ortho.dispose()
             from .qt_lifecycle import dispose_plot_widgets
             for _plane in SIDE_PLANES:
