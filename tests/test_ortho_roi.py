@@ -361,3 +361,92 @@ def test_a_zero_drag_changes_nothing():
         geometry = {"x": [0.0, 10.0], "y": [0.0, 10.0], "z": [0.0, 10.0]}
 
     assert translate_volume(R(), {0: 0.0, 1: 0.0}) is None
+
+
+# ------------------------------------------ shape preservation while editing
+def test_a_cuboid_is_a_RECTANGLE_item_in_every_plane(_qt_app):
+    """Reported: dragging a corner deformed the box into a polygon.
+
+    ⚠ The item KIND has to match the shape, not just the outline. Drawn as a
+    PolyLineROI a cuboid *is* a polygon on screen -- its handles move single
+    vertices -- so a corner drag produced a shape the record could no longer
+    represent. An axis-aligned box is a rectangle in every plane.
+    """
+    from minflux_viewer.ui.roi_overlay import FilledEllipseROI, FilledRectROI
+
+    state = _state()
+    win = _scatter(_qt_app, state)
+    try:
+        ctrl = win._roi_overlay
+        cuboid = _volume_draft()
+        sphere = type(cuboid)(**{**cuboid.__dict__})
+        sphere.type = "sphere"
+        sphere.geometry = {"center": [0.0, 0.0, 0.0], "radii": [100.0, 80.0, 40.0]}
+
+        for plane in ("XY", "XZ", "YZ"):
+            win._axis_combo.setCurrentText(plane)
+            for _ in range(2):
+                _qt_app.processEvents()
+            assert isinstance(ctrl._make_item(cuboid), FilledRectROI), plane
+            assert isinstance(ctrl._make_item(sphere), FilledEllipseROI), plane
+    finally:
+        win.close()
+
+
+def test_resizing_in_one_plane_leaves_the_third_axis_alone():
+    """A projection has nothing to say about the axis it does not show."""
+    from minflux_viewer.core.roi_volume import set_volume_extent
+
+    class R:
+        type = "cuboid"
+        geometry = {"x": [0.0, 10.0], "y": [0.0, 10.0], "z": [100.0, 200.0]}
+
+    resized = set_volume_extent(R(), (0, 1), (5.0, 5.0, 20.0, 30.0))   # an XY resize
+    assert resized["x"] == [5.0, 25.0] and resized["y"] == [5.0, 35.0]
+    assert resized["z"] == [100.0, 200.0]                              # untouched
+
+
+def test_resizing_a_sphere_keeps_it_an_ellipsoid():
+    from minflux_viewer.core.roi_volume import set_volume_extent
+
+    class R:
+        type = "sphere"
+        geometry = {"center": [0.0, 0.0, 7.0], "radii": [10.0, 10.0, 3.0]}
+
+    resized = set_volume_extent(R(), (0, 2), (-50.0, -5.0, 100.0, 20.0))  # XZ
+    assert resized["center"] == [0.0, 0.0, 5.0]
+    assert resized["radii"] == [50.0, 10.0, 10.0]     # Y radius untouched
+
+
+def test_a_polyhedron_keeps_the_corners_the_user_drew():
+    """⚠ A single-level prism's own polygon IS its silhouette down the stack;
+    resampling it radially rounded off every corner of their shape."""
+    from minflux_viewer.core.roi_volume import volume_silhouette
+
+    square = [[0.0, 0.0], [100.0, 0.0], [100.0, 80.0], [0.0, 80.0]]
+
+    class R:
+        type = "polyhedron"
+        geometry = {"axis": "Z", "thickness": 40.0,
+                    "levels": [{"at": 0.0, "polygon": square}]}
+
+    outline = volume_silhouette(R(), 0, 1)
+    assert len(outline) == 4
+    assert [[float(a), float(b)] for a, b in outline] == square
+
+
+def test_a_polyhedron_shows_a_band_across_the_stack():
+    """It is not missing from the side panes -- it is a band there, because that
+    is what an extruded cross-section looks like edge-on."""
+    from minflux_viewer.core.roi_volume import volume_silhouette
+
+    class R:
+        type = "polyhedron"
+        geometry = {"axis": "Z", "thickness": 40.0,
+                    "levels": [{"at": 0.0,
+                                "polygon": [[0.0, 0.0], [100.0, 0.0], [100.0, 80.0]]}]}
+
+    xz = volume_silhouette(R(), 0, 2)
+    assert xz is not None and len(xz) >= 4
+    assert float(min(p[1] for p in xz)) == -20.0     # thickness/2 either side
+    assert float(max(p[1] for p in xz)) == 20.0
