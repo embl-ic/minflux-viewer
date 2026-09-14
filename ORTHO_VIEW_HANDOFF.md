@@ -46,16 +46,17 @@ otherwise, and a saved ortho state falls back to XY on a 2-D dataset.
 
 | File | Lines | Role |
 |---|---|---|
-| `minflux_viewer/ui/ortho_view.py` | 1280 | **All shared plumbing.** Pure geometry + `OrthoPanes`, `OrthoCrosshair`, `FloatingPaneWindow`. View-agnostic: imports no render/scatter widgets. |
+| `minflux_viewer/ui/ortho_view.py` | 1478 | **All shared plumbing.** Pure geometry + `OrthoPanes`, `OrthoCrosshair`, `FloatingPaneWindow`. View-agnostic: imports no render/scatter widgets. |
 | `minflux_viewer/ui/render_window.py` | — | Render integration (~40 methods, grep `_ortho`), plus the shared `render_scalar`. |
 | `minflux_viewer/ui/scatter_window.py` | — | Scatter integration (~16 methods, grep `_ortho`/`_pane_`). |
-| `tests/test_ortho_view.py` | 813 | 31 tests — pure geometry + scatter integration. |
-| `tests/test_render_ortho.py` | 658 | 24 tests — render integration, crosshair, axis direction, reconstruction identity. |
-| `tests/test_render_ortho_floating.py` | 531 | 17 tests — screen fitting, view carry-over, display linking, focus, overlay, grids and depth navigation. |
+| `tests/test_ortho_view.py` | 956 | 38 tests — pure geometry + scatter integration. |
+| `tests/test_render_ortho.py` | 688 | 26 tests — render integration, crosshair, axis direction, reconstruction identity and decorated-frame geometry. |
+| `tests/test_render_ortho_floating.py` | 662 | 23 tests — screen fitting, initial frame separation, crosshair-centred 3-D zoom coupling, display linking, focus, overlay, grids and depth navigation. |
 
-**72 dedicated ortho tests**, plus advanced-render integration in
-`tests/test_precision_render.py`. The focused render/ortho regression set after the
-2026-09-13 hardening pass is **105 passed, 1 skipped**.
+**87 dedicated ortho tests**, plus advanced-render integration in
+`tests/test_precision_render.py`. Two adjacent suites sit on top of this mode rather
+than inside it: `tests/test_ortho_roi.py` (29 — volume ROIs drawn and edited in the
+side panes) and `tests/test_ortho_rotation.py` (7 — the fourth cell, §7.8).
 
 ### Public surface of `ortho_view.py`
 
@@ -83,7 +84,10 @@ with reasons measured in this codebase:
   `_show_render`, `_swap_render_mode` and the LUT dialog.
 * Three `RoiOverlayController`s would share `source_view="render"` for one dataset, and
   `roi_visible_in` gates on **family + dataset, not plane** — so every ROI would draw in
-  all three panes with geometry meaningless in two.
+  all three panes with geometry meaningless in two. *(Per-pane controllers were added
+  later — `ui/ortho_roi.py::OrthoPaneOwner` — and they answer this objection without a
+  second `RenderWindow`: each pane states its own `roi_view_columns()`, so the geometry
+  is read through the axes that pane actually shows.)*
 
 ImageJ's own implementation shows the cost of the architecture: `arrangeWindows()`
 **polls up to 2.5 s** for the windows to exist, and `updateMagnification()` loops
@@ -274,7 +278,7 @@ overlay with more than four channels could evict its early fields before rasteri
 | Aspect | Behaviour |
 |---|---|
 | Proportions | 0.6 / 0.4 both axes (`PRIMARY_STRETCH=3`, `SIDE_STRETCH=2`) |
-| Side panes | `setMouseEnabled(False)` — slaved (**see §7.1**) |
+| Side panes | Interactive; only `sigRangeChangedManually` couples panes, while programmatic link updates are ignored (**see §7.1**) |
 | Projection | Cropped to the XY viewport (`_ortho_row_filter`), **before** decimation |
 | Crop lifts | While the view auto-ranges (`_ortho_view_rect()` → `None`) |
 | Reset View | Lifts the crop **before** fitting, or the fit re-fits to the cropped subset and can never escape |
@@ -287,10 +291,10 @@ overlay with more than four channels could evict its early fields before rasteri
 | Aspect | Behaviour |
 |---|---|
 | Placement | Floating only; `OrthoPanes` still implements embedded for scatter |
-| Screen fit | `fit_ortho_plot_rects` scales the primary **down only** until the set fits the monitor (was overflowing by 214 px) |
+| Screen fit | `fit_ortho_plot_rects` scales the primary **down only** until the set fits the monitor (was overflowing by 214 px); the final sticky alignment preserves the chrome-aware 8 px frame gap |
 | View carry-over | Range captured/restored around the resize — **0.27 nm** drift, centre exact |
 | From XZ/YZ | Carried as X/Y/Z: X kept exactly, the depth gate becomes Y, Z keeps its centre |
-| Side panes | **Interactive** (`interactive_sides=True`); each drives the panes sharing its axes, and its Z centre updates the depth anchor/crosshair |
+| Side panes | **Interactive** (`interactive_sides=True`); a zoom couples all 3 axes, anchoring the missing X/Y axis on the visible crosshair (or its current centre), while Z interaction updates the depth anchor/crosshair |
 | Depth slider | **Hidden**; "All" forced so no gate survives invisibly |
 | Focus | Activating any of the three raises all three, primary last (wired on **both** `FloatingPaneWindow.changeEvent` and the render window's own) |
 | Closing a side window | **Leaves the mode**, back to XY (Fiji behaviour) |
@@ -314,9 +318,11 @@ a user-facing toggle.
 | Floating alignment | dx = dy = dw = dh = **0 px** |
 | Linked axis agreement | **0.000 nm** (X and Y), both placements |
 | Isotropy | XY / XZ / YZ all **16.8924 nm/px** |
+| Side zoom coupling | 0.5× zoom-in and 1.8× zoom-out from XZ and YZ retain one scale; previous opposite pane error was exactly **2×** after a 0.5× zoom |
 | Axis direction | **0 px** on both shared axes, both origins, both placements |
 | Reconstruction identity | `max|diff| = 0` at three zoom levels |
 | Screen fit | 964 × 947 inside 1920 × 1032 |
+| Window overlap on entry | **0 px**; XZ/YZ frames clear XY by the requested 8 px (was 50 px overlap at XZ after the final alignment pass discarded chrome) |
 | Per-pane render cost | 6.9 ms @ 30 k · 56 ms @ 500 k · 2.1 s @ 20 M visible locs |
 | `histogram2d` vs `bincount` | 4.8× (bincount faster; **not** used — see §7.3) |
 
@@ -324,11 +330,13 @@ a user-facing toggle.
 
 ## 7. Known limitations and open items
 
-### 7.1 Scatter side panes are not interactive
-Deliberate. Enabling `interactive_sides` there made the side panes push ranges onto the
-primary with `setXRange`, which **disables auto-range** — scatter's "showing everything"
-state and what its viewport crop keys on. The ranges ran away to **±100 µm**. If
-expanding this, the crop's auto-range contract must be reworked first.
+### 7.1 Scatter side interaction and the crop guard
+Scatter side panes are interactive. The earlier attempt inferred "showing everything"
+from pyqtgraph auto-range, but a side pane's programmatic push disables auto-range; that
+engaged the crop, moved Z, fed back into the side pane and ran ranges to **±100 µm**.
+`_ortho_show_all` is now explicit and changes only on `sigRangeChangedManually`, Reset,
+or mode entry. `OrthoPanes` likewise couples a side range only from that manual signal,
+so native-link/programmatic echoes cannot masquerade as a second user gesture.
 
 ### 7.2 The physical tiled LOD regime is intentionally not shared yet
 The production `PrecisionRenderWindow` already uses tiled LOD for XY at every zoom;
@@ -368,9 +376,15 @@ so a state saved as `"Ortho"` falls back to XY — handled silently by `findText
 The crosshair, the status-line coordinate and the floating placement are render-only.
 Wiring the crosshair into scatter is small (`OrthoCrosshair` is already shared).
 
-### 7.8 Empty bottom-right cell
-0.4 × 0.4 of the embedded grid, painted in the background colour. It is where the
-colorbar could live instead of being hidden.
+### 7.8 The bottom-right cell
+0.4 × 0.4 of the embedded grid. It now holds a **rotating projection**
+(`OrthoPanes.set_extra_pane`, `EXTRA_CELL`, `ui/ortho_rotation.py`): one matrix multiply
+on the localizations already in hand, re-projected into the same nm/px as its
+neighbours, so at 0° it reproduces the XY view. It answers what three fixed projections
+cannot — orthogonal silhouettes are ambiguous about depth ordering. **Embedded only**,
+so scatter has it and render (floating-only) does not; floating hands the whole page
+back to the primary pane instead. The colorbar therefore no longer has this cell to
+move into.
 
 ### 7.9 Image-stack orthogonal slicing is out of scope
 ImageJ/Fiji already handles ordinary image stacks well. MINFLUX Viewer keeps this mode
@@ -462,11 +476,12 @@ mode* section), but it is **local-only and gitignored** by project convention �
 never appears in `git status` and must not be staged or committed. Same for
 `AGENTS.md` and everything under `docs/`.
 
-⚠ The working tree also carries **unrelated** in-progress work from earlier sessions
+⚠ The working tree used to carry **unrelated** in-progress work from earlier sessions
 (`attribute_separation_dialog.py`, `peak_channels.py`, `channel_labels.py`,
-`roi_highlight.py`, `histogram_window.py`, `main_window.py`, `filter_io.py`,
-`command_meta.py`, `attribute_window.py`, `roi_selection.py` and their tests). A commit
-of this feature should name the ortho paths explicitly.
+`roi_highlight.py` and their tests). That is now committed separately, as
+`feat(channel): rework attribute separation around channels of two kinds` — but the
+lesson stands: name the paths explicitly when committing, because anything left in the
+tree is otherwise swept into whichever commit runs next.
 
 Per project convention: **no `Co-Authored-By:` trailers**, on any machine, in any
 session, whatever the tool.
