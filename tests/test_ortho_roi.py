@@ -123,6 +123,21 @@ def _scatter(app, state):
     return win
 
 
+def _shown_in_pane(win, plane: str, roi_id: str) -> bool:
+    """Is that ROI on that side pane, by whichever layer draws it?
+
+    A volume ROI is drawn by the pane's own controller (grabbable) and a flat
+    one by the display-only outline layer, so a test that names one layer is
+    asserting the mechanism rather than the behaviour -- and broke when the
+    controllers took over the volume shapes.
+    """
+    controller = (getattr(win, "_pane_roi_controllers", None) or {}).get(plane)
+    if controller is not None and roi_id in controller.items:
+        return True
+    drawer = getattr(win, "_ortho_roi_outlines", None)
+    return drawer is not None and (plane, roi_id) in drawer._items
+
+
 def test_a_volume_roi_appears_in_the_side_panes_of_a_live_view(_qt_app):
     from minflux_viewer.core.roi import RoiRecord
 
@@ -140,8 +155,8 @@ def test_a_volume_roi_appears_in_the_side_panes_of_a_live_view(_qt_app):
         for _ in range(3):
             _qt_app.processEvents()
 
-        drawn = win._ortho_roi_outlines._items
-        assert ("XZ", rec.id) in drawn and ("YZ", rec.id) in drawn
+        assert _shown_in_pane(win, "XZ", rec.id)
+        assert _shown_in_pane(win, "YZ", rec.id)
     finally:
         win.close()
 
@@ -161,13 +176,15 @@ def test_deleting_a_roi_removes_its_side_pane_outlines(_qt_app):
         state.rois.add(rec)
         for _ in range(3):
             _qt_app.processEvents()
-        assert win._ortho_roi_outlines._items
+        assert _shown_in_pane(win, "XZ", rec.id)
+        assert _shown_in_pane(win, "YZ", rec.id)
 
         state.rois.select([rec.id])
         state.rois.delete_selected()
         for _ in range(3):
             _qt_app.processEvents()
-        assert not win._ortho_roi_outlines._items
+        assert not _shown_in_pane(win, "XZ", rec.id)
+        assert not _shown_in_pane(win, "YZ", rec.id)
     finally:
         win.close()
 
@@ -558,3 +575,151 @@ def test_the_properties_read_out_describes_a_volume_roi_in_three_dimensions():
     text = RoiOverlayController._geometry_text(_Formatter(), rec)
     assert text == "X=0, Y=10, Z=-20, W=100, H=20, D=80"
     assert "0 points" not in text                  # what it used to say
+
+
+# --------------------------------------------- drawing in a side pane, for real
+# ⚠ The tests above drive `_set_draft` / `_promote_draft_to_volume` directly, so
+# they proved the geometry and not that a **drag** in a side pane does anything.
+# It did not, in the render view, which had no pane controllers at all: the
+# volume tools turned the mode on, said "draw in any pane", and XZ/YZ ignored
+# the mouse. Drive the viewport, the way a user does.
+
+def _render(app, state):
+    from minflux_viewer.ui.render_window import RenderWindow
+
+    win = RenderWindow(state, 0)
+    win.resize(900, 900)
+    win.show()
+    for _ in range(6):
+        app.processEvents()
+    return win
+
+
+def _drag(app, widget, frm=(0.35, 0.35), to=(0.65, 0.65)):
+    """A real press / move / release on a pane's viewport."""
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtTest import QTest
+
+    vp = widget.viewport()
+    a = QPoint(int(vp.width() * frm[0]), int(vp.height() * frm[1]))
+    b = QPoint(int(vp.width() * to[0]), int(vp.height() * to[1]))
+    QTest.mousePress(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, a)
+    for _ in range(3):
+        app.processEvents()
+    QTest.mouseMove(vp, b)
+    for _ in range(3):
+        app.processEvents()
+    QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, b)
+    for _ in range(8):
+        app.processEvents()
+
+
+@pytest.mark.parametrize("view", ["scatter", "render"])
+def test_dragging_in_a_side_pane_draws_a_volume_roi(_qt_app, view):
+    state = _state()
+    win = _scatter(_qt_app, state) if view == "scatter" else _render(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        for _ in range(8):
+            _qt_app.processEvents()
+        assert sorted(win._pane_roi_controllers) == ["XZ", "YZ"]
+
+        state.rois.set_tool("cuboid")
+        panes = getattr(win, "_pane_plots", None) or win._pane_widgets
+        _drag(_qt_app, panes["XZ"])
+
+        draft = win._pane_roi_controllers["XZ"].draft
+        assert draft is not None and draft.type == "cuboid"
+        # ⚠ and it is filed as an XZ shape: the owner's normalize_roi_record
+        # reads self.roi_view_plane(), which through __getattr__ would bind to
+        # the window and answer "XY" for the whole mode.
+        assert (draft.context or {}).get("view_plane") == "XZ"
+    finally:
+        win.close()
+
+
+def test_a_stored_volume_roi_is_drawn_once_per_pane(_qt_app):
+    """Once the pane has its own controller the decorative outline must stand
+    down, or every ROI is two overlapping shapes, one of them ungrabbable."""
+    import pyqtgraph as pg
+
+    from minflux_viewer.core.roi import RoiRecord
+
+    state = _state()
+    win = _scatter(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        for _ in range(8):
+            _qt_app.processEvents()
+        record = RoiRecord.create(
+            "cuboid", {"x": [-200.0, 200.0], "y": [-150.0, 150.0], "z": [-80.0, 80.0]},
+            **win._roi_overlay._record_kwargs())
+        state.rois.add(record)
+        state.rois.show_all = True
+        for _ in range(8):
+            _qt_app.processEvents()
+
+        items = win._pane_plots["XZ"].getPlotItem().items
+        curves = [i for i in items if isinstance(i, pg.PlotCurveItem)]
+        assert record.id in win._pane_roi_controllers["XZ"].items    # grabbable
+        assert curves == []                                          # and only once
+    finally:
+        win.close()
+
+
+def test_a_flat_roi_from_another_plane_is_shown_but_not_edited_in_a_side_pane(_qt_app):
+    """Its bounds are in ITS plane's axes. Drawn by a side pane's controller,
+    a rectangle's Y coordinate would land on that pane's Z axis -- and be
+    draggable there, writing the nonsense back. The dashed outline is the
+    honest way to show it."""
+    from minflux_viewer.core.roi import RoiRecord
+
+    state = _state()
+    win = _scatter(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        for _ in range(8):
+            _qt_app.processEvents()
+        flat = RoiRecord.create(
+            "rectangle", {"bounds": [-200.0, 5000.0, 400.0, 300.0]},
+            **win._roi_overlay._record_kwargs())
+        flat.context = dict(flat.context or {})
+        flat.context["view_plane"] = "XY"
+        flat.context["depth_value"] = 10.0
+        state.rois.add(flat)
+        state.rois.show_all = True
+        for _ in range(8):
+            _qt_app.processEvents()
+
+        xz = win._pane_roi_controllers["XZ"]
+        assert flat.id not in xz.items                 # not drawn on XZ's axes
+        assert xz._record_in_scope(flat) is False      # and not hit-tested there
+        # still visible, as the edge-on dashed outline
+        assert ("XZ", flat.id) in win._ortho_roi_outlines._items
+    finally:
+        win.close()
+
+
+def test_an_in_progress_draft_still_reaches_the_side_panes(_qt_app):
+    """A draft belongs to the controller drawing it, so no other pane's
+    controller holds it -- the outline layer is the only thing that can show
+    it, which is the whole point while a volume ROI is being seeded."""
+    from minflux_viewer.core.roi import RoiRecord
+
+    state = _state()
+    win = _scatter(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        for _ in range(8):
+            _qt_app.processEvents()
+        draft = RoiRecord.create(
+            "cuboid", {"x": [-100.0, 100.0], "y": [-90.0, 90.0], "z": [-40.0, 40.0]},
+            **win._roi_overlay._record_kwargs())
+        win._roi_overlay.replace_draft(draft)
+        for _ in range(8):
+            _qt_app.processEvents()
+
+        panes = {key[0] for key in win._ortho_roi_outlines._items if key[1] == draft.id}
+        assert panes == {"XZ", "YZ"}
+    finally:
+        win.close()

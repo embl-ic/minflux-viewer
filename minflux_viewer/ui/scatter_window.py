@@ -406,7 +406,10 @@ class ScatterWindow(QWidget):
         # editing); the side panes show where each ROI lies on their own axes,
         # so a ROI is visible in all three views rather than only the one it was
         # drawn in.
-        self._ortho_roi_outlines = OrthoRoiOutlines(self._pane_plots)
+        self._ortho_roi_outlines = OrthoRoiOutlines(
+            self._pane_plots,
+            has_controller=lambda plane: plane in (
+                getattr(self, "_pane_roi_controllers", None) or {}))
         # Real controllers on the side panes: they share the store, so a ROI
         # drawn in any pane is the same record everywhere and the panes differ
         # only in the axes they read it through.
@@ -790,17 +793,21 @@ class ScatterWindow(QWidget):
             drawer.clear()
             return
         controller = getattr(self, "_roi_overlay", None)
-        records = []
+        records, drafts = [], []
         try:
             for record in self._state.rois.records:
                 if controller is None or controller._record_in_scope(record):
                     records.append(record)
-            draft = getattr(controller, "draft", None) if controller else None
-            if draft is not None:
-                records.append(draft)
+            # Drafts are passed apart: a draft belongs to the controller drawing
+            # it, so no side pane's controller holds it and this layer is the
+            # only thing that can show it while the shape is being made.
+            for source in (controller, *(getattr(self, "_pane_roi_controllers", None) or {}).values()):
+                draft = getattr(source, "draft", None) if source is not None else None
+                if draft is not None:
+                    drafts.append(draft)
         except Exception:
             return
-        drawer.refresh(records, color_of=lambda rec: rec.stroke_color)
+        drawer.refresh(records, drafts=drafts, color_of=lambda rec: rec.stroke_color)
 
     def _set_info_text(self, text: str, ds=None) -> None:
         """Prefix Scatter status with the source dataset dimensionality."""
@@ -2923,6 +2930,16 @@ class ScatterWindow(QWidget):
             self._roi_overlay.dispose()
             self._roi_overlay = None
         release_shared_lut_owner(self)
+        # The side panes carry their own ROI controllers; each holds an event
+        # filter on its pane's viewport and three store connections, so it must
+        # go before the panes do -- a store change arriving at a controller whose
+        # plot is half torn down is the documented route to a Qt abort.
+        for _controller in (getattr(self, "_pane_roi_controllers", None) or {}).values():
+            try:
+                _controller.dispose()
+            except Exception:
+                pass
+        self._pane_roi_controllers = {}
         # Drop the inter-pane links before the plots go inert: a queued range
         # change must not reach a half-torn-down pane.
         self._ortho.dispose()

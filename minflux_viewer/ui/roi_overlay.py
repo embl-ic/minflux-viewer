@@ -1715,9 +1715,21 @@ class RoiOverlayController(QObject):
         return None if own is None else frozenset({own})
 
     def _record_in_scope(self, record) -> bool:
-        return roi_scope.roi_visible_in(
-            record, family=self.view_family,
-            dataset_indices=self._view_dataset_indices())
+        if not roi_scope.roi_visible_in(
+                record, family=self.view_family,
+                dataset_indices=self._view_dataset_indices()):
+            return False
+        # An owner may narrow this further: an ortho side pane shows only what
+        # its two axes can express (see ortho_roi.pane_owns_record). Both the
+        # draw loop and the hit-test come through here, so they cannot disagree
+        # about what is on screen.
+        narrow = getattr(self.owner, "roi_displays_record", None)
+        if callable(narrow):
+            try:
+                return bool(narrow(record))
+            except Exception:
+                return True
+        return True
 
     def _event_target(self):
         return self.view_widget.viewport() if hasattr(self.view_widget, "viewport") else self.view_widget
