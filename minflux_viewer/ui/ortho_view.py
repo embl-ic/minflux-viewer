@@ -39,13 +39,16 @@ resolves a violated aspect by expanding the other axis -- and on a side pane
 that axis is *linked to XY*, so the lock could push the primary pane's range
 around.  Setting Z explicitly cannot feed back.
 
-Side-pane input is an owner choice.  Scatter keeps them slaved to the primary
-pane, while render opts into interaction and propagates a side pane's shared
-axis and Z range to the other panes.  In either case every pane stays a
-projection over the axis it does not show.
+Side-pane input is an owner choice.  Both current owners opt into interaction
+and propagate a side pane's shared axis and Z scale to the other panes; render
+also supplies its visible crosshair as the zoom anchor for the axis the active
+side pane cannot show.  Every pane stays a projection over the axis it does not
+show.
 """
 
 from __future__ import annotations
+
+import math
 
 from PyQt6.QtCore import QObject
 from PyQt6.QtWidgets import QGridLayout, QWidget
@@ -106,6 +109,10 @@ PANE_CELLS: dict[str, tuple[int, int]] = {
     "YZ": (0, 1),
     "XZ": (1, 0),
 }
+
+#: The grid's remaining cell. Three projections fill a 2x2 layout with one cell
+#: over; an owner may put an auxiliary view there (see ``set_extra_pane``).
+EXTRA_CELL: tuple[int, int] = (1, 1)
 
 #: The two panes added by the orthogonal mode.
 SIDE_PLANES: tuple[str, str] = ("YZ", "XZ")
@@ -217,6 +224,7 @@ class OrthoPanes(QObject):
         on_pane_closed=None,
         on_activated=None,
         on_side_range_changed=None,
+        side_zoom_anchor=None,
         interactive_sides: bool = False,
     ) -> None:
         super().__init__(parent if parent is not None else container)
@@ -233,11 +241,11 @@ class OrthoPanes(QObject):
         self._on_pane_closed = on_pane_closed
         self._on_activated = on_activated
         self._side_range_callback = on_side_range_changed
-        # ⚠ Opt-in. An interactive side pane pushes its range onto the primary
-        # with setXRange/setYRange, and an explicit range assignment *disables
-        # auto-range* — which is the scatter view's "showing everything" state
-        # and what its viewport crop keys on. Turning this on there made the
-        # crop unable to lift and the ranges run away.
+        self._side_zoom_anchor = side_zoom_anchor
+        # ⚠ Opt-in. An interactive side pane pushes its range onto the primary,
+        # and an explicit range assignment disables auto-range. Scatter must
+        # therefore track "showing everything" independently rather than infer
+        # it from pyqtgraph's auto-range bookkeeping.
         self._interactive_sides = bool(interactive_sides)
         self._hosts: dict[str, QWidget] = {}
         self._owner_filter_installed = False
@@ -327,6 +335,22 @@ class OrthoPanes(QObject):
         """Whether floating windows follow the owner when it moves."""
         self._sticky = bool(sticky)
 
+    def set_extra_pane(self, widget) -> None:
+        """Put *widget* in the grid's fourth cell, shown only while ortho is on.
+
+        The cell is otherwise painted in the page background, so an owner that
+        never calls this sees no change. Hidden with the mode for the same
+        reason the side panes are: a stretch factor keeps a row open even when
+        its widget is hidden, and ``grid_stretch`` zeroes the side weights on
+        the way out.
+        """
+        self._extra_pane = widget
+        if widget is None:
+            return
+        row, column = EXTRA_CELL
+        self._layout.addWidget(widget, row, column)
+        widget.setVisible(self._active)
+
     def set_active(self, active: bool) -> None:
         """Show or hide the side panes and (un)link the shared axes."""
         active = bool(active)
@@ -358,6 +382,11 @@ class OrthoPanes(QObject):
         else:
             self._unlink()
         self._active = active
+        extra = getattr(self, "_extra_pane", None)
+        if extra is not None:
+            # Floating hands the whole page back to the primary pane, so the
+            # fourth cell only exists in the embedded layout.
+            extra.setVisible(active and not floating)
         if floating:
             # Fit on entry only. A later sticky re-align must not resize the
             # owner again -- that would fight a window the user just sized.
@@ -450,9 +479,9 @@ class OrthoPanes(QObject):
         """Per-window overhead around the plot, as ``(left, top, right, bottom)``.
 
         Measured on each side rather than as a total: a side window carries its
-        title bar above the plot and its out-of-plane slider below it, and a
-        planner that treats the whole overhead as one number puts the bottom
-        window past the screen edge by exactly the slider's height.
+        title bar above the plot while the owner has controls below it. A
+        planner that treats the whole overhead as one number cannot either fit
+        the complete set or keep the decorated windows from overlapping.
         """
         out: dict[str, tuple[int, int, int, int]] = {}
         for plane in PANE_PLANES:
@@ -570,7 +599,7 @@ class OrthoPanes(QObject):
                 pass
 
     def align_floating(self) -> None:
-        """Place each floating window so its PLOT AREA lines up with XY's.
+        """Place floating plots in alignment without overlapping their frames.
 
         ⚠ Matching window *frames* would leave the data misaligned by whatever
         the axis gutters and the window decorations happen to be -- which is
@@ -578,7 +607,10 @@ class OrthoPanes(QObject):
         only approximate it (``arrangeWindows`` polls for the windows to exist,
         then positions frames). Here the target is computed for the plot
         rectangle and the frame offset is measured back out of the shown
-        window, so the answer is exact rather than approximate.
+        window, so the answer is exact rather than approximate. Conversely,
+        placing adjacent *plot* rectangles without accounting for that chrome
+        puts XZ's title bar under the bottom of the owner window. Both offsets
+        are therefore part of the target calculation.
         """
         if not self._hosts or self._aligning:
             return
@@ -588,8 +620,16 @@ class OrthoPanes(QObject):
         self._aligning = True
         try:
             thickness = self._floating_thickness(owner_plot)
+            chrome = self._chrome()
+            owner_chrome = chrome.get("XY", (0, 0, 0, 0))
             for plane, host in self._hosts.items():
-                target = floating_geometry(owner_plot, plane, thickness=thickness)
+                target = floating_geometry(
+                    owner_plot,
+                    plane,
+                    thickness=thickness,
+                    owner_chrome=owner_chrome,
+                    side_chrome=chrome.get(plane, (0, 0, 0, 0)),
+                )
                 self._place_host(host, plane, target)
         finally:
             self._aligning = False
@@ -702,6 +742,32 @@ class OrthoPanes(QObject):
         if rect.width() <= 1.0 or x1 <= x0:
             return None
         return float(x1 - x0) / float(rect.width())
+
+    def _primary_pixels(self) -> tuple[float, float] | None:
+        """XY's plot-area size, used to construct an isotropic range pair."""
+        view_box = self.view_box("XY")
+        if view_box is None:
+            return None
+        try:
+            rect = view_box.sceneBoundingRect()
+            width, height = float(rect.width()), float(rect.height())
+        except Exception:
+            return None
+        if width <= 1.0 or height <= 1.0:
+            return None
+        return width, height
+
+    def _visible_zoom_anchor(self) -> tuple[float, float, float] | None:
+        """Owner-provided marker used only for a side zoom's missing axis."""
+        if not callable(self._side_zoom_anchor):
+            return None
+        try:
+            point = tuple(float(value) for value in self._side_zoom_anchor())
+        except (TypeError, ValueError):
+            return None
+        if len(point) != 3 or not all(math.isfinite(value) for value in point):
+            return None
+        return point
 
     def apply_depth_range(self, lo: float, hi: float) -> bool:
         """Centre both side panes on ``[lo, hi]`` of Z **at the XY scale**.
@@ -839,7 +905,7 @@ class OrthoPanes(QObject):
         finally:
             self._syncing = False
 
-    def _on_side_range_changed(self, *args) -> None:
+    def _on_side_range_changed(self, *_args) -> None:
         """Push a side pane's own pan/zoom out to the panes that share its axes.
 
         A side pane owns one shared axis (XZ owns X, YZ owns Y) and one Z axis
@@ -850,7 +916,12 @@ class OrthoPanes(QObject):
         """
         if self._syncing or not self._active:
             return
-        source = args[0] if args else None
+        # Connected to sigRangeChangedManually, not sigRangeChanged. A primary
+        # update changes a natively linked embedded side pane *before* the
+        # primary's own signal is delivered; treating that programmatic echo
+        # as a new side gesture can undo the primary zoom. The manual signal is
+        # emitted only after ViewBox has applied a mouse drag/wheel operation.
+        source = self.sender()
         plane = next((p for p in SIDE_PLANES if self.view_box(p) is source), None)
         if plane is None:
             return
@@ -864,20 +935,84 @@ class OrthoPanes(QObject):
         z_range = None
         try:
             (h0, h1), (v0, v1) = side.viewRange()
+            (px0, px1), (py0, py1) = primary.viewRange()
+            primary_pixels = self._primary_pixels()
+            depth_pixels = self.depth_pixels()
+            old_scale = self.primary_scale_nm_per_px()
+            if (primary_pixels is None or len(depth_pixels) < 2
+                    or old_scale is None):
+                return
+            primary_width, primary_height = primary_pixels
+
+            # A side-pane wheel scales both visible axes, but only one of them
+            # belongs to XY. The aspect-locked primary consequently scales its
+            # missing axis too. That range must be chosen explicitly so it can
+            # be centred on the crosshair, and copied explicitly because this
+            # method's recursion guard suppresses the ordinary primary signal.
             if plane == "XZ":
-                primary.setXRange(h0, h1, padding=0)      # shared X
+                shared_span = float(h1 - h0)
+                old_shared_span = float(px1 - px0)
                 z_range = (float(v0), float(v1))
             else:
-                primary.setYRange(v0, v1, padding=0)      # shared Y
+                shared_span = float(v1 - v0)
+                old_shared_span = float(py1 - py0)
                 z_range = (float(h0), float(h1))
-            # ⚠ Carry Z to the other pane as a SCALE, never as a range. The two
-            # side panes have different pixel extents (0.6x0.4 against 0.4x0.6
-            # embedded), so copying the range verbatim gives them different
-            # nm/px -- the exact anisotropy apply_depth_range exists to prevent,
-            # and it reappeared the moment scatter's side panes took the mouse.
-            # Each pane gets the range its own extent earns about the gesture's
-            # own centre.
-            self._share_depth_from_gesture(*z_range)
+            z_span = float(z_range[1] - z_range[0])
+            old_z_span = old_scale * depth_pixels[plane]
+            shared_zoom = not math.isclose(
+                shared_span, old_shared_span, rel_tol=1e-6, abs_tol=1e-9)
+            depth_zoom = not math.isclose(
+                z_span, old_z_span, rel_tol=1e-6, abs_tol=1e-9)
+            zoomed = shared_zoom or depth_zoom
+
+            # The shared axis is authoritative for an ordinary two-axis wheel
+            # gesture. A depth-only zoom still works: it supplies the scale and
+            # the shared axis is resized about the centre visible in the source.
+            if shared_zoom:
+                scale = (shared_span / primary_width if plane == "XZ"
+                         else shared_span / primary_height)
+            elif depth_zoom:
+                scale = z_span / depth_pixels[plane]
+            else:
+                scale = old_scale                 # a pan, not a zoom
+            if not (math.isfinite(scale) and scale > 0.0):
+                return
+
+            anchor = self._visible_zoom_anchor() if zoomed else None
+            x_centre = 0.5 * (px0 + px1)
+            y_centre = 0.5 * (py0 + py1)
+            if plane == "XZ":
+                x_centre = 0.5 * (h0 + h1)
+                if anchor is not None:
+                    y_centre = anchor[1]
+            else:
+                y_centre = 0.5 * (v0 + v1)
+                if anchor is not None:
+                    x_centre = anchor[0]
+
+            x_half = 0.5 * scale * primary_width
+            y_half = 0.5 * scale * primary_height
+            primary.setRange(
+                xRange=(x_centre - x_half, x_centre + x_half),
+                yRange=(y_centre - y_half, y_centre + y_half),
+                padding=0,
+            )
+
+            # Read back what the aspect-locked primary accepted, then update
+            # both shared axes while the guard is held. Without the second
+            # assignment, zooming XZ left YZ's Y at the old scale (and vice
+            # versa), visibly stretching/compressing its Z axis.
+            (px0, px1), (py0, py1) = primary.viewRange()
+            self.view_box("XZ").setXRange(px0, px1, padding=0)
+            self.view_box("YZ").setYRange(py0, py1, padding=0)
+
+            # Carry Z as a SCALE, never as a range: XZ and YZ have different
+            # depth-axis pixel extents. Each gets the range its pixels earn,
+            # about the source gesture's own Z centre.
+            actual_scale = self.primary_scale_nm_per_px()
+            if actual_scale is not None:
+                self._share_depth_from_gesture(
+                    *z_range, scale=actual_scale, pixels=depth_pixels)
         except Exception:
             pass
         finally:
@@ -895,7 +1030,14 @@ class OrthoPanes(QObject):
             finally:
                 self._syncing = False
 
-    def _share_depth_from_gesture(self, lo: float, hi: float) -> None:
+    def _share_depth_from_gesture(
+        self,
+        lo: float,
+        hi: float,
+        *,
+        scale: float | None = None,
+        pixels: dict[str, float] | None = None,
+    ) -> None:
         """Give both side panes the Z their own pixel extents earn, about the
         centre of an explicit user gesture.
 
@@ -905,11 +1047,12 @@ class OrthoPanes(QObject):
         gesture look ineffective. The owner updates the marker afterwards
         through ``_side_range_callback``.
         """
-        pixels = self.depth_pixels()
-        scale = self.primary_scale_nm_per_px()
+        pixels = self.depth_pixels() if pixels is None else pixels
+        scale = self.primary_scale_nm_per_px() if scale is None else scale
         if len(pixels) < 2 or scale is None:
             return
         centre = 0.5 * (float(lo) + float(hi))
+        self._depth_centre = centre
         # The caller already holds _syncing raised around the whole gesture.
         self._set_depth_about(centre, scale, pixels, guard=False)
 
@@ -991,7 +1134,8 @@ class OrthoPanes(QObject):
             for plane in SIDE_PLANES:
                 side = self.view_box(plane)
                 if side is not None:
-                    side.sigRangeChanged.connect(self._on_side_range_changed)
+                    side.sigRangeChangedManually.connect(
+                        self._on_side_range_changed)
         self._linked = True
 
     def _unlink(self) -> None:
@@ -1009,7 +1153,8 @@ class OrthoPanes(QObject):
             if side is None:
                 continue
             try:
-                side.sigRangeChanged.disconnect(self._on_side_range_changed)
+                side.sigRangeChangedManually.disconnect(
+                    self._on_side_range_changed)
             except TypeError:
                 pass
         for plane, setter in (("XZ", "setXLink"), ("YZ", "setYLink")):
@@ -1175,9 +1320,9 @@ def fit_ortho_plot_rects(
 
     ``chrome`` is per window as ``{plane: (left, top, right, bottom)}``.
     ⚠ The split matters and a single width/height will not do: a side window
-    carries its title bar **above** the plot and its out-of-plane slider
-    **below** it, so treating the total as all-above puts the bottom window
-    past the screen edge by exactly the slider's height.
+    carries its title bar **above** the plot while the owner carries controls
+    **below** it, so treating the total as all-above misplaces the bottom
+    window by exactly that lower overhead.
 
     Scaling is **down only** -- enabling the mode should not grow a window the
     user sized.
@@ -1281,6 +1426,8 @@ def floating_geometry(
     *,
     thickness: int,
     gap: int = 8,
+    owner_chrome: tuple[int, int, int, int] = (0, 0, 0, 0),
+    side_chrome: tuple[int, int, int, int] = (0, 0, 0, 0),
 ) -> tuple[int, int, int, int]:
     """Where one floating side window's *plot area* must sit, in screen px.
 
@@ -1292,13 +1439,17 @@ def floating_geometry(
     Returned as the *plot area* rather than the window frame: matching the
     frames would leave the data misaligned by whatever the axis gutters and
     the window decorations happen to be, which is the whole difficulty of the
-    floating arrangement.
+    floating arrangement. ``owner_chrome`` and ``side_chrome`` are
+    ``(left, top, right, bottom)`` plot-to-frame offsets. They place the side
+    *frames* beyond the owner frame while retaining exact plot alignment.
     """
     x, y, w, h = owner_plot
+    _owner_l, _owner_t, owner_r, owner_b = owner_chrome
+    side_l, side_t, _side_r, _side_b = side_chrome
     if plane == "YZ":
-        return x + w + gap, y, thickness, h
+        return x + w + owner_r + gap + side_l, y, thickness, h
     if plane == "XZ":
-        return x, y + h + gap, w, thickness
+        return x, y + h + owner_b + gap + side_t, w, thickness
     raise ValueError(f"not a side plane: {plane!r}")
 
 

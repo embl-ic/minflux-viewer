@@ -359,6 +359,17 @@ def record_to_imagej(record: RoiRecord):
     """
     from roifile import ROI_TYPE, ImagejRoi
 
+    # ⚠ ImageJ has no volume ROI, and no projection of one is the ROI. Refusing
+    # by name is the honest answer: silently writing an XY silhouette would put
+    # a flat rectangle in the file under the name of a cuboid, and nothing
+    # downstream could tell the difference.
+    if record.type in {"cuboid", "sphere", "polyhedron"}:
+        raise ValueError(
+            f"{record.name or record.type!r} is a 3-D ROI ({record.type}); ImageJ "
+            "has no volume ROI type. Save it to the native ROI-set JSON instead, "
+            "which round-trips it exactly."
+        )
+
     g = record.geometry or {}
     rotated = abs(float(g.get("angle", 0.0) or 0.0)) > 1e-9
     if record.type == "rectangle" and not rotated:
