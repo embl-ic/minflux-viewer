@@ -1285,6 +1285,7 @@ class RenderWindow(QWidget):
             on_pane_closed=self._on_ortho_pane_closed,
             on_activated=self.raise_ortho_group,
             on_side_range_changed=self._on_ortho_side_range_changed,
+            side_zoom_anchor=self._ortho_side_zoom_anchor,
             interactive_sides=True,
         )
         self._update_grid_pen()
@@ -1628,6 +1629,14 @@ class RenderWindow(QWidget):
         # mid-gesture; its resize handler then reapplies the pre-gesture range
         # and effectively undoes the side pan.
         self._update_crosshair_label()
+
+    def _ortho_side_zoom_anchor(self) -> tuple[float, float, float] | None:
+        """Visible crosshair position for the axis a side zoom cannot choose."""
+        crosshair = getattr(self, "_ortho_crosshair", None)
+        if (not self._show_crosshair or crosshair is None
+                or not crosshair.visible or crosshair.point is None):
+            return None
+        return crosshair.point
 
     def _render_ortho_sides(self) -> None:
         """Draw both side panes: a projection of the locs inside the XY viewport."""
@@ -4973,6 +4982,19 @@ class RenderWindow(QWidget):
             pen=None,
             size=7,
         )
+
+    def enter_ortho_mode(self) -> bool:
+        """Switch this view to the orthogonal mode. True if it is now on.
+
+        Public because selecting a 3-D ROI tool turns it on: a volume shape is
+        drawn in one plane and bounded in the other two, so a single projection
+        cannot show what is being made.
+        """
+        if not self._ortho_available():
+            return False
+        if self._orientation != ORTHO_AXIS:
+            self._set_orientation(ORTHO_AXIS)
+        return self._orientation == ORTHO_AXIS
 
     def roi_view_plane(self) -> str | None:
         """Current view orientation for ROI 3-D placement (XY/XZ/YZ)."""
