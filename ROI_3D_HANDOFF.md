@@ -282,6 +282,14 @@ draws and edits: a **volume** ROI (geometry in named data axes, so any pane can 
 through its own columns), or a **flat** ROI drawn in that pane. Everything else gets the
 display-only **dashed** outline, which `project_flat_record` places honestly.
 
+An unfiled volume ROI is still a single draft rather than a store record. Pointing into
+another pane transfers that draft before PyQtGraph caches the hover/drag target, replacing
+its decorative projection with the correct editable rectangle/oval/polygon item. A direct
+click is also a fallback hand-off. The decorative copy is removed from the pane that now
+owns the editable draft but retained in the third pane. A stored ROI needs an activation
+step: ROI Manager *Update* reads the active adapter, so every edit-mode left press activates
+its pane before the item moves.
+
 ⚠ Dashed is load-bearing. A flat ROI has no extent on the axis it was drawn against, so
 edge-on it is a segment at its recorded depth. Solid would make it indistinguishable from
 a volume ROI of zero thickness, and a user would reasonably read it as constraining Z
@@ -416,6 +424,37 @@ parametrised over both views.
   event filter and three store connections, and a store change arriving at a controller
   whose plot is half torn down is the documented route to a Qt abort.
 
+### 8.7 XZ/YZ looked editable but a pending ROI was still owned by XY
+
+`18d2a9e` attached side-pane controllers only in Scatter; `8e7f707` added the missing
+Render controllers and proved that a real side drag creates a draft. Neither covered the
+next gesture. A draft is deliberately absent from `RoiStore`, so it remained owned by the
+controller that created it and its other two projections were `PlotCurveItem` decorations
+with no handles. Also, an edit-mode left press did not call `activate()`: a stored side-pane
+item could move visually while ROI Manager *Update* still read the untouched active XY
+adapter.
+
+Controller peers now identify their common real window. Hovering into another pane transfers
+the one pending **volume** draft within that group before PyQtGraph selects a drag target;
+edit-mode left press also activates the pane before PyQtGraph handles the drag. Flat ROIs do
+not transfer across planes because a projection cannot express a change on the collapsed
+axis. The regression drives both side planes in Scatter and Render and verifies both a
+pending cuboid edit and the adapter used by Manager Update.
+
+### 8.8 Render highlighted ROI data only in XY
+
+Scatter had a highlight `ScatterPlotItem` in every orthogonal pane, but Render had only
+the primary pane's item. Its XZ/YZ windows therefore reconstructed the selected rows into
+their raster and drew the ROI silhouette, but had no layer on which to mark those rows.
+
+Each Render side pane now owns a highlight item above its image and below the ROI overlay.
+The existing boolean ROI masks are resolved once, then painted as XZ `(X, Z)` and ortho YZ
+`(Z, Y)` using `ORTHO_AXIS_COLUMNS`. Side highlights use the same XY-viewport crop as the
+side reconstructions, are cleared when ortho is left or highlighting is disabled, and a
+draft owned by a side controller counts as a draft from this Render view for the
+`roi_highlight_in_roi` preference. The regression checks both side-axis mappings and the
+side-draft preference path.
+
 ---
 
 ## 9. Known limitations
@@ -515,6 +554,18 @@ ortho, arm a tool, and send **real** `QTest.mousePress` / `mouseMove` / `mouseRe
 `pane.viewport()` — not `_set_draft`. Assert on the resulting record. The pattern is in
 `tests/test_ortho_roi.py::_drag`, parametrised over `["scatter", "render"]`.
 
+⚠ **`QTest.mouseMove` does not deliver a hover.** Offscreen it produced only `Enter` on
+the pane viewport, never the `MouseMove` with `NoButton` that the draft hand-off (§8.7)
+keys on — so a probe built on it reports the feature dead when it is fine. Every pane
+viewport has `hasMouseTracking() is True`, so a real pointer move does deliver it;
+construct the event explicitly instead (`QMouseEvent(QEvent.Type.MouseMove, …,
+Qt.MouseButton.NoButton, …)` sent with `app.sendEvent(viewport, event)`), as
+`tests/test_ortho_roi.py::_move_to_view_point` does.
+
+A click test should compare against **where the click landed**, not against a tolerance:
+a widget click is an integer pixel, several nm wide at these zooms. Map the pixel back
+through `mapSceneToView` and assert exactly — see `tests/test_ortho_view.py::_click_pane`.
+
 Things worth driving by hand that no test covers yet:
 
 * Draw a cuboid in XZ, press `t`, select it in the ROI Manager, check it appears in all
@@ -524,6 +575,8 @@ Things worth driving by hand that no test covers yet:
 * With **Show all** on and several ROIs, confirm no ROI is drawn twice in a side pane.
 * Draw a flat rectangle in XY and confirm it is **dashed** in XZ/YZ and cannot be grabbed
   there.
+* Select a region ROI in Render and confirm the same localization rows are highlighted
+  over the XY, XZ and YZ images.
 
 ### 11.3 Re-measure the agreement
 

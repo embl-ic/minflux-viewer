@@ -562,6 +562,19 @@ def test_the_selecting_type_gates_include_the_volume_shapes():
         assert line_type not in selecting          # these enclose nothing
 
 
+def test_a_volume_edit_queues_a_fresh_localization_selection(_qt_app):
+    """The shared selecting-type rule must reach the debounce entry point too."""
+    state = _state()
+    win = _scatter(_qt_app, state)
+    try:
+        record = _volume_draft()
+        win._roi_overlay._queue_selection_update(record)
+        assert win._roi_overlay._pending_selection_record is record
+        assert record.selection_dirty is True
+    finally:
+        win.close()
+
+
 def test_the_properties_read_out_describes_a_volume_roi_in_three_dimensions():
     from minflux_viewer.core.roi import RoiRecord
     from minflux_viewer.ui.roi_overlay import RoiOverlayController
@@ -611,6 +624,42 @@ def _drag(app, widget, frm=(0.35, 0.35), to=(0.65, 0.65)):
         app.processEvents()
     QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, b)
     for _ in range(8):
+        app.processEvents()
+
+
+def _click_view_point(app, widget, point=(0.0, 0.0)):
+    """Click a PlotWidget at a data-space point, not an arbitrary pixel."""
+    from PyQt6.QtCore import QPointF, Qt
+    from PyQt6.QtTest import QTest
+
+    scene = widget.getPlotItem().getViewBox().mapViewToScene(QPointF(*point))
+    pixel = widget.mapFromScene(scene)
+    QTest.mouseClick(
+        widget.viewport(), Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier, pixel,
+    )
+    for _ in range(4):
+        app.processEvents()
+
+
+def _move_to_view_point(app, widget, point=(0.0, 0.0)):
+    """Send an unpressed mouse move to a PlotWidget data-space point."""
+    from PyQt6.QtCore import QEvent, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+
+    scene = widget.getPlotItem().getViewBox().mapViewToScene(QPointF(*point))
+    pixel = widget.mapFromScene(scene)
+    viewport = widget.viewport()
+    event = QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(pixel),
+        QPointF(viewport.mapToGlobal(pixel)),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    app.sendEvent(viewport, event)
+    for _ in range(4):
         app.processEvents()
 
 
@@ -721,5 +770,101 @@ def test_an_in_progress_draft_still_reaches_the_side_panes(_qt_app):
 
         panes = {key[0] for key in win._ortho_roi_outlines._items if key[1] == draft.id}
         assert panes == {"XZ", "YZ"}
+    finally:
+        win.close()
+
+
+@pytest.mark.parametrize("view", ["scatter", "render"])
+@pytest.mark.parametrize("plane,axes", [("XZ", ("x", "z")), ("YZ", ("z", "y"))])
+def test_pointing_into_a_side_pane_makes_a_pending_volume_editable_there(
+        _qt_app, view, plane, axes):
+    """Regression: the pending ROI was editable only in the pane that drew it.
+
+    Its other projections were decorative curves because a draft is not in the
+    shared store.  A real edit-mode hover now hands that one draft to the pane's
+    controller, where its normal edit signal updates the correct two axes.
+    """
+    from minflux_viewer.ui.roi_overlay import FilledRectROI
+
+    state = _state()
+    win = _scatter(_qt_app, state) if view == "scatter" else _render(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        for _ in range(8):
+            _qt_app.processEvents()
+        primary = win._roi_overlay
+        side = win._pane_roi_controllers[plane]
+        pane = (getattr(win, "_pane_plots", None) or win._pane_widgets)[plane]
+
+        # Give the side viewport focus first, then explicitly make XY active.
+        # The following move therefore exercises MouseMove rather than passing
+        # only because a FocusIn event happened to activate the pane.
+        pane.setFocus()
+        _qt_app.processEvents()
+        primary.replace_draft(_volume_draft())
+        primary.activate()
+        assert state.rois.active_adapter is primary
+        assert side.draft is None
+
+        before = dict(primary.draft.geometry)
+        _move_to_view_point(_qt_app, pane)
+
+        assert state.rois.active_adapter is side
+        assert primary.draft is None
+        assert side.draft is not None and side.draft.type == "cuboid"
+        assert isinstance(side.draft_item, FilledRectROI)
+        other_plane = "YZ" if plane == "XZ" else "XZ"
+        assert (plane, side.draft.id) not in win._ortho_roi_outlines._items
+        assert (other_plane, side.draft.id) in win._ortho_roi_outlines._items
+        side.draft_item.translate((25.0, 10.0), finish=True)
+        for _ in range(4):
+            _qt_app.processEvents()
+        expected_delta = {"x": 0.0, "y": 0.0, "z": 0.0}
+        expected_delta[axes[0]] = 25.0
+        expected_delta[axes[1]] = 10.0
+        for axis, delta in expected_delta.items():
+            assert side.draft.geometry[axis] == [v + delta for v in before[axis]]
+    finally:
+        win.close()
+
+
+@pytest.mark.parametrize("view", ["scatter", "render"])
+@pytest.mark.parametrize("plane,axes", [("XZ", ("x", "z")), ("YZ", ("z", "y"))])
+def test_side_pane_edit_becomes_the_roi_manager_update_source(
+        _qt_app, view, plane, axes):
+    """A side edit must activate that adapter before Manager Update reads it."""
+    state = _state()
+    win = _scatter(_qt_app, state) if view == "scatter" else _render(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        for _ in range(8):
+            _qt_app.processEvents()
+        record = _volume_draft()
+        state.rois.add(record)
+        state.rois.show_all = True
+        state.rois.changed.emit()
+        for _ in range(6):
+            _qt_app.processEvents()
+
+        primary = win._roi_overlay
+        side = win._pane_roi_controllers[plane]
+        pane = (getattr(win, "_pane_plots", None) or win._pane_widgets)[plane]
+        pane.setFocus()
+        _qt_app.processEvents()
+        primary.activate()
+        assert state.rois.active_adapter is primary
+
+        _click_view_point(_qt_app, pane)
+        assert state.rois.active_adapter is side
+
+        side.items[record.id].translate((25.0, 10.0), finish=True)
+        for _ in range(3):
+            _qt_app.processEvents()
+        updated = state.rois.active_adapter.record_for_update(record)
+        expected_delta = {"x": 0.0, "y": 0.0, "z": 0.0}
+        expected_delta[axes[0]] = 25.0
+        expected_delta[axes[1]] = 10.0
+        for axis, delta in expected_delta.items():
+            assert updated.geometry[axis] == [v + delta for v in record.geometry[axis]]
     finally:
         win.close()

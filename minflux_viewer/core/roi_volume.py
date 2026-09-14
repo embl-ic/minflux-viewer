@@ -64,6 +64,7 @@ __all__ = [
     "cross_section_at",
     "roi_volume_mask",
     "volume_bounds",
+    "volume_mesh",
     "volume_silhouette",
     "NotStarShaped",
     "PLANE_NORMAL_AXIS",
@@ -470,6 +471,129 @@ def volume_bounds(record) -> tuple[tuple[float, float], ...] | None:
             spans[stack_col] = (float(at_values[0]), float(at_values[-1]))
         return tuple(spans)
     return None
+
+
+def volume_mesh(
+    record,
+    *,
+    latitude_segments: int = 12,
+    longitude_segments: int = 24,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Surface geometry for a cuboid or axis-aligned ellipsoid ROI.
+
+    Returns ``(vertices, triangle_faces, wire_edges)`` in XYZ display-nm
+    coordinates. Faces and edges contain integer indices into ``vertices``.
+    Keeping this pure geometry here lets the OpenGL 3-D view and the rotating
+    2-D projection display exactly the same object without either UI inventing
+    its own interpretation of a volume record.
+
+    ``polyhedron`` is intentionally not approximated yet: its interpolated
+    cross-section model needs a separately tested tessellator. Returning
+    ``None`` keeps the first implementation honest and limited to the two
+    analytic volume types.
+    """
+    kind = getattr(record, "type", None)
+    geometry = getattr(record, "geometry", None) or {}
+    if kind == "cuboid":
+        bounds = volume_bounds(record)
+        if bounds is None:
+            return None
+        (x0, x1), (y0, y1), (z0, z1) = bounds
+        vertices = np.array([
+            [x0, y0, z0],
+            [x1, y0, z0],
+            [x1, y1, z0],
+            [x0, y1, z0],
+            [x0, y0, z1],
+            [x1, y0, z1],
+            [x1, y1, z1],
+            [x0, y1, z1],
+        ], dtype=np.float64)
+        faces = np.array([
+            [0, 2, 1], [0, 3, 2],       # -Z
+            [4, 5, 6], [4, 6, 7],       # +Z
+            [0, 1, 5], [0, 5, 4],       # -Y
+            [3, 7, 6], [3, 6, 2],       # +Y
+            [0, 4, 7], [0, 7, 3],       # -X
+            [1, 2, 6], [1, 6, 5],       # +X
+        ], dtype=np.uint32)
+        edges = np.array([
+            [0, 1], [1, 2], [2, 3], [3, 0],
+            [4, 5], [5, 6], [6, 7], [7, 4],
+            [0, 4], [1, 5], [2, 6], [3, 7],
+        ], dtype=np.uint32)
+        return vertices, faces, edges
+
+    if kind != "sphere":
+        return None
+    centre = np.asarray(geometry.get("center", ()), dtype=np.float64).ravel()
+    radii = np.asarray(geometry.get("radii", ()), dtype=np.float64).ravel()
+    if (
+        centre.size < 3
+        or radii.size < 3
+        or not np.all(np.isfinite(centre[:3]))
+        or not np.all(np.isfinite(radii[:3]))
+        or not np.all(radii[:3] > 0)
+    ):
+        return None
+
+    n_lat = max(3, int(latitude_segments))
+    n_lon = max(3, int(longitude_segments))
+    cx, cy, cz = centre[:3]
+    rx, ry, rz = radii[:3]
+    vertices_list = [[cx, cy, cz + rz]]
+    for latitude in range(1, n_lat):
+        theta = np.pi * latitude / n_lat
+        sin_theta, cos_theta = np.sin(theta), np.cos(theta)
+        for longitude in range(n_lon):
+            phi = 2.0 * np.pi * longitude / n_lon
+            vertices_list.append([
+                cx + rx * sin_theta * np.cos(phi),
+                cy + ry * sin_theta * np.sin(phi),
+                cz + rz * cos_theta,
+            ])
+    south = len(vertices_list)
+    vertices_list.append([cx, cy, cz - rz])
+    vertices = np.asarray(vertices_list, dtype=np.float64)
+
+    def ring_index(ring: int, longitude: int) -> int:
+        return 1 + ring * n_lon + (longitude % n_lon)
+
+    faces_list: list[list[int]] = []
+    edges_list: list[list[int]] = []
+    for longitude in range(n_lon):
+        nxt = (longitude + 1) % n_lon
+        faces_list.append([0, ring_index(0, longitude), ring_index(0, nxt)])
+        edges_list.append([0, ring_index(0, longitude)])
+    for ring in range(n_lat - 1):
+        for longitude in range(n_lon):
+            edges_list.append([
+                ring_index(ring, longitude),
+                ring_index(ring, longitude + 1),
+            ])
+    for ring in range(n_lat - 2):
+        for longitude in range(n_lon):
+            a = ring_index(ring, longitude)
+            b = ring_index(ring, longitude + 1)
+            c = ring_index(ring + 1, longitude)
+            d = ring_index(ring + 1, longitude + 1)
+            faces_list.extend(([a, c, b], [b, c, d]))
+            edges_list.append([a, c])
+    last_ring = n_lat - 2
+    for longitude in range(n_lon):
+        nxt = (longitude + 1) % n_lon
+        faces_list.append([
+            south,
+            ring_index(last_ring, nxt),
+            ring_index(last_ring, longitude),
+        ])
+        edges_list.append([ring_index(last_ring, longitude), south])
+
+    return (
+        vertices,
+        np.asarray(faces_list, dtype=np.uint32),
+        np.asarray(edges_list, dtype=np.uint32),
+    )
 
 
 def volume_silhouette(record, h_axis: int, v_axis: int,

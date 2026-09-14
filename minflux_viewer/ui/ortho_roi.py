@@ -1,12 +1,14 @@
 """
 minflux_viewer.ui.ortho_roi
 ===========================
-ROI outlines drawn into the orthogonal view's **side** panes.
+ROI projections and controllers in the orthogonal view's **side** panes.
 
 The primary pane keeps the window's own :class:`RoiOverlayController`, which
-draws, hit-tests and edits. The side panes are display-only here: they show
-where each ROI lies on their own axes, so a ROI is visible in all three views
-rather than in the one it happened to be drawn in.
+draws, hit-tests and edits. Each side pane has a peer controller for drawing and
+editing geometry its axes can express. This module's outline layer supplies the
+remaining display-only projections, so every ROI stays visible in all three
+views. A pending volume draft is handed to whichever peer pane the user enters,
+making its projected 2-D shape editable without filing it into the Manager.
 
 ⚠ **The side panes use the ORTHO column order, not the standalone one.** An ortho
 YZ pane draws Z horizontally (``ORTHO_AXIS_COLUMNS["YZ"] == (2, 1)``) while a
@@ -127,15 +129,15 @@ class OrthoRoiOutlines:
         self._items.clear()
 
     def refresh(self, records, *, color_of=None, visible: bool = True,
-                drafts=()) -> None:
+                drafts=(), draft_planes=None) -> None:
         """Draw *records* into every side pane; drop the items of any that went.
 
         A record a pane's **own** controller draws is skipped there, or it would
         appear twice -- once as a grabbable item and once as this decoration,
-        which is a confusing picture even when the two agree. *drafts* are drawn
-        regardless: a draft belongs to the controller that is drawing it and no
-        other pane's controller holds it, so this layer is the only thing that
-        can show it while a volume ROI is being seeded.
+        which is a confusing picture even when the two agree. A draft is drawn
+        everywhere except the pane named by ``draft_planes[id]``: that controller
+        already owns the editable item, while this layer still supplies the two
+        other projections during seeding and cross-pane editing.
         """
         if not visible:
             self.clear()
@@ -147,7 +149,9 @@ class OrthoRoiOutlines:
                 continue
             owned = self._owned_here(plane)
             for record in list(records or []) + list(drafts or []):
-                if owned and record not in (drafts or ()) and pane_owns_record(record, plane):
+                draft_plane = (draft_planes or {}).get(getattr(record, "id", ""))
+                controller_owns = record not in (drafts or ()) or draft_plane == plane
+                if owned and controller_owns and pane_owns_record(record, plane):
                     continue
                 result = pane_outline(record, plane)
                 if result is None:
@@ -229,6 +233,17 @@ class OrthoPaneOwner(QObject):
 
     def roi_view_columns(self):
         return ORTHO_AXIS_COLUMNS[self._plane]
+
+    def roi_controller_group(self):
+        """Identity shared by the primary and both side-pane controllers.
+
+        A pending volume ROI may move between controllers in this group when
+        the user enters another pane.  Returning the real window keeps that
+        hand-off local to one orthogonal view; a draft must never jump to a
+        different render/scatter window merely because both use the same
+        :class:`RoiStore`.
+        """
+        return self._owner
 
     def compute_roi_selection(self, record):
         """Rows inside *record*, measured on THIS pane's axes."""

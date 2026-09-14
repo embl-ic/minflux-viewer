@@ -3,7 +3,11 @@
 import numpy as np
 import pytest
 
-from minflux_viewer.ui.ortho_rotation import ROTATION_AXES, rotated_projection
+from minflux_viewer.ui.ortho_rotation import (
+    ROTATION_AXES,
+    rotated_projection,
+    rotation_axis_labels,
+)
 
 
 def _cube():
@@ -50,9 +54,23 @@ def test_every_mode_holds_a_different_axis():
         assert np.allclose(v, pts[:, up]), mode
 
 
+@pytest.mark.parametrize(
+    "mode,bottom,left",
+    [
+        ("about Y", "X cos θ + Z sin θ (nm)", "Y — rotation axis (nm)"),
+        ("about X", "Y cos θ + Z sin θ (nm)", "X — rotation axis (nm)"),
+        ("about Z", "X cos θ + Y sin θ (nm)", "Z — rotation axis (nm)"),
+    ],
+)
+def test_rotation_axis_labels_name_the_mixed_and_held_axes(mode, bottom, left):
+    assert rotation_axis_labels(mode) == (bottom, left)
+
+
 def test_a_bad_mode_is_refused_rather_than_silently_defaulted():
     with pytest.raises(ValueError, match="unknown rotation mode"):
         rotated_projection(_cube(), 10.0, "about W")
+    with pytest.raises(ValueError, match="unknown rotation mode"):
+        rotation_axis_labels("about W")
 
 
 def test_two_d_input_yields_nothing():

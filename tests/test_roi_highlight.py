@@ -345,3 +345,75 @@ def test_render_roi_mask_spans_the_whole_depth_axis(_app):
     finally:
         window.close()
         _app.processEvents()
+
+
+@pytest.mark.parametrize("plane,axes", [("XZ", (0, 2)), ("YZ", (2, 1))])
+def test_render_ortho_side_panes_highlight_the_selected_rows(_app, plane, axes):
+    """Render's side rasters need the same row highlight as the primary pane."""
+    from minflux_viewer.ui.render_window import RenderWindow
+
+    state = _state()
+    ds = state.datasets[0]
+    window = RenderWindow(state, 0)
+    window.resize(640, 640)
+    window.show()
+    for _ in range(4):
+        _app.processEvents()
+    try:
+        assert window.enter_ortho_mode() is True
+        for _ in range(8):
+            _app.processEvents()
+        rows = np.array([1, 4, 7], dtype=np.int64)
+        _add_mask_roi(state, ds, rows, source_view="render")
+        window._redraw_roi_highlight()
+
+        highlight = window._pane_highlights[plane]
+        x, y = highlight.getData()
+        locs = window._raw_render_locs(ds)
+        assert np.asarray(x) == pytest.approx(locs[rows, axes[0]])
+        assert np.asarray(y) == pytest.approx(locs[rows, axes[1]])
+    finally:
+        window.close()
+        _app.processEvents()
+
+
+def test_render_side_pane_draft_uses_the_drawing_view_highlight_preference(_app):
+    """A draft owned by XZ is still sourced by this Render view, not a peer view."""
+    from minflux_viewer.ui.render_window import RenderWindow
+
+    state = _state()
+    state.prefs.setdefault("plot", {})["roi_highlight_in_roi"] = True
+    state.prefs["plot"]["roi_sync_highlight"] = False
+    ds = state.datasets[0]
+    window = RenderWindow(state, 0)
+    window.resize(640, 640)
+    window.show()
+    for _ in range(4):
+        _app.processEvents()
+    try:
+        assert window.enter_ortho_mode() is True
+        for _ in range(8):
+            _app.processEvents()
+        rows = np.array([1, 4, 7], dtype=np.int64)
+        draft = RoiRecord.create(
+            "cuboid",
+            {"x": [-10.0, 120.0], "y": [0.0, 10.0], "z": [0.0, 100.0]},
+        )
+        mask = np.zeros(int(ds.prop.num_loc), dtype=bool)
+        mask[rows] = True
+        store_roi_mask(
+            ds, draft, mask,
+            context={"source_view": "render", "dataset_idx": 0},
+        )
+        ds.state["active_roi_draft_id"] = draft.id
+        side = window._pane_roi_controllers["XZ"]
+        side.replace_draft(draft)
+        side.activate()
+
+        assert window._owns_active_roi_draft() is True
+        window._redraw_roi_highlight()
+        x, _y = window._pane_highlights["XZ"].getData()
+        assert x is not None and len(x) == len(rows)
+    finally:
+        window.close()
+        _app.processEvents()

@@ -373,8 +373,12 @@ gains the callback that re-renders on move. This is the most natural expansion.
 so a state saved as `"Ortho"` falls back to XY — handled silently by `findText`.
 
 ### 7.7 Not carried to scatter
-The crosshair, the status-line coordinate and the floating placement are render-only.
-Wiring the crosshair into scatter is small (`OrthoCrosshair` is already shared).
+The **floating placement** is render-only; scatter is embedded. The crosshair and the
+status-line coordinate are now in both — `OrthoCrosshair` was always shared, so what was
+missing was the wiring: a View entry (in the same place render keeps it, and only while
+the mode is on), one click handler per pane, the seed, the status suffix and teardown.
+A click sets the two axes its pane shows and carries the third; a ROI tool wins the
+click; and the marker is never re-centred by the view.
 
 ### 7.8 The bottom-right cell
 0.4 × 0.4 of the embedded grid. It now holds a **rotating projection**

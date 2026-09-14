@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["rotated_projection", "ROTATION_AXES"]
+__all__ = ["rotated_projection", "rotation_axis_labels", "ROTATION_AXES"]
 
 #: Which data axes the rotation mixes, per named mode. The third axis is the
 #: one held vertical on screen, so the view stays comparable to its neighbours.
@@ -34,6 +34,21 @@ ROTATION_AXES: dict[str, tuple[int, int, int]] = {
     "about X": (1, 2, 0),      # Y and Z turn, X stays up
     "about Z": (0, 1, 2),      # X and Y turn, Z stays up
 }
+
+
+def rotation_axis_labels(mode: str) -> tuple[str, str]:
+    """Bottom/left labels that explain a rotating projection's coordinates."""
+    try:
+        a, b, up = ROTATION_AXES[mode]
+    except KeyError:
+        raise ValueError(
+            f"unknown rotation mode {mode!r}; expected one of {sorted(ROTATION_AXES)}"
+        ) from None
+    names = "XYZ"
+    return (
+        f"{names[a]} cos θ + {names[b]} sin θ (nm)",
+        f"{names[up]} — rotation axis (nm)",
+    )
 
 
 def rotated_projection(xyz, angle_deg: float, mode: str = "about Y"):

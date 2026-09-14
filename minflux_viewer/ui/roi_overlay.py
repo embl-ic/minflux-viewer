@@ -703,7 +703,79 @@ class RoiOverlayController(QObject):
     def activate(self) -> None:
         if _controller_disposed(self):
             return
+        self._adopt_peer_volume_draft()
         self.store.set_active_adapter(self)
+
+    def _controller_group(self):
+        """Identity of the orthogonal controller group this adapter belongs to.
+
+        Ordinary viewers are their own group.  ``OrthoPaneOwner`` returns its
+        real window, making the primary controller and both side controllers
+        peers without coupling this shared overlay class to either viewer.
+        """
+        getter = getattr(self.owner, "roi_controller_group", None)
+        if callable(getter):
+            try:
+                group = getter()
+            except Exception:
+                group = None
+            if group is not None:
+                return group
+        return self.owner
+
+    def _adopt_peer_volume_draft(self) -> bool:
+        """Move the pending volume draft here when another pane is activated.
+
+        A draft is intentionally absent from ``RoiStore``.  Previously that
+        made its XZ/YZ projections decorative ``PlotCurveItem`` objects: the
+        controller that created the draft was the only one with an editable
+        ROI item.  Moving the single draft between peer controllers preserves
+        the explicit Add-to-Manager model while allowing the same volume to be
+        reshaped in every orthogonal plane.
+
+        Flat drafts do not transfer.  A projection has no information about
+        the collapsed axis, so editing it from another plane would invent
+        geometry rather than edit the recorded 2-D shape.
+        """
+        previous = getattr(self.store, "active_adapter", None)
+        if (previous is None or previous is self
+                or not isinstance(previous, RoiOverlayController)
+                or _controller_disposed(previous)):
+            return False
+        try:
+            if previous._controller_group() is not self._controller_group():
+                return False
+            record = previous.draft
+        except (AttributeError, RuntimeError):
+            return False
+        if record is None or record.type not in VOLUME_ROI_TYPES:
+            return False
+        if self.draft is not None and self.draft.id != record.id:
+            return False
+        if not self._record_in_scope(record):
+            return False
+
+        # Relinquish the source item without clearing the record's selection
+        # mask or status: this is a view hand-off, not draft deletion.
+        previous.draft = None
+        previous._pending_selection_record = None
+        try:
+            previous._selection_timer.stop()
+        except (AttributeError, RuntimeError):
+            pass
+        if previous.draft_item is not None:
+            try:
+                previous.plot_item.removeItem(previous.draft_item)
+            except Exception:
+                pass
+        previous.draft_item = None
+
+        self._set_draft(record)
+        self._queue_selection_update(record)
+        # Both peer owners resolve to this same real window, so one refresh is
+        # enough to replace the source projection and suppress the target copy.
+        self._notify_overlay_changed()
+        return True
 
     def add_key_event_source(self, widget) -> None:
         """Also catch keyboard events (arrow nudge, ``t``) when *widget* holds
@@ -954,6 +1026,17 @@ class RoiOverlayController(QObject):
             return False
         tool = self.store.active_tool
         if not tool:
+            # Move a pending volume draft as the pointer enters a peer pane, so
+            # pyqtgraph's hover pass can register the newly editable item before
+            # the following press chooses a drag target.  Activating only on that
+            # press displays the item but can be one gesture too late for the
+            # scene's cached hover target.  Stored ROI adapters do NOT activate on
+            # hover: doing so could redirect Manager Update away from an edit in
+            # another pane.
+            if (event.type() == QEvent.Type.MouseMove
+                    and event.buttons() == Qt.MouseButton.NoButton
+                    and self._adopt_peer_volume_draft()):
+                self.store.set_active_adapter(self)
             # Edit mode: note which sub-element a left click selects on the active
             # ROI (body → move, corner/side → resize, rotation handle → rotate,
             # vertex → move that vertex) so a following arrow key behaves
@@ -961,6 +1044,12 @@ class RoiOverlayController(QObject):
             # interactive edit.
             if (event.type() == QEvent.Type.MouseButtonPress
                     and event.button() == Qt.MouseButton.LeftButton):
+                # The ROI Manager reads edits from the active adapter.  Merely
+                # dragging an item in XZ/YZ used to leave the primary XY adapter
+                # active, so Update could commit the untouched XY copy.  Activate
+                # before the scene handles this same press; this also hands over
+                # an unfiled volume draft if hover has not already done so.
+                self.activate()
                 self._track_kbd_handle_selection(event)
             return False
         if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
@@ -2481,7 +2570,7 @@ class RoiOverlayController(QObject):
         return normalized if isinstance(normalized, RoiRecord) else record
 
     def _queue_selection_update(self, record: RoiRecord) -> None:
-        if record.type not in {"rectangle", "oval", "polygon", "freehand"}:
+        if record.type not in self._SELECTING_TYPES:
             return
         record.selection_dirty = True
         self._pending_selection_record = record
