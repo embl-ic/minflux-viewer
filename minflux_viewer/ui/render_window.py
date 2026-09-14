@@ -1043,6 +1043,7 @@ class RenderWindow(QWidget):
         self._sigma_dialog: SigmaDialog | None = None
         self._roi_overlay = None
         self._roi_highlight_item = None
+        self._pane_highlights: dict[str, object] = {}
         self._volume_window = None
         self._ortho_redrawing = False
         self._ortho_crosshair = None
@@ -1264,6 +1265,7 @@ class RenderWindow(QWidget):
         """
         self._pane_widgets: dict[str, QWidget] = {"XY": self._image_view}
         self._pane_images: dict[str, object] = {}
+        self._pane_highlights = {}
         self._pane_grids = {}
         # Kept so closeEvent can disconnect exactly what was connected.
         self._ortho_click_handlers: list = []
@@ -1280,8 +1282,17 @@ class RenderWindow(QWidget):
             grid = pg.GridItem(textPen=None)
             grid.setZValue(-5)
             plot.addItem(grid, ignoreBounds=True)
+            highlight = pg.ScatterPlotItem(
+                size=7,
+                pen=pg.mkPen(255, 210, 0, 235, width=1.6),
+                brush=pg.mkBrush(255, 230, 0, 65),
+            )
+            # Above the rendered image/grid, below ROI outlines and handles.
+            highlight.setZValue(0)
+            plot.addItem(highlight, ignoreBounds=True)
             self._pane_widgets[plane] = plot
             self._pane_images[plane] = image
+            self._pane_highlights[plane] = highlight
             self._pane_grids[plane] = grid
 
         self._ortho = OrthoPanes(
@@ -1572,6 +1583,7 @@ class RenderWindow(QWidget):
                 image.clear()
         if self._ortho_crosshair is not None:
             self._ortho_crosshair.set_visible(active and self._show_crosshair)
+        self._redraw_roi_highlight()
 
     # -- side-pane projection -------------------------------------------
 
@@ -1681,21 +1693,25 @@ class RenderWindow(QWidget):
             drawer.clear()
             return
         controller = getattr(self, "_roi_overlay", None)
-        records, drafts = [], []
+        records, drafts, draft_planes = [], [], {}
         try:
             for record in self._state.rois.records:
                 if controller is None or controller._record_in_scope(record):
                     records.append(record)
-            # Drafts are passed apart: a draft belongs to the controller drawing
-            # it, so no side pane's controller holds it and this layer is the
-            # only thing that can show it while the shape is being made.
-            for source in (controller, *(getattr(self, "_pane_roi_controllers", None) or {}).values()):
+            sources = [(None, controller)]
+            sources.extend(
+                (getattr(self, "_pane_roi_controllers", None) or {}).items())
+            for plane, source in sources:
                 draft = getattr(source, "draft", None) if source is not None else None
                 if draft is not None:
                     drafts.append(draft)
+                    draft_planes[draft.id] = plane or source._view_plane()
         except Exception:
             return
-        drawer.refresh(records, drafts=drafts, color_of=lambda rec: rec.stroke_color)
+        drawer.refresh(
+            records, drafts=drafts, draft_planes=draft_planes,
+            color_of=lambda rec: rec.stroke_color,
+        )
 
     def _render_ortho_sides_now(self) -> None:
         channels = [
@@ -4949,8 +4965,11 @@ class RenderWindow(QWidget):
         return f"{left}{values[0]:.1f}, {values[1]:.1f}{right} nm"
 
     def _clear_roi_highlight(self) -> None:
-        if self._roi_highlight_item is not None:
-            self._roi_highlight_item.setData([], [])
+        items = [self._roi_highlight_item]
+        items.extend(getattr(self, "_pane_highlights", {}).values())
+        for item in items:
+            if item is not None:
+                item.setData([], [])
 
     def _roi_masks_for_dataset(self, ds) -> list[tuple[object, np.ndarray]]:
         from .roi_highlight import highlight_masks
@@ -4963,7 +4982,10 @@ class RenderWindow(QWidget):
     def _owns_active_roi_draft(self) -> bool:
         """True when an ROI is currently being drawn in *this* render view."""
         from .roi_highlight import owns_active_draft
-        return owns_active_draft(getattr(self, "_roi_overlay", None))
+        controllers = [getattr(self, "_roi_overlay", None)]
+        controllers.extend(
+            (getattr(self, "_pane_roi_controllers", None) or {}).values())
+        return any(owns_active_draft(controller) for controller in controllers)
 
     def _roi_highlight_enabled(self) -> bool:
         from .roi_highlight import roi_highlight_enabled
@@ -4988,10 +5010,17 @@ class RenderWindow(QWidget):
             self._clear_roi_highlight()
             return
 
-        xs: list[np.ndarray] = []
-        ys: list[np.ndarray] = []
-        brushes: list = []
-        channels = self._channels or [{"dataset_idx": self._idx, "visible": True, "kind": "localizations"}]
+        # Side panes are lazy and may retain points from a previous ortho visit.
+        # Clear them first; the active ortho path below repopulates both.
+        for item in getattr(self, "_pane_highlights", {}).values():
+            item.setData([], [])
+
+        entries: list[tuple[object, np.ndarray, np.ndarray]] = []
+        channels = self._channels or [{
+            "dataset_idx": self._idx,
+            "visible": True,
+            "kind": "localizations",
+        }]
         per_channel_max = max(1, 200_000 // max(len(channels), 1))
         for ch in channels:
             if not ch.get("visible", True) or ch.get("kind") == "image":
@@ -5013,24 +5042,58 @@ class RenderWindow(QWidget):
                     lo_mask = depth >= lo if left_inc else depth > lo
                     hi_mask = depth <= hi if right_inc else depth < hi
                     visible &= lo_mask & hi_mask
-                indices = np.flatnonzero(visible)
+                entries.append((record, locs[:n], visible))
+
+        xy_bounds = None
+        if self._ortho_active():
+            try:
+                (x0, x1), (y0, y1) = self._view_box.viewRange()
+                xy_bounds = (
+                    *sorted((float(x0), float(x1))),
+                    *sorted((float(y0), float(y1))),
+                )
+            except Exception:
+                pass
+
+        def paint(item, columns, *, crop_to_xy: bool) -> None:
+            xs: list[np.ndarray] = []
+            ys: list[np.ndarray] = []
+            brushes: list = []
+            for record, locs, visible in entries:
+                shown = visible
+                if crop_to_xy and xy_bounds is not None:
+                    x0, x1, y0, y1 = xy_bounds
+                    shown = (
+                        visible
+                        & (locs[:, 0] >= x0) & (locs[:, 0] <= x1)
+                        & (locs[:, 1] >= y0) & (locs[:, 1] <= y1)
+                    )
+                indices = np.flatnonzero(shown)
                 if indices.size > per_channel_max:
                     step = int(np.ceil(indices.size / per_channel_max))
                     indices = indices[::step]
                 if indices.size:
-                    xs.append(locs[indices, axes[0]])
-                    ys.append(locs[indices, axes[1]])
-                    brushes.extend(self._roi_highlight_brushes(record, indices.size))
-        if not xs:
-            self._clear_roi_highlight()
-            return
-        self._roi_highlight_item.setData(
-            x=np.concatenate(xs),
-            y=np.concatenate(ys),
-            brush=brushes,
-            pen=None,
-            size=7,
-        )
+                    xs.append(locs[indices, columns[0]])
+                    ys.append(locs[indices, columns[1]])
+                    brushes.extend(
+                        self._roi_highlight_brushes(record, indices.size))
+            if not xs:
+                item.setData([], [])
+                return
+            item.setData(
+                x=np.concatenate(xs),
+                y=np.concatenate(ys),
+                brush=brushes,
+                pen=None,
+                size=7,
+            )
+
+        paint(self._roi_highlight_item, axes, crop_to_xy=False)
+        if self._ortho_active():
+            for side_plane, item in getattr(self, "_pane_highlights", {}).items():
+                columns = ORTHO_AXIS_COLUMNS.get(side_plane)
+                if columns is not None:
+                    paint(item, columns, crop_to_xy=True)
 
     def enter_ortho_mode(self) -> bool:
         """Switch this view to the orthogonal mode. True if it is now on.

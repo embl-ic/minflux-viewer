@@ -65,11 +65,13 @@ from .gl_3d_reference import nice_step, three_plane_grid_positions, tick_values
 from .ortho_view import (
     AXIS_COLUMNS,
     ORTHO_AXIS,
+    OrthoCrosshair,
     OrthoPanes,
     SIDE_PLANES,
     axis_columns,
     axis_labels,
     ortho_pane_labels,
+    plot_item_of,
 )
 from .plot_format import plot_widget
 
@@ -110,6 +112,7 @@ class ScatterWindow(QWidget):
         self._3d_axis = None
         self._3d_axis_items: list = []
         self._3d_box_items: list = []
+        self._3d_roi_items: dict[str, tuple[object, object]] = {}
         self._show_2d_axis = True
         self._show_3d_axis = True
         self._show_2d_grid = True
@@ -130,6 +133,9 @@ class ScatterWindow(QWidget):
         self._lut_gamma = 1.0
         self._roi_overlay = None
         self._view_state_key = "scatter_plot_state"
+        # The 3-D marker is off until asked for, like the render view's.
+        self._show_crosshair = False
+        self._ortho_crosshair = None
         self._cached_dataset_idx: int | None = None
         self._cached_locs_nm: np.ndarray | None = None
         self._color_cache_key: tuple | None = None
@@ -184,11 +190,14 @@ class ScatterWindow(QWidget):
         # the same as it does in the primary pane.
         state.rois.changed.connect(self._refresh_ortho_roi_outlines)
         state.rois.selection_changed.connect(self._refresh_ortho_roi_outlines)
+        state.rois.changed.connect(self._refresh_volume_roi_displays)
+        state.rois.selection_changed.connect(self._refresh_volume_roi_displays)
 
     def refresh_preferences(self) -> None:
         self._apply_y_axis_direction()
         if getattr(self, "_roi_overlay", None) is not None:
             self._roi_overlay.refresh()
+        self._refresh_volume_roi_displays()
 
     def refresh_global_colors(self, *, reset_overlay: bool = False) -> None:
         """Repaint solid colors and, when requested, reload overlay slots."""
@@ -209,6 +218,7 @@ class ScatterWindow(QWidget):
         self._rebuild_channel_ui()
         self._invalidate_color_cache()
         self._redraw_current(save_state=False)
+        self._refresh_volume_roi_displays()
 
     @property
     def dataset_idx(self) -> int | None:
@@ -410,6 +420,21 @@ class ScatterWindow(QWidget):
             self._pane_plots,
             has_controller=lambda plane: plane in (
                 getattr(self, "_pane_roi_controllers", None) or {}))
+        # The 3-D position marker. Shared with the render view, which is what
+        # makes a point read the same in both; scatter simply had no wiring for
+        # it until now. Click any pane to place it.
+        self._ortho_crosshair = OrthoCrosshair(self._pane_plots)
+        self._ortho_click_handlers: list = []
+        for _plane, _widget in self._pane_plots.items():
+            _item = plot_item_of(_widget)
+            if _item is None:
+                continue
+            try:
+                _handler = (lambda ev, plane=_plane: self._on_ortho_click(plane, ev))
+                _item.scene().sigMouseClicked.connect(_handler)
+                self._ortho_click_handlers.append((_item, _handler))
+            except Exception:
+                pass
         # Real controllers on the side panes: they share the store, so a ROI
         # drawn in any pane is the same record everywhere and the panes differ
         # only in the axes they read it through.
@@ -453,7 +478,15 @@ class ScatterWindow(QWidget):
         silhouettes are ambiguous about depth ordering, and a few degrees of
         rotation resolves it at once.
         """
-        from PyQt6.QtWidgets import QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget
+        from PyQt6.QtWidgets import (
+            QComboBox,
+            QHBoxLayout,
+            QLabel,
+            QSlider,
+            QToolButton,
+            QVBoxLayout,
+            QWidget,
+        )
 
         holder = QWidget()
         column = QVBoxLayout(holder)
@@ -466,10 +499,28 @@ class ScatterWindow(QWidget):
             size=self._point_size, symbol=self._point_symbol, pen=None,
             brush=pg.mkBrush(200, 200, 200, 180))
         self._rotation_plot.addItem(self._rotation_scatter)
+        self._rotation_roi_items: dict[str, object] = {}
         column.addWidget(self._rotation_plot, 1)
 
         row = QHBoxLayout()
         row.setContentsMargins(2, 0, 2, 0)
+        self._rotation_play_button = QToolButton()
+        self._rotation_play_button.setText("▶")
+        self._rotation_play_button.setCheckable(True)
+        self._rotation_play_button.setAccessibleName("Play rotation")
+        self._rotation_play_button.setToolTip("Play a slow continuous rotation")
+        self._rotation_play_button.toggled.connect(self._set_rotation_playing)
+        row.addWidget(self._rotation_play_button)
+
+        self._rotation_axis_combo = QComboBox()
+        for axis in ("Y", "X", "Z"):
+            self._rotation_axis_combo.addItem(f"About {axis}", f"about {axis}")
+        self._rotation_axis_combo.setToolTip(
+            "Choose the data axis held fixed and vertical while the other two rotate")
+        self._rotation_axis_combo.currentIndexChanged.connect(
+            self._on_rotation_axis_changed)
+        row.addWidget(self._rotation_axis_combo)
+
         self._rotation_slider = QSlider(Qt.Orientation.Horizontal)
         self._rotation_slider.setRange(0, 360)
         self._rotation_slider.setValue(0)
@@ -484,12 +535,177 @@ class ScatterWindow(QWidget):
         row.addWidget(self._rotation_label)
         column.addLayout(row)
 
+        self._rotation_play_timer = QTimer(self)
+        self._rotation_play_timer.setInterval(100)
+        self._rotation_play_timer.timeout.connect(self._advance_rotation)
+        self._update_rotation_axis_labels()
+
         self._rotation_holder = holder
         self._ortho.set_extra_pane(holder)
 
     def _on_rotation_changed(self, value: int) -> None:
         self._rotation_label.setText(f"{int(value)}°")
         self._refresh_rotation_pane()
+
+    def _rotation_mode(self) -> str:
+        combo = getattr(self, "_rotation_axis_combo", None)
+        if combo is None:
+            return "about Y"
+        return str(combo.currentData() or "about Y")
+
+    def _update_rotation_axis_labels(self) -> None:
+        from .ortho_rotation import rotation_axis_labels
+
+        bottom, left = rotation_axis_labels(self._rotation_mode())
+        self._rotation_plot.setLabel("bottom", bottom)
+        self._rotation_plot.setLabel("left", left)
+
+    def _on_rotation_axis_changed(self, _index: int) -> None:
+        self._update_rotation_axis_labels()
+        self._refresh_rotation_pane()
+
+    def _set_rotation_playing(self, playing: bool) -> None:
+        timer = getattr(self, "_rotation_play_timer", None)
+        button = getattr(self, "_rotation_play_button", None)
+        if timer is None or button is None:
+            return
+        if playing and self._ortho_active():
+            timer.start()
+            button.setText("❚❚")
+            button.setAccessibleName("Pause rotation")
+            button.setToolTip("Pause the continuous rotation")
+            return
+        timer.stop()
+        button.blockSignals(True)
+        button.setChecked(False)
+        button.blockSignals(False)
+        button.setText("▶")
+        button.setAccessibleName("Play rotation")
+        button.setToolTip("Play a slow continuous rotation")
+
+    def _advance_rotation(self) -> None:
+        value = int(self._rotation_slider.value())
+        self._rotation_slider.setValue(0 if value >= 360 else value + 1)
+
+    def _visible_mesh_roi_records(self) -> list[tuple[object, bool]]:
+        """Visible cuboid/ellipsoid records and whether each is emphasized."""
+        controller = getattr(self, "_roi_overlay", None)
+        if controller is None:
+            return []
+        selected = set(self._state.rois.selected_ids)
+        records: list[tuple[object, bool]] = []
+        seen: set[str] = set()
+        for record in self._state.rois.records:
+            if record.type not in {"cuboid", "sphere"} or not record.visible:
+                continue
+            if not self._state.rois.show_all and record.id not in selected:
+                continue
+            try:
+                if not controller._record_in_scope(record):
+                    continue
+            except Exception:
+                continue
+            records.append((record, record.id in selected))
+            seen.add(record.id)
+
+        sources = [controller]
+        sources.extend(
+            (getattr(self, "_pane_roi_controllers", None) or {}).values())
+        for source in sources:
+            draft = getattr(source, "draft", None)
+            if (
+                draft is None
+                or draft.id in seen
+                or draft.type not in {"cuboid", "sphere"}
+            ):
+                continue
+            try:
+                if not controller._record_in_scope(draft):
+                    continue
+            except Exception:
+                continue
+            records.append((draft, True))
+            seen.add(draft.id)
+        return records
+
+    def _mesh_roi_colors(self, record, emphasized: bool):
+        """QColor edge plus OpenGL edge/face tuples for a volume ROI."""
+        color = record.stroke_color or "#ffff00"
+        controller = getattr(self, "_roi_overlay", None)
+        if controller is not None:
+            try:
+                palette = controller._roi_palette(
+                    record, manager_highlight=bool(
+                        emphasized and record.id in self._state.rois.selected_ids))
+                color = palette.get("edge", color)
+            except Exception:
+                pass
+        qcolor = pg.mkColor(color)
+        edge = (qcolor.redF(), qcolor.greenF(), qcolor.blueF(), 0.98)
+        face = (
+            qcolor.redF(), qcolor.greenF(), qcolor.blueF(),
+            0.20 if emphasized else 0.12,
+        )
+        qcolor.setAlphaF(0.98)
+        return qcolor, edge, face
+
+    def _refresh_rotation_roi_items(self) -> None:
+        """Project cuboid/ellipsoid wireframes into the rotating 2-D pane."""
+        plot = getattr(self, "_rotation_plot", None)
+        items = getattr(self, "_rotation_roi_items", None)
+        if plot is None or items is None:
+            return
+        if not self._ortho_active():
+            for item in items.values():
+                item.setData([], [])
+            return
+
+        from ..core.roi_volume import volume_mesh
+        from .ortho_rotation import rotated_projection
+
+        wanted: set[str] = set()
+        for record, emphasized in self._visible_mesh_roi_records():
+            geometry = volume_mesh(record)
+            if geometry is None:
+                continue
+            vertices, _faces, edges = geometry
+            segments = vertices[edges].reshape(-1, 3)
+            projected = rotated_projection(
+                segments,
+                float(self._rotation_slider.value()),
+                self._rotation_mode(),
+            )
+            if projected is None:
+                continue
+            h, v = projected
+            key = record.id
+            wanted.add(key)
+            item = items.get(key)
+            if item is None:
+                item = pg.PlotCurveItem()
+                item.setZValue(6)
+                plot.addItem(item, ignoreBounds=True)
+                items[key] = item
+            qcolor, _edge, _face = self._mesh_roi_colors(record, emphasized)
+            item.setData(
+                h,
+                v,
+                connect="pairs",
+                pen=pg.mkPen(
+                    qcolor,
+                    width=float(record.line_width) + (1.2 if emphasized else 0.0),
+                ),
+            )
+        for key in [key for key in items if key not in wanted]:
+            item = items.pop(key)
+            try:
+                plot.removeItem(item)
+            except Exception:
+                pass
+
+    def _refresh_volume_roi_displays(self) -> None:
+        self._refresh_rotation_roi_items()
+        self._refresh_3d_roi_items()
 
     def _refresh_rotation_pane(self, locs=None, rows=None) -> None:
         """Redraw the rotating projection from whatever the panes are showing."""
@@ -499,22 +715,30 @@ class ScatterWindow(QWidget):
         ds = self._dataset()
         if ds is None:
             scatter.setData([], [])
+            self._refresh_rotation_roi_items()
             return
         if locs is None:
             locs = self._current_locs(ds)
             rows = None
         if locs is None or getattr(locs, "ndim", 0) != 2 or locs.shape[1] < 3:
             scatter.setData([], [])
+            self._refresh_rotation_roi_items()
             return
         picked = locs if rows is None else locs[rows]
         from .ortho_rotation import rotated_projection
-        result = rotated_projection(picked, float(self._rotation_slider.value()))
+        result = rotated_projection(
+            picked,
+            float(self._rotation_slider.value()),
+            self._rotation_mode(),
+        )
         if result is None:
             scatter.setData([], [])
+            self._refresh_rotation_roi_items()
             return
         h, v = result
         finite = np.isfinite(h) & np.isfinite(v)
         scatter.setData(h[finite], v[finite])
+        self._refresh_rotation_roi_items()
 
     def _apply_page_background(self, black: bool) -> None:
         """Paint the pane page itself, so the empty bottom-right cell and the
@@ -758,6 +982,87 @@ class ScatterWindow(QWidget):
             self._ortho_redrawing = False
         self._refresh_ortho_roi_outlines()
 
+    def _apply_crosshair_visibility(self) -> None:
+        """Show the marker while the mode is on, seeding it if it has none."""
+        crosshair = getattr(self, "_ortho_crosshair", None)
+        if crosshair is None:
+            return
+        active = self._axis_combo.currentText() == ORTHO_AXIS
+        if active and self._show_crosshair and crosshair.point is None:
+            crosshair.set_point(self._default_crosshair_point())
+        crosshair.set_visible(active and self._show_crosshair)
+
+    def _default_crosshair_point(self):
+        """The centre of the current view, at the middle of the depth range.
+
+        ⚠ Seeded once and never moved afterwards. A marker that re-centres
+        itself is not a marker; it is a read-out of the view, which the view
+        already shows. (Verified against ImageJ's ``Orthogonal_Views``: it
+        assigns ``crossLoc`` only from explicit navigation.)
+        """
+        try:
+            (x0, x1), (y0, y1) = self._pane_plots["XY"].getPlotItem().getViewBox().viewRange()
+        except Exception:
+            x0 = y0 = -1.0
+            x1 = y1 = 1.0
+        depth = self.roi_depth_center()
+        return (0.5 * (x0 + x1), 0.5 * (y0 + y1), float(depth) if depth is not None else 0.0)
+
+    def _set_crosshair_visible(self, checked: bool) -> None:
+        self._show_crosshair = bool(checked)
+        self._apply_crosshair_visibility()
+        self._refresh_ortho_info()
+        self._save_view_state()
+
+    def _on_ortho_click(self, plane: str, event) -> None:
+        """Place the marker, unless a ROI tool has claimed the click.
+
+        A click fixes the two axes the pane draws and says nothing about the one
+        it projects over, so ``update_from_pane`` carries the third forward.
+        """
+        if self._axis_combo.currentText() != ORTHO_AXIS or not self._show_crosshair:
+            return
+        crosshair = getattr(self, "_ortho_crosshair", None)
+        if crosshair is None:
+            return
+        try:
+            if event.button() != Qt.MouseButton.LeftButton:
+                return
+            if getattr(self._state.rois, "active_tool", None) is not None:
+                return          # drawing a ROI wins
+            view_box = self._pane_plots[plane].getPlotItem().getViewBox()
+            point = view_box.mapSceneToView(event.scenePos())
+        except Exception:
+            return
+        crosshair.update_from_pane(plane, float(point.x()), float(point.y()))
+        self._refresh_ortho_info()
+
+    def ortho_info_suffix(self) -> str:
+        """The single 3-D point the panes are centred on, for the status line.
+
+        One coordinate, not three: the panes share their axes pairwise, so
+        there is only ever one point to report.
+        """
+        if self._axis_combo.currentText() != ORTHO_AXIS:
+            return ""
+        crosshair = getattr(self, "_ortho_crosshair", None)
+        if crosshair is not None and crosshair.visible and crosshair.point is not None:
+            point, label = crosshair.point, "crosshair"
+        else:
+            point, label = self._default_crosshair_point(), "centre"
+        return (f"  |  {label} X={point[0]:,.1f}  Y={point[1]:,.1f}  "
+                f"Z={point[2]:,.1f} nm")
+
+    def _refresh_ortho_info(self) -> None:
+        """Re-stamp the status line so the marker's coordinate follows it."""
+        text = self._info_label.text()
+        for marker in ("  |  crosshair X=", "  |  centre X="):
+            head = text.split(marker)[0]
+            if head != text:
+                text = head
+                break
+        self._info_label.setText(text + self.ortho_info_suffix())
+
     def roi_pane_coords(self):
         """Display-nm coordinates a side pane measures its depth from."""
         ds = self._dataset()
@@ -793,28 +1098,32 @@ class ScatterWindow(QWidget):
             drawer.clear()
             return
         controller = getattr(self, "_roi_overlay", None)
-        records, drafts = [], []
+        records, drafts, draft_planes = [], [], {}
         try:
             for record in self._state.rois.records:
                 if controller is None or controller._record_in_scope(record):
                     records.append(record)
-            # Drafts are passed apart: a draft belongs to the controller drawing
-            # it, so no side pane's controller holds it and this layer is the
-            # only thing that can show it while the shape is being made.
-            for source in (controller, *(getattr(self, "_pane_roi_controllers", None) or {}).values()):
+            sources = [(None, controller)]
+            sources.extend(
+                (getattr(self, "_pane_roi_controllers", None) or {}).items())
+            for plane, source in sources:
                 draft = getattr(source, "draft", None) if source is not None else None
                 if draft is not None:
                     drafts.append(draft)
+                    draft_planes[draft.id] = plane or source._view_plane()
         except Exception:
             return
-        drawer.refresh(records, drafts=drafts, color_of=lambda rec: rec.stroke_color)
+        drawer.refresh(
+            records, drafts=drafts, draft_planes=draft_planes,
+            color_of=lambda rec: rec.stroke_color,
+        )
 
     def _set_info_text(self, text: str, ds=None) -> None:
         """Prefix Scatter status with the source dataset dimensionality."""
         if ds is None:
             ds = self._dataset()
         prefix = f"{ds.prop.num_dim}D  |  " if ds is not None else ""
-        self._info_label.setText(f"{prefix}{text}")
+        self._info_label.setText(f"{prefix}{text}{self.ortho_info_suffix()}")
 
     def _ensure_3d_built(self) -> None:
         """Construct the OpenGL widget on first 3D request."""
@@ -867,6 +1176,66 @@ class ScatterWindow(QWidget):
         self._roi_highlight_3d = roi_scatter
         self._stack.addWidget(view)
         self._apply_3d_blend(self._black_bg_check.isChecked())
+        self._refresh_3d_roi_items()
+
+    def _clear_3d_roi_items(self) -> None:
+        view = getattr(self, "_3d_view", None)
+        items = getattr(self, "_3d_roi_items", {})
+        if view is not None:
+            for mesh, wire in items.values():
+                for item in (mesh, wire):
+                    try:
+                        view.removeItem(item)
+                    except Exception:
+                        pass
+        items.clear()
+
+    def _refresh_3d_roi_items(self) -> None:
+        """Draw visible cuboids/ellipsoids as translucent OpenGL meshes."""
+        view = getattr(self, "_3d_view", None)
+        if view is None:
+            return
+        self._clear_3d_roi_items()
+        try:
+            import pyqtgraph.opengl as gl
+        except ImportError:
+            return
+        from ..core.roi_volume import volume_mesh
+
+        for record, emphasized in self._visible_mesh_roi_records():
+            geometry = volume_mesh(record)
+            if geometry is None:
+                continue
+            vertices, faces, edges = geometry
+            _qcolor, edge_color, face_color = self._mesh_roi_colors(
+                record, emphasized)
+            mesh_data = gl.MeshData(
+                vertexes=np.asarray(vertices, dtype=np.float32),
+                faces=np.asarray(faces, dtype=np.uint32),
+            )
+            mesh = gl.GLMeshItem(
+                meshdata=mesh_data,
+                smooth=record.type == "sphere",
+                color=face_color,
+                shader="shaded",
+                glOptions="translucent",
+            )
+            wire = gl.GLLinePlotItem(
+                pos=np.asarray(vertices[edges].reshape(-1, 3), dtype=np.float32),
+                color=edge_color,
+                width=float(record.line_width) + (1.2 if emphasized else 0.0),
+                mode="lines",
+                antialias=True,
+            )
+            wire.setGLOptions("translucent")
+            try:
+                mesh.setDepthValue(4)
+                wire.setDepthValue(5)
+            except Exception:
+                pass
+            view.addItem(mesh)
+            view.addItem(wire)
+            self._3d_roi_items[record.id] = (mesh, wire)
 
     def _on_background_changed(self, black: bool) -> None:
         self._apply_background(black)
@@ -1003,6 +1372,18 @@ class ScatterWindow(QWidget):
                     else "Orthogonal views need a 3-D dataset"
                 )
             action.triggered.connect(lambda _checked=False, value=axis: self._axis_combo.setCurrentText(value))
+        if self._axis_combo.currentText() == ORTHO_AXIS:
+            # Only while the mode is on, and in the same place the render view
+            # keeps it, so one habit serves both.
+            cross_action = view_menu.addAction("Crosshair")
+            cross_action.setCheckable(True)
+            cross_action.setChecked(bool(self._show_crosshair))
+            cross_action.setToolTip(
+                "A 3-D position marker shown in all three panes. The side panes "
+                "are projections, so it reports where a feature sits along the "
+                "collapsed axis — it does not select a slice."
+            )
+            cross_action.triggered.connect(self._set_crosshair_visible)
         view_menu.addSeparator()
 
         bg_action = view_menu.addAction("Black background")
@@ -1123,6 +1504,8 @@ class ScatterWindow(QWidget):
         # Leaving ortho must also drop the side panes' grid weight, or the
         # primary pane keeps only its share of the window (see grid_stretch).
         ortho_on = axis_text == ORTHO_AXIS and not is_3d
+        if not ortho_on:
+            self._set_rotation_playing(False)
         if ortho_on:
             self._ensure_pane_roi_controllers()
         if ortho_on and not self._ortho.active:
@@ -1131,6 +1514,7 @@ class ScatterWindow(QWidget):
             # whole dataset rather than on a rectangle the user set elsewhere.
             self._ortho_show_all = True
         self._ortho.set_active(ortho_on)
+        self._apply_crosshair_visibility()
         self._sync_ortho_colorbar(ortho_on)
         if is_3d:
             self._ensure_3d_built()
@@ -1148,6 +1532,7 @@ class ScatterWindow(QWidget):
         self._last_axis_text = axis_text
         self._save_view_state()
         self._refresh()
+        self._refresh_volume_roi_displays()
         # Re-project point markers onto the new projection plane.
         if self._roi_overlay is not None and not is_3d:
             self._roi_overlay.refresh()
@@ -1988,6 +2373,7 @@ class ScatterWindow(QWidget):
         self._show_3d_bounding_box = bool(
             saved.get("show_3d_bounding_box", True)
         )
+        self._show_crosshair = bool(saved.get("show_crosshair", False))
         self._show_colorbar = bool(saved.get("show_colorbar", True))
         self._colorbar_show_values = bool(
             saved.get("colorbar_show_values", True)
@@ -2401,6 +2787,7 @@ class ScatterWindow(QWidget):
             "point_size": int(self._point_size),
             "point_alpha": int(self._point_alpha),
             "axis": self._axis_combo.currentText(),
+            "show_crosshair": bool(self._show_crosshair),
         }
 
     # -- 2D path -----------------------------------------------------
@@ -2925,6 +3312,7 @@ class ScatterWindow(QWidget):
         from .lut_dialog import release_shared_lut_owner
         from .qt_lifecycle import close_plot_widgets
 
+        self._set_rotation_playing(False)
         self._end_overlay_alignment()
         if self._roi_overlay is not None:
             self._roi_overlay.dispose()
@@ -2940,6 +3328,15 @@ class ScatterWindow(QWidget):
             except Exception:
                 pass
         self._pane_roi_controllers = {}
+        for _item, _handler in getattr(self, "_ortho_click_handlers", []):
+            try:
+                _item.scene().sigMouseClicked.disconnect(_handler)
+            except (TypeError, RuntimeError, AttributeError):
+                pass
+        self._ortho_click_handlers = []
+        if getattr(self, "_ortho_crosshair", None) is not None:
+            self._ortho_crosshair.dispose()
+            self._ortho_crosshair = None
         # Drop the inter-pane links before the plots go inert: a queued range
         # change must not reach a half-torn-down pane.
         self._ortho.dispose()

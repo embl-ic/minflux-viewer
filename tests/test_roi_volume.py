@@ -23,6 +23,7 @@ from minflux_viewer.core.roi_volume import (
     roi_volume_mask,
     seed_interval,
     volume_bounds,
+    volume_mesh,
     volume_silhouette,
 )
 
@@ -46,6 +47,40 @@ def test_volume_types_are_not_region_types():
     """A volume ROI must never pass a 2-D consumer's gate."""
     assert VOLUME_ROI_TYPES.isdisjoint(REGION_ROI_TYPES)
     assert VOLUME_ROI_TYPES == {"cuboid", "sphere", "polyhedron"}
+
+
+def test_cuboid_mesh_has_its_eight_corners_and_twelve_real_edges():
+    rec = Rec("cuboid", {"x": [10, -10], "y": [20, 40], "z": [-5, 15]})
+
+    vertices, faces, edges = volume_mesh(rec)
+
+    assert vertices.shape == (8, 3)
+    assert faces.shape == (12, 3)
+    assert edges.shape == (12, 2)
+    assert set(vertices[:, 0]) == {-10.0, 10.0}
+    assert set(vertices[:, 1]) == {20.0, 40.0}
+    assert set(vertices[:, 2]) == {-5.0, 15.0}
+    # Each wire edge changes exactly one data coordinate; triangle diagonals
+    # must not leak into the projected wireframe.
+    assert np.all(np.count_nonzero(np.diff(vertices[edges], axis=1)[:, 0], axis=1) == 1)
+
+
+def test_sphere_mesh_is_the_stored_axis_aligned_ellipsoid():
+    rec = Rec("sphere", {"center": [5, 6, 7], "radii": [2, 3, 4]})
+
+    vertices, faces, edges = volume_mesh(
+        rec, latitude_segments=6, longitude_segments=8)
+
+    normalized = (vertices - np.array([5.0, 6.0, 7.0])) / np.array([2.0, 3.0, 4.0])
+    assert np.sum(normalized * normalized, axis=1) == pytest.approx(1.0)
+    assert faces.shape == (2 * 8 * (6 - 1), 3)
+    assert edges.ndim == 2 and edges.shape[1] == 2
+    assert int(faces.max()) < len(vertices)
+    assert int(edges.max()) < len(vertices)
+
+
+def test_volume_mesh_does_not_pretend_a_polyhedron_is_an_analytic_shape():
+    assert volume_mesh(Rec("polyhedron", {"axis": "Z", "levels": []})) is None
 
 
 def test_two_d_mask_raises_rather_than_selecting_nothing():

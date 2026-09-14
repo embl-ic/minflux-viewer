@@ -505,6 +505,84 @@ def test_roi_highlight_is_drawn_in_every_pane(_qt_app):
         win.close()
 
 
+def test_rotation_controls_name_the_axis_and_play_continuously(_qt_app):
+    state = _state()
+    win = _window(_qt_app, state)
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+
+        index = win._rotation_axis_combo.findData("about X")
+        assert index >= 0
+        win._rotation_axis_combo.setCurrentIndex(index)
+        assert win._rotation_plot.getAxis("bottom").labelText == (
+            "Y cos θ + Z sin θ (nm)")
+        assert win._rotation_plot.getAxis("left").labelText == (
+            "X — rotation axis (nm)")
+
+        win._rotation_slider.setValue(12)
+        win._rotation_play_button.click()
+        assert win._rotation_play_timer.isActive()
+        assert win._rotation_play_button.accessibleName() == "Pause rotation"
+        win._advance_rotation()
+        assert win._rotation_slider.value() == 13
+        win._rotation_play_button.click()
+        assert not win._rotation_play_timer.isActive()
+
+        win._rotation_slider.setValue(360)
+        win._advance_rotation()
+        assert win._rotation_slider.value() == 0
+    finally:
+        win.close()
+
+
+def test_cuboid_and_sphere_meshes_appear_in_rotation_and_3d_views(_qt_app):
+    from minflux_viewer.core.roi import RoiRecord
+
+    state = _state()
+    cuboid = RoiRecord.create(
+        "cuboid",
+        {"x": [6500, 8500], "y": [4300, 5600], "z": [150, 450]},
+        context={"source_view": "scatter", "dataset_idx": 0},
+    )
+    sphere = RoiRecord.create(
+        "sphere",
+        {"center": [8500, 5200, 300], "radii": [500, 350, 120]},
+        context={"source_view": "scatter", "dataset_idx": 0},
+    )
+    state.rois.add(cuboid)
+    state.rois.add(sphere)
+    state.rois.set_show_all(True)
+
+    win = _window(_qt_app, state)
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+        assert set(win._rotation_roi_items) == {cuboid.id, sphere.id}
+        cube_x, cube_y = win._rotation_roi_items[cuboid.id].getData()
+        sphere_x, _sphere_y = win._rotation_roi_items[sphere.id].getData()
+        assert len(cube_x) == 24          # 12 edge pairs
+        assert len(sphere_x) > len(cube_x)
+
+        cube_at_zero = np.column_stack([cube_x, cube_y]).copy()
+        win._rotation_slider.setValue(90)
+        rotated_x, rotated_y = win._rotation_roi_items[cuboid.id].getData()
+        assert not np.allclose(
+            cube_at_zero, np.column_stack([rotated_x, rotated_y]))
+
+        win._axis_combo.setCurrentText("3D")
+        _settle(_qt_app)
+        assert set(win._3d_roi_items) == {cuboid.id, sphere.id}
+        cube_mesh, cube_wire = win._3d_roi_items[cuboid.id]
+        sphere_mesh, sphere_wire = win._3d_roi_items[sphere.id]
+        assert cube_mesh.opts["meshdata"].vertexes().shape == (8, 3)
+        assert cube_wire.pos.shape == (24, 3)
+        assert sphere_mesh.opts["meshdata"].vertexes().shape[0] > 8
+        assert sphere_wire.pos.shape[0] > cube_wire.pos.shape[0]
+    finally:
+        win.close()
+
+
 def test_overlay_channels_draw_into_every_pane(_qt_app):
     state = _state()
     state.add_dataset(_dataset(name="ortho-ch2"))
@@ -952,5 +1030,175 @@ def test_entering_ortho_starts_uncropped(_qt_app):
         _settle(_qt_app)
         assert win._ortho_view_rect() is None
         assert "full range" in win._info_label.text()
+    finally:
+        win.close()
+
+
+# ------------------------------------------------------- the scatter crosshair
+# It was render-only. `OrthoCrosshair` was already shared, so what was missing
+# was the wiring: a View entry, a click handler per pane, the seed, the status
+# line and teardown.
+
+def _click_pane(app, win, plane, view_point):
+    """Click a pane at a point in DATA coordinates, and return where it landed.
+
+    A widget click is an integer pixel, which at these zooms is several nm, so
+    the caller compares against the pixel's own data coordinate rather than
+    against a tolerance pulled out of the air.
+    """
+    from PyQt6.QtCore import QPointF, Qt
+    from PyQt6.QtTest import QTest
+
+    widget = win._pane_plots[plane]
+    view_box = widget.getPlotItem().getViewBox()
+    pixel = widget.mapFromScene(view_box.mapViewToScene(QPointF(*view_point)))
+    QTest.mouseClick(widget.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, pixel)
+    _settle(app, turns=6)
+    landed = view_box.mapSceneToView(widget.mapToScene(pixel))
+    return float(landed.x()), float(landed.y())
+
+
+def test_scatter_crosshair_is_off_until_asked_for_then_marks_every_pane(_qt_app):
+    win = _window(_qt_app, _state())
+    try:
+        win.enter_ortho_mode()
+        _settle(_qt_app, turns=8)
+        crosshair = win._ortho_crosshair
+        assert crosshair is not None and crosshair.visible is False
+
+        win._set_crosshair_visible(True)
+        _settle(_qt_app, turns=6)
+        assert crosshair.visible is True
+        assert crosshair.point is not None          # seeded, not left at None
+        assert sorted(crosshair._lines) == ["XY", "XZ", "YZ"]
+    finally:
+        win.close()
+
+
+@pytest.mark.parametrize("plane, view_point, fixed, carried", [
+    # ⚠ YZ is the transposed one: its horizontal is Z and its vertical is Y.
+    ("XY", (120.0, -60.0), (0, 1), 2),
+    ("XZ", (120.0, 45.0), (0, 2), 1),
+    ("YZ", (-30.0, 80.0), (2, 1), 0),
+])
+def test_a_click_sets_the_two_axes_that_pane_shows_and_carries_the_third(
+        _qt_app, plane, view_point, fixed, carried):
+    """A click says nothing about the axis the pane projects over."""
+    win = _window(_qt_app, _state())
+    try:
+        win.enter_ortho_mode()
+        _settle(_qt_app, turns=8)
+        win._set_crosshair_visible(True)
+        _settle(_qt_app, turns=4)
+        before = tuple(win._ortho_crosshair.point)
+
+        landed_h, landed_v = _click_pane(_qt_app, win, plane, view_point)
+        after = win._ortho_crosshair.point
+
+        horizontal, vertical = fixed
+        assert after[horizontal] == pytest.approx(landed_h, abs=1e-6)
+        assert after[vertical] == pytest.approx(landed_v, abs=1e-6)
+        assert after[carried] == before[carried]         # untouched
+    finally:
+        win.close()
+
+
+def test_a_roi_tool_wins_the_click(_qt_app):
+    state = _state()
+    win = _window(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        _settle(_qt_app, turns=8)
+        win._set_crosshair_visible(True)
+        _settle(_qt_app, turns=4)
+        before = tuple(win._ortho_crosshair.point)
+
+        state.rois.set_tool("cuboid")
+        _click_pane(_qt_app, win, "XY", (-200.0, 200.0))
+        assert tuple(win._ortho_crosshair.point) == before
+    finally:
+        state.rois.set_tool(None)
+        win.close()
+
+
+def test_the_scatter_crosshair_never_recentres_itself(_qt_app):
+    """ImageJ assigns crossLoc only from explicit navigation. A marker that
+    follows the view is a read-out of the view, which the view already shows."""
+    win = _window(_qt_app, _state())
+    try:
+        win.enter_ortho_mode()
+        _settle(_qt_app, turns=8)
+        win._set_crosshair_visible(True)
+        _click_pane(_qt_app, win, "XY", (120.0, -60.0))
+        placed = tuple(win._ortho_crosshair.point)
+
+        win._axis_combo.setCurrentText("XY")          # leave the mode
+        _settle(_qt_app, turns=6)
+        assert win._ortho_crosshair.visible is False
+
+        win.enter_ortho_mode()                        # and come back
+        _settle(_qt_app, turns=8)
+        assert win._ortho_crosshair.visible is True
+        assert tuple(win._ortho_crosshair.point) == placed
+    finally:
+        win.close()
+
+
+def test_the_status_line_carries_one_three_dimensional_point(_qt_app):
+    """The panes share their axes pairwise, so there is only ever one point."""
+    win = _window(_qt_app, _state())
+    try:
+        win.enter_ortho_mode()
+        _settle(_qt_app, turns=8)
+        assert "centre X=" in win.ortho_info_suffix()      # before it is shown
+        win._set_crosshair_visible(True)
+        _click_pane(_qt_app, win, "XY", (120.0, -60.0))
+
+        suffix = win.ortho_info_suffix()
+        assert "crosshair X=" in suffix and "Y=" in suffix and "Z=" in suffix
+        assert win._info_label.text().endswith(suffix)
+        assert suffix.count("X=") == 1                     # one point, not three
+    finally:
+        win.close()
+
+
+def test_the_crosshair_setting_is_remembered_with_the_view(_qt_app):
+    state = _state()
+    win = _window(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        _settle(_qt_app, turns=8)
+        win._set_crosshair_visible(True)
+        _settle(_qt_app, turns=4)
+        saved = state.datasets[0].state[win._view_state_key]
+        assert saved["show_crosshair"] is True
+    finally:
+        win.close()
+
+
+def test_the_crosshair_entry_appears_only_while_the_mode_is_on(_qt_app):
+    """Same place the render view keeps it, so one habit serves both."""
+    import pytest as _pytest
+
+    from tests.test_view_context_menus import (
+        _capture_context_menu, _menu_texts, _submenu)
+
+    def view_entries(win):
+        monkeypatch = _pytest.MonkeyPatch()
+        try:
+            menu = _capture_context_menu(monkeypatch, win._show_context_menu)
+            return _menu_texts(_submenu(menu, "View"))
+        finally:
+            monkeypatch.undo()
+
+    win = _window(_qt_app, _state())
+    try:
+        assert "Crosshair" not in view_entries(win)
+
+        win.enter_ortho_mode()
+        _settle(_qt_app, turns=8)
+        texts = view_entries(win)
+        assert texts.index("Crosshair") == texts.index(ORTHO_AXIS) + 1
     finally:
         win.close()
