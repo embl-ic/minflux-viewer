@@ -649,3 +649,48 @@ def test_imagej_export_refuses_a_volume_roi_by_name():
     rec = RoiRecord.create("cuboid", {"x": [0, 1], "y": [0, 1], "z": [0, 1]}, name="box-1")
     with pytest.raises(ValueError, match="3-D ROI"):
         record_to_imagej(rec)
+
+
+# --- the property read-out -------------------------------------------------
+# ⚠ Both ROI property dialogs used the 2-D `_bounds`, which knows only
+# bounds/point/points and answers (0, 0, 0, 0) for a named-axis geometry -- so a
+# volume ROI reported "0 vertices, bbox X=0, Y=0, W=0, H=0", a wrong answer
+# rather than a missing one. One formatter now serves both.
+
+def _nm(value):
+    v = float(value)
+    return f"{int(round(v))}" if np.isfinite(v) else ""
+
+
+def test_volume_read_out_states_the_real_three_dimensional_extent():
+    from minflux_viewer.core.roi_volume import volume_geometry_text
+
+    rec = Rec("cuboid", {"x": [0, 100], "y": [10, 30], "z": [-20, 60]})
+    text = volume_geometry_text(rec, _nm)
+    assert text == "X=0, Y=10, Z=-20, W=100, H=20, D=80"
+    assert "W=0" not in text and "H=0" not in text        # the defect it replaces
+
+
+def test_each_volume_shape_adds_what_only_it_can_say():
+    from minflux_viewer.core.roi_volume import volume_geometry_text
+
+    sphere = Rec("sphere", {"center": [5, 6, 7], "radii": [2, 3, 4]})
+    assert "centre=(5, 6, 7), radii=(2, 3, 4)" in volume_geometry_text(sphere, _nm)
+
+    prism = Rec("polyhedron", {"axis": "Z", "thickness": 40.0, "levels": [
+        {"at": 0.0, "polygon": [[0, 0], [10, 0], [10, 10]]}]})
+    assert "1 cross-section along Z at 0, thickness=40" in volume_geometry_text(prism, _nm)
+
+    stack = Rec("polyhedron", {"axis": "Z", "levels": [
+        {"at": 0.0, "polygon": [[0, 0], [10, 0], [10, 10]]},
+        {"at": 40.0, "polygon": [[2, 2], [8, 2], [8, 8]]}]})
+    text = volume_geometry_text(stack, _nm)
+    assert "2 cross-sections along Z at 0, 40" in text
+    assert "thickness" not in text          # a second level supersedes it
+
+
+def test_an_unreadable_volume_geometry_says_so_instead_of_reading_as_empty():
+    from minflux_viewer.core.roi_volume import volume_geometry_text
+
+    rec = Rec("cuboid", {"x": [0, 100]})       # no y / z
+    assert "not readable" in volume_geometry_text(rec, _nm)

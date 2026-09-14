@@ -73,6 +73,7 @@ __all__ = [
     "scale_z",
     "translate_volume",
     "set_volume_extent",
+    "volume_geometry_text",
     "add_cross_section",
     "convex_hull_polyhedron",
 ]
@@ -773,6 +774,41 @@ def set_volume_extent(record, columns, bounds) -> dict | None:
         g["center"], g["radii"] = centre, radii
         return g
     return None
+
+
+def volume_geometry_text(record, fmt) -> str:
+    """The geometry read-out for a volume ROI, in the caller's number format.
+
+    Shared by both ROI property dialogs so they cannot drift. ⚠ It exists at
+    all because the 2-D ``_bounds`` returns ``(0, 0, 0, 0)`` for a named-axis
+    geometry, so both dialogs reported a volume ROI as *0 vertices, bbox
+    X=0, Y=0, W=0, H=0* -- a wrong answer rather than a missing one.
+    """
+    spans = volume_bounds(record)
+    if spans is None:
+        return f"{getattr(record, 'type', '?')} (geometry not readable)"
+    (x0, x1), (y0, y1), (z0, z1) = spans
+    lines = [f"X={fmt(x0)}, Y={fmt(y0)}, Z={fmt(z0)}, "
+             f"W={fmt(x1 - x0)}, H={fmt(y1 - y0)}, D={fmt(z1 - z0)}"]
+
+    g = getattr(record, "geometry", None) or {}
+    kind = getattr(record, "type", None)
+    if kind == "sphere":
+        centre = list(g.get("center") or [])
+        radii = list(g.get("radii") or [])
+        if len(centre) >= 3 and len(radii) >= 3:
+            lines.append("centre=(" + ", ".join(fmt(c) for c in centre[:3]) + "), "
+                         "radii=(" + ", ".join(fmt(r) for r in radii[:3]) + ")")
+    elif kind == "polyhedron":
+        axis = str(g.get("axis", "Z")).upper()
+        levels = list(g.get("levels") or [])
+        at = ", ".join(fmt(lv.get("at", 0.0)) for lv in levels)
+        noun = "cross-section" if len(levels) == 1 else "cross-sections"
+        line = f"{len(levels)} {noun} along {axis} at {at}"
+        if len(levels) == 1 and g.get("thickness") is not None:
+            line += f", thickness={fmt(g['thickness'])}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def add_cross_section(record, at: float, polygon) -> dict | None:
