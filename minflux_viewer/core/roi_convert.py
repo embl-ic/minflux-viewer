@@ -22,6 +22,7 @@ from .roi import (
     _bounds,
     record_to_points,
 )
+from .roi_volume import VOLUME_ROI_TYPES, volume_bounds
 
 #: Closed, area-bearing ROI types.
 REGION_TYPES = {"rectangle", "oval", "polygon", "freehand"}
@@ -75,6 +76,20 @@ def _centroid(record: RoiRecord) -> tuple[float, float]:
     return float(c[0]), float(c[1])
 
 
+def _volume_centre(record: RoiRecord) -> list[float] | None:
+    """``[x, y, z]`` centre of a volume ROI, or ``None`` when it is not one.
+
+    The centre of the bounding box on each data axis, which is the one point a
+    cuboid, a sphere and a polyhedron all agree on.
+    """
+    if getattr(record, "type", None) not in VOLUME_ROI_TYPES:
+        return None
+    spans = volume_bounds(record)
+    if spans is None:
+        return None
+    return [0.5 * (float(lo) + float(hi)) for lo, hi in spans]
+
+
 def _depth_of(record: RoiRecord) -> float:
     ctx = record.context if isinstance(record.context, dict) else {}
     try:
@@ -87,6 +102,11 @@ def available_conversions(record: RoiRecord) -> list[str]:
     """Conversion target tokens valid for *record* (in menu order)."""
     t = record.type
     out: list[str] = []
+    if t in VOLUME_ROI_TYPES:
+        # A volume ROI has a well-defined 3-D centre and nothing else here is
+        # defined for it: every other target is a 2-D fit of an outline, which
+        # for a volume would silently discard the third axis.
+        return ["point"]
     if t == "angle":
         return ["point"]
     if t != "point":          # a point → point conversion is meaningless
@@ -463,6 +483,13 @@ def convert_roi(
     t = record.type
 
     if target == "point":
+        centre = _volume_centre(record)
+        if centre is not None:
+            # ⚠ A volume ROI's geometry is in NAMED DATA AXES, not in a view
+            # plane, so the 2-D centroid path below does not apply to it: it
+            # finds no ``bounds``/``points`` key and returns the origin, which
+            # is a wrong answer rather than a refusal.
+            return _derive(record, "point", {"point": list(centre)})
         cx, cy = _centroid(record)
         return _derive(record, "point", {"point": [cx, cy, _depth_of(record)]})
 
@@ -506,8 +533,15 @@ def convert_roi(
 # --------------------------------------------------------------------------
 
 def can_resize(record: RoiRecord) -> bool:
-    """True when enlarge/shrink is defined for this ROI type (all but angle)."""
-    return record.type != "angle"
+    """True when enlarge/shrink is defined for this ROI type.
+
+    Not for an angle (it measures, it does not enclose) and not for a volume
+    ROI: growing one means growing it on three axes, and the 2-D bounds this
+    function's callers work in cannot say what should happen to the third.
+    ``enlarge_shrink_roi`` refuses those too, so the gate exists to refuse
+    *before* asking the user for an amount rather than after.
+    """
+    return record.type != "angle" and record.type not in VOLUME_ROI_TYPES
 
 
 def enlarge_shrink_roi(record: RoiRecord, value_nm: float, *, mode: str = "enlarge") -> RoiRecord:

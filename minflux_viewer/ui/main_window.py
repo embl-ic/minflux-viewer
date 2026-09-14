@@ -3030,7 +3030,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Enlarge / Shrink ROI", "Select an ROI (or draw one) first.")
             return
         if not can_resize(record):
-            QMessageBox.information(self, "Enlarge / Shrink ROI", "Angle ROIs cannot be enlarged or shrunk.")
+            QMessageBox.information(
+                self, "Enlarge / Shrink ROI",
+                f"A {record.type} ROI cannot be enlarged or shrunk.")
             return
         allow_shrink = record.type not in ({"point"} | LINE_TYPES)
         dlg = RoiResizeDialog(self, allow_shrink=allow_shrink)

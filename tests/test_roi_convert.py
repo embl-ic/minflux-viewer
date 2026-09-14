@@ -336,3 +336,46 @@ def test_convert_preserves_context_and_color():
     assert out.context["dataset_idx"] == 3
     assert out.stroke_color == "#00ff00"
     assert out.geometry["point"][2] == 42.0  # depth carried onto the point
+
+
+# --- volume (3-D) ROIs ------------------------------------------------------
+# A volume ROI's geometry is in named data axes, not in a view plane, so every
+# 2-D path here has to either handle it or refuse it. Silently returning the
+# origin (which the 2-D centroid did) is the failure these pin down.
+
+def _cuboid():
+    return RoiRecord.create(
+        "cuboid", {"x": [0, 100], "y": [10, 30], "z": [-20, 60]}, name="cuboid-1")
+
+
+def _sphere():
+    return RoiRecord.create(
+        "sphere", {"center": [5, 6, 7], "radii": [2, 3, 4]}, name="sphere-1")
+
+
+def _polyhedron():
+    return RoiRecord.create("polyhedron", {"axis": "Z", "levels": [
+        {"at": 0.0, "polygon": [[0, 0], [10, 0], [10, 10], [0, 10]]},
+        {"at": 40.0, "polygon": [[2, 2], [8, 2], [8, 8], [2, 8]]},
+    ]}, name="polyhedron-1")
+
+
+@pytest.mark.parametrize("record, centre", [
+    (_cuboid(), [50.0, 20.0, 20.0]),
+    (_sphere(), [5.0, 6.0, 7.0]),
+    (_polyhedron(), [5.0, 5.0, 20.0]),
+])
+def test_volume_roi_converts_to_its_own_3d_centre(record, centre):
+    assert available_conversions(record) == ["point"]      # nothing else is defined
+    out = convert_roi(record, "point")
+    assert out.type == "point"
+    assert out.geometry["point"] == pytest.approx(centre)
+
+
+@pytest.mark.parametrize("record", [_cuboid(), _sphere(), _polyhedron()])
+def test_volume_roi_is_refused_before_asking_for_a_resize_amount(record):
+    # enlarge_shrink_roi raises anyway; can_resize is what stops the dialog
+    # opening first and refusing only after the user typed a number.
+    assert can_resize(record) is False
+    with pytest.raises(ValueError):
+        enlarge_shrink_roi(record, 10.0, mode="enlarge")
