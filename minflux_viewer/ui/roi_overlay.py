@@ -743,7 +743,12 @@ class RoiOverlayController(QObject):
         if item is None:
             return None
         record = copy.deepcopy(selected_record)
-        if record.type == "point":
+        if record.type in VOLUME_ROI_TYPES:
+            geometry = self._volume_geometry_from_item(item, record)
+            if geometry is None:
+                return None
+            record.geometry = geometry
+        elif record.type == "point":
             record.geometry = self._point_geometry_from_item(item, record.geometry)
         elif record.type in {"line", "polyline", "freehand_line"}:
             record.geometry = self._open_line_geometry_from_item(item, record.geometry, record.type)
@@ -1707,6 +1712,21 @@ class RoiOverlayController(QObject):
         elif tool == "freehand_line":
             self._set_draft(RoiRecord.create("freehand_line", {"points": self._freehand_points, "closed": False}, **self._record_kwargs()))
 
+    def _volume_view_bounds(self, record):
+        """``(x, y, w, h)`` of a volume ROI's silhouette in the current plane.
+
+        ⚠ ``_bounds`` cannot answer this: a volume geometry has none of the keys
+        it knows (``bounds`` / ``point`` / ``points``), so it returned a
+        degenerate box at the origin -- which is why a drawn cuboid could not be
+        right-clicked, selected or deleted. Its own silhouette is the extent.
+        """
+        outline = self._volume_outline(record)
+        if not outline:
+            return None
+        xs = [float(p[0]) for p in outline]
+        ys = [float(p[1]) for p in outline]
+        return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+
     def _volume_outline(self, record) -> list:
         """The volume ROI's outline in this view, as ``[[h, v], ...]``.
 
@@ -2052,6 +2072,7 @@ class RoiOverlayController(QObject):
             except Exception:
                 pass
         self.draft_item = None
+        self._notify_overlay_changed()
 
     def _show_manager_if_needed(self) -> None:
         app = QApplication.instance()
@@ -2110,7 +2131,7 @@ class RoiOverlayController(QObject):
             # view shows, asked for by data-axis columns rather than a plane
             # name -- so no view can read the geometry in the wrong convention.
             outline = self._volume_outline(record)
-            return FilledPolyLineROI(outline, closed=True, movable=False,
+            return FilledPolyLineROI(outline, closed=True, movable=True,
                                      fill_color=record.stroke_color)
         if record.type == "angle":
             pts = g.get("points", [[0, 0], [1, 0], [2, 1]])
@@ -2242,8 +2263,43 @@ class RoiOverlayController(QObject):
         elif hasattr(item, "sigRegionChanged"):          # live shape edit → status
             item.sigRegionChanged.connect(lambda _item=item: self._report_status_from_item(_item))
 
+    def _volume_geometry_from_item(self, item, record):
+        """Translate a volume ROI by however far its silhouette was dragged.
+
+        A view can only move a shape on the two axes it shows, so the drag is
+        applied to exactly those and the third axis comes through untouched --
+        recomputing it from a projection that never saw it is how a Z would
+        quietly change on an XY drag.
+        """
+        from ..core.roi_volume import translate_volume
+
+        columns = _PLANE_PLOT_AXES.get(self._view_plane())
+        if columns is None:
+            return None
+        try:
+            pos = item.pos()
+            dh, dv = float(pos.x()), float(pos.y())
+        except Exception:
+            return None
+        geometry = translate_volume(record, {columns[0]: dh, columns[1]: dv})
+        if geometry is not None:
+            # The outline was rebuilt in absolute coordinates, so the item's own
+            # offset has been consumed and must go back to zero or the next drag
+            # would apply it twice.
+            try:
+                item.setPos(pg.Point(0.0, 0.0))
+            except Exception:
+                pass
+        return geometry
+
     def _update_draft_from_item(self, item) -> None:
         if self.draft is None:
+            return
+        if self.draft.type in VOLUME_ROI_TYPES:
+            geometry = self._volume_geometry_from_item(item, self.draft)
+            if geometry is not None:
+                self.draft.geometry = geometry
+                self._finalize_draft_selection(update_item=True)
             return
         if self.draft.type == "point":
             self.draft.geometry = self._point_geometry_from_item(item, self.draft.geometry)
@@ -2254,6 +2310,21 @@ class RoiOverlayController(QObject):
         self.draft.geometry = item_to_geometry(self.draft.type, item, prev=self.draft.geometry)
         if self.draft.type in {"rectangle", "oval", "polygon", "freehand"}:
             self._finalize_draft_selection(update_item=True)
+
+    def _notify_overlay_changed(self) -> None:
+        """Tell the owner the drawn set changed, draft included.
+
+        ⚠ A draft is deliberately NOT in the store, so ``rois.changed`` never
+        fires for it. Without this hook a shape drawn in the primary pane
+        appeared in the side panes only when something unrelated happened to
+        refresh them -- which reads as "the silhouette never shows".
+        """
+        hook = getattr(self.owner, "on_roi_overlay_changed", None)
+        if callable(hook):
+            try:
+                hook()
+            except Exception:
+                pass
 
     def _finalize_draft_selection(self, *, update_item: bool) -> None:
         if self.draft is None:
@@ -2270,6 +2341,7 @@ class RoiOverlayController(QObject):
             self._connect_draft_edit(self.draft_item)
             self.plot_item.addItem(self.draft_item)
         self._queue_selection_update(record)
+        self._notify_overlay_changed()
         self._remember_active_roi(record)   # for Process › ROI › Restore ROI
         # One-shot: hand a freshly drawn rectangle to a pending requester.
         cb = self._rect_request
@@ -2395,6 +2467,13 @@ class RoiOverlayController(QObject):
             # would otherwise select it.
             return any(abs(pos[0] - px) <= tolerance and abs(pos[1] - py) <= tolerance
                        for px, py in self._project_points(record))
+        if record.type in VOLUME_ROI_TYPES:
+            box = self._volume_view_bounds(record)
+            if box is None:
+                return False
+            x, y, w, h = box
+            return (x - tolerance <= pos[0] <= x + w + tolerance
+                    and y - tolerance <= pos[1] <= y + h + tolerance)
         if record.type not in {"rectangle", "oval"}:
             x, y, w, h = _bounds(record.geometry)
             return x - tolerance <= pos[0] <= x + w + tolerance and y - tolerance <= pos[1] <= y + h + tolerance

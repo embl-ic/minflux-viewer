@@ -229,3 +229,135 @@ def test_entering_is_idempotent(_qt_app):
         assert win._ortho_active()
     finally:
         win.close()
+
+
+# --------------------------------------------------- the two reported defects
+def test_a_freshly_drawn_volume_roi_reaches_the_side_panes_at_once(_qt_app):
+    """Reported: the silhouette never showed until another shape was drawn.
+
+    ⚠ A draft is deliberately NOT in the store, so ``rois.changed`` never fires
+    for it; the side panes were refreshed only by store signals and the view
+    debounce, so a drawn shape appeared there only when something unrelated
+    happened next.
+    """
+    state = _state()
+    win = _scatter(_qt_app, state)
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        for _ in range(3):
+            _qt_app.processEvents()
+
+        ctrl = win._roi_overlay
+        ctrl._set_draft(_volume_draft())
+        ctrl._finalize_draft_selection(update_item=True)
+        for _ in range(3):
+            _qt_app.processEvents()
+
+        drawn = win._ortho_roi_outlines._items
+        assert any(plane == "XZ" for plane, _rid in drawn), "no XZ silhouette"
+        assert any(plane == "YZ" for plane, _rid in drawn), "no YZ silhouette"
+    finally:
+        win.close()
+
+
+def test_clearing_the_draft_takes_its_silhouettes_with_it(_qt_app):
+    state = _state()
+    win = _scatter(_qt_app, state)
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        for _ in range(3):
+            _qt_app.processEvents()
+        ctrl = win._roi_overlay
+        ctrl._set_draft(_volume_draft())
+        ctrl._finalize_draft_selection(update_item=True)
+        for _ in range(3):
+            _qt_app.processEvents()
+        assert win._ortho_roi_outlines._items
+
+        ctrl._clear_draft()
+        for _ in range(3):
+            _qt_app.processEvents()
+        assert not win._ortho_roi_outlines._items
+    finally:
+        win.close()
+
+
+def _volume_draft():
+    from minflux_viewer.core.roi import RoiRecord
+
+    return RoiRecord.create(
+        "cuboid", {"x": [-100.0, 100.0], "y": [-80.0, 80.0], "z": [-40.0, 40.0]},
+        context={"source_view": "scatter", "dataset_idx": 0})
+
+
+def test_a_volume_roi_can_be_hit_so_it_can_be_selected_and_deleted(_qt_app):
+    """Reported: the drawn shape could not be right-clicked or deleted.
+
+    ⚠ ``_bounds`` knows only ``bounds`` / ``point`` / ``points``; a volume
+    geometry has none of them, so it returned a degenerate box at the origin and
+    every hit-test missed. The silhouette's own extent is the answer.
+    """
+    state = _state()
+    win = _scatter(_qt_app, state)
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        for _ in range(3):
+            _qt_app.processEvents()
+        ctrl = win._roi_overlay
+        rec = _volume_draft()
+        ctrl._set_draft(rec)
+        ctrl._finalize_draft_selection(update_item=True)
+
+        assert ctrl._volume_view_bounds(rec) is not None
+        assert ctrl._point_hits_record((0.0, 0.0), rec, 1.0)          # inside
+        assert not ctrl._point_hits_record((5000.0, 5000.0), rec, 1.0)  # far away
+    finally:
+        win.close()
+
+
+def test_the_hit_box_follows_the_pane_that_is_showing_it(_qt_app):
+    """In XY the box is the X/Y footprint; in XZ it is X/Z. A single stored
+    geometry, read through whichever axes the view shows."""
+    state = _state()
+    win = _scatter(_qt_app, state)
+    try:
+        ctrl = win._roi_overlay
+        rec = _volume_draft()          # X ±100, Y ±80, Z ±40
+        win._axis_combo.setCurrentText("XY")
+        for _ in range(2):
+            _qt_app.processEvents()
+        x, y, w, h = ctrl._volume_view_bounds(rec)
+        assert (w, h) == (200.0, 160.0)
+
+        win._axis_combo.setCurrentText("XZ")
+        for _ in range(2):
+            _qt_app.processEvents()
+        x, y, w, h = ctrl._volume_view_bounds(rec)
+        assert (w, h) == (200.0, 80.0)
+    finally:
+        win.close()
+
+
+def test_dragging_a_volume_roi_moves_only_the_axes_the_view_shows():
+    """A view can move a shape on the two axes it shows; the third must come
+    through untouched rather than be recomputed from a projection."""
+    from minflux_viewer.core.roi_volume import translate_volume
+
+    class R:
+        type = "cuboid"
+        geometry = {"x": [0.0, 10.0], "y": [0.0, 10.0], "z": [100.0, 200.0]}
+
+    moved = translate_volume(R(), {0: 5.0, 1: -2.0})       # an XY drag
+    assert moved["x"] == [5.0, 15.0]
+    assert moved["y"] == [-2.0, 8.0]
+    assert moved["z"] == [100.0, 200.0]                    # untouched
+
+
+def test_a_zero_drag_changes_nothing():
+    from minflux_viewer.core.roi_volume import translate_volume
+
+    class R:
+        type = "cuboid"
+        geometry = {"x": [0.0, 10.0], "y": [0.0, 10.0], "z": [0.0, 10.0]}
+
+    assert translate_volume(R(), {0: 0.0, 1: 0.0}) is None
