@@ -71,6 +71,7 @@ __all__ = [
     "plane_in_plane_axes",
     "volume_from_flat",
     "scale_z",
+    "translate_volume",
 ]
 
 
@@ -667,5 +668,61 @@ def scale_z(record, factor: float):
              else [float(p[0]), float(p[1])])
             for p in pts
         ]
+        return g
+    return None
+
+
+def translate_volume(record, deltas: dict) -> dict | None:
+    """Shift a volume ROI along one or more axes; new geometry, or ``None``.
+
+    *deltas* is keyed by **axis column** (0=X, 1=Y, 2=Z), so a view states the
+    axes it moved the shape along and never a plane name -- the same rule the
+    rest of this module follows.
+
+    This is what makes a volume ROI draggable: a view can only move it on the
+    two axes it shows, and the third must come through untouched rather than be
+    recomputed from a projection that never saw it.
+    """
+    kind = getattr(record, "type", None)
+    g = dict(getattr(record, "geometry", None) or {})
+    moves = {int(k): float(v) for k, v in (deltas or {}).items()
+             if np.isfinite(float(v))}
+    if not moves or not any(abs(v) > 1e-12 for v in moves.values()):
+        return None
+
+    if kind == "cuboid":
+        for column, delta in moves.items():
+            name = AXIS_NAMES[column].lower()
+            if name in g:
+                lo, hi = _as_interval(g[name])
+                g[name] = [lo + delta, hi + delta]
+        return g
+
+    if kind == "sphere":
+        centre = list(g.get("center") or [])
+        if len(centre) < 3:
+            return None
+        for column, delta in moves.items():
+            centre[column] = float(centre[column]) + delta
+        g["center"] = centre
+        return g
+
+    if kind == "polyhedron":
+        axis = str(g.get("axis", "Z")).upper()
+        stack = AXIS_INDEX[axis]
+        ui, vi = cross_axes(axis)
+        levels = [dict(lv) for lv in (g.get("levels") or [])]
+        if not levels:
+            return None
+        for lv in levels:
+            if stack in moves:
+                lv["at"] = float(lv["at"]) + moves[stack]
+            poly = [[float(pt[0]), float(pt[1])] for pt in lv.get("polygon") or []]
+            if ui in moves or vi in moves:
+                for pt in poly:
+                    pt[0] += moves.get(ui, 0.0)
+                    pt[1] += moves.get(vi, 0.0)
+            lv["polygon"] = poly
+        g["levels"] = levels
         return g
     return None

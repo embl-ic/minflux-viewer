@@ -678,6 +678,10 @@ class ScatterWindow(QWidget):
             self._ortho_redrawing = False
         self._refresh_ortho_roi_outlines()
 
+    def on_roi_overlay_changed(self) -> None:
+        """The ROI controller's hook: the drawn set changed, draft included."""
+        self._refresh_ortho_roi_outlines()
+
     def _refresh_ortho_roi_outlines(self) -> None:
         """Show every in-scope ROI in the two side panes as well.
 
