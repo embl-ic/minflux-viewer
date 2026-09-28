@@ -91,10 +91,28 @@ def test_result_window_fits_image_without_view_all(_qt_app):
     try:
         win.show()
         _qt_app.processEvents()
+        assert win._plot.getViewBox().yInverted()
         (xr, yr) = win._plot.getViewBox().viewRange()
         # the view range contains the image centre → visible without View All
         assert xr[0] <= 63000 <= xr[1]
         assert yr[0] <= 23000 <= yr[1]
+    finally:
+        win.close()
+        _qt_app.processEvents()
+
+
+def test_result_window_follows_render_bottom_left_preference(_qt_app):
+    import minflux_viewer.analysis.local_density as ld
+
+    win = ld.LocalDensityImageWindow(
+        np.ones((4, 4)),
+        (np.arange(5.0), np.arange(5.0)),
+        title="LD",
+        info="i",
+        prefs={"plot": {"render_xy_origin": "bottom_left"}},
+    )
+    try:
+        assert not win._plot.getViewBox().yInverted()
     finally:
         win.close()
         _qt_app.processEvents()

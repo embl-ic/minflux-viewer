@@ -278,6 +278,58 @@ def test_point_labels_assign_localizations_to_objects():
     assert agree > 0.9
 
 
+def test_hlyb_shape_components_split_three_touching_cells_without_splitting_one():
+    """Regression for the connected three-cell footprint in the HlyB/D data."""
+    from minflux_viewer.analysis.hlyb_staged import (
+        Staged3DConfig,
+        segment_shape_components,
+        shape_config_for,
+    )
+
+    rng = np.random.default_rng(41)
+    cfg = Staged3DConfig(
+        component_mode="shape", shape_min_length_nm=800.0,
+        shape_max_length_nm=2500.0, shape_min_width_nm=400.0,
+        shape_max_width_nm=800.0, shape_pixel_size_nm=20.0,
+        shape_smoothing_nm=60.0, shape_instance_cost=0.08,
+        shape_min_iou=0.25, shape_min_component_area_frac=0.20,
+        min_sites_per_component=20)
+    prior, detector = shape_config_for(cfg)
+
+    def cloud(specs):
+        raw = []
+        for spec in specs:
+            mask = instance_mask(_instance(*spec), (320, 340), PIXEL)
+            rows, cols = np.nonzero(mask)
+            pick = rng.choice(rows.size, 3500, replace=True)
+            raw.append(np.column_stack([
+                (cols[pick] + rng.random(pick.size)) * PIXEL,
+                (rows[pick] + rng.random(pick.size)) * PIXEL,
+                rng.uniform(-300.0, 300.0, pick.size),
+            ]))
+        image = np.vstack(raw)
+        sites = image[rng.choice(image.shape[0], 500, replace=False)]
+        return sites, image
+
+    touching = [
+        ((2300.0, 3200.0), 90.0, 2200.0, 650.0),
+        ((2900.0, 3200.0), 90.0, 2200.0, 650.0),
+        ((3500.0, 3200.0), 90.0, 2200.0, 650.0),
+    ]
+    sites, image = cloud(touching)
+    split = segment_shape_components(
+        sites, image, prior=prior, shape_cfg=detector, min_sites=20)
+    assert len(split["components"]) == 3
+    assert any(row["chosen_k"] == 3
+               for row in split["detection"].stats["components"])
+
+    sites, image = cloud([touching[0]])
+    single = segment_shape_components(
+        sites, image, prior=prior, shape_cfg=detector, min_sites=20)
+    assert len(single["components"]) == 1
+    assert single["detection"].stats["components"][0]["chosen_k"] == 1
+
+
 def test_explicit_field_bounds_make_clipping_detectable():
     """A point cloud spans only itself, so the real frame must be supplied."""
     rng = np.random.default_rng(11)

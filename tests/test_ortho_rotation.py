@@ -75,3 +75,56 @@ def test_a_bad_mode_is_refused_rather_than_silently_defaulted():
 
 def test_two_d_input_yields_nothing():
     assert rotated_projection(np.zeros((5, 2)), 0.0) is None
+
+
+# --------------------------------------------- spinning about the crosshair
+# ⚠ Without a pivot the spin is about the coordinate ORIGIN, and MINFLUX
+# coordinates sit tens of microns from it: a 15 degree turn moved a cloud at
+# x = 15000 nm by 485 nm, and 90 degrees put it clean off the pane.
+def _far_from_origin():
+    return np.array([[15000.0, 20000.0, 100.0],
+                     [15050.0, 20000.0, 100.0],
+                     [15000.0, 20000.0, 200.0]])
+
+
+def test_a_pivot_keeps_the_zero_degree_identity():
+    pts = _far_from_origin()
+    pivot = pts[0]
+    h, v = rotated_projection(pts, 0.0, "about Y", centre=pivot)
+    assert np.allclose(h, pts[:, 0])
+    assert np.allclose(v, pts[:, 1])
+
+
+@pytest.mark.parametrize("angle", [0.0, 37.0, 90.0, 180.0, 271.0])
+@pytest.mark.parametrize("mode", sorted(ROTATION_AXES))
+def test_the_pivot_maps_to_itself_at_every_angle(angle, mode):
+    """That is what keeps the marked feature in place while its surroundings
+    turn -- and it is why the pane can be centred on the pivot."""
+    pivot = np.array([15000.0, 20000.0, 100.0])
+    axis_a, _axis_b, axis_up = ROTATION_AXES[mode]
+    h, v = rotated_projection(pivot[None, :], angle, mode, centre=pivot)
+    assert np.isclose(h[0], pivot[axis_a])
+    assert np.isclose(v[0], pivot[axis_up])
+
+
+def test_one_hundred_eighty_degrees_reflects_through_the_pivot():
+    pts = _far_from_origin()
+    pivot = pts[0]
+    h, _v = rotated_projection(pts, 180.0, "about Y", centre=pivot)
+    assert np.isclose(h[1], 14950.0)          # 15050 mirrored about 15000
+
+
+def test_without_a_pivot_a_far_cloud_swings_away_from_the_pane():
+    """The behaviour the pivot exists to fix, pinned so it cannot come back."""
+    pts = _far_from_origin()
+    h_origin, _ = rotated_projection(pts, 15.0, "about Y")
+    h_pivot, _ = rotated_projection(pts, 15.0, "about Y", centre=pts[0])
+    assert abs(h_origin[0] - 15000.0) > 400.0     # ~485 nm off
+    assert np.isclose(h_pivot[0], 15000.0)        # fixed
+
+
+def test_a_non_finite_pivot_is_ignored_rather_than_poisoning_the_projection():
+    pts = _far_from_origin()
+    for bad in (np.array([np.nan, 0.0, 0.0]), np.array([0.0, np.inf, 0.0])):
+        h, v = rotated_projection(pts, 0.0, "about Y", centre=bad)
+        assert np.all(np.isfinite(h)) and np.all(np.isfinite(v))

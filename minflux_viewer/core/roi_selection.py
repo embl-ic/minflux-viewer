@@ -156,7 +156,7 @@ REGION_ROI_TYPES = frozenset({"rectangle", "oval", "polygon", "freehand"})
 #: are deliberately NOT in ``REGION_ROI_TYPES`` -- every 2-D consumer gates on
 #: that set and would otherwise take a volume ROI and quietly select nothing.
 #: See :mod:`minflux_viewer.core.roi_volume`.
-VOLUME_ROI_TYPES = frozenset({"cuboid", "sphere", "polyhedron"})
+VOLUME_ROI_TYPES = frozenset({"cuboid", "sphere", "polyhedron", "cylinder"})
 
 
 def roi_region_mask(x, y, record, *, base_mask=None) -> np.ndarray:

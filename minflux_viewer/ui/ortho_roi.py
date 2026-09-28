@@ -249,6 +249,17 @@ class OrthoPaneOwner(QObject):
         """Rows inside *record*, measured on THIS pane's axes."""
         return self._owner.compute_roi_selection(record, columns=self.roi_view_columns())
 
+    def wand_select(self, position, **kwargs):
+        """Grow from a click in THIS pane, on this pane's axes.
+
+        ⚠ Overridden for the same reason as ``compute_roi_selection``: reaching
+        the window's implementation through ``__getattr__`` binds it to the
+        WINDOW, whose ``_active_plane()`` is XY in orthogonal mode -- so a click
+        in the XZ pane would be read as an XY click.
+        """
+        kwargs.setdefault("columns", self.roi_view_columns())
+        return self._owner.wand_select(position, **kwargs)
+
     def roi_displays_record(self, record) -> bool:
         """Narrows the controller's scope to what this pane's axes can express."""
         return pane_owns_record(record, self._plane)
@@ -286,6 +297,13 @@ def _depth_of(owner, plane: str, *, centre: bool):
     from ..core.roi_volume import AXIS_INDEX, PLANE_NORMAL_AXIS
 
     column = AXIS_INDEX[PLANE_NORMAL_AXIS[plane]]
+    if centre and bool(getattr(owner, "_show_crosshair", False)):
+        crosshair = getattr(owner, "_ortho_crosshair", None)
+        point = getattr(crosshair, "point", None)
+        if (crosshair is not None and bool(getattr(crosshair, "visible", False))
+                and point is not None and len(point) > column
+                and np.isfinite(float(point[column]))):
+            return float(point[column])
     getter = getattr(owner, "roi_pane_coords", None)
     coords = getter() if callable(getter) else None
     if coords is None or getattr(coords, "ndim", 0) != 2 or coords.shape[1] <= column:

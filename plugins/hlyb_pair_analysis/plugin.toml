@@ -1,13 +1,13 @@
 [plugin]
 id = "embl.hlyb_pair_analysis"
-name = "HlyB/D staged pair analysis"
+name = "HlyB/D pair distance analysis"
 version = "1.0.0"
 author = "EMBL Imaging Centre"
-description = "Model-independent short-range population analysis on inferred HlyB/D label sites."
+description = "HlyB/D pair-distance analysis with automatic 3-D E. coli detection or drawn cell ROIs."
 
 [menu]
-path = "Plugins > HlyB/D"
-entry = "Staged pair analysis..."
+path = "Plugins"
+entry = "HlyB/D pair distance analysis"
 keywords = [
     "hlyb",
     "hlyd",
@@ -18,6 +18,8 @@ keywords = [
     "e. coli",
     "ecoli",
     "pooled roi",
+    "2d",
+    "roi",
 ]
 
 [run]
@@ -28,3 +30,130 @@ callable = "run"
 mfv_api = ">=1.0,<2.0"
 app = ">=0.4.2"
 python = ["numpy", "scipy"]
+
+# The method, declared once. Parameter values are left as {slots} and filled
+# from what the run recorded, so this text cannot drift out of step with the
+# numbers it quotes. Rendered by Generate Method Text and by
+# mfv.plugins.method_text().
+[method]
+title = "Staged short-range pair analysis of inferred HlyB/D label sites"
+description = """
+Localizations were grouped into traces and each trace reduced to a centroid \
+with its measured standard error. Repeated visits to the same label were \
+consolidated into label-site estimates, the sites partitioned into spatial \
+components, and the within-component pair-distance profile compared with a \
+conditional null that destroys short-range structure while preserving the \
+observed density. The result is evidence for a population-level short-range \
+excess; it does not identify which sites form a pair and does not estimate a \
+molecular subunit distance."""
+workflow = [
+    "Raw last-valid localizations were read and the configured Z scaling factor of {z_scaling_factor} applied once; the 2-D ROI scope ignores it and works in the displayed XY plane.",
+    "Traces carrying at least {min_loc_per_trace} localization(s) contributed a centroid and its standard error.",
+    "Repeated trace centroids were consolidated into label sites by uncertainty-aware complete linkage within a hard {site_merge_nm} diameter, so a transitive chain cannot join two distinct nearby sites.",
+    "Cells were defined according to the selected mode ({mode}): automatic 3-D detection used penalized multi-capsule fitting in XY with {boundary_evidence}, while drawn ROIs supplied cell membership directly. Pairs were formed only within a cell.",
+    "The exact within-component pair-distance profile was histogrammed in {bin_nm} bins out to {r_max_nm}.",
+    "A conditional null ({null_model}) was drawn {null_replicates} times, permuting transverse coordinates within axial-rank strata of {null_stratum_sites} sites while holding every observed axial coordinate fixed.",
+    "The pre-declared band {short_range_lo_nm} to {short_range_hi_nm} was tested; its lower edge is twice the same-site diameter, so repeated visits to one label cannot populate it.",
+]
+limitations = """
+The reported excess is a property of the population, not of any pair: no site \
+is assigned a partner. The observed/null ratio is conditional on the null \
+stratification scale and must be quoted with it, while the positive-excess \
+centroid is the stable descriptor. The empirical p-value is bounded below by \
+1/(replicates + 1) and was measured anti-conservative, so the ratio and its \
+distance from the null spread are what should be quoted. Temporal emitter \
+assignment is not modelled."""
+
+[[method.inputs]]
+name = "mode"
+label = "analysis mode"
+description = "Automatic E. coli detection in the active 3-D field, drawn ROIs in the active dataset, or the persistent multi-dataset 3-D ROI pool."
+
+[[method.inputs]]
+name = "boundary_evidence"
+label = "automatic cell-boundary evidence"
+description = "Automatic 3-D detection either used localization density alone or weak support from the best calibrated independent acquisition image."
+
+[[method.inputs]]
+name = "min_loc_per_trace"
+label = "minimum localizations per trace"
+description = "A trace below this contributes no centroid."
+
+[[method.inputs]]
+name = "z_scaling_factor"
+label = "Z scaling factor"
+description = "Applied once to the raw axial coordinate; 1.0 in the XY-only 2-D ROI scope."
+
+[[method.inputs]]
+name = "site_merge_nm"
+label = "same-site diameter"
+unit = "nm"
+description = "Hard maximum diameter for consolidating repeated trace centroids into one label site."
+
+[[method.inputs]]
+name = "bin_nm"
+label = "profile bin width"
+unit = "nm"
+description = "Histogram bin of the pair-distance profile."
+
+[[method.inputs]]
+name = "r_max_nm"
+label = "maximum pair distance"
+unit = "nm"
+description = "Pairs beyond this were not enumerated."
+
+[[method.inputs]]
+name = "short_range_lo_nm"
+label = "pre-declared band, lower edge"
+unit = "nm"
+description = "Fixed before the test at twice the same-site diameter, so repeated visits to one label cannot populate the band."
+
+[[method.inputs]]
+name = "short_range_hi_nm"
+label = "pre-declared band, upper edge"
+unit = "nm"
+description = "Fixed before the test; the reported result is computed over this band."
+
+[[method.inputs]]
+name = "null_stratum_sites"
+label = "null stratum size (sites)"
+description = "Axial-rank stratum within which transverse coordinates are permuted; the observed/null ratio is conditional on it."
+
+[[method.inputs]]
+name = "null_replicates"
+label = "null replicates"
+description = "Conditional randomizations behind the reported expectation and spread."
+
+[[method.inputs]]
+name = "null_model"
+label = "null model"
+replay = false   # derived from the scope, not asked for
+description = "surface_conditioned_3d for a 3-D field, roi_conditioned_2d for a drawn 2-D ROI."
+
+[[method.outputs]]
+name = "band_ratio"
+label = "observed/null ratio"
+description = "Observed pairs in the tested band over the conditional-null expectation."
+
+[[method.outputs]]
+name = "band_ratio_z"
+label = "ratio against the null spread"
+unit = "sigma"
+description = "The ratio scored against the distribution of the same ratio over null replicates; quote this rather than the censored p-value."
+
+[[method.outputs]]
+name = "excess_centroid_nm"
+label = "positive-excess centroid"
+unit = "nm"
+description = "Centroid of the positive observed-minus-null population in the tested band. A distribution descriptor, not a fitted molecular distance."
+
+[[method.outputs]]
+name = "binning_persistent_excess_peaks_nm"
+label = "binning-persistent excess peak(s)"
+unit = "nm"
+description = "Exploratory local excess modes that survived a bin-width and phase audit. Not assigned pairs."
+
+[[method.outputs]]
+name = "null_moved_site_fraction"
+label = "fraction of sites the null moved"
+description = "Randomization health: a null that cannot move its sites has not destroyed the structure it is meant to."

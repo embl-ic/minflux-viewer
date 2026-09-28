@@ -49,7 +49,7 @@ from ..core.cell_collection import (
     save_cell_collection,
 )
 
-TITLE = "HlyB/D Pooled Pair Analysis"
+TITLE = "HlyB/D — Hand-draw ROI, multiple datasets (3D)"
 _COLUMNS = ("Dataset", "ROI", "Localizations", "Traces")
 
 
@@ -74,7 +74,7 @@ class HlyBCollectionWindow(QDialog):
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.addWidget(QLabel(
-            "<b>Pool cells across datasets.</b> Draw a region ROI around each "
+            "<b>Pool 3-D cells across datasets.</b> Draw a region ROI around each "
             "cell (by hand, or with <i>Analyze › Segmentation › Shape "
             "Model…</i>), file them in the ROI Manager, then collect. Repeat "
             "for as many datasets as you need."))
@@ -199,6 +199,20 @@ class HlyBCollectionWindow(QDialog):
             if QApplication.overrideCursor() is not None:
                 QApplication.restoreOverrideCursor()
 
+        genuine_3d = [cell for cell in cells
+                      if np.isfinite(cell.loc_m).all(axis=1).sum() >= 3
+                      and float(np.ptp(
+                          cell.loc_m[np.isfinite(cell.loc_m).all(axis=1), 2]
+                      )) * 1e9 >= 5.0]
+        if cells and not genuine_3d:
+            QMessageBox.information(
+                self, TITLE,
+                "The multi-dataset pool currently accepts genuine 3-D cells "
+                "only. Use 'Hand-draw ROI, active dataset (2D/3D)' to analyse "
+                "this 2-D dataset.")
+            return
+        cells = genuine_3d
+
         added = self._collection.extend(cells)
         self._refresh()
         notes = []
@@ -275,9 +289,7 @@ class HlyBCollectionWindow(QDialog):
             return
         defaults = getattr(self._state, "_hlyb_staged_cfg", None)
         defaults = (Staged3DConfig(z_scaling_factor=PROJECT_Z_SCALING_FACTOR)
-                    if defaults is None else
-                    Staged3DConfig(**{**vars(defaults),
-                    "z_scaling_factor": PROJECT_Z_SCALING_FACTOR}))
+                    if defaults is None else defaults)
         dlg = HlyBStagedDialog(self, defaults=defaults)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return

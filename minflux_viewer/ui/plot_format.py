@@ -6,7 +6,6 @@ import math
 
 import pyqtgraph as pg
 
-
 _SUPERSCRIPT = str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹")
 
 
@@ -78,3 +77,43 @@ def plot_widget(*, background="w", **kwargs) -> pg.PlotWidget:
         "left": ScientificAxisItem("left"),
     }
     return pg.PlotWidget(background=background, axisItems=axis_items, **kwargs)
+
+
+def xy_origin_top_left(prefs: dict | None, preference_key: str) -> bool:
+    """Return the configured XY screen convention, defaulting to image-style Y.
+
+    Render and Scatter intentionally keep separate preferences, so secondary
+    coordinate views name which family they follow instead of inventing a
+    third origin setting. Unknown/stale values retain the established
+    top-left default; only the explicit ``bottom_left`` value opts out.
+    """
+    plot_prefs = (prefs or {}).get("plot", {}) or {}
+    return str(plot_prefs.get(preference_key, "top_left")).lower() != "bottom_left"
+
+
+def apply_spatial_y_direction(
+    plot,
+    *,
+    vertical_coordinate: str,
+    prefs: dict | None = None,
+    preference_key: str = "scatter_xy_origin",
+) -> bool:
+    """Apply the shared screen direction when a plot's ordinate is coordinate Y.
+
+    The top-left convention means larger Y values appear lower on screen. A Z
+    ordinate and non-coordinate values (counts, speed, intensity, …) keep the
+    mathematical bottom-left direction. ``plot`` may be a PlotWidget or
+    PlotItem. The returned flag is useful to regression tests.
+    """
+    inverted = (
+        str(vertical_coordinate).strip().upper() == "Y"
+        and xy_origin_top_left(prefs, preference_key)
+    )
+    if hasattr(plot, "getPlotItem"):
+        view_box = plot.getPlotItem().getViewBox()
+    elif hasattr(plot, "getViewBox"):
+        view_box = plot.getViewBox()
+    else:
+        raise TypeError("spatial plot must provide getPlotItem() or getViewBox()")
+    view_box.invertY(inverted)
+    return bool(inverted)

@@ -532,11 +532,17 @@ def test_rotation_controls_name_the_axis_and_play_continuously(_qt_app):
         win._rotation_slider.setValue(360)
         win._advance_rotation()
         assert win._rotation_slider.value() == 0
+
+        win._rotation_play_button.click()
+        assert win._rotation_play_timer.isActive()
+        win._axis_combo.setCurrentText("XY")
+        assert not win._rotation_play_timer.isActive()
+        assert not win._rotation_play_button.isChecked()
     finally:
         win.close()
 
 
-def test_cuboid_and_sphere_meshes_appear_in_rotation_and_3d_views(_qt_app):
+def test_all_mesh_capable_rois_appear_in_rotation_and_3d_views(_qt_app):
     from minflux_viewer.core.roi import RoiRecord
 
     state = _state()
@@ -550,15 +556,41 @@ def test_cuboid_and_sphere_meshes_appear_in_rotation_and_3d_views(_qt_app):
         {"center": [8500, 5200, 300], "radii": [500, 350, 120]},
         context={"source_view": "scatter", "dataset_idx": 0},
     )
+    cylinder = RoiRecord.create(
+        "cylinder",
+        {"axis": "Z", "center": [7600, 4800, 300],
+         "radii": [350, 220], "height": 300},
+        context={"source_view": "scatter", "dataset_idx": 0},
+    )
+    projection_hull = RoiRecord.create(
+        "polyhedron",
+        {
+            "representation": "projection_hull",
+            "primary_plane": "XY",
+            "margin_nm": 0.0,
+            "projections": {
+                "XY": {"points": [[7000, 4300], [7600, 4300],
+                                    [7600, 4900], [7000, 4900]], "source": "manual"},
+                "XZ": {"points": [[7000, 180], [7600, 180],
+                                    [7600, 420], [7000, 420]], "source": "fallback"},
+                "YZ": {"points": [[4300, 180], [4900, 180],
+                                    [4900, 420], [4300, 420]], "source": "fallback"},
+            },
+        },
+        context={"source_view": "scatter", "dataset_idx": 0},
+    )
     state.rois.add(cuboid)
     state.rois.add(sphere)
+    state.rois.add(cylinder)
+    state.rois.add(projection_hull)
     state.rois.set_show_all(True)
 
     win = _window(_qt_app, state)
     try:
         win._axis_combo.setCurrentText(ORTHO_AXIS)
         _settle(_qt_app)
-        assert set(win._rotation_roi_items) == {cuboid.id, sphere.id}
+        assert set(win._rotation_roi_items) == {
+            cuboid.id, sphere.id, cylinder.id, projection_hull.id}
         cube_x, cube_y = win._rotation_roi_items[cuboid.id].getData()
         sphere_x, _sphere_y = win._rotation_roi_items[sphere.id].getData()
         assert len(cube_x) == 24          # 12 edge pairs
@@ -572,13 +604,42 @@ def test_cuboid_and_sphere_meshes_appear_in_rotation_and_3d_views(_qt_app):
 
         win._axis_combo.setCurrentText("3D")
         _settle(_qt_app)
-        assert set(win._3d_roi_items) == {cuboid.id, sphere.id}
+        assert set(win._3d_roi_items) == {
+            cuboid.id, sphere.id, cylinder.id, projection_hull.id}
         cube_mesh, cube_wire = win._3d_roi_items[cuboid.id]
         sphere_mesh, sphere_wire = win._3d_roi_items[sphere.id]
+        cylinder_mesh, cylinder_wire = win._3d_roi_items[cylinder.id]
+        hull_mesh, hull_wire = win._3d_roi_items[projection_hull.id]
         assert cube_mesh.opts["meshdata"].vertexes().shape == (8, 3)
         assert cube_wire.pos.shape == (24, 3)
         assert sphere_mesh.opts["meshdata"].vertexes().shape[0] > 8
         assert sphere_wire.pos.shape[0] > cube_wire.pos.shape[0]
+        assert cylinder_mesh.opts["meshdata"].vertexes().shape[0] > 8
+        assert cylinder_wire.pos.shape[0] > cube_wire.pos.shape[0]
+        assert hull_mesh.opts["meshdata"].vertexes().shape == (8, 3)
+        assert hull_wire.pos.shape == (24, 3)
+
+        state.rois.set_show_all(False)
+        state.rois.select([cuboid.id])
+        _settle(_qt_app)
+        assert set(win._3d_roi_items) == {cuboid.id}
+
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+        assert set(win._rotation_roi_items) == {cuboid.id}
+
+        draft = RoiRecord.create(
+            "sphere",
+            {"center": [7800, 5000, 300], "radii": [200, 150, 80]},
+            context={"source_view": "scatter", "dataset_idx": 0},
+        )
+        win._roi_overlay.replace_draft(draft)
+        win._refresh_volume_roi_displays()
+        assert set(win._rotation_roi_items) == {cuboid.id, draft.id}
+
+        win._axis_combo.setCurrentText("3D")
+        _settle(_qt_app)
+        assert set(win._3d_roi_items) == {cuboid.id, draft.id}
     finally:
         win.close()
 
@@ -1059,19 +1120,26 @@ def _click_pane(app, win, plane, view_point):
     return float(landed.x()), float(landed.y())
 
 
-def test_scatter_crosshair_is_off_until_asked_for_then_marks_every_pane(_qt_app):
+def test_scatter_crosshair_is_on_by_default_and_marks_every_pane(_qt_app):
+    """On by default in the mode, as in the render view: the panes share their
+    axes only pairwise, so the crosshair is what ties the three of them into one
+    3-D reading -- and it is the point the rotating pane spins about.
+
+    (It used to be off until asked for; this test encoded that older contract.)
+    """
     win = _window(_qt_app, _state())
     try:
         win.enter_ortho_mode()
         _settle(_qt_app, turns=8)
         crosshair = win._ortho_crosshair
-        assert crosshair is not None and crosshair.visible is False
-
-        win._set_crosshair_visible(True)
-        _settle(_qt_app, turns=6)
+        assert crosshair is not None
         assert crosshair.visible is True
         assert crosshair.point is not None          # seeded, not left at None
         assert sorted(crosshair._lines) == ["XY", "XZ", "YZ"]
+
+        win._set_crosshair_visible(False)           # and it can still be turned off
+        _settle(_qt_app, turns=6)
+        assert crosshair.visible is False
     finally:
         win.close()
 
@@ -1151,7 +1219,13 @@ def test_the_status_line_carries_one_three_dimensional_point(_qt_app):
     try:
         win.enter_ortho_mode()
         _settle(_qt_app, turns=8)
-        assert "centre X=" in win.ortho_info_suffix()      # before it is shown
+        # The crosshair is shown by default now, so it is what the line carries;
+        # turned off, the line falls back to the centre of the views.
+        assert "crosshair X=" in win.ortho_info_suffix()
+        win._set_crosshair_visible(False)
+        _settle(_qt_app, turns=4)
+        assert "centre X=" in win.ortho_info_suffix()
+
         win._set_crosshair_visible(True)
         _click_pane(_qt_app, win, "XY", (120.0, -60.0))
 
@@ -1200,5 +1274,348 @@ def test_the_crosshair_entry_appears_only_while_the_mode_is_on(_qt_app):
         _settle(_qt_app, turns=8)
         texts = view_entries(win)
         assert texts.index("Crosshair") == texts.index(ORTHO_AXIS) + 1
+    finally:
+        win.close()
+
+
+# ----------------------------------- the crosshair and the rotating pane
+def test_entering_ortho_shows_the_crosshair_by_default(_qt_app):
+    """As in the render view: the panes share their axes only pairwise, so the
+    crosshair is what ties the three of them into one 3-D reading -- and it is
+    what the rotating pane spins about."""
+    win = _window(_qt_app, _state())
+    try:
+        assert win._show_crosshair is False              # not in a flat projection
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+        assert win._show_crosshair is True
+        crosshair = win._ortho_crosshair
+        assert crosshair is not None
+        assert crosshair.visible is True
+        assert crosshair.point is not None
+    finally:
+        win.close()
+
+
+def test_the_default_crosshair_lands_on_the_data_not_near_the_origin(_qt_app):
+    """⚠ It is seeded as the mode is entered, before the panes have been ranged,
+    so reading the XY pane's view range put it within a nanometre of the origin
+    -- tens of microns from the data, which also put the rotating pane's pivot
+    there."""
+    state = _state()
+    win = _window(_qt_app, state)
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+        point = np.asarray(win._ortho_crosshair.point, dtype=float)
+        locs = np.asarray(win._current_locs(state.datasets[0]), dtype=float)
+        for column in (0, 1):
+            lo, hi = locs[:, column].min(), locs[:, column].max()
+            assert lo <= point[column] <= hi, (column, point[column], lo, hi)
+    finally:
+        win.close()
+
+
+def test_the_rotating_pane_spins_about_the_crosshair(_qt_app):
+    win = _window(_qt_app, _state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+        pivot = win._rotation_centre()
+        assert pivot is not None
+        assert np.allclose(pivot, np.asarray(win._ortho_crosshair.point, dtype=float)[:3])
+    finally:
+        win.close()
+
+
+def test_the_rotating_pane_shares_the_fixed_panes_scale(_qt_app):
+    """⚠ The three fixed panes are isotropic at the XY pane's nm per pixel, so a
+    structure's proportions on screen are its proportions in the sample. A
+    fourth pane that auto-ranged to whatever it was handed would show the same
+    data at its own magnification and could not be compared with them."""
+    win = _window(_qt_app, _state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+        win._refresh_rotation_pane()
+        _settle(_qt_app)
+        win._sync_rotation_view()
+
+        primary = win._ortho.primary_scale_nm_per_px()
+        assert primary is not None
+        view = win._rotation_plot.getPlotItem().getViewBox()
+        (x0, x1), (y0, y1) = view.viewRange()
+        rect = view.sceneBoundingRect()
+        assert abs((x1 - x0) / rect.width() - primary) < 1e-6
+        assert abs((y1 - y0) / rect.height() - primary) < 1e-6   # isotropic
+
+        pivot = win._rotation_centre()
+        assert abs(0.5 * (x0 + x1) - pivot[0]) < 1e-6            # centred on it
+        assert abs(0.5 * (y0 + y1) - pivot[1]) < 1e-6
+    finally:
+        win.close()
+
+
+def test_the_rotating_cloud_stays_on_its_pane_at_every_angle(_qt_app):
+    """The point of pivoting on the crosshair rather than the origin."""
+    win = _window(_qt_app, _state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app)
+        view = win._rotation_plot.getPlotItem().getViewBox()
+        for angle in (0, 30, 90, 180, 270):
+            win._rotation_slider.setValue(angle)
+            _settle(_qt_app)
+            h, v = win._rotation_scatter.getData()
+            assert h is not None and len(h) > 0
+            (x0, x1), (y0, y1) = view.viewRange()
+            inside = np.mean((h >= x0) & (h <= x1) & (v >= y0) & (v <= y1))
+            assert inside > 0.5, (angle, inside)
+    finally:
+        win.close()
+
+
+def test_the_crosshair_survives_a_trip_through_another_projection(_qt_app):
+    """⚠ Leaving the mode hides the pane page, and coming back refreshed the
+    crosshair *before* the page was shown again -- so ``refresh`` skipped every
+    pane as "not visible", nothing was re-shown, and the marker stayed invisible
+    while its menu entry still read as checked. It took an off/on toggle to
+    bring it back.
+
+    Asserted on the LINE ITEMS, not on the crosshair's own flag: the flag was
+    correct throughout, which is exactly why the bug was invisible to a
+    state-level check.
+    """
+    win = _window(_qt_app, _state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app, turns=8)
+        crosshair = win._ortho_crosshair
+
+        def drawn():
+            return [bool(line.isVisible())
+                    for lines in (crosshair._lines or {}).values() for line in lines]
+
+        assert drawn() and all(drawn())
+
+        for axis in ("3D", "XY", "XZ", "YZ"):
+            win._axis_combo.setCurrentText(axis)
+            _settle(_qt_app, turns=4)
+            win._axis_combo.setCurrentText(ORTHO_AXIS)
+            _settle(_qt_app, turns=6)
+            assert crosshair.visible is True, axis
+            assert all(drawn()), axis
+
+        win._set_crosshair_visible(False)          # unchecking still hides them
+        _settle(_qt_app, turns=4)
+        assert not any(drawn())
+    finally:
+        win.close()
+
+
+# ------------------------------------------- the rotating pane's axis directions
+def _into_screen(h_axis: int, v_axis: int, inverted: bool) -> np.ndarray:
+    """``right x down`` as a data-axis vector: which way the pane is looked at."""
+    right = np.eye(3)[h_axis]
+    down = np.eye(3)[v_axis] * (1.0 if inverted else -1.0)
+    return np.cross(right, down)
+
+
+def test_a_held_y_runs_downward_like_every_pane_beside_it(_qt_app):
+    """⚠ It ran upward, so at 0 degrees the fourth pane was a MIRROR IMAGE of
+    its own neighbour: the same localization read at a different place. Asserted
+    on screen position, because both panes cover identical numeric ranges and a
+    range-based check cannot see the flip."""
+    from PyQt6.QtCore import QPointF
+
+    win = _window(_qt_app, _state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app, turns=8)
+        pivot = np.asarray(win._ortho_crosshair.point, dtype=float)
+
+        def lower_for_larger(plot, column):
+            view = plot.getPlotItem().getViewBox()
+            low = view.mapViewToScene(QPointF(float(pivot[0]),
+                                              float(pivot[column] - 50.0))).y()
+            high = view.mapViewToScene(QPointF(float(pivot[0]),
+                                               float(pivot[column] + 50.0))).y()
+            return high > low
+
+        assert lower_for_larger(win._pane_plots["XY"], 1)      # the convention
+        win._rotation_axis_combo.setCurrentText("Y")
+        _settle(_qt_app, turns=6)
+        win._refresh_rotation_pane()
+        _settle(_qt_app, turns=3)
+        win._sync_rotation_view()
+        assert lower_for_larger(win._rotation_plot, 1)         # and it matches
+    finally:
+        win.close()
+
+
+@pytest.mark.parametrize("letter, held", [("Y", 1), ("X", 0), ("Z", 2)])
+def test_no_rotation_mode_is_a_handedness_flipped_twin(_qt_app, letter, held):
+    """Each mode must look at the data from the same side as one of the fixed
+    panes -- otherwise a point's position reads mirrored between the fourth pane
+    and its neighbours, which is the hard-to-spot failure."""
+    from minflux_viewer.ui.ortho_rotation import ROTATION_AXES
+
+    win = _window(_qt_app, _state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app, turns=8)
+        fixed = []
+        for plane in ("XY", "XZ", "YZ"):
+            h, v = ORTHO_AXIS_COLUMNS[plane]
+            inverted = win._pane_plots[plane].getPlotItem().getViewBox().yInverted()
+            fixed.append(_into_screen(h, v, inverted))
+
+        win._rotation_axis_combo.setCurrentText(letter)
+        _settle(_qt_app, turns=6)
+        win._refresh_rotation_pane()
+        _settle(_qt_app, turns=3)
+        win._sync_rotation_view()
+        axis_a, _axis_b, axis_up = ROTATION_AXES[f"about {letter}"]
+        assert axis_up == held
+        inverted = win._rotation_plot.getPlotItem().getViewBox().yInverted()
+        direction = _into_screen(axis_a, axis_up, inverted)
+        assert any(np.allclose(direction, other) for other in fixed), (letter, direction)
+    finally:
+        win.close()
+
+
+def test_the_rotating_pane_follows_the_xy_origin_preference(_qt_app):
+    """A held Y is inverted because the XY pane is; with a bottom-left origin
+    neither is, so the two stay consistent either way."""
+    state = _state()
+    state.prefs.setdefault("plot", {})["scatter_xy_origin"] = "bottom_left"
+    win = _window(_qt_app, state)
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app, turns=8)
+        win._rotation_axis_combo.setCurrentText("Y")
+        _settle(_qt_app, turns=6)
+        win._apply_y_axis_direction()
+        xy = win._pane_plots["XY"].getPlotItem().getViewBox().yInverted()
+        rotation = win._rotation_plot.getPlotItem().getViewBox().yInverted()
+        assert xy is False and rotation is False
+    finally:
+        win.close()
+
+
+def test_the_display_settings_reach_the_rotating_pane(_qt_app):
+    """Black background, axis, grid lines and plot style are view-wide, so the
+    fourth pane must not sit there on white with its own markers."""
+    win = _window(_qt_app, _state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app, turns=8)
+        plot = win._rotation_plot
+        assert plot in win._display_plots()
+        assert plot not in win._pane_plots.values()    # not a fourth projection
+
+        win._black_bg_check.setChecked(True)
+        _settle(_qt_app, turns=3)
+        assert plot.backgroundBrush().color().name() == "#000000"
+        win._black_bg_check.setChecked(False)
+        _settle(_qt_app, turns=3)
+        assert plot.backgroundBrush().color().name() == "#ffffff"
+
+        item = plot.getPlotItem()
+        win._show_2d_axis = False
+        win._show_2d_grid = False
+        win._apply_2d_reference_visibility()
+        assert item.getAxis("left").isVisible() is False
+        win._show_2d_axis = True
+        win._apply_2d_reference_visibility()
+        assert item.getAxis("left").isVisible() is True
+
+        win._apply_plot_style({"symbol": "s", "size": 9, "alpha": 120,
+                               "color": (10, 200, 30)}, color_changed=True)
+        win._refresh_rotation_pane()
+        _settle(_qt_app, turns=2)
+        assert win._rotation_scatter.opts["symbol"] == "s"
+        assert win._rotation_scatter.opts["size"] == 9
+        # the style's own colour and alpha, but NOT the Color-by LUT: the pane
+        # pools every visible channel, so one channel's mapping would
+        # misdescribe it
+        assert win._rotation_scatter.opts["brush"].color().getRgb() == (10, 200, 30, 120)
+    finally:
+        win.close()
+
+
+def test_the_rotating_panes_controls_leave_the_slider_the_room(_qt_app):
+    """The play button grew from 44 to 56 px when its glyph swapped to the pause
+    bars, and the axis combo spent 114 px saying "About Y"; both came out of the
+    angle slider."""
+    win = _window(_qt_app, _state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app, turns=8)
+        button = win._rotation_play_button
+        idle = button.size()
+        win._set_rotation_playing(True)
+        _settle(_qt_app, turns=2)
+        assert button.size() == idle          # square, and it does not grow
+        win._set_rotation_playing(False)
+        _settle(_qt_app, turns=2)
+        assert idle.width() <= 30 and abs(idle.width() - idle.height()) <= 4
+
+        combo = win._rotation_axis_combo
+        assert [combo.itemText(i) for i in range(combo.count())] == ["Y", "X", "Z"]
+        assert [combo.itemData(i) for i in range(combo.count())] == [
+            "about Y", "about X", "about Z"]
+        assert combo.width() <= 60
+        assert win._rotation_slider.width() > 4 * combo.width()
+    finally:
+        win.close()
+
+
+def test_the_play_button_swaps_a_triangle_for_a_solid_square(_qt_app):
+    """One glyph per state in a fixed square, each at its own visual size.
+
+    ⚠ The font is scaled from a base captured ONCE. Scaling the button's current
+    font on every state change would compound, so the glyph would shrink away
+    over a few play/pause cycles.
+    """
+    from minflux_viewer.ui.scatter_window import (
+        _ROTATION_GLYPH_SCALE,
+        _ROTATION_PAUSE_GLYPH,
+        _ROTATION_PLAY_GLYPH,
+    )
+
+    assert _ROTATION_PLAY_GLYPH == "▶"        # BLACK RIGHT-POINTING TRIANGLE
+    assert _ROTATION_PAUSE_GLYPH == "■"       # BLACK SQUARE, one solid block
+    # both are single glyphs, so neither state is wider than the other
+    assert len(_ROTATION_PLAY_GLYPH) == len(_ROTATION_PAUSE_GLYPH) == 1
+    # and the square is set a little smaller, since a filled block carries about
+    # twice the ink of a triangle in the same em box
+    assert _ROTATION_GLYPH_SCALE[_ROTATION_PAUSE_GLYPH] < \
+        _ROTATION_GLYPH_SCALE[_ROTATION_PLAY_GLYPH] < 1.0
+
+    win = _window(_qt_app, _state())
+    try:
+        win._axis_combo.setCurrentText(ORTHO_AXIS)
+        _settle(_qt_app, turns=8)
+        button = win._rotation_play_button
+        base = win._rotation_base_point_size
+        idle_size = button.size()
+
+        assert button.text() == _ROTATION_PLAY_GLYPH
+        play_pt = button.font().pointSizeF()
+        assert abs(play_pt - base * _ROTATION_GLYPH_SCALE[_ROTATION_PLAY_GLYPH]) < 1e-6
+        assert play_pt < base                       # a bit smaller than before
+
+        win._set_rotation_playing(True)
+        _settle(_qt_app, turns=2)
+        assert button.text() == _ROTATION_PAUSE_GLYPH
+        assert button.size() == idle_size           # square, and it does not grow
+
+        for _ in range(10):                         # the compounding trap
+            win._set_rotation_playing(True)
+            win._set_rotation_playing(False)
+        assert button.text() == _ROTATION_PLAY_GLYPH
+        assert abs(button.font().pointSizeF() - play_pt) < 1e-6
+        assert button.size() == idle_size
     finally:
         win.close()

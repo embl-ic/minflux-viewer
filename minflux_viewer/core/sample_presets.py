@@ -69,6 +69,15 @@ def default_presets() -> list[dict]:
         normalize_preset({"name": "E. coli HlyB dimers 3D (simulation)",
                           "structure": "ecoli_hlyb_dimer", "dim": 3,
                           "locs_per_trace": 14.0, "precision_nm": 6.0}),
+        # Moving molecules, for the Tracking View. The step size and sampling
+        # are the measured medians of the reference tracking acquisition, so a
+        # simulated run plays at the same rate as a real one.
+        normalize_preset({"name": "Tracking on shells 3D (simulation)",
+                          "structure": "tracking_shells", "dim": 3,
+                          "precision_nm": 5.0}),
+        normalize_preset({"name": "Tracking: NPC scaffold + cargo (simulation)",
+                          "structure": "npc_tracking_2ch", "dim": 3,
+                          "locs_per_trace": 4.0, "precision_nm": 5.0}),
     ]
 
 

@@ -23,7 +23,7 @@ ROI_TYPES = {
     # Volume (3-D) shapes. Listed literally rather than imported from
     # roi_selection.VOLUME_ROI_TYPES to keep this module free of that import;
     # tests/test_roi_volume.py asserts the two agree.
-    "cuboid", "sphere", "polyhedron",
+    "cuboid", "sphere", "polyhedron", "cylinder",
 }
 
 #: A ``points`` record is ImageJ's **multi-point**: one ROI holding N markers,
@@ -36,7 +36,11 @@ MULTI_POINT_TYPES = {"points"}
 #: variant tools that produce an existing record type (a rotated rectangle is a
 #: ``rectangle`` record + ``geometry["variant"]``; an ellipse is a rotated ``oval``),
 #: so they are valid *tools* but never record *types*.
-ROI_TOOLS = ROI_TYPES | {"rotated_rectangle", "ellipse", "multi_point"}
+#: ``magic_wand`` is a TOOL only, like the rotated variants: one click grows a
+#: region and files it as an ordinary ``polygon`` record (holes included, via the
+#: even-odd rule), so every consumer -- masks, crop, channels, save, ImageJ
+#: export -- needs no knowledge of it.
+ROI_TOOLS = ROI_TYPES | {"rotated_rectangle", "ellipse", "multi_point", "magic_wand"}
 
 #: Open multi-vertex curve types (no enclosed area; drawn as open polylines).
 OPEN_LINE_TYPES = {"polyline", "freehand_line"}
@@ -363,7 +367,7 @@ def record_to_imagej(record: RoiRecord):
     # by name is the honest answer: silently writing an XY silhouette would put
     # a flat rectangle in the file under the name of a cuboid, and nothing
     # downstream could tell the difference.
-    if record.type in {"cuboid", "sphere", "polyhedron"}:
+    if record.type in {"cuboid", "sphere", "polyhedron", "cylinder"}:
         raise ValueError(
             f"{record.name or record.type!r} is a 3-D ROI ({record.type}); ImageJ "
             "has no volume ROI type. Save it to the native ROI-set JSON instead, "

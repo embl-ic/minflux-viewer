@@ -349,6 +349,31 @@ def test_staged_analysis_runs_on_detected_rod_components():
         14.0, abs=3.0)
 
 
+def test_staged_analysis_runs_through_the_shape_prior_component_route():
+    from minflux_viewer.analysis.hlyb_staged import analyze_hlyb_staged_3d
+
+    rng = np.random.default_rng(111)
+    loc, tid, tim = _rod_dataset(
+        rng, centers=[(0.0, 0.0), (0.0, 600.0), (0.0, 1200.0)],
+        length=2200.0, width=650.0, n_sites=220)
+    cfg = _staged_cfg(
+        component_mode="shape", shape_min_length_nm=800.0,
+        shape_max_length_nm=2500.0, shape_min_width_nm=400.0,
+        shape_max_width_nm=800.0, shape_pixel_size_nm=20.0,
+        shape_smoothing_nm=60.0, shape_instance_cost=0.08,
+        shape_min_iou=0.25, shape_min_component_area_frac=0.20)
+
+    result = analyze_hlyb_staged_3d(loc, tid, tim, cfg)
+
+    assert result["component_mode"] == "shape"
+    assert result["n_components"] == 3
+    assert result["cell_detection"] is not None
+    assert result["cell_segmentation"]["mode"] == "capsule_shape_prior"
+    assert result["rod_detection"] is None
+    assert any(row["chosen_k"] == 3
+               for row in result["cell_detection"].stats["components"])
+
+
 def test_rod_mode_takes_the_null_axis_from_the_measured_cell_axis():
     from minflux_viewer.analysis.hlyb_staged import (
         rod_config_for, segment_rod_components)

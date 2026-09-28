@@ -45,9 +45,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..colormaps import colormap_lut
 from ..analysis import conv_segmentation as cs
+from ..colormaps import colormap_lut
 from .layer_brightness import LayerBrightness, percentile_levels
+from .plot_format import apply_spatial_y_direction
 from .roi_overlay import PointMarkerItem
 
 _MAX_IMAGE_PX = 40_000_000      # guard: skip convolution above this histogram size
@@ -266,6 +267,12 @@ class ConvSegmentationWindow(QDialog):
         self._plot.setAspectLocked(True)
         self._plot.setLabel("bottom", "X (nm)")
         self._plot.setLabel("left", "Y (nm)")
+        apply_spatial_y_direction(
+            self._plot,
+            vertical_coordinate="Y",
+            prefs=self._state.prefs,
+            preference_key="render_xy_origin",
+        )
 
         self._resp_img = pg.ImageItem()
         self._resp_img.setZValue(0)

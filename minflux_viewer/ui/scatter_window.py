@@ -97,6 +97,21 @@ _MAX_DISPLAY_POINTS_3D = 150_000
 _NAMED_CMAPS = list(BUILTIN_COLORMAP_NAMES)
 
 
+#: The rotating pane's controls are squeezed so the angle slider gets the room.
+#: A fixed square keeps the play button from growing when its glyph swaps to the
+#: pause bars, and the axis combo shows just the letter.
+_ROTATION_BUTTON_SIZE = (26, 24)
+_ROTATION_COMBO_MAX_WIDTH = 56
+_ROTATION_PLAY_GLYPH = "\u25b6"          # BLACK RIGHT-POINTING TRIANGLE
+_ROTATION_PAUSE_GLYPH = "\u25a0"         # BLACK SQUARE -- one solid block
+
+#: Point-size multipliers per glyph, applied to the button's own default size.
+#: The square is nudged further down because a filled block covers roughly twice
+#: the ink of a triangle in the same em box, so matching their point sizes makes
+#: the pause state read visibly heavier than the play state.
+_ROTATION_GLYPH_SCALE = {_ROTATION_PLAY_GLYPH: 0.85, _ROTATION_PAUSE_GLYPH: 0.72}
+
+
 class ScatterWindow(QWidget):
     """Interactive 2D / 3D scatter plot of MINFLUX localisations."""
 
@@ -153,6 +168,10 @@ class ScatterWindow(QWidget):
         self._roi_highlight_2d = None
         self._roi_highlight_3d = None
         self._ortho_redrawing = False
+        # Tearing down the plots changes their range, which re-enters
+        # _on_ortho_view_changed and would re-arm the debounce after closeEvent
+        # has already stopped it. Same idea as MainWindow's _is_shutting_down.
+        self._closing = False
         # ⚠ "The XY pane is showing everything, so do not crop" is an
         # EXPLICIT flag, not pyqtgraph's auto-range state. Inferring it was
         # what kept the side panes read-only: a side pane pushes its pan
@@ -499,14 +518,27 @@ class ScatterWindow(QWidget):
             size=self._point_size, symbol=self._point_symbol, pen=None,
             brush=pg.mkBrush(200, 200, 200, 180))
         self._rotation_plot.addItem(self._rotation_scatter)
+        self._rotation_points = np.empty((0, 3), dtype=np.float64)
         self._rotation_roi_items: dict[str, object] = {}
         column.addWidget(self._rotation_plot, 1)
 
         row = QHBoxLayout()
         row.setContentsMargins(2, 0, 2, 0)
         self._rotation_play_button = QToolButton()
-        self._rotation_play_button.setText("▶")
         self._rotation_play_button.setCheckable(True)
+        # A fixed square, so the button does not grow when the glyph swaps to
+        # the pause bars -- it rendered nearly twice as wide while playing, and
+        # the width came out of the angle slider.
+        self._rotation_play_button.setFixedSize(*_ROTATION_BUTTON_SIZE)
+        # ⚠ The base size is captured ONCE. Scaling ``button.font()`` on each
+        # state change would compound, so the glyph would shrink away over a few
+        # play/pause cycles.
+        base = self._rotation_play_button.font().pointSizeF()
+        if base <= 0.0:                      # a font set in pixels reports -1
+            from PyQt6.QtGui import QFontInfo
+            base = QFontInfo(self._rotation_play_button.font()).pointSizeF()
+        self._rotation_base_point_size = float(base) if base > 0.0 else 9.0
+        self._set_rotation_button_glyph(_ROTATION_PLAY_GLYPH)
         self._rotation_play_button.setAccessibleName("Play rotation")
         self._rotation_play_button.setToolTip("Play a slow continuous rotation")
         self._rotation_play_button.toggled.connect(self._set_rotation_playing)
@@ -514,9 +546,14 @@ class ScatterWindow(QWidget):
 
         self._rotation_axis_combo = QComboBox()
         for axis in ("Y", "X", "Z"):
-            self._rotation_axis_combo.addItem(f"About {axis}", f"about {axis}")
+            # Just the axis letter: the label beside the pane already spells out
+            # what the axis does, and the width saved goes to the angle slider.
+            self._rotation_axis_combo.addItem(axis, f"about {axis}")
         self._rotation_axis_combo.setToolTip(
             "Choose the data axis held fixed and vertical while the other two rotate")
+        self._rotation_axis_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._rotation_axis_combo.setMaximumWidth(_ROTATION_COMBO_MAX_WIDTH)
         self._rotation_axis_combo.currentIndexChanged.connect(
             self._on_rotation_axis_changed)
         row.addWidget(self._rotation_axis_combo)
@@ -562,7 +599,24 @@ class ScatterWindow(QWidget):
 
     def _on_rotation_axis_changed(self, _index: int) -> None:
         self._update_rotation_axis_labels()
+        self._apply_rotation_axis_direction()
         self._refresh_rotation_pane()
+
+    def _set_rotation_button_glyph(self, glyph: str) -> None:
+        """Show *glyph* on the play button at its own visual size.
+
+        Both states are one glyph in a fixed square, so the button neither grows
+        nor changes shape when it swaps -- and each is scaled from the captured
+        base size rather than from the current font, which would compound.
+        """
+        button = getattr(self, "_rotation_play_button", None)
+        if button is None:
+            return
+        font = button.font()
+        base = float(getattr(self, "_rotation_base_point_size", 9.0) or 9.0)
+        font.setPointSizeF(max(5.0, base * _ROTATION_GLYPH_SCALE.get(glyph, 1.0)))
+        button.setFont(font)
+        button.setText(glyph)
 
     def _set_rotation_playing(self, playing: bool) -> None:
         timer = getattr(self, "_rotation_play_timer", None)
@@ -571,7 +625,7 @@ class ScatterWindow(QWidget):
             return
         if playing and self._ortho_active():
             timer.start()
-            button.setText("❚❚")
+            self._set_rotation_button_glyph(_ROTATION_PAUSE_GLYPH)
             button.setAccessibleName("Pause rotation")
             button.setToolTip("Pause the continuous rotation")
             return
@@ -579,7 +633,7 @@ class ScatterWindow(QWidget):
         button.blockSignals(True)
         button.setChecked(False)
         button.blockSignals(False)
-        button.setText("▶")
+        self._set_rotation_button_glyph(_ROTATION_PLAY_GLYPH)
         button.setAccessibleName("Play rotation")
         button.setToolTip("Play a slow continuous rotation")
 
@@ -588,7 +642,14 @@ class ScatterWindow(QWidget):
         self._rotation_slider.setValue(0 if value >= 360 else value + 1)
 
     def _visible_mesh_roi_records(self) -> list[tuple[object, bool]]:
-        """Visible cuboid/ellipsoid records and whether each is emphasized."""
+        """Visible mesh-capable volume records and whether each is emphasized.
+
+        Capability is decided by ``volume_mesh`` downstream.  Keeping a second
+        hard-coded cuboid/sphere allow-list here previously hid a cylinder even
+        though the core had already produced its watertight mesh.
+        """
+        from ..core.roi_selection import VOLUME_ROI_TYPES
+
         controller = getattr(self, "_roi_overlay", None)
         if controller is None:
             return []
@@ -596,7 +657,7 @@ class ScatterWindow(QWidget):
         records: list[tuple[object, bool]] = []
         seen: set[str] = set()
         for record in self._state.rois.records:
-            if record.type not in {"cuboid", "sphere"} or not record.visible:
+            if record.type not in VOLUME_ROI_TYPES or not record.visible:
                 continue
             if not self._state.rois.show_all and record.id not in selected:
                 continue
@@ -616,7 +677,7 @@ class ScatterWindow(QWidget):
             if (
                 draft is None
                 or draft.id in seen
-                or draft.type not in {"cuboid", "sphere"}
+                or draft.type not in VOLUME_ROI_TYPES
             ):
                 continue
             try:
@@ -674,6 +735,7 @@ class ScatterWindow(QWidget):
                 segments,
                 float(self._rotation_slider.value()),
                 self._rotation_mode(),
+                centre=self._rotation_centre(),
             )
             if projected is None:
                 continue
@@ -707,29 +769,152 @@ class ScatterWindow(QWidget):
         self._refresh_rotation_roi_items()
         self._refresh_3d_roi_items()
 
+    def _apply_rotation_axis_direction(self) -> None:
+        """Point the rotating pane's axes the way the fixed panes point theirs.
+
+        The rule is the direction each axis already has where a fixed pane draws
+        it vertically: Y runs downward in the XY pane (and in the ortho YZ pane),
+        so a held Y runs downward here too; Z runs upward in the XZ pane, so a
+        held Z stays upward. X is vertical in no pane, and leaving it natural is
+        what makes this projection share the XY pane's viewing direction --
+        taking ``into-screen = right x down``::
+
+            about Y, Y down : (+X) x (+Y) = +Z  -> viewed from -Z, as XY is
+            about Z, Z up   : (+X) x (-Z) = +Y  -> viewed from -Y, as XZ is
+            about X, X up   : (+Y) x (-X) = +Z  -> viewed from -Z, as XY is
+
+        so all three modes look at the data from the same side as one of the
+        fixed panes, and none of them is the handedness-flipped twin of another.
+
+        ⚠ Without this a held Y ran *upward* while every pane beside it ran Y
+        downward, so at 0 degrees the fourth pane was a MIRROR IMAGE of its own
+        neighbour: the same localization read at a different place. That is the
+        kind of disagreement a range-based check cannot see, since both panes
+        cover identical numeric ranges.
+        """
+        plot = getattr(self, "_rotation_plot", None)
+        if plot is None:
+            return
+        from .ortho_rotation import ROTATION_AXES
+
+        _axis_a, _axis_b, axis_up = ROTATION_AXES[self._rotation_mode()]
+        invert = axis_up == 1 and self._xy_origin_top_left()
+        try:
+            plot.getPlotItem().getViewBox().invertY(bool(invert))
+        except Exception:
+            pass
+
+    def _display_plots(self) -> list:
+        """Every 2-D plot the display settings apply to, the rotating pane included.
+
+        ⚠ The rotating pane is deliberately NOT in ``_pane_plots``: that dict is
+        the orthogonal view's geometry -- the axis links, the crosshair, the ROI
+        pane controllers and the isotropy rule all key off it -- and a fourth
+        entry there would be taken for a fourth projection.
+        """
+        plots = list(getattr(self, "_pane_plots", {"XY": self._plot_2d}).values())
+        rotation = getattr(self, "_rotation_plot", None)
+        if rotation is not None and rotation not in plots:
+            plots.append(rotation)
+        return plots
+
+    def _rotation_centre(self):
+        """The 3-D point the rotating pane spins about, or ``None``.
+
+        The crosshair, because it is the point the other three panes already
+        agree on: spinning about it keeps the feature being inspected in place
+        while its surroundings turn. Falls back to the centroid of the drawn
+        points so the pane is still usable before a crosshair exists -- never to
+        the coordinate origin, which is tens of microns away from the data.
+        """
+        crosshair = getattr(self, "_ortho_crosshair", None)
+        point = getattr(crosshair, "point", None)
+        if point is not None and len(point) >= 3:
+            pivot = np.asarray(point, dtype=float).ravel()[:3]
+            if np.all(np.isfinite(pivot)):
+                return pivot
+        picked = getattr(self, "_rotation_points", None)
+        if picked is not None and getattr(picked, "size", 0):
+            arr = np.asarray(picked, dtype=float)
+            if arr.ndim == 2 and arr.shape[1] >= 3:
+                finite = np.all(np.isfinite(arr[:, :3]), axis=1)
+                if finite.any():
+                    return arr[finite, :3].mean(axis=0)
+        return None
+
+    def _sync_rotation_view(self) -> None:
+        """Put the rotating pane on the fixed panes' scale, centred on the pivot.
+
+        ⚠ The three fixed panes are isotropic at the XY pane's nm per pixel, so
+        a structure's proportions on screen are its proportions in the sample. A
+        fourth pane that auto-ranged to whatever it was handed would show the
+        same data at its own magnification, and nothing in it could be compared
+        with the panes beside it.
+
+        Computed rather than delegated to an aspect lock, for the same reason
+        the side panes are: a lock equalises a pane's own two axes but says
+        nothing about matching another pane's scale.
+        """
+        plot = getattr(self, "_rotation_plot", None)
+        if plot is None or not self._ortho_active():
+            return
+        self._apply_rotation_axis_direction()
+        scale = self._ortho.primary_scale_nm_per_px()
+        pivot = self._rotation_centre()
+        if scale is None or pivot is None:
+            return
+        try:
+            view = plot.getPlotItem().getViewBox()
+            rect = view.sceneBoundingRect()
+        except Exception:
+            return
+        width, height = float(rect.width()), float(rect.height())
+        if width <= 1.0 or height <= 1.0:
+            return
+        from .ortho_rotation import ROTATION_AXES
+
+        axis_a, _axis_b, axis_up = ROTATION_AXES[self._rotation_mode()]
+        # The pivot maps to itself at every angle, so the mixed horizontal axis
+        # is centred on its component along the first mixed axis.
+        h_half = 0.5 * float(scale) * width
+        v_half = 0.5 * float(scale) * height
+        try:
+            view.disableAutoRange()
+            view.setRange(
+                xRange=(float(pivot[axis_a]) - h_half, float(pivot[axis_a]) + h_half),
+                yRange=(float(pivot[axis_up]) - v_half, float(pivot[axis_up]) + v_half),
+                padding=0.0)
+        except Exception:
+            pass
+
     def _refresh_rotation_pane(self, locs=None, rows=None) -> None:
         """Redraw the rotating projection from whatever the panes are showing."""
         scatter = getattr(self, "_rotation_scatter", None)
         if scatter is None or not self._ortho_active():
             return
-        ds = self._dataset()
-        if ds is None:
+        if self._dataset() is None:
             scatter.setData([], [])
             self._refresh_rotation_roi_items()
             return
-        if locs is None:
-            locs = self._current_locs(ds)
-            rows = None
-        if locs is None or getattr(locs, "ndim", 0) != 2 or locs.shape[1] < 3:
+        if locs is not None:
+            array = np.asarray(locs, dtype=np.float64)
+            if array.ndim != 2 or array.shape[1] < 3:
+                self._rotation_points = np.empty((0, 3), dtype=np.float64)
+            else:
+                self._rotation_points = (
+                    array[:, :3] if rows is None else array[rows, :3])
+        picked = getattr(
+            self, "_rotation_points", np.empty((0, 3), dtype=np.float64))
+        if picked.ndim != 2 or picked.shape[0] == 0 or picked.shape[1] < 3:
             scatter.setData([], [])
             self._refresh_rotation_roi_items()
             return
-        picked = locs if rows is None else locs[rows]
         from .ortho_rotation import rotated_projection
         result = rotated_projection(
             picked,
             float(self._rotation_slider.value()),
             self._rotation_mode(),
+            centre=self._rotation_centre(),
         )
         if result is None:
             scatter.setData([], [])
@@ -737,7 +922,19 @@ class ScatterWindow(QWidget):
             return
         h, v = result
         finite = np.isfinite(h) & np.isfinite(v)
+        # Plot style reaches this pane too. Its colour stays a neutral grey on
+        # purpose -- the pane pools every visible channel, so one channel's solid
+        # colour would misdescribe it -- but the symbol, size and alpha are the
+        # user's choice and apply here as anywhere else.
+        try:
+            red, green, blue = getattr(self, "_point_color", (200, 200, 200))
+            scatter.setSymbol(self._point_symbol)
+            scatter.setSize(self._point_size)
+            scatter.setBrush(pg.mkBrush(red, green, blue, self._point_alpha))
+        except Exception:
+            pass
         scatter.setData(h[finite], v[finite])
+        self._sync_rotation_view()
         self._refresh_rotation_roi_items()
 
     def _apply_page_background(self, black: bool) -> None:
@@ -968,12 +1165,12 @@ class ScatterWindow(QWidget):
         drag, and re-running two ``setData`` calls per step would make panning
         the cost of redrawing the whole plot twice.
         """
-        if not self._ortho_active() or self._ortho_redrawing:
+        if self._closing or not self._ortho_active() or self._ortho_redrawing:
             return
         self._ortho_timer.start()
 
     def _redraw_ortho_projection(self) -> None:
-        if not self._ortho_active() or self._dataset() is None:
+        if self._closing or not self._ortho_active() or self._dataset() is None:
             return
         self._ortho_redrawing = True
         try:
@@ -993,20 +1190,48 @@ class ScatterWindow(QWidget):
         crosshair.set_visible(active and self._show_crosshair)
 
     def _default_crosshair_point(self):
-        """The centre of the current view, at the middle of the depth range.
+        """The centre of the visible data, at the middle of the depth range.
+
+        ⚠ From the DATA, not from the XY pane's view range. The crosshair is
+        seeded as the mode is entered, which is *before* the panes have been
+        ranged, so the range was still pyqtgraph's placeholder and the marker
+        landed within a nanometre of the origin -- tens of microns away from
+        MINFLUX coordinates. That also put the rotating pane's pivot there.
+        Entering the mode shows everything anyway, so the data centre IS the
+        view centre at that moment.
 
         ⚠ Seeded once and never moved afterwards. A marker that re-centres
         itself is not a marker; it is a read-out of the view, which the view
         already shows. (Verified against ImageJ's ``Orthogonal_Views``: it
         assigns ``crossLoc`` only from explicit navigation.)
         """
-        try:
-            (x0, x1), (y0, y1) = self._pane_plots["XY"].getPlotItem().getViewBox().viewRange()
-        except Exception:
-            x0 = y0 = -1.0
-            x1 = y1 = 1.0
+        centre = None
+        ds = self._dataset()
+        if ds is not None:
+            arr = np.asarray(self._current_locs(ds), dtype=float)
+            if arr.ndim == 2 and arr.shape[0] and arr.shape[1] >= 2:
+                base = getattr(ds, "filter_mask", None)
+                if base is not None:
+                    base = np.asarray(base, dtype=bool).ravel()
+                    if base.size == arr.shape[0]:
+                        arr = arr[base]
+                if arr.shape[0]:
+                    finite = np.all(np.isfinite(arr[:, :2]), axis=1)
+                    if finite.any():
+                        seen = arr[finite]
+                        centre = (0.5 * (seen[:, 0].min() + seen[:, 0].max()),
+                                  0.5 * (seen[:, 1].min() + seen[:, 1].max()))
+        if centre is None:
+            try:
+                view = self._pane_plots["XY"].getPlotItem().getViewBox()
+                (x0, x1), (y0, y1) = view.viewRange()
+            except Exception:
+                x0 = y0 = -1.0
+                x1 = y1 = 1.0
+            centre = (0.5 * (x0 + x1), 0.5 * (y0 + y1))
         depth = self.roi_depth_center()
-        return (0.5 * (x0 + x1), 0.5 * (y0 + y1), float(depth) if depth is not None else 0.0)
+        return (float(centre[0]), float(centre[1]),
+                float(depth) if depth is not None else 0.0)
 
     def _set_crosshair_visible(self, checked: bool) -> None:
         self._show_crosshair = bool(checked)
@@ -1191,9 +1416,9 @@ class ScatterWindow(QWidget):
         items.clear()
 
     def _refresh_3d_roi_items(self) -> None:
-        """Draw visible cuboids/ellipsoids as translucent OpenGL meshes."""
+        """Draw visible cuboids/ellipsoids/cylinders as translucent OpenGL meshes."""
         view = getattr(self, "_3d_view", None)
-        if view is None:
+        if view is None or self._axis_combo.currentText() != "3D":
             return
         self._clear_3d_roi_items()
         try:
@@ -1215,7 +1440,7 @@ class ScatterWindow(QWidget):
             )
             mesh = gl.GLMeshItem(
                 meshdata=mesh_data,
-                smooth=record.type == "sphere",
+                smooth=record.type in {"sphere", "cylinder"},
                 color=face_color,
                 shader="shaded",
                 glOptions="translucent",
@@ -1292,6 +1517,11 @@ class ScatterWindow(QWidget):
                 max(0, min(255, int(v)))
                 for v in payload.get("color", (128, 128, 128))
             )
+            # Kept for the rotating pane: its points are not coloured by the
+            # Color-by LUT (it pools every visible channel, so one channel's
+            # mapping would misdescribe it), but the style's own colour is the
+            # user's explicit choice and applies there as anywhere else.
+            self._point_color = (r, g, b)
             custom_lut = f"solid:custom:#{r:02x}{g:02x}{b:02x}"
             if len(self._channels) > 1:
                 self._on_channel_lut(self._active_channel_index(), custom_lut)
@@ -1305,7 +1535,7 @@ class ScatterWindow(QWidget):
         self._redraw_current(save_state=True)
 
     def _apply_background(self, black: bool) -> None:
-        for plot in getattr(self, "_pane_plots", {"XY": self._plot_2d}).values():
+        for plot in self._display_plots():
             plot.setBackground("k" if black else "w")
         self._apply_page_background(black)
         if self._3d_view is not None:
@@ -1353,6 +1583,9 @@ class ScatterWindow(QWidget):
                     xz.invertY(False)
         except Exception:
             pass
+        # The rotating pane follows the same preference: its held axis is a data
+        # axis and must run the way the fixed panes run it.
+        self._apply_rotation_axis_direction()
 
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -1513,6 +1746,12 @@ class ScatterWindow(QWidget):
             # projection's zoom left behind: the side panes should open on the
             # whole dataset rather than on a rectangle the user set elsewhere.
             self._ortho_show_all = True
+        if ortho_on and not self._show_crosshair:
+            # On by default in the mode, as in the render view: the panes share
+            # their axes only pairwise, so the crosshair is what ties the three
+            # of them into a single 3-D reading -- and it is what the rotating
+            # pane spins about.
+            self._show_crosshair = True
         self._ortho.set_active(ortho_on)
         self._apply_crosshair_visibility()
         self._sync_ortho_colorbar(ortho_on)
@@ -1745,7 +1984,7 @@ class ScatterWindow(QWidget):
             self._plot_2d.autoRange()
 
     def _apply_2d_reference_visibility(self) -> None:
-        for plot in getattr(self, "_pane_plots", {"XY": self._plot_2d}).values():
+        for plot in self._display_plots():
             plot_item = plot.getPlotItem()
             for axis_name in ("left", "bottom"):
                 plot_item.showAxis(axis_name, show=self._show_2d_axis)
@@ -2687,6 +2926,7 @@ class ScatterWindow(QWidget):
             total += int(np.count_nonzero(mask))
         if not picked:
             self._clear_2d_panes()
+            self._refresh_rotation_pane(np.empty((0, 3), dtype=np.float64))
             self._last_color_values = np.empty(0, dtype=float)
             self._update_colorbar_visibility()
             self._set_info_text("No localisations pass the current filters.")
@@ -2703,9 +2943,13 @@ class ScatterWindow(QWidget):
             ax_x, ax_y = self._pane_labels(plane)
             plot.setLabel("bottom", ax_x)
             plot.setLabel("left", ax_y)
+        self._refresh_rotation_pane(np.vstack([
+            locs[indices, :3] for locs, indices in picked]))
         self._sync_ortho_depth(picked)
         self._update_colorbar_visibility()
-        self._set_info_text(f"{total:,} filtered localisations across {len([c for c in self._channels if c.get('visible', True)])} channel(s)")
+        self._set_info_text(
+            f"{total:,} filtered localisations across "
+            f"{len([c for c in self._channels if c.get('visible', True)])} channel(s)")
 
     def _draw_overlay_3d(self) -> None:
         self._ensure_3d_built()
@@ -2755,7 +2999,9 @@ class ScatterWindow(QWidget):
             self._reset_3d_camera(pos)
             self._3d_camera_initialised = True
         self._update_colorbar_visibility()
-        self._set_info_text(f"{total:,} filtered localisations across {len([c for c in self._channels if c.get('visible', True)])} channel(s)")
+        self._set_info_text(
+            f"{total:,} filtered localisations across "
+            f"{len([c for c in self._channels if c.get('visible', True)])} channel(s)")
 
     def _draw(self, locs: np.ndarray, ftr: np.ndarray, ds, *, save_state: bool = True) -> None:
         if save_state:
@@ -2809,6 +3055,7 @@ class ScatterWindow(QWidget):
         n_display = indices.size
         if n_display == 0:
             self._clear_2d_panes()
+            self._refresh_rotation_pane(np.empty((0, 3), dtype=np.float64))
             self._last_color_values = np.empty(0, dtype=float)
             self._update_colorbar_visibility()
             self._set_info_text("No localisations pass the current filter.", ds)
@@ -2835,6 +3082,7 @@ class ScatterWindow(QWidget):
             plot.setLabel("bottom", ax_x)
             plot.setLabel("left", ax_y)
 
+        self._refresh_rotation_pane(locs, indices)
         self._sync_ortho_depth([(locs, indices)])
         self._update_colorbar_visibility()
 
@@ -3163,6 +3411,13 @@ class ScatterWindow(QWidget):
             return None
         locs = self._current_locs(ds)
         k = depth_map[axis]
+        crosshair = getattr(self, "_ortho_crosshair", None)
+        point = getattr(crosshair, "point", None)
+        if (self._ortho_active() and self._show_crosshair
+                and crosshair is not None and crosshair.visible
+                and point is not None and len(point) > k
+                and np.isfinite(float(point[k]))):
+            return float(point[k])
         if locs.ndim != 2 or locs.shape[1] <= k:
             return None
         col = locs[:, k]
@@ -3242,6 +3497,110 @@ class ScatterWindow(QWidget):
         record.context = ctx
         return record
 
+    def _wand_source(self):
+        """The dataset and *Color by* attribute the magic wand grows on.
+
+        Mirrors what the colorbar reports, so the wand grows on the value the
+        user can actually see: with one channel that is the Color-by combo, and
+        in an overlay it is the ACTIVE channel's own attribute and dataset.
+        """
+        ds = self._dataset()
+        attribute = self._cbar_combo.currentText()
+        if len(self._channels) > 1:
+            active = self._active_channel_index()
+            if not (0 <= active < len(self._channels)):
+                return None, ""
+            channel = self._channels[active]
+            attribute = str(channel.get("color_by") or "")
+            dataset_idx = channel.get("dataset_idx")
+            if dataset_idx is None or not (0 <= dataset_idx < len(self._state.datasets)):
+                return None, ""
+            ds = self._state.datasets[dataset_idx]
+        return ds, str(attribute or "")
+
+    def _show_wand_highlight(self, ds, result, field: str) -> str:
+        """Highlight a 3-D wand selection instead of filing a ROI shape.
+
+        ⚠ In 3-D the selection is a SET OF LOCALIZATIONS, not a region: two
+        points can be neighbours in space and still disagree on the attribute,
+        so neither a polygon nor a polyhedron encloses exactly what was selected.
+        The exact mask is stored as this dataset's active draft mask, which the
+        existing highlight path already draws in every pane and in the 3-D view
+        -- so what is shown IS the selection, with no shape to misrepresent it.
+        """
+        from ..analysis.wand_select import describe_wand
+        from ..core.roi import RoiRecord
+        from ..core.roi_selection import store_roi_mask
+
+        record = RoiRecord.create("polygon", {"points": [], "closed": True},
+                                  name="magic wand", stroke_color=self._wand_mask_color())
+        idx = self._state.datasets.index(ds) if ds in self._state.datasets else None
+        store_roi_mask(ds, record, result.mask,
+                       context={"source_view": "scatter", "dataset_idx": idx})
+        ds.state["active_roi_draft_id"] = record.id
+        self._state.notify_roi_selection_changed(idx)
+        return (describe_wand(result, field)
+                + " · highlighted (3-D selection, no ROI shape)")
+
+    def _wand_mask_color(self) -> str:
+        from .roi_highlight import highlight_color
+        colour = highlight_color(self._state.prefs)
+        try:
+            return colour.name()
+        except AttributeError:
+            return "#ffff00"
+
+    def wand_select(self, position, *, distance_nm, value_percent, columns=None):
+        """Magic-wand selection seeded at *position*, grown on the Color-by value.
+
+        Returns ``(record_kind, geometry, message)``; the kind is ``None`` when the
+        click cannot be served and the message then says why -- refusing with a
+        reason rather than quietly growing on a field the user did not choose.
+        """
+        from ..analysis.wand_select import describe_wand, wand_from_rows
+
+        if self._axis_combo.currentText() == "3D":
+            return None, None, ("the magic wand needs a 2-D projection — a click "
+                                "in the 3-D view carries no data coordinate to "
+                                "seed from")
+        ds, attribute = self._wand_source()
+        if ds is None:
+            return None, None, "no dataset to select from"
+        if not attribute:
+            return None, None, ("the magic wand grows on the Color by value — pick "
+                                "an attribute instead of a solid colour")
+        cache = self._color_cache_for_dataset(ds, attribute)
+        if cache is None:
+            return None, None, f"'{attribute}' has no per-localization value here"
+        locs = self._current_locs(ds)
+        if locs.ndim != 2 or locs.shape[0] == 0:
+            return None, None, "no localizations in view"
+        if locs.shape[1] == 2:
+            locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
+        plane = self._active_plane()
+        if columns is None:
+            columns = AXIS_COLUMNS.get(plane)
+        if columns is None:
+            return None, None, f"the magic wand does not work in the {plane} view"
+        base = np.asarray(ds.filter_mask, dtype=bool)
+        if base.shape[0] != locs.shape[0]:
+            base = np.ones(locs.shape[0], dtype=bool)
+        # The orthogonal view shows all three axes at once, so that is where
+        # growing in 3-D is meaningful; a single flat projection keeps growing in
+        # the plane it shows. Arming the wand never changes the view.
+        grow_3d = bool(self._ortho_active())
+        result = wand_from_rows(locs, cache["values"], base, columns, position,
+                                distance_nm=distance_nm, value_percent=value_percent,
+                                grow_3d=grow_3d)
+        if result is None or not result.polygon:
+            return None, None, (f"no visible localization within {distance_nm:g} nm "
+                                "of that click")
+        if grow_3d:
+            return "highlight", None, self._show_wand_highlight(ds, result, attribute)
+        geometry = {"points": [[float(p[0]), float(p[1])] for p in result.polygon],
+                    "closed": True}
+        return "polygon", geometry, describe_wand(result, attribute)
+
     def compute_roi_selection(self, record, *, columns=None):
         """Rows inside *record*. ``columns`` names the axes a 2-D shape was
         measured on, so an ortho side pane can ask about its own plane rather
@@ -3312,6 +3671,14 @@ class ScatterWindow(QWidget):
         from .lut_dialog import release_shared_lut_owner
         from .qt_lifecycle import close_plot_widgets
 
+        # The debounced ortho redraw must not outlive the plots it draws into:
+        # once close_plot_widgets has made them inert, _redraw_ortho_projection
+        # reaches a deleted axis label. render_window stops its own at the same
+        # point in its closeEvent. Stopping it is not enough on its own --
+        # disposing the plots emits sigRangeChanged, which re-arms it -- so the
+        # flag keeps it disarmed for the rest of teardown.
+        self._closing = True
+        self._ortho_timer.stop()
         self._set_rotation_playing(False)
         self._end_overlay_alignment()
         if self._roi_overlay is not None:

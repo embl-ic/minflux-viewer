@@ -36,6 +36,7 @@ from ..core.confocal_mapping import (
     mapping_image,
 )
 from .overlay_alignment import alignment_help_label
+from .plot_format import apply_spatial_y_direction
 
 
 @dataclass(frozen=True)
@@ -310,7 +311,12 @@ class ConfocalManualAlignmentDialog(QDialog):
 
         self._plot = pg.PlotWidget(background="k")
         self._plot.setAspectLocked(True)
-        self._plot.getViewBox().invertY(True)
+        apply_spatial_y_direction(
+            self._plot,
+            vertical_coordinate="Y",
+            prefs=getattr(self._state, "prefs", None),
+            preference_key="render_xy_origin",
+        )
         self._plot.getPlotItem().setMenuEnabled(False)
         self._image_item = pg.ImageItem()
         self._plot.addItem(self._image_item)

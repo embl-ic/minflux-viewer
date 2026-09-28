@@ -85,6 +85,39 @@ class ConfocalCandidate:
 
 
 @dataclass(frozen=True)
+class AssociatedImageCandidate:
+    """A calibrated image that contains one acquisition ROI.
+
+    Unlike :class:`ConfocalCandidate`, whose complete bounds must match an
+    acquisition exactly, this association deliberately permits overview and
+    pre-scan images.  ``image`` carries the calibration needed to sample it;
+    the remaining fields explain why it was associated and let a caller rank
+    several channels without relying on stack names.
+    """
+
+    image: ConfocalCandidate
+    dataset_key: str
+    did: str
+    roi_bounds_xy_m: tuple[tuple[float, float], tuple[float, float]]
+    coverage_area_ratio: float
+    generated: bool
+    source_did: str = ""
+
+    @property
+    def raw_index(self) -> int:
+        return self.image.raw_index
+
+    @property
+    def name(self) -> str:
+        return self.image.name
+
+    @property
+    def pixel_xy_nm(self) -> tuple[float, float]:
+        return (abs(float(self.image.x_step_m)) * 1e9,
+                abs(float(self.image.y_step_m)) * 1e9)
+
+
+@dataclass(frozen=True)
 class ConfocalMappingTransform:
     """Manual image-coordinate adjustment used for preview and sampling.
 
@@ -326,6 +359,112 @@ def discover_confocal_candidates(
         selected_datasets,
         did_label_map=extract_did_label_map(path),
         tolerance=tolerance,
+    )
+
+
+def _bounds_contain_roi(
+    image_bounds: tuple[tuple[float, float], tuple[float, float]],
+    roi_box: tuple[float, float, float, float],
+    tolerance: float,
+) -> bool:
+    rx, ry, rw, rh = (float(v) for v in roi_box)
+    if rw <= 0.0 or rh <= 0.0:
+        return False
+    (ix0, ix1), (iy0, iy1) = image_bounds
+    tx, ty = float(tolerance) * rw, float(tolerance) * rh
+    return bool(
+        ix0 <= rx + tx and ix1 >= rx + rw - tx
+        and iy0 <= ry + ty and iy1 >= ry + rh - ty
+    )
+
+
+def detect_associated_image_candidates(
+    stacks: Iterable[Mapping],
+    rois: Iterable[AcquisitionRoi],
+    selected_datasets: Iterable[Mapping],
+    *,
+    did_label_map: Mapping[str, str] | None = None,
+    containment_tolerance: float = DEFAULT_GEOMETRY_TOLERANCE,
+    include_generated: bool = False,
+) -> list[AssociatedImageCandidate]:
+    """Find calibrated scalar images that spatially contain an acquisition.
+
+    This is the broad, reusable counterpart to
+    :func:`detect_confocal_candidates`: an overview or acquisition image may
+    be much larger than the MINFLUX ROI and is cropped later in physical
+    coordinates.  Generated MINFLUX density/trace stacks are excluded by
+    default because they contain no independent boundary evidence; callers
+    may request them for display or diagnostics.
+    """
+    tol = float(containment_tolerance)
+    if not np.isfinite(tol) or tol < 0.0:
+        raise ValueError("Image containment tolerance must be non-negative")
+    roi_groups = group_by_dataset(rois)
+    selected = _selected_dataset_ids(selected_datasets, roi_groups, did_label_map)
+    if not selected:
+        return []
+
+    rows: list[AssociatedImageCandidate] = []
+    for stack in stacks:
+        geometry = _stack_geometry(stack)
+        if geometry is None or not is_image_stack(dict(stack)):
+            continue
+        generated = is_known_non_channel_stack(stack)
+        if generated and not include_generated:
+            continue
+        for key, did in selected:
+            box = union_bounds(roi_groups[did])
+            if not _bounds_contain_roi(
+                    geometry["bounds_xy_m"], box, tol):
+                continue
+            rx, ry, rw, rh = (float(v) for v in box)
+            (ix0, ix1), (iy0, iy1) = geometry["bounds_xy_m"]
+            ratio = ((ix1 - ix0) * (iy1 - iy0)) / max(rw * rh, 1e-30)
+            image = ConfocalCandidate(
+                raw_index=int(stack.get("raw_index", -1)),
+                name=str(stack.get("name", "") or f"Series {len(rows) + 1}"),
+                shape=geometry["shape"],
+                axes=geometry["axes"],
+                dtype=str(stack.get("dtype", "") or ""),
+                x_start_m=float(geometry["x_start_m"]),
+                y_start_m=float(geometry["y_start_m"]),
+                x_step_m=float(geometry["x_step_m"]),
+                y_step_m=float(geometry["y_step_m"]),
+                z_start_m=(None if geometry["z_start_m"] is None
+                           else float(geometry["z_start_m"])),
+                z_step_m=(None if geometry["z_step_m"] is None
+                          else float(geometry["z_step_m"])),
+                bounds_xy_m=geometry["bounds_xy_m"],
+                matches=(),
+            )
+            rows.append(AssociatedImageCandidate(
+                image=image,
+                dataset_key=key,
+                did=did,
+                roi_bounds_xy_m=((rx, rx + rw), (ry, ry + rh)),
+                coverage_area_ratio=float(ratio),
+                generated=bool(generated),
+                source_did=str(stack.get("source_did", "") or ""),
+            ))
+    return rows
+
+
+def discover_associated_image_candidates(
+    msr_path: str | Path,
+    selected_datasets: Iterable[Mapping],
+    *,
+    containment_tolerance: float = DEFAULT_GEOMETRY_TOLERANCE,
+    include_generated: bool = False,
+) -> list[AssociatedImageCandidate]:
+    """Header-only discovery of acquisition images that contain a dataset."""
+    path = Path(msr_path)
+    return detect_associated_image_candidates(
+        scan_obf_stacks(path),
+        read_acquisition_rois(path),
+        selected_datasets,
+        did_label_map=extract_did_label_map(path),
+        containment_tolerance=containment_tolerance,
+        include_generated=include_generated,
     )
 
 

@@ -31,6 +31,7 @@ from ..colors import (
     normalize_color_preferences,
     normalize_rgba,
 )
+from . import formats as _formats
 from .dataset import MinfluxDataset
 
 if TYPE_CHECKING:
@@ -70,8 +71,6 @@ class _TaskProgress:
 #: How many recent files are remembered on disk (the menu shows only
 #: ``num_file_history`` of these). ~0.1-0.27 MB of paths — negligible.
 MAX_RECENT_REMEMBERED: int = 1000
-
-from . import formats as _formats
 
 DEFAULT_PREFS: dict = {
     "file": {
@@ -114,6 +113,38 @@ DEFAULT_PREFS: dict = {
         "export_include_derived": False,         # freeze derived attributes (snapshot)
         "export_include_recipe": True,           # write the metadata sidecar
         "export_filter_mode": "flag",            # "apply" (drop rows) | "flag" (ftr col)
+    },
+    "tracking": {
+        # ``tim`` is canonical seconds.  Keep a user-facing value + unit so a
+        # precision such as 1 µs is legible and can be changed without storing
+        # a fragile, very small decimal in the UI itself.
+        "timestamp_precision_value": 1.0,
+        "timestamp_precision_unit": "us",
+        # Analysis results are attached only when explicitly enabled. The
+        # selected names still define the repeatable default for the workbench.
+        "materialize_analysis_attributes": False,
+        "analysis_attributes": [
+            "msd_d", "msd_alpha", "msd_sigma_apparent", "step_angle",
+            "track_straightness",
+        ],
+        # Tracking View presentation/playback defaults.
+        "default_axis_mode": "trace",
+        "default_projection": "XY",
+        "tail_fraction": 0.04,
+        "tail_grow": False,
+        "tail_color_mode": "Channel",
+        "tail_bands": 6,
+        "tail_width": 2.0,
+        "tail_head_opacity": 255,
+        "tail_tip_opacity": 70,
+        "head_symbol": "star",
+        "head_size": 7,
+        "backdrop_mode": "Render",
+        "backdrop_level": "Normal",
+        "playback_rate_hz": 10.0,
+        "playback_loop": True,
+        "role_displacement_nm": 25.0,
+        "role_min_median_locs": 5,
     },
     "plot": {
         "z_scaling_factor": 0.67,
@@ -187,6 +218,7 @@ DEFAULT_PREFS: dict = {
         "open_msr": "",
         "save": "Ctrl+S",
         "render": "Ctrl+R",
+        "tracking_view": "Ctrl+T",
         "brightness_contrast": "Shift+C",
         "attribute_plot": "Ctrl+1",
         "attribute_histogram": "Ctrl+2",
@@ -211,6 +243,13 @@ DEFAULT_PREFS: dict = {
         "average_occurrence_count": 10,
         "transform_type": "rigid XY + translational Z",
         "align_to_channel": "first",
+    },
+    # Magic-wand tolerances. The value band is a PERCENTAGE of the attribute's
+    # finite range, because the attributes differ by orders of magnitude -- one
+    # absolute slider cannot serve cfr (0..1) and tid (thousands) alike.
+    "wand": {
+        "distance_nm": 20.0,
+        "value_percent": 10.0,
     },
     "measurements": {
         "area": True,
@@ -715,6 +754,9 @@ class AppState(QObject):
         Requests the existing interactive Manual align mode for a dataset.
     roi_selection_changed(int)
         Emitted when a dataset's cached ROI selection mask is modified.
+    tracking_playhead_changed(dataset, trace_id, trace_time, source)
+        Synchronizes an explicitly selected trace and trace-relative playhead
+        between tracking-aware views. ``source`` prevents feedback loops.
     status_message(str)
         Short text for the main-window status bar.
     """
@@ -728,6 +770,7 @@ class AppState(QObject):
     overlay_transform_changed = pyqtSignal(int)
     overlay_manual_alignment_requested = pyqtSignal(int)
     roi_selection_changed = pyqtSignal(int)
+    tracking_playhead_changed = pyqtSignal(object, object, float, object)
     colors_changed = pyqtSignal(object)  # {paths, previous, current}
     #: The shared colormap list was reordered (LUT ▸ Custom ▸ Reorder…), so
     #: every long-lived colormap selector should rebuild itself.

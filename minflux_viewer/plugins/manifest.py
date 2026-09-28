@@ -27,6 +27,8 @@ from typing import Any
 
 import tomllib
 
+from .method import MethodError, parse_method_spec
+
 #: The file that makes a directory a Tier 2 plugin.
 MANIFEST_NAME = "plugin.toml"
 
@@ -69,6 +71,11 @@ class PluginManifest:
     requires_mfv_api: str = ""
     requires_app: str = ""
     requires_python: tuple[str, ...] = ()
+
+    #: The declared method text, or ``None`` when the plugin ships none.
+    #: Parsed here so a malformed block is reported like any other manifest
+    #: error, at scan time, without importing the plugin.
+    method: Any = None
 
     #: Where the manifest was read from.
     directory: Path = field(default_factory=Path)
@@ -147,6 +154,11 @@ def parse_manifest(raw: dict[str, Any], directory: str | Path) -> PluginManifest
         if spec:
             _parse_requirement(spec, key)          # validate eagerly
 
+    try:
+        method = parse_method_spec(raw.get("method"))
+    except MethodError as exc:
+        raise ManifestError(f"[plugin] {plugin_id}: {exc}") from None
+
     return PluginManifest(
         id=plugin_id,
         name=name,
@@ -161,6 +173,7 @@ def parse_manifest(raw: dict[str, Any], directory: str | Path) -> PluginManifest
         requires_mfv_api=str(requires.get("mfv_api", "") or ""),
         requires_app=str(requires.get("app", "") or ""),
         requires_python=tuple(str(p) for p in python_reqs),
+        method=method,
         directory=directory,
     )
 

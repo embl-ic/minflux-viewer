@@ -15,25 +15,28 @@ one they are in. Naming the axes removes the question::
 
     cuboid      {"x": [lo, hi], "y": [lo, hi], "z": [lo, hi]}
     sphere      {"center": [cx, cy, cz], "radii": [rx, ry, rz]}
-    polyhedron  {"axis": "Z",
-                 "levels": [{"at": z0, "polygon": [[u, v], ...]}, ...]}
+    cylinder    {"axis": "Z", "center": [cx, cy, cz],
+                 "radii": [ru, rv], "height": h}
+    polyhedron  {"representation": "projection_hull",
+                 "projections": {"XY": {"points": ...}, "XZ": ..., "YZ": ...}}
 
 ``sphere`` is the user-facing name for an **axis-aligned ellipsoid** — a drag
 almost never produces equal radii, and the name is kept because it is what a
 user looks for.
 
-For a ``polyhedron`` the ``axis`` is the stacking axis and each level's polygon
-is given in the **remaining two axes, in canonical (ascending) order**:
+Newly drawn polyhedra are the intersection of their three editable projection
+polygons, stored in canonical XY=(X,Y), XZ=(X,Z), YZ=(Y,Z) order.  Legacy
+contour-stack records remain supported. For those, ``axis`` is the stacking
+axis and every level polygon uses the **remaining two axes in ascending order**:
 
     axis "Z" -> polygon vertices are (X, Y)
     axis "Y" -> polygon vertices are (X, Z)
     axis "X" -> polygon vertices are (Y, Z)
 
-A **prism is the degenerate case with one level** plus ``thickness``; the same
-record type, mask and editor serve both, so a prism upgrades to a multi-level
-polyhedron with no migration.
+A legacy **prism is the degenerate case with one level** plus ``thickness``; it
+can still upgrade to a multi-level contour stack with no migration.
 
-Interpolation between levels is **angular resampling** (star-shaped
+Legacy interpolation between levels is **angular resampling** (star-shaped
 cross-sections): each polygon is described by its centroid plus a radius at
 fixed angles, and intermediate cross-sections interpolate those radii. Unlike
 pairing vertices it tolerates different vertex counts and never self-intersects,
@@ -58,6 +61,7 @@ __all__ = [
     "MIN_SEED_LOCS",
     "MIN_SEED_THICKNESS_NM",
     "EMPTY_SEED_FRACTION",
+    "PROJECTION_AXES",
     "cross_axes",
     "seed_interval",
     "radial_profile",
@@ -75,15 +79,24 @@ __all__ = [
     "translate_volume",
     "set_volume_extent",
     "volume_geometry_text",
+    "projection_hull_from_flat",
+    "projection_polygon",
+    "set_projection_polygon",
     "add_cross_section",
     "convex_hull_polyhedron",
+    "points_to_polyhedron",
+    "MAX_POINT_LEVELS",
 ]
 
 
 #: The data axis a standalone 2-D projection does NOT show.
 PLANE_NORMAL_AXIS: dict[str, str] = {"XY": "Z", "XZ": "Y", "YZ": "X"}
 
-#: Which volume type a 2-D drawing tool's shape becomes.
+#: Which volume type a 2-D drawing tool's shape becomes **by default**.
+#: ⚠ An oval lifts to either a ``sphere`` or a ``cylinder`` -- the same drawn
+#: ellipse, extruded rather than revolved -- so that choice cannot come from the
+#: flat shape alone. ``volume_from_flat(..., volume_type=)`` names it explicitly;
+#: this table is only the fallback for callers that have no tool in hand.
 FLAT_TO_VOLUME: dict[str, str] = {
     "rectangle": "cuboid",
     "oval": "sphere",
@@ -95,6 +108,16 @@ FLAT_TO_VOLUME: dict[str, str] = {
 #: Data-axis name -> column of an ``(N, 3)`` display-nm array.
 AXIS_INDEX: dict[str, int] = {"X": 0, "Y": 1, "Z": 2}
 AXIS_NAMES: tuple[str, str, str] = ("X", "Y", "Z")
+
+#: Canonical coordinate order of the three ordinary projections.  A stored
+#: projection-hull polygon always follows this table; a view may reverse it
+#: (the orthogonal YZ pane shows Z horizontally and Y vertically), so the
+#: public accessors below take actual axis columns and perform that reversal.
+PROJECTION_AXES: dict[str, tuple[int, int]] = {
+    "XY": (0, 1),
+    "XZ": (0, 2),
+    "YZ": (1, 2),
+}
 
 #: Angles used to describe a cross-section radially. 64 keeps a 100 nm pore's
 #: boundary within ~0.1 nm of the drawn polygon, far below the localization
@@ -109,8 +132,8 @@ MIN_SEED_LOCS = 10
 MIN_SEED_THICKNESS_NM = 20.0
 
 #: Fraction of the visible range a seeded interval spans when there is no data
-#: to measure. One constant for cuboid, sphere and polyhedron alike — the third
-#: dimension of all three is an interval, so one rule governs them.
+#: to measure. One constant for cuboid, sphere, cylinder and a projection-hull
+#: fallback alike -- the derived dimension begins as an interval in each case.
 EMPTY_SEED_FRACTION = 0.5
 
 
@@ -264,6 +287,100 @@ def _levels_sorted(record_geometry: dict) -> tuple[np.ndarray, list]:
     return at[order], [levels[i] for i in order]
 
 
+def _projection_key(columns) -> tuple[str, bool] | None:
+    """``(plane, reversed)`` for an actual pair of displayed axis columns.
+
+    ``reversed`` says the view order is opposite to :data:`PROJECTION_AXES`.
+    This is what keeps the orthogonal YZ pane's (Z, Y) screen convention out of
+    the stored geometry, where YZ is always canonical (Y, Z).
+    """
+    try:
+        columns = int(columns[0]), int(columns[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    for plane, canonical in PROJECTION_AXES.items():
+        if columns == canonical:
+            return plane, False
+        if columns == canonical[::-1]:
+            return plane, True
+    return None
+
+
+def _projection_points(geometry: dict, plane: str) -> np.ndarray | None:
+    entry = (geometry.get("projections") or {}).get(str(plane).upper())
+    raw = entry.get("points") if isinstance(entry, dict) else entry
+    try:
+        points = np.asarray(raw, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if points.ndim != 2 or points.shape[0] < 3 or points.shape[1] < 2:
+        return None
+    points = points[:, :2]
+    return points if np.all(np.isfinite(points)) else None
+
+
+def projection_polygon(geometry: dict, h_axis: int, v_axis: int) -> np.ndarray | None:
+    """Editable projection constraint in a view's actual ``(h, v)`` order.
+
+    ``None`` means *geometry* is not a projection-hull polyhedron or lacks that
+    view.  The returned polygon is the user's constraint, deliberately not
+    advertised as the exact silhouette of the intersection (which may be a
+    subset after the other two constraints are applied).
+    """
+    if str(geometry.get("representation") or "") != "projection_hull":
+        return None
+    key = _projection_key((h_axis, v_axis))
+    if key is None:
+        return None
+    plane, reverse = key
+    points = _projection_points(geometry, plane)
+    if points is None:
+        return None
+    return points[:, ::-1].copy() if reverse else points.copy()
+
+
+def set_projection_polygon(record, columns, polygon) -> dict | None:
+    """Replace one editable projection constraint of a projection-hull ROI.
+
+    *polygon* is supplied in the calling view's screen-axis order.  Existing
+    provenance is retained but changed to ``manual``: once the user edits an
+    auto hull it must not silently refit itself.
+    """
+    if getattr(record, "type", None) != "polyhedron":
+        return None
+    geometry = dict(getattr(record, "geometry", None) or {})
+    if str(geometry.get("representation") or "") != "projection_hull":
+        return None
+    key = _projection_key(columns)
+    if key is None:
+        return None
+    plane, reverse = key
+    try:
+        points = np.asarray(polygon, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if points.ndim != 2 or points.shape[0] < 3 or points.shape[1] < 2:
+        return None
+    points = points[:, :2]
+    if not np.all(np.isfinite(points)):
+        return None
+    if reverse:
+        points = points[:, ::-1]
+    projections = {
+        str(name): (dict(value) if isinstance(value, dict)
+                    else {"points": value})
+        for name, value in (geometry.get("projections") or {}).items()
+    }
+    old = projections.get(plane, {})
+    projections[plane] = {
+        **old,
+        "points": [[float(a), float(b)] for a, b in points],
+        "source": "manual",
+    }
+    geometry["projections"] = projections
+    return geometry
+
+
 def cross_section_at(
     geometry: dict,
     at: float,
@@ -332,7 +449,70 @@ def _sphere_mask(xyz: np.ndarray, g: dict) -> np.ndarray:
     return np.einsum("ij,ij->i", d, d) <= 1.0
 
 
+def _cylinder_parts(g: dict):
+    """``(axis, stack_col, u, v, centre, radii, height)`` for a cylinder, or ``None``.
+
+    The schema is named data axes, like every other volume type:
+    ``{"axis": "Z", "center": [cx, cy, cz], "radii": [r_u, r_v], "height": h}``.
+    ``radii`` is in ``cross_axes(axis)`` **ascending column order** -- the same
+    rule a polyhedron's polygon columns follow -- and ``height`` is the full
+    length along ``axis``, centred on the axis component of ``center``. The
+    extent is therefore stored once (one fact, one place): there is deliberately
+    no separate ``extent`` key that could disagree with the centre.
+    """
+    axis = str(g.get("axis", "Z")).upper()
+    if axis not in AXIS_INDEX:
+        return None
+    centre = np.asarray(g.get("center", ()), dtype=float).ravel()
+    radii = np.asarray(g.get("radii", ()), dtype=float).ravel()
+    try:
+        height = float(g.get("height"))
+    except (TypeError, ValueError):
+        return None
+    if centre.size < 3 or radii.size < 2 or not np.all(np.isfinite(centre[:3])):
+        return None
+    if not np.all(np.isfinite(radii[:2])) or not np.all(radii[:2] > 0):
+        return None
+    if not np.isfinite(height) or height <= 0:
+        return None
+    u, v = cross_axes(axis)
+    return axis, AXIS_INDEX[axis], u, v, centre[:3], radii[:2], height
+
+
+def _cylinder_mask(xyz: np.ndarray, g: dict) -> np.ndarray:
+    """Inside an axis-aligned elliptic cylinder: in the ellipse AND in the slab.
+
+    Closed-form and fully vectorised, like the cuboid and the ellipsoid -- the
+    cross-section is analytic, so unlike a polyhedron there is no radial profile
+    to interpolate.
+    """
+    parts = _cylinder_parts(g)
+    if parts is None:
+        return np.zeros(xyz.shape[0], dtype=bool)
+    _axis, stack_col, u, v, centre, radii, height = parts
+    du = (xyz[:, u] - centre[u]) / radii[0]
+    dv = (xyz[:, v] - centre[v]) / radii[1]
+    in_ellipse = (du * du + dv * dv) <= 1.0
+    in_slab = np.abs(xyz[:, stack_col] - centre[stack_col]) <= 0.5 * height
+    return in_ellipse & in_slab
+
+
 def _polyhedron_mask(xyz: np.ndarray, g: dict, *, n_angles: int, strict: bool) -> np.ndarray:
+    if str(g.get("representation") or "") == "projection_hull":
+        # A projection hull is the intersection of three generalized prisms:
+        # every point must lie in the polygon made by its XY, XZ and YZ
+        # projection.  This remains exact for concave polygons and needs no
+        # voxel grid or reconstructed surface.
+        out = np.ones(xyz.shape[0], dtype=bool)
+        for plane, (u, v) in PROJECTION_AXES.items():
+            polygon = _projection_points(g, plane)
+            if polygon is None:
+                return np.zeros(xyz.shape[0], dtype=bool)
+            out &= _point_in_polygon(xyz[:, u], xyz[:, v], polygon)
+            if not out.any():
+                break
+        return out
+
     axis = str(g.get("axis", "Z")).upper()
     stack_col = AXIS_INDEX[axis]
     ui, vi = cross_axes(axis)
@@ -423,6 +603,8 @@ def roi_volume_mask(
             inside = _cuboid_mask(sub, g)
         elif kind == "sphere":
             inside = _sphere_mask(sub, g)
+        elif kind == "cylinder":
+            inside = _cylinder_mask(sub, g)
         else:
             inside = _polyhedron_mask(sub, g, n_angles=n_angles, strict=strict)
         out[finite] = inside
@@ -451,7 +633,40 @@ def volume_bounds(record) -> tuple[tuple[float, float], ...] | None:
             return None
         return tuple((float(centre[i] - radii[i]), float(centre[i] + radii[i]))
                      for i in range(3))
+    if kind == "cylinder":
+        parts = _cylinder_parts(g)
+        if parts is None:
+            return None
+        _axis, stack_col, u, v, centre, radii, height = parts
+        spans = [None, None, None]
+        spans[u] = (float(centre[u] - radii[0]), float(centre[u] + radii[0]))
+        spans[v] = (float(centre[v] - radii[1]), float(centre[v] + radii[1]))
+        spans[stack_col] = (float(centre[stack_col] - 0.5 * height),
+                            float(centre[stack_col] + 0.5 * height))
+        return tuple(spans)
     if kind == "polyhedron":
+        if str(g.get("representation") or "") == "projection_hull":
+            # Each world axis occurs in two projection constraints.  Their
+            # interval intersection is a conservative axis-aligned bound of
+            # the visual hull and, unlike a union, cannot claim space excluded
+            # by one of the user's other views.
+            candidates: list[list[tuple[float, float]]] = [[], [], []]
+            for plane, axes in PROJECTION_AXES.items():
+                polygon = _projection_points(g, plane)
+                if polygon is None:
+                    return None
+                for local, column in enumerate(axes):
+                    candidates[column].append(
+                        (float(polygon[:, local].min()),
+                         float(polygon[:, local].max())))
+            spans = []
+            for values in candidates:
+                lo = max(value[0] for value in values)
+                hi = min(value[1] for value in values)
+                if hi < lo:
+                    return None
+                spans.append((lo, hi))
+            return tuple(spans)
         try:
             at_values, levels = _levels_sorted(g)
         except ValueError:
@@ -473,13 +688,137 @@ def volume_bounds(record) -> tuple[tuple[float, float], ...] | None:
     return None
 
 
+def _clean_polygon(polygon: np.ndarray) -> np.ndarray:
+    """Drop consecutive duplicate vertices and a repeated closing vertex."""
+    points = np.asarray(polygon, dtype=float)
+    if points.ndim != 2 or points.shape[1] < 2:
+        return np.empty((0, 2), dtype=float)
+    points = points[:, :2]
+    if points.shape[0] > 1 and np.allclose(points[0], points[-1]):
+        points = points[:-1]
+    if points.shape[0] > 1:
+        keep = np.ones(points.shape[0], dtype=bool)
+        keep[1:] = np.any(np.abs(np.diff(points, axis=0)) > 1e-12, axis=1)
+        points = points[keep]
+    return points
+
+
+def _convex_halfspaces(geometry: dict) -> np.ndarray | None:
+    """Half-spaces of a convex projection hull, or ``None`` if one constraint
+    is missing, degenerate or concave.
+
+    Each 2-D edge becomes a 3-D plane whose coefficient on the projection's
+    hidden axis is zero.  The intersection of all those generalized prisms is
+    therefore the exact convex volume described by the three polygons.
+    """
+    rows = []
+    for plane, axes in PROJECTION_AXES.items():
+        polygon = _projection_points(geometry, plane)
+        if polygon is None:
+            return None
+        polygon = _clean_polygon(polygon)
+        if polygon.shape[0] < 3:
+            return None
+        x, y = polygon[:, 0], polygon[:, 1]
+        area2 = float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
+        if abs(area2) <= 1e-12:
+            return None
+        edge = np.roll(polygon, -1, axis=0) - polygon
+        turns = edge[:, 0] * np.roll(edge[:, 1], -1) \
+            - edge[:, 1] * np.roll(edge[:, 0], -1)
+        significant = turns[np.abs(turns) > 1e-10]
+        if significant.size and np.any(significant * significant[0] < 0.0):
+            return None
+        # For a CCW polygon, interior points lie left of every directed edge:
+        # cross(edge, point-a) >= 0.  scipy uses A*x + b <= 0, hence the
+        # coefficients below.  Reverse them for clockwise input.
+        winding = 1.0 if area2 > 0.0 else -1.0
+        u, v = axes
+        for a, delta in zip(polygon, edge):
+            if float(np.hypot(delta[0], delta[1])) <= 1e-12:
+                continue
+            row = np.zeros(4, dtype=float)
+            row[u] = winding * delta[1]
+            row[v] = winding * -delta[0]
+            row[3] = winding * (delta[0] * a[1] - delta[1] * a[0])
+            rows.append(row)
+    return np.asarray(rows, dtype=float) if len(rows) >= 4 else None
+
+
+def _projection_hull_mesh(geometry: dict):
+    """Exact mesh of a convex projection hull.
+
+    Arbitrary concave projection polygons still have exact point membership,
+    but tessellating their Boolean prism intersection needs a separate CSG or
+    voxel-resolution contract.  Returning ``None`` for that case keeps the 3-D
+    display honest rather than silently convexifying a user's drawing.
+    """
+    halfspaces = _convex_halfspaces(geometry)
+    if halfspaces is None:
+        return None
+    try:
+        from scipy.optimize import linprog
+        from scipy.spatial import ConvexHull, HalfspaceIntersection, QhullError
+
+        normals = np.linalg.norm(halfspaces[:, :3], axis=1)
+        # Chebyshev centre: maximize distance t from every plane.  A positive
+        # t supplies the strictly interior point HalfspaceIntersection needs.
+        result = linprog(
+            np.array([0.0, 0.0, 0.0, -1.0]),
+            A_ub=np.column_stack([halfspaces[:, :3], normals]),
+            b_ub=-halfspaces[:, 3],
+            bounds=[(None, None), (None, None), (None, None), (0.0, None)],
+            method="highs",
+        )
+        if not result.success or result.x[3] <= 1e-8:
+            return None
+        vertices = np.asarray(
+            HalfspaceIntersection(halfspaces, result.x[:3]).intersections,
+            dtype=np.float64,
+        )
+        hull = ConvexHull(vertices)
+    except (QhullError, ValueError, RuntimeError):
+        return None
+
+    faces = np.asarray(hull.simplices, dtype=np.uint32).copy()
+    # scipy associates equations and simplices facet-for-facet.  Orient every
+    # triangle toward its facet's outward normal for consistent GL shading.
+    for index, face in enumerate(faces):
+        p = vertices[face]
+        if np.dot(np.cross(p[1] - p[0], p[2] - p[0]),
+                  hull.equations[index, :3]) < 0.0:
+            faces[index, 1], faces[index, 2] = faces[index, 2], faces[index, 1]
+    # ConvexHull triangulates every planar facet.  Do not expose those internal
+    # diagonals as wire-frame edges: they are a tessellation detail, not an edge
+    # of the user's solid.  A real edge either joins non-coplanar triangles or
+    # occurs at a boundary (the latter is defensive; a valid hull is closed).
+    adjacency: dict[tuple[int, int], list[int]] = {}
+    for face_index, face in enumerate(faces):
+        for a, b in ((face[0], face[1]),
+                     (face[1], face[2]),
+                     (face[2], face[0])):
+            adjacency.setdefault(tuple(sorted((int(a), int(b)))), []).append(face_index)
+    facet_normals = np.asarray(hull.equations[:, :3], dtype=float)
+    edges = []
+    for edge, neighbours in adjacency.items():
+        if len(neighbours) != 2:
+            edges.append(edge)
+            continue
+        first, second = facet_normals[neighbours]
+        cosine = abs(float(np.dot(first, second)) / max(
+            float(np.linalg.norm(first) * np.linalg.norm(second)), 1e-15))
+        if cosine < 1.0 - 1e-9:
+            edges.append(edge)
+    return vertices, faces, np.asarray(edges, dtype=np.uint32)
+
+
 def volume_mesh(
     record,
     *,
     latitude_segments: int = 12,
     longitude_segments: int = 24,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    """Surface geometry for a cuboid or axis-aligned ellipsoid ROI.
+    """Surface geometry for a cuboid, axis-aligned ellipsoid or cylinder ROI.
 
     Returns ``(vertices, triangle_faces, wire_edges)`` in XYZ display-nm
     coordinates. Faces and edges contain integer indices into ``vertices``.
@@ -487,13 +826,16 @@ def volume_mesh(
     2-D projection display exactly the same object without either UI inventing
     its own interpretation of a volume record.
 
-    ``polyhedron`` is intentionally not approximated yet: its interpolated
-    cross-section model needs a separately tested tessellator. Returning
-    ``None`` keeps the first implementation honest and limited to the two
-    analytic volume types.
+    A convex projection-hull ``polyhedron`` is returned exactly as the
+    half-space intersection of its three projected polygons.  The legacy
+    contour-stack polyhedron and a concave projection hull deliberately return
+    ``None`` until they have a separately tested tessellation contract.
     """
     kind = getattr(record, "type", None)
     geometry = getattr(record, "geometry", None) or {}
+    if (kind == "polyhedron"
+            and str(geometry.get("representation") or "") == "projection_hull"):
+        return _projection_hull_mesh(geometry)
     if kind == "cuboid":
         bounds = volume_bounds(record)
         if bounds is None:
@@ -523,6 +865,66 @@ def volume_mesh(
             [0, 4], [1, 5], [2, 6], [3, 7],
         ], dtype=np.uint32)
         return vertices, faces, edges
+
+    if kind == "cylinder":
+        parts = _cylinder_parts(geometry)
+        if parts is None:
+            return None
+        _axis, stack_col, u, v, centre, radii, height = parts
+        n_lon = max(3, int(longitude_segments))
+        lo = float(centre[stack_col] - 0.5 * height)
+        hi = float(centre[stack_col] + 0.5 * height)
+        ang = np.arange(n_lon, dtype=float) * (2.0 * np.pi / n_lon)
+        # Built in the ROI's own (u, v, axis) frame and scattered into XYZ
+        # columns, so one code path serves a cylinder about X, Y or Z with no
+        # per-axis branch -- the same reasoning that keeps the geometry in named
+        # data axes rather than as a 2-D shape plus a plane name.
+        rim = np.zeros((n_lon, 3), dtype=np.float64)
+        rim[:, u] = centre[u] + radii[0] * np.cos(ang)
+        rim[:, v] = centre[v] + radii[1] * np.sin(ang)
+        bottom = rim.copy()
+        bottom[:, stack_col] = lo
+        top = rim.copy()
+        top[:, stack_col] = hi
+        cap_lo = np.zeros(3, dtype=np.float64)
+        cap_hi = np.zeros(3, dtype=np.float64)
+        cap_lo[u] = cap_hi[u] = centre[u]
+        cap_lo[v] = cap_hi[v] = centre[v]
+        cap_lo[stack_col], cap_hi[stack_col] = lo, hi
+        vertices = np.vstack([cap_lo[None, :], cap_hi[None, :], bottom, top])
+        base, apex = 2, 2 + n_lon              # first vertex index of each rim
+        faces: list[list[int]] = []
+        edges: list[list[int]] = []
+        # A rim edge per segment reads as a circle; a vertical at every segment
+        # reads as a solid band, so the wireframe keeps about eight of them.
+        step = max(1, n_lon // 8)
+        # Faces are wound so every normal points OUTWARD -- a translucent
+        # GLMeshItem shades an inward normal visibly wrong.
+        #
+        # The (u, v, axis) frame is not always right-handed: cross_axes returns
+        # the two cross axes in ascending order, so an axis of Y gives the frame
+        # (X, Z, Y) whose u x v is -axis. Emitting one index order for every axis
+        # would turn a Y-cylinder's surface inside out, so the handedness is
+        # measured and the winding flipped with it.
+        basis = np.eye(3)
+        handed = float(np.dot(np.cross(basis[u], basis[v]), basis[stack_col]))
+
+        def tri(a, b, c):
+            return [a, c, b] if handed < 0.0 else [a, b, c]
+
+        for i in range(n_lon):
+            j = (i + 1) % n_lon
+            faces.append(tri(0, base + j, base + i))          # lower cap, -axis
+            faces.append(tri(1, apex + i, apex + j))          # upper cap, +axis
+            faces.append(tri(base + i, base + j, apex + i))   # side, first half
+            faces.append(tri(base + j, apex + j, apex + i))   # side, second half
+            edges.append([base + i, base + j])                # lower rim
+            edges.append([apex + i, apex + j])                # upper rim
+            if i % step == 0:
+                edges.append([base + i, apex + i])            # a few verticals
+        return (vertices,
+                np.asarray(faces, dtype=np.uint32),
+                np.asarray(edges, dtype=np.uint32))
 
     if kind != "sphere":
         return None
@@ -609,12 +1011,21 @@ def volume_silhouette(record, h_axis: int, v_axis: int,
     kind = getattr(record, "type", None)
     g = getattr(record, "geometry", None) or {}
 
-    if kind in ("cuboid", "sphere"):
+    if kind in ("cuboid", "sphere", "cylinder"):
         bounds = volume_bounds(record)
         if bounds is None:
             return None
         (h0, h1), (v0, v1) = bounds[h_axis], bounds[v_axis]
-        if kind == "cuboid":
+        rectangular = kind == "cuboid"
+        if kind == "cylinder":
+            # A cylinder is the one volume type whose silhouette KIND depends on
+            # the view: the drawn ellipse looking down its axis, a rectangle from
+            # either side. Both fall straight out of the bounds, so neither needs
+            # projection maths -- and because the axis is named in the geometry,
+            # no view has to know which plane drew it.
+            rectangular = AXIS_INDEX.get(
+                str(g.get("axis", "Z")).upper()) in (h_axis, v_axis)
+        if rectangular:
             return np.array([[h0, v0], [h1, v0], [h1, v1], [h0, v1]], dtype=float)
         # An axis-aligned ellipsoid's silhouette is exactly the ellipse of that
         # plane's two radii — no projection maths needed.
@@ -626,6 +1037,14 @@ def volume_silhouette(record, h_axis: int, v_axis: int,
 
     if kind != "polyhedron":
         return None
+
+    constraint = projection_polygon(g, h_axis, v_axis)
+    if constraint is not None:
+        # This is the editable constraint in that projection.  The actual
+        # silhouette of the three-prism intersection may be smaller, but
+        # replacing the user's primary polygon with it would violate the
+        # projection-hull editing contract.
+        return constraint
 
     axis = str(g.get("axis", "Z")).upper()
     stack_col = AXIS_INDEX[axis]
@@ -675,8 +1094,135 @@ def plane_in_plane_axes(plane: str) -> tuple[int, int]:
     return cross_axes(PLANE_NORMAL_AXIS[str(plane).upper()])
 
 
+def _projected_convex_hull(points: np.ndarray, margin: float) -> np.ndarray | None:
+    """Convex hull of 2-D *points*, with a cheap approximate round buffer.
+
+    Only the already-small hull vertex set is expanded, so the margin work does
+    not scale with a large localization cloud.  Sixteen directions are ample
+    here: the margin is a visual drawing allowance, not a measurement result.
+    """
+    try:
+        from scipy.spatial import ConvexHull, QhullError
+
+        points = np.asarray(points, dtype=float)
+        points = points[np.all(np.isfinite(points[:, :2]), axis=1), :2]
+        points = np.unique(points, axis=0)
+        if points.shape[0] < 3 or np.linalg.matrix_rank(points - points.mean(axis=0)) < 2:
+            return None
+        hull = points[ConvexHull(points).vertices]
+        margin = max(0.0, float(margin))
+        if margin > 0.0:
+            angles = np.linspace(0.0, 2.0 * np.pi, 16, endpoint=False)
+            offsets = margin * np.column_stack([np.cos(angles), np.sin(angles)])
+            expanded = (hull[:, None, :] + offsets[None, :, :]).reshape(-1, 2)
+            hull = expanded[ConvexHull(expanded).vertices]
+        return hull
+    except (QhullError, ValueError, IndexError):
+        return None
+
+
+def _projection_fallback(axis_bounds: list[tuple[float, float]], plane: str) -> np.ndarray:
+    u, v = PROJECTION_AXES[plane]
+    u0, u1 = axis_bounds[u]
+    v0, v1 = axis_bounds[v]
+    return np.asarray([[u0, v0], [u1, v0], [u1, v1], [u0, v1]], dtype=float)
+
+
+def projection_hull_from_flat(
+    geometry: dict,
+    columns,
+    interval: tuple[float, float],
+    contained_points,
+    *,
+    min_points: int = MIN_SEED_LOCS,
+) -> dict | None:
+    """Build three editable projection constraints from one drawn polygon.
+
+    The primary polygon is preserved exactly.  With enough contained 3-D data,
+    each secondary projection is a buffered convex hull of those same rows.  No
+    data and too few data deliberately share one path: both secondary views get
+    the existing four-corner fallback, using the primary extent on their shared
+    axis and the crosshair/visible-range *interval* on the hidden axis.
+
+    The small inherited margin is the mean axis-aligned clearance between the
+    primary polygon's bounding box and the contained data's bounding box.  It
+    is intentionally cheap and merely keeps a generated boundary from visually
+    sitting on top of the outermost localization.
+    """
+    key = _projection_key(columns)
+    if key is None:
+        return None
+    primary_plane, reverse = key
+    try:
+        primary = np.asarray((geometry or {}).get("points"), dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if primary.ndim != 2 or primary.shape[0] < 3 or primary.shape[1] < 2:
+        return None
+    primary = primary[:, :2]
+    if not np.all(np.isfinite(primary)):
+        return None
+    if reverse:
+        primary = primary[:, ::-1]
+
+    try:
+        points = np.asarray(contained_points, dtype=float)
+    except (TypeError, ValueError):
+        points = np.empty((0, 3), dtype=float)
+    if points.ndim != 2 or points.shape[1] < 3:
+        points = np.empty((0, 3), dtype=float)
+    else:
+        points = points[np.all(np.isfinite(points[:, :3]), axis=1), :3]
+
+    primary_axes = PROJECTION_AXES[primary_plane]
+    normal = ({0, 1, 2} - set(primary_axes)).pop()
+    lo, hi = sorted((float(interval[0]), float(interval[1])))
+    axis_bounds: list[tuple[float, float]] = [(0.0, 0.0)] * 3
+    axis_bounds[primary_axes[0]] = (
+        float(primary[:, 0].min()), float(primary[:, 0].max()))
+    axis_bounds[primary_axes[1]] = (
+        float(primary[:, 1].min()), float(primary[:, 1].max()))
+    axis_bounds[normal] = (lo, hi)
+
+    enough = points.shape[0] >= max(3, int(min_points))
+    margin = 0.0
+    if enough:
+        projected = points[:, primary_axes]
+        data_lo, data_hi = projected.min(axis=0), projected.max(axis=0)
+        roi_lo, roi_hi = primary.min(axis=0), primary.max(axis=0)
+        gaps = np.concatenate([data_lo - roi_lo, roi_hi - data_hi])
+        margin = max(1.0, float(np.mean(np.maximum(gaps, 0.0))))
+
+    projections: dict[str, dict] = {
+        primary_plane: {
+            "points": [[float(a), float(b)] for a, b in primary],
+            "source": "manual",
+        }
+    }
+    for plane, axes in PROJECTION_AXES.items():
+        if plane == primary_plane:
+            continue
+        polygon = (_projected_convex_hull(points[:, axes], margin)
+                   if enough else None)
+        source = "auto_hull"
+        if polygon is None:
+            polygon = _projection_fallback(axis_bounds, plane)
+            source = "fallback"
+        projections[plane] = {
+            "points": [[float(a), float(b)] for a, b in polygon],
+            "source": source,
+        }
+    return {
+        "representation": "projection_hull",
+        "primary_plane": primary_plane,
+        "margin_nm": margin,
+        "projections": projections,
+    }
+
+
 def volume_from_flat(flat_type: str, geometry: dict, plane: str,
-                     interval: tuple[float, float]) -> tuple[str, dict]:
+                     interval: tuple[float, float],
+                     *, volume_type: str | None = None) -> tuple[str, dict]:
     """Lift a 2-D shape drawn in *plane* into a volume record.
 
     *interval* is the extent on the axis normal to *plane* -- what
@@ -685,12 +1231,15 @@ def volume_from_flat(flat_type: str, geometry: dict, plane: str,
     know which view drew it.
 
     The in-plane shape is carried across unchanged: a rectangle becomes the two
-    in-plane sides of a cuboid, an oval the two in-plane radii of an ellipsoid,
-    a polygon the cross-section of a prism. Only the third axis is new.
+    in-plane sides of a cuboid, an oval the two in-plane radii of an ellipsoid
+    or cylinder, and the legacy polygon branch becomes a prism cross-section.
+    New UI polyhedra use :func:`projection_hull_from_flat` instead.
     """
-    volume_type = FLAT_TO_VOLUME.get(flat_type)
+    volume_type = volume_type or FLAT_TO_VOLUME.get(flat_type)
     if volume_type is None:
         raise ValueError(f"{flat_type!r} has no volume counterpart")
+    if volume_type not in VOLUME_ROI_TYPES:
+        raise ValueError(f"{volume_type!r} is not a volume ROI type")
     plane = str(plane).upper()
     if plane not in PLANE_NORMAL_AXIS:
         raise ValueError(f"unknown plane {plane!r}; expected one of {sorted(PLANE_NORMAL_AXIS)}")
@@ -718,6 +1267,24 @@ def volume_from_flat(flat_type: str, geometry: dict, plane: str,
         k = AXIS_INDEX[normal]
         centre[k], radii[k] = 0.5 * (lo + hi), 0.5 * abs(hi - lo)
         return volume_type, {"center": centre, "radii": radii}
+
+    if volume_type == "cylinder":
+        # The same drawn ellipse as a sphere, extruded along the plane normal
+        # instead of revolved: the two in-plane radii are kept and the third axis
+        # becomes a length rather than a third radius.
+        x, y, w, h = (float(v) for v in (g.get("bounds") or [0.0, 0.0, 0.0, 0.0]))
+        centre = [0.0, 0.0, 0.0]
+        centre[ui] = x + 0.5 * w
+        centre[vi] = y + 0.5 * h
+        centre[AXIS_INDEX[normal]] = 0.5 * (lo + hi)
+        # ``radii`` is in cross_axes(normal) ascending order, and
+        # plane_in_plane_axes returns exactly that pair, so (ui, vi) IS the order.
+        return volume_type, {
+            "axis": normal,
+            "center": centre,
+            "radii": [0.5 * abs(w), 0.5 * abs(h)],
+            "height": abs(hi - lo),
+        }
 
     # polyhedron: a prism -- one cross-section plus a thickness. The polygon is
     # already in (ui, vi) order, which cross_axes(normal) reproduces exactly.
@@ -764,7 +1331,51 @@ def scale_z(record, factor: float):
         radii[2] = abs(float(radii[2]) * factor)
         g["center"], g["radii"] = centre, radii
         return g
+    if kind == "cylinder":
+        parts = _cylinder_parts(g)
+        if parts is None:
+            return None
+        _axis, stack_col, u, _v, centre, radii, height = parts
+        centre = [float(c) for c in centre]
+        radii = [float(r) for r in radii]
+        zcol = AXIS_INDEX["Z"]
+        centre[zcol] = centre[zcol] * factor
+        if stack_col == zcol:
+            height = abs(height * factor)
+        else:
+            # Z is one of the cross-section's own axes here, so it is a radius
+            # rather than the extruded length.
+            which = 0 if u == zcol else 1
+            radii[which] = abs(radii[which] * factor)
+        g["center"], g["radii"], g["height"] = centre, radii, height
+        return g
     if kind == "polyhedron":
+        if str(g.get("representation") or "") == "projection_hull":
+            projections = {
+                str(name): (dict(value) if isinstance(value, dict)
+                            else {"points": value})
+                for name, value in (g.get("projections") or {}).items()
+            }
+            for plane, axes in PROJECTION_AXES.items():
+                entry = projections.get(plane)
+                if not isinstance(entry, dict):
+                    return None
+                polygon = [[float(p[0]), float(p[1])]
+                           for p in (entry.get("points") or [])]
+                if len(polygon) < 3:
+                    return None
+                if AXIS_INDEX["Z"] in axes:
+                    column = axes.index(AXIS_INDEX["Z"])
+                    for point in polygon:
+                        point[column] *= factor
+                entry["points"] = polygon
+            g["projections"] = projections
+            if "margin_nm" in g:
+                # A single inherited margin is only drawing flavour.  Retain a
+                # sensible scalar under Z scaling rather than introducing a
+                # false per-axis precision contract.
+                g["margin_nm"] = abs(float(g["margin_nm"]) * factor)
+            return g
         axis = str(g.get("axis", "Z")).upper()
         levels = [dict(lv) for lv in (g.get("levels") or [])]
         if not levels:
@@ -831,7 +1442,9 @@ def translate_volume(record, deltas: dict) -> dict | None:
                 g[name] = [lo + delta, hi + delta]
         return g
 
-    if kind == "sphere":
+    if kind in ("sphere", "cylinder"):
+        # Both store a full 3-D ``center``, and a cylinder's extent is centred on
+        # it, so moving the centre moves the whole shape.
         centre = list(g.get("center") or [])
         if len(centre) < 3:
             return None
@@ -841,6 +1454,28 @@ def translate_volume(record, deltas: dict) -> dict | None:
         return g
 
     if kind == "polyhedron":
+        if str(g.get("representation") or "") == "projection_hull":
+            projections = {
+                str(name): (dict(value) if isinstance(value, dict)
+                            else {"points": value})
+                for name, value in (g.get("projections") or {}).items()
+            }
+            for plane, axes in PROJECTION_AXES.items():
+                entry = projections.get(plane)
+                if not isinstance(entry, dict):
+                    return None
+                polygon = [[float(p[0]), float(p[1])]
+                           for p in (entry.get("points") or [])]
+                if len(polygon) < 3:
+                    return None
+                for local, column in enumerate(axes):
+                    delta = moves.get(column, 0.0)
+                    if delta:
+                        for point in polygon:
+                            point[local] += delta
+                entry["points"] = polygon
+            g["projections"] = projections
+            return g
         axis = str(g.get("axis", "Z")).upper()
         stack = AXIS_INDEX[axis]
         ui, vi = cross_axes(axis)
@@ -869,8 +1504,8 @@ def set_volume_extent(record, columns, bounds) -> dict | None:
     is left exactly as it was -- a projection has nothing to say about it, and
     recomputing it would let an XY resize silently change a Z extent.
 
-    Only ``cuboid`` and ``sphere`` have an extent expressible this way; a
-    polyhedron's cross-section is a polygon and is edited vertex-wise.
+    Only ``cuboid``, ``sphere`` and ``cylinder`` have an extent expressible this
+    way; a polyhedron's cross-section is a polygon and is edited vertex-wise.
     """
     kind = getattr(record, "type", None)
     g = dict(getattr(record, "geometry", None) or {})
@@ -896,6 +1531,24 @@ def set_volume_extent(record, columns, bounds) -> dict | None:
             centre[column] = 0.5 * (lo + hi)
             radii[column] = 0.5 * abs(hi - lo)
         g["center"], g["radii"] = centre, radii
+        return g
+    if kind == "cylinder":
+        parts = _cylinder_parts(g)
+        if parts is None:
+            return None
+        _axis, stack_col, u, v, centre, radii, height = parts
+        centre = [float(c) for c in centre]
+        radii = [float(r) for r in radii]
+        for column, (lo, hi) in spans.items():
+            centre[column] = 0.5 * (lo + hi)
+            half = 0.5 * abs(hi - lo)
+            if column == stack_col:
+                height = 2.0 * half        # resized along the extrusion axis
+            elif column == u:
+                radii[0] = half
+            elif column == v:
+                radii[1] = half
+        g["center"], g["radii"], g["height"] = centre, radii, height
         return g
     return None
 
@@ -923,7 +1576,26 @@ def volume_geometry_text(record, fmt) -> str:
         if len(centre) >= 3 and len(radii) >= 3:
             lines.append("centre=(" + ", ".join(fmt(c) for c in centre[:3]) + "), "
                          "radii=(" + ", ".join(fmt(r) for r in radii[:3]) + ")")
+    elif kind == "cylinder":
+        parts = _cylinder_parts(g)
+        if parts is not None:
+            axis, _sc, _u, _v, centre, radii, height = parts
+            lines.append(
+                f"axis={axis}, centre=(" + ", ".join(fmt(c) for c in centre) + "), "
+                "radii=(" + ", ".join(fmt(r) for r in radii) + "), "
+                f"height={fmt(height)}")
     elif kind == "polyhedron":
+        if str(g.get("representation") or "") == "projection_hull":
+            projections = g.get("projections") or {}
+            sources = []
+            for plane in PROJECTION_AXES:
+                entry = projections.get(plane) or {}
+                source = entry.get("source", "unknown") if isinstance(entry, dict) else "unknown"
+                sources.append(f"{plane}={source}")
+            lines.append("projection hull (" + ", ".join(sources) + ")")
+            if g.get("margin_nm") is not None:
+                lines.append(f"generated margin={fmt(g['margin_nm'])}")
+            return "\n".join(lines)
         axis = str(g.get("axis", "Z")).upper()
         levels = list(g.get("levels") or [])
         at = ", ".join(fmt(lv.get("at", 0.0)) for lv in levels)
@@ -950,6 +1622,11 @@ def add_cross_section(record, at: float, polygon) -> dict | None:
     if getattr(record, "type", None) != "polyhedron":
         return None
     g = dict(getattr(record, "geometry", None) or {})
+    # The new projection-hull representation is edited directly in XY/XZ/YZ.
+    # Adding a legacy stack level to it would create geometry the mask ignores,
+    # making the command appear to succeed while changing nothing.
+    if str(g.get("representation") or "") == "projection_hull":
+        return None
     points = [[float(p[0]), float(p[1])] for p in (polygon or [])]
     if len(points) < 3:
         return None
@@ -962,6 +1639,182 @@ def add_cross_section(record, at: float, polygon) -> dict | None:
     if len(levels) > 1:
         g.pop("thickness", None)
     return g
+
+
+#: Levels a point cloud is bounded with at most. Each level costs a polygon in
+#: the record and an interpolation in every mask call, and the shape between
+#: levels is interpolated anyway, so more levels buy accuracy that the radial
+#: description cannot express.
+MAX_POINT_LEVELS = 24
+
+
+def _radial_level(plane_pts: np.ndarray, n_angles: int, pad: float) -> list | None:
+    """One star-shaped cross-section enclosing *plane_pts*.
+
+    The per-angle furthest point about the centroid, so a concave outline stays
+    concave in the radial direction -- tighter than a convex hull, which fills
+    every notch.
+
+    ⚠ Rays from the point-cloud mean do NOT make the result star-shaped about
+    its own centroid, which is what ``radial_profile`` measures -- an early
+    version claimed they did and raised ``NotStarShaped`` (ray 32 of 64 crossing
+    three times) on the first concave cloud. Since ``roi_volume_mask`` defaults
+    to ``strict=True``, such a level makes the finished ROI throw inside every
+    consumer that asks it for a mask, so :func:`_star_shaped_level` validates
+    this outline and degrades instead of trusting it.
+    """
+    if plane_pts.shape[0] == 0:
+        return None
+    centre = plane_pts.mean(axis=0)
+    delta = plane_pts - centre
+    radius = np.hypot(delta[:, 0], delta[:, 1])
+    step = 2.0 * np.pi / int(n_angles)
+    bins = (np.arctan2(delta[:, 1], delta[:, 0]) % (2.0 * np.pi) / step).astype(np.intp)
+    bins = np.clip(bins, 0, int(n_angles) - 1)
+    radii = np.zeros(int(n_angles), dtype=float)
+    np.maximum.at(radii, bins, radius)
+
+    filled = np.flatnonzero(radii > 0.0)
+    if filled.size == 0:
+        radii[:] = max(pad, 1e-6)                  # a single point still has extent
+    elif filled.size < radii.size:
+        # Empty angular bins are gaps in the sampling, not a boundary at the
+        # centre; interpolate around the circle rather than collapsing inward.
+        index = np.arange(radii.size, dtype=float)
+        wrapped_i = np.concatenate([filled - radii.size, filled, filled + radii.size])
+        wrapped_r = np.tile(radii[filled], 3)
+        radii = np.interp(index, wrapped_i.astype(float), wrapped_r)
+    radii = radii + max(0.0, float(pad))
+    return [[float(x), float(y)] for x, y in _outline(centre, radii, int(n_angles))]
+
+
+def _convex_level(plane_pts: np.ndarray, pad: float) -> list | None:
+    """The level's convex hull, pushed out by *pad*.
+
+    A convex polygon is star-shaped about every interior point, its own centroid
+    included, so this always validates -- at the cost of filling this level's
+    concavities.
+    """
+    if plane_pts.shape[0] < 3:
+        return None
+    try:
+        from scipy.spatial import ConvexHull, QhullError
+        hull = ConvexHull(plane_pts)
+    except Exception:
+        return None
+    verts = plane_pts[hull.vertices]
+    centre = verts.mean(axis=0)
+    out = []
+    for v in verts:
+        delta = v - centre
+        length = float(np.hypot(delta[0], delta[1]))
+        if length > 0.0 and pad > 0.0:
+            v = centre + delta * (1.0 + pad / length)
+        out.append([float(v[0]), float(v[1])])
+    return out
+
+
+def _star_shaped_level(plane_pts: np.ndarray, n_angles: int, pad: float) -> list | None:
+    """A cross-section for *plane_pts* that ``radial_profile`` will accept.
+
+    Tried in order of tightness: the radial profile, then the convex hull, then a
+    circle. Each candidate is VALIDATED rather than assumed -- the guarantee has
+    to hold for the ROI to be usable at all, and only a convex outline or a
+    circle holds it unconditionally.
+    """
+    outline = _radial_level(plane_pts, n_angles, pad)
+    if outline is None:
+        return None
+    for candidate in (outline, _convex_level(plane_pts, pad)):
+        if candidate is None or len(candidate) < 3:
+            continue
+        try:
+            radial_profile(candidate, n_angles=n_angles, strict=True)
+        except NotStarShaped:
+            continue
+        except ValueError:
+            continue
+        return candidate
+    # A circle about the cloud's mean, which is star-shaped about its own centre.
+    centre = plane_pts.mean(axis=0)
+    delta = plane_pts - centre
+    radius = float(np.hypot(delta[:, 0], delta[:, 1]).max()) + max(0.0, float(pad))
+    radii = np.full(int(n_angles), max(radius, 1e-6), dtype=float)
+    return [[float(x), float(y)] for x, y in _outline(centre, radii, int(n_angles))]
+
+
+def points_to_polyhedron(points, *, axis: str = "Z", level_thickness: float | None = None,
+                         max_levels: int = MAX_POINT_LEVELS,
+                         n_angles: int = DEFAULT_ANGLES,
+                         pad: float = 0.0) -> tuple[dict, float] | None:
+    """A ``polyhedron`` bounding *points*, as one radial cross-section per level.
+
+    Returns ``(geometry, recovered)``, where *recovered* is the fraction of
+    *points* the reconstruction actually contains -- reported rather than
+    assumed, because the radial description cannot express a hole or a spiral
+    and the caller should be able to say how close the shape is.
+
+    This is the sibling of :func:`convex_hull_polyhedron`: same stack-of-levels
+    representation, but each level follows the cloud radially instead of taking
+    its convex hull, so a C-shaped selection does not come back filled in.
+    """
+    pts = np.asarray(points, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] < 3:
+        return None
+    pts = pts[np.all(np.isfinite(pts[:, :3]), axis=1)]
+    if pts.shape[0] == 0:
+        return None
+    key = str(axis).upper()
+    if key not in AXIS_INDEX:
+        return None
+    stack = AXIS_INDEX[key]
+    ui, vi = cross_axes(key)
+
+    lo, hi = float(pts[:, stack].min()), float(pts[:, stack].max())
+    span = hi - lo
+    thickness = (float(level_thickness) if level_thickness
+                 else max(span / 8.0, MIN_SEED_THICKNESS_NM))
+    if not np.isfinite(thickness) or thickness <= 0.0:
+        thickness = MIN_SEED_THICKNESS_NM
+    n_levels = int(np.clip(int(np.ceil(span / thickness)) + 1, 1, int(max_levels)))
+
+    levels: list[dict] = []
+    if n_levels <= 1 or span <= 0.0:
+        # A single cross-section plus a thickness -- the prism the polyhedron
+        # model already understands, and the one case whose polygon is used
+        # verbatim rather than radially re-sampled.
+        polygon = _star_shaped_level(np.column_stack([pts[:, ui], pts[:, vi]]),
+                                     n_angles, pad)
+        if polygon is None:
+            return None
+        geometry = {
+            "axis": key,
+            "thickness": max(span, MIN_SEED_THICKNESS_NM),
+            "levels": [{"at": 0.5 * (lo + hi), "polygon": polygon}],
+        }
+    else:
+        positions = np.linspace(lo, hi, n_levels)
+        half = 0.5 * (positions[1] - positions[0])
+        for at in positions:
+            near = pts[np.abs(pts[:, stack] - at) <= half * 1.5]
+            polygon = _star_shaped_level(np.column_stack([near[:, ui], near[:, vi]]),
+                                         n_angles, pad)
+            if polygon is None:
+                continue
+            levels.append({"at": float(at), "polygon": polygon})
+        if not levels:
+            return None
+        geometry = {"axis": key, "levels": levels}
+
+    class _Rec:                                    # what the mask reader needs
+        type = "polyhedron"
+
+    probe = _Rec()
+    probe.geometry = geometry
+    inside = roi_volume_mask(pts[:, 0], pts[:, 1], pts[:, 2], probe,
+                             n_angles=n_angles, strict=False)
+    recovered = float(inside.mean()) if inside.size else 0.0
+    return geometry, recovered
 
 
 def convex_hull_polyhedron(points, *, axis: str = "Z", levels: int = 9) -> dict | None:

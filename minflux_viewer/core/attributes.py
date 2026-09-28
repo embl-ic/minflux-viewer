@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 import numpy as np
-
 
 SPATIAL_VECTOR_ATTRIBUTES = {"loc", "lnc", "ext", "xyz"}
 RAW_ATTRIBUTE_NAMES = (
@@ -17,9 +16,14 @@ RAW_ATTRIBUTE_NAMES = (
 )
 DERIVED_ATTRIBUTE_NAMES = (
     "idx", "siz", "dst", "dur", "len", "spd", "dt", "tim_trace", "den",
+    "msd_d", "msd_alpha", "msd_sigma_apparent", "step_angle",
+    "track_straightness",
 )
 LEGACY_DERIVED_ATTRIBUTE_ALIASES = {"nLoc": "siz"}
-TRACE_WISE_ATTRIBUTE_NAMES = {"siz", "dur", "len"}
+TRACE_WISE_ATTRIBUTE_NAMES = {
+    "siz", "dur", "len", "msd_d", "msd_alpha", "msd_sigma_apparent",
+    "track_straightness",
+}
 
 RAW_ATTRIBUTE_DESCRIPTIONS = {
     "vld": "Valid localization flag. True means a valid localization was obtained.",
@@ -57,6 +61,23 @@ DERIVED_ATTRIBUTE_DESCRIPTIONS = {
     "dt": "Time interval from the previous localization in the same track.",
     "tim_trace": "Time stamp zeroed at each track start.",
     "den": "Local density at data point.",
+    "msd_d": (
+        "Short-lag diffusion coefficient fitted from measured-lag MSD for the "
+        "localization's uninterrupted trajectory segment."
+    ),
+    "msd_alpha": (
+        "Descriptive short-lag MSD exponent for the localization's uninterrupted "
+        "trajectory segment; not a motion-state classification."
+    ),
+    "msd_sigma_apparent": (
+        "Apparent localization sigma from the MSD intercept; motion blur and "
+        "tracking-loop dynamic error are not corrected."
+    ),
+    "step_angle": "Turning angle between consecutive trajectory steps, in radians.",
+    "track_straightness": (
+        "Net displacement divided by path length for the uninterrupted trajectory "
+        "segment containing the localization."
+    ),
 }
 
 AGGREGATION_DESCRIPTIONS = {

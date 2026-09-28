@@ -31,6 +31,42 @@ def overlay_color_cycle(prefs: dict | None) -> list[str]:
     return [f"solid:custom:{rgba_hex(color)}" for color in colors] or list(DEFAULT_OVERLAY_COLORS)
 
 
+#: The prefix :func:`overlay_color_cycle` encodes a literal colour behind.
+CUSTOM_SOLID_PREFIX = "solid:custom:"
+
+
+def channel_rgb(lut: str, default: tuple[int, int, int] = (200, 200, 200)):
+    """Decode a channel LUT value to ``(r, g, b)``, 0..255.
+
+    ⚠ ``solid_color_rgb`` does **not** understand the
+    ``solid:custom:#rrggbbaa`` form that :func:`overlay_color_cycle` produces:
+    ``is_solid_color`` returns False for it and the accessor then hands back a
+    grey **without raising**, so a caller that guards with ``try`` still gets
+    grey and never learns why. That is how the Tracking View's comet tails came
+    out grey instead of the channel colour. This resolves all three spellings --
+    a bare name, ``solid:<Name>``, and the encoded literal.
+    """
+    from ..colors import is_solid_color, normalize_rgba, solid_color_rgb
+
+    text = str(lut or "")
+    if text.startswith(CUSTOM_SOLID_PREFIX):
+        try:
+            rgba = normalize_rgba(text[len(CUSTOM_SOLID_PREFIX):])
+        except (TypeError, ValueError):
+            return default
+        return (int(rgba[0]), int(rgba[1]), int(rgba[2]))
+    name = text[6:] if text.startswith("solid:") else text
+    if is_solid_color(name):
+        r, g, b = solid_color_rgb(name)
+        return (int(r), int(g), int(b))
+    try:
+        from ..colormaps import representative_rgb
+        rgb = representative_rgb(name, position=0.85)
+    except (KeyError, ValueError, ImportError):
+        return default
+    return tuple(int(round(c * 255.0)) for c in rgb)
+
+
 @dataclass
 class OverlayMemberSpec:
     dataset_idx: int

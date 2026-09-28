@@ -49,7 +49,7 @@ from PyQt6.QtWidgets import (
 
 from ...colors import component_colors
 from ...core.loader import attr_values_1d
-from ...ui.plot_format import plot_widget
+from ...ui.plot_format import apply_spatial_y_direction, plot_widget
 from . import trace_data as td
 
 _PLANE = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
@@ -84,6 +84,7 @@ class TraceViewerWindow(QDialog):
         self._headers: list[str] = []
         self._series: dict = {}
         self._selected_tid: int | None = None
+        self._syncing_playhead = False
         self._child_windows: list = []   # keep Tile/Overlay windows alive (else GC'd)
         self._play_timer = QTimer(self)
         self._play_timer.setInterval(40)
@@ -91,6 +92,7 @@ class TraceViewerWindow(QDialog):
 
         self._build_ui()
         self._reload_tid(reset=True)
+        state.tracking_playhead_changed.connect(self._receive_playhead)
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
@@ -355,6 +357,12 @@ class TraceViewerWindow(QDialog):
     def _redraw_scatter(self) -> None:
         xyz = self._series.get("xyz", np.empty((0, 3)))
         i, j = _PLANE[self._orient_combo.currentText()]
+        apply_spatial_y_direction(
+            self._scatter_plot,
+            vertical_coordinate="XYZ"[j],
+            prefs=self._state.prefs,
+            preference_key="scatter_xy_origin",
+        )
         if xyz.shape[0]:
             self._scatter_item.setData(x=xyz[:, i], y=xyz[:, j])
         else:
@@ -405,6 +413,39 @@ class TraceViewerWindow(QDialog):
             for region in self._ts_regions.values():
                 region.setRegion((left, right))
                 region.setVisible(True)
+            if self._selected_tid is not None and not self._syncing_playhead:
+                ds = self._dataset()
+                if ds is not None:
+                    self._state.tracking_playhead_changed.emit(
+                        ds, self._selected_tid, right, self)
+
+    def _receive_playhead(
+        self,
+        dataset,
+        trace_id,
+        trace_time: float,
+        source,
+    ) -> None:
+        if source is self or dataset is not self._dataset():
+            return
+        try:
+            trace_id = int(trace_id)
+        except (TypeError, ValueError):
+            return
+        available = {int(row["trace ID"]) for row in self._rows}
+        if trace_id not in available:
+            return
+        self._syncing_playhead = True
+        try:
+            if self._selected_tid != trace_id:
+                self._select_trace(trace_id)
+            times = np.asarray(self._series.get("t", np.empty(0)), dtype=float)
+            if times.size:
+                position = int(np.argmin(np.abs(times - float(trace_time))))
+                self._time_slider.setValue(position)
+                self._frame_update()
+        finally:
+            self._syncing_playhead = False
 
     # ------------------------------------------------------------- play
     def _on_play_toggled(self, on: bool) -> None:
@@ -538,9 +579,12 @@ class _TileDialog(QDialog):
         lay.addLayout(form)
         btns = QHBoxLayout()
         btns.addStretch(1)
-        ok = QPushButton("OK"); ok.clicked.connect(self.accept)
-        cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
-        btns.addWidget(ok); btns.addWidget(cancel)
+        ok = QPushButton("OK")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(ok)
+        btns.addWidget(cancel)
         lay.addLayout(btns)
 
     def values(self):
@@ -570,6 +614,12 @@ class _TileWindow(QWidget):
         for k, tid in enumerate(ids):
             p = plot_widget()
             p.setAspectLocked(True)
+            apply_spatial_y_direction(
+                p,
+                vertical_coordinate="Y",
+                prefs=viewer._state.prefs,
+                preference_key="scatter_xy_origin",
+            )
             p.setTitle(f"tid: {tid}")
             p.getAxis("bottom").setStyle(showValues=False)
             p.getAxis("left").setStyle(showValues=False)
@@ -590,6 +640,12 @@ class _OverlayWindow(QWidget):
         lay = QVBoxLayout(self)
         p = plot_widget()
         p.setAspectLocked(True)
+        apply_spatial_y_direction(
+            p,
+            vertical_coordinate="Y",
+            prefs=viewer._state.prefs,
+            preference_key="scatter_xy_origin",
+        )
         p.showGrid(x=True, y=True, alpha=0.15)
         p.addLegend()
         for k, tid in enumerate(ids):

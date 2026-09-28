@@ -5124,6 +5124,15 @@ class RenderWindow(QWidget):
         on screen when there is no data at that XY.  ``None`` for 2-D datasets."""
         if not self._has_depth:
             return None
+        if self._ortho_active() and self._show_crosshair:
+            crosshair = getattr(self, "_ortho_crosshair", None)
+            point = getattr(crosshair, "point", None)
+            plane = self._active_plane()
+            column = {"XY": 2, "XZ": 1, "YZ": 0}.get(plane)
+            if (crosshair is not None and crosshair.visible and point is not None
+                    and column is not None and len(point) > column
+                    and np.isfinite(float(point[column]))):
+                return float(point[column])
         lo, hi = self._depth_range
         return 0.5 * (float(lo) + float(hi))
 
@@ -5254,6 +5263,133 @@ class RenderWindow(QWidget):
                 ctx.setdefault("depth_value", float(center))
         record.context = ctx
         return record
+
+    def _wand_depth_mask(self, locs, columns) -> "np.ndarray":
+        """The depth-slider gate as a row mask over *locs*.
+
+        ⚠ A ROI's *stored* mask deliberately spans the whole depth axis (see
+        ``compute_roi_selection``), but the wand is seeded and grown from what is
+        actually on screen. With a thin Z slab shown, growing through
+        localizations the user cannot see bridges gaps that are not there and
+        selects data from outside the slice -- which is exactly what it appeared
+        to do. The gate therefore restricts the CANDIDATES, and on 3-D data the
+        ROI that results narrows Z by its own geometry.
+        """
+        n = locs.shape[0]
+        if not self._has_depth or self._all_depth_check.isChecked():
+            return np.ones(n, dtype=bool)
+        try:
+            depth_axis = ({0, 1, 2} - {int(columns[0]), int(columns[1])}).pop()
+        except (TypeError, ValueError, KeyError):
+            return np.ones(n, dtype=bool)
+        if depth_axis >= locs.shape[1]:
+            return np.ones(n, dtype=bool)
+        lo, hi = sorted(float(v) for v in self._depth_range)
+        depth = locs[:, depth_axis]
+        return (depth >= lo) & (depth <= hi)
+
+    def _wand_density(self, ds, locs, radius_nm: float):
+        """Per-localization local density for the wand, and the field's name.
+
+        ``den`` is normally there -- the load-time step computes it by default --
+        but it is skipped for a particle average, can be switched off in
+        Preferences, and is computed at the PREFERENCE radius, which need not be
+        the wand's reach. Computing it on demand at the wand's own radius keeps
+        the field and the connectivity on one scale, and the name that comes back
+        says which was used, so a selection is never silently grown on a
+        different scale from the one on the slider.
+        """
+        import numpy as _np
+
+        if "den" in ds.attr:
+            values = _np.asarray(ds.attr["den"], dtype=float).ravel()
+            if values.size == locs.shape[0]:
+                return values, "den"
+        from ..analysis.local_density import compute_local_density_for_points
+
+        z = locs[:, 2] if locs.shape[1] > 2 else _np.zeros(locs.shape[0])
+        finite_z = _np.isfinite(z)
+        dims = 3 if (finite_z.any() and _np.any(z[finite_z] != 0.0)) else 2
+        density, _method, _detail = compute_local_density_for_points(
+            locs[:, :3], {"data": {"local_density_radius": float(radius_nm)}},
+            dimensions=dims)
+        return (_np.asarray(density, dtype=float).ravel(),
+                f"local density at {radius_nm:g} nm")
+
+    def wand_select(self, position, *, distance_nm, value_percent, columns=None):
+        """Magic-wand selection seeded at *position*, grown on local density.
+
+        The render view has no per-point colour to grow on -- it draws a density
+        image -- so the field is local density, which is what the picture already
+        shows. Behind the scenes this is the scatter plot's wand with *Color by*
+        set to ``den``.
+
+        Returns ``(record_kind, geometry, message)``: a ``polyhedron`` on 3-D data
+        so the depth slice is kept, a ``polygon`` on 2-D data.
+        """
+        from ..analysis.wand_select import describe_wand, wand_from_rows
+
+        if self._idx is None or not (0 <= self._idx < len(self._state.datasets)):
+            return None, None, "no dataset to select from"
+        ds = self._state.datasets[self._idx]
+        locs = self._raw_render_locs(ds)
+        if locs.ndim != 2 or locs.shape[0] == 0:
+            return None, None, ("the magic wand needs localizations — this view "
+                                "is showing an image")
+        plane = self._active_plane()
+        if columns is None:
+            columns = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}.get(plane)
+        if columns is None:
+            return None, None, f"the magic wand does not work in the {plane} view"
+        values, field = self._wand_density(ds, locs, distance_nm)
+        if values.size != locs.shape[0]:
+            return None, None, "local density is not available for this dataset"
+        base = np.asarray(ds.filter_mask, dtype=bool)
+        if base.shape[0] != locs.shape[0]:
+            base = np.ones(locs.shape[0], dtype=bool)
+        base = base & self._wand_depth_mask(locs, columns)
+        # The orthogonal view shows all three axes at once, so that is where
+        # growing in 3-D is meaningful; a single flat projection keeps growing in
+        # the plane it shows. Arming the wand never changes the view.
+        grow_3d = bool(self._ortho_active())
+        result = wand_from_rows(locs, values, base, columns, position,
+                                distance_nm=distance_nm, value_percent=value_percent,
+                                grow_3d=grow_3d)
+        if result is None or not result.polygon:
+            return None, None, (f"no visible localization within {distance_nm:g} nm "
+                                "of that click")
+        message = describe_wand(result, field)
+
+        # ⚠ On 3-D data the record must be a POLYHEDRON, not a polygon. A 2-D
+        # polygon's mask spans the whole depth axis by design (see
+        # compute_roi_selection), so a selection grown inside a thin Z slab would
+        # come straight back out again selecting everything above and below it --
+        # which is exactly what it appeared to do. A polyhedron narrows the depth
+        # axis by its own geometry, so the slab the user grew in is the slab the
+        # ROI keeps.
+        from ..core.dataset_kind import is_3d
+
+        if is_3d(ds):
+            from ..core.roi_volume import PLANE_NORMAL_AXIS, points_to_polyhedron
+
+            # The stacking axis is the one this pane does not show, named from
+            # the columns so a side-pane click is not read as the primary's.
+            spare = ({0, 1, 2} - {int(columns[0]), int(columns[1])})
+            axis_name = "XYZ"[spare.pop()] if spare else PLANE_NORMAL_AXIS.get(plane, "Z")
+            built = points_to_polyhedron(
+                locs[result.mask][:, :3],
+                axis=axis_name,
+                level_thickness=float(distance_nm),
+                pad=0.5 * float(distance_nm))
+            if built is not None:
+                geometry, recovered = built
+                levels = len(geometry.get("levels") or ())
+                message += (f" · polyhedron, {levels} level(s), "
+                            f"{recovered * 100:.0f}% enclosed")
+                return "polyhedron", geometry, message
+        geometry = {"points": [[float(p[0]), float(p[1])] for p in result.polygon],
+                    "closed": True}
+        return "polygon", geometry, message
 
     def compute_roi_selection(self, record, *, columns=None):
         """Rows inside *record*. ``columns`` names the axes a 2-D shape was

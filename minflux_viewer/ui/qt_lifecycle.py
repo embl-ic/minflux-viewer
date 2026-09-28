@@ -99,6 +99,73 @@ def install_pyqtgraph_lifecycle_guards() -> None:
     LabelItem.resizeEvent = resize_event
     LabelItem._mfv_deleted_object_guard = True
 
+    _install_infinite_line_guard(sip, warnings)
+
+
+def _install_infinite_line_guard(sip, warnings) -> None:
+    """Stop ``InfiniteLine`` raising out of a paint once its view is gone.
+
+    ``GraphicsItem.viewRect`` answers from ``self._cachedView``, which it does
+    **not** invalidate when the item loses its ViewBox. So after the item has
+    been painted once and its view has gone away, ``viewRect()`` still returns
+    a rectangle while ``getViewBox()`` returns ``None`` -- and
+    ``InfiniteLine._computeBoundingRect`` guards the first of those two
+    accesses (``if vr is None``) and not the second
+    (``self.getViewBox().size()``).  The ``AttributeError`` then escapes inside
+    a paint, where it becomes a native abort rather than a traceback anyone can
+    act on.
+
+    Upstream through pyqtgraph 0.14 and independent of this application: any
+    ``InfiniteLine`` that outlives its view by one queued paint reaches it.
+    Filter bounds, scale-bar guides, the pair-profile band edges and every
+    ``LinearRegionItem`` (which is built from two of them) are affected.
+
+    Like the label guard, this **fails open**: an unexpected pyqtgraph is
+    deferred to and warned about rather than silently having its geometry
+    replaced for the rest of the session.
+    """
+    try:
+        from pyqtgraph import QtCore
+        from pyqtgraph.graphicsItems.InfiniteLine import InfiniteLine
+    except Exception:                       # pragma: no cover - minimal install
+        return
+    if getattr(InfiniteLine, "_mfv_deleted_object_guard", False):
+        return
+    original = getattr(InfiniteLine, "_computeBoundingRect", None)
+    if original is None:
+        warnings.warn(
+            "pyqtgraph InfiniteLine has no '_computeBoundingRect'; the MINFLUX "
+            "Viewer detached-line guard is inactive. Update qt_lifecycle.py "
+            "for this version.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+
+    def compute_bounding_rect(line):
+        if sip.isdeleted(line) or line.getViewBox() is None:
+            # The cheap case: already detached. Same answer upstream gives for
+            # a line with no view at all.
+            return QtCore.QRectF()
+        try:
+            return original(line)
+        except AttributeError:
+            # ⚠ The pre-check above cannot be the guarantee. ``getViewBox`` ends
+            # in ``return self._viewBox()`` -- a *weakref deref* -- so it can
+            # answer with a ViewBox on one call and None on the very next, as
+            # the referent is collected in between. Only catching the call can
+            # close that window.
+            if line.getViewBox() is None:
+                return QtCore.QRectF()
+            raise
+        except RuntimeError as exc:
+            if "has been deleted" in str(exc):
+                return QtCore.QRectF()
+            raise
+
+    InfiniteLine._computeBoundingRect = compute_bounding_rect
+    InfiniteLine._mfv_deleted_object_guard = True
+
 
 def qobject_alive(obj: Any) -> bool:
     """Return whether *obj* still wraps a live Qt object."""

@@ -79,6 +79,17 @@ class Ui(Namespace):
 
         if not fields:
             raise ApiError("ask() needs at least one field.")
+
+        # A replay answers this dialog from the recording instead of showing
+        # it. Only the keys this call actually asks for are taken, so a
+        # recording made before the plugin gained a parameter still replays --
+        # the new one keeps its default rather than the call failing.
+        take = getattr(self._facade, "take_preset_answers", None)
+        preset = take() if take is not None else None
+        if preset is not None:
+            return {key: preset.get(key, default)
+                    for key, default in fields.items()}
+
         help_text = dict(descriptions or {})
 
         dialog = QDialog(self._parent_widget())

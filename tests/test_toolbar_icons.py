@@ -2,21 +2,13 @@
 
 from __future__ import annotations
 
-import sys
-
 from PyQt6.QtGui import QImage
-from PyQt6.QtWidgets import QApplication
 
 from minflux_viewer import resource_path
 from minflux_viewer.ui.main_window import _adaptive_toolbar_pixmap
 
 
-def _app() -> QApplication:
-    return QApplication.instance() or QApplication(sys.argv)
-
-
-def test_monochrome_toolbar_icon_drops_white_matte_and_tints_linework():
-    _app()
+def test_monochrome_toolbar_icon_drops_white_matte_and_tints_linework(qapp):
     pixmap = _adaptive_toolbar_pixmap(str(resource_path("icons", "angle.png")))
     assert pixmap is not None
     image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
@@ -36,8 +28,7 @@ def test_monochrome_toolbar_icon_drops_white_matte_and_tints_linework():
     assert not all(color.red() == color.green() == color.blue() == 255 for color in visible)
 
 
-def test_colored_toolbar_icon_keeps_artwork_but_drops_white_matte():
-    _app()
+def test_colored_toolbar_icon_keeps_artwork_but_drops_white_matte(qapp):
     pixmap = _adaptive_toolbar_pixmap(str(resource_path("icons", "color.png")))
     assert pixmap is not None
     image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)

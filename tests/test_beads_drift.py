@@ -108,6 +108,13 @@ def test_dialog_adds_shared_pmt_panels_on_white_background(qtbot):
     assert len(dialog._plots) == 10                         # five plots × two beads
     assert all(plot.backgroundBrush().color() == QColor("white")
                for plot, _x_range, _y_range in dialog._plots)
+    # Coordinate Y follows the viewer convention in both Y-vs-X and Y-vs-time;
+    # X, Z and signal ordinates retain the mathematical direction.
+    assert dialog._plots[0][0].getViewBox().yInverted()
+    assert dialog._plots[2][0].getViewBox().yInverted()
+    assert not dialog._plots[1][0].getViewBox().yInverted()
+    assert not dialog._plots[3][0].getViewBox().yInverted()
+    assert not dialog._plots[4][0].getViewBox().yInverted()
 
     # Every PMT panel uses the complete dataset's str range, not a per-bead range.
     assert dialog._plots[4][2] == (100.0, 220.0)

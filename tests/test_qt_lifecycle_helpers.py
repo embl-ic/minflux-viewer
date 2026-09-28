@@ -212,3 +212,86 @@ def test_dispose_plot_widgets_leaves_an_image_views_own_plot_alone(_app):
     assert image_view.view.vb not in ViewBox.AllViews
     assert roi_plot.getPlotItem().vb not in ViewBox.AllViews
     window.close()
+
+
+def test_an_infinite_line_that_outlived_its_view_does_not_raise_in_a_paint(_app):
+    """Upstream guards the first ViewBox access in boundingRect, not the second.
+
+    ``GraphicsItem.viewRect`` answers from ``_cachedView``, which is not
+    invalidated when the item loses its ViewBox, so
+    ``InfiniteLine._computeBoundingRect`` passes its ``if vr is None`` guard and
+    then calls ``self.getViewBox().size()`` on ``None``. Inside a paint that
+    AttributeError becomes a native abort rather than a traceback, which is how
+    it reached the suite as ``Fatal Python error: Aborted`` with no Python
+    stack.
+    """
+    import pyqtgraph as pg
+    from PyQt6.QtCore import QRectF
+    from pyqtgraph.graphicsItems.InfiniteLine import InfiniteLine
+
+    import minflux_viewer.ui  # noqa: F401 - installing the guards is the point
+
+    assert InfiniteLine._mfv_deleted_object_guard
+
+    plot = pg.PlotWidget()
+    line = pg.InfiniteLine(pos=5.0, angle=90)
+    plot.addItem(line)
+    plot.resize(300, 200)
+    plot.show()
+    _app.processEvents()
+    assert line.boundingRect().width() != 0          # a real rect while shown
+
+    plot.removeItem(line)
+    line._boundingRect = None                         # force a recomputation
+    # Exactly the inconsistent pair the guard exists for.
+    assert line.viewRect() is not None
+    assert line.getViewBox() is None
+
+    assert line.boundingRect() == QRectF()            # empty, and no raise
+    plot.close()
+
+
+def test_the_infinite_line_guard_is_installed_once_and_defers_when_unsure():
+    """Fails open: an unexpected pyqtgraph is warned about, not silently bent."""
+    import warnings
+
+    from pyqtgraph.graphicsItems.InfiniteLine import InfiniteLine
+
+    from minflux_viewer.ui.qt_lifecycle import _install_infinite_line_guard
+
+    installed = InfiniteLine._computeBoundingRect
+    _install_infinite_line_guard(__import__("PyQt6.sip", fromlist=["sip"]),
+                                 warnings)
+    # Already guarded, so re-installing must not wrap it a second time.
+    assert InfiniteLine._computeBoundingRect is installed
+
+
+def test_the_guard_survives_the_view_dying_mid_call(_app):
+    """``getViewBox`` is a weakref deref, so a pre-check cannot be the guarantee.
+
+    It can answer with a ViewBox on one call and ``None`` on the very next, as
+    the referent is collected in between -- which is exactly what happened
+    after the first version of this guard shipped: it checked, passed, and
+    upstream then got ``None`` a moment later.
+    """
+    import pyqtgraph as pg
+    from PyQt6.QtCore import QRectF
+
+    import minflux_viewer.ui  # noqa: F401
+
+    plot = pg.PlotWidget()
+    line = pg.InfiniteLine(pos=5.0, angle=90)
+    plot.addItem(line)
+    plot.resize(300, 200)
+    plot.show()
+    _app.processEvents()
+    line._boundingRect = None
+
+    answers = [plot.getPlotItem().vb, None, None, None]
+
+    def dying_view_box():
+        return answers.pop(0) if answers else None
+
+    line.getViewBox = dying_view_box          # live once, then collected
+    assert line.boundingRect() == QRectF()    # no raise out of the paint
+    plot.close()

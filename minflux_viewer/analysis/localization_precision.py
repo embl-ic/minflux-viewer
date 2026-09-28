@@ -855,6 +855,17 @@ def run_frc(parent, state) -> None:
     ds = state.active_dataset
     if ds is None:
         return
+    from ..core.tracks import dataset_tracking_role
+    role, reason, _explicit = dataset_tracking_role(ds)
+    if role == "Tracking":
+        _show_info_dialog(
+            parent,
+            "FRC — unavailable for a tracking channel",
+            "FRC compares two independent reconstructions of the same static "
+            "structure. A moving trajectory does not satisfy that assumption, "
+            f"so no FRC value was computed.<br><br>Role basis: {reason}.",
+        )
+        return
     from ..core.dataset_kind import missing_reason, require
     miss = require(ds, "loc")
     if miss:
@@ -898,6 +909,18 @@ def run_stddev_per_trace(parent, state) -> None:
     """Compute σ per trace for the active dataset and show a results dialog."""
     ds = state.active_dataset
     if ds is None:
+        return
+    from ..core.tracks import dataset_tracking_role
+    role, reason, _explicit = dataset_tracking_role(ds)
+    if role == "Tracking":
+        _show_info_dialog(
+            parent,
+            "StdDev per trace — unavailable for a tracking channel",
+            "For a moving emitter, scatter about the trace mean is dominated "
+            "by the trajectory's excursion and is not localization precision. "
+            "Use the tracking MSD result's explicitly labelled apparent "
+            f"short-lag intercept instead.<br><br>Role basis: {reason}.",
+        )
         return
     from ..core.dataset_kind import missing_reason, require
     miss = require(ds, "loc", "traces")
