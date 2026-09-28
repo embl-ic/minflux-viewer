@@ -1,6 +1,6 @@
 """Pure reporting helpers for the HlyB/D staged analysis.
 
-The customer-facing workflow lives in the external Tier 2 plugin.  These
+The customer-facing workflow lives in the built-in HlyB/D plugin.  These
 serialisers remain with the reusable numerical engine because the legacy
 collection window and method-text generator still consume their stable output
 schema.  This module deliberately has no Qt or viewer-state dependency.

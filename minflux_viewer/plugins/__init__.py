@@ -317,6 +317,7 @@ def ensure_loaded() -> None:
         data_simulator,  # noqa: F401  (immediately under ParaView)
         drift_correction,  # noqa: F401
         generate_method_text,  # noqa: F401
+        hlyb_pair_analysis,  # noqa: F401
         macro_recorder,  # noqa: F401
         msr_reader,  # noqa: F401
         paraview,  # noqa: F401

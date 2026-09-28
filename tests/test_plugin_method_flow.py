@@ -10,7 +10,8 @@ from __future__ import annotations
 import pytest
 
 from minflux_viewer.core.app_state import AppState
-from minflux_viewer.plugins import PluginEntry, method as method_mod
+from minflux_viewer.plugins import PluginEntry
+from minflux_viewer.plugins import method as method_mod
 
 
 @pytest.fixture
@@ -199,13 +200,13 @@ def test_a_derived_setting_is_written_up_but_never_replayed_as_an_answer():
 
 def test_the_hlyb_plugin_declares_a_method_whose_slots_all_resolve():
     """The shipped example must not reference a value nothing declares."""
-    from minflux_viewer.plugins import loader
+    from minflux_viewer import plugins
 
-    found = next(
-        plugin for plugin in loader.scan_root(loader.app_plugin_dir())
-        if plugin.id == "embl.hlyb_pair_analysis")
+    plugins.ensure_loaded()
+    found = next(entry for entry in plugins.available()
+                 if entry.plugin_id == "embl.hlyb_pair_analysis")
     assert found.error == ""
-    spec = found.manifest.method
+    spec = found.method
     assert spec is not None
     # Every {slot} in the prose is a declared field, so its unit and
     # description are reachable and no slot can render as "not recorded"
@@ -214,3 +215,26 @@ def test_the_hlyb_plugin_declares_a_method_whose_slots_all_resolve():
     assert spec.workflow and spec.description and spec.limitations
     assert {item.name for item in spec.outputs} >= {
         "band_ratio", "excess_centroid_nm"}
+
+
+def test_the_hlyb_builtin_launcher_preserves_plugin_attribution(monkeypatch):
+    """Moving the plugin in-package must not lose journal/macro attribution."""
+    from minflux_viewer import plugins
+    from minflux_viewer.plugins.hlyb_pair_analysis import main
+
+    plugins.ensure_loaded()
+    entry = next(item for item in plugins.available()
+                 if item.plugin_id == "embl.hlyb_pair_analysis")
+    state = AppState()
+    seen = {}
+
+    monkeypatch.setattr(
+        main, "run", lambda ctx: seen.setdefault("active", ctx.active_plugin))
+    entry.launch(state)
+
+    assert seen["active"] == {
+        "id": "embl.hlyb_pair_analysis",
+        "label": "HlyB/D pair distance analysis",
+        "method": entry.method,
+    }
+    assert state.mfv.active_plugin is None

@@ -185,3 +185,17 @@ def test_macos_bundle_has_an_icon() -> None:
     assert icns.read_bytes()[:4] == b"icns"
     namespace, _calls = _evaluate_spec()
     assert namespace["MAC_ICON"] == str(icns)
+
+
+def test_hlyb_builtin_plugin_metadata_is_bundled() -> None:
+    """The HlyB/D menu entry must not disappear from a frozen application."""
+    namespace, _calls = _evaluate_spec()
+    manifest = (
+        ROOT / "minflux_viewer" / "plugins" / "hlyb_pair_analysis" / "plugin.toml"
+    ).resolve()
+    bundled_sources = {Path(source).resolve() for source, _target in namespace["datas"]}
+
+    assert manifest in bundled_sources
+    old_location = ROOT / "plugins" / "hlyb_pair_analysis"
+    assert not (old_location / "main.py").exists()
+    assert not (old_location / "plugin.toml").exists()

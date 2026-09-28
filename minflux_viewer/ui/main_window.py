@@ -658,8 +658,8 @@ class MainWindow(QMainWindow):
         self.actionKNearestNeighbour.triggered.connect(
             lambda: self._placeholder("K nearest neighbour", "a later implementation")
         )
-        # The HlyB/D subunit pair analysis moved out of Clustering and is now an
-        # external Tier 2 plugin under *Plugins › HlyB/D* (it is one
+        # The HlyB/D subunit pair analysis moved out of Clustering and is now a
+        # direct built-in plugin under *Plugins* (it is one
         # project-specific workflow, not a family of general clustering tools).
         # Its earlier menu entries —
         # "2D"/"3D", "Pair-distance model fit (2D/3D)" and "Template matching
