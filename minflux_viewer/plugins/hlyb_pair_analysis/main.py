@@ -1,4 +1,4 @@
-"""Customer HlyB/D workflow implemented against the public ``mfv`` API.
+"""Built-in HlyB/D workflow implemented against the public ``mfv`` API.
 
 The reusable numerical engine remains in :mod:`minflux_viewer.analysis`; this
 file owns the customer-specific choices and every interaction with the viewer.

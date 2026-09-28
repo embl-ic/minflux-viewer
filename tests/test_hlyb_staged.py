@@ -430,11 +430,11 @@ def test_batch_summary_treats_acquisitions_not_pair_counts_as_replicates():
 
 
 def test_analysis_is_one_direct_plugins_menu_item(qtbot):
-    """The workflow is discovered outside the package as one direct item.
+    """The built-in workflow is exposed as one direct item.
 
     It is one project-specific analysis, not a family of general clustering
     tools: the retired variants stay unexposed though their numerical modules
-    are kept. One Tier 2 entry chooses between active and pooled-ROI scopes.
+    are kept. One entry chooses between active and pooled-ROI scopes.
     """
     from minflux_viewer import plugins
     from minflux_viewer.core.app_state import AppState
@@ -442,10 +442,10 @@ def test_analysis_is_one_direct_plugins_menu_item(qtbot):
     from minflux_viewer.ui.main_window import MainWindow
 
     plugins.ensure_loaded()
-    assert not any(
-        "hlyb" in entry.name.lower() and not entry.discovered
-        for entry in plugins.available()
-    )
+    entries = [entry for entry in plugins.available()
+               if entry.plugin_id == "embl.hlyb_pair_analysis"]
+    assert len(entries) == 1
+    assert entries[0].discovered is False
 
     window = MainWindow(AppState())
     qtbot.addWidget(window)
@@ -455,7 +455,7 @@ def test_analysis_is_one_direct_plugins_menu_item(qtbot):
     assert [c.text for c in hlyb] == ["HlyB/D pair distance analysis"]
     assert hlyb[0].path == "Plugins"
     assert hlyb[0].source.replace("\\", "/").endswith(
-        "plugins/hlyb_pair_analysis/main.py"
+        "minflux_viewer/plugins/hlyb_pair_analysis/main.py"
     )
 
     # The retired workflows stay out of the menus.
@@ -474,21 +474,13 @@ def test_analysis_is_one_direct_plugins_menu_item(qtbot):
             c.text for c in filter_commands(commands, query)]
 
 
-def test_external_plugin_exercises_the_published_extension_surfaces(monkeypatch):
-    """The proving plugin asks, backgrounds, tables, plots and journals."""
-    import sys
+def test_builtin_plugin_exercises_the_published_extension_surfaces(monkeypatch):
+    """The API-based plugin asks, backgrounds, tables, plots and journals."""
     from types import SimpleNamespace
 
-    from minflux_viewer.plugins import loader
+    from minflux_viewer.plugins.hlyb_pair_analysis import main as module
 
-    loader.unload_plugin_modules()
-    found = next(
-        plugin for plugin in loader.scan_root(loader.app_plugin_dir())
-        if plugin.id == "embl.hlyb_pair_analysis"
-    )
-    assert found.error == ""
-    launch = loader.load_entry_callable(found)
-    module = sys.modules[loader.module_name_for(found.id)]
+    launch = module.run
 
     result = {
         "summary": {
@@ -645,14 +637,7 @@ def test_external_plugin_exercises_the_published_extension_surfaces(monkeypatch)
 def test_plugin_2d_scope_uses_only_active_roi_display_coordinates():
     from types import SimpleNamespace
 
-    from minflux_viewer.plugins import loader
-
-    found = next(
-        plugin for plugin in loader.scan_root(loader.app_plugin_dir())
-        if plugin.id == "embl.hlyb_pair_analysis")
-    loader.load_entry_callable(found)
-    import sys
-    module = sys.modules[loader.module_name_for(found.id)]
+    from minflux_viewer.plugins.hlyb_pair_analysis import main as module
 
     dataset = object()
     roi = SimpleNamespace(id="chosen", type="rectangle", name="one cell")
@@ -704,16 +689,9 @@ def test_plugin_2d_scope_uses_only_active_roi_display_coordinates():
 
 
 def test_active_dataset_roi_mode_collects_every_stored_2d_cell():
-    import sys
     from types import SimpleNamespace
 
-    from minflux_viewer.plugins import loader
-
-    found = next(
-        plugin for plugin in loader.scan_root(loader.app_plugin_dir())
-        if plugin.id == "embl.hlyb_pair_analysis")
-    loader.load_entry_callable(found)
-    module = sys.modules[loader.module_name_for(found.id)]
+    from minflux_viewer.plugins.hlyb_pair_analysis import main as module
     dataset = object()
     rois = [SimpleNamespace(type="rectangle", name="cell 1", context={}),
             SimpleNamespace(type="rectangle", name="cell 2", context={})]
@@ -766,16 +744,9 @@ def test_active_dataset_roi_mode_collects_every_stored_2d_cell():
 
 def test_multi_dataset_mode_opens_the_persistent_pool_instead_of_a_worker(
         monkeypatch):
-    import sys
     from types import SimpleNamespace
 
-    from minflux_viewer.plugins import loader
-
-    found = next(
-        plugin for plugin in loader.scan_root(loader.app_plugin_dir())
-        if plugin.id == "embl.hlyb_pair_analysis")
-    loader.load_entry_callable(found)
-    module = sys.modules[loader.module_name_for(found.id)]
+    from minflux_viewer.plugins.hlyb_pair_analysis import main as module
     sentinel = object()
     seen = {}
 
@@ -796,11 +767,10 @@ def test_multi_dataset_mode_opens_the_persistent_pool_instead_of_a_worker(
 
 
 def test_plugin_2d_capture_matches_the_public_roi_mask(qapp):
-    import sys
 
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.core.dataset import build_localization_dataset
-    from minflux_viewer.plugins import loader
+    from minflux_viewer.plugins.hlyb_pair_analysis import main as module
 
     state = AppState()
     dataset = build_localization_dataset(
@@ -809,12 +779,6 @@ def test_plugin_2d_capture_matches_the_public_roi_mask(qapp):
     state.add_dataset(dataset)
     roi = state.mfv.roi.add(
         "rectangle", {"bounds": [0, 0, 50, 50]}, select=True)
-    found = next(
-        plugin for plugin in loader.scan_root(loader.app_plugin_dir())
-        if plugin.id == "embl.hlyb_pair_analysis")
-    loader.load_entry_callable(found)
-    module = sys.modules[loader.module_name_for(found.id)]
-
     request, captured_dataset = module._capture_roi_2d(state.mfv)
     assert captured_dataset is dataset
     assert request["cells"][0]["loc_m"][:, :2] * 1e9 == pytest.approx(
@@ -1174,19 +1138,12 @@ def test_plugin_opens_the_window_non_owned_and_retained(qtbot):
     requires. The full facade path was verified separately against a live
     window.
     """
-    import sys
     from types import SimpleNamespace
 
     from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QWidget
 
-    from minflux_viewer.plugins import loader
-
-    found = next(
-        plugin for plugin in loader.scan_root(loader.app_plugin_dir())
-        if plugin.id == "embl.hlyb_pair_analysis")
-    loader.load_entry_callable(found)
-    module = sys.modules[loader.module_name_for(found.id)]
+    from minflux_viewer.plugins.hlyb_pair_analysis import main as module
 
     owner = QWidget()
     qtbot.addWidget(owner)

@@ -282,21 +282,14 @@ def test_save_and_load_round_trip_through_the_window(app, monkeypatch, tmp_path)
         other.close()
 
 
-def test_the_multi_dataset_mode_is_owned_by_one_direct_tier2_plugin_item():
+def test_the_multi_dataset_mode_is_owned_by_one_direct_builtin_plugin_item():
     from minflux_viewer import plugins
-    from minflux_viewer.plugins import loader
 
     plugins.ensure_loaded()
-    assert not any(
-        "hlyb" in entry.name.lower() and not entry.discovered
-        for entry in plugins._REGISTRY
-    )
-    found = next(
-        plugin for plugin in loader.scan_root(loader.app_plugin_dir())
-        if plugin.id == "embl.hlyb_pair_analysis"
-    )
-    assert found.tier == 2
-    assert found.label == "HlyB/D pair distance analysis"
+    found = next(entry for entry in plugins._REGISTRY
+                 if entry.plugin_id == "embl.hlyb_pair_analysis")
+    assert found.discovered is False
+    assert found.name == "HlyB/D pair distance analysis"
     assert found.menu_path == ()
     assert "pooled roi" in found.keywords
 

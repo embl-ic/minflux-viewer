@@ -26,7 +26,7 @@ import importlib.util
 import re
 import sys
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH)   # repo root (where this .spec lives)
 
@@ -150,7 +150,7 @@ datas = [
     (str(ROOT / "resources"), "resources"),
     # pip must remain an ordinary on-disk package, never a frozen hidden import.
     (str(ROOT / "resources" / "pip"), "resources/pip"),
-]
+] + collect_data_files("minflux_viewer.plugins.hlyb_pair_analysis")
 
 # ---------------------------------------------------------------------------
 # Hidden imports that PyInstaller's static analysis misses

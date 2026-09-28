@@ -1,3 +1,4 @@
+# Built-in plugin metadata and method-text declaration.
 [plugin]
 id = "embl.hlyb_pair_analysis"
 name = "HlyB/D pair distance analysis"
