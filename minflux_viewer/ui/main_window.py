@@ -129,17 +129,21 @@ _LINE_FAMILY: tuple[tuple[str, str, str], ...] = (
 #: the base icon turned 45° (no new asset). (label, tool, icon file, icon rotation °).
 #: The 2-D members draw a ``rectangle`` / ``oval`` / ``polygon`` record carrying
 #: ``geometry["variant"]``; the **3-D** members (``cuboid`` / ``sphere`` /
-#: ``polyhedron``) are placeholders — their icons are wired here now, their drawing
-#: actions are implemented later (they are not yet in ``core.roi.ROI_TOOLS``).
+#: ``polyhedron`` / ``cylinder``) reuse their family's flat drawing gesture and
+#: are lifted into named-axis volume geometry when the gesture finishes.
 _RECT_FAMILY: tuple[tuple[str, str, str, float], ...] = (
     ("Rectangle", "rectangle", "rec.png", 0.0),
     ("Rotated Rectangle", "rotated_rectangle", "rec.png", 45.0),
-    ("Cuboid (3D)", "cuboid", "cube.png", 0.0),
+    ("Cuboid (3D)", "cuboid", "cuboid.png", 0.0),
 )
 _OVAL_FAMILY: tuple[tuple[str, str, str, float], ...] = (
     ("Oval", "oval", "ellipse.png", 0.0),
     ("Ellipse", "ellipse", "ellipse.png", 45.0),
     ("Sphere (3D)", "sphere", "sphere.png", 0.0),
+    # A cylinder is an oval cross-section extruded along the axis normal to the
+    # drawing plane, so it belongs to the oval family: drawn as an oval in one
+    # plane, a rectangle in the other two.
+    ("Cylinder (3D)", "cylinder", "cylinder.png", 0.0),
 )
 _POLY_FAMILY: tuple[tuple[str, str, str, float], ...] = (
     ("Polygon", "polygon", "polygon.png", 0.0),
@@ -153,6 +157,61 @@ _POINT_FAMILY: tuple[tuple[str, str, str, float], ...] = (
     ("Point", "point", "point.png", 0.0),
     ("Multi-point", "multi_point", "multipoint.png", 0.0),
 )
+#: The lasso family. Both members select a region by tracing or growing from a
+#: click rather than by dragging a fixed shape. ``magic_wand`` has no drawing
+#: tool yet, so the switcher shows it disabled with the reason (see
+#: ``_show_shape_family_menu``) rather than offering a control that does nothing.
+_LASSO_FAMILY: tuple[tuple[str, str, str, float], ...] = (
+    ("Magnetic Lasso", "magnetic_lasso", "lasso.png", 0.0),
+    ("Magic Wand", "magic_wand", "wand.png", 0.0),
+)
+
+#: ``angle`` is the one ROI tool with no family table -- it is a standalone
+#: toolbar action -- so its label is named here rather than guessed from the key.
+_ROI_TOOL_EXTRA_LABELS = {"angle": "Angle"}
+
+#: Tools that are not dragged into existence. "drawing" is wrong for a marker
+#: you place and for a wand you click, and a status line that misdescribes the
+#: gesture is worse than one word longer.
+_ROI_TOOL_VERBS = {"point": "placing", "multi_point": "placing"}
+
+
+def roi_tool_labels() -> dict:
+    """Tool key -> the label the menus show for it.
+
+    Gathered from the same toolbar tables the menus are built from, so the status
+    line cannot announce a tool under a name the user never sees.
+    """
+    labels: dict = {}
+    for label, tool, _attr in _ROI_TOOL_DEFS:
+        labels[tool] = label
+    for table in (_LINE_FAMILY, _RECT_FAMILY, _OVAL_FAMILY, _POLY_FAMILY,
+                  _POINT_FAMILY, _LASSO_FAMILY):
+        for entry in table:
+            labels[entry[1]] = entry[0]
+    labels.update(_ROI_TOOL_EXTRA_LABELS)
+    return labels
+
+
+def roi_tool_status(tool: str, *, has_view: bool = True) -> str:
+    """The status line for an armed ROI tool, or ``""`` when none is armed.
+
+    *has_view* is False when no coordinate view is open to draw in; the line then
+    says what to do about it, because the status bar is where the user is looking
+    and a bare "drawing Rectangle ROI..." would be a promise nothing can keep.
+    """
+    key = str(tool or "")
+    if not key:
+        return ""
+    label = roi_tool_labels().get(key)
+    if label is None:
+        return ""
+    if not has_view:
+        return f"{label} ROI: open a render, scatter, histogram or attribute plot to draw in…"
+    if key == "magic_wand":
+        return f"{label}: click a localization to grow a ROI…"
+    return f"{_ROI_TOOL_VERBS.get(key, 'drawing')} {label} ROI…"
+
 
 class _ScrollableMenuStyle(QProxyStyle):
     """Make an over-tall menu scroll (arrows at the top/bottom edges, which
@@ -317,6 +376,10 @@ class MainWindow(QMainWindow):
         self._window_cycle_index = -1
         # One render window per dataset: {dataset_idx: RenderWindow}
         self._render_windows: dict[int, QWidget] = {}
+        # ...and one tracking view per dataset, the same contract.
+        self._tracking_windows: dict[int, QWidget] = {}
+        # One modeless MSD workbench per dataset; results stay beside the views.
+        self._msd_windows: dict[int, QWidget] = {}
         # Standalone TIFF viewers are not MINFLUX datasets and never appear in
         # the dataset manager.
         self._tiff_windows: dict[str, QWidget] = {}
@@ -555,6 +618,14 @@ class MainWindow(QMainWindow):
         u.actionHistogram.triggered.connect(self._show_histogram)
         u.actionAttributePlot.triggered.connect(self._show_attr_plot)
         u.actionRender.triggered.connect(self._show_render)        # was Process > Render image
+        # Trajectories as comets over a de-emphasised structure. Its own viewer
+        # rather than a mode of Render or Scatter: it answers *when*, and it
+        # needs the structure to step back to a context layer for that to read,
+        # which is not something to do to a view opened to look at localizations.
+        self.actionTrackingView = QAction("Tracking View", self)
+        self.actionTrackingView.setStatusTip(
+            "Play localization trajectories as comets over the structure")
+        self.actionTrackingView.triggered.connect(self._show_tracking_view)
         # The unified render view exposes methods from its right-click
         # View › Render Method menu.
         u.actionShowInfo.triggered.connect(self._show_info_for_active)
@@ -636,15 +707,17 @@ class MainWindow(QMainWindow):
         self.actionSegParticleAverage.triggered.connect(self._show_particle_average)
         self.menuAnalyzeSegmentation.addAction(self.actionSegParticleAverage)
 
-        # Tracking submenu — Phase 5 placeholders
-        u.actionParticleTracking.triggered.connect(
-            lambda: self._placeholder("Particle tracking", "Phase 5")
-        )
+        # Tracking analysis
+        # MINFLUX already supplies authoritative ``tid`` values. A generic
+        # camera-style linker would overwrite that acquisition fact, while
+        # merge/split repair needs experiment-specific priors. Retire the old
+        # placeholder; repair algorithms belong behind the tracking method /
+        # plugin contracts when a validated model is available.
+        u.menuTracking.removeAction(u.actionParticleTracking)
+        u.actionParticleTracking.setVisible(False)
         # actionTraceViewer (legacy View/Tracking entry) retired. The retained
         # trace inspection workflow lives in Plugins > Trace Viewer.
-        u.actionMsdAnalysis.triggered.connect(
-            lambda: self._placeholder("MSD analysis", "Phase 5")
-        )
+        u.actionMsdAnalysis.triggered.connect(self._show_msd_analysis)
 
         # Process menu — Batch Processing submenu (Phase 5 placeholders)
         u.actionBatchRender.triggered.connect(
@@ -751,12 +824,12 @@ class MainWindow(QMainWindow):
         self.actionRoiConvexHull = QAction("Convex Hull", self)
         self.actionRoiConvexHull.triggered.connect(self._convex_hull_active_roi)
         self.menuProcessRoi.addAction(self.actionRoiConvexHull)
-        # Multi-slice polyhedron: draw the outline again at another Z and the
-        # shape between is interpolated rather than extruded.
+        # Legacy contour-stack polyhedron: draw another level at Z and
+        # interpolate between them. Projection hulls edit their panes directly.
         self.actionRoiAddSlice = QAction("Add Cross-Section…", self)
         self.actionRoiAddSlice.setToolTip(
-            "Add the drawn polygon to the selected polyhedron as a cross-section "
-            "at another Z, turning a prism into a multi-slice shape")
+            "Add the drawn polygon to a legacy contour-stack polyhedron at "
+            "another Z (projection-hull polygons are edited in their panes)")
         self.actionRoiAddSlice.triggered.connect(self._add_cross_section_to_roi)
         self.menuProcessRoi.addAction(self.actionRoiAddSlice)
         self.menuProcessRoi.addSeparator()
@@ -804,6 +877,7 @@ class MainWindow(QMainWindow):
         self._oval_variant = "oval"
         self._poly_variant = "polygon"
         self._point_variant = "point"
+        self._lasso_variant = "magnetic_lasso"
         _variant_getters = {
             "line": lambda: self._line_variant,
             "rectangle": lambda: self._rect_variant,
@@ -848,8 +922,20 @@ class MainWindow(QMainWindow):
             u.toolbar.addAction(self.toolMagneticLasso)
         self._roi_tool_actions["magnetic_lasso"] = self.toolMagneticLasso
         self._roi_tool_group.addAction(self.toolMagneticLasso)
-        self.toolMagneticLasso.triggered.connect(lambda checked: self._on_roi_tool("magnetic_lasso", checked))
+        # ⚠ Through the variant getter, exactly like the .ui family buttons: wired
+        # to the literal "magnetic_lasso" instead, a left-click on the shared
+        # button re-activated the lasso and silently discarded a chosen Magic
+        # Wand, so the variant would not stay put.
+        self.toolMagneticLasso.triggered.connect(
+            lambda checked: self._on_roi_tool(self._lasso_variant, checked))
         self._state.rois.tool_changed.connect(self._sync_roi_tool_actions)
+        # ⚠ A separate connection, deliberately NOT folded into
+        # _sync_roi_tool_actions: that method is also called directly to re-sync
+        # the buttons after a refusal (see _volume_tool_allowed), which has just
+        # put its reason in the status bar -- announcing the tool there too would
+        # overwrite the explanation with an unrelated line.
+        self._state.rois.tool_changed.connect(self._announce_roi_tool)
+        self._roi_tool_status_text = ""
 
         # Wire icon images for toolbar buttons
         self._install_toolbar_icons()
@@ -883,7 +969,7 @@ class MainWindow(QMainWindow):
         u.actionLocPrecisionCrlb.setText("CRLB (Cramer-Rao Lower Bound)")
         u.actionLocPrecisionStdDev.setText("StdDev per Trace")
         u.actionLocalDensity.setText("Local Density")
-        u.actionParticleTracking.setText("Particle Tracking")
+        u.actionParticleTracking.setText("Particle Tracking")  # retired; not in menu
         u.actionMsdAnalysis.setText("MSD Analysis")
         u.actionBatchRender.setText("Batch Render...")
         u.actionBatchExport.setText("Batch Export...")
@@ -966,6 +1052,7 @@ class MainWindow(QMainWindow):
         u.menuView.addAction(u.actionHistogram)
         u.menuView.addAction(u.actionScatter)
         u.menuView.addAction(u.actionRender)
+        u.menuView.addAction(self.actionTrackingView)
         u.menuView.addSeparator()
         u.menuView.addAction(u.actionLog)
         u.menuView.setToolTipsVisible(True)
@@ -1009,6 +1096,7 @@ class MainWindow(QMainWindow):
             "duplicate": u.actionDuplicate,
             "show_info": u.actionShowInfo,
             "render": u.actionRender,
+            "tracking_view": self.actionTrackingView,
             "brightness_contrast": u.actionBrightnessContrast,
             "attribute_plot": u.actionAttributePlot,
             "attribute_histogram": u.actionHistogram,
@@ -1078,9 +1166,9 @@ class MainWindow(QMainWindow):
             #self.actionSegConvolution,
             #self.actionSegCurvilinear,
             #self.actionSegParticleAverage,
-            u.menuTracking.menuAction(),
+            #u.menuTracking.menuAction(),
             #u.actionParticleTracking,
-            u.actionMsdAnalysis,
+            #u.actionMsdAnalysis,
         ]
         for action in actions:
             self._mark_action_ai_unapproved(action)
@@ -1261,11 +1349,24 @@ class MainWindow(QMainWindow):
             key = self._roi_tool_buttons[obj]
             if key == "line":
                 self._show_line_family_menu(obj, pos)
-            elif key in ("rectangle", "oval", "polygon"):
+            elif key in ("rectangle", "oval", "polygon", "point", "lasso"):
+                # ⚠ A family button must reach its OWN switcher. "point" was
+                # missing here, so right-clicking Point fell through to
+                # _show_roi_tool_menu and listed every ROI tool in the
+                # application instead of the two point variants.
                 self._show_shape_family_menu(obj, pos, key)
             else:
                 self._show_roi_tool_menu(obj, pos)
             return True
+        # Double-click a ROI toolbar button → that tool's options, the gesture
+        # Fiji uses. Only the magic wand has any, so every other button falls
+        # through to its normal behaviour rather than opening an empty dialog.
+        if (event.type() == QEvent.Type.MouseButtonDblClick
+                and obj in getattr(self, "_roi_tool_buttons", {})):
+            key = self._roi_tool_buttons[obj]
+            if self._shape_variant(key) == "magic_wand":
+                self._show_wand_dialog()
+                return True
         if event.type() not in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
             return super().eventFilter(obj, event)
         seq = self._event_sequence_text(event)
@@ -1613,6 +1714,10 @@ class MainWindow(QMainWindow):
                 self._generate_sim_dcr(p)
             elif kind == "ecoli":
                 self._generate_sim_ecoli(p)
+            elif kind == "tracking":
+                self._generate_sim_tracking(p)
+            elif kind == "track_overlay":
+                self._generate_sim_track_overlay(p)
             else:
                 self._generate_sim_single(p)
         finally:
@@ -1675,6 +1780,78 @@ class MainWindow(QMainWindow):
                 "two reporters mixed with a bimodal 'dcr' (separate via Process › Channel › "
                 "Separate Channel by DCR).")
             self._state.add_dataset(ds)
+        except Exception as exc:
+            self._state.log(f"Sample data generation failed: {exc}", "ERROR")
+            QMessageBox.critical(self, "Data Simulator", str(exc))
+            self._status_label.setText("Sample data failed.")
+
+    def _generate_sim_tracking(self, p: dict) -> None:
+        """A pure tracking dataset: molecules moving, with real timestamps."""
+        from ..core.simulate import simulate_tracking_shells
+        label = p["name"]
+        self._status_label.setText(f"Simulating {label}\u2026")
+        try:
+            coords, tid, attrs = simulate_tracking_shells(
+                p["params"], precision_nm=p["precision_nm"], seed=p["seed"])
+            ds, nloc, ntr = self._finalize_sim_dataset(
+                f"Sample: {label}", coords, tid, attrs)
+            span = float(attrs["tim"].max() - attrs["tim"].min())
+            self._state.log(
+                f"Generated sample data '{label}': {nloc:,} localization(s), "
+                f"{ntr:,} track(s) over {span:,.0f} s. Open View \u203a Tracking "
+                "View to play them.")
+            self._state.add_dataset(ds)
+        except Exception as exc:
+            self._state.log(f"Sample data generation failed: {exc}", "ERROR")
+            QMessageBox.critical(self, "Data Simulator", str(exc))
+            self._status_label.setText("Sample data failed.")
+
+    def _generate_sim_track_overlay(self, p: dict) -> None:
+        """A structure channel and a tracking channel, as one overlay.
+
+        The two-colour trafficking design: the scaffold is the reference frame
+        and the cargo moves through it, so the two must arrive grouped or the
+        Tracking View has nothing to draw its comets over.
+        """
+        import uuid
+
+        from ..core.simulate import simulate_npc_tracking
+        label = p["name"]
+        self._status_label.setText(f"Simulating {label}\u2026")
+        try:
+            chans = simulate_npc_tracking(
+                p["params"], locs_per_trace=p["locs_per_trace"],
+                precision_nm=p["precision_nm"], seed=p["seed"])
+            overlay_id = f"sim:{uuid.uuid4().hex}"
+            overlay_index = int(getattr(self, "_next_overlay_index", 1))
+            self._next_overlay_index = overlay_index + 1
+            prev_suspend = getattr(self._state, "suspend_auto_render", False)
+            self._state.suspend_auto_render = True
+            made: list[int] = []
+            try:
+                for order, ch in enumerate(chans, start=1):
+                    ds, _n, _t = self._finalize_sim_dataset(
+                        f"Sample: {label} \u00b7 {ch['name']}",
+                        ch["coords"], ch["tid"], ch["attrs"])
+                    lut = ch.get("lut") or "Gray"
+                    ds.state.update({
+                        "overlay_id": overlay_id, "render_group_id": overlay_id,
+                        "overlay_index": overlay_index, "overlay_order": order,
+                        "overlay_lut": lut, "render_channel_lut": lut})
+                    ds.metadata["overlay_id"] = overlay_id
+                    # Recorded so the Tracking View's role guess can be checked
+                    # against what was simulated, rather than only inferred.
+                    ds.metadata["simulated_role"] = ch.get("role", "")
+                    made.append(self._state.add_dataset(ds))
+            finally:
+                self._state.suspend_auto_render = prev_suspend
+            counts = " + ".join(f"{c['coords'].shape[0]:,}" for c in chans)
+            self._state.log(
+                f"Generated sample data '{label}': {len(chans)} channel(s) "
+                f"({counts} localizations) as one overlay \u2014 a static scaffold "
+                "and cargo tracked through it. Open View \u203a Tracking View.")
+            if made:
+                self._state.set_active(made[0])
         except Exception as exc:
             self._state.log(f"Sample data generation failed: {exc}", "ERROR")
             QMessageBox.critical(self, "Data Simulator", str(exc))
@@ -2104,7 +2281,8 @@ class MainWindow(QMainWindow):
 
         # No localizations accompany a companion file, so there is no data
         # region box to draw the beads against.
-        win = MbmInfoWindow(name, beads, data_bounds_nm=None)
+        win = MbmInfoWindow(
+            name, beads, data_bounds_nm=None, prefs=self._state.prefs)
         show_modeless(win, self)
         self._state.log(
             f"Opened MBM companion '{name}': {len(beads)} bead(s), "
@@ -2233,8 +2411,14 @@ class MainWindow(QMainWindow):
         occupied = list(self._tiff_windows.values())
         occupied += list(self._render_windows.values())
         if dataset_idx is not None:
-            for registry in (self._scatter_windows, self._histogram_windows,
-                             self._attr_windows, self._data_windows):
+            for registry in (
+                self._scatter_windows,
+                self._tracking_windows,
+                self._msd_windows,
+                self._histogram_windows,
+                self._attr_windows,
+                self._data_windows,
+            ):
                 other = registry.get(dataset_idx)
                 if other is not None:
                     occupied.append(other)
@@ -2262,9 +2446,15 @@ class MainWindow(QMainWindow):
         from them.
         """
         windows: list = []
-        registries = (self._data_windows, self._attr_windows,
-                      self._histogram_windows, self._scatter_windows,
-                      self._render_windows)
+        registries = (
+            self._data_windows,
+            self._attr_windows,
+            self._histogram_windows,
+            self._scatter_windows,
+            self._tracking_windows,
+            self._msd_windows,
+            self._render_windows,
+        )
         for registry in registries:
             for idx in dataset_indices or ():
                 win = registry.get(idx)
@@ -2693,6 +2883,28 @@ class MainWindow(QMainWindow):
         self._macro_recorder_win = window
         return show_modeless(window, self)
 
+    def show_hlyb_cell_collection(self, defaults=None):
+        """Open or raise the persistent HlyB/D multi-dataset ROI pool."""
+        from .hlyb_collection_dialog import HlyBCollectionWindow
+        from .modeless import show_modeless
+
+        if defaults is not None:
+            self._state._hlyb_staged_cfg = defaults
+        window = getattr(self, "_hlyb_collection_win", None)
+        if window is not None:
+            try:
+                window.show()
+                window.raise_()
+                window.activateWindow()
+                return window
+            except RuntimeError:
+                self._hlyb_collection_win = None
+        window = HlyBCollectionWindow(self._state, owner=self)
+        window.destroyed.connect(
+            lambda *_args: setattr(self, "_hlyb_collection_win", None))
+        self._hlyb_collection_win = window
+        return show_modeless(window, self)
+
     def _on_macro_recorder_destroyed(self, *_args) -> None:
         self._macro_recorder_win = None
 
@@ -2803,6 +3015,54 @@ class MainWindow(QMainWindow):
             self._place_new_window(win, idx)
         win.raise_(); win.activateWindow()
         self._notify_view_state_changed()
+        return win
+
+    def _show_tracking_view(self, dataset_idx: int | None = None):
+        """Open (or raise) this dataset's tracking view."""
+        if self._state.active_dataset is None:
+            self._no_data_warning()
+            return None
+        idx = dataset_idx if type(dataset_idx) is int else self._state.active_idx
+        if idx is None:
+            return None
+        win = self._tracking_windows.get(idx)
+        fresh = win is None
+        if fresh:
+            from .tracking_window import TrackingWindow
+            win = TrackingWindow(self._state, dataset_idx=idx)
+            win.destroyed.connect(
+                lambda _=None, i=idx: self._tracking_windows.pop(i, None))
+            self._tracking_windows[idx] = win
+        self._install_window_shortcuts(win)
+        win.show()
+        if fresh:
+            self._place_new_window(win, idx)
+        win.raise_(); win.activateWindow()
+        self._notify_view_state_changed()
+        return win
+
+    def _show_msd_analysis(self, dataset_idx: int | None = None):
+        """Open (or raise) the active dataset's modeless MSD workbench."""
+        if self._state.active_dataset is None:
+            self._no_data_warning()
+            return None
+        idx = dataset_idx if type(dataset_idx) is int else self._state.active_idx
+        if idx is None:
+            return None
+        win = self._msd_windows.get(idx)
+        if win is None:
+            from .modeless import show_modeless
+            from .tracking_analysis_window import MsdAnalysisWindow
+
+            win = MsdAnalysisWindow(self._state, idx, owner=self)
+            win.destroyed.connect(
+                lambda _=None, i=idx: self._msd_windows.pop(i, None))
+            self._msd_windows[idx] = win
+            show_modeless(win, self)
+        else:
+            win.show()
+        win.raise_()
+        win.activateWindow()
         return win
 
     def _show_histogram(self, dataset_idx: int | None = None):
@@ -4223,12 +4483,32 @@ class MainWindow(QMainWindow):
         self._sync_roi_tool_actions(self._state.rois.active_tool or "")
         return False
 
+    def _announce_roi_tool(self, tool: str) -> None:
+        """Report in the status bar that *tool* is armed and waiting for a draw.
+
+        ⚠ The line is cleared on deactivation only while it is still OURS. A
+        finished draw emits its geometry read-out and *then* releases the tool,
+        so a blanket clear would wipe the read-out the user just earned -- the
+        status bar is shared, and the last writer is not always this method.
+        """
+        has_view = self._state.rois.active_adapter is not None
+        text = roi_tool_status(tool, has_view=has_view)
+        if text:
+            self._roi_tool_status_text = text
+            self._state.status_message.emit(text)
+            return
+        previous = getattr(self, "_roi_tool_status_text", "")
+        self._roi_tool_status_text = ""
+        if previous and self._status_label.text() == previous:
+            self._state.status_message.emit("")
+
     def _sync_roi_tool_actions(self, tool: str = "") -> None:
         active_tool = tool or self._state.rois.active_tool or ""
         rect_family = {t for _l, t, _ic, _r in _RECT_FAMILY}
         oval_family = {t for _l, t, _ic, _r in _OVAL_FAMILY}
         poly_family = {t for _l, t, _ic, _r in _POLY_FAMILY}
         point_family = {t for _l, t, _ic, _r in _POINT_FAMILY}
+        lasso_family = {t for _l, t, _ic, _r in _LASSO_FAMILY}
         line_family = {t for _l, t, _ic in _LINE_FAMILY}
         # Track the active family member + refresh that button's variant icon.
         if active_tool in line_family:
@@ -4246,6 +4526,9 @@ class MainWindow(QMainWindow):
         elif active_tool in point_family:
             self._point_variant = active_tool
             self._update_shape_button_icon("point")
+        elif active_tool in lasso_family:
+            self._lasso_variant = active_tool
+            self._update_shape_button_icon("lasso")
         for name, action in self._roi_tool_actions.items():
             blocked = action.blockSignals(True)
             # A family button stays checked for any of its variants.
@@ -4259,6 +4542,9 @@ class MainWindow(QMainWindow):
                 checked = active_tool in poly_family
             elif name == "point":
                 checked = active_tool in point_family
+            elif name == "magnetic_lasso":
+                # The action key is the tool, not the family, so name it here.
+                checked = active_tool in lasso_family
             else:
                 checked = name == active_tool
             action.setChecked(checked)
@@ -4286,8 +4572,9 @@ class MainWindow(QMainWindow):
             ("toolOval", "oval"),
             ("toolPolygon", "polygon"),
             ("toolPoint", "point"),
+            ("toolMagneticLasso", "lasso"),
         ):
-            action = getattr(self._ui, attr, None)
+            action = getattr(self._ui, attr, None) or getattr(self, attr, None)
             button = self._ui.toolbar.widgetForAction(action) if action is not None else None
             if button is not None:
                 self._roi_tool_buttons[button] = key
@@ -4319,6 +4606,8 @@ class MainWindow(QMainWindow):
             return _POLY_FAMILY
         if kind == "point":
             return _POINT_FAMILY
+        if kind == "lasso":
+            return _LASSO_FAMILY
         return ()
 
     def _shape_variant(self, kind: str) -> str:
@@ -4330,16 +4619,31 @@ class MainWindow(QMainWindow):
             return self._poly_variant
         if kind == "point":
             return self._point_variant
+        if kind == "lasso":
+            return self._lasso_variant
         return kind
 
     def _show_shape_family_menu(self, widget: QWidget, pos, kind: str) -> None:
-        """Fiji-style right-click switcher on a shape-family toolbar button."""
+        """Fiji-style right-click switcher on a shape-family toolbar button.
+
+        A member whose tool is not registered in ``core.roi.ROI_TOOLS`` is shown
+        **disabled, with the reason in its tooltip**, rather than omitted or
+        offered: ``RoiStore.set_tool`` ignores an unknown tool, so an enabled
+        entry would switch the button icon and then draw nothing -- the project
+        convention is disabled-with-a-reason over a silently dead control."""
+        from ..core.roi import ROI_TOOLS
+
         menu = QMenu(widget)
+        menu.setToolTipsVisible(True)
         active = self._state.rois.active_tool
         current = self._shape_variant(kind)
         for label, tool, _ic, _rot in self._shape_family(kind):
             action = menu.addAction(label)
             action.setCheckable(True)
+            if tool not in ROI_TOOLS:
+                action.setEnabled(False)
+                action.setToolTip(f"{label} — the drawing tool is not implemented yet")
+                continue
             action.setChecked(tool == active or (active is None and tool == current))
             action.triggered.connect(
                 lambda _checked=False, k=kind, t=tool: self._select_shape_variant(k, t))
@@ -4354,8 +4658,55 @@ class MainWindow(QMainWindow):
             self._poly_variant = tool
         elif kind == "point":
             self._point_variant = tool
+        elif kind == "lasso":
+            self._lasso_variant = tool
         self._update_shape_button_icon(kind)
         self._activate_roi_tool(tool)
+
+    def _show_wand_dialog(self) -> None:
+        """Open the Magic Wand Tool options, arming the wand with them.
+
+        Double-clicking a checkable toolbar button toggles it on the first press,
+        so a wand that was already armed would be switched *off* by the very
+        gesture that opens its options. Re-selecting the variant here makes the
+        double-click mean "show me the options for this tool" in both directions.
+        """
+        from . import modeless
+        from .wand_dialog import MagicWandDialog
+
+        self._select_shape_variant("lasso", "magic_wand")
+        dialog = getattr(self, "_wand_dialog", None)
+        if dialog is not None:
+            try:
+                dialog.raise_()
+                dialog.activateWindow()
+                return
+            except RuntimeError:           # the C++ side is gone; build a new one
+                self._wand_dialog = None
+        dialog = MagicWandDialog(self._state.prefs, self)
+        dialog.parameters_changed.connect(self._on_wand_parameters_changed)
+        dialog.destroyed.connect(self._on_wand_dialog_destroyed)
+        self._wand_dialog = dialog
+        modeless.show_modeless(dialog, self)
+
+    def _on_wand_dialog_destroyed(self, *_args) -> None:
+        self._wand_dialog = None
+
+    def _on_wand_parameters_changed(self) -> None:
+        """Re-apply the new tolerances to the last wand click.
+
+        Two tolerances are hard to set blind, so moving a slider re-grows the
+        region that is already on screen instead of asking for another click.
+        The controller that served the last click remembers its seed; with no
+        previous click there is simply nothing to re-run.
+        """
+        controller = getattr(self._state, "_wand_last_controller", None)
+        if controller is None:
+            return
+        try:
+            controller.redo_wand()
+        except RuntimeError:               # its view has closed since
+            self._state._wand_last_controller = None
 
     def _rotated_icon(self, path: str, rotate_deg: float) -> QIcon:
         """A QIcon from *path*, optionally turned *rotate_deg*° (the rotated rectangle
@@ -4385,8 +4736,22 @@ class MainWindow(QMainWindow):
             "oval": "toolOval",
             "polygon": "toolPolygon",
             "point": "toolPoint",
+            "lasso": "toolMagneticLasso",
         }.get(kind)
-        action = getattr(self._ui, action_name, None) if action_name else None
+        action = None
+        if action_name:
+            # The .ui buttons hang off ``self._ui``; the ones built in code
+            # (Magnetic Lasso, Angle) hang off ``self``.
+            #
+            # ⚠ A missing attribute on a QObject whose C++ peer is gone raises
+            # RuntimeError, not AttributeError, so getattr's default does not
+            # absorb it -- the same stale-wrapper tolerance the rest of the
+            # QObject lookups in this file are written with.
+            try:
+                action = (getattr(self._ui, action_name, None)
+                          or getattr(self, action_name, None))
+            except RuntimeError:
+                return
         if action is None:
             return
         current = self._shape_variant(kind)
@@ -4401,8 +4766,10 @@ class MainWindow(QMainWindow):
         action.setIcon(self._rotated_icon(str(path), rot))
         switch = {
             "rectangle": "rectangle / rotated / cuboid",
-            "oval": "oval / ellipse / sphere",
+            "oval": "oval / ellipse / sphere / cylinder",
             "polygon": "polygon / polyhedron",
+            "point": "point / multi-point",
+            "lasso": "magnetic lasso / magic wand",
         }.get(kind, kind)
         action.setToolTip(f"{label} — right-click to switch ({switch})")
 
@@ -4650,6 +5017,8 @@ class MainWindow(QMainWindow):
         windows = (
             list(self._render_windows.values())
             + list(self._scatter_windows.values())
+            + list(self._tracking_windows.values())
+            + list(self._msd_windows.values())
             + list(self._histogram_windows.values())
             + list(self._attr_windows.values())
         )
@@ -6293,6 +6662,13 @@ class MainWindow(QMainWindow):
                 "Select exactly one polyhedron ROI in the ROI Manager first.")
             return
         target = selected[0]
+        if str((target.geometry or {}).get("representation") or "") == "projection_hull":
+            QMessageBox.information(
+                self, "Add Cross-Section",
+                "This projection-hull ROI is edited directly in its XY, XZ, "
+                "and YZ panes. Add Cross-Section applies only to legacy "
+                "contour-stack polyhedra.")
+            return
 
         polygon = None
         view = self._active_coordinate_view()
@@ -8456,6 +8832,8 @@ class MainWindow(QMainWindow):
             self._data_windows,
             self._render_windows,
             self._scatter_windows,
+            self._tracking_windows,
+            self._msd_windows,
             self._histogram_windows,
             self._attr_windows,
             self._filter_dlgs,
@@ -9477,6 +9855,8 @@ class MainWindow(QMainWindow):
             except Exception: pass
         for mapping in (
             self._scatter_windows,
+            self._tracking_windows,
+            self._msd_windows,
             self._histogram_windows,
             self._attr_windows,
         ):

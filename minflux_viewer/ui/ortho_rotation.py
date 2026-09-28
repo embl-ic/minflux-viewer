@@ -51,12 +51,19 @@ def rotation_axis_labels(mode: str) -> tuple[str, str]:
     )
 
 
-def rotated_projection(xyz, angle_deg: float, mode: str = "about Y"):
+def rotated_projection(xyz, angle_deg: float, mode: str = "about Y", *, centre=None):
     """``(h, v)`` screen coordinates for *xyz* spun by *angle_deg*.
 
     At 0° this reproduces the pane's neighbour exactly (``about Y`` gives X
     horizontal, Y vertical -- the XY view), so the rotation reads as a
     continuous departure from a known picture rather than a new one.
+
+    *centre* is the 3-D point the spin turns about, in the same coordinates as
+    *xyz*. ⚠ Without it the rotation is about the coordinate ORIGIN, and MINFLUX
+    coordinates sit tens of microns from it -- so a few degrees swung the whole
+    cloud clean off the pane. Passing the crosshair keeps the marked feature
+    fixed while everything around it turns, and the 0° identity is unaffected
+    (the centre maps to itself at every angle).
     """
     pts = np.asarray(xyz, dtype=float)
     if pts.ndim != 2 or pts.shape[1] < 3:
@@ -71,5 +78,12 @@ def rotated_projection(xyz, angle_deg: float, mode: str = "about Y"):
     cos_t, sin_t = np.cos(theta), np.sin(theta)
     # Only the horizontal axis is a mix; the vertical one is held so the view
     # stays comparable with the fixed panes beside it.
-    horizontal = pts[:, a] * cos_t + pts[:, b] * sin_t
+    origin_a = origin_b = 0.0
+    if centre is not None:
+        pivot = np.asarray(centre, dtype=float).ravel()
+        if pivot.size >= 3 and np.all(np.isfinite(pivot[:3])):
+            origin_a, origin_b = float(pivot[a]), float(pivot[b])
+    horizontal = (origin_a
+                  + (pts[:, a] - origin_a) * cos_t
+                  + (pts[:, b] - origin_b) * sin_t)
     return horizontal, pts[:, up]

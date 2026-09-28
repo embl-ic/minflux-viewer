@@ -371,6 +371,8 @@ def _viewer(order_log, *, dead=False):
     win._tiff_windows = {"f#obf": make("image", order_log)}
     win._render_windows = {0: _FakeWindow("render", order_log)}
     win._scatter_windows = {0: _FakeWindow("scatter", order_log)}
+    win._tracking_windows = {}
+    win._msd_windows = {}
     win._histogram_windows = {}
     win._attr_windows = {}
     win._data_windows = {0: _FakeWindow("data-info", order_log)}
@@ -415,6 +417,7 @@ def test_stacking_an_import_that_produced_nothing_is_a_no_op(_app):
 
     win = MainWindow.__new__(MainWindow)
     for name in ("_tiff_windows", "_render_windows", "_scatter_windows",
+                 "_tracking_windows", "_msd_windows",
                  "_histogram_windows", "_attr_windows", "_data_windows"):
         setattr(win, name, {})
     win._mbm_windows = lambda: []

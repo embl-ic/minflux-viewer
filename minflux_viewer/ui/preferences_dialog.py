@@ -56,10 +56,12 @@ from PyQt6.QtWidgets import (
 )
 
 from ..colors import DEFAULT_COLOR_PREFS, normalize_color_preferences
+from ..core import formats as _formats
 from ..core.app_state import DEFAULT_PREFS, AppState, merge_pref_changes
 from ..core.attributes import aggregation_description
 from ..core.iteration import POOL_KEYS
 from ..msr.descriptions import describe_path
+from . import save_dialog as _save_dialog
 from .color_button import (
     ColorSwatchButton,
     choose_rgba,
@@ -116,9 +118,6 @@ _XY_ORIGIN_OPTIONS = [
     ("origin at bottom left (Y increase upward)", "bottom_left"),
 ]
 
-from ..core import formats as _formats
-from . import save_dialog as _save_dialog
-
 # Save/Export — file formats offered (Preferences > Data, and the Save dialog).
 # From the one registry, in its order; ``.msr`` gets its own row below with a
 # disclaimer, so it is excluded from the inline checkbox row here. Formats whose
@@ -166,6 +165,11 @@ _COMPUTED_ATTRIBUTE_INFO = [
     ("dt", "time interval from the previous localization in the same track"),
     ("tim_trace", "time stamp zeroed at each track start"),
     ("den", "local density at data point"),
+    ("msd_d", "short-lag MSD diffusion coefficient per uninterrupted segment"),
+    ("msd_alpha", "descriptive short-lag MSD exponent per segment"),
+    ("msd_sigma_apparent", "apparent sigma from the MSD intercept"),
+    ("step_angle", "turning angle between consecutive trajectory steps"),
+    ("track_straightness", "segment net displacement divided by path length"),
 ]
 
 
@@ -187,6 +191,7 @@ _SHORTCUT_LABELS = {
     "open": "Open",
     "save": "Save (MINFLUX Viewer Zarr v2)",
     "render": "Render",
+    "tracking_view": "Tracking View",
     "brightness_contrast": "Brightness / Contrast",
     "attribute_plot": "Attribute Plot",
     "attribute_histogram": "Attribute Histogram",
@@ -362,11 +367,12 @@ class PreferencesDialog(QDialog):
 
         self._add_page("File", self._build_file_tab(), ["file"])
         self._add_page("Data", self._build_data_tab(), ["data"])
-        self._add_page("Appearance", self._build_plot_tab(), ["plot", "colors"])
-        self._add_page("Plugin", self._build_plugin_tab(), ["plugin", "file"])
-        self._add_page("Shortcuts", self._build_shortcuts_tab(), ["shortcuts"])
         self._add_page("Attributes", self._build_attributes_tab(), ["attributes"])
+        self._add_page("Tracking", self._build_tracking_tab(), ["tracking"])
+        self._add_page("Appearance", self._build_plot_tab(), ["plot", "colors"])
         self._add_page("MBM Handling", self._build_mbm_tab(), ["mbm_handling"])
+        self._add_page("Shortcuts", self._build_shortcuts_tab(), ["shortcuts"])
+        self._add_page("Plugin", self._build_plugin_tab(), ["plugin", "file"])
         self._page_list.setCurrentRow(0)
 
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self._search_edit.setFocus)
@@ -683,6 +689,191 @@ class PreferencesDialog(QDialog):
         filt_row.addStretch()
         root.addLayout(filt_row)
 
+        root.addStretch()
+        return w
+
+    # -- Tracking tab ------------------------------------------------
+
+    def _build_tracking_tab(self) -> QWidget:
+        w = QWidget()
+        root = QVBoxLayout(w)
+        root.setContentsMargins(16, 12, 16, 12)
+        root.setSpacing(10)
+
+        group = QGroupBox("Timestamp preprocessing")
+        form = QFormLayout(group)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+
+        precision_row = QHBoxLayout()
+        self._tracking_precision_value = QDoubleSpinBox()
+        self._tracking_precision_value.setRange(0.000001, 1.0e9)
+        self._tracking_precision_value.setDecimals(6)
+        self._tracking_precision_value.setSingleStep(0.1)
+        self._tracking_precision_value.setMinimumWidth(110)
+        self._tracking_precision_unit = QComboBox()
+        for label, value in (("s", "s"), ("ms", "ms"), ("µs", "us"), ("ns", "ns")):
+            self._tracking_precision_unit.addItem(label, value)
+        precision_tip = (
+            "Round the canonical 'tim' values to this precision before each "
+            "trace onset is set to zero. The default 1 µs is a rounding "
+            "resolution, not an assumed acquisition interval: the view always "
+            "measures the actual interval from the loaded data."
+        )
+        self._tracking_precision_value.setToolTip(precision_tip)
+        self._tracking_precision_unit.setToolTip(precision_tip)
+        precision_row.addWidget(self._tracking_precision_value)
+        precision_row.addWidget(self._tracking_precision_unit)
+        precision_row.addStretch()
+        form.addRow("Round timestamp precision to", precision_row)
+        root.addWidget(group)
+
+        analysis_group = QGroupBox("Computed on tracking analysis")
+        analysis_layout = QVBoxLayout(analysis_group)
+        self._tracking_materialize_attributes = QCheckBox(
+            "Add selected attributes to the dataset after a successful analysis")
+        self._tracking_materialize_attributes.setToolTip(
+            "The MSD workbench expands accepted per-segment results onto source "
+            "localizations. Excluded/filtered rows remain NaN, and method "
+            "parameters and citations are retained as provenance.")
+        analysis_layout.addWidget(self._tracking_materialize_attributes)
+        self._tracking_attribute_checks: dict[str, QCheckBox] = {}
+        attribute_grid = QGridLayout()
+        attribute_info = (
+            ("msd_d", "short-lag diffusion coefficient"),
+            ("msd_alpha", "descriptive anomalous exponent"),
+            ("msd_sigma_apparent", "apparent sigma from MSD intercept"),
+            ("step_angle", "turning angle between steps"),
+            ("track_straightness", "uninterrupted-segment straightness"),
+        )
+        for position, (name, description) in enumerate(attribute_info):
+            check = QCheckBox(f"{name}: {description}")
+            check.setToolTip(
+                "A fit is stored only when its diagnostic reason is 'ok'. "
+                "This attribute is user-visible and can be filtered or plotted.")
+            self._tracking_attribute_checks[name] = check
+            attribute_grid.addWidget(check, position // 2, position % 2)
+        analysis_layout.addLayout(attribute_grid)
+        root.addWidget(analysis_group)
+
+        view_group = QGroupBox("Tracking View defaults")
+        view_form = QFormLayout(view_group)
+        view_form.setHorizontalSpacing(14)
+        view_form.setVerticalSpacing(7)
+
+        mode_row = QHBoxLayout()
+        self._tracking_default_axis = QComboBox()
+        self._tracking_default_axis.addItem("Each trace from zero", "trace")
+        self._tracking_default_axis.addItem("Absolute timestamp", "absolute")
+        self._tracking_default_axis.addItem("Relative index", "index")
+        self._tracking_default_projection = QComboBox()
+        for projection in ("XY", "XZ", "YZ", "3D"):
+            self._tracking_default_projection.addItem(projection, projection)
+        mode_row.addWidget(self._tracking_default_axis)
+        mode_row.addWidget(QLabel("Projection"))
+        mode_row.addWidget(self._tracking_default_projection)
+        mode_row.addStretch()
+        view_form.addRow("Initial axis", mode_row)
+
+        tail_row = QHBoxLayout()
+        self._tracking_tail_fraction = QDoubleSpinBox()
+        self._tracking_tail_fraction.setRange(0.01, 100.0)
+        self._tracking_tail_fraction.setDecimals(2)
+        self._tracking_tail_fraction.setSuffix(" % of axis")
+        self._tracking_tail_color_mode = QComboBox()
+        for mode in ("Channel", "Time"):
+            self._tracking_tail_color_mode.addItem(mode, mode)
+        self._tracking_tail_bands = QSpinBox()
+        self._tracking_tail_bands.setRange(1, 24)
+        self._tracking_tail_width = QDoubleSpinBox()
+        self._tracking_tail_width.setRange(0.1, 20.0)
+        self._tracking_tail_width.setDecimals(1)
+        tail_row.addWidget(self._tracking_tail_fraction)
+        tail_row.addWidget(QLabel("colour"))
+        tail_row.addWidget(self._tracking_tail_color_mode)
+        tail_row.addWidget(QLabel("bands"))
+        tail_row.addWidget(self._tracking_tail_bands)
+        tail_row.addWidget(QLabel("width"))
+        tail_row.addWidget(self._tracking_tail_width)
+        tail_row.addStretch()
+        view_form.addRow("Tail", tail_row)
+
+        opacity_row = QHBoxLayout()
+        self._tracking_tail_head_opacity = QSpinBox()
+        self._tracking_tail_head_opacity.setRange(0, 255)
+        self._tracking_tail_tip_opacity = QSpinBox()
+        self._tracking_tail_tip_opacity.setRange(0, 255)
+        opacity_row.addWidget(QLabel("head"))
+        opacity_row.addWidget(self._tracking_tail_head_opacity)
+        opacity_row.addWidget(QLabel("tip"))
+        opacity_row.addWidget(self._tracking_tail_tip_opacity)
+        self._tracking_tail_grow = QCheckBox("grow from start")
+        opacity_row.addWidget(self._tracking_tail_grow)
+        opacity_row.addStretch()
+        view_form.addRow("Tail opacity", opacity_row)
+
+        head_row = QHBoxLayout()
+        self._tracking_head_symbol = QComboBox()
+        for label, symbol in (
+            ("Star", "star"), ("Circle", "o"), ("Triangle", "t"),
+            ("Diamond", "d"), ("Plus", "+"),
+        ):
+            self._tracking_head_symbol.addItem(label, symbol)
+        self._tracking_head_size = QSpinBox()
+        self._tracking_head_size.setRange(2, 64)
+        head_row.addWidget(self._tracking_head_symbol)
+        head_row.addWidget(QLabel("size"))
+        head_row.addWidget(self._tracking_head_size)
+        head_row.addStretch()
+        view_form.addRow("Head marker", head_row)
+
+        backdrop_row = QHBoxLayout()
+        self._tracking_backdrop_mode = QComboBox()
+        for value in ("Render", "Scatter", "None"):
+            self._tracking_backdrop_mode.addItem(value, value)
+        self._tracking_backdrop_level = QComboBox()
+        for value in ("Faint", "Normal", "Strong"):
+            self._tracking_backdrop_level.addItem(value, value)
+        backdrop_row.addWidget(self._tracking_backdrop_mode)
+        backdrop_row.addWidget(QLabel("brightness"))
+        backdrop_row.addWidget(self._tracking_backdrop_level)
+        backdrop_row.addStretch()
+        view_form.addRow("Structure backdrop", backdrop_row)
+
+        playback_row = QHBoxLayout()
+        self._tracking_playback_rate = QDoubleSpinBox()
+        self._tracking_playback_rate.setRange(0.1, 120.0)
+        self._tracking_playback_rate.setDecimals(1)
+        self._tracking_playback_rate.setSuffix(" steps/s")
+        self._tracking_playback_loop = QCheckBox("loop")
+        playback_row.addWidget(self._tracking_playback_rate)
+        playback_row.addWidget(self._tracking_playback_loop)
+        playback_row.addStretch()
+        view_form.addRow("Playback", playback_row)
+
+        role_row = QHBoxLayout()
+        self._tracking_role_displacement = QDoubleSpinBox()
+        self._tracking_role_displacement.setRange(0.0, 1.0e6)
+        self._tracking_role_displacement.setDecimals(1)
+        self._tracking_role_displacement.setSuffix(" nm")
+        self._tracking_role_min_locs = QSpinBox()
+        self._tracking_role_min_locs.setRange(2, 1_000_000)
+        role_row.addWidget(self._tracking_role_displacement)
+        role_row.addWidget(QLabel("minimum median localizations"))
+        role_row.addWidget(self._tracking_role_min_locs)
+        role_row.addStretch()
+        view_form.addRow("Automatic Tracking role", role_row)
+        root.addWidget(view_group)
+
+        note = QLabel(
+            "The Tracking View and analysis workbench round only their derived "
+            "working time axis; canonical 'tim' is never changed. Trace onset is "
+            "zeroed before filtering. Missing or removed rows become explicit "
+            "segment boundaries and positions are never interpolated by default."
+        )
+        note.setWordWrap(True)
+        note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        root.addWidget(note)
         root.addStretch()
         return w
 
@@ -1240,6 +1431,7 @@ class PreferencesDialog(QDialog):
         g = self._draft.get("plugin", {})
         s = self._draft.get("shortcuts", {})
         a = self._draft.get("attributes", {})
+        t = self._draft.get("tracking", {})
         m = self._draft.get("mbm_handling", {})
         colors = normalize_color_preferences(self._draft.get("colors", {}))
         self._draft["colors"] = colors
@@ -1275,6 +1467,50 @@ class PreferencesDialog(QDialog):
         self._show_scatter.setChecked(bool(d.get("show_scatter", False)))
         self._show_hist.setChecked(bool(d.get("show_histogram", False)))
         self._show_render.setChecked(bool(d.get("show_render", False)))
+
+        # Tracking
+        self._tracking_precision_value.setValue(
+            float(t.get("timestamp_precision_value", 1.0))
+        )
+        self._set_combo_data(
+            self._tracking_precision_unit,
+            t.get("timestamp_precision_unit", "us"),
+        )
+        self._tracking_materialize_attributes.setChecked(bool(
+            t.get("materialize_analysis_attributes", False)))
+        selected_tracking_attrs = set(t.get(
+            "analysis_attributes", self._tracking_attribute_checks))
+        for name, check in self._tracking_attribute_checks.items():
+            check.setChecked(name in selected_tracking_attrs)
+        self._set_combo_data(
+            self._tracking_default_axis, t.get("default_axis_mode", "trace"))
+        self._set_combo_data(
+            self._tracking_default_projection, t.get("default_projection", "XY"))
+        self._tracking_tail_fraction.setValue(
+            100.0 * float(t.get("tail_fraction", 0.04)))
+        self._tracking_tail_grow.setChecked(bool(t.get("tail_grow", False)))
+        self._set_combo_data(
+            self._tracking_tail_color_mode, t.get("tail_color_mode", "Channel"))
+        self._tracking_tail_bands.setValue(int(t.get("tail_bands", 6)))
+        self._tracking_tail_width.setValue(float(t.get("tail_width", 2.0)))
+        self._tracking_tail_head_opacity.setValue(
+            int(t.get("tail_head_opacity", 255)))
+        self._tracking_tail_tip_opacity.setValue(
+            int(t.get("tail_tip_opacity", 70)))
+        self._set_combo_data(
+            self._tracking_head_symbol, t.get("head_symbol", "star"))
+        self._tracking_head_size.setValue(int(t.get("head_size", 7)))
+        self._set_combo_data(
+            self._tracking_backdrop_mode, t.get("backdrop_mode", "Render"))
+        self._set_combo_data(
+            self._tracking_backdrop_level, t.get("backdrop_level", "Normal"))
+        self._tracking_playback_rate.setValue(
+            float(t.get("playback_rate_hz", 10.0)))
+        self._tracking_playback_loop.setChecked(bool(t.get("playback_loop", True)))
+        self._tracking_role_displacement.setValue(
+            float(t.get("role_displacement_nm", 25.0)))
+        self._tracking_role_min_locs.setValue(
+            int(t.get("role_min_median_locs", 5)))
 
         # When saving/exporting
         enabled_fmts = set(d.get("export_formats", _EXPORT_FORMAT_DEFAULTS))
@@ -1400,6 +1636,7 @@ class PreferencesDialog(QDialog):
         g = self._draft.setdefault("plugin", {})
         s = self._draft.setdefault("shortcuts", {})
         a = self._draft.setdefault("attributes", {})
+        t = self._draft.setdefault("tracking", {})
         m = self._draft.setdefault("mbm_handling", {})
         colors = normalize_color_preferences(self._draft.get("colors", {}))
         self._draft["colors"] = colors
@@ -1430,6 +1667,42 @@ class PreferencesDialog(QDialog):
         d["show_scatter"] = bool(self._show_scatter.isChecked())
         d["show_histogram"] = bool(self._show_hist.isChecked())
         d["show_render"] = bool(self._show_render.isChecked())
+
+        # Tracking
+        t["timestamp_precision_value"] = float(
+            self._tracking_precision_value.value()
+        )
+        t["timestamp_precision_unit"] = str(
+            self._tracking_precision_unit.currentData() or "us"
+        )
+        t["materialize_analysis_attributes"] = bool(
+            self._tracking_materialize_attributes.isChecked())
+        t["analysis_attributes"] = [
+            name for name, check in self._tracking_attribute_checks.items()
+            if check.isChecked()
+        ]
+        t["default_axis_mode"] = str(
+            self._tracking_default_axis.currentData() or "trace")
+        t["default_projection"] = str(
+            self._tracking_default_projection.currentData() or "XY")
+        t["tail_fraction"] = float(self._tracking_tail_fraction.value()) / 100.0
+        t["tail_grow"] = bool(self._tracking_tail_grow.isChecked())
+        t["tail_color_mode"] = self._tracking_tail_color_mode.currentText()
+        t["tail_bands"] = int(self._tracking_tail_bands.value())
+        t["tail_width"] = float(self._tracking_tail_width.value())
+        t["tail_head_opacity"] = int(self._tracking_tail_head_opacity.value())
+        t["tail_tip_opacity"] = int(self._tracking_tail_tip_opacity.value())
+        t["head_symbol"] = str(self._tracking_head_symbol.currentData() or "star")
+        t["head_size"] = int(self._tracking_head_size.value())
+        t["backdrop_mode"] = str(
+            self._tracking_backdrop_mode.currentData() or "Render")
+        t["backdrop_level"] = str(
+            self._tracking_backdrop_level.currentData() or "Normal")
+        t["playback_rate_hz"] = float(self._tracking_playback_rate.value())
+        t["playback_loop"] = bool(self._tracking_playback_loop.isChecked())
+        t["role_displacement_nm"] = float(
+            self._tracking_role_displacement.value())
+        t["role_min_median_locs"] = int(self._tracking_role_min_locs.value())
 
         # When saving/exporting
         d["export_formats"] = [k for k, cb in self._export_format_checks.items()

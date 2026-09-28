@@ -19,6 +19,8 @@ each behaviour rather than two that can drift.
 
 from __future__ import annotations
 
+import contextlib
+
 import sys
 import types
 from typing import TYPE_CHECKING, Any
@@ -147,6 +149,8 @@ class MinfluxViewerFacade:
     def __init__(self, state: AppState) -> None:
         self._state = state
         self._main_window = None
+        self._active_plugin = None
+        self._preset_answers = None
         self._windows: list[_AdHocPlotWindow] = []
         self._tasks: list = []
 
@@ -187,6 +191,44 @@ class MinfluxViewerFacade:
 
     def bind_main_window(self, main_window) -> None:
         self._main_window = main_window
+
+    # -- the running plugin --------------------------------------------------
+
+    @property
+    def active_plugin(self) -> dict | None:
+        """The plugin currently executing, or ``None`` for a plain script.
+
+        Set by the plugin runner rather than by the plugin, so a plugin needs
+        no bookkeeping of its own for its journal entries to be attributable.
+        """
+        return getattr(self, "_active_plugin", None)
+
+    @contextlib.contextmanager
+    def plugin_scope(self, plugin_id: str, label: str = "", method=None):
+        """Mark *plugin_id* as running for the duration of the block."""
+        previous = self.active_plugin
+        self._active_plugin = {
+            "id": str(plugin_id), "label": str(label or plugin_id),
+            "method": method,
+        }
+        try:
+            yield
+        finally:
+            self._active_plugin = previous
+
+    def take_preset_answers(self) -> dict | None:
+        """Consume answers staged for the next ``mfv.ui.ask()``, if any.
+
+        One-shot on purpose: a replay supplies the answers for the dialog the
+        plugin is about to raise, and a second, unrelated question later in the
+        same run must still be asked.
+        """
+        pending = getattr(self, "_preset_answers", None)
+        self._preset_answers = None
+        return pending
+
+    def stage_preset_answers(self, answers: dict | None) -> None:
+        self._preset_answers = dict(answers) if answers else None
 
     def require_main_window(self):
         if self._main_window is None:

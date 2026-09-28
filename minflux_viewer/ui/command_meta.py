@@ -152,6 +152,12 @@ COMMAND_META: dict[str, CommandMeta] = {
                               "Localization scatter plot.", "view",
                               gui_class=GuiClass.GUI_ONLY,
                               record="mfv.view.scatter()"),
+    "actionTrackingView": CommandMeta(U + "tracking_window.py",
+                              ("tracking", "movie", "playback", "comet", "trajectory", "track",
+                               "time", "animation", "cargo", "transport", "spt"),
+                              "Play localization trajectories as comets with fading tails over a "
+                              "de-emphasised structure backdrop.", "view",
+                              gui_class=GuiClass.GUI_ONLY),
     "actionRender": CommandMeta(U + "render_window.py",
                               ("image", "reconstruction", "histogram", "gaussian", "advanced", "precision", "bilinear"),
                               "Rendered localization image (right-click › View › Render Method "
@@ -221,9 +227,9 @@ COMMAND_META: dict[str, CommandMeta] = {
     "actionRoiAddSlice": CommandMeta(C + "roi_volume.py",
                               ("roi", "3d", "polyhedron", "cross-section", "slice", "level",
                                "multi-slice", "interpolate", "volume"),
-                              "Add the drawn polygon to the selected polyhedron as a "
-                              "cross-section at another Z, so the shape between levels is "
-                              "interpolated rather than extruded.", "process",
+                              "Add the drawn polygon to a legacy contour-stack polyhedron "
+                              "at another Z, so the shape between levels is interpolated "
+                              "rather than extruded.", "process",
                               params=(ParamMeta("at", "nm", 0.0, "nm",
                                                 "stacking coordinate of the new cross-section"),),
                               inputs=("selected polyhedron ROI", "a drawn polygon"),

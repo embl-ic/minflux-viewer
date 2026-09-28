@@ -61,7 +61,7 @@ def mfv(state):
 # ---------------------------------------------------------------------------
 
 def test_facade_exposes_every_published_namespace(mfv):
-    from minflux_viewer.api import NAMESPACES
+    from minflux_viewer.api import NAMESPACES, __api_version__
 
     for name in NAMESPACES:
         assert hasattr(mfv, name), name
@@ -437,7 +437,7 @@ def test_legacy_get_attr_other_sources_still_read_components(mfv, state):
 
 
 def test_runtime_module_publishes_namespaces_and_legacy_names(mfv):
-    from minflux_viewer.api import NAMESPACES
+    from minflux_viewer.api import NAMESPACES, __api_version__
     from minflux_viewer.scripting import install_runtime_module
 
     module = install_runtime_module(mfv)
@@ -445,7 +445,10 @@ def test_runtime_module_publishes_namespaces_and_legacy_names(mfv):
         assert hasattr(module, name), name
     for name in ("get_active_dataset", "get_loc", "log", "viewer", "ScriptError"):
         assert hasattr(module, name), name
-    assert module.__api_version__ == "1.2"
+    # Read from the source of truth: adding a namespace is a deliberate minor
+    # bump, and this assertion is about the module publishing the version, not
+    # about which version it is.
+    assert module.__api_version__ == __api_version__
 
 
 def test_script_error_is_the_api_error(mfv):

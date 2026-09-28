@@ -237,8 +237,10 @@ def test_a_plugin_needing_a_newer_api_is_refused_with_both_versions(roots):
     _tier2(root, "future", plugin_id="a.future", name="Future",
            body="def run(ctx): pass\n",
            extra_manifest='\n[requires]\nmfv_api = ">=99.0"\n')
+    from minflux_viewer.api import __api_version__
+
     found = loader.scan_root(root)[0]
-    assert "99.0" in found.error and "1.2" in found.error
+    assert "99.0" in found.error and __api_version__ in found.error
 
 
 def test_a_plugin_needing_a_missing_package_says_where_to_get_it(roots):

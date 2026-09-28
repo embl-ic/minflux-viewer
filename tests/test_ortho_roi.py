@@ -307,6 +307,57 @@ def _volume_draft():
         context={"source_view": "scatter", "dataset_idx": 0})
 
 
+def _projection_hull_draft():
+    from minflux_viewer.core.roi import RoiRecord
+
+    def rectangle(a, b):
+        return [[a[0], b[0]], [a[1], b[0]], [a[1], b[1]], [a[0], b[1]]]
+
+    return RoiRecord.create(
+        "polyhedron",
+        {
+            "representation": "projection_hull",
+            "primary_plane": "XY",
+            "margin_nm": 0.0,
+            "projections": {
+                "XY": {"points": rectangle((-100.0, 100.0), (-80.0, 80.0)),
+                       "source": "manual"},
+                "XZ": {"points": rectangle((-100.0, 100.0), (-40.0, 40.0)),
+                       "source": "auto_hull"},
+                "YZ": {"points": rectangle((-80.0, 80.0), (-40.0, 40.0)),
+                       "source": "auto_hull"},
+            },
+        },
+        context={"source_view": "scatter", "dataset_idx": 0},
+    )
+
+
+def test_projection_hull_side_polygon_can_add_and_delete_vertices(_qt_app):
+    """The generated four-corner fallback is only a starting outline: side
+    panes use the same Add/Delete-point path as an ordinary polygon ROI."""
+    state = _state()
+    win = _scatter(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        for _ in range(6):
+            _qt_app.processEvents()
+        side = win._pane_roi_controllers["XZ"]
+        side.replace_draft(_projection_hull_draft())
+        assert side._has_editable_vertices(side.draft)
+        assert len(side._editable_vertex_points(side.draft)) == 4
+
+        # Midpoint of the lower XZ edge: insert one editable handle there.
+        side._add_vertex_hit("draft", side.draft, (0.0, -40.0))
+        assert len(side._editable_vertex_points(side.draft)) == 5
+        assert side.draft.geometry["projections"]["XZ"]["source"] == "manual"
+        assert len(side.draft.geometry["projections"]["XY"]["points"]) == 4
+
+        side._delete_vertex_hit("draft", side.draft, (0.0, -40.0))
+        assert len(side._editable_vertex_points(side.draft)) == 4
+    finally:
+        win.close()
+
+
 def test_a_volume_roi_can_be_hit_so_it_can_be_selected_and_deleted(_qt_app):
     """Reported: the drawn shape could not be right-clicked or deleted.
 
@@ -512,6 +563,69 @@ def test_a_cuboid_drawn_in_xz_takes_x_and_z_from_the_drag_and_seeds_y(_qt_app):
         assert g["x"] == [-500.0, 500.0]          # the drag's horizontal axis
         assert g["z"] == [-100.0, 100.0]          # the drag's vertical axis
         assert g["y"][0] < g["y"][1]              # Y came from the data
+    finally:
+        win.close()
+
+
+@pytest.mark.parametrize("view", ["scatter", "render"])
+def test_a_drawn_polyhedron_keeps_its_polygon_and_fits_the_side_views(_qt_app, view):
+    from minflux_viewer.core.roi import RoiRecord
+
+    state = _state()
+    win = _scatter(_qt_app, state) if view == "scatter" else _render(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        for _ in range(8):
+            _qt_app.processEvents()
+        primary = [
+            [-2500.0, -2000.0], [2500.0, -2000.0],
+            [2200.0, 1900.0], [0.0, 2400.0], [-2200.0, 1900.0],
+        ]
+        controller = win._roi_overlay
+        controller._set_draft(RoiRecord.create(
+            "polygon", {"points": primary, "closed": True},
+            **controller._record_kwargs()))
+
+        assert controller._promote_draft_to_volume("polyhedron") is True
+        geometry = controller.draft.geometry
+        assert geometry["representation"] == "projection_hull"
+        assert geometry["projections"]["XY"]["points"] == primary
+        assert geometry["projections"]["XY"]["source"] == "manual"
+        assert geometry["projections"]["XZ"]["source"] == "auto_hull"
+        assert geometry["projections"]["YZ"]["source"] == "auto_hull"
+    finally:
+        win.close()
+
+
+@pytest.mark.parametrize("view", ["scatter", "render"])
+@pytest.mark.parametrize(("plane", "axis"), [("XY", "z"), ("XZ", "y")])
+def test_sparse_volume_fallback_is_centred_on_the_visible_crosshair(
+        _qt_app, view, plane, axis):
+    from minflux_viewer.core.roi import RoiRecord
+
+    state = _state()
+    win = _scatter(_qt_app, state) if view == "scatter" else _render(_qt_app, state)
+    try:
+        win.enter_ortho_mode()
+        for _ in range(8):
+            _qt_app.processEvents()
+        controller = (win._roi_overlay if plane == "XY"
+                      else win._pane_roi_controllers[plane])
+        lo, hi = controller.owner.roi_depth_range()
+        target = 0.5 * (lo + hi) + 0.1 * (hi - lo)
+        point = [0.0, 0.0, 0.0]
+        point[{"x": 0, "y": 1, "z": 2}[axis]] = target
+        win._set_crosshair_visible(True)
+        win._ortho_crosshair.set_point(tuple(point))
+
+        # Far outside the cloud: this must take the shared no/sparse-data seed,
+        # not accidentally derive its interval from localizations.
+        controller._set_draft(RoiRecord.create(
+            "rectangle", {"bounds": [1e6, 1e6, 100.0, 100.0]},
+            **controller._record_kwargs()))
+        assert controller._promote_draft_to_volume("cuboid") is True
+        interval = controller.draft.geometry[axis]
+        assert 0.5 * (interval[0] + interval[1]) == pytest.approx(target)
     finally:
         win.close()
 
@@ -868,3 +982,103 @@ def test_side_pane_edit_becomes_the_roi_manager_update_source(
             assert updated.geometry[axis] == [v + delta for v in record.geometry[axis]]
     finally:
         win.close()
+
+
+# --------------------------------------------------------------------- cylinder
+def test_a_cylinder_is_its_ellipse_down_the_axis_and_a_band_in_the_side_panes():
+    """The point of the shape: draw an oval in one plane, and the other two show
+    a rectangle automatically -- no second drawing gesture, and no view needing
+    to know which plane drew it."""
+    rec = Rec("cylinder", {"axis": "Z", "center": [50.0, 100.0, 350.0],
+                           "radii": [50.0, 100.0], "height": 100.0})
+
+    kind, xy = pane_outline(rec, "XY")
+    assert kind == "full"
+    assert len(xy) > 4                                       # the drawn ellipse
+    assert min(p[0] for p in xy) == 0.0 and max(p[0] for p in xy) == 100.0     # X
+    assert min(p[1] for p in xy) == 0.0 and max(p[1] for p in xy) == 200.0     # Y
+
+    kind, xz = pane_outline(rec, "XZ")
+    assert kind == "full"
+    assert len(xz) == 4                                      # a rectangle
+    assert min(p[0] for p in xz) == 0.0 and max(p[0] for p in xz) == 100.0     # X
+    assert min(p[1] for p in xz) == 300.0 and max(p[1] for p in xz) == 400.0   # Z
+
+    kind, yz = pane_outline(rec, "YZ")
+    assert kind == "full"
+    assert len(yz) == 4
+    # ⚠ Still transposed: the ortho YZ pane draws Z horizontally.
+    assert min(p[0] for p in yz) == 300.0 and max(p[0] for p in yz) == 400.0   # Z
+    assert min(p[1] for p in yz) == 0.0 and max(p[1] for p in yz) == 200.0     # Y
+
+
+def test_a_cylinder_about_x_shows_its_ellipse_in_the_yz_pane():
+    """Which pane shows the ellipse follows the ROI's own named axis, not the
+    plane that happened to draw it."""
+    rec = Rec("cylinder", {"axis": "X", "center": [10.0, 50.0, 60.0],
+                           "radii": [50.0, 60.0], "height": 20.0})
+    assert len(pane_outline(rec, "YZ")[1]) > 4               # ellipse
+    assert len(pane_outline(rec, "XY")[1]) == 4              # rectangle
+    assert len(pane_outline(rec, "XZ")[1]) == 4              # rectangle
+
+
+def test_the_cylinder_item_is_an_oval_in_its_own_plane_and_a_box_from_the_side(_qt_app):
+    """⚠ The ITEM KIND, not just the outline: a cylinder must get bounding-box
+    handles that resize it in every pane, and it is the only volume type whose
+    item kind depends on the view."""
+    from types import SimpleNamespace
+
+    import pyqtgraph as pg
+    from PyQt6.QtWidgets import QWidget
+
+    from minflux_viewer.core.roi import RoiRecord, RoiStore
+    from minflux_viewer.ui.roi_overlay import (
+        FilledEllipseROI,
+        FilledRectROI,
+        RoiOverlayController,
+    )
+
+    class _Owner(QWidget):
+        def __init__(self, plane):
+            super().__init__()
+            self._plane = plane
+            self._state = SimpleNamespace(
+                prefs={"plot": {"roi_color": "Yellow"}}, datasets=[])
+
+        def roi_view_plane(self):
+            return self._plane
+
+        def roi_depth_center(self):
+            return 0.0
+
+        def normalize_roi_record(self, record):
+            return record
+
+    record = RoiRecord.create("cylinder", {"axis": "Z", "center": [50.0, 30.0, 0.0],
+                                           "radii": [50.0, 30.0], "height": 40.0})
+    # One controller whose owner changes plane: _make_item reads the view axes
+    # each time, and three plot widgets would be three sets of pyqtgraph
+    # registrations to tear down for no extra coverage.
+    owner = _Owner("XY")
+    plot = pg.PlotWidget()
+    ctrl = RoiOverlayController(RoiStore(), owner, plot, plot.getPlotItem())
+    kinds = {}
+    try:
+        for plane in ("XY", "XZ", "YZ"):
+            owner._plane = plane
+            kinds[plane] = type(ctrl._make_item(record)).__name__
+    finally:
+        ctrl.dispose()
+
+    assert kinds["XY"] == FilledEllipseROI.__name__      # looking down Z
+    assert kinds["XZ"] == FilledRectROI.__name__         # from the side
+    assert kinds["YZ"] == FilledRectROI.__name__
+
+
+def test_the_cylinder_tool_draws_an_oval_and_lifts_it_on_release():
+    """It reuses the existing oval gesture, so the rubber band, handles and
+    status read-out are the ones already in use; only the lift is new."""
+    from minflux_viewer.ui.roi_overlay import _FLAT_TOOL_FOR_VOLUME
+
+    assert _FLAT_TOOL_FOR_VOLUME["cylinder"] == "oval"
+    assert _FLAT_TOOL_FOR_VOLUME["sphere"] == "oval"     # same gesture, different lift

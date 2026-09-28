@@ -1245,8 +1245,16 @@ class OrthoCrosshair:
 
         for plane, widget in self._panes.items():
             item = plot_item_of(widget)
-            if item is None or not widget.isVisible():
+            if item is None:
                 continue
+            # ⚠ Deliberately NOT gated on ``widget.isVisible()``. Leaving the
+            # mode for the 3-D view hides the pane page, and coming back runs
+            # this refresh before the page is shown again -- so every pane was
+            # skipped, nothing was re-shown, and the crosshair stayed invisible
+            # while its menu entry read as checked (it took an off/on toggle to
+            # come back). A line on a hidden pane is simply not drawn by Qt and
+            # appears when the pane does, which removes the timing dependence
+            # rather than trying to order the two events.
             horizontal, vertical = ORTHO_AXIS_COLUMNS[plane]
             lines = self._lines.get(plane)
             if lines is None:

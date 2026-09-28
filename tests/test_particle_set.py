@@ -250,14 +250,10 @@ def test_pool_multiple_particle_set_files(tmp_path):
     assert len(pool) == 6                               # 2 particles × 3 files
 
 
-def test_load_dialog_spec_carries_multiple_paths(tmp_path):
+def test_load_dialog_spec_carries_multiple_paths(tmp_path, qapp):
     pytest.importorskip("PyQt6")
-    import sys
-
-    from PyQt6.QtWidgets import QApplication
     from minflux_viewer.ui.particle_average_dialog import ParticleLoadDialog
 
-    QApplication.instance() or QApplication(sys.argv)
     dlg = ParticleLoadDialog()
     try:
         assert dlg._build_spec() is None               # nothing selected yet

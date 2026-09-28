@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ...ui.plot_format import apply_spatial_y_direction
 from ...ui.plot_style_dialog import PlotStyleDialog
 
 
@@ -919,7 +920,8 @@ class AlignmentPlotWindow(QDialog):
     _single_channel = None   # class default so bypass-__init__ tests see None
 
     def __init__(self, results, parent=None, data_bounds_nm=None,
-                 requested_transform_type=None, single_channel=None):
+                 requested_transform_type=None, single_channel=None,
+                 prefs: dict | None = None):
         super().__init__(parent)
         # single_channel (dict: name/bead_ids/rids/pos_nm/drift_nm) → no alignment;
         # show the beads + data region + a per-bead drift table.
@@ -932,6 +934,7 @@ class AlignmentPlotWindow(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.resize(1150, 800)
         self._owner = parent
+        self._prefs = prefs or {}
         self.results = results
         # Requested MBM-handling mode (may be downgraded per bead count when re-fit);
         # falls back to the effective mode already on the results.
@@ -1544,6 +1547,12 @@ class AlignmentPlotWindow(QDialog):
             self.plot.plotItem.legend.clear()
         self._items = {}
         x_idx, y_idx = self._axis_indices
+        apply_spatial_y_direction(
+            self.plot,
+            vertical_coordinate="XYZ"[y_idx],
+            prefs=self._prefs,
+            preference_key="scatter_xy_origin",
+        )
         for key, meta in self.datasets.items():
             xyz = self._to_um(meta["xyz_nm"])
             # Excluded beads stay visible but faint, so the user can see which beads
@@ -5339,7 +5348,8 @@ class MsrReaderDialog(QWidget):
                 "Parse a modern multi-channel .msr that contains 'grd/mbm/points'.")
             return
         dlg = BeadsDriftDialog(bead_data, unchecked_gris=self._bead_unchecked_gris, parent=self,
-                               drift_correction=self._run_bead_drift_correction)
+                               drift_correction=self._run_bead_drift_correction,
+                               prefs=getattr(self._state, "prefs", None))
         dlg.accepted.connect(lambda d=dlg, data=bead_data: self._apply_beads_drift_selection(d, data))
         self._show_child_dialog(dlg)
 
@@ -5587,7 +5597,8 @@ class MsrReaderDialog(QWidget):
             data_bounds = self._combined_loc_bounds_nm(loc_bound_names)
             self._show_child_dialog(
                 AlignmentPlotWindow(results, self, data_bounds_nm=data_bounds,
-                                    requested_transform_type=transform_type)
+                                    requested_transform_type=transform_type,
+                                    prefs=getattr(self._state, "prefs", None))
             )
         from ...msr.alignment import RMSE_WARN_NM, alignment_quality_report
 
@@ -5638,7 +5649,9 @@ class MsrReaderDialog(QWidget):
             f"{len(beads)} bead(s) + the data region (per-bead drift). "
             f"user-excluded {len(excluded)} bead(s).")
         self._show_child_dialog(
-            AlignmentPlotWindow([], self, data_bounds_nm=bounds, single_channel=data))
+            AlignmentPlotWindow(
+                [], self, data_bounds_nm=bounds, single_channel=data,
+                prefs=getattr(self._state, "prefs", None)))
 
     # ------------------------------------------------------------------
     # Export

@@ -11,6 +11,7 @@ from minflux_viewer.core.confocal_mapping import (
     ConfocalCandidateMatch,
     ConfocalMappingTransform,
     attach_confocal_signal,
+    detect_associated_image_candidates,
     detect_confocal_candidates,
     discover_confocal_candidates,
     geometry_match_error,
@@ -82,6 +83,37 @@ def test_candidate_detection_excludes_generated_stacks_and_applies_xy_one_percen
     assert [candidate.name for candidate in candidates] == ["Ch1 {12}"]
     np.testing.assert_allclose(candidates[0].matches[0].x_error_fraction, 0.009)
     assert candidates[0].matches[0].y_error_fraction < 0.01
+
+
+def test_associated_image_detection_accepts_containing_prescans_but_not_derived():
+    roi = AcquisitionRoi("did-1", 2.0, 3.0, 8.0, 13.0)
+    base = {
+        "sizes": (20, 20),
+        "ndim": 2,
+        "dtype": "uint16",
+        "offset": (0.0, 0.0),
+        "length": (20.0, 20.0),
+        "extent_m": None,
+        "minflux_type": "",
+    }
+    stacks = [
+        {**base, "raw_index": 1, "name": "Ch4 {13}"},
+        {**base, "raw_index": 2, "name": "too small", "offset": (3.0, 3.0),
+         "length": (4.0, 20.0)},
+        {**base, "raw_index": 3, "name": "density", "minflux_type": "density"},
+    ]
+    selected = [{"dataset_key": "run", "did": "did-1"}]
+
+    independent = detect_associated_image_candidates(stacks, [roi], selected)
+    assert [item.name for item in independent] == ["Ch4 {13}"]
+    assert independent[0].dataset_key == "run"
+    assert independent[0].pixel_xy_nm == pytest.approx((1e9, 1e9))
+    assert independent[0].coverage_area_ratio == pytest.approx(20.0 / 3.0)
+
+    with_generated = detect_associated_image_candidates(
+        stacks, [roi], selected, include_generated=True)
+    assert [item.name for item in with_generated] == ["Ch4 {13}", "density"]
+    assert with_generated[-1].generated is True
 
 
 @pytest.mark.skipif(not _OVERLAY_FILES, reason="rotar overlay sample .msr not present")
@@ -243,6 +275,7 @@ def test_manual_alignment_dialog_uses_editable_steps_and_shortcuts(qtbot):
     )
     qtbot.addWidget(dialog)
     assert dialog.windowTitle().startswith("Manual fluorescent channel alignment —")
+    assert dialog._plot.getViewBox().yInverted()
     dialog._nudge(0.5, -0.5, 0.1)
     assert dialog.transform == ConfocalMappingTransform(0.5, -0.5, 0.1)
     assert "X +0.5 px" in dialog._status.text()

@@ -64,6 +64,11 @@ class Data(Namespace):
             "dimensions": int(getattr(prop, "num_dim", 0)),
             "z_scaling_factor": float(getattr(ds.cali, "z_scaling_factor", 1.0)),
             "source_version": str(ds.metadata.get("source_version", "")),
+            # Stable source identity for plugins that need to associate other
+            # calibrated content from the same acquisition file.  Exposing it
+            # here avoids making plugins reach into the dataset implementation.
+            "source_path": str(ds.metadata.get("msr_source_path", "") or ""),
+            "dataset_did": str(ds.metadata.get("msr_dataset_did", "") or ""),
             "num_filtered": int(np.count_nonzero(np.asarray(ds.filter_mask, dtype=bool))),
         }
 

@@ -1492,6 +1492,37 @@ def _guess_stage(message: str) -> str:
     return "other"
 
 
+def plugin_method_entry(ev):
+    """Render one plugin run from its declared ``[method]`` block.
+
+    Returns ``(stage, sentence, citations)`` or ``None`` when the event is not
+    a plugin run or its plugin ships no declaration.
+
+    Matched on the structured payload the plugin runner attaches rather than on
+    the wording of the log line: a plugin owns its own prose, and a regex over
+    it would break the moment its author reworded a sentence -- which is
+    exactly how the built-in rules used to lose track of this plugin.
+    """
+    payload = (ev.get("method_data") or {}).get("mfv_plugin")
+    if not payload:
+        return None
+    from ..plugins import available
+    from ..plugins.method import render_method_text
+
+    wanted = payload.get("id")
+    entry = next((e for e in available() if e.plugin_id == wanted), None)
+    spec = getattr(entry, "method", None)
+    if spec is None:
+        return None
+    text, missing = render_method_text(
+        spec, payload.get("values") or {}, dataset=payload.get("dataset", ""))
+    if missing:
+        # Named, not hidden: a write-up that silently omits a parameter the
+        # method promised cannot be checked against the run it describes.
+        text += ("\n  (not recorded by this run: " + ", ".join(missing) + ")")
+    return "analysis", text, tuple(spec.citations)
+
+
 def _collect(state, events):
     """Map *events* to ``(by_stage, citations)``; citations de-duped by text, order-preserving."""
     by_stage: dict[str, list[str]] = {s: [] for s in STAGE_ORDER}
@@ -1501,6 +1532,20 @@ def _collect(state, events):
     for ev in events:
         msg = str(ev.get("message", "")).strip()
         if not msg:
+            continue
+        # A plugin that declares its own method text renders from that, ahead
+        # of the built-in rules: it knows what it did and they do not.
+        try:
+            declared = plugin_method_entry(ev)
+        except Exception:                                   # noqa: BLE001
+            declared = None                                 # never block a report
+        if declared is not None:
+            stage, sentence, cites = declared
+            by_stage[stage].append(sentence)
+            for cit in cites or ():
+                if cit[0] and cit[0] not in seen:
+                    seen.add(cit[0])
+                    citations.append(cit)
             continue
         matched = False
         for pattern, stage, render in RULES:

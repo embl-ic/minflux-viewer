@@ -6,7 +6,8 @@ import colorsys
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,16 +20,77 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QTextEdit,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
 from ..analysis.hlyb_staged import Staged3DConfig
+from .plot_format import apply_spatial_y_direction
 from .text_select import make_labels_selectable
 
 _VIEW_AXES = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
 _AXIS_LABELS = {"XY": ("X", "Y"), "XZ": ("X", "Z"), "YZ": ("Y", "Z")}
 _MAX_RAW_POINTS = 100_000
+
+# A pair link is one line segment, so the drawn set is capped rather than
+# allowed to grow with the square of the site count.  The read-out always
+# states when the cap is in force -- a silently thinned overlay would
+# misreport how many pairs the selected bins actually hold.
+_MAX_PAIR_LINKS = 20_000
+# Distance labels follow the pair-analysis window's rules: only links long
+# enough on screen to carry a number, longest first, and never more than can
+# be read at once.
+_MAX_DISTANCE_LABELS = 100
+_PAIR_LABEL_MIN_PIXELS = 42.0
+# One event-loop turn's worth of coalescing, so dragging a band selector
+# re-draws once per settled position instead of once per mouse move.
+_BAND_REDRAW_MS = 30
+
+# Two independent highlight bands, so two populations -- say one near 14 nm and
+# one near 25 nm -- can be marked and compared at once. The colours have to work
+# on the white profile plot *and* as links and rings on the black site view, and
+# they differ on the blue-yellow axis as well as in luminance, so they stay
+# separable under the common red-green colour vision deficiencies. Neither is
+# the orange of the pre-declared band or the green of the excess curve.
+_BAND_STYLES = (
+    ("A", (80, 195, 255)),          # cyan-blue
+    ("B", (245, 120, 215)),         # magenta
+)
+
+
+class _Band:
+    """One highlight selection: its region, its mirror and its drawn items.
+
+    Built in three places -- the definition here, the site-view items in
+    ``_build_spatial_items`` and the regions in ``_build_profile_view`` -- so
+    the fields start empty and are filled as each view is constructed.
+    """
+
+    __slots__ = ("index", "key", "rgb", "region", "mirror",
+                 "link_item", "glow_item", "enabled")
+
+    def __init__(self, index: int, key: str, rgb: tuple) -> None:
+        self.index = int(index)
+        self.key = str(key)
+        self.rgb = tuple(int(c) for c in rgb)
+        self.region = None
+        self.mirror = None
+        self.link_item = None
+        self.glow_item = None
+        # Band A is always on; a second band is opt-in so the default view is
+        # exactly the single-selection one.
+        self.enabled = index == 0
+
+    @property
+    def label(self) -> str:
+        return f"band {self.key}"
+
+    def pen(self, alpha: int = 230, width: float = 2.0):
+        return pg.mkPen(*self.rgb, alpha, width=width)
+
+    def brush(self, alpha: int = 60):
+        return pg.mkBrush(*self.rgb, alpha)
 
 _COMPONENT_MODES = (
     ("Neighbour link (single-linkage)", "link"),
@@ -335,6 +397,13 @@ class HlyBStagedWindow(QDialog):
         self._result = result
         self._owner = owner
         self._prefs = prefs or {}
+        # Built lazily by _pair_table(); assigned here so the spatial view can
+        # be drawn before the profile view that owns the band selector exists.
+        self._pairs = None
+        self._bands = [_Band(i, key, rgb)
+                       for i, (key, rgb) in enumerate(_BAND_STYLES)]
+        self._band_label = None
+        self._band_check = None
         self.setWindowTitle(
             f"HlyB Staged Short-Range Population (3D) — {title}" if title
             else "HlyB Staged Short-Range Population (3D)")
@@ -406,38 +475,118 @@ class HlyBStagedWindow(QDialog):
         row.addWidget(QLabel("Projection:"))
         self._view_combo = QComboBox()
         self._view_combo.addItems(["XY", "XZ", "YZ"])
-        self._view_combo.currentTextChanged.connect(self._refresh_spatial)
+        self._view_combo.currentTextChanged.connect(self._on_projection_changed)
         row.addWidget(self._view_combo)
         self._raw_check = QCheckBox("raw loc")
         self._raw_check.setChecked(False)
+        self._raw_check.setToolTip(
+            "Every localization of every used trace, thinned for drawing.")
         self._trace_check = QCheckBox("trace centroid")
         self._trace_check.setChecked(True)
+        self._trace_check.setToolTip(
+            "One point per trace: the sub-unit position before repeated visits "
+            "to the same label are consolidated into a site.")
+        self._merge_check = QCheckBox("consolidation link")
+        self._merge_check.setChecked(False)
+        has_map = self._trace_site_map().size > 0
+        self._merge_check.setEnabled(has_map)
+        self._merge_check.setToolTip(
+            "Joins each trace centroid to the label site it was consolidated "
+            "into, so which repeats were merged is visible. A site built from a "
+            "single trace draws a zero-length link."
+            if has_map else
+            "This result carries no trace-to-site map, so which traces were "
+            "consolidated cannot be drawn.")
         self._site_check = QCheckBox("inferred label site")
         self._site_check.setChecked(True)
-        self._null_check = QCheckBox("one surface-null draw")
+        self._site_check.setToolTip(
+            "The consolidated label positions the pair distances are measured "
+            "between. Colour is the spatial component; hover for details.")
+        self._pair_check = QCheckBox("selected pair link")
+        self._pair_check.setChecked(True)
+        self._pair_check.setToolTip(
+            "Draws a line between the two sites of every pair counted in the "
+            "selected histogram bins, with its distance where the line is long "
+            "enough on screen to carry a number. Drag the band on the pair "
+            "profile below to change the selection.")
+        self._null_check = QCheckBox("one null draw")
         self._null_check.setChecked(False)
+        self._null_check.setToolTip(
+            "One randomization from the conditional null, for visual "
+            "comparison with the inferred sites.")
         self._rod_check = QCheckBox("detected cell")
-        has_rods = self._result.get("rod_detection") is not None
+        has_rods = (self._result.get("cell_detection") is not None
+                    or self._result.get("rod_detection") is not None)
         self._rod_check.setChecked(has_rods)
         self._rod_check.setEnabled(has_rods)
         self._rod_check.setToolTip(
-            "Outlines of the detected cells (XY projection only). Accepted "
-            "cells are drawn solid; regions rejected by the size or shape "
-            "gates are dashed — those took no part in the analysis."
+            "Outlines of the detected cells (XY projection only). Shape-prior "
+            "cells are fitted as full capsules; legacy rod-detector regions "
+            "rejected by size or shape gates are dashed."
             if has_rods else
-            "Available when the spatial components come from rod cell detection.")
-        for box in (self._raw_check, self._trace_check, self._site_check,
-                    self._null_check, self._rod_check):
+            "Available when spatial components come from automatic cell detection.")
+        for box in (self._raw_check, self._trace_check, self._merge_check,
+                    self._site_check, self._pair_check, self._null_check,
+                    self._rod_check):
             box.toggled.connect(self._refresh_spatial)
             row.addWidget(box)
         row.addStretch(1)
         root.addLayout(row)
+
         self._spatial_plot = pg.PlotWidget(background="k")
         self._spatial_plot.showGrid(x=True, y=True, alpha=0.15)
         self._spatial_plot.getViewBox().setAspectLocked(True)
         root.addWidget(self._spatial_plot, 1)
-        self._refresh_spatial()
+        self._build_spatial_items()
+        # A label is placed by how long its link is *on screen*, so the set is
+        # recomputed when the view moves, not only when the data changes.
+        self._spatial_plot.getViewBox().sigRangeChanged.connect(
+            self._schedule_label_refresh)
+        self._refresh_spatial(refit=True)
         return holder
+
+    def _build_spatial_items(self) -> None:
+        """Create the plot items once and keep them.
+
+        Rebuilding the scene on every toggle would auto-range it again, which
+        throws away the pan and zoom the user chose \u2014 and with a draggable
+        band selector driving this view, that would happen continuously.
+        """
+        plot = self._spatial_plot
+        self._cell_items: list = []
+        self._label_items: dict[int, pg.TextItem] = {}
+        self._raw_item = pg.ScatterPlotItem(
+            size=2, pen=None, brush=pg.mkBrush(90, 90, 90, 90), pxMode=True)
+        self._null_item = pg.ScatterPlotItem(
+            size=5, pen=pg.mkPen(120, 190, 255, 180), brush=None, pxMode=True)
+        self._merge_item = pg.PlotDataItem()
+        self._trace_item = pg.ScatterPlotItem(
+            size=3, pen=None, brush=pg.mkBrush(255, 150, 40, 120), pxMode=True)
+        self._site_item = pg.ScatterPlotItem(
+            size=7, pen=pg.mkPen(230, 230, 230, 90), pxMode=True)
+        # One link and one ring layer per band, so two selections can be shown
+        # at once in their own colours. A single item takes a single pen.
+        layers: list = [self._raw_item, self._null_item, self._merge_item]
+        for offset, band in enumerate(self._bands):
+            band.link_item = pg.PlotDataItem()
+            # Rings are sized apart so two bands sharing a site both stay
+            # visible instead of one hiding inside the other.
+            band.glow_item = pg.ScatterPlotItem(
+                size=13 + 5 * offset, pen=pg.mkPen(*band.rgb, 220),
+                brush=None, pxMode=True)
+            layers.append(band.link_item)
+        layers.append(self._trace_item)
+        layers.extend(band.glow_item for band in self._bands)
+        layers.append(self._site_item)
+        for z, item in enumerate(layers):
+            item.setZValue(z)
+            plot.addItem(item)
+        self._site_item.sigHovered.connect(self._on_site_hovered)
+        self._trace_item.sigHovered.connect(self._on_trace_hovered)
+
+    def _on_projection_changed(self, *_args) -> None:
+        """A different projection is a different picture, so it is re-fitted."""
+        self._refresh_spatial(refit=True)
 
     @staticmethod
     def _component_brush(component: int):
@@ -447,61 +596,409 @@ class HlyBStagedWindow(QDialog):
         rgb = colorsys.hsv_to_rgb(hue, 0.75, 1.0)
         return pg.mkBrush(*(int(255 * value) for value in rgb), 230)
 
-    def _refresh_spatial(self, *_args) -> None:
+    def _pair_table(self) -> dict:
+        """Every within-component pair the profile counts, computed once."""
+        if getattr(self, "_pairs", None) is None:
+            from ..analysis.hlyb_staged import within_component_pairs
+
+            sites = np.asarray(
+                self._result.get("site_centers_nm", np.empty((0, 3))), dtype=float)
+            labels = np.asarray(
+                self._result.get("component_labels", np.full(sites.shape[0], -1)),
+                dtype=np.int64)
+            if sites.shape[0] < 2 or labels.size != sites.shape[0]:
+                self._pairs = {
+                    "pairs": np.empty((0, 2), dtype=np.int64),
+                    "distances_nm": np.empty(0, dtype=float),
+                    "component": np.empty(0, dtype=np.int64),
+                }
+            else:
+                self._pairs = within_component_pairs(
+                    sites, labels, r_max_nm=float(self._result["config"].r_max_nm))
+        return self._pairs
+
+    def _default_band_range(self, band: int) -> tuple[float, float]:
+        """Where a band opens before the user has moved it.
+
+        Band A opens on the pre-declared test range, so the window starts by
+        reproducing the reported band counts. A second band opens just above it
+        rather than on top of it -- two selections at the same place would look
+        like one.
+        """
+        cfg = self._result["config"]
+        lo = float(cfg.short_range_lo_nm)
+        hi = float(cfg.short_range_hi_nm)
+        if band == 0:
+            return lo, hi
+        width = max(hi - lo, float(cfg.bin_nm))
+        r_max = float(cfg.r_max_nm)
+        start = min(hi, max(0.0, r_max - width))
+        return start, min(r_max, start + width)
+
+    def _enabled_bands(self) -> list:
+        return [band for band in self._bands if band.enabled]
+
+    def _band_range(self, band: int = 0) -> tuple[float, float]:
+        region = self._bands[band].region
+        if region is None:
+            return self._default_band_range(band)
+        lo, hi = sorted(float(value) for value in region.getRegion())
+        return lo, hi
+
+    def selected_bin_mask(self, band: int = 0) -> np.ndarray:
+        """Histogram bins currently inside *band*'s selector."""
+        from ..analysis.hlyb_staged import bin_mask_for_range
+
+        lo, hi = self._band_range(band)
+        return bin_mask_for_range(
+            np.asarray(self._result["edges_nm"], dtype=float), lo, hi)
+
+    def selected_pair_mask(self, band: int = 0) -> np.ndarray:
+        """Pairs counted by *band*'s bins \u2014 the same pairs, not a re-cut."""
+        from ..analysis.hlyb_staged import pairs_in_bins
+
+        return pairs_in_bins(
+            self._pair_table()["distances_nm"],
+            np.asarray(self._result["edges_nm"], dtype=float),
+            self.selected_bin_mask(band))
+
+    def _refresh_spatial(self, *_args, refit: bool = False) -> None:
         if not hasattr(self, "_spatial_plot"):
             return
         plot = self._spatial_plot
-        plot.clear()
         view = self._view_combo.currentText() if hasattr(self, "_view_combo") else "XY"
         a, b = _VIEW_AXES[view]
         xlab, ylab = _AXIS_LABELS[view]
         plot.setLabel("bottom", xlab, units="nm")
         plot.setLabel("left", ylab, units="nm")
+        apply_spatial_y_direction(
+            plot,
+            vertical_coordinate=ylab,
+            prefs=self._prefs,
+            preference_key="scatter_xy_origin",
+        )
 
-        if self._raw_check.isChecked():
-            points = np.asarray(self._result.get("points_nm", np.empty((0, 3))), dtype=float)
+        points = np.asarray(
+            self._result.get("points_nm", np.empty((0, 3))), dtype=float)
+        if self._raw_check.isChecked() and points.shape[0]:
             if points.shape[0] > _MAX_RAW_POINTS:
                 points = points[::int(np.ceil(points.shape[0] / _MAX_RAW_POINTS))]
-            plot.addItem(pg.ScatterPlotItem(
-                x=points[:, a], y=points[:, b], size=2,
-                pen=None, brush=pg.mkBrush(90, 90, 90, 90), pxMode=True))
-        if self._trace_check.isChecked():
-            traces = np.asarray(self._result.get("trace_centroids_nm", np.empty((0, 3))))
-            plot.addItem(pg.ScatterPlotItem(
-                x=traces[:, a], y=traces[:, b], size=3,
-                pen=None, brush=pg.mkBrush(255, 150, 40, 120), pxMode=True))
-        if self._null_check.isChecked():
-            null = np.asarray(self._result.get("null_preview_sites_nm", np.empty((0, 3))))
-            plot.addItem(pg.ScatterPlotItem(
-                x=null[:, a], y=null[:, b], size=5,
-                pen=pg.mkPen(120, 190, 255, 180), brush=None, pxMode=True))
-        if self._rod_check.isChecked():
-            self._draw_detected_cells(plot, view)
-        if self._site_check.isChecked():
-            sites = np.asarray(self._result.get("site_centers_nm", np.empty((0, 3))))
-            labels = np.asarray(self._result.get("component_labels", np.full(sites.shape[0], -1)))
-            spots = [{"pos": (float(p[a]), float(p[b])), "brush": self._component_brush(int(c))}
-                     for p, c in zip(sites, labels)]
-            plot.addItem(pg.ScatterPlotItem(
-                spots=spots, size=7, pen=pg.mkPen(230, 230, 230, 90), pxMode=True))
-        plot.enableAutoRange()
+            self._raw_item.setData(x=points[:, a], y=points[:, b])
+        else:
+            self._raw_item.setData(x=[], y=[])
+        self._raw_item.setVisible(self._raw_check.isChecked())
 
-    def _draw_detected_cells(self, plot, view: str) -> None:
-        """Capsule outlines of the detected cells — an XY-plane geometry."""
-        detection = self._result.get("rod_detection")
-        if detection is None or view != "XY":
+        traces = np.asarray(
+            self._result.get("trace_centroids_nm", np.empty((0, 3))), dtype=float)
+        if self._trace_check.isChecked() and traces.shape[0]:
+            self._trace_item.setData(
+                x=traces[:, a], y=traces[:, b],
+                data=np.arange(traces.shape[0], dtype=int),
+                hoverable=True, tip=None)
+        else:
+            self._trace_item.setData(x=[], y=[], hoverable=True, tip=None)
+        self._trace_item.setVisible(self._trace_check.isChecked())
+
+        null = np.asarray(
+            self._result.get("null_preview_sites_nm", np.empty((0, 3))), dtype=float)
+        if self._null_check.isChecked() and null.shape[0]:
+            self._null_item.setData(x=null[:, a], y=null[:, b])
+        else:
+            self._null_item.setData(x=[], y=[])
+        self._null_item.setVisible(self._null_check.isChecked())
+
+        self._refresh_detected_cells(view)
+        self._refresh_merge_links(a, b)
+        self._refresh_pair_links(a, b)
+        self._refresh_sites(a, b)
+        if refit:
+            plot.getViewBox().autoRange()
+        self._refresh_pair_labels()
+        self._refresh_band_readout()
+
+    def _refresh_sites(self, a: int, b: int) -> None:
+        sites = np.asarray(
+            self._result.get("site_centers_nm", np.empty((0, 3))), dtype=float)
+        labels = np.asarray(
+            self._result.get("component_labels", np.full(sites.shape[0], -1)),
+            dtype=np.int64)
+        show = self._site_check.isChecked() and sites.shape[0] > 0
+        if show:
+            self._site_item.setData(
+                x=sites[:, a], y=sites[:, b],
+                data=np.arange(sites.shape[0], dtype=int),
+                brush=[self._component_brush(int(c)) for c in labels],
+                hoverable=True, tip=None)
+        else:
+            self._site_item.setData(x=[], y=[], hoverable=True, tip=None)
+        self._site_item.setVisible(show)
+
+        # The sites taking part in a selected pair, ringed in their band's own
+        # colour so a highlighted distance can be traced back to the labels
+        # that produced it -- and so two bands stay told apart.
+        links_on = self._pair_check.isChecked()
+        for band in self._bands:
+            involved = (self._selected_site_indices(band.index)
+                        if band.enabled else np.empty(0, dtype=np.int64))
+            glow = show and links_on and band.enabled and involved.size > 0
+            if glow:
+                band.glow_item.setData(
+                    x=sites[involved, a], y=sites[involved, b])
+            else:
+                band.glow_item.setData(x=[], y=[])
+            band.glow_item.setVisible(glow)
+
+    def _selected_site_indices(self, band: int = 0) -> np.ndarray:
+        pairs = self._pair_table()["pairs"]
+        if pairs.shape[0] == 0:
+            return np.empty(0, dtype=np.int64)
+        return np.unique(pairs[self.selected_pair_mask(band)])
+
+    def _selected_pair_rows(self, band: int = 0) -> np.ndarray:
+        """Indices of *band*'s drawn pairs, longest first when the cap applies."""
+        table = self._pair_table()
+        rows = np.flatnonzero(self.selected_pair_mask(band))
+        if rows.size > _MAX_PAIR_LINKS:
+            order = np.argsort(table["distances_nm"][rows])[::-1]
+            rows = np.sort(rows[order[:_MAX_PAIR_LINKS]])
+        return rows
+
+    def _refresh_pair_links(self, a: int, b: int) -> None:
+        show = self._pair_check.isChecked()
+        sites = np.asarray(
+            self._result.get("site_centers_nm", np.empty((0, 3))), dtype=float)
+        table = self._pair_table()
+        for band in self._bands:
+            item = band.link_item
+            if not show or not band.enabled:
+                item.setData(x=[], y=[])
+                item.setVisible(False)
+                continue
+            rows = self._selected_pair_rows(band.index)
+            if rows.size == 0 or sites.shape[0] == 0:
+                item.setData(x=[], y=[])
+            else:
+                left = sites[table["pairs"][rows, 0]]
+                right = sites[table["pairs"][rows, 1]]
+                gap = np.full(rows.size, np.nan)
+                xs = np.column_stack([left[:, a], right[:, a], gap]).ravel()
+                ys = np.column_stack([left[:, b], right[:, b], gap]).ravel()
+                item.setData(xs, ys, connect="finite",
+                             pen=band.pen(190, width=1.2))
+            item.setVisible(True)
+
+    def _trace_site_map(self) -> np.ndarray:
+        """Trace-to-site map, empty when this result does not carry one.
+
+        The pooled entry point once exported ``None`` here, so the array is
+        normalized in one place rather than at each reader.
+        """
+        traces = np.asarray(
+            self._result.get("trace_centroids_nm", np.empty((0, 3))), dtype=float)
+        mapping = self._result.get("trace_to_site")
+        if mapping is None:
+            return np.empty(0, dtype=np.int64)
+        mapping = np.asarray(mapping, dtype=np.int64).ravel()
+        return mapping if mapping.size == traces.shape[0] else np.empty(
+            0, dtype=np.int64)
+
+    def _refresh_merge_links(self, a: int, b: int) -> None:
+        """Trace centroid to the label site it was consolidated into."""
+        if not self._merge_check.isChecked():
+            self._merge_item.setData(x=[], y=[])
+            self._merge_item.setVisible(False)
             return
-        from ..analysis.rod_segmentation import capsule_outline
+        traces = np.asarray(
+            self._result.get("trace_centroids_nm", np.empty((0, 3))), dtype=float)
+        sites = np.asarray(
+            self._result.get("site_centers_nm", np.empty((0, 3))), dtype=float)
+        mapping = self._trace_site_map()
+        if (mapping.size == traces.shape[0] and sites.shape[0] > 0
+                and traces.shape[0] > 0):
+            valid = (mapping >= 0) & (mapping < sites.shape[0])
+            src = traces[valid]
+            dst = sites[mapping[valid]]
+            gap = np.full(src.shape[0], np.nan)
+            xs = np.column_stack([src[:, a], dst[:, a], gap]).ravel()
+            ys = np.column_stack([src[:, b], dst[:, b], gap]).ravel()
+            self._merge_item.setData(
+                xs, ys, connect="finite",
+                pen=pg.mkPen(255, 150, 40, 110, width=0.9))
+        else:
+            self._merge_item.setData(x=[], y=[])
+        self._merge_item.setVisible(True)
 
-        for rod in detection.rods:
-            outline = capsule_outline(rod)
-            pen = (pg.mkPen(90, 235, 150, width=2) if rod.accepted else
+    def _refresh_detected_cells(self, view: str) -> None:
+        """Capsule outlines of the detected cells \u2014 an XY-plane geometry."""
+        for item in self._cell_items:
+            self._spatial_plot.removeItem(item)
+        self._cell_items = []
+        detection = (self._result.get("cell_detection")
+                     or self._result.get("rod_detection"))
+        if detection is None or view != "XY" or not self._rod_check.isChecked():
+            return
+        if hasattr(detection, "instances"):
+            from ..analysis.shape_segmentation import instance_outline
+            outlined = [(instance_outline(instance), True)
+                        for instance in detection.instances]
+        else:
+            from ..analysis.rod_segmentation import capsule_outline
+            outlined = [(capsule_outline(rod), bool(rod.accepted))
+                        for rod in detection.rods]
+
+        for outline, accepted in outlined:
+            pen = (pg.mkPen(90, 235, 150, width=2) if accepted else
                    pg.mkPen(235, 120, 95, width=1, style=Qt.PenStyle.DashLine))
-            plot.addItem(pg.PlotCurveItem(outline[:, 0], outline[:, 1], pen=pen))
+            item = pg.PlotCurveItem(outline[:, 0], outline[:, 1], pen=pen)
+            item.setZValue(-1)
+            self._spatial_plot.addItem(item)
+            self._cell_items.append(item)
+
+    def _schedule_label_refresh(self, *_args) -> None:
+        timer = getattr(self, "_label_timer", None)
+        if timer is None:
+            timer = self._label_timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._refresh_pair_labels)
+        timer.start(_BAND_REDRAW_MS)
+
+    def _refresh_pair_labels(self) -> None:
+        """Distances on the links long enough on screen to carry a number."""
+        if not hasattr(self, "_spatial_plot"):
+            return
+        existing = self._label_items
+        if not self._pair_check.isChecked():
+            for item in existing.values():
+                item.setVisible(False)
+            return
+        sites = np.asarray(
+            self._result.get("site_centers_nm", np.empty((0, 3))), dtype=float)
+        table = self._pair_table()
+        a, b = _VIEW_AXES[self._view_combo.currentText()]
+        (x0, x1), (y0, y1) = self._spatial_plot.getPlotItem().vb.viewRange()
+        width = max(int(self._spatial_plot.viewport().width()), 1)
+        height = max(int(self._spatial_plot.viewport().height()), 1)
+        # Candidates are pooled across the bands and capped once, so turning a
+        # second band on does not double the number of numbers on screen.
+        pool: list[tuple] = []
+        for band in self._enabled_bands():
+            rows = self._selected_pair_rows(band.index)
+            if not rows.size or not sites.shape[0] or x1 <= x0 or y1 <= y0:
+                continue
+            left = sites[table["pairs"][rows, 0]]
+            right = sites[table["pairs"][rows, 1]]
+            dx = np.abs(right[:, a] - left[:, a]) / (x1 - x0) * width
+            dy = np.abs(right[:, b] - left[:, b]) / (y1 - y0) * height
+            pixels = np.hypot(dx, dy)
+            mid_x = 0.5 * (left[:, a] + right[:, a])
+            mid_y = 0.5 * (left[:, b] + right[:, b])
+            on_screen = ((mid_x >= x0) & (mid_x <= x1)
+                         & (mid_y >= y0) & (mid_y <= y1))
+            for local in np.flatnonzero(
+                    on_screen & (pixels >= _PAIR_LABEL_MIN_PIXELS)):
+                pool.append((
+                    float(pixels[local]), (band.index, int(rows[local])),
+                    float(mid_x[local]), float(mid_y[local]),
+                    float(table["distances_nm"][rows[local]]), band.rgb))
+        pool.sort(key=lambda row: row[0], reverse=True)
+        selected = {row[1]: row[2:] for row in pool[:_MAX_DISTANCE_LABELS]}
+        for key, item in existing.items():
+            if key in selected:
+                item.setPos(selected[key][0], selected[key][1])
+                item.setVisible(True)
+            else:
+                item.setVisible(False)
+        # Hidden items are kept so panning back and forth does not rebuild
+        # them, but only up to a bound: the pair count grows with the square of
+        # the site count, and every pair that was ever labelled would otherwise
+        # keep a QGraphicsItem for the life of the window.
+        if len(existing) > 4 * _MAX_DISTANCE_LABELS:
+            for key in [k for k in existing if k not in selected]:
+                self._spatial_plot.removeItem(existing.pop(key))
+        for key, (x, y, distance, rgb) in selected.items():
+            if key in existing:
+                continue
+            # Coloured by its band, so a number can be attributed to the
+            # selection it came from without tracing its line.
+            item = pg.TextItem(
+                f"{distance:.1f}", color=rgb, anchor=(0.5, 0.5),
+                fill=pg.mkBrush(0, 0, 0, 165))
+            item.setZValue(20)
+            item.setPos(x, y)
+            self._spatial_plot.addItem(item, ignoreBounds=True)
+            existing[key] = item
+
+    def _on_site_hovered(self, _item, points, _event) -> None:
+        if points is None or len(points) == 0:
+            QToolTip.hideText()
+            return
+        text = self._site_tooltip(points[0])
+        if text:
+            QToolTip.showText(QCursor.pos(), text, self)
+
+    def _site_tooltip(self, point) -> str:
+        sites = np.asarray(
+            self._result.get("site_centers_nm", np.empty((0, 3))), dtype=float)
+        index = point.data()
+        if index is None or not (0 <= int(index) < sites.shape[0]):
+            return ""
+        index = int(index)
+        labels = np.asarray(
+            self._result.get("component_labels", np.full(sites.shape[0], -1)),
+            dtype=np.int64)
+        component = (f"{labels[index] + 1}" if labels[index] >= 0
+                     else "\u2014 (excluded from pairing)")
+        position = sites[index]
+        lines = [
+            f"Inferred label site {index + 1}",
+            f"X {position[0]:.2f} nm   Y {position[1]:.2f} nm   "
+            f"Z {position[2]:.2f} nm",
+            f"Component {component}",
+        ]
+        mapping = self._trace_site_map()
+        if mapping.size:
+            lines.append(
+                f"Traces consolidated: {int(np.sum(mapping == index))}")
+        pairs = self._pair_table()["pairs"]
+        if pairs.shape[0]:
+            member = np.any(pairs == index, axis=1)
+            # Named per band, so a site ringed twice says which selection
+            # each of its pairs belongs to.
+            within = (f" of {int(member.sum())} within "
+                      f"{self._result['config'].r_max_nm:g} nm")
+            for band in self._enabled_bands():
+                hits = int(np.sum(member & self.selected_pair_mask(band.index)))
+                lines.append(f"Pairs in {band.label}: {hits}{within}")
+                within = ""
+        return "\n".join(lines)
+
+    def _on_trace_hovered(self, _item, points, _event) -> None:
+        if points is None or len(points) == 0:
+            QToolTip.hideText()
+            return
+        traces = np.asarray(
+            self._result.get("trace_centroids_nm", np.empty((0, 3))), dtype=float)
+        index = points[0].data()
+        if index is None or not (0 <= int(index) < traces.shape[0]):
+            return
+        index = int(index)
+        position = traces[index]
+        mapping = self._trace_site_map()
+        site = (f"site {int(mapping[index]) + 1}"
+                if index < mapping.size and mapping[index] >= 0 else "no site")
+        QToolTip.showText(
+            QCursor.pos(),
+            f"Trace centroid {index + 1}\n"
+            f"X {position[0]:.2f} nm   Y {position[1]:.2f} nm   "
+            f"Z {position[2]:.2f} nm\n"
+            f"Consolidated into {site}",
+            self)
 
     def _build_profile_view(self) -> QWidget:
         holder = QWidget()
-        root = QHBoxLayout(holder)
+        outer = QVBoxLayout(holder)
+        outer.setContentsMargins(0, 0, 0, 0)
+        root = QHBoxLayout()
         root.setContentsMargins(0, 0, 0, 0)
         centers = np.asarray(self._result["centers_nm"], dtype=float)
         observed = np.asarray(self._result["observed"], dtype=float)
@@ -509,6 +1006,8 @@ class HlyBStagedWindow(QDialog):
         lo = np.asarray(self._result["null_lo"], dtype=float)
         hi = np.asarray(self._result["null_hi"], dtype=float)
         cfg = self._result["config"]
+        null_name = ("ROI-conditioned null" if self._result.get("is_2d")
+                     else "surface null")
 
         profile = pg.PlotWidget(background="w")
         profile.setLabel("bottom", "Site-pair distance", units="nm")
@@ -521,17 +1020,51 @@ class HlyBStagedWindow(QDialog):
         profile.addItem(lower)
         profile.addItem(pg.FillBetweenItem(
             upper, lower, brush=pg.mkBrush(120, 170, 230, 55)))
-        profile.plot(centers, mean, pen=pg.mkPen(45, 105, 190, width=2), name="surface null")
-        profile.plot(centers, observed, pen=pg.mkPen(30, 30, 30, width=2), name="observed")
-        region = pg.LinearRegionItem(
-            values=(cfg.short_range_lo_nm, cfg.short_range_hi_nm), movable=False,
-            brush=pg.mkBrush(255, 180, 50, 35), pen=pg.mkPen(220, 130, 20, 100))
-        profile.addItem(region)
+        profile.plot(centers, mean, pen=pg.mkPen(45, 105, 190, width=2),
+                     name=null_name)
+        profile.plot(centers, observed, pen=pg.mkPen(30, 30, 30, width=2),
+                     name="observed")
+        # The pre-declared band is marked by its two edges rather than by a
+        # second shaded region: shading both made the fixed test range and the
+        # movable selection read as one band, which is exactly the distinction
+        # that has to stay visible.
+        self._declared_lines = []
+        for position in (cfg.short_range_lo_nm, cfg.short_range_hi_nm):
+            line = pg.InfiniteLine(
+                pos=float(position), angle=90,
+                pen=pg.mkPen(220, 130, 20, 200, width=2,
+                             style=Qt.PenStyle.DashLine))
+            line.setZValue(-10)
+            line.setToolTip(
+                f"Pre-declared test band: "
+                f"{cfg.short_range_lo_nm:g}–{cfg.short_range_hi_nm:g} nm. "
+                f"The reported result is this range; the blue selection only "
+                f"chooses what the site view highlights.")
+            profile.addItem(line, ignoreBounds=True)
+            self._declared_lines.append(line)
+        for band in self._bands:
+            band.region = pg.LinearRegionItem(
+                values=self._default_band_range(band.index), movable=True,
+                brush=band.brush(60), pen=band.pen(230),
+                hoverBrush=band.brush(95))
+            band.region.setZValue(10 + band.index)
+            band.region.setToolTip(
+                f"Highlight {band.label}. Drag to choose which histogram bins "
+                f"it covers; the pairs counted in them are drawn as links in "
+                f"that colour in the site view above. The orange dashed lines "
+                f"mark the pre-declared test range, which no selector moves.")
+            band.region.sigRegionChanged.connect(
+                lambda *_a, _i=band.index: self._on_band_changed(_i))
+            band.region.sigRegionChangeFinished.connect(
+                lambda *_a, _i=band.index: self._snap_band_to_bins(_i))
+            profile.addItem(band.region)
+            band.region.setVisible(band.enabled)
+        self._profile_plot = profile
         root.addWidget(profile, 1)
 
         excess = pg.PlotWidget(background="w")
         excess.setLabel("bottom", "Site-pair distance", units="nm")
-        excess.setLabel("left", "Observed − null count")
+        excess.setLabel("left", "Observed \u2212 null count")
         excess.showGrid(x=True, y=True, alpha=0.18)
         excess.addLine(y=0, pen=pg.mkPen(100, 100, 100, style=Qt.PenStyle.DashLine))
         excess.plot(
@@ -541,8 +1074,108 @@ class HlyBStagedWindow(QDialog):
         excess.addItem(pg.LinearRegionItem(
             values=(cfg.short_range_lo_nm, cfg.short_range_hi_nm), movable=False,
             brush=pg.mkBrush(255, 180, 50, 25), pen=pg.mkPen(220, 130, 20, 80)))
+        # Read-only mirrors, so both panels show the same selections without
+        # giving the user two places to drag each one from.
+        for band in self._bands:
+            band.mirror = pg.LinearRegionItem(
+                values=self._band_range(band.index), movable=False,
+                brush=band.brush(35), pen=band.pen(140, width=1.0))
+            excess.addItem(band.mirror)
+            band.mirror.setVisible(band.enabled)
         root.addWidget(excess, 1)
+        outer.addLayout(root, 1)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        second = self._bands[1]
+        self._band_check = QCheckBox(f"second highlight ({second.label})")
+        self._band_check.setChecked(second.enabled)
+        self._band_check.setToolTip(
+            "Add a second, independently coloured selection, so two "
+            "populations \u2014 say one near 14 nm and one near 25 nm \u2014 "
+            "can be marked and compared in the site view at the same time.")
+        self._band_check.toggled.connect(self._on_second_band_toggled)
+        row.addWidget(self._band_check)
+        self._band_label = QLabel()
+        self._band_label.setWordWrap(True)
+        self._band_label.setToolTip(
+            "The selected bins, and the pairs they count. The pair count is "
+            "the same number the observed curve shows over those bins, because "
+            "both come from one enumeration of the within-component pairs.")
+        row.addWidget(self._band_label, 1)
+        outer.addLayout(row)
+        self._refresh_band_readout()
         return holder
+
+    def _on_second_band_toggled(self, checked: bool) -> None:
+        """Show or hide the second selection, in every panel at once."""
+        band = self._bands[1]
+        band.enabled = bool(checked)
+        if band.region is not None:
+            band.region.setVisible(band.enabled)
+        if band.mirror is not None:
+            band.mirror.setVisible(band.enabled)
+        self._refresh_spatial()
+
+    def _on_band_changed(self, band: int = 0) -> None:
+        """Coalesce a drag into one redraw per settled position."""
+        mirror = self._bands[band].mirror
+        if mirror is not None:
+            mirror.setRegion(self._band_range(band))
+        self._refresh_band_readout()
+        timer = getattr(self, "_band_timer", None)
+        if timer is None:
+            timer = self._band_timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._refresh_spatial)
+        timer.start(_BAND_REDRAW_MS)
+
+    def _snap_band_to_bins(self, band: int = 0) -> None:
+        """Settle a selector on the bin edges it actually selected.
+
+        The selection is a set of whole bins, so leaving the handles between
+        edges would show a range that does not match the pairs highlighted
+        from it.
+        """
+        edges = np.asarray(self._result["edges_nm"], dtype=float)
+        mask = self.selected_bin_mask(band)
+        if not mask.any():
+            return
+        inside = np.flatnonzero(mask)
+        snapped = (float(edges[inside[0]]), float(edges[inside[-1] + 1]))
+        region = self._bands[band].region
+        if region is not None and not np.allclose(snapped, region.getRegion()):
+            region.setRegion(snapped)
+
+    def band_readout(self, band: int = 0) -> str:
+        """One line describing what *band* currently selects."""
+        observed = np.asarray(self._result["observed"], dtype=float)
+        mean = np.asarray(self._result["null_mean"], dtype=float)
+        mask = self.selected_bin_mask(band)
+        lo, hi = self._band_range(band)
+        name = self._bands[band].label
+        if not mask.any():
+            return (f"{name} {lo:.2f}\u2013{hi:.2f} nm: no histogram bin falls "
+                    f"in this range.")
+        drawn = self._selected_pair_rows(band).size
+        total = int(round(float(observed[mask].sum())))
+        expected = float(mean[mask].sum())
+        ratio = (f"{total / expected:.2f}" if expected > 0 else "n/a")
+        sites = self._selected_site_indices(band).size
+        capped = ("" if drawn >= total else
+                  f"  \u00b7  drawing the {drawn:,} longest of them")
+        return (f"{name} {lo:.2f}\u2013{hi:.2f} nm ({int(mask.sum())} bin(s)): "
+                f"{total:,} pair(s) over {sites:,} site(s)  \u00b7  null expects "
+                f"{expected:,.0f}  \u00b7  ratio {ratio}{capped}")
+
+    def _refresh_band_readout(self) -> None:
+        label = getattr(self, "_band_label", None)
+        if label is None:
+            return
+        # One line per enabled band, so a second selection is described rather
+        # than merely drawn.
+        label.setText("\n".join(
+            self.band_readout(band.index) for band in self._enabled_bands()))
 
     def _rod_report_lines(self) -> list[str]:
         """Detection block: what was found, what was rejected, and on what number.
@@ -593,16 +1226,47 @@ class HlyBStagedWindow(QDialog):
                 "— widen the window if genuine cells sit just outside it")
         return lines
 
+    def _shape_report_lines(self) -> list[str]:
+        summary = self._result.get("cell_segmentation") or {}
+        if summary.get("mode") != "capsule_shape_prior":
+            return []
+        instances = summary.get("instances") or []
+        sizes = ", ".join(
+            f"{item.get('width_nm', float('nan')):.0f}×"
+            f"{item.get('length_nm', float('nan')):.0f}"
+            for item in instances)
+        components = summary.get("components") or []
+        multi = sum(int(row.get("chosen_k", 0)) > 1 for row in components)
+        lines = [
+            "",
+            "AUTOMATIC E. COLI DETECTION",
+            f"Fitted {summary.get('n_instances', len(instances))} capsule(s); "
+            f"{summary.get('n_components_kept', 0)} kept after the minimum-site cut",
+            f"Connected footprints explained by multiple cells: {multi}",
+            f"Instance penalty: {summary.get('instance_cost', 0.0):g}; "
+            f"detection pixel: {summary.get('detection_pixel_nm', 0.0):g} nm",
+        ]
+        if sizes:
+            lines.append("Fitted cells (width × length nm): " + sizes)
+        return lines
+
     def _build_report(self) -> QTextEdit:
         r = self._result
         s = r["summary"]
         b = r.get("bootstrap", {})
         cfg = r["config"]
+        # Name the null that was actually run: the 2-D ROI mode randomizes
+        # inside the drawn outline and models no membrane surface, so calling
+        # it a surface null in its own report would misdescribe the result.
+        null_name = ("ROI-conditioned 2-D null" if r.get("is_2d")
+                     else "conditional surface null")
+        projection = (" Distances are XY projections, so a Z separation is not "
+                      "recoverable." if r.get("is_2d") else "")
         lines = [
             "INTERPRETATION",
-            "A positive result supports a short-range population relative to the "
-            "conditional surface null. It does not identify pair membership and does "
-            "not estimate a molecular dimer distance.",
+            f"A positive result supports a short-range population relative to the "
+            f"{null_name}. It does not identify pair membership and does "
+            f"not estimate a molecular dimer distance.{projection}",
             "",
             "PRIMARY RESULT",
             f"Band: {cfg.short_range_lo_nm:g}–{cfg.short_range_hi_nm:g} nm",
@@ -631,6 +1295,7 @@ class HlyBStagedWindow(QDialog):
             f"{r['n_components']} retained component(s)",
         ]
         lines += self._rod_report_lines()
+        lines += self._shape_report_lines()
         span = r.get("centroid_sensitivity_range_nm") or []
         if len(span) == 2 and np.isfinite(span[0]) and np.isfinite(span[1]):
             lines += [
@@ -705,7 +1370,11 @@ class HlyBStagedWindow(QDialog):
         return report
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
-        """Retire this window's pyqtgraph plots before Qt deletes them."""
+        """Stop the pending redraws, then retire this window's plots."""
+        for name in ("_band_timer", "_label_timer"):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                timer.stop()
         from .qt_lifecycle import dispose_plot_widgets
 
         dispose_plot_widgets(self)

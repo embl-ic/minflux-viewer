@@ -149,6 +149,63 @@ def test_repeated_lut_plot_teardown_survives_deferred_layout_events() -> None:
     _assert_clean(result, "repeated LUT plot teardown")
 
 
+def test_scatter_ortho_close_does_not_redraw_into_disposed_plots() -> None:
+    """Disposing the plots re-enters the ortho debounce that close just stopped.
+
+    ``close_plot_widgets`` changes the plots' range on its way out, which emits
+    ``sigRangeChanged`` -> ``_on_ortho_view_changed`` -> ``_ortho_timer.start()``
+    *after* ``closeEvent`` stopped it.  The rearmed timer then reached a deleted
+    ``QGraphicsTextItem`` through ``plot.setLabel``, which surfaced as a
+    pytest-qt teardown error on whichever unrelated test ran next and, with the
+    paint landing differently, as a Windows access violation.
+    """
+    code = """
+        import gc
+        import numpy as np
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QApplication
+        from minflux_viewer.core.app_state import AppState
+        from minflux_viewer.core.loader import build_localization_dataset
+        from minflux_viewer.ui.ortho_view import ORTHO_AXIS
+        from minflux_viewer.ui.scatter_window import ScatterWindow
+
+        app = QApplication([])
+        rng = np.random.default_rng(7)
+        n = 600
+        for _ in range(12):
+            state = AppState()
+            state.add_dataset(build_localization_dataset(
+                name="ortho",
+                x_nm=rng.normal(8000.0, 1500.0, n),
+                y_nm=rng.normal(5000.0, 900.0, n),
+                z_nm=rng.normal(300.0, 120.0, n),
+                tid=rng.integers(0, 60, n),
+                source_version="simulation",
+            ))
+            state.set_active(0)
+            win = ScatterWindow(state, dataset_idx=0)
+            win.resize(900, 900)
+            win.show()
+            for _ in range(3):
+                app.processEvents()
+            win._axis_combo.setCurrentText(ORTHO_AXIS)
+            for _ in range(3):
+                app.processEvents()
+            win.close()
+            # The debounce must stay disarmed for the whole of teardown, not
+            # merely at the moment closeEvent ran.
+            assert not win._ortho_timer.isActive(), "ortho debounce re-armed"
+            win.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            app.processEvents()
+            del win, state
+            gc.collect()
+            app.processEvents()
+    """
+    result = _run_python(code, timeout=120)
+    _assert_clean(result, "ScatterWindow ortho close")
+
+
 def test_render_close_never_waits_for_a_tiff_export() -> None:
     """A long export must not make RenderWindow.close() block the GUI thread."""
     code = """
@@ -304,6 +361,112 @@ def test_particle_average_close_detaches_running_task() -> None:
     """
     result = _run_python(code)
     _assert_clean(result, "Particle Average close during work")
+
+
+def test_tracking_window_close_detaches_running_index_task() -> None:
+    code = """
+        import threading
+        import time
+        import numpy as np
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QApplication
+        from minflux_viewer.core.app_state import AppState
+        from minflux_viewer.core.dataset import build_localization_dataset
+        from minflux_viewer.ui.background_tasks import shared_thread_pool
+        import minflux_viewer.ui.tracking_window as tracking_window
+
+        app = QApplication([])
+        state = AppState()
+        n = 200
+        ds = build_localization_dataset(
+            name="tracking-close",
+            x_nm=np.arange(n, dtype=float),
+            y_nm=np.zeros(n),
+            z_nm=np.zeros(n),
+            tid=np.repeat(np.arange(4), n // 4),
+            tim=np.tile(np.arange(n // 4, dtype=float) * 1e-3, 4),
+        )
+        state.add_dataset(ds)
+        entered = threading.Event()
+        original = tracking_window._build_track_payload
+
+        def slow_build(*args, **kwargs):
+            entered.set()
+            time.sleep(0.45)
+            return original(*args, **kwargs)
+
+        tracking_window._build_track_payload = slow_build
+        window = tracking_window.TrackingWindow(state, dataset_idx=0)
+        if not entered.wait(2.0):
+            raise AssertionError("tracking indexing worker did not start")
+        started = time.perf_counter()
+        window.close()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+        elapsed = time.perf_counter() - started
+        shared_thread_pool("tracking-index", max_threads=1).waitForDone()
+        app.processEvents()
+        if elapsed >= 0.2:
+            raise AssertionError(
+                f"TrackingWindow.close during indexing blocked for {elapsed:.3f}s")
+    """
+    result = _run_python(code)
+    _assert_clean(result, "Tracking View close during indexing")
+
+
+def test_msd_window_close_detaches_running_analysis_task() -> None:
+    code = """
+        import threading
+        import time
+        import numpy as np
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QApplication
+        from minflux_viewer.core.app_state import AppState
+        from minflux_viewer.core.dataset import build_localization_dataset
+        from minflux_viewer.ui.background_tasks import shared_thread_pool
+        import minflux_viewer.ui.tracking_analysis_window as analysis_window
+
+        app = QApplication([])
+        state = AppState()
+        n = 240
+        state.add_dataset(build_localization_dataset(
+            name="msd-close",
+            x_nm=np.arange(n, dtype=float),
+            y_nm=np.zeros(n),
+            z_nm=np.zeros(n),
+            tid=np.repeat(np.arange(4), n // 4),
+            tim=np.tile(np.arange(n // 4, dtype=float) * 1e-3, 4),
+        ))
+        entered = threading.Event()
+        original = analysis_window.run_tracking_method
+
+        def slow_analysis(*args, **kwargs):
+            entered.set()
+            time.sleep(0.45)
+            return original(*args, **kwargs)
+
+        analysis_window.run_tracking_method = slow_analysis
+        window = analysis_window.MsdAnalysisWindow(state, 0)
+        window.show()
+        deadline = time.perf_counter() + 2.0
+        while not entered.is_set() and time.perf_counter() < deadline:
+            app.processEvents()
+            time.sleep(0.005)
+        if not entered.is_set():
+            raise AssertionError("MSD analysis worker did not start")
+        started = time.perf_counter()
+        window.close()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+        elapsed = time.perf_counter() - started
+        shared_thread_pool("tracking-analysis", max_threads=1).waitForDone()
+        app.processEvents()
+        if elapsed >= 0.2:
+            raise AssertionError(
+                f"MsdAnalysisWindow.close blocked for {elapsed:.3f}s")
+    """
+    result = _run_python(code)
+    _assert_clean(result, "MSD Analysis close during work")
 
 
 def test_main_window_close_detaches_running_zarr_io() -> None:

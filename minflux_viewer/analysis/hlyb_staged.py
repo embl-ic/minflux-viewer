@@ -21,7 +21,8 @@ The stages are:
    stratification scale.
 
 Coordinates supplied to :func:`analyze_hlyb_staged_3d` are raw metres.  The
-configured Z scaling factor is applied exactly once here.  Pure NumPy/SciPy; no Qt.
+configured Z scaling factor is applied exactly once here.  The optional 2-D
+ROI mode uses the viewer's existing region-membership rule, without Qt widgets.
 """
 
 from __future__ import annotations
@@ -56,7 +57,10 @@ class Staged3DConfig:
     # one local axis per component.  ``component_mode="rod"`` instead detects
     # rod-shaped cells of a stated width in the projected XY view, which both
     # rejects mis-segmented objects explicitly and supplies a measured cell
-    # axis in place of a per-component PCA axis.
+    # axis in place of a per-component PCA axis. ``component_mode="shape"``
+    # fits one or more full capsule instances to each connected footprint. Its
+    # description-length penalty is specifically useful when touching cells
+    # have no watershed valley, while discouraging fragments of a single cell.
     component_mode: str = "link"
     cell_link_nm: float = 180.0
     min_sites_per_component: int = 20
@@ -80,6 +84,20 @@ class Staged3DConfig:
     # Take the null's axial direction from the fitted cell axis rather than
     # from the component's own principal axis.
     rod_use_axis: bool = True
+
+    # Shape-prior cell detection (component_mode="shape"). The bounds are a
+    # biological prior in the XY projection, not a template for HlyB/D sites.
+    # These defaults were checked across the 2026-06-24/25/26 acquisitions.
+    shape_min_length_nm: float = 800.0
+    shape_max_length_nm: float = 2500.0
+    shape_min_width_nm: float = 400.0
+    shape_max_width_nm: float = 800.0
+    shape_pixel_size_nm: float = 20.0
+    shape_smoothing_nm: float = 60.0
+    shape_instance_cost: float = 0.08
+    shape_min_iou: float = 0.25
+    shape_min_component_area_frac: float = 0.20
+    shape_use_axis: bool = True
 
     # Pair observable and pre-declared short-range band.
     r_max_nm: float = 60.0
@@ -173,8 +191,8 @@ def _validate_config(cfg: Staged3DConfig) -> None:
         raise ValueError("cell_link_nm must exceed site_merge_nm")
     if cfg.min_sites_per_component < 3:
         raise ValueError("min_sites_per_component must be at least 3")
-    if cfg.component_mode not in ("link", "rod"):
-        raise ValueError("component_mode must be 'link' or 'rod'")
+    if cfg.component_mode not in ("link", "rod", "shape"):
+        raise ValueError("component_mode must be 'link', 'rod' or 'shape'")
     if cfg.component_mode == "rod":
         if cfg.rod_min_width_nm <= 0 or cfg.rod_max_width_nm < cfg.rod_min_width_nm:
             raise ValueError("rod width window must be positive with max >= min")
@@ -188,6 +206,25 @@ def _validate_config(cfg: Staged3DConfig) -> None:
             raise ValueError(
                 "rod_pixel_size_nm must be at most an eighth of the minimum "
                 "rod width")
+    if cfg.component_mode == "shape":
+        if (cfg.shape_min_width_nm <= 0
+                or cfg.shape_max_width_nm < cfg.shape_min_width_nm):
+            raise ValueError("shape width window must be positive with max >= min")
+        if (cfg.shape_min_length_nm <= 0
+                or cfg.shape_max_length_nm < cfg.shape_min_length_nm):
+            raise ValueError("shape length window must be positive with max >= min")
+        if cfg.shape_min_length_nm < cfg.shape_min_width_nm:
+            raise ValueError("shape minimum length must be at least its minimum width")
+        if cfg.shape_pixel_size_nm <= 0:
+            raise ValueError("shape_pixel_size_nm must be positive")
+        if cfg.shape_smoothing_nm < 0:
+            raise ValueError("shape_smoothing_nm must not be negative")
+        if cfg.shape_instance_cost < 0:
+            raise ValueError("shape_instance_cost must not be negative")
+        if not 0 <= cfg.shape_min_iou <= 1:
+            raise ValueError("shape_min_iou must lie in [0, 1]")
+        if cfg.shape_min_component_area_frac <= 0:
+            raise ValueError("shape_min_component_area_frac must be positive")
     if cfg.bin_nm <= 0 or cfg.r_max_nm <= cfg.bin_nm:
         raise ValueError("r_max_nm must exceed a positive bin_nm")
     if not 0 <= cfg.short_range_lo_nm < cfg.short_range_hi_nm <= cfg.r_max_nm:
@@ -246,6 +283,7 @@ def infer_label_sites(
         empty3 = np.empty((0, 3), dtype=float)
         return {
             "centers_nm": empty3, "sem_nm": empty3.copy(),
+            "trace_finite_mask": np.zeros(0, dtype=bool),
             "trace_to_site": np.empty(0, dtype=np.int64),
             "n_traces": np.empty(0, dtype=int), "n_locs": np.empty(0, dtype=int),
             "t_start": np.empty(0), "t_end": np.empty(0),
@@ -328,6 +366,10 @@ def infer_label_sites(
     return {
         "centers_nm": centers,
         "sem_nm": site_sem,
+        # ``trace_to_site`` is indexed over the *finite* centroids only, so the
+        # mask is published with it -- a caller pooling several blocks needs it
+        # to place these labels back on the rows it passed in.
+        "trace_finite_mask": finite,
         "trace_to_site": labels,
         "n_traces": trace_counts,
         "n_locs": loc_counts,
@@ -446,6 +488,112 @@ def rod_config_for(cfg: Staged3DConfig, *, width_scale: float = 1.0):
     )
 
 
+def shape_config_for(cfg: Staged3DConfig, *, width_scale: float = 1.0):
+    """Capsule prior and detector configuration for automatic cell finding."""
+    from .shape_segmentation import ShapePrior, ShapeSegmentationConfig
+
+    prior = ShapePrior.capsule(
+        length_nm=(float(cfg.shape_min_length_nm),
+                   float(cfg.shape_max_length_nm)),
+        width_nm=(float(cfg.shape_min_width_nm) * float(width_scale),
+                  float(cfg.shape_max_width_nm) * float(width_scale)),
+    )
+    detector = ShapeSegmentationConfig(
+        detection_pixel_nm=float(cfg.shape_pixel_size_nm),
+        smoothing_nm=float(cfg.shape_smoothing_nm),
+        min_component_area_frac=float(cfg.shape_min_component_area_frac),
+        instance_cost=float(cfg.shape_instance_cost),
+        min_instance_iou=float(cfg.shape_min_iou),
+    )
+    return prior, detector
+
+
+def segment_shape_components(
+    sites_nm: np.ndarray,
+    image_points_nm: np.ndarray | None = None,
+    *,
+    image_field=None,
+    prior=None,
+    shape_cfg=None,
+    min_sites: int = 20,
+    use_axis: bool = True,
+) -> dict:
+    """Fit capsule instances to the XY footprint, then assign 3-D sites.
+
+    A connected density component can be explained by several complete
+    capsules. The detector selects their number with a description-length
+    penalty, which separates touching cells without relying on a watershed
+    valley and makes splitting one cell into fragments costly.
+    """
+    from .shape_segmentation import (
+        ShapePrior,
+        ShapeSegmentationConfig,
+        segment_shapes,
+        segment_shapes_in_points,
+    )
+
+    pts = np.asarray(sites_nm, dtype=float)
+    n = int(pts.shape[0])
+    if n == 0:
+        return {"labels": np.empty(0, dtype=np.int64), "components": [],
+                "n_excluded_sites": 0, "n_all_components": 0,
+                "detection": None}
+    image = pts if image_points_nm is None else np.asarray(image_points_nm, dtype=float)
+    if image.ndim != 2 or image.shape[0] == 0:
+        image = pts
+    prior = prior or ShapePrior.capsule(
+        length_nm=(800.0, 2500.0), width_nm=(400.0, 800.0))
+    shape_cfg = shape_cfg or ShapeSegmentationConfig(
+        smoothing_nm=60.0, min_component_area_frac=0.20,
+        instance_cost=0.08, min_instance_iou=0.25)
+    if image_field is None:
+        detection = segment_shapes_in_points(
+            image[:, 0], image[:, 1], prior=prior, cfg=shape_cfg)
+    else:
+        detection = segment_shapes(image_field, prior=prior, cfg=shape_cfg)
+
+    assigned = np.full(n, -1, dtype=np.int64)
+    if detection.instances:
+        distances = np.stack([
+            item.model.sdf(
+                pts[:, 0], pts[:, 1], item.center_nm[0], item.center_nm[1],
+                item.angle_deg, item.size_nm)
+            for item in detection.instances
+        ])
+        nearest = distances.argmin(axis=0)
+        inside = distances[nearest, np.arange(n)] < 0.0
+        assigned[inside] = nearest[inside]
+
+    labels = np.full(n, -1, dtype=np.int64)
+    components = []
+    for index, instance in enumerate(detection.instances):
+        idx = np.flatnonzero(assigned == index)
+        if idx.size < int(min_sites):
+            continue
+        new_id = len(components)
+        labels[idx] = new_id
+        theta = np.radians(float(instance.angle_deg))
+        axis = np.array([np.cos(theta), np.sin(theta)])
+        record = _component_record(
+            new_id, idx, pts, _frame_from_axis(axis) if use_axis else None)
+        sizes = instance.size()
+        record.update({
+            "shape_instance": instance,
+            "rod_width_nm": float(sizes.get("width_nm", np.nan)),
+            "rod_length_nm": float(sizes.get("length_nm", np.nan)),
+            "rod_angle_deg": float(instance.angle_deg),
+        })
+        components.append(record)
+
+    return {
+        "labels": labels,
+        "components": components,
+        "n_excluded_sites": int(np.sum(labels < 0)),
+        "n_all_components": int(len(detection.instances)),
+        "detection": detection,
+    }
+
+
 def segment_rod_components(
     sites_nm: np.ndarray,
     image_points_nm: np.ndarray | None = None,
@@ -532,6 +680,93 @@ def _profile_components(
     return matrix.sum(axis=0), matrix, edges
 
 
+def within_component_pairs(
+    points_nm: np.ndarray,
+    labels: np.ndarray,
+    *,
+    r_max_nm: float,
+) -> dict:
+    """Every site pair the profile counts, as index pairs with their distance.
+
+    The histogram built by :func:`_profile_components` is the count of exactly
+    these pairs, so a view that draws them cannot disagree with the curve it is
+    read against.  Both come from one KD-tree query per component, and neither
+    pairs across components nor beyond ``r_max_nm``.
+    """
+    from scipy.spatial import cKDTree
+
+    pts = np.asarray(points_nm, dtype=float)
+    lab = np.asarray(labels, dtype=np.int64).ravel()
+    if pts.ndim != 2 or lab.size != pts.shape[0]:
+        raise ValueError("labels must have one entry per point")
+    left, right, owner = [], [], []
+    for component in np.unique(lab[lab >= 0]):
+        member = np.flatnonzero(lab == component)
+        if member.size < 2:
+            continue
+        found = cKDTree(pts[member]).query_pairs(
+            r=float(r_max_nm), output_type="ndarray")
+        if found.shape[0] == 0:
+            continue
+        left.append(member[found[:, 0]])
+        right.append(member[found[:, 1]])
+        owner.append(np.full(found.shape[0], component, dtype=np.int64))
+    if not left:
+        return {
+            "pairs": np.empty((0, 2), dtype=np.int64),
+            "distances_nm": np.empty(0, dtype=float),
+            "component": np.empty(0, dtype=np.int64),
+        }
+    i = np.concatenate(left)
+    j = np.concatenate(right)
+    return {
+        "pairs": np.column_stack([i, j]).astype(np.int64),
+        "distances_nm": np.linalg.norm(pts[j] - pts[i], axis=1),
+        "component": np.concatenate(owner),
+    }
+
+
+def bin_mask_for_range(
+    edges_nm: np.ndarray, lo_nm: float, hi_nm: float) -> np.ndarray:
+    """Histogram bins whose centre lies in ``[lo_nm, hi_nm)``.
+
+    The same rule :func:`_excess_summary` uses to build the tested band, so a
+    selection set to the configured range reproduces the reported band counts
+    rather than an interval that merely looks like them.
+    """
+    edges = np.asarray(edges_nm, dtype=float).ravel()
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    return (centers >= float(lo_nm)) & (centers < float(hi_nm))
+
+
+def pairs_in_bins(
+    distances_nm: np.ndarray,
+    edges_nm: np.ndarray,
+    bin_mask: np.ndarray,
+) -> np.ndarray:
+    """Mask of the pairs counted by the selected histogram bins.
+
+    The selection is expressed in *bins*, not as a free distance interval, so
+    the number of highlighted pairs is exactly ``observed[bin_mask].sum()``.
+    That identity is what makes a highlight readable against the curve it was
+    drawn from; a free interval would silently include or drop part of an edge
+    bin.
+    """
+    d = np.asarray(distances_nm, dtype=float).ravel()
+    edges = np.asarray(edges_nm, dtype=float).ravel()
+    mask = np.asarray(bin_mask, dtype=bool).ravel()
+    if mask.size != edges.size - 1:
+        raise ValueError("bin_mask must have one entry per histogram bin")
+    index = np.searchsorted(edges, d, side="right") - 1
+    # ``np.histogram`` closes its final bin, so a distance sitting exactly on
+    # the last edge belongs to the last bin instead of falling off the end.
+    index[d == edges[-1]] = mask.size - 1
+    inside = (index >= 0) & (index < mask.size)
+    out = np.zeros(d.shape, dtype=bool)
+    out[inside] = mask[index[inside]]
+    return out
+
+
 def _surface_models(points_nm: np.ndarray, components: list[dict]) -> list[dict]:
     pts = np.asarray(points_nm, dtype=float)
     models = []
@@ -600,6 +835,267 @@ def surface_conditioned_null(
         "replicates": int(stack.shape[0]),
         "stratum_sites": int(stratum_sites),
     }
+
+
+def _inside_roi_xy(points_xy: np.ndarray, roi: dict) -> np.ndarray:
+    """Use the viewer's exact rectangle/oval/polygon/freehand membership rule."""
+    from types import SimpleNamespace
+
+    from ..core.roi_selection import roi_region_mask
+
+    xy = np.asarray(points_xy, dtype=float)
+    record = SimpleNamespace(type=roi["type"], geometry=roi["geometry"])
+    return roi_region_mask(xy[:, 0], xy[:, 1], record)
+
+
+def roi_conditioned_null_2d(
+    sites_nm: np.ndarray,
+    components: list[dict],
+    *,
+    r_max_nm: float = 60.0,
+    bin_nm: float = 0.5,
+    stratum_sites: int = 64,
+    replicates: int = 99,
+    rng_seed: int = 0,
+) -> dict:
+    """Shuffle projected sites within each drawn ROI, never outside its outline.
+
+    Within axial-rank strata, pairwise swaps retain every observed axial and
+    transverse coordinate. A swap is accepted only if *both* resulting sites
+    remain in the user's ROI. This is a projected 2-D conditional null, not a
+    reconstruction of the unobserved 3-D membrane surface.
+    """
+    pts = np.asarray(sites_nm, dtype=float)
+    rng = np.random.default_rng(int(rng_seed))
+    n_bins = int(np.ceil(float(r_max_nm) / float(bin_nm)))
+    stack = np.zeros((int(replicates), n_bins), dtype=float)
+    component_stack = np.zeros((int(replicates), len(components), n_bins), dtype=float)
+    preview = np.empty((0, 3), dtype=float)
+    proposed = accepted = moved = eligible = 0
+
+    for rep in range(int(replicates)):
+        preview_parts = []
+        for ci, component in enumerate(components):
+            idx = np.asarray(component["indices"], dtype=np.int64)
+            roi = component["roi"]
+            axes = np.asarray(component["axes"], dtype=float)
+            center = np.asarray(component["center_nm"], dtype=float)
+            q = (pts[idx] - center) @ axes
+            if not np.all(_inside_roi_xy(pts[idx, :2], roi)):
+                raise ValueError("An inferred site lies outside its selected ROI")
+            original_v = q[:, 1].copy()
+            order = np.argsort(q[:, 0], kind="stable")
+            for start in range(0, order.size, int(stratum_sites)):
+                stratum = order[start:start + int(stratum_sites)]
+                if stratum.size < 2:
+                    continue
+                for _ in range(8):
+                    shuffled = rng.permutation(stratum)
+                    pairs = shuffled[:2 * (shuffled.size // 2)].reshape(-1, 2)
+                    left, right = pairs[:, 0], pairs[:, 1]
+                    u = np.concatenate([q[left, 0], q[right, 0]])
+                    v = np.concatenate([q[right, 1], q[left, 1]])
+                    candidate_xy = (center[:2] + u[:, None] * axes[:2, 0]
+                                    + v[:, None] * axes[:2, 1])
+                    inside = _inside_roi_xy(candidate_xy, roi)
+                    good = inside[:left.size] & inside[left.size:]
+                    left, right = left[good], right[good]
+                    proposed += pairs.shape[0]
+                    accepted += left.size
+                    q[left, 1], q[right, 1] = q[right, 1].copy(), q[left, 1].copy()
+            moved += int(np.count_nonzero(q[:, 1] != original_v))
+            eligible += int(q.shape[0])
+            sample = q @ axes.T + center
+            sample[:, 2] = 0.0
+            hist, _ = pair_distance_profile(sample, r_max_nm, bin_nm)
+            component_stack[rep, ci] = hist
+            stack[rep] += hist
+            if rep == 0:
+                preview_parts.append(sample)
+        if rep == 0 and preview_parts:
+            preview = np.vstack(preview_parts)
+
+    moved_fraction = moved / eligible if eligible else 0.0
+    if moved_fraction < 0.05:
+        raise ValueError(
+            "The ROI-constrained 2-D null could not move at least 5% of sites; "
+            "the ROI is too narrow or the axial strata are too small")
+    return {
+        "mean": stack.mean(axis=0),
+        "sd": stack.std(axis=0, ddof=1) if stack.shape[0] > 1 else np.zeros(n_bins),
+        "lo": np.quantile(stack, 0.025, axis=0),
+        "hi": np.quantile(stack, 0.975, axis=0),
+        "profiles": stack,
+        "component_mean": component_stack.mean(axis=0),
+        "preview_sites_nm": preview,
+        "replicates": int(stack.shape[0]),
+        "stratum_sites": int(stratum_sites),
+        "swap_acceptance_fraction": accepted / proposed if proposed else 0.0,
+        "moved_site_fraction": moved_fraction,
+    }
+
+
+def surface_normalized_profile(
+    observed: np.ndarray,
+    null_mean: np.ndarray,
+    edges_nm: np.ndarray,
+    *,
+    smoothing_nm: float = 1.5,
+    min_expected_pairs: float = 10.0,
+) -> np.ndarray:
+    """Smoothed observed/null profile; bins with little null support stay NaN.
+
+    Smoothing numerator and denominator separately avoids division spikes near
+    zero expected counts. The effective Gaussian-window count is used only as
+    a denominator-quality gate, not as a significance test.
+    """
+    from scipy.ndimage import gaussian_filter1d
+
+    obs = np.asarray(observed, dtype=float).ravel()
+    mean = np.asarray(null_mean, dtype=float).ravel()
+    edges = np.asarray(edges_nm, dtype=float).ravel()
+    if obs.shape != mean.shape or edges.size != obs.size + 1:
+        raise ValueError("observed, null_mean and edges_nm must align")
+    step = float(np.mean(np.diff(edges)))
+    if step <= 0 or not np.allclose(np.diff(edges), step):
+        raise ValueError("edges_nm must be uniformly increasing")
+    sigma_bins = float(smoothing_nm) / step
+    if sigma_bins <= 0:
+        raise ValueError("smoothing_nm must be positive")
+    smooth_obs = gaussian_filter1d(obs, sigma_bins, mode="constant")
+    smooth_null = gaussian_filter1d(mean, sigma_bins, mode="constant")
+    effective_bins = max(1.0, np.sqrt(2.0 * np.pi) * sigma_bins)
+    ratio = np.full(obs.shape, np.nan, dtype=float)
+    valid = smooth_null * effective_bins >= float(min_expected_pairs)
+    np.divide(smooth_obs, smooth_null, out=ratio, where=valid)
+    return ratio
+
+
+def surface_normalized_null_envelope(
+    null_profiles: np.ndarray,
+    edges_nm: np.ndarray,
+    *,
+    smoothing_nm: float = 1.5,
+    min_expected_pairs: float = 10.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pointwise 95% envelope of leave-one-out normalized null profiles."""
+    from scipy.ndimage import gaussian_filter1d
+
+    profiles = np.asarray(null_profiles, dtype=float)
+    edges = np.asarray(edges_nm, dtype=float).ravel()
+    if profiles.ndim != 2 or edges.size != profiles.shape[1] + 1:
+        raise ValueError("null_profiles and edges_nm must align")
+    if profiles.shape[0] < 3:
+        empty = np.full(profiles.shape[1], np.nan)
+        return empty, empty.copy()
+    step = float(np.mean(np.diff(edges)))
+    if step <= 0 or not np.allclose(np.diff(edges), step) or smoothing_nm <= 0:
+        raise ValueError("uniform edges and positive smoothing_nm are required")
+    sigma_bins = float(smoothing_nm) / step
+    smoothed = gaussian_filter1d(profiles, sigma_bins, axis=1, mode="constant")
+    leave_one_out = (smoothed.sum(axis=0) - smoothed) / (smoothed.shape[0] - 1)
+    effective_bins = max(1.0, np.sqrt(2.0 * np.pi) * sigma_bins)
+    valid = ((smoothed.mean(axis=0) * effective_bins >= min_expected_pairs)
+             & np.all(leave_one_out > 0, axis=0))
+    lower = np.full(profiles.shape[1], np.nan)
+    upper = np.full(profiles.shape[1], np.nan)
+    if np.any(valid):
+        ratios = smoothed[:, valid] / leave_one_out[:, valid]
+        lower[valid], upper[valid] = np.quantile(ratios, [0.025, 0.975], axis=0)
+    return lower, upper
+
+
+def persistent_excess_peaks(
+    observed: np.ndarray,
+    null_profiles: np.ndarray,
+    edges_nm: np.ndarray,
+    *,
+    lo_nm: float = 8.0,
+    hi_nm: float = 40.0,
+    smoothing_nm: float = 1.5,
+) -> list[dict]:
+    """Exploratory excess modes stable to bin width and edge phase.
+
+    Candidates are local maxima of a smoothed observed-minus-null curve. A
+    candidate must be wider than a one-bin spike, exceed the 95th percentile
+    of the *maximum* null-replicate excess in the search range, and recur in at
+    least 75% of distinct nearby coarse-binning configurations.
+    Histograms coarser than 1 nm cannot resolve this audit and return no peaks.
+    Persistence is descriptive; it does not identify molecular pair members.
+    """
+    from scipy.ndimage import gaussian_filter1d
+    from scipy.signal import find_peaks
+
+    obs = np.asarray(observed, dtype=float).ravel()
+    profiles = np.asarray(null_profiles, dtype=float)
+    edges = np.asarray(edges_nm, dtype=float).ravel()
+    if profiles.ndim != 2 or profiles.shape[1] != obs.size or edges.size != obs.size + 1:
+        raise ValueError("observed, null_profiles and edges_nm must align")
+    if profiles.shape[0] < 2 or obs.size < 5:
+        return []
+    step = float(np.mean(np.diff(edges)))
+    if step <= 0 or not np.allclose(np.diff(edges), step):
+        raise ValueError("edges_nm must be uniformly increasing")
+    if step > 1.0:
+        return []
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    band = (centers >= float(lo_nm)) & (centers < float(hi_nm))
+    if not band.any():
+        return []
+
+    mean = profiles.mean(axis=0)
+    excess = obs - mean
+    sigma_bins = max(float(smoothing_nm) / step, 0.5)
+    smooth = gaussian_filter1d(excess, sigma_bins, mode="constant")
+    null_fluctuation = gaussian_filter1d(
+        profiles - mean, sigma_bins, axis=1, mode="constant")
+    noise_sd = null_fluctuation.std(axis=0, ddof=1)
+    null_maxima = (profiles.shape[0] / (profiles.shape[0] - 1)
+                   * null_fluctuation[:, band]).max(axis=1)
+    null_max_threshold = float(np.quantile(null_maxima, 0.95))
+    candidates, properties = find_peaks(
+        smooth, prominence=max(0.05 * float(np.max(smooth[band])), 1e-9),
+        distance=max(1, int(np.ceil(2.0 / step))))
+
+    binnings = []
+    for width in sorted({max(target, 2.0 * step) for target in (1.0, 2.0, 3.0)}):
+        phases = np.linspace(0.0, width, min(4, max(1, int(width / step))), endpoint=False)
+        for shift in np.unique(np.round(phases / step).astype(int)) * step:
+            shifted = np.arange(-shift, edges[-1] + width, width)
+            counts = np.histogram(centers, bins=shifted, weights=excess)[0]
+            rebinned = gaussian_filter1d(
+                counts, max(0.5, float(smoothing_nm) / width), mode="constant")
+            coarse_centers = 0.5 * (shifted[:-1] + shifted[1:])
+            in_band = (coarse_centers >= lo_nm) & (coarse_centers < hi_nm)
+            if not in_band.any():
+                continue
+            local_maxima, _ = find_peaks(
+                rebinned, prominence=max(0.08 * float(np.max(rebinned[in_band])), 1e-9))
+            binnings.append((width, coarse_centers[local_maxima[in_band[local_maxima]]]))
+
+    output = []
+    for candidate, prominence in zip(candidates, properties["prominences"]):
+        location = float(centers[candidate])
+        if not band[candidate] or smooth[candidate] <= 0:
+            continue
+        if smooth[candidate] <= null_max_threshold:
+            continue
+        if prominence < max(0.08 * float(np.max(smooth[band])), noise_sd[candidate]):
+            continue
+        near = np.abs(centers - location) <= 2.0
+        local_positive = np.clip(excess[near], 0.0, None)
+        if local_positive.sum() <= 0 or local_positive.max() / local_positive.sum() > 0.5:
+            continue
+        support = sum(np.any(np.abs(positions - location) <= max(1.5, width * 0.75))
+                      for width, positions in binnings)
+        if not binnings or support / len(binnings) < 0.75:
+            continue
+        output.append({
+            "distance_nm": location,
+            "support_fraction": float(support / len(binnings)),
+            "smoothed_excess_count": float(smooth[candidate]),
+        })
+    return sorted(output, key=lambda row: row["smoothed_excess_count"], reverse=True)
 
 
 def _band_descriptors(
@@ -780,7 +1276,7 @@ def _component_bootstrap(
     }
 
 
-def _stratum_profile(base: dict, cfg: Staged3DConfig) -> dict:
+def _stratum_profile(base: dict, cfg: Staged3DConfig, *, is_2d: bool = False) -> dict:
     """Vary the null stratification alone, holding sites and components fixed.
 
     Isolates how much of ``band_ratio`` is set by the randomization scale
@@ -792,11 +1288,26 @@ def _stratum_profile(base: dict, cfg: Staged3DConfig) -> dict:
     components = base["components"]["components"]
     rows: list[dict] = []
     for i, stratum in enumerate(sorted({int(s) for s in cfg.stratum_profile_sites})):
-        null = surface_conditioned_null(
-            sites, components, r_max_nm=cfg.r_max_nm, bin_nm=cfg.bin_nm,
-            stratum_sites=stratum, replicates=cfg.sensitivity_replicates,
-            rng_seed=cfg.rng_seed + 3571 * (i + 1),
-        )
+        null_fn = roi_conditioned_null_2d if is_2d else surface_conditioned_null
+        try:
+            null = null_fn(
+                sites, components, r_max_nm=cfg.r_max_nm, bin_nm=cfg.bin_nm,
+                stratum_sites=stratum, replicates=cfg.sensitivity_replicates,
+                rng_seed=cfg.rng_seed + 3571 * (i + 1),
+            )
+        except ValueError as exc:
+            if not is_2d:
+                raise
+            rows.append({
+                "null_stratum_sites": stratum,
+                "band_ratio": float("nan"),
+                "band_ratio_z": float("nan"),
+                "band_p": float("nan"),
+                "positive_excess_centroid_nm": float("nan"),
+                "peak_nm": float("nan"),
+                "invalid_reason": str(exc),
+            })
+            continue
         s = _excess_summary(
             base["observed"], null["profiles"], base["edges_nm"],
             lo_nm=cfg.short_range_lo_nm, hi_nm=cfg.short_range_hi_nm,
@@ -840,6 +1351,7 @@ def _analyze_sites(
     null_replicates: int,
     rng_seed: int,
     rod_width_scale: float = 1.0,
+    cell_detection_field=None,
 ) -> dict:
     sites = infer_label_sites(
         traces["centroids_nm"], traces["sem_nm"], traces["n_locs"],
@@ -847,16 +1359,26 @@ def _analyze_sites(
         sigma_factor=cfg.site_sigma_factor,
         precision_floor_nm=cfg.site_precision_floor_nm,
     )
-    if cfg.component_mode == "rod":
+    if cfg.component_mode in ("rod", "shape"):
         image = traces.get("points_nm")
         if image is None or np.asarray(image).size == 0:
             image = traces["centroids_nm"]
-        components = segment_rod_components(
-            sites["centers_nm"], image,
-            rod_cfg=rod_config_for(cfg, width_scale=rod_width_scale),
-            min_sites=cfg.min_sites_per_component,
-            use_axis=cfg.rod_use_axis,
-        )
+        if cfg.component_mode == "shape":
+            prior, shape_cfg = shape_config_for(
+                cfg, width_scale=rod_width_scale)
+            components = segment_shape_components(
+                sites["centers_nm"], image, prior=prior, shape_cfg=shape_cfg,
+                min_sites=cfg.min_sites_per_component,
+                use_axis=cfg.shape_use_axis,
+                image_field=cell_detection_field,
+            )
+        else:
+            components = segment_rod_components(
+                sites["centers_nm"], image,
+                rod_cfg=rod_config_for(cfg, width_scale=rod_width_scale),
+                min_sites=cfg.min_sites_per_component,
+                use_axis=cfg.rod_use_axis,
+            )
     else:
         components = segment_spatial_components(
             sites["centers_nm"], link_nm=cell_link_nm,
@@ -875,8 +1397,9 @@ def _profile_and_null(
     stratum_sites: int,
     null_replicates: int,
     rng_seed: int,
+    is_2d: bool = False,
 ) -> dict:
-    """Within-component pair profile, conditional surface null and excess summary.
+    """Within-component pair profile, conditional null and excess summary.
 
     Shared by the single-dataset and pooled entry points: everything below the
     component stage is indifferent to *how* the components were formed, which is
@@ -887,7 +1410,8 @@ def _profile_and_null(
         sites["centers_nm"], components["labels"],
         r_max_nm=cfg.r_max_nm, bin_nm=cfg.bin_nm,
     )
-    null = surface_conditioned_null(
+    null_fn = roi_conditioned_null_2d if is_2d else surface_conditioned_null
+    null = null_fn(
         sites["centers_nm"], components["components"],
         r_max_nm=cfg.r_max_nm, bin_nm=cfg.bin_nm,
         stratum_sites=stratum_sites, replicates=null_replicates,
@@ -909,6 +1433,10 @@ def analyze_hlyb_staged_3d(
     tid: np.ndarray,
     tim: np.ndarray | None = None,
     cfg: Staged3DConfig | None = None,
+    *,
+    cell_detection_field=None,
+    cell_detection_provenance: dict | None = None,
+    associated_image_source: dict | None = None,
 ) -> dict:
     """Run the staged model-independent HlyB short-range analysis."""
     cfg = cfg or Staged3DConfig()
@@ -927,13 +1455,53 @@ def analyze_hlyb_staged_3d(
     if traces["centroids_nm"].shape[0] < cfg.min_sites_per_component:
         raise ValueError("Too few qualifying traces for a 3-D spatial component")
 
+    # Acquisition images are optional supporting evidence, never a hard
+    # dependency.  Build the common calibrated field here, after the same
+    # trace-quality gate used by cell detection, so the image agreement score
+    # and the localization-only fallback see exactly the same point cloud.
+    if (cell_detection_field is None and cfg.component_mode == "shape"
+            and associated_image_source):
+        try:
+            from .image_assisted_segmentation import (
+                field_from_points_with_associated_image,
+            )
+            assisted = field_from_points_with_associated_image(
+                traces["points_nm"][:, 0], traces["points_nm"][:, 1],
+                msr_path=str(associated_image_source.get("source_path") or ""),
+                dataset_did=str(associated_image_source.get("dataset_did") or ""),
+                pixel_size_nm=float(cfg.shape_pixel_size_nm),
+                # At least four source pixels across the narrowest allowed
+                # cell; coarser overview images cannot constrain a boundary.
+                max_source_pixel_nm=float(cfg.shape_min_width_nm) / 4.0,
+                agreement_smoothing_nm=max(float(cfg.shape_smoothing_nm), 100.0),
+            )
+            cell_detection_field = assisted.field
+            cell_detection_provenance = assisted.provenance
+        except Exception as exc:
+            cell_detection_provenance = {
+                "used": False,
+                "source_path": str(associated_image_source.get("source_path") or ""),
+                "dataset_did": str(associated_image_source.get("dataset_did") or ""),
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+
     base = _analyze_sites(
         traces, cfg, merge_nm=cfg.site_merge_nm,
         cell_link_nm=cfg.cell_link_nm,
         stratum_sites=cfg.null_stratum_sites,
         null_replicates=cfg.null_replicates, rng_seed=cfg.rng_seed,
+        cell_detection_field=cell_detection_field,
     )
     if not base["components"]["components"]:
+        if cfg.component_mode == "shape":
+            detection = base["components"].get("detection")
+            reason = ((detection.stats.get("reason") if detection else None)
+                      or "no capsule instance survived the fit")
+            raise ValueError(
+                "Automatic E. coli detection found no cell of the configured "
+                f"size ({cfg.shape_min_length_nm:g}–{cfg.shape_max_length_nm:g} "
+                f"nm long, {cfg.shape_min_width_nm:g}–"
+                f"{cfg.shape_max_width_nm:g} nm wide): {reason}.")
         if cfg.component_mode == "rod":
             detection = base["components"].get("detection")
             reasons = (detection.stats.get("rejections") if detection else None) or {}
@@ -966,10 +1534,11 @@ def analyze_hlyb_staged_3d(
                      for v in cfg.sensitivity_stratum_sites]
         # Both families vary the spatial segmentation; which knob expresses it
         # depends on how the components were formed.
-        if cfg.component_mode == "rod":
+        if cfg.component_mode in ("rod", "shape"):
             variants += [(float(cfg.site_merge_nm), float(cfg.cell_link_nm),
                           int(cfg.null_stratum_sites), float(factor),
-                          "rod width window")
+                          ("capsule width window" if cfg.component_mode == "shape"
+                           else "rod width window"))
                          for factor in cfg.sensitivity_rod_width_factors]
         else:
             variants += [(float(cfg.site_merge_nm),
@@ -994,6 +1563,7 @@ def analyze_hlyb_staged_3d(
                     null_replicates=cfg.sensitivity_replicates,
                     rng_seed=cfg.rng_seed + 1009 * (vi + 1),
                     rod_width_scale=width_scale,
+                    cell_detection_field=cell_detection_field,
                 )
             s = variant["summary"]
             sensitivity.append({
@@ -1069,8 +1639,14 @@ def analyze_hlyb_staged_3d(
         "component_mode": str(cfg.component_mode),
         # The live detection (images, labels, fitted rods) for the result view;
         # ``rod_segmentation`` is its plain-Python counterpart for payloads.
-        "rod_detection": components.get("detection"),
-        "rod_segmentation": _rod_summary(components),
+        "cell_detection": components.get("detection"),
+        "cell_segmentation": _cell_summary(
+            cfg, components, image_support=cell_detection_provenance),
+        # Backwards-compatible keys for the original rod detector and its UI.
+        "rod_detection": (components.get("detection")
+                          if cfg.component_mode == "rod" else None),
+        "rod_segmentation": (_rod_summary(components)
+                             if cfg.component_mode == "rod" else None),
         "n_repeated_sites": int(np.sum(repeated)),
         "n_traces_consolidated": int(np.sum(np.clip(trace_counts - 1, 0, None))),
         "median_within_site_rms_nm": (float(np.median(sites["within_site_rms_nm"][repeated]))
@@ -1131,6 +1707,32 @@ def _rod_summary(components: dict) -> dict | None:
     }
 
 
+def _cell_summary(cfg: Staged3DConfig, components: dict, *,
+                  image_support: dict | None = None) -> dict | None:
+    """Serializable summary of whichever automatic detector formed cells."""
+    detection = components.get("detection")
+    if detection is None:
+        return None
+    if cfg.component_mode == "rod":
+        return {"mode": "rod", **(_rod_summary(components) or {})}
+    if cfg.component_mode != "shape":
+        return None
+    summary = {
+        "mode": "capsule_shape_prior",
+        **{key: value for key, value in detection.stats.items()},
+        "n_components_kept": int(len(components["components"])),
+        "length_window_nm": [float(cfg.shape_min_length_nm),
+                             float(cfg.shape_max_length_nm)],
+        "width_window_nm": [float(cfg.shape_min_width_nm),
+                            float(cfg.shape_max_width_nm)],
+        "instance_cost": float(cfg.shape_instance_cost),
+        "instances": [item.as_dict() for item in detection.instances],
+    }
+    if image_support is not None:
+        summary["associated_image_support"] = dict(image_support)
+    return summary
+
+
 def _limitations(cfg: Staged3DConfig, components: dict) -> list[str]:
     items = [
         "Inferred sites are label-site estimates, not identified HlyB/HlyD protomers.",
@@ -1140,7 +1742,18 @@ def _limitations(cfg: Staged3DConfig, components: dict) -> list[str]:
         "The randomization p-value is bounded below by 1/(replicates + 1) and is anti-conservative; quote the band ratio and its calibrated z instead.",
         "The band ratio is conditional on the null stratification scale and must be quoted together with it; the excess location is the stable descriptor.",
     ]
-    if cfg.component_mode == "rod":
+    if cfg.component_mode == "shape":
+        items.insert(2, (
+            "Cells were delineated by penalized multi-capsule fitting in the XY "
+            "projection of this 3-D dataset. The instance penalty discourages "
+            "splitting a single cell, while allowing a connected footprint to "
+            "contain several complete cells; a genuine XY overlap remains "
+            "ambiguous and sites there are assigned to the nearest capsule."))
+        items.append(
+            "Sites outside every fitted capsule take no part in the analysis, "
+            "so the result describes the automatically detected cell population "
+            "rather than the whole field.")
+    elif cfg.component_mode == "rod":
         detection = components.get("detection")
         rejected = int((detection.stats.get("n_rejected", 0)) if detection else 0)
         items.insert(2, (
@@ -1174,6 +1787,7 @@ def components_from_cells(
     cell_index: np.ndarray,
     *,
     min_sites: int = 20,
+    cell_rois: list[dict] | None = None,
 ) -> dict:
     """Components taken from the caller's cell assignment, not inferred.
 
@@ -1196,11 +1810,18 @@ def components_from_cells(
     components: list[dict] = []
     for cell in ids:
         members = np.flatnonzero(index == cell)
+        if cell_rois is not None:
+            roi = cell_rois[int(cell)]
+            inside = _inside_roi_xy(pts[members, :2], roi)
+            members = members[inside]
         if members.size < int(min_sites):
             continue
         new_id = len(components)
         labels[members] = new_id
-        components.append(_component_record(new_id, members, pts, None))
+        record = _component_record(new_id, members, pts, None)
+        if cell_rois is not None:
+            record["roi"] = roi
+        components.append(record)
     return {
         "labels": labels,
         "components": components,
@@ -1234,6 +1855,7 @@ def _pool_cell_sites(cells, cfg: Staged3DConfig, *, merge_nm: float) -> dict:
     centers, sems, n_traces, n_locs = [], [], [], []
     t_starts, t_ends, within_rms, cell_index = [], [], [], []
     trace_centres, trace_cell_index, points = [], [], []
+    trace_to_site, site_offset = [], 0
     n_traces_total = 0
     n_traces_used = 0
     per_cell = []
@@ -1269,6 +1891,16 @@ def _pool_cell_sites(cells, cfg: Staged3DConfig, *, merge_nm: float) -> dict:
         cell_index.append(np.full(count, position, dtype=np.int64))
         trace_centres.append(np.asarray(traces["centroids_nm"], dtype=float))
         trace_cell_index.append(np.full(used, position, dtype=np.int64))
+        # Shift this cell's site numbering into the pooled block, and scatter
+        # the labels back onto every trace row -- a trace whose centroid was
+        # not finite took part in no site and keeps -1.
+        block = np.full(used, -1, dtype=np.int64)
+        mask = np.asarray(sites["trace_finite_mask"], dtype=bool)
+        assigned = np.asarray(sites["trace_to_site"], dtype=np.int64)
+        if mask.size == used and assigned.size == int(mask.sum()):
+            block[mask] = np.where(assigned >= 0, assigned + site_offset, -1)
+        trace_to_site.append(block)
+        site_offset += count
         block = traces.get("points_nm")
         if block is not None and np.asarray(block).size:
             points.append(np.asarray(block, dtype=float))
@@ -1288,10 +1920,12 @@ def _pool_cell_sites(cells, cfg: Staged3DConfig, *, merge_nm: float) -> dict:
         "t_start": stack(t_starts) if have_time else None,
         "t_end": stack(t_ends) if have_time else None,
         "within_site_rms_nm": stack(within_rms),
-        # A pooled trace->site map would need a global trace numbering that does
-        # not exist across files; the per-site trace counts carry what the
-        # reporting actually uses.
-        "trace_to_site": None,
+        # Indexed over the pooled ``trace_centroids_nm`` below: concatenating
+        # the cells in order *is* the global trace numbering, and each cell's
+        # site labels are offset into the pooled site block. Consolidation is
+        # still confined to one cell, so no site spans two of them.
+        "trace_to_site": (np.concatenate(trace_to_site).astype(np.int64)
+                          if trace_to_site else np.empty(0, dtype=np.int64)),
         "n_candidate_edges": 0,
         "n_accepted_merges": 0,
     }
@@ -1308,20 +1942,25 @@ def _pool_cell_sites(cells, cfg: Staged3DConfig, *, merge_nm: float) -> dict:
     }
 
 
-def analyze_hlyb_staged_pooled(cells, cfg: Staged3DConfig | None = None) -> dict:
+def analyze_hlyb_staged_pooled(
+    cells, cfg: Staged3DConfig | None = None, *, is_2d: bool = False,
+) -> dict:
     """Staged short-range analysis over cells pooled from several acquisitions.
 
     Each entry of *cells* is one ROI-delimited cell: ``loc_m`` ``(N, 3)`` raw
-    metres, ``tid``, optional ``tim``, plus ``label`` / ``dataset`` / ``roi``
-    for reporting. Each becomes one spatial component, so pairs are formed only
-    within a cell and never between cells or between acquisitions — the same
-    rule the single-dataset workflow enforces, with the segmentation supplied
-    rather than inferred.
+    metres in 3-D, or ``(N, 2)`` displayed XY metres in 2-D, ``tid``, optional
+    ``tim``, plus ``label`` / ``dataset`` / ``roi`` for reporting. The 2-D mode
+    also requires ``roi_geometry``. Each entry becomes one analysis component,
+    so pairs are formed only within its ROI, never between ROIs or acquisitions.
+    The 2-D mode treats the ROI as an operator-defined boundary, not a detected
+    cell.
 
     The result mirrors :func:`analyze_hlyb_staged_3d` so the same result window
     and method-text generator consume it.
     """
     cfg = cfg or Staged3DConfig()
+    if is_2d:
+        cfg = replace(cfg, z_scaling_factor=1.0)
     _validate_config(cfg)
     entries = [dict(cell) for cell in cells]
     if not entries:
@@ -1329,34 +1968,40 @@ def analyze_hlyb_staged_pooled(cells, cfg: Staged3DConfig | None = None) -> dict
             "No cells were collected; add at least one ROI-delimited cell.")
     for position, cell in enumerate(entries):
         loc = np.asarray(cell.get("loc_m"), dtype=float)
-        if loc.ndim != 2 or loc.shape[1] < 3:
+        if loc.ndim != 2 or loc.shape[1] < (2 if is_2d else 3):
             raise ValueError(
                 f"cell {position + 1} ({cell.get('label', '?')}): "
-                f"loc_m must have shape (N, 3)")
-        cell["loc_m"] = loc
+                f"loc_m must have shape (N, {2 if is_2d else 3})")
+        cell["loc_m"] = (np.column_stack([loc[:, :2], np.zeros(loc.shape[0])])
+                         if is_2d else loc)
+        if is_2d and not isinstance(cell.get("roi_geometry"), dict):
+            raise ValueError(f"cell {position + 1} needs its drawn ROI geometry")
 
     stacked = np.concatenate([cell["loc_m"] for cell in entries], axis=0)
     finite_z = stacked[np.isfinite(stacked).all(axis=1), 2]
-    if finite_z.size < 3 or float(np.ptp(finite_z)) * 1e9 * cfg.z_scaling_factor < 5.0:
+    if not is_2d and (finite_z.size < 3
+                      or float(np.ptp(finite_z)) * 1e9 * cfg.z_scaling_factor < 5.0):
         raise ValueError("The staged workflow requires genuinely 3-D localizations")
 
     def build(merge_nm, stratum_sites, replicates, rng_seed):
         pooled = _pool_cell_sites(entries, cfg, merge_nm=merge_nm)
         components = components_from_cells(
             pooled["sites"]["centers_nm"], pooled["cell_index"],
-            min_sites=cfg.min_sites_per_component)
+            min_sites=cfg.min_sites_per_component,
+            cell_rois=([cell["roi_geometry"] for cell in entries] if is_2d else None))
         return pooled, _profile_and_null(
             pooled["sites"], components, cfg, stratum_sites=stratum_sites,
-            null_replicates=replicates, rng_seed=rng_seed)
+            null_replicates=replicates, rng_seed=rng_seed, is_2d=is_2d)
 
     pooled, base = build(cfg.site_merge_nm, cfg.null_stratum_sites,
                          cfg.null_replicates, cfg.rng_seed)
     components = base["components"]
     if not components["components"]:
+        scope_name = "drawn ROI" if is_2d else "collected cell"
         raise ValueError(
-            f"No collected cell holds the configured minimum of "
-            f"{cfg.min_sites_per_component} inferred site(s). Collect more "
-            f"cells, or lower 'Min sites per component'.")
+            f"No {scope_name} holds the configured minimum of "
+            f"{cfg.min_sites_per_component} inferred site(s). Select a larger "
+            f"ROI, or lower 'Min sites per component'.")
 
     sites = base["sites"]
     summary = base["summary"]
@@ -1440,20 +2085,39 @@ def analyze_hlyb_staged_pooled(cells, cfg: Staged3DConfig | None = None) -> dict
     datasets = sorted({row["dataset"] for row in per_cell if row["dataset"]})
 
     limitations = _limitations(cfg, components)
-    limitations.insert(2, (
-        "Cells were delineated by hand-drawn ROIs, so the component "
-        "segmentation is an operator input: it is reproducible from the saved "
-        "ROI set, but it is not audited by the sensitivity scan, which here "
-        "varies only the same-site radius and the null stratification."))
-    limitations.append(
-        f"Pairs are formed only within a cell, so pooling {len(per_cell)} "
-        f"cell(s) from {max(len(datasets), 1)} acquisition(s) adds pair counts "
-        f"without creating cross-cell or cross-acquisition pairs; biological "
-        f"replication should still be judged across acquisitions.")
+    if is_2d:
+        limitations = [item for item in limitations
+                       if not item.startswith("The conditional null relies on coarse")]
+        limitations.extend([
+            "Distances are XY projections; Z separation and 3-D membrane distances cannot be recovered.",
+            "The 2-D null preserves observed axial coordinates and transverse values while accepting only swaps that stay inside the drawn ROI; it is not a 3-D surface model.",
+            "The ROI outline is an operator choice and its uncertainty is not included in the sensitivity audit.",
+        ])
+    if is_2d:
+        limitations.insert(2, (
+            "Each drawn ROI defines one analysis region; no E. coli boundary is "
+            "segmented or verified. Pairs never cross ROIs, but an individual "
+            "ROI containing multiple cells would mix their pair distances."))
+    else:
+        limitations.insert(2, (
+            "Cells were delineated by hand-drawn ROIs, so the component "
+            "segmentation is an operator input: it is reproducible from the saved "
+            "ROI set, but it is not audited by the sensitivity scan, which here "
+            "varies only the same-site radius and the null stratification."))
+        limitations.append(
+            f"Pairs are formed only within a cell, so pooling {len(per_cell)} "
+            f"cell(s) from {max(len(datasets), 1)} acquisition(s) adds pair counts "
+            f"without creating cross-cell or cross-acquisition pairs; biological "
+            f"replication should still be judged across acquisitions.")
 
     return {
-        "schema": "hlyb_staged_short_range_3d/v1",
+        "schema": ("hlyb_staged_short_range_2d_roi/v1" if is_2d
+                   else "hlyb_staged_short_range_3d/v1"),
         "pooled": True,
+        "is_2d": bool(is_2d),
+        "null_model": ("roi_conditioned_2d" if is_2d else "surface_conditioned_3d"),
+        "null_swap_acceptance_fraction": base["null"].get("swap_acceptance_fraction"),
+        "null_moved_site_fraction": base["null"].get("moved_site_fraction"),
         "config": cfg,
         "n_cells": len(per_cell),
         "n_cells_analysed": int(sum(row["analysed"] for row in per_cell)),
@@ -1470,7 +2134,9 @@ def analyze_hlyb_staged_pooled(cells, cfg: Staged3DConfig | None = None) -> dict
         "n_rod_like_components": int(
             sum(bool(item["rod_like"]) for item in components["components"])),
         "n_excluded_sites": int(components["n_excluded_sites"]),
-        "component_mode": "given",
+        "component_mode": "roi" if is_2d else "given",
+        "cell_detection": None,
+        "cell_segmentation": None,
         "rod_detection": None,
         "rod_segmentation": None,
         "n_repeated_sites": int(np.sum(repeated)),
@@ -1484,7 +2150,7 @@ def analyze_hlyb_staged_pooled(cells, cfg: Staged3DConfig | None = None) -> dict
         "trace_centroids_nm": pooled["trace_centroids_nm"],
         "site_centers_nm": sites["centers_nm"],
         "site_sem_nm": sites["sem_nm"],
-        "trace_to_site": None,
+        "trace_to_site": sites["trace_to_site"],
         "component_labels": labels,
         "components": components["components"],
         "edges_nm": base["edges_nm"],
@@ -1515,7 +2181,7 @@ def analyze_hlyb_staged_pooled(cells, cfg: Staged3DConfig | None = None) -> dict
         "band_ratio_sensitivity_range": (
             [float(ratio_spread.min()), float(ratio_spread.max())]
             if ratio_spread.size else [float("nan"), float("nan")]),
-        "stratum_profile": (_stratum_profile(base, cfg)
+        "stratum_profile": (_stratum_profile(base, cfg, is_2d=is_2d)
                             if cfg.run_stratum_profile else None),
         "limitations": limitations,
     }

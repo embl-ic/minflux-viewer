@@ -81,6 +81,9 @@ def test_alignment_plot_3d_builds_visible_gl_layers():
         ),
     )
     try:
+        assert win.plot.getViewBox().yInverted()
+        win._set_view_mode("XZ")
+        assert not win.plot.getViewBox().yInverted()
         win._set_view_mode("3D")
 
         assert win._view_mode == "3D"

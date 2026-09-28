@@ -29,6 +29,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from .plot_format import apply_spatial_y_direction
+
 _CLOUD_RGBA = (0.35, 0.72, 1.0, 0.9)      # localizations — light blue
 _MODEL_RGBA = (1.0, 0.55, 0.15, 1.0)      # fitted model — orange
 # Reference-item colors (match the 3-D scatter view on a black background).
@@ -41,9 +43,10 @@ class ParticleInspectorWindow(QWidget):
     """Point cloud of one particle + its fitted model overlay (2-D or 3-D)."""
 
     def __init__(self, *, title: str, cloud, model_points=None, model_curves=None,
-                 is_3d: bool = False, owner=None) -> None:
+                 is_3d: bool = False, owner=None, prefs: dict | None = None) -> None:
         super().__init__(None)
         self._owner = owner
+        self._prefs = prefs or {}
         self.setWindowTitle(title)
         self.setWindowFlags(Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
@@ -118,6 +121,12 @@ class ParticleInspectorWindow(QWidget):
         plot.addLegend(offset=(10, 10))
         plot.setLabel("bottom", "X (nm)")
         plot.setLabel("left", "Y (nm)")
+        apply_spatial_y_direction(
+            plot,
+            vertical_coordinate="Y",
+            prefs=self._prefs,
+            preference_key="scatter_xy_origin",
+        )
         self._plot = plot
         c = self._cloud
         sc = pg.ScatterPlotItem(x=c[:, 0], y=c[:, 1], size=4,

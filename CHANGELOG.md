@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.4.4
+
+Adds trajectory playback and quantitative analysis, richer 3-D ROI and magic-wand workflows, reproducible plugin methods, and an improved HlyB/D pair-distance workflow.
+
 ## v0.4.3
 
 Adds a scripting and plugin layer, post-hoc drift correction, and simplifies

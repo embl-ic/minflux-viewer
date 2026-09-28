@@ -67,12 +67,13 @@ class MbmInfoWindow(QWidget):
     PREFERRED_SIZE = (1150, 820)
 
     def __init__(self, dataset_name: str, beads: list[dict], *,
-                 data_bounds_nm=None) -> None:
+                 data_bounds_nm=None, prefs: dict | None = None) -> None:
         super().__init__(None)
         self.setWindowTitle(f"MBM info — {dataset_name}")
         self.setWindowFlags(Qt.WindowType.Window)
 
         self._beads = beads
+        self._prefs = prefs or {}
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
 
@@ -114,7 +115,8 @@ class MbmInfoWindow(QWidget):
         from ..plugins.msr_reader.beads_drift_dialog import BeadsDriftDialog
 
         self._drift = BeadsDriftDialog(
-            [{"name": name, "beads": beads}], info_mode=True)
+            [{"name": name, "beads": beads}], info_mode=True,
+            prefs=self._prefs)
         return _as_page(self._drift)
 
     def _build_region_tab(self, name: str, beads: list[dict],
@@ -128,7 +130,8 @@ class MbmInfoWindow(QWidget):
         # the beads at their absolute positions with the data-region box and
         # fills its table with drift instead of fit residuals.
         self._region = AlignmentPlotWindow(
-            [], None, data_bounds_nm=data_bounds_nm, single_channel=payload)
+            [], None, data_bounds_nm=data_bounds_nm, single_channel=payload,
+            prefs=self._prefs)
         page = _as_page(self._region)
         if data_bounds_nm is None:
             # Say why the yellow data-region box is absent. The region is the
@@ -224,6 +227,12 @@ def open_mbm_info(owner, ds, dataset_name: str | None = None):
 
     from .modeless import show_modeless
 
-    win = MbmInfoWindow(name, beads, data_bounds_nm=dataset_loc_bounds_nm(ds))
+    state = getattr(owner, "_state", None)
+    win = MbmInfoWindow(
+        name,
+        beads,
+        data_bounds_nm=dataset_loc_bounds_nm(ds),
+        prefs=getattr(state, "prefs", None),
+    )
     show_modeless(win, owner)
     return win, None

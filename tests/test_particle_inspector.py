@@ -221,12 +221,22 @@ def test_inspector_window_builds_and_toggles(_qt_app):
 
     win = ParticleInspectorWindow(title="p", cloud=cloud, model_curves=[ring], is_3d=False)
     assert win._cloud_items and win._model_items
+    assert win._plot.getViewBox().yInverted()
     assert all(it.isVisible() for it in win._cloud_items)
     win._model_chk.setChecked(False)
     assert not any(it.isVisible() for it in win._model_items)
     win._cloud_chk.setChecked(False)
     assert not any(it.isVisible() for it in win._cloud_items)
     win.close()
+
+    bottom_left = ParticleInspectorWindow(
+        title="p",
+        cloud=cloud,
+        is_3d=False,
+        prefs={"plot": {"scatter_xy_origin": "bottom_left"}},
+    )
+    assert not bottom_left._plot.getViewBox().yInverted()
+    bottom_left.close()
 
 
 def test_inspector_disables_model_toggle_when_no_model(_qt_app):

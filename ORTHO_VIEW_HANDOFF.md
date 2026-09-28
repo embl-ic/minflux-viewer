@@ -1,6 +1,6 @@
 # Orthogonal view mode — implementation handoff
 
-**Status:** working, tested, uncommitted. **Date:** 2026-09-13.
+**Status:** working, tested, and included in v0.4.4. **Date:** 2026-09-13.
 **Audience:** an independent agent session doing review, independent validation, and possible expansion.
 
 This document is the full context for the orthogonal ("Ortho-View") mode added to the
@@ -460,7 +460,7 @@ edits that had "succeeded". Apply edits individually, or write before asserting.
 
 ## 10. Repository state
 
-Uncommitted. Ortho-related paths:
+The implementation is tracked. Ortho-related paths at the original handoff were:
 
 ```
 new:      minflux_viewer/ui/ortho_view.py

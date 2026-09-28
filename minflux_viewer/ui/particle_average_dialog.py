@@ -919,7 +919,8 @@ class ParticleAverageWindow(QDialog):
                 win = ParticleInspectorWindow(
                     title=f"Particle {idx + 1} — {method}", cloud=aligned,
                     model_points=model_pts, model_curves=model_curves,
-                    is_3d=_has_z(aligned), owner=self._owner)
+                    is_3d=_has_z(aligned), owner=self._owner,
+                    prefs=self._state.prefs)
             elif method == "geomfit":
                 from ..analysis import npc_geomfit as gfit
                 table, fits, aligned = (ctx.get("table") or [], ctx.get("fits") or [],
@@ -936,7 +937,8 @@ class ParticleAverageWindow(QDialog):
                     model_pts, model_curves = gfit.canonical_overlay(fit["radius"], fit["inter"], sym)
                 win = ParticleInspectorWindow(
                     title=f"Particle {idx + 1} — NPC model fit", cloud=cloud,
-                    model_points=model_pts, model_curves=model_curves, is_3d=True, owner=self._owner)
+                    model_points=model_pts, model_curves=model_curves, is_3d=True,
+                    owner=self._owner, prefs=self._state.prefs)
             else:
                 return
         except Exception as exc:                                      # pragma: no cover - defensive

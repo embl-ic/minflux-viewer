@@ -1,4 +1,4 @@
-"""Plugins › HlyB/D pooled pair analysis — the accumulator window."""
+"""Multi-dataset accumulator behind the direct HlyB/D plugin item."""
 
 import os
 import sys
@@ -231,6 +231,28 @@ def test_collecting_without_an_active_dataset_explains_itself(app, monkeypatch):
         win.close()
 
 
+def test_multi_dataset_pool_explains_that_2d_is_not_yet_persisted(app, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        "PyQt6.QtWidgets.QMessageBox.information",
+        staticmethod(lambda parent, title, text, *a, **k:
+                     seen.setdefault("text", text)))
+    state = _State()
+    state.datasets = [build_localization_dataset(
+        name="legacy 2D", x_nm=np.arange(30.0), y_nm=np.arange(30.0),
+        tid=np.arange(30.0))]
+    state.active_idx = 0
+    state.rois.add(_polygon("cell 1", 15.0, 15.0, 30.0, 0))
+    win = HlyBCollectionWindow(state, owner=None)
+    try:
+        win._collect()
+        assert len(win._collection) == 0
+        assert "genuine 3-D cells only" in seen.get("text", "")
+        assert "active dataset (2D/3D)" in seen.get("text", "")
+    finally:
+        win.close()
+
+
 def test_save_and_load_round_trip_through_the_window(app, monkeypatch, tmp_path):
     state = _state_with_two_datasets()
     win = HlyBCollectionWindow(state, owner=None)
@@ -260,7 +282,7 @@ def test_save_and_load_round_trip_through_the_window(app, monkeypatch, tmp_path)
         other.close()
 
 
-def test_the_pooled_scope_is_owned_by_the_external_tier2_plugin():
+def test_the_multi_dataset_mode_is_owned_by_one_direct_tier2_plugin_item():
     from minflux_viewer import plugins
     from minflux_viewer.plugins import loader
 
@@ -274,8 +296,8 @@ def test_the_pooled_scope_is_owned_by_the_external_tier2_plugin():
         if plugin.id == "embl.hlyb_pair_analysis"
     )
     assert found.tier == 2
-    assert found.label == "Staged pair analysis..."
-    assert found.menu_path == ("HlyB/D",)
+    assert found.label == "HlyB/D pair distance analysis"
+    assert found.menu_path == ()
     assert "pooled roi" in found.keywords
 
 

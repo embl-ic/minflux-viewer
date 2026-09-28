@@ -105,6 +105,7 @@ def _dialog(qtbot, mfx=None, **kwargs):
 # ---------------------------------------------------------------- base flow
 def test_dialog_seeds_two_channels_and_assigns(qtbot):
     dlg, ds, _owner = _dialog(qtbot)
+    assert dlg._preview.getViewBox().yInverted()
     assert len(dlg._rows) == 2
     masks, _overlap, unassigned = dlg._resolve_assignment()
     assert masks is not None and len(masks) == 2

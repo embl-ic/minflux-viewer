@@ -24,6 +24,8 @@ def test_default_presets_are_the_named_entries():
         "NPC 3-channel overlay (simulation)",
         "NPC 2-channel by DCR (simulation)",
         "E. coli HlyB dimers 3D (simulation)",
+        "Tracking on shells 3D (simulation)",
+        "Tracking: NPC scaffold + cargo (simulation)",
     ]
     overlay = next(p for p in default_presets() if p["structure"] == "npc_overlay_3ch")
     assert "ch1_diameter_nm" in overlay["params"]        # multi-sim params merged
@@ -33,6 +35,12 @@ def test_default_presets_are_the_named_entries():
     assert mt["channels"] == 2 and mt["structure"] == "microtubule" and mt["dim"] == 3
     npc2d = next(p for p in default_presets() if p["name"].startswith("NPC 2D"))
     assert npc2d["dim"] == 2
+    # The tracking presets exist so the Tracking View has something to play, and
+    # the two-channel one has to arrive as a scaffold plus cargo.
+    shells = next(p for p in default_presets() if p["structure"] == "tracking_shells")
+    assert "step_nm" in shells["params"] and "dt_ms" in shells["params"]
+    cargo = next(p for p in default_presets() if p["structure"] == "npc_tracking_2ch")
+    assert "travel_nm" in cargo["params"] and "n_pores" in cargo["params"]
 
 
 def test_normalize_preset_fills_and_coerces():

@@ -69,6 +69,7 @@ from ..core.iteration import FLATTEN_LABEL, iteration_labels, ordinal, parse_ite
 from ..core.loader import attr_values_1d, is_value_pool_selector, mfx_get
 from ..utils.filters import raw_trace_aggregate
 from .attribute_help import apply_attribute_tooltips
+from .plot_format import apply_spatial_y_direction
 
 _DISPLAY_AGG = ["per loc", "trace mean", "trace median"]
 
@@ -235,6 +236,12 @@ class AttributeSeparationDialog(QDialog):
         self._preview = pg.PlotWidget()
         self._preview.setMinimumWidth(220)
         self._preview.setAspectLocked(True)
+        apply_spatial_y_direction(
+            self._preview,
+            vertical_coordinate="Y",
+            prefs=self._state.prefs,
+            preference_key="scatter_xy_origin",
+        )
         self._preview.hideAxis("left")
         self._preview.hideAxis("bottom")
         self._preview.setMouseEnabled(x=False, y=False)

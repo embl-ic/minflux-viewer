@@ -71,6 +71,10 @@ class PluginEntry:
     # ``discover`` de-duplicates on this rather than on the display name, so
     # two vendors may publish the same leaf label under different submenus.
     plugin_id: str = ""
+    # The plugin's declared ``[method]`` block, or None. Carried on the entry
+    # so the method-text generator and the macro recorder can reach it from a
+    # recorded run without re-reading plugin.toml or importing the plugin.
+    method: object | None = None
 
 
 _REGISTRY: list[PluginEntry] = []
@@ -169,6 +173,7 @@ def _entry_for(found, prefs: dict | None) -> PluginEntry:
         discovered=True,
         source=str(found.entry_path),
         plugin_id=found.id,
+        method=getattr(found.manifest, "method", None),
     )
 
 
@@ -221,8 +226,11 @@ def _launch_discovered(found, state, parent, prefs: dict | None) -> None:
     # "does it record the plugin, or the plugin's actions?").
     calls = getattr(ctx, "calls", None)
     suppression = calls.suppress() if calls is not None else contextlib.nullcontext()
+    scope = getattr(ctx, "plugin_scope", None)
+    running = (scope(found.id, found.label, getattr(found.manifest, "method", None))
+               if scope is not None else contextlib.nullcontext())
     try:
-        with suppression:
+        with suppression, running:
             func(ctx)
     except BaseException as exc:                # noqa: BLE001 - third-party code
         report(f"Plugin '{found.label}' failed: {exc!r}")

@@ -46,7 +46,7 @@ def _circle(radius, centre=(0.0, 0.0), n=32):
 def test_volume_types_are_not_region_types():
     """A volume ROI must never pass a 2-D consumer's gate."""
     assert VOLUME_ROI_TYPES.isdisjoint(REGION_ROI_TYPES)
-    assert VOLUME_ROI_TYPES == {"cuboid", "sphere", "polyhedron"}
+    assert VOLUME_ROI_TYPES == {"cuboid", "sphere", "polyhedron", "cylinder"}
 
 
 def test_cuboid_mesh_has_its_eight_corners_and_twelve_real_edges():
@@ -440,6 +440,138 @@ def test_the_lifted_shape_selects_what_was_drawn_over():
     assert not roi_volume_mask([150.0], [50.0], [0.0], rec).any()  # outside the draw
 
 
+# -------------------------------------------- three editable projection hulls
+def _projection_box(x=(0.0, 10.0), y=(0.0, 10.0), z=(0.0, 10.0)):
+    def rectangle(a, b):
+        return [[a[0], b[0]], [a[1], b[0]], [a[1], b[1]], [a[0], b[1]]]
+
+    return {
+        "representation": "projection_hull",
+        "primary_plane": "XY",
+        "margin_nm": 0.0,
+        "projections": {
+            "XY": {"points": rectangle(x, y), "source": "manual"},
+            "XZ": {"points": rectangle(x, z), "source": "fallback"},
+            "YZ": {"points": rectangle(y, z), "source": "fallback"},
+        },
+    }
+
+
+def test_projection_hull_keeps_the_drawn_polygon_and_fits_both_side_views():
+    from minflux_viewer.core.roi_volume import projection_hull_from_flat
+
+    primary = [[0.0, 0.0], [100.0, 0.0], [100.0, 80.0], [35.0, 95.0], [0.0, 80.0]]
+    rng = np.random.default_rng(14)
+    points = np.column_stack([
+        rng.uniform(20.0, 75.0, 30),
+        rng.uniform(15.0, 65.0, 30),
+        rng.uniform(-25.0, 35.0, 30),
+    ])
+
+    geometry = projection_hull_from_flat(
+        {"points": primary}, (0, 1), (-80.0, 80.0), points)
+
+    assert geometry["representation"] == "projection_hull"
+    assert geometry["projections"]["XY"] == {
+        "points": primary, "source": "manual"}
+    assert geometry["margin_nm"] > 0.0
+    assert geometry["projections"]["XZ"]["source"] == "auto_hull"
+    assert geometry["projections"]["YZ"]["source"] == "auto_hull"
+    assert len(geometry["projections"]["XZ"]["points"]) > 4
+    assert len(geometry["projections"]["YZ"]["points"]) > 4
+    assert roi_volume_mask(points[:, 0], points[:, 1], points[:, 2],
+                           Rec("polyhedron", geometry)).all()
+
+
+def test_no_points_and_too_few_points_share_the_four_corner_fallback():
+    from minflux_viewer.core.roi_volume import projection_hull_from_flat
+
+    primary = [[10.0, 20.0], [110.0, 20.0], [110.0, 80.0], [10.0, 80.0]]
+    empty = projection_hull_from_flat(
+        {"points": primary}, (0, 1), (-40.0, 60.0), np.empty((0, 3)))
+    sparse = projection_hull_from_flat(
+        {"points": primary}, (0, 1), (-40.0, 60.0),
+        np.array([[20.0, 30.0, -5.0], [50.0, 50.0, 5.0], [90.0, 60.0, 20.0]]))
+
+    for plane in ("XZ", "YZ"):
+        assert empty["projections"][plane]["source"] == "fallback"
+        assert sparse["projections"][plane]["source"] == "fallback"
+        assert sparse["projections"][plane]["points"] == \
+            empty["projections"][plane]["points"]
+        assert len(empty["projections"][plane]["points"]) == 4
+    assert empty["margin_nm"] == sparse["margin_nm"] == 0.0
+    assert empty["projections"]["XZ"]["points"] == [
+        [10.0, -40.0], [110.0, -40.0], [110.0, 60.0], [10.0, 60.0]]
+    assert empty["projections"]["YZ"]["points"] == [
+        [20.0, -40.0], [80.0, -40.0], [80.0, 60.0], [20.0, 60.0]]
+
+
+def test_ortho_yz_screen_order_round_trips_without_swapping_the_roi():
+    from minflux_viewer.core.roi_volume import (
+        projection_hull_from_flat,
+        projection_polygon,
+        set_projection_polygon,
+    )
+
+    # The orthogonal YZ pane is (Z horizontal, Y vertical), while storage is
+    # canonical (Y, Z).  The user's polygon must come back in screen order.
+    screen = [[-20.0, 10.0], [30.0, 10.0], [30.0, 40.0], [-20.0, 40.0]]
+    geometry = projection_hull_from_flat(
+        {"points": screen}, (2, 1), (-5.0, 5.0), np.empty((0, 3)))
+    assert geometry["primary_plane"] == "YZ"
+    assert geometry["projections"]["YZ"]["points"] == [
+        [10.0, -20.0], [10.0, 30.0], [40.0, 30.0], [40.0, -20.0]]
+    assert projection_polygon(geometry, 2, 1).tolist() == screen
+
+    edited = [[-30.0, 5.0], [40.0, 5.0], [50.0, 25.0], [0.0, 45.0]]
+    updated = set_projection_polygon(Rec("polyhedron", geometry), (2, 1), edited)
+    assert updated["projections"]["YZ"]["source"] == "manual"
+    assert projection_polygon(updated, 2, 1).tolist() == edited
+
+
+def test_projection_hull_membership_intersects_all_three_drawn_constraints():
+    geometry = _projection_box()
+    # Narrow only the XZ constraint; an XY-only implementation would keep the
+    # second point, while the three-prism intersection correctly rejects it.
+    geometry["projections"]["XZ"]["points"] = [
+        [0.0, 0.0], [6.0, 0.0], [6.0, 10.0], [0.0, 10.0]]
+    mask = roi_volume_mask(
+        [5.0, 8.0, 5.0], [5.0, 5.0, 5.0], [5.0, 5.0, 20.0],
+        Rec("polyhedron", geometry))
+    assert mask.tolist() == [True, False, False]
+
+
+def test_a_convex_projection_hull_has_an_exact_watertight_box_mesh():
+    from collections import Counter
+
+    rec = Rec("polyhedron", _projection_box(x=(-2.0, 3.0), y=(4.0, 8.0), z=(-5.0, 7.0)))
+    vertices, faces, edges = volume_mesh(rec)
+
+    assert vertices.shape == (8, 3)
+    assert faces.shape == (12, 3)
+    assert edges.shape == (12, 2)       # planar triangulation diagonals removed
+    assert set(np.round(vertices[:, 0], 8)) == {-2.0, 3.0}
+    assert set(np.round(vertices[:, 1], 8)) == {4.0, 8.0}
+    assert set(np.round(vertices[:, 2], 8)) == {-5.0, 7.0}
+    edge_uses = Counter(
+        tuple(sorted(edge))
+        for face in faces.tolist()
+        for edge in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])))
+    assert all(count == 2 for count in edge_uses.values())
+
+
+def test_a_concave_projection_constraint_keeps_exact_membership_without_a_fake_mesh():
+    geometry = _projection_box()
+    geometry["projections"]["XY"]["points"] = [
+        [0.0, 0.0], [10.0, 0.0], [10.0, 4.0],
+        [4.0, 4.0], [4.0, 10.0], [0.0, 10.0],
+    ]
+    rec = Rec("polyhedron", geometry)
+    assert roi_volume_mask([2.0, 8.0], [8.0, 8.0], [5.0, 5.0], rec).tolist() \
+        == [True, False]
+    assert volume_mesh(rec) is None
+
+
 def test_a_shape_with_no_volume_counterpart_is_refused():
     from minflux_viewer.core.roi_volume import volume_from_flat
 
@@ -651,6 +783,8 @@ def test_a_prism_is_left_alone_by_a_no_op_add():
     assert add_cross_section(rec, 0.0, _circle(5.0).tolist()) is None      # wrong type
     poly = Rec("polyhedron", {"axis": "Z", "levels": []})
     assert add_cross_section(poly, 0.0, [[0.0, 0.0], [1.0, 1.0]]) is None  # <3 vertices
+    projection = Rec("polyhedron", _projection_box())
+    assert add_cross_section(projection, 20.0, _circle(5.0).tolist()) is None
 
 
 def test_the_convex_hull_encloses_its_own_points():
@@ -675,13 +809,19 @@ def test_the_hull_needs_enough_points_to_be_a_solid():
     assert convex_hull_polyhedron(np.zeros((0, 3))) is None
 
 
-def test_imagej_export_refuses_a_volume_roi_by_name():
+@pytest.mark.parametrize(("kind", "geometry"), [
+    ("cuboid", {"x": [0, 1], "y": [0, 1], "z": [0, 1]}),
+    ("sphere", {"center": [0, 0, 0], "radii": [1, 1, 1]}),
+    ("cylinder", {"axis": "Z", "center": [0, 0, 0], "radii": [1, 1], "height": 2}),
+    ("polyhedron", _projection_box()),
+])
+def test_imagej_export_refuses_a_volume_roi_by_name(kind, geometry):
     """⚠ Silently writing an XY silhouette would put a flat rectangle in the
     file under the name of a cuboid, and nothing downstream could tell."""
     pytest.importorskip("roifile")
     from minflux_viewer.core.roi import RoiRecord, record_to_imagej
 
-    rec = RoiRecord.create("cuboid", {"x": [0, 1], "y": [0, 1], "z": [0, 1]}, name="box-1")
+    rec = RoiRecord.create(kind, geometry, name=f"{kind}-1")
     with pytest.raises(ValueError, match="3-D ROI"):
         record_to_imagej(rec)
 
@@ -729,3 +869,258 @@ def test_an_unreadable_volume_geometry_says_so_instead_of_reading_as_empty():
 
     rec = Rec("cuboid", {"x": [0, 100]})       # no y / z
     assert "not readable" in volume_geometry_text(rec, _nm)
+
+
+# --------------------------------------------------------------------- cylinder
+# A cylinder is an oval cross-section extruded along the axis normal to the plane
+# it was drawn in: the drawn ellipse in that plane, a rectangle in the other two.
+
+
+def _cyl(axis="Z", centre=(50.0, 30.0, 0.0), radii=(50.0, 30.0), height=40.0):
+    return Rec("cylinder", {"axis": axis, "center": list(centre),
+                            "radii": list(radii), "height": height})
+
+
+def test_cylinder_lifts_an_oval_keeping_its_two_in_plane_radii():
+    from minflux_viewer.core.roi_volume import volume_from_flat
+
+    kind, g = volume_from_flat("oval", {"bounds": [0.0, 0.0, 100.0, 60.0]}, "XY",
+                               (-20.0, 20.0), volume_type="cylinder")
+    assert kind == "cylinder"
+    assert g == {"axis": "Z", "center": [50.0, 30.0, 0.0],
+                 "radii": [50.0, 30.0], "height": 40.0}
+
+
+def test_an_oval_still_lifts_to_a_sphere_unless_a_cylinder_is_asked_for():
+    """The same drawn ellipse becomes either shape, so the flat geometry alone
+    cannot decide it and the default must not change."""
+    from minflux_viewer.core.roi_volume import volume_from_flat
+
+    kind, _g = volume_from_flat("oval", {"bounds": [0.0, 0.0, 10.0, 10.0]},
+                                "XY", (0.0, 5.0))
+    assert kind == "sphere"
+
+
+def test_volume_from_flat_refuses_a_target_that_is_not_a_volume_type():
+    from minflux_viewer.core.roi_volume import volume_from_flat
+
+    with pytest.raises(ValueError):
+        volume_from_flat("oval", {"bounds": [0.0, 0.0, 1.0, 1.0]}, "XY",
+                         (0.0, 1.0), volume_type="rectangle")
+
+
+def test_cylinder_membership_is_elliptic_not_its_bounding_box():
+    rec = _cyl()
+    box = Rec("cuboid", {"x": [0.0, 100.0], "y": [0.0, 60.0], "z": [-20.0, 20.0]})
+    corner = ([95.0], [55.0], [0.0])       # in the bbox, outside the ellipse
+    assert roi_volume_mask(*corner, box)[0]
+    assert not roi_volume_mask(*corner, rec)[0]
+
+
+def test_cylinder_membership_is_bounded_on_its_own_axis():
+    m = roi_volume_mask([50.0] * 3, [30.0] * 3, [0.0, 19.0, 21.0], _cyl())
+    assert m.tolist() == [True, True, False]
+
+
+def test_cylinder_bounds_are_the_radii_and_the_height():
+    assert volume_bounds(_cyl()) == ((0.0, 100.0), (0.0, 60.0), (-20.0, 20.0))
+
+
+def test_cylinder_silhouette_is_an_ellipse_down_the_axis_and_a_rectangle_across():
+    rec = _cyl()                                            # axis Z
+    assert len(volume_silhouette(rec, 0, 1)) > 4            # XY: the ellipse
+    assert len(volume_silhouette(rec, 0, 2)) == 4           # XZ: a rectangle
+    assert len(volume_silhouette(rec, 2, 1)) == 4           # ortho YZ: a rectangle
+
+
+def test_cylinder_silhouette_follows_the_named_axis_not_the_drawing_plane():
+    """The axis is stored in the geometry, so a cylinder about X shows its
+    ellipse in YZ -- no view has to remember which plane drew it, which is the
+    whole reason the schema is named data axes rather than plane + 2-D shape."""
+    rec = _cyl(axis="X", centre=(5.0, 20.0, 10.0), radii=(20.0, 10.0), height=20.0)
+    assert len(volume_silhouette(rec, 1, 2)) > 4            # YZ: the ellipse
+    assert len(volume_silhouette(rec, 0, 1)) == 4           # XY: a rectangle
+    assert len(volume_silhouette(rec, 0, 2)) == 4           # XZ: a rectangle
+
+
+@pytest.mark.parametrize("axis", ["X", "Y", "Z"])
+def test_cylinder_mesh_is_watertight_and_wound_outward(axis):
+    """The 3-D view shades this mesh, so an inward or inconsistent normal is
+    visible. ⚠ The ``(u, v, axis)`` frame is LEFT-handed for an axis of Y --
+    cross_axes gives (X, Z) there, and X x Z is -Y -- so a single index order
+    cannot serve all three axes.
+    """
+    from collections import Counter
+
+    centre, radii, height = (50.0, 30.0, 10.0), (50.0, 30.0), 40.0
+    rec = _cyl(axis=axis, centre=centre, radii=radii, height=height)
+    verts, faces, _edges = volume_mesh(rec)
+
+    undirected, directed = Counter(), Counter()
+    for a, b, c in faces.tolist():
+        for edge in ((a, b), (b, c), (c, a)):
+            undirected[tuple(sorted(edge))] += 1
+            directed[edge] += 1
+    assert all(n == 2 for n in undirected.values())     # closed surface
+    assert all(n == 1 for n in directed.values())       # one consistent winding
+
+    k = {"X": 0, "Y": 1, "Z": 2}[axis]
+    u, v = cross_axes(axis)
+    c = np.asarray(centre, dtype=float)
+    for face in faces.tolist():
+        p = verts[face]
+        n = np.cross(p[1] - p[0], p[2] - p[0])
+        if not np.any(n):
+            continue
+        n = n / np.linalg.norm(n)
+        cen = p.mean(axis=0)
+        out = np.zeros(3)
+        if abs(cen[k] - c[k]) > 0.49 * height:
+            out[k] = np.sign(cen[k] - c[k])             # a cap face
+        else:
+            out[u] = (cen[u] - c[u]) / radii[0]
+            out[v] = (cen[v] - c[v]) / radii[1]
+        assert float(np.dot(n, out / np.linalg.norm(out))) > 0.5
+
+
+def test_cylinder_mesh_agrees_with_its_bounds_and_sits_on_the_surface():
+    rec = _cyl()
+    verts, _faces, edges = volume_mesh(rec)
+    bbox = tuple((float(verts[:, i].min()), float(verts[:, i].max())) for i in range(3))
+    assert np.allclose(np.asarray(bbox), np.asarray(volume_bounds(rec)))
+    rim = verts[2:]                                     # after the two cap centres
+    radial = np.hypot((rim[:, 0] - 50.0) / 50.0, (rim[:, 1] - 30.0) / 30.0)
+    assert np.allclose(radial, 1.0)
+    assert set(np.round(rim[:, 2], 9).tolist()) == {-20.0, 20.0}
+    assert len(edges) > 0
+
+
+def test_cylinder_scale_z_is_the_height_on_a_z_axis_and_a_radius_otherwise():
+    from minflux_viewer.core.roi_volume import scale_z
+
+    g = scale_z(_cyl(centre=(50.0, 30.0, 10.0)), 0.5)
+    assert g["center"][2] == 5.0 and g["height"] == 20.0
+    # About X, Z is one of the cross-section's own axes, so it is a radius.
+    g = scale_z(_cyl(axis="X", centre=(0.0, 0.0, 20.0), radii=(10.0, 4.0), height=30.0), 0.5)
+    assert g["center"][2] == 10.0 and g["radii"] == [10.0, 2.0] and g["height"] == 30.0
+
+
+def test_resizing_a_cylinder_leaves_the_axis_the_view_cannot_see():
+    from minflux_viewer.core.roi_volume import set_volume_extent
+
+    g = set_volume_extent(_cyl(), (0, 1), (0.0, 0.0, 20.0, 20.0))
+    assert g["height"] == 40.0                          # an XY resize says nothing about Z
+    g = set_volume_extent(_cyl(), (0, 2), (0.0, 0.0, 20.0, 20.0))
+    assert g["height"] == 20.0                          # resized along the axis
+    assert g["radii"][1] == 30.0                        # the Y radius is untouched
+
+
+def test_translating_a_cylinder_moves_the_whole_shape():
+    from minflux_viewer.core.roi_volume import translate_volume
+
+    g = translate_volume(_cyl(), {0: 10.0, 2: 5.0})
+    assert g["center"] == [60.0, 30.0, 5.0] and g["height"] == 40.0
+
+
+def test_a_two_d_region_mask_refuses_a_cylinder():
+    """Same reason as the other volume types: an all-False mask would be
+    indistinguishable from a correct empty selection."""
+    with pytest.raises(ValueError):
+        roi_region_mask([0.0], [0.0], _cyl())
+
+
+def test_cylinder_geometry_read_out_names_its_axis():
+    from minflux_viewer.core.roi_volume import volume_geometry_text
+
+    text = volume_geometry_text(_cyl(), lambda v: f"{v:.1f}")
+    assert "axis=Z" in text and "height=40.0" in text
+
+
+# ------------------------------------------------ bounding a selected cloud
+# points_to_polyhedron is what lets a magic-wand selection in 3-D data keep its
+# depth slice: a 2-D polygon's mask spans the whole depth axis by design.
+def _blob(n=1500, sigma=40.0, seed=0):
+    rng = np.random.default_rng(seed)
+    return rng.normal(0.0, sigma, size=(n, 3))
+
+
+@pytest.mark.parametrize("axis", ["X", "Y", "Z"])
+def test_points_to_polyhedron_is_accepted_by_a_strict_mask(axis):
+    """⚠ Every level must be star-shaped about its OWN centroid, which is what
+    radial_profile measures -- rays from the point-cloud mean do not guarantee
+    it. An early version assumed they did and raised NotStarShaped on the first
+    concave cloud, and since roi_volume_mask defaults to strict=True that makes
+    the finished ROI throw inside every consumer that asks for its mask."""
+    from minflux_viewer.core.roi_volume import points_to_polyhedron
+
+    pts = _blob()
+    built = points_to_polyhedron(pts, axis=axis, level_thickness=20.0, pad=10.0)
+    assert built is not None
+    geometry, recovered = built
+    record = Rec("polyhedron", geometry)
+    mask = roi_volume_mask(pts[:, 0], pts[:, 1], pts[:, 2], record)   # strict=True
+    assert mask.any()
+    assert 0.0 < recovered <= 1.0
+
+
+def test_points_to_polyhedron_bounds_the_cloud_on_its_stacking_axis():
+    """A thin slab must come back thin: that is what excludes the data above and
+    below the slice the selection was grown in."""
+    from minflux_viewer.core.roi_volume import points_to_polyhedron
+
+    rng = np.random.default_rng(1)
+    slab = np.column_stack([rng.normal(0.0, 200.0, 1200),
+                            rng.normal(0.0, 200.0, 1200),
+                            rng.normal(0.0, 8.0, 1200)])
+    geometry, _recovered = points_to_polyhedron(slab, level_thickness=20.0, pad=10.0)
+    (_x, _y, (z0, z1)) = volume_bounds(Rec("polyhedron", geometry))
+    assert z1 - z0 < 120.0                       # thin, not the whole axis
+    far = np.column_stack([rng.normal(0.0, 100.0, 300),
+                           rng.normal(0.0, 100.0, 300),
+                           np.full(300, 300.0)])
+    record = Rec("polyhedron", geometry)
+    assert not roi_volume_mask(far[:, 0], far[:, 1], far[:, 2], record).any()
+
+
+def test_points_to_polyhedron_follows_a_concavity_radially():
+    """Tighter than a convex hull, which is the reason for a second builder: a
+    C-shaped cloud must not come back filled in."""
+    from minflux_viewer.core.roi_volume import points_to_polyhedron
+
+    rng = np.random.default_rng(2)
+    ang = rng.uniform(0.35 * np.pi, 1.65 * np.pi, 2500)
+    rad = rng.uniform(80.0, 120.0, 2500)
+    c_shape = np.column_stack([rad * np.cos(ang), rad * np.sin(ang),
+                               rng.normal(0.0, 15.0, 2500)])
+    geometry, recovered = points_to_polyhedron(c_shape, level_thickness=20.0, pad=6.0)
+    assert recovered > 0.9
+    notch = np.array([[100.0, 0.0, 0.0]])        # in the gap of the C
+    record = Rec("polyhedron", geometry)
+    assert not roi_volume_mask(notch[:, 0], notch[:, 1], notch[:, 2],
+                               record, strict=False)[0]
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 4])
+def test_points_to_polyhedron_survives_a_degenerate_cloud(n):
+    """A selection can be one localization; it still has to produce a usable ROI
+    rather than a geometry the mask reader refuses."""
+    from minflux_viewer.core.roi_volume import points_to_polyhedron
+
+    rng = np.random.default_rng(3)
+    pts = rng.normal(0.0, 1.0, size=(n, 3))
+    built = points_to_polyhedron(pts, level_thickness=20.0, pad=5.0)
+    assert built is not None
+    geometry, _recovered = built
+    record = Rec("polyhedron", geometry)
+    roi_volume_mask(pts[:, 0], pts[:, 1], pts[:, 2], record)      # must not raise
+
+
+def test_points_to_polyhedron_caps_its_level_count():
+    from minflux_viewer.core.roi_volume import MAX_POINT_LEVELS, points_to_polyhedron
+
+    rng = np.random.default_rng(4)
+    tall = np.column_stack([rng.normal(0.0, 50.0, 4000),
+                            rng.normal(0.0, 50.0, 4000),
+                            rng.uniform(-5000.0, 5000.0, 4000)])
+    geometry, _recovered = points_to_polyhedron(tall, level_thickness=5.0, pad=2.0)
+    assert len(geometry["levels"]) <= MAX_POINT_LEVELS

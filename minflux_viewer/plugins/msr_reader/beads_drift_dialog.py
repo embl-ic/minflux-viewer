@@ -30,6 +30,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ...ui.plot_format import apply_spatial_y_direction
+
 # rainbow time colormap: blue → cyan → green → yellow → orange → red
 _CMAP_POS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 _CMAP_RGB = [(0, 0, 255), (0, 255, 255), (0, 255, 0), (255, 255, 0), (255, 165, 0), (255, 0, 0)]
@@ -173,9 +175,11 @@ class BeadsDriftDialog(QDialog):
     """
 
     def __init__(self, datasets: list[dict], *, unchecked_gris=None, parent=None,
-                 info_mode: bool = False, drift_correction=None) -> None:
+                 info_mode: bool = False, drift_correction=None,
+                 prefs: dict | None = None) -> None:
         super().__init__(parent)
         self._info_mode = bool(info_mode)
+        self._prefs = prefs or {}
         # Callback(selected_gris) run by the "Drift correction..." button. The
         # dialog only knows the bead traces it plots; the owner holds the mfx
         # arrays the correction rewrites, so it owns the action.
@@ -461,6 +465,12 @@ class BeadsDriftDialog(QDialog):
                 y_rng = y_range_for[yi]
                 plot.setXRange(*x_rng, padding=0.06)
                 plot.setYRange(*y_rng, padding=0.06)
+                apply_spatial_y_direction(
+                    plot,
+                    vertical_coordinate="Y" if yi == 1 else "",
+                    prefs=self._prefs,
+                    preference_key="scatter_xy_origin",
+                )
                 if yi == "str" and not np.any(valid):
                     note = pg.TextItem("not recorded", color=(100, 100, 100),
                                        anchor=(0.5, 0.5))

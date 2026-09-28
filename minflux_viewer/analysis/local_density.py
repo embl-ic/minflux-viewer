@@ -34,6 +34,7 @@ from scipy.signal import fftconvolve
 from scipy.spatial import cKDTree
 
 from ..colormaps import BUILTIN_COLORMAP_NAMES, make_colormap, named_colormap_names
+from ..ui.plot_format import apply_spatial_y_direction
 
 #: Leaf size for the KD-tree. Larger than scipy's default (16): for radius
 #: counting on dense MINFLUX data, fewer/larger leaves cut tree-traversal
@@ -527,6 +528,7 @@ def run_local_density(parent, state) -> None:
         points_nm=pts_valid,
         density_values=dens_valid,
         dimensions=int(opts["dimensions"]),
+        prefs=state.prefs,
         parent=None,
     )
     # Modeless + non-owned, but registered on the owner so it is closed with the
@@ -622,6 +624,7 @@ class LocalDensityImageWindow(QWidget):
         points_nm: np.ndarray | None = None,
         density_values: np.ndarray | None = None,
         dimensions: int = 2,
+        prefs: dict | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -636,6 +639,7 @@ class LocalDensityImageWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
         self._cmap = "hot"
+        self._prefs = prefs or {}
         self._img = np.asarray(image, dtype=float)
         if self._img.size == 0:
             self._img = np.zeros((1, 1), dtype=float)
@@ -709,6 +713,12 @@ class LocalDensityImageWindow(QWidget):
         self._plot.setAspectLocked(True)
         self._plot.setLabel("bottom", "X", units="nm")
         self._plot.setLabel("left", "Y", units="nm")
+        apply_spatial_y_direction(
+            self._plot,
+            vertical_coordinate="Y",
+            prefs=self._prefs,
+            preference_key="render_xy_origin",
+        )
         try:
             self._plot.getViewBox().setMenuEnabled(False)     # use our context menu
         except Exception:

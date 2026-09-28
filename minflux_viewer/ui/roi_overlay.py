@@ -40,7 +40,8 @@ _PLANE_DEPTH_NAME = {"XY": "Z", "XZ": "Y", "YZ": "X"}
 
 #: While drawing, a volume tool behaves as its 2-D counterpart; the lift into
 #: three dimensions happens on the finishing gesture (see _promote_draft_to_volume).
-_FLAT_TOOL_FOR_VOLUME = {"cuboid": "rectangle", "sphere": "oval", "polyhedron": "polygon"}
+_FLAT_TOOL_FOR_VOLUME = {"cuboid": "rectangle", "sphere": "oval",
+                         "polyhedron": "polygon", "cylinder": "oval"}
 
 
 def resolve_axes(plane_or_columns):
@@ -581,6 +582,12 @@ class RoiOverlayController(QObject):
         # when the active target changes) + the active session point for arrows.
         self._kbd_target_id: str | None = None
         self._active_session_point_id: str | None = None
+        # Where the magic wand was last clicked, so a tolerance change can be
+        # re-applied to the same seed instead of asking the user to click again.
+        self._wand_last_pos: tuple[float, float] | None = None
+        # The tool this controller last saw, so _on_tool_changed can tell that a
+        # multi-point session has just ended (the button was unchecked).
+        self._last_tool: str = store.active_tool or ""
         self._selection_timer = QTimer(self)
         self._selection_timer.setSingleShot(True)
         self._selection_timer.setInterval(120)
@@ -599,6 +606,9 @@ class RoiOverlayController(QObject):
         store.changed.connect(self.refresh)
         store.selection_changed.connect(self.refresh)
         store.restore_requested.connect(self.restore_view_edits)
+        # Unchecking the toolbar button is the other way a multi-point session
+        # ends; it must file the set just as the finishing right-click does.
+        store.tool_changed.connect(self._on_tool_changed)
         # QWidget.destroyed is emitted before Qt recursively deletes its child
         # widgets.  Dispose here as a final safety net for owners that do not
         # provide their own closeEvent (including small test/tool plots).
@@ -1092,6 +1102,11 @@ class RoiOverlayController(QObject):
                 return True
             if self._record_at(pos) is not None:
                 return False
+            if tool == "magic_wand":
+                # One click grows a region; the tool stays armed so several
+                # structures can be picked in a row, like the point tool.
+                self._wand_click(pos)
+                return True
             if tool in {"point", "multi_point"}:
                 # Each click drops a persistent point; the tool stays pressed so
                 # the user can keep marking points until the toolbar button is
@@ -1129,7 +1144,7 @@ class RoiOverlayController(QObject):
             if pos is not None:
                 self._update_drag_draft(pos)
             self._drag_start = None
-            if tool in {"cuboid", "sphere"}:
+            if tool in {"cuboid", "sphere", "cylinder"}:
                 self._promote_draft_to_volume(tool)
                 self._finalize_draft_selection(update_item=True)
             elif tool in {"rectangle", "oval", "freehand", "rotated_rectangle", "ellipse"}:
@@ -1222,7 +1237,7 @@ class RoiOverlayController(QObject):
         # vertex-based: line / polyline / freehand_line / polygon / freehand / angle
         from ..core.roi_vertex_edit import nearest_vertex
 
-        projected = self._project_points(record)
+        projected = self._editable_vertex_points(record)
         if projected:
             idx, dist = nearest_vertex(projected, pos)
             if idx >= 0 and dist <= self._hit_tolerance() * 3.0:
@@ -1610,6 +1625,88 @@ class RoiOverlayController(QObject):
         self.store.deselect()
         self._emit_status(self._roi_status_text("points", grouped.geometry))
 
+    def _wand_click(self, pos) -> None:
+        """One magic-wand click: ask the view to grow a region, draft its outline.
+
+        The VIEW owns the field -- the scatter plot grows on its *Color by* value,
+        the render view on local density -- because only it knows which dataset,
+        attribute and projection the user is looking at. The overlay only turns
+        the returned outline into a draft polygon, so the wand needs no record
+        type of its own and everything downstream is unchanged.
+        """
+        from ..analysis.wand_select import wand_parameters
+
+        hook = getattr(self.owner, "wand_select", None)
+        if not callable(hook):
+            self._emit_status("the magic wand is not available in this view")
+            return
+        try:
+            prefs = self.owner._state.prefs
+        except AttributeError:
+            prefs = None
+        try:
+            kind, geometry, message = hook(pos, **wand_parameters(prefs))
+        except Exception as exc:                     # a bad click must not kill the tool
+            self._emit_status(f"magic wand failed: {exc}")
+            return
+        if kind == "highlight":
+            # The view highlighted the selection itself and has nothing to file:
+            # a 3-D selection is a set of localizations, and no polygon or
+            # polyhedron encloses exactly the ones whose attribute agreed.
+            self._wand_last_pos = (float(pos[0]), float(pos[1]))
+            try:
+                self.owner._state._wand_last_controller = self
+            except AttributeError:
+                pass
+            self._emit_status(message or "highlighted the selection")
+            return
+        if not kind or not geometry:
+            self._emit_status(message or "nothing grew from there")
+            return
+        # The view decides the record KIND: a 2-D selection is a polygon, and a
+        # selection in 3-D data is a polyhedron, which bounds the depth axis by
+        # its own geometry instead of spanning all of it.
+        record = RoiRecord.create(kind, geometry, **self._record_kwargs())
+        self._set_draft(self._normalize_record(record))
+        self._finalize_draft_selection(update_item=True)
+        self._wand_last_pos = (float(pos[0]), float(pos[1]))
+        try:
+            # Remember who to re-run when the tolerance sliders move. A transient
+            # UI pointer on the shared state, as `_hlyb_staged_cfg` already is.
+            self.owner._state._wand_last_controller = self
+        except AttributeError:
+            pass
+        if message:
+            self._emit_status(message)
+
+    def redo_wand(self) -> bool:
+        """Re-run the last wand click, for a live tolerance change."""
+        pos = getattr(self, "_wand_last_pos", None)
+        if pos is None:
+            return False
+        self._wand_click(pos)
+        return True
+
+    def _on_tool_changed(self, tool: str) -> None:
+        """File a pending multi-point set when its tool is switched off.
+
+        A multi-point session ends either with the finishing right-click or by
+        unchecking the toolbar button, and both must produce the same thing: one
+        ``points`` ROI holding every marker placed. Without this the markers of
+        an unchecked session stayed on screen unfiled, so a set the user had just
+        placed never reached the Manager.
+
+        ``_session_points`` is per controller, so of the several controllers
+        sharing one store only the one actually holding the markers files them.
+        The right-click route empties the session before releasing the tool, so
+        it cannot double-file.
+        """
+        current = tool or ""
+        if (self._last_tool == "multi_point" and current != "multi_point"
+                and self._session_points):
+            self._add_session_points_as_multi_point()
+        self._last_tool = current
+
     def _add_all_session_points_to_manager(self) -> None:
         records = self._take_session_points()
         if not records:
@@ -1898,7 +1995,31 @@ class RoiOverlayController(QObject):
             return [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]
         return [[float(a), float(b)] for a, b in outline]
 
-    def _seed_depth_interval(self, flat_record):
+    def _contained_display_points(self, flat_record) -> np.ndarray:
+        """Full XYZ display coordinates selected by a flat draft.
+
+        The drawing view remains the authority for channel/filter scope and for
+        the orthogonal pane's actual axis order.  Keeping this beside depth
+        seeding means the projection-hull fit and the interval are guaranteed
+        to use the same rows.
+        """
+        from ..core.roi_crop import display_coords
+
+        try:
+            selection = self.owner.compute_roi_selection(flat_record)
+        except Exception:
+            selection = None
+        if selection is None:
+            return np.empty((0, 3), dtype=float)
+        dataset, mask, _context = selection
+        coords = np.asarray(display_coords(dataset), dtype=float)
+        mask = np.asarray(mask, dtype=bool)
+        if (coords.ndim != 2 or coords.shape[1] < 3
+                or mask.size != coords.shape[0]):
+            return np.empty((0, 3), dtype=float)
+        return coords[mask, :3]
+
+    def _seed_depth_interval(self, flat_record, contained=None):
         """``(lo, hi)`` on the axis normal to the drawing plane, or ``None``.
 
         The depths come from the localizations the drawn 2-D shape already
@@ -1906,8 +2027,7 @@ class RoiOverlayController(QObject):
         seed reuses the view's own selection path rather than a second one that
         could disagree about which rows are in view, filtered or visible.
         """
-        from ..core.roi_crop import display_coords
-        from ..core.roi_volume import PLANE_NORMAL_AXIS, AXIS_INDEX, seed_interval
+        from ..core.roi_volume import AXIS_INDEX, PLANE_NORMAL_AXIS, seed_interval
 
         plane = self._view_plane()
         if plane not in PLANE_NORMAL_AXIS:
@@ -1919,18 +2039,11 @@ class RoiOverlayController(QObject):
         if visible is None:
             return None
 
-        depths = []
-        try:
-            selection = self.owner.compute_roi_selection(flat_record)
-        except Exception:
-            selection = None
-        if selection is not None:
-            ds, mask, _ctx = selection
-            coords = display_coords(ds)
-            column = AXIS_INDEX[PLANE_NORMAL_AXIS[plane]]
-            mask = np.asarray(mask, dtype=bool)
-            if coords.ndim == 2 and coords.shape[1] > column and mask.size == coords.shape[0]:
-                depths = coords[mask, column]
+        points = (self._contained_display_points(flat_record)
+                  if contained is None else np.asarray(contained, dtype=float))
+        column = AXIS_INDEX[PLANE_NORMAL_AXIS[plane]]
+        depths = (points[:, column]
+                  if points.ndim == 2 and points.shape[1] > column else [])
 
         crosshair = None
         centre_getter = getattr(self.owner, "roi_depth_center", None)
@@ -1946,19 +2059,33 @@ class RoiOverlayController(QObject):
         2-D draft alone and says why, rather than filing a volume ROI whose depth
         is invented.
         """
-        from ..core.roi_volume import volume_from_flat
+        from ..core.roi_volume import projection_hull_from_flat, volume_from_flat
 
         draft = self.draft
         if draft is None:
             return False
-        interval = self._seed_depth_interval(draft)
+        contained = self._contained_display_points(draft)
+        interval = self._seed_depth_interval(draft, contained)
         if interval is None:
             self._emit_status(
                 f"{tool} needs a 3-D dataset — kept the 2-D {draft.type}")
             return False
         try:
-            kind, geometry = volume_from_flat(
-                draft.type, draft.geometry, self._view_plane(), interval)
+            if tool == "polyhedron":
+                axes = resolve_axes(self._view_axes())
+                geometry = projection_hull_from_flat(
+                    draft.geometry,
+                    axes[:2] if axes is not None else None,
+                    interval,
+                    contained,
+                )
+                if geometry is None:
+                    return False
+                kind = "polyhedron"
+            else:
+                kind, geometry = volume_from_flat(
+                    draft.type, draft.geometry, self._view_plane(), interval,
+                    volume_type=tool if tool in VOLUME_ROI_TYPES else None)
         except ValueError:
             return False
         record = RoiRecord.create(kind, geometry, **self._record_kwargs())
@@ -2291,10 +2418,22 @@ class RoiOverlayController(QObject):
             # every plane, so those are the items -- and their bounding-box
             # handles resize rather than deform.
             box = self._volume_view_bounds(record)
-            if record.type in {"cuboid", "sphere"} and box is not None:
+            cls = {"cuboid": FilledRectROI, "sphere": FilledEllipseROI}.get(record.type)
+            if record.type == "cylinder":
+                # ⚠ A cylinder is the one volume type whose ITEM KIND depends on
+                # the view: the drawn ellipse looking down its axis, a rectangle
+                # from either side. Both are bounding-box items, so the handles
+                # resize rather than deform in all three panes -- and the axis is
+                # named in the geometry, so no view has to know which plane drew
+                # it.
+                from ..core.roi_volume import AXIS_INDEX as _AXIS_INDEX
+                _h_axis, _v_axis, third = resolve_axes(self._view_axes())
+                axis_col = _AXIS_INDEX.get(
+                    str(record.geometry.get("axis", "Z")).upper())
+                cls = FilledEllipseROI if axis_col == third else FilledRectROI
+            if cls is not None and box is not None:
                 x, y, w, h = box
                 size = [max(w, 1e-9), max(h, 1e-9)]
-                cls = FilledRectROI if record.type == "cuboid" else FilledEllipseROI
                 return cls([x, y], size, angle=0.0,
                            fill_color=record.stroke_color,
                            y_axis_inverted=self._view_y_inverted(),
@@ -2440,18 +2579,37 @@ class RoiOverlayController(QObject):
         polyhedron is a polygon item with no such box, so only its translation
         is taken.
         """
-        from ..core.roi_volume import set_volume_extent
+        from ..core.roi_volume import set_projection_polygon, set_volume_extent
 
         columns = resolve_axes(self._view_axes())
         if columns is None:
             return None
-        if record.type in {"cuboid", "sphere"}:
+        if record.type in {"cuboid", "sphere", "cylinder"}:
             try:
                 bounds = item_to_geometry("rectangle", item).get("bounds")
             except Exception:
                 bounds = None
             if bounds is not None:
                 return set_volume_extent(record, columns, bounds)
+        if (record.type == "polyhedron"
+                and str((record.geometry or {}).get("representation") or "")
+                == "projection_hull"):
+            # A body drag moves the whole 3-D volume coherently.  A handle drag
+            # leaves item.pos() at zero and edits only this view's stored
+            # projection constraint.
+            try:
+                pos = item.pos()
+                moved = abs(float(pos.x())) > 1e-12 or abs(float(pos.y())) > 1e-12
+            except Exception:
+                moved = False
+            if moved:
+                return self._volume_translation_from_item(item, record)
+            try:
+                points = item_to_geometry("polygon", item).get("points")
+            except Exception:
+                points = None
+            if points:
+                return set_projection_polygon(record, columns[:2], points)
         return self._volume_translation_from_item(item, record)
 
     def _volume_translation_from_item(self, item, record):
@@ -2723,7 +2881,9 @@ class RoiOverlayController(QObject):
         # Vertex editing for polyline-family shapes: add a point on the nearest
         # edge, or delete the vertex nearest the right-click.
         add_point_action = delete_point_action = None
-        if kind in {"draft", "stored"} and record.type in _VERTEX_EDIT_TYPES and view_pos is not None:
+        if (kind in {"draft", "stored"}
+                and self._has_editable_vertices(record)
+                and view_pos is not None):
             menu.addSeparator()
             add_point_action = menu.addAction("Add point")
             delete_point_action = menu.addAction("Delete point")
@@ -2807,8 +2967,25 @@ class RoiOverlayController(QObject):
         self.replace_draft(new_record)
 
     # ------------------------------------------------------- vertex editing
+    @staticmethod
+    def _is_projection_hull(record: RoiRecord) -> bool:
+        return (getattr(record, "type", None) == "polyhedron"
+                and str((getattr(record, "geometry", None) or {}).get(
+                    "representation") or "") == "projection_hull")
+
+    def _has_editable_vertices(self, record: RoiRecord) -> bool:
+        return record.type in _VERTEX_EDIT_TYPES or self._is_projection_hull(record)
+
+    def _editable_vertex_points(self, record: RoiRecord) -> list:
+        """Vertices as they appear in this controller's actual view order."""
+        if self._is_projection_hull(record):
+            return self._volume_outline(record)
+        return self._project_points(record)
+
     def _is_closed(self, record: RoiRecord) -> bool:
         """Whether a polyline-family record forms a closed loop (mirrors _make_item)."""
+        if self._is_projection_hull(record):
+            return True
         g = record.geometry
         if record.type in {"polyline", "freehand_line"}:
             return bool(g.get("closed", False))
@@ -2820,8 +2997,9 @@ class RoiOverlayController(QObject):
         is within hit tolerance of it and the shape stays above its minimum count."""
         from ..core.roi_vertex_edit import min_vertices, nearest_vertex
 
-        projected = self._project_points(record)
-        pts = record.geometry.get("points", [])
+        projected = self._editable_vertex_points(record)
+        pts = projected if self._is_projection_hull(record) \
+            else record.geometry.get("points", [])
         if len(projected) != len(pts) or len(projected) < 2:
             return False, -1
         idx, dist = nearest_vertex(projected, view_pos)
@@ -2835,8 +3013,9 @@ class RoiOverlayController(QObject):
                         view_pos: tuple[float, float]) -> None:
         from ..core.roi_vertex_edit import insert_vertex, nearest_edge
 
-        projected = self._project_points(record)
-        pts = record.geometry.get("points", [])
+        projected = self._editable_vertex_points(record)
+        pts = projected if self._is_projection_hull(record) \
+            else record.geometry.get("points", [])
         if len(projected) != len(pts) or len(pts) < 2:
             return
         seg, t = nearest_edge(projected, view_pos, closed=self._is_closed(record))
@@ -2852,7 +3031,10 @@ class RoiOverlayController(QObject):
         can_del, idx = self._vertex_delete_candidate(record, view_pos)
         if not can_del:
             return
-        new_pts = delete_vertex(record.geometry.get("points", []), idx)
+        points = (self._editable_vertex_points(record)
+                  if self._is_projection_hull(record)
+                  else record.geometry.get("points", []))
+        new_pts = delete_vertex(points, idx)
         self._commit_vertex_edit(kind, record, new_pts)
 
     def _commit_vertex_edit(self, kind: str, record: RoiRecord,
@@ -2862,7 +3044,17 @@ class RoiOverlayController(QObject):
         editable draft in the view."""
         from dataclasses import replace
 
-        new_geom = {**record.geometry, "points": new_points}
+        if self._is_projection_hull(record):
+            from ..core.roi_volume import set_projection_polygon
+
+            columns = resolve_axes(self._view_axes())
+            new_geom = (set_projection_polygon(
+                record, columns[:2] if columns is not None else None, new_points)
+                if columns is not None else None)
+            if new_geom is None:
+                return
+        else:
+            new_geom = {**record.geometry, "points": new_points}
         new_record = replace(record, geometry=new_geom)
         if kind == "stored":
             self._delete_mask_for_record(record)  # geometry changed → old mask is stale

@@ -401,6 +401,53 @@ _ECOLI_PARAMS = [
 ]
 
 
+_TRACK_PARAMS = [
+    ParamSpec("n_tracks", "Number of tracks", 60, 1, 5000, True, "",
+              desc="How many separate molecules are tracked. Each becomes one "
+                   "trace with its own start time."),
+    ParamSpec("radius_nm", "Shell radius", 400, 20, 5000, False, " nm",
+              desc="Radius of the spherical shell the molecules diffuse on."),
+    ParamSpec("n_shells", "Number of shells", 8, 1, 500, True, "",
+              desc="How many shells are in the field. Tracks are shared out "
+                   "between them, as separate structures in one acquisition."),
+    ParamSpec("field_nm", "Field size", 8000, 500, 100000, False, " nm",
+              desc="Width of the simulated field the shells are placed in."),
+    ParamSpec("locs_per_track", "Localizations per track", 120, 3, 20000, True, "",
+              desc="Mean length of a trace, Poisson-distributed. The reference "
+                   "file has a median of 77."),
+    ParamSpec("dt_ms", "Sampling interval", 0.9, 0.001, 1000.0, False, " ms",
+              desc="Time between consecutive localizations in a trace. The "
+                   "reference file samples every 0.9 ms."),
+    ParamSpec("step_nm", "Step size", 12.0, 0.1, 1000.0, False, " nm",
+              desc="Root-mean-square displacement per sampling interval, along "
+                   "the shell surface. The reference file steps 12.7 nm."),
+    ParamSpec("acquisition_s", "Acquisition length", 600.0, 0.1, 100000.0, False, " s",
+              desc="How long the run lasts. Traces start at random times inside "
+                   "it, which is what makes absolute-time playback mostly empty "
+                   "and trace-relative playback the useful one."),
+]
+
+_NPC_TRACK_PARAMS = _SCAFFOLD_PARAMS + [
+    ParamSpec("scaffold_diameter_nm", "Scaffold ring diameter", 107, 10, 500, False, " nm",
+              desc="Diameter of the labelled NPC scaffold ring."),
+    ParamSpec("n_tracks", "Number of cargo tracks", 40, 1, 5000, True, "",
+              desc="How many cargo molecules are tracked through the pores."),
+    ParamSpec("channel_radius_nm", "Central channel radius", 25, 2, 300, False, " nm",
+              desc="Lateral confinement of the cargo inside the pore."),
+    ParamSpec("travel_nm", "Axial travel", 180, 10, 2000, False, " nm",
+              desc="How far along the pore axis a translocating cargo travels."),
+    ParamSpec("abort_fraction", "Aborted fraction", 0.35, 0.0, 1.0, False, "",
+              desc="Fraction of cargo that enters, fails to translocate and "
+                   "returns the way it came."),
+    ParamSpec("locs_per_track", "Localizations per track", 120, 3, 20000, True, "",
+              desc="Mean trace length, Poisson-distributed."),
+    ParamSpec("dt_ms", "Sampling interval", 0.9, 0.001, 1000.0, False, " ms",
+              desc="Time between consecutive localizations in a trace."),
+    ParamSpec("acquisition_s", "Acquisition length", 600.0, 0.1, 100000.0, False, " s",
+              desc="How long the run lasts; traces start at random times in it."),
+]
+
+
 MULTI_SIMS: dict[str, tuple] = {
     "npc_overlay_3ch": ("overlay", "NPC 3-channel overlay (shared scaffold)",
                         _SCAFFOLD_PARAMS + [
@@ -418,6 +465,11 @@ MULTI_SIMS: dict[str, tuple] = {
                                   desc="Mean DCR of reporter B (inner ring).")]),
     "ecoli_hlyb_dimer": ("ecoli", "E. coli HlyB dimers (rod cell, known distance)",
                          _ECOLI_PARAMS),
+    "tracking_shells": ("tracking", "Tracking: molecules on spherical shells",
+                        _TRACK_PARAMS),
+    "npc_tracking_2ch": ("track_overlay",
+                         "Tracking: NPC scaffold + cargo (2 channels)",
+                         _NPC_TRACK_PARAMS),
 }
 
 
@@ -431,7 +483,13 @@ def param_specs(key: str) -> list:
 
 
 def sim_kind(key: str) -> str:
-    """"single" (a plain structure), "overlay" or "dcr" (a multi-channel sim)."""
+    """The shape of a simulation's output.
+
+    ``single`` a plain structure; ``overlay`` / ``dcr`` the multi-channel
+    labelling sims; ``tracking`` one dataset whose molecules move and which
+    therefore carries ``tim``; ``track_overlay`` a structure channel plus a
+    tracking channel, the two-colour trafficking design.
+    """
     return MULTI_SIMS[key][0] if key in MULTI_SIMS else "single"
 
 
@@ -833,3 +891,175 @@ def simulate_ecoli_hlyb(params: dict, *, locs_per_trace: float = 14.0,
     attrs = simulate_attributes(total, rng)
     attrs["tim"] = tim
     return coords, tid, attrs
+
+
+# --------------------------------------------------------------------------- #
+# Tracking simulations — molecules that MOVE, so the Tracking View has something
+# to play. Two shapes, matching the two experiments it has to serve: a pure
+# tracking run, and a structure channel with a tracking channel referred to it
+# (the two-colour NPC-trafficking design).
+#
+# The step sizes and sampling below are taken from the reference tracking file
+# (1_sample_A_1-100_seqTrk-3D-Seb_Octahedron): 0.9 ms between localizations,
+# 12.7 nm median step, ~77 localizations and 104 nm end-to-end per trace.
+# --------------------------------------------------------------------------- #
+
+def _track_lengths(n_tracks: int, mean_locs: float, rng) -> np.ndarray:
+    """Poisson trace lengths with a floor of 3 -- two points is a line, not a track."""
+    return np.maximum(rng.poisson(max(float(mean_locs), 3.0), int(n_tracks)), 3)
+
+
+def _track_times(counts: np.ndarray, dt_s: float, acquisition_s: float, rng
+                 ) -> tuple[np.ndarray, np.ndarray]:
+    """Per-row absolute times, and each trace's onset.
+
+    Traces start at random points in the acquisition, which is what a real run
+    looks like -- and is exactly why the Tracking View zeroes them by default.
+    """
+    onsets = np.sort(rng.uniform(0.0, max(float(acquisition_s), dt_s), counts.size))
+    within = np.concatenate([np.arange(c, dtype=float) * dt_s for c in counts])
+    return np.repeat(onsets, counts) + within, onsets
+
+
+def _walk_on_sphere(n_steps: int, radius: float, step: float, rng) -> np.ndarray:
+    """A random walk constrained to the surface of a sphere of *radius*.
+
+    Each step is taken in the tangent plane and then projected back onto the
+    shell, so the track stays on the surface instead of drifting off it -- which
+    is what "a molecule moving on the surface of a spherical shell" means.
+    """
+    start = rng.normal(size=3)
+    start /= np.linalg.norm(start) or 1.0
+    out = np.empty((n_steps, 3), dtype=float)
+    point = start
+    for i in range(n_steps):
+        out[i] = point
+        tangent = rng.normal(size=3)
+        tangent -= point * float(np.dot(tangent, point))     # project into the plane
+        norm = np.linalg.norm(tangent)
+        if norm > 0:
+            point = point + tangent / norm * (step / max(radius, 1e-9))
+            point /= np.linalg.norm(point) or 1.0
+    return out * radius
+
+
+def simulate_tracking_shells(params: dict, *, precision_nm: float = 5.0,
+                             seed: int | None = None
+                             ) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Molecules diffusing on spherical shells: a **pure tracking** dataset.
+
+    The shape of the reference file, whose molecules move on the surface of a
+    shell. Returns ``(coords, tid, attrs)`` with ``attrs["tim"]`` set, so the
+    result is a dataset the Tracking View can play.
+    """
+    rng = np.random.default_rng(seed)
+    p = {**default_params("tracking_shells"), **(params or {})}
+    n_tracks = int(p["n_tracks"])
+    radius = float(p["radius_nm"])
+    n_shells = max(int(p["n_shells"]), 1)
+    field = float(p["field_nm"])
+    dt_s = float(p["dt_ms"]) * 1.0e-3
+
+    half = field / 2.0
+    xy = place_nonoverlapping(n_shells, 2.2 * radius, rng, box_half=(half, half))
+    if xy.shape[0] == 0:
+        xy = np.zeros((1, 2))
+    # Shells sit at different depths too, so the XZ/YZ projections are not a line.
+    centres = np.column_stack([xy, rng.uniform(-half / 4.0, half / 4.0, xy.shape[0])])
+    counts = _track_lengths(n_tracks, p["locs_per_track"], rng)
+    shell_of = rng.integers(0, centres.shape[0], n_tracks)
+
+    parts = [
+        _walk_on_sphere(int(c), radius, float(p["step_nm"]), rng) + centres[s]
+        for c, s in zip(counts, shell_of)
+    ]
+    coords = np.vstack(parts) + rng.normal(0.0, float(precision_nm),
+                                           size=(int(counts.sum()), 3))
+    tid = np.repeat(np.arange(1, n_tracks + 1, dtype=np.int64), counts)
+    tim, _onsets = _track_times(counts, dt_s, float(p["acquisition_s"]), rng)
+    attrs = simulate_attributes(coords.shape[0], rng)
+    attrs["tim"] = tim
+    return coords, tid, attrs
+
+
+def _cargo_through_pore(n_steps: int, frame, centre, channel_radius: float,
+                        travel: float, abort: bool, rng) -> np.ndarray:
+    """One cargo trajectory along a pore axis, laterally confined in the channel.
+
+    A translocation runs the length of the axis; an aborted one turns round part
+    way and comes back, which is the event the two-colour experiment is looking
+    for.
+    """
+    u, v, normal = frame
+    progress = np.linspace(-0.5, 0.5, n_steps)
+    if abort:
+        turn = rng.uniform(0.15, 0.45)
+        half = n_steps // 2
+        progress = np.concatenate([
+            np.linspace(-0.5, -0.5 + turn, half),
+            np.linspace(-0.5 + turn, -0.5, n_steps - half),
+        ])
+    axial = progress * travel
+    # A confined lateral wander: an Ornstein-Uhlenbeck-ish pull to the axis, so
+    # the cargo stays inside the channel instead of diffusing out of the pore.
+    lateral = np.zeros((n_steps, 2))
+    pos = rng.normal(0.0, channel_radius * 0.3, 2)
+    for i in range(n_steps):
+        lateral[i] = pos
+        pos = pos * 0.92 + rng.normal(0.0, channel_radius * 0.25, 2)
+        radius = float(np.hypot(*pos))
+        if radius > channel_radius:
+            pos *= channel_radius / radius
+    return (centre
+            + axial[:, None] * normal
+            + lateral[:, 0:1] * u
+            + lateral[:, 1:2] * v)
+
+
+def simulate_npc_tracking(params: dict, *, locs_per_trace: float = 4.0,
+                          precision_nm: float = 5.0, seed: int | None = None
+                          ) -> list[dict]:
+    """A **structure channel and a tracking channel** on one shared NPC scaffold.
+
+    The two-colour design of the NPC-trafficking work: one channel is the pore
+    scaffold, which does not move, and the other is cargo translocating through
+    the pores, which does. Returns a list of channel dicts; the tracking channel
+    carries ``attrs["tim"]`` and the structure channel does not need it.
+    """
+    rng = np.random.default_rng(seed)
+    p = {**default_params("npc_tracking_2ch"), **(params or {})}
+    scaffold = _npc_scaffold(int(p["n_pores"]), float(p["size_nm"]),
+                             float(p["field_curvature"]), float(p["local_tilt_deg"]),
+                             rng, min_separation=float(p["scaffold_diameter_nm"]))
+    centres, u_axes, v_axes, normals = scaffold
+
+    subs = _npc_channel_subunits(scaffold, diameter=float(p["scaffold_diameter_nm"]),
+                                 ring_sep=float(p["ring_sep_nm"]), rng=rng)
+    struct_coords, struct_tid = _expand_to_localizations(
+        subs, locs_per_trace, precision_nm, rng)
+
+    n_tracks = int(p["n_tracks"])
+    counts = _track_lengths(n_tracks, p["locs_per_track"], rng)
+    pore_of = rng.integers(0, centres.shape[0], n_tracks)
+    aborts = rng.random(n_tracks) < float(p["abort_fraction"])
+    parts = [
+        _cargo_through_pore(int(c), (u_axes[i], v_axes[i], normals[i]), centres[i],
+                            float(p["channel_radius_nm"]), float(p["travel_nm"]),
+                            bool(a), rng)
+        for c, i, a in zip(counts, pore_of, aborts)
+    ]
+    cargo = np.vstack(parts) + rng.normal(0.0, precision_nm,
+                                          size=(int(counts.sum()), 3))
+    cargo_tid = np.repeat(np.arange(1, n_tracks + 1, dtype=np.int64), counts)
+    tim, _ = _track_times(counts, float(p["dt_ms"]) * 1.0e-3,
+                          float(p["acquisition_s"]), rng)
+
+    struct_attrs = simulate_attributes(struct_coords.shape[0], rng)
+    cargo_attrs = simulate_attributes(cargo.shape[0], rng)
+    cargo_attrs["tim"] = tim
+    return [
+        {"name": "NPC scaffold", "lut": "Green", "coords": struct_coords,
+         "tid": struct_tid, "attrs": struct_attrs, "role": "structure"},
+        {"name": "Cargo tracks", "lut": "Magenta", "coords": cargo,
+         "tid": cargo_tid, "attrs": cargo_attrs, "role": "tracking"},
+    ]

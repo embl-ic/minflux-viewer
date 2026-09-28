@@ -2,7 +2,8 @@
 
 **Feature:** volume (3-D) regions of interest for MINFLUX Viewer, drawn through the
 orthogonal view.
-**Status:** core complete and in use; seven extensions outstanding (§10).
+**Status:** core complete and in use; projection-hull drawing and cylinder integration
+completed 2026-09-15; remaining extensions are in §10.
 **Companion document:** `ORTHO_VIEW_HANDOFF.md` — the view this feature is drawn in.
 Read it first if the orthogonal mode is unfamiliar; this document assumes it.
 **Canonical record:** `CLAUDE.md` ▸ *Volume (3-D) ROIs* and ▸ *Multi-point ROI*.
@@ -15,24 +16,58 @@ Every number below was measured, and §11 says how to measure each one again.
 
 ## 1. What was asked for
 
-Five ROI types that are genuinely three-dimensional:
+Six ROI types/families that are genuinely three-dimensional:
 
 | # | Asked for | Became | Family it is drawn from |
 |---|---|---|---|
 | 1 | cuboid | `cuboid` | rectangle |
 | 2 | sphere | `sphere` — an **axis-aligned ellipsoid** | oval |
-| 3 | polyhedron | `polyhedron` — a stack of cross-sections | polygon / freehand |
-| 4 | 3-D line | the existing `line` / `polyline` / `freehand_line`, whose vertices already carry a per-vertex depth | line family |
-| 5 | 3-D point | the existing `point`, plus a new `points` (ImageJ multi-point) | point |
+| 3 | cylinder | `cylinder` — an axis-aligned elliptic cylinder | oval |
+| 4 | polyhedron | `polyhedron` — three editable projection constraints (legacy cross-section stacks still load) | polygon / freehand |
+| 5 | 3-D line | the existing `line` / `polyline` / `freehand_line`, whose vertices already carry a per-vertex depth | line family |
+| 6 | 3-D point | the existing `point`, plus a new `points` (ImageJ multi-point) | point |
 
-Types 1–3 are the new work and are collectively `VOLUME_ROI_TYPES`. Types 4–5 needed
+Types 1–4 are the volume records and are collectively `VOLUME_ROI_TYPES`. Types 5–6 needed
 no new record type — a line vertex and a point were already `[x, y, z]` — but they did
 need the side panes to be drawable in, which is what made them 3-D in practice.
 
 **"Sphere" is deliberately the user-facing name for an ellipsoid.** A drag almost never
-produces equal radii, and *sphere* is what a user looks for in a toolbar. Rotation is not
-modelled: that needs a 3×3 orientation, and `min_enclosing.min_enclosing_ellipsoid` is
-already N-D if fitting an oriented one is ever wanted.
+produces equal radii, and *sphere* is what a user looks for in a toolbar. `cylinder` is
+nested under the same oval family: its drawing-plane silhouette is the oval and its two
+side silhouettes are rectangles.
+
+Free ROI orientation remains unmodelled after an explicit burden review. It is not just
+three 2-D angle fields: the record needs a 3×3 orthonormal frame, masks must inverse-
+transform points, bounds/silhouettes/meshes must project the rotated solid, and editing
+needs a 3-D orientation gizmo with defined resize semantics. A rotated cuboid may project
+to a hexagon and a tilted cylinder no longer has the current oval/rectangle projections.
+That is a separate feature rather than a safe extension of the axis-aligned pane handles.
+
+### 1.1 Projection-hull update (2026-09-15)
+
+A newly drawn polyhedron no longer starts as one polygon plus rectangular side bands. It
+stores an editable polygon in all three canonical projections:
+
+```python
+{"representation": "projection_hull", "primary_plane": "XY",
+ "projections": {
+   "XY": {"points": [[x, y], ...], "source": "manual"},
+   "XZ": {"points": [[x, z], ...], "source": "auto_hull"},
+   "YZ": {"points": [[y, z], ...], "source": "auto_hull"}}}
+```
+
+The drawn primary polygon is kept exactly. With at least ten contained localizations,
+the other two panes receive independently computed convex hulls of those same XYZ rows,
+expanded by a cheap margin derived from the primary polygon's mean nonnegative bounding-
+box clearance (at least 1 nm). With no points **or too few points**, both side panes use
+the same existing four-corner fallback from the primary extent and the crosshair/visible-
+depth seed. Every projection is then an ordinary editable polygon: vertices can be moved,
+added or deleted, and an edited generated outline changes its source to `manual`.
+
+Membership is the exact intersection of the XY, XZ and YZ polygon prisms. Convex
+projection constraints also yield an exact half-space-intersection mesh in Scatter 3-D
+and the rotating pane. Concave constraints retain exact membership but intentionally do
+not receive a fake convex mesh.
 
 ---
 
@@ -75,11 +110,14 @@ data axes**, never as a 2-D shape plus a plane string.
 ```python
 cuboid      {"x": [lo, hi], "y": [lo, hi], "z": [lo, hi]}
 sphere      {"center": [x, y, z], "radii": [rx, ry, rz]}
-polyhedron  {"axis": "Z", "levels": [{"at": z, "polygon": [[u, v], …]}, …]}
+cylinder    {"axis": "Z", "center": [x, y, z], "radii": [ru, rv], "height": h}
+polyhedron  {"representation": "projection_hull", "projections": {"XY": …, "XZ": …, "YZ": …}}
 ```
 
-A polyhedron's polygon vertices are in **the remaining two axes in ascending order**
-(`cross_axes`): axis Z → (X, Y), axis Y → (X, Z), axis X → (Y, Z).
+Projection polygons use canonical ascending axis order: XY → (X,Y), XZ → (X,Z),
+YZ → (Y,Z). `projection_polygon` / `set_projection_polygon` reverse YZ at the ortho
+pane boundary. The earlier contour-stack schema remains supported for native JSON and
+the legacy Add Cross-Section workflow; its polygon vertices use `cross_axes(axis)`.
 
 The tree carries two incompatible readings of the string `"YZ"`:
 
@@ -93,7 +131,7 @@ Four numbers plus a plane name cannot say which. So every query takes **axis col
 `set_volume_extent(record, columns, bounds)`, `translate_volume(record, {column: delta})`.
 A view states what it shows; there is no convention left to pick wrongly.
 
-### 3.2 Interpolation between cross-sections is angular resampling
+### 3.2 Legacy interpolation between cross-sections is angular resampling
 
 `radial_profile` describes a cross-section as a centroid plus a radius at
 `DEFAULT_ANGLES = 64` fixed angles. Intermediate sections interpolate centroid and radii.
@@ -109,16 +147,15 @@ The price: a cross-section must be **star-shaped about its centroid**. `radial_p
 raises `NotStarShaped` rather than quietly dropping a lobe (`strict=False` takes the
 outer boundary, filling concavities).
 
-The payoff is why it was chosen: **membership is closed-form and fully vectorised**.
+The payoff is why it was chosen for legacy contour stacks: **membership is closed-form and fully vectorised**.
 `_polyhedron_mask` interpolates the centroid and radius profile at each point's own
 stacking coordinate and compares the point's own radius against the boundary — no
 per-point polygon is ever constructed.
 
-### 3.3 One seeding rule for all three shapes
+### 3.3 One fallback seeding rule for all volume shapes
 
-The third dimension of each is an *interval* — a cuboid's extent, an ellipsoid's
-diameter, a prism's extrusion length. Only the in-plane shape differs, so
-`seed_interval` is shared:
+The derived dimension begins as an *interval* — a cuboid extent, ellipsoid diameter,
+cylinder height, or projection-hull fallback depth. `seed_interval` is shared:
 
 ```python
 MIN_SEED_LOCS = 10; MIN_SEED_THICKNESS_NM = 20.0; EMPTY_SEED_FRACTION = 0.5
@@ -171,7 +208,7 @@ the worse experience.
 
 | File | Lines | Role |
 |---|---|---|
-| `minflux_viewer/core/roi_volume.py` | 895 | **The geometry core.** Pure NumPy, Qt-free. Schemas, membership, seeding, silhouettes, interpolation, edits. |
+| `minflux_viewer/core/roi_volume.py` | — | **The geometry core.** Qt-free. Schemas, membership, seeding, silhouettes, meshes, interpolation, edits. |
 | `minflux_viewer/core/roi_projection.py` | 149 | How a **flat** ROI appears in a plane it was not drawn in. |
 | `minflux_viewer/ui/ortho_roi.py` | 307 | The side panes: outlines, the per-pane controller adapter, the ownership rule. |
 | `minflux_viewer/ui/ortho_rotation.py` | 60 | The grid's fourth cell: a rotating projection. |
@@ -179,12 +216,12 @@ the worse experience.
 | `minflux_viewer/ui/render_window.py` / `scatter_window.py` | — | Integration (grep `_pane_roi_controllers`, `roi_pane_coords`, `compute_roi_selection`). |
 | `minflux_viewer/ui/main_window.py` | — | Tool gating, auto-ortho, *Add Cross-Section…* (grep `_volume_tool_allowed`, `_enter_ortho_for_volume_tool`, `_add_cross_section_to_roi`). |
 
-### Tests — 134 dedicated
+### Tests — 183 dedicated
 
 | File | Lines | Tests | Covers |
 |---|---|---|---|
-| `tests/test_roi_volume.py` | 696 | 64 | Geometry, membership, seeding, silhouettes, edits, the property read-out. |
-| `tests/test_ortho_roi.py` | 725 | 34 | The side panes, end to end, **driving real mouse events**. |
+| `tests/test_roi_volume.py` | — | 93 | Geometry, membership, seeding, projection hulls, meshes, edits, the property read-out. |
+| `tests/test_ortho_roi.py` | — | 54 | The side panes, end to end, **driving real mouse events**. |
 | `tests/test_multi_point_roi.py` | 212 | 16 | The `points` record type. |
 | `tests/test_roi_projection.py` | 123 | 13 | Flat ROIs seen edge-on. |
 | `tests/test_ortho_rotation.py` | 59 | 7 | The rotating fourth pane. |
@@ -192,12 +229,13 @@ the worse experience.
 ### Public surface
 
 ```
-roi_volume     VOLUME_ROI_TYPES · AXIS_INDEX · AXIS_NAMES · DEFAULT_ANGLES ·
+roi_volume     VOLUME_ROI_TYPES · AXIS_INDEX · AXIS_NAMES · PROJECTION_AXES · DEFAULT_ANGLES ·
                MIN_SEED_LOCS · MIN_SEED_THICKNESS_NM · EMPTY_SEED_FRACTION ·
                PLANE_NORMAL_AXIS · FLAT_TO_VOLUME · NotStarShaped ·
                cross_axes · plane_in_plane_axes · seed_interval · radial_profile ·
                cross_section_at · roi_volume_mask · volume_bounds ·
-               volume_silhouette · volume_from_flat · scale_z · translate_volume ·
+               volume_silhouette · volume_mesh · volume_from_flat · projection_hull_from_flat ·
+               projection_polygon · set_projection_polygon · scale_z · translate_volume ·
                set_volume_extent · add_cross_section · convex_hull_polyhedron ·
                volume_geometry_text
 roi_projection FULL · DEGENERATE_LINE · DEGENERATE_POINT · PLANE_COLUMNS ·
@@ -217,9 +255,14 @@ FLAT_TO_VOLUME = {'rectangle': 'cuboid', 'oval': 'sphere',
                   'polygon': 'polyhedron', 'freehand': 'polyhedron'}
 ```
 
+`cylinder` deliberately is not another value in this one-to-one fallback table: it uses
+the same oval gesture as `sphere`, and the active tool is passed explicitly to
+`volume_from_flat(..., volume_type="cylinder")`. New polyhedron drawings take the
+separate `projection_hull_from_flat` path described in §1.1.
+
 During the drag the rubber band, the handles and the status read-out are the existing
 ones. The third dimension is seeded only on the **finishing gesture** (release for
-cuboid/sphere, the polygon's right-click for polyhedron), when there is a finished shape
+cuboid/sphere/cylinder, the polygon's right-click for polyhedron), when there is a finished shape
 to measure the data against. `volume_from_flat(flat_type, geometry, plane, interval)`
 does the lift.
 
@@ -230,20 +273,21 @@ and there are no per-view special cases. Asserted by a test:
 
 ### The item kind matches the shape, not merely the outline
 
-An axis-aligned box and ellipsoid **are** a rectangle and an oval in every plane, so
-`_make_item` builds `FilledRectROI` / `FilledEllipseROI` for cuboid and sphere
-(bounding-box handles resize instead of deform) and keeps the polyline only for a
-polyhedron. `set_volume_extent` writes a resize back on the **two visible axes only** — a
-projection has nothing to say about the third, and recomputing it would let an XY resize
-silently change a Z extent.
+An axis-aligned box and ellipsoid **are** a rectangle and an oval in every plane. A
+cylinder is an oval down its named axis and a rectangle from either side. `_make_item`
+therefore gives all three analytic shapes bounding-box handles, while a projection hull
+uses a polyline whose vertices edit that pane's stored constraint. `set_volume_extent`
+writes an analytic resize back on the **two visible axes only**; a projection has nothing
+to say about the third.
 
-### A prism is a polyhedron with one level
+### A legacy prism is a polyhedron with one level
 
 `{"levels": [one], "thickness": t}` — same record type, mask and editor, so it upgrades to
-a multi-level shape with no migration. *Process ▸ ROI ▸ Add Cross-Section…* draws the
+a multi-level contour stack with no migration. *Process ▸ ROI ▸ Add Cross-Section…* draws the
 outline again at another Z; a **second level supersedes `thickness`** (with one level the
 thickness *is* the extent; with several the outermost levels are, and keeping both would
-be two answers to one question). Re-adding at an existing level replaces it.
+be two answers to one question). Re-adding at an existing level replaces it. The command
+refuses projection-hull records, whose three polygons are edited directly in the panes.
 
 ⚠ The Z is **asked for**, not taken from the view: render has a crosshair to read and
 scatter does not, and a level at a depth the user never chose is worse than one typed in.
@@ -455,25 +499,46 @@ draft owned by a side controller counts as a draft from this Render view for the
 `roi_highlight_in_roi` preference. The regression checks both side-axis mappings and the
 side-draft preference path.
 
+### 8.9 Volume geometry was absent from 3-D and rotating views
+
+The fixed orthogonal panes displayed volume silhouettes, but Scatter's actual OpenGL 3-D
+view contained only localization points/highlights, and the rotating fourth pane projected
+only localization points. `core.roi_volume.volume_mesh` now supplies one tested
+`(vertices, triangle faces, wire edges)` representation for both consumers: a cuboid is 8
+corners / 12 real edges / 12 triangles, `sphere` is its stored axis-aligned ellipsoid,
+`cylinder` is a watertight elliptic-cylinder mesh with outward winding for all three named
+axes, and a convex projection hull is the exact half-space intersection of its projected
+prisms. Legacy contour stacks and concave projection constraints remain deliberately
+unmeshed until they have a tested CSG/tessellation contract.
+
+Scatter draws all visible mesh-capable volume records as a translucent `GLMeshItem` plus opaque
+wireframe in 3-D, and projects the same wire edges into the lower-right pane. Both follow
+the ROI Manager's visibility, Show-all and selection gates and include a pending draft.
+The rotation pane now has Play/Pause (1 degree per 100 ms), an **About X/Y/Z** selector,
+and explicit labels: the vertical label names the held rotation axis while the horizontal
+label states the two-axis mixture (for example `X cos θ + Z sin θ`). Play stops when the
+user leaves Ortho or closes the window, and animation reuses the already displayed,
+filtered and decimated points rather than scanning the full dataset on every timer tick.
+
 ---
 
 ## 9. Known limitations
 
-**9.1 Star-shaped cross-sections only.** `radial_profile(strict=True)` raises
+**9.1 Legacy contour stacks require star-shaped cross-sections.** `radial_profile(strict=True)` raises
 `NotStarShaped` for an outline a ray from the centroid crosses twice (a crescent, a U).
 Between levels the interpolation is exact and vectorised; for such an outline there is
 none.
 
-**9.2 The convex hull is sampled cross-sections, not a face list.**
+**9.2 The legacy `convex_hull_polyhedron` command is sampled cross-sections, not a face list.**
 `convex_hull_polyhedron(points, levels=9)` slices the hull at nine heights, because this
 application's volume ROI *is* a stack of cross-sections and reusing that keeps the mask,
 silhouette, Scale Z and the editor working unchanged. The reconstruction is slightly
 tighter than the true hull between levels — measured ~99 % enclosure of its own points.
 
-**9.3 The empty-region seed is clamped to the dataset's Z, and ignores the crosshair.**
-In ortho the depth slider is forced to *All*, so `roi_depth_range()` is the whole extent
-and `roi_depth_center()` is its midpoint — **the crosshair is never consulted**. Drawing
-over a void therefore seeds ±25 % of the whole dataset's Z about the middle of the data.
+**9.3 The empty/sparse-region seed is clamped to the visible depth range.** When the
+orthogonal crosshair is visible, its component on the derived axis is the requested
+centre; otherwise the visible/data-range midpoint is used. Near an edge, clamping can
+move the interval's midpoint, but the interval still contains the crosshair.
 
 **9.4 A line or point drawn in a *side* pane gets a constant third coordinate.**
 Measured: both vertices of a line drawn in XZ came out at Y = −11.6.
@@ -484,10 +549,11 @@ the third axis. In the **XY** pane the same line gets a per-vertex, data-aware d
 **9.5 A flat ROI is display-only in the side panes.** By design (§6), so a rectangle drawn
 in XY cannot be edited from XZ.
 
-**9.6 A polyhedron can be moved but not reshaped in any view.**
-`_volume_geometry_from_item` falls through to `_volume_translation_from_item` for
-polyhedra. The obstacle is real — a multi-level silhouette is the *union* of several
-levels, so there is no single level to write a dragged vertex back to.
+**9.6 Projection-hull polyhedra are reshapeable; legacy contour stacks are not.**
+Each projection-hull pane exposes its own polygon handles plus right-click Add/Delete
+point. A body move translates all three constraints. The older multi-level silhouette is
+the union of several levels, so there is still no unique level to receive a dragged
+vertex; those records remain translation-only.
 
 **9.7 ImageJ export refuses a volume ROI, and the refusal aborts the whole save.** A set
 holding one cuboid cannot be written to `.zip` at all, rather than writing the 2-D ones
@@ -500,6 +566,11 @@ is unaffected.
 including untouched ones. A single green run proves little, and a bisect built on one run
 per configuration will indict whatever it looked at first. See `CLAUDE.md` ▸ *Qt lifecycle*.
 
+**9.9 Only convex projection-hull polyhedra have a 3-D/rotating mesh.** Concave projection
+constraints still have exact point membership and editable fixed-pane outlines, but a
+watertight Boolean-prism tessellation needs a separate CSG contract. Legacy interpolated
+cross-sections are likewise left unmeshed rather than approximated as a box.
+
 ---
 
 ## 10. Not implemented
@@ -511,17 +582,21 @@ Ordered by my estimate of value; the next agent is welcome to disagree.
 2. **Level editing** — `Add Cross-Section…` is the only level operation; no list, delete,
    reorder, or jump-to-Z. `add_cross_section` already replaces at the same `at` and keeps
    levels sorted, so the core half is small; the weight is the dialog and where it lives.
-3. **Polyhedron cross-section reshaping** (§9.6). Needs 2 first: the tractable version is
-   editing a level *in the plane it was drawn in*, which needs a level selector.
-4. **Fit for volume types** — silently ignored, gated on `_REGION_ROI_TYPES`.
+3. **Legacy contour-stack cross-section reshaping** (§9.6). Projection-hull polygons are
+   already editable in every pane; the old level representation needs 2 first so the
+   editor can name which level receives the change.
+4. **Free 3-D orientation for cuboid/ellipsoid/cylinder.** This needs a shared 3×3 frame,
+   rotated mask/silhouette/mesh maths, migration and a 3-D orientation editor; independent
+   pane angles are not a valid orientation model.
+5. **Fit for volume types** — silently ignored, gated on `_REGION_ROI_TYPES`.
    `min_enclosing.min_enclosing_ellipsoid` is already N-D, so this is record plumbing plus
    a decision about what "fit a cuboid to these points" should mean.
-5. **Particle extraction is rectangle-only** — `extract_particles` skips anything else. A
+6. **Particle extraction is rectangle-only** — `extract_particles` skips anything else. A
    cuboid is the natural 3-D collection box; `ParticleData` would need to carry a Z crop.
-6. **Crosshair-anchored seeding** (§9.3) — would make "point at the feature, then draw"
-   work.
 7. **The rotating pane exists only in the embedded layout**, i.e. scatter. Render offers
    floating ortho only, which has no 2×2 grid and so no fourth cell.
+8. **Concave projection-hull / legacy contour-stack surface tessellation** (§9.9) for the
+   OpenGL and rotating displays.
 
 ---
 
@@ -533,7 +608,7 @@ Ordered by my estimate of value; the next agent is welcome to disagree.
 .venv/Scripts/python.exe -m pytest tests/test_roi_volume.py tests/test_roi_projection.py \
     tests/test_ortho_roi.py tests/test_ortho_rotation.py tests/test_multi_point_roi.py -q
 ```
-Expect 134 passed. Then the surrounding surface:
+All of these should pass. Then run the surrounding surface:
 ```bash
 .venv/Scripts/python.exe -m pytest tests/test_ortho_view.py tests/test_render_ortho.py \
     tests/test_render_ortho_floating.py tests/test_roi_manager.py tests/test_roi_convert.py \
@@ -570,13 +645,18 @@ Things worth driving by hand that no test covers yet:
 
 * Draw a cuboid in XZ, press `t`, select it in the ROI Manager, check it appears in all
   three panes and that *Property* reports a sane extent and count.
-* Draw a polyhedron in XY, add a cross-section at another Z, and confirm the side panes
-  show a band rather than a line.
+* Draw a non-rectangular polyhedron in XY over a populated structure. Confirm XY stays
+  exactly as drawn, XZ/YZ start as fitted hulls, and Add/Delete point works in both sides.
+  Repeat in an empty area and confirm both sides use editable four-corner fallbacks.
 * With **Show all** on and several ROIs, confirm no ROI is drawn twice in a side pane.
 * Draw a flat rectangle in XY and confirm it is **dashed** in XZ/YZ and cannot be grabbed
   there.
 * Select a region ROI in Render and confirm the same localization rows are highlighted
   over the XY, XZ and YZ images.
+* With a cuboid, sphere, cylinder and convex projection hull visible, switch Scatter
+  between Ortho and 3D. Confirm the
+  lower-right wireframes and the translucent 3-D meshes follow Manager selection/Show-all;
+  play each About-X/Y/Z rotation and compare the held axis with its label.
 
 ### 11.3 Re-measure the agreement
 
@@ -591,9 +671,9 @@ one stopped routing through `roi_volume_mask`.
   a side pane by projecting the edit back? I judged not — a projection cannot express a
   change on the collapsed axis — but the alternative is arguable.
 * Is `EMPTY_SEED_FRACTION = 0.5` of the visible range a defensible default, given §9.3?
-* Does `volume_silhouette` return the right thing for a **non-convex** multi-level
+* Does `volume_silhouette` return the right thing for a **non-convex legacy multi-level**
   polyhedron? The radial union is exercised by tests, but not against a deliberately
-  awkward shape.
+  awkward shape. (A non-convex projection hull follows a different exact mask path.)
 * `MIN_SEED_LOCS = 10` is a judgement, not a measurement. Is there a dataset where it is
   wrong?
 

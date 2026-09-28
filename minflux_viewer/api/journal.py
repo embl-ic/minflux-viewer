@@ -21,6 +21,25 @@ from ._base import ApiError, Namespace
 CATEGORIES = ("load", "filter", "transform", "analysis", "export", "plugin", "other")
 
 
+def _replay_call(plugin_id: str, values: dict, method=None) -> str:
+    """The one-line call that re-runs this plugin with these answers.
+
+    Only what a generated parameter dialog can carry is written down. When the
+    plugin declares a ``[method]`` block its **inputs** decide what an answer
+    is, so the run's own results stay out of the replay line -- a recorded
+    script that appears to set ``band_ratio`` reads as though the outcome were
+    an input, which is the opposite of what happened.
+    """
+    inputs = {item.name for item in getattr(method, "inputs", ())
+              if item.replay}
+    answers = {
+        key: value for key, value in values.items()
+        if (isinstance(value, (str, int, float, bool)) or value is None)
+        and (not inputs or key in inputs)
+    }
+    return f"mfv.plugins.run({plugin_id!r}, answers={answers!r})"
+
+
 class Journal(Namespace):
     """Append to the session's processing record."""
 
@@ -61,14 +80,31 @@ class Journal(Namespace):
             idx = self._dataset_index(ds)
             ds_name = ds.name
 
-        self._state.journal.add(cat, str(summary), **details)
+        # A plugin's own entry carries who recorded it and with what, so the
+        # method-text generator can render the plugin's declared ``[method]``
+        # block and the macro recorder can re-run it. A plain script records
+        # exactly as before.
+        plugin = getattr(self._facade, "active_plugin", None)
+        payload = None
+        code = command = None
+        if plugin is not None:
+            payload = {"mfv_plugin": {
+                "id": plugin["id"],
+                "label": plugin.get("label", plugin["id"]),
+                "values": dict(details),
+                "dataset": ds_name,
+            }}
+            command = f"plugin:{plugin['id']}"
+            code = _replay_call(plugin["id"], details, plugin.get("method"))
+        self._state.journal.add(
+            cat, str(summary), code=code, command=command, **details)
 
         detail_text = ", ".join(f"{k}={v}" for k, v in details.items())
         target = f" on {ds_name!r}" if ds_name else ""
         line = f"{summary}{target}"
         if detail_text:
             line = f"{line}: {detail_text}"
-        self._state.log(line, "INFO", dataset_idx=idx)
+        self._state.log(line, "INFO", dataset_idx=idx, method_data=payload)
 
     def entries(self, *, category: str | None = None) -> list:
         """Every recorded entry, optionally filtered to one category."""

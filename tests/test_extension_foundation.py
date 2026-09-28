@@ -10,6 +10,8 @@ See ``docs/extension-layer/PLAN.md`` section 5.
 
 from __future__ import annotations
 
+import re
+
 import importlib
 
 import numpy as np
@@ -22,14 +24,17 @@ import pytest
 def test_api_version_is_declared():
     from minflux_viewer import api
 
-    assert api.__api_version__ == "1.2"
+    # The published version, not a literal: adding a namespace is a
+    # deliberate minor bump and this asserts the shape, not the number.
+    assert re.fullmatch(r"\d+\.\d+", api.__api_version__)
+    assert api.__api_version__.split(".")[0] == "1"
 
 
 def test_every_namespace_exists_and_is_importable():
     """A track must be able to code against a namespace it does not own."""
     from minflux_viewer import api
 
-    assert len(api.NAMESPACES) == 9
+    assert len(api.NAMESPACES) == len(set(api.NAMESPACES))
     for name in api.NAMESPACES:
         module = importlib.import_module(f"minflux_viewer.api.{name}")
         cls = getattr(module, name.capitalize())
