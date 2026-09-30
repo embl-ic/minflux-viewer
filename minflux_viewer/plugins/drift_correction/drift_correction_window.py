@@ -373,15 +373,34 @@ class DriftCorrectionWindow(QDialog):
         else:
             z_corr = None
 
+        from ...core.loader import (
+            _broadcast_iteration_to_rows, effective_iteration_for_attr,
+            mfx_filter_mask, mfx_row_mask,
+        )
+
         n = x_corr.size
-        # Carry over the canonical per-localization quality attributes (last-valid,
-        # aligned with the coordinates). Derived attributes are recomputed by the
-        # builder / post-load chain.
+        raw = getattr(ds, "mfx_raw", None)
+        browse = (mfx_row_mask(raw, itr="last", vld_only=True)
+                  if raw is not None and len(raw) else None)
+
+        def _values(name):
+            # cfr/efc are measured at ONE iteration (not the last): take them from
+            # that effective iteration, broadcast onto the last-valid rows -- the
+            # same values the Filter dialog shows. Everything else: last-valid.
+            eff = effective_iteration_for_attr(ds, name) if name in ("cfr", "efc") else None
+            if eff is not None and browse is not None:
+                return _broadcast_iteration_to_rows(
+                    ds, name, src_itr=eff, src_vld=True, browse_mask=browse, raw=raw)
+            return mfx_get(ds, name, itr="last", vld_only=True)
+
+        # Carry over the canonical per-localization quality attributes (aligned with
+        # the coordinates). Derived attributes are recomputed by the builder /
+        # post-load chain.
         carry = {}
         for name in ("efo", "cfr", "dcr", "eco", "ecc", "efc", "fbg",
                      "lcx", "lcy", "lcz", "ext", "sta"):
             try:
-                arr = mfx_get(ds, name, itr="last", vld_only=True)
+                arr = _values(name)
             except Exception:
                 arr = None
             if arr is None:
@@ -389,6 +408,25 @@ class DriftCorrectionWindow(QDialog):
             arr = np.asarray(arr)
             if arr.ndim == 1 and arr.shape[0] == n:
                 carry[name] = arr
+
+        # Honour the source dataset's active filters: only localizations that pass
+        # them go into the corrected dataset (previously the filter was dropped).
+        keep = np.ones(n, dtype=bool)
+        fm = mfx_filter_mask(ds, itr="last", vld_only=True)
+        if fm is not None and fm[0] is not None and np.asarray(fm[0]).shape[0] == n:
+            keep = np.asarray(fm[0], dtype=bool)
+            if fm[1]:
+                self._state.log("Drift correction: filters on "
+                                f"{', '.join(fm[1])} could not be evaluated and were ignored.",
+                                "WARNING")
+        if not keep.all():
+            x_corr, y_corr = x_corr[keep], y_corr[keep]
+            z_corr = z_corr[keep] if z_corr is not None else None
+            tid, t = np.asarray(tid)[keep], np.asarray(t)[keep]
+            carry = {k: v[keep] for k, v in carry.items()}
+            n = int(keep.sum())
+            if n == 0:
+                return None
 
         new = build_localization_dataset(
             name=f"{ds.name} (drift corrected)",
@@ -415,6 +453,8 @@ class DriftCorrectionWindow(QDialog):
             "n_windows": result.n_windows,
             "rms_nm": list(result.rms),
             "source": ds.name,
+            "filtered_from_source": bool(not keep.all()),
+            "n_kept": int(n),
         }
 
         idx = self._state.add_dataset(new)
