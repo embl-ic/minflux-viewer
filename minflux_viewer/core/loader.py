@@ -1423,6 +1423,35 @@ def iteration_attr_values_1d(
     return _gather_iteration_values(raw, attr, source_mask, target_mask)
 
 
+def last_valid_attr_values(ds: "MinfluxDataset", attr: str) -> "np.ndarray | None":
+    """Per-localization *attr* on the last-valid rows, cfr/efc at their measured
+    iteration.
+
+    The rows are those of ``mfx_get(ds, …, itr="last", vld_only=True)`` -- what
+    an export or a derived dataset built from that selection must align to.
+    This is the counterpart of :func:`attr_values_1d`, which aligns to
+    ``ds.attr`` instead; the two coincide whenever
+    :func:`attr_matches_last_valid` holds.
+
+    ``cfr``/``efc`` are measured at ONE loop iteration, and at the last one they
+    read 0 / NaN (a 3-D m2410 sequence measures them at iteration 7 of 10), so
+    reading them with ``itr="last"`` exports a column of zeros. Here they are
+    gathered from each localization's valid row at the effective iteration
+    (:func:`effective_iteration_for_attr`) -- the same values the Filter dialog
+    and the Histogram show. Every other attribute is ``mfx_get(itr="last")``.
+    Returns ``None`` when *attr* is absent, or when cfr/efc have an effective
+    iteration that cannot be aligned to these rows -- never the last-iteration
+    placeholder in its place.
+    """
+    eff = effective_iteration_for_attr(ds, attr)
+    raw = getattr(ds, "mfx_raw", None)
+    if eff is None or raw is None or len(raw) == 0:
+        return mfx_get(ds, attr, itr="last", vld_only=True)
+    target_mask = mfx_row_mask(raw, itr="last", vld_only=True)
+    source_mask = mfx_row_mask(raw, itr=eff, vld_only=True)
+    return _gather_iteration_values(raw, attr, source_mask, target_mask)
+
+
 #: Iteration selectors that collapse a localization's iterations to ONE value.
 VALUE_POOL_SELECTORS = ("sum", "average")
 

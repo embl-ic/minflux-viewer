@@ -324,7 +324,7 @@ def build_snapshot_table(
     Returns ``(columns, rows_dropped)``. Coordinates are in nm.
     """
     from . import overlay as _ov
-    from .loader import mfx_filter_mask, mfx_get
+    from .loader import last_valid_attr_values, mfx_filter_mask, mfx_get
 
     xnm = mfx_get(ds, "xnm", itr="last", vld_only=True)
     ynm = mfx_get(ds, "ynm", itr="last", vld_only=True)
@@ -346,7 +346,8 @@ def build_snapshot_table(
     if include_attrs:
         skip = _EXCLUDE_KEYS | {"loc_x", "loc_y", "loc_z", "itr", "vld"}
         for name in sorted(source_keys - skip):
-            v = mfx_get(ds, name, itr="last", vld_only=True)
+            # cfr/efc at their measured iteration: at the last one they are 0/NaN.
+            v = last_valid_attr_values(ds, name)
             if v is None:
                 continue
             v = np.asarray(v)
