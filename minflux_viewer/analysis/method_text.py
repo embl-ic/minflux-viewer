@@ -44,6 +44,13 @@ CITE_STDDEV = (
 # The CRLB here is the MINFLUX targeted-donut Cramér-Rao bound (Balzarotti 2017;
 # background-aware closed form of Marin & Ries 2024) — NOT the camera/Gaussian
 # bound (Mortensen 2010).
+# Ostersehlt et al. 2022 is also the source of the time-window drift correction.
+CITE_DRIFT_TIME_WINDOWS = CITE_STDDEV
+# The commercial instrument and its fiducial-based stabilisation.
+CITE_MINFLUX_STABILISATION = (
+    "Schmidt et al., Nat. Commun. 12:1478 (2021)",
+    "https://doi.org/10.1038/s41467-021-21652-z",
+)
 CITE_CRLB = (
     "Balzarotti et al., Science 355:606 (2017)",
     "https://doi.org/10.1126/science.aak9913",
@@ -287,6 +294,64 @@ def _render_dcr(m, ev, state):
         f"channel ratio): a two-component Gaussian mixture was fitted to the DCR distribution by "
         f"expectation-maximization, and each trace was assigned to a channel by its mean DCR."
     ), []
+
+
+def _render_drift_beads(m, ev, state):
+    name = _ds_name(state, ev)
+    consensus = m.group("consensus")
+    how = ("mean" if consensus == "mean"
+           else "per-axis median (robust to a single deviating bead)")
+    s = (f"Drift in '{name}' was corrected with the instrument's fiducial (MBM) beads: "
+         f"the uncorrected localization positions were shifted by the {how} of "
+         f"{m.group('k')} of the {m.group('m')} tracked beads ({m.group('beads')}), each "
+         f"bead track Gaussian-smoothed (σ = {m.group('smooth')} bead samples) and "
+         "linearly interpolated to the localization times, referenced to the start of "
+         "the acquisition — the computation the acquisition software applies during "
+         "and after the measurement. The drift removed spanned "
+         f"{m.group('ptp')} nm peak-to-peak ({m.group('axes')}).")
+    if m.group("rep"):
+        s += (" With the bead selection recorded in the file the correction reproduces "
+              f"the file's own coordinates to {m.group('rep')} nm rms "
+              f"({m.group('axes')}), after a constant offset that is a rigid "
+              "translation of the whole dataset.")
+    elif m.group("moved"):
+        s += (f" Relative to the correction stored in the file, the localizations moved "
+              f"by a median of {m.group('moved')} nm.")
+    return s, [CITE_MINFLUX_STABILISATION]
+
+
+def _render_drift_windows(m, ev, state):
+    name = _ds_name(state, ev)
+    residual = bool(m.group("residual"))
+    auto = m.group("mode") == "automatic"
+    what = ("Residual drift not captured by the fiducial beads" if residual
+            else f"Drift in '{name}'")
+    s = (f"{what} was estimated without fiducials by time-window cross-correlation: "
+         f"the localizations were divided into {m.group('n')} consecutive windows of "
+         f"{m.group('T')} s"
+         + (" (the largest number of windows for which 80 % of them held at least "
+            "1,000 localizations in 2-D or 3,000 in 3-D, at most 20)" if auto else "")
+         + f", each rendered in {m.group('dims')}-D on a {m.group('s')} nm grid with a "
+         "Gaussian of three pixels FWHM per localization; every pair of windows was "
+         "cross-correlated and their displacement read from a Gaussian-weighted "
+         "centroid of the correlation peak; the drift trajectory was the least-squares "
+         "solution to all pairwise displacements with a roughness penalty, interpolated "
+         "by a cubic spline and subtracted. The estimated "
+         + ("residual drift" if residual else "drift")
+         + f" spanned {m.group('ptp')} nm peak-to-peak ({m.group('axes')}; rms "
+         f"{m.group('rms')} nm).")
+    if m.group("kept"):
+        s += (f" The estimate used, and the corrected dataset kept, only the "
+              f"{m.group('kept')} of {m.group('total')} localizations that passed the "
+              f"filter on {m.group('fattrs')}.")
+    return s, [CITE_DRIFT_TIME_WINDOWS]
+
+
+def _render_drift_old(m, ev, state):
+    return (f"Drift in '{m.group('name')}' was estimated without fiducials by "
+            f"time-window cross-correlation of the localizations in {m.group('dims')}-D "
+            f"({m.group('n')} windows of {m.group('T')} s, {m.group('s')} nm grid) and "
+            "subtracted."), [CITE_DRIFT_TIME_WINDOWS]
 
 
 def _render_aggregation(m, ev, state):
@@ -1472,6 +1537,24 @@ RULES = [
                 r"diameter=(?P<diam>[\d.]+) nm, rim=(?P<rim>[\d.]+) nm, pixel=(?P<pixel>[\d.]+) nm, "
                 r"min support=(?P<support>[\d.]+)"), "segmentation", _render_npc),
     (re.compile(r"Separated '(?P<name>.+?)' into (?P<n>\d+) DCR channel"), "transform", _render_dcr),
+    (re.compile(r"Drift correction \(MBM beads\) on '(?P<name>.+?)': (?P<k>\d+) of "
+                r"(?P<m>\d+) beads \((?P<beads>[^)]*)\), (?P<consensus>mean|median) "
+                r"consensus, smoothing (?P<smooth>[\d.]+) bead samples; drift removed "
+                r"peak-to-peak (?P<axes>[xyz/]+) = (?P<ptp>[\d./]+) nm; "
+                r"(?:reproduces the file's recorded correction to (?P<rep>[\d./]+) nm rms"
+                r"|moves the file's coordinates by median (?P<moved>[\d.]+) nm)?"),
+     "transform", _render_drift_beads),
+    (re.compile(r"Drift correction \(time windows\) on '(?P<name>.+?)': (?P<dims>[23])-D, "
+                r"(?P<n>\d+) windows of (?P<T>[\d.]+) s \((?P<mode>automatic|set)\), "
+                r"render (?P<s>[\d.]+) nm; (?P<residual>residual )?drift peak-to-peak "
+                r"(?P<axes>[xyz/]+) = (?P<ptp>[\d./]+) nm, rms (?P<rms>[\d./]+) nm"
+                r"(?:; estimated from (?P<kept>[\d,]+) of (?P<total>[\d,]+) localizations "
+                r"passing the active filter on (?P<fattrs>[^.;]+))?"),
+     "transform", _render_drift_windows),
+    # Pre-2026-10 wording of the time-window estimate.
+    (re.compile(r"Estimated (?P<dims>[23])-D drift for '(?P<name>.+?)': (?P<n>\d+) time "
+                r"windows of (?P<T>[\d.]+)s, resolution (?P<s>[\d.]+) nm"),
+     "transform", _render_drift_old),
     (re.compile(r"Duplicated dataset as '(?P<name>.+?)'"), "transform",
      lambda m, ev, st: (f"Dataset '{m.group('name')}' was duplicated.", [])),
     (re.compile(r"Created overlay \d+ with (?P<n>\d+) dataset"), "transform",

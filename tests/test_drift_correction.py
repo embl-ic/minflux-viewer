@@ -41,12 +41,78 @@ def _synthetic_drifted_2d(seed=0, n_struct=400, span=2000.0, total_time=4000.0,
     return x, y, t, tid, dxt, dyt
 
 
-def test_default_time_window_bounds():
-    t = np.linspace(0, 4000, 10000)
-    tid = np.repeat(np.arange(500), 20)
-    T = dc.default_time_window(t, tid, (-1000, 1000), (-1000, 1000))
-    assert T >= dc._MIN_AUTO_WINDOW_S               # at least 10 minutes
-    assert T <= (t[-1] - t[0]) / 2 + 1e-6           # at least two windows
+def test_auto_time_window_is_the_most_windows_with_enough_localizations():
+    t = np.linspace(0, 4000, 10000)                 # 10 000 localizations, uniform
+    aw = dc.auto_time_window(t, dims=2)
+    # 1000 per window is the 2-D floor → 10 windows of 400 s
+    assert aw.n_windows == 10 and not aw.sparse
+    assert aw.time_window_s == pytest.approx(400.0, rel=1e-6)
+    assert np.percentile(aw.locs_per_window, 20) >= dc.AUTO_MIN_LOCS_PER_WINDOW[2]
+    # dense data stop at the window cap; 3-D asks for more per window
+    assert dc.auto_time_window(np.linspace(0, 4000, 10 ** 6), 2).n_windows == dc.AUTO_MAX_WINDOWS
+    assert dc.auto_time_window(t, dims=3).n_windows == 3
+    # too sparse for even two windows of the floor: two windows, flagged
+    sparse = dc.auto_time_window(np.linspace(0, 100, 500), 2)
+    assert sparse.n_windows == 2 and sparse.sparse
+    assert dc.default_time_window(t) == pytest.approx(aw.time_window_s)
+
+
+def test_reference_parameters_are_kept():
+    """Centroid radius, pair weights and roughness of the reference MATLAB code."""
+    p2, p3 = dc.PARAMETERS[2], dc.PARAMETERS[3]
+    assert (p2.centroid_radius_px, p2.weight_far, p2.roughness) == (10.0, 0.5, 0.1)
+    assert (p3.centroid_radius_px, p3.weight_far, p3.roughness) == (8.0, 0.2, 0.01)
+
+
+def test_trajectory_weights_adjacent_pairs_by_one():
+    """MATLAB indexes w(b − a) 1-based: adjacent windows weigh 1, the most distant
+    pair weight_far. A consistent shift set must come back exactly."""
+    truth = np.array([0.0, 2.0, 5.0, 4.0])
+    a, b = np.triu_indices(4, 1)
+    shifts = truth[b] - truth[a]
+    params = dc.WindowCorrelationParameters(10.0, 0.5, 0.0)       # no roughness
+    est = dc._trajectory(4, a, b, shifts, params)
+    assert np.allclose(est, truth, atol=1e-5)
+
+
+def test_spline_extrapolates_linearly():
+    ti = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+    f = dc._spline(ti, ti ** 2)
+    assert f(2.0) == pytest.approx(4.0)
+    # slope at the last centre carried on beyond it
+    slope = float(f(4.0) - f(3.999)) / 0.001
+    assert f(6.0) == pytest.approx(16.0 + 2.0 * slope, rel=1e-3)
+
+
+def test_3d_recovers_known_drift():
+    rng = np.random.default_rng(3)
+    n_struct, reps, T_tot = 400, 50, 4000.0
+    f = np.column_stack([rng.uniform(-800, 800, n_struct), rng.uniform(-800, 800, n_struct),
+                         rng.uniform(-150, 150, n_struct)])
+    t = np.sort(rng.uniform(0, T_tot, n_struct * reps))
+    feat = rng.integers(0, n_struct, t.size)
+    d = np.column_stack([10 * t / T_tot, -8 * t / T_tot, 6 * np.sin(np.pi * t / T_tot)])
+    p = f[feat] + d + rng.normal(0, 1.0, (t.size, 3))
+    res = dc.estimate_drift(p[:, 0], p[:, 1], p[:, 2], t, resolution_nm=5.0,
+                            time_window_s=500.0, dims=3)
+    for k, est in enumerate((res.dx, res.dy, res.dz)):
+        truth = d[:, k] - d[:, k].mean()
+        assert np.sqrt(np.mean((est - est.mean() - truth) ** 2)) < 0.25 * truth.std()
+
+
+def test_progress_reaches_one_and_cancel_stops():
+    x, y, t, tid, _, _ = _synthetic_drifted_2d(n_struct=80)
+    seen = []
+    dc.estimate_drift(x, y, None, t, resolution_nm=4.0, time_window_s=400.0,
+                      progress=seen.append)
+    assert seen and seen[-1] == pytest.approx(1.0)
+    assert all(b >= a for a, b in zip(seen, seen[1:]))
+
+    def stop(_frac):
+        raise dc.DriftCancelled()
+    with pytest.raises(dc.DriftCancelled):
+        dc.estimate_drift(x, y, None, t, resolution_nm=4.0, time_window_s=400.0,
+                          progress=stop)
 
 
 def test_2d_recovers_known_drift_sign_and_shape():
@@ -105,7 +171,8 @@ def test_estimate_drift_requires_two_windows():
 
 
 def test_render_2d_orientation_matches_shift_direction():
-    """A +x shift of all points must move the render's centroid toward +x pixel."""
+    """Image axis 0 is x (the reference's convention): a +x shift of all points
+    moves the render's centroid along axis 0."""
     rng = np.random.default_rng(1)
     x = rng.uniform(-500, 500, 5000)
     y = rng.uniform(-500, 500, 5000)
@@ -116,8 +183,7 @@ def test_render_2d_orientation_matches_shift_direction():
     sigma = (3 * s) * dc._FWHM_TO_SIGMA / s
     h0 = dc._render_2d(x, y, s, rx, ry, nx, ny, sigma)
     h1 = dc._render_2d(x + 40.0, y, s, rx, ry, nx, ny, sigma)  # +40 nm in x
-    # Column centroid (x pixel) should increase.
-    cols = np.arange(nx)
-    cx0 = (h0.sum(0) * cols).sum() / h0.sum()
-    cx1 = (h1.sum(0) * cols).sum() / h1.sum()
-    assert cx1 > cx0
+    rows = np.arange(nx)
+    cx0 = (h0.sum(1) * rows).sum() / h0.sum()
+    cx1 = (h1.sum(1) * rows).sum() / h1.sum()
+    assert cx1 - cx0 == pytest.approx(40.0 / s, abs=0.2)

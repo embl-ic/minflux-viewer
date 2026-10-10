@@ -1,77 +1,113 @@
 """
 minflux_viewer.analysis.drift_correction
-==========================================
-Time-window auto-correlation **drift correction** for MINFLUX localizations.
+========================================
+Fiducial-free drift correction by **time-window cross-correlation** (Ostersehlt
+et al., *DNA-PAINT MINFLUX nanoscopy*, Nat. Methods 19:1072, 2022).
 
-This is a faithful, Qt-free reimplementation of the 2D/3D drift-correction
-functions exposed by **pyMINFLUX** (``pyminflux.correct``), which are themselves
-reimplemented (with modifications) from the DNA-PAINT MINFLUX nanoscopy method:
+The acquisition is cut into ``Ns`` consecutive time windows of length ``T``; each
+window's localizations are rendered as an image (a Gaussian of FWHM ``3·s`` per
+localization on an ``s``-nm grid); every pair of windows is cross-correlated and
+the displacement between them is read off the correlation peak by an iterative
+Gaussian-weighted centroid; and the drift trajectory is the one whose pairwise
+differences best match all those displacements, with a roughness penalty —
+a least-squares problem solved per axis. The trajectory, known at the window
+centres, is interpolated onto every localization time with a cubic spline
+(linear beyond the first and last centre) and subtracted.
 
-* [paper] Ostersehlt, L.M., Jans, D.C., Wittek, A. et al. *DNA-PAINT MINFLUX
-  nanoscopy.* Nat Methods 19, 1072-1075 (2022).
-  https://doi.org/10.1038/s41592-022-01577-1
-* [code]  https://zenodo.org/record/6563100  (Apache-2.0)
-* [pyMINFLUX] https://github.com/bsse-scf/pyMINFLUX  (Apache-2.0)
+The method needs no fiducials and sees *any* drift the localizations share,
+including what fiducial beads do not; its time resolution is the window length
+(minutes, not seconds) and it assumes the imaged structure does not move.
 
-Algorithm
----------
-1. Split the acquisition time span into ``Ns`` equal windows of length ``T``.
-2. Render each window as a Gaussian-smoothed localization image / volume.
-3. FFT-cross-correlate every window pair (up to ``D`` apart) and refine the
-   correlation peak with an iterative weighted centroid → a set of pairwise
-   shift measurements.
-4. Solve, per spatial axis, a regularised (roughness-penalised) least-squares
-   problem for the per-window drift trajectory.
-5. Linearly interpolate the trajectory onto every localization's time point.
+Re-derived from the reference MATLAB implementation published with that paper
+(``drift_correction_time_windows_2D.m`` / ``_3D.m``), keeping its parameters: in
+2-D a centroid radius of 10 px, pair weights falling linearly from 1 (adjacent
+windows) to 0.5 (the most distant pair) and a roughness weight of 0.1; in 3-D
+8 px, 1 → 0.2 and 0.01. One implementation serves both dimensionalities. Two
+deliberate differences, neither of which changes the estimate beyond pixel
+noise: the per-localization Gaussian is rendered as a sub-pixel (multilinear)
+histogram blurred with the same Gaussian, which is O(pixels) instead of
+O(localizations × kernel), and localizations near the border are kept instead
+of dropped.
 
-The rendering here uses a fast histogram + Gaussian blur (equivalent for the
-cross-correlation peak) instead of pyMINFLUX's per-localization Gaussian splat,
-but the image **orientation, cross-correlation, centroid refinement and
-optimisation are identical**, so the returned drift has the same sign
-convention and magnitude.
+The time window ``T`` is the operator's choice in the reference code. Our
+automatic proposal (:func:`auto_time_window`) is the largest number of windows
+— at most :data:`AUTO_MAX_WINDOWS` — for which 80 % of the windows hold at least
+:data:`AUTO_MIN_LOCS_PER_WINDOW` localizations: the cross-correlation needs the
+same structures to appear in both windows of a pair, so the window must collect
+enough of them, while every additional window adds time resolution.
 
-Units
------
-``x``/``y``/``z`` are in **nanometres**, ``t`` in **seconds**, ``tid`` are
-integer trace ids, ``resolution_nm`` is the render pixel/voxel size in nm and
-``time_window_s`` the window length in seconds. The returned drift (``dx``,
-``dy``, ``dz``) is in **nanometres** and is meant to be **subtracted** from the
-coordinates to correct them (``x_corrected = x - dx``).
+Reference implementation: https://github.com/jkfindeisen/dna_paint_minflux_nanoscopy_2021
+(also Zenodo record 6563100), distributed under the MIT license:
+
+    Copyright (c) 2022 Lynn M. Ostersehlt, Jan Keller-Findeisen
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+Pure NumPy/SciPy, Qt-free.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
-from numpy.fft import ifftshift
-from scipy.fft import fftn, ifftn
-from scipy.interpolate import interp1d
-from scipy.ndimage import gaussian_filter
-from scipy.optimize import minimize
 
-# FWHM (nm) -> Gaussian sigma in pixels conversion constant (2*sqrt(2*ln2)).
 _FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
 
-# Minimum floor on the auto time window (seconds): at least 10 minutes, matching
-# pyMINFLUX. Kept as a module constant so the UI can show/adjust the heuristic.
-_MIN_AUTO_WINDOW_S = 600.0
-_MAX_AUTO_WINDOW_S = 3600.0
-
-# Guard against a huge render grid (FOV / resolution too fine) exhausting memory.
+#: Render cell budget (pixels or voxels) — a guard against an accidental fine
+#: grid over a large field of view.
 _MAX_RENDER_CELLS = 64_000_000
+#: Every window's spectrum is kept for the pairwise correlations.
+_MAX_SPECTRA_BYTES = 3 * 2 ** 30
+
+
+@dataclass(frozen=True)
+class WindowCorrelationParameters:
+    """The reference implementation's constants for one dimensionality."""
+    centroid_radius_px: float   # FWHM of the centroid weight; search half-width 2·this
+    weight_far: float           # pair weight of the most distant pair (adjacent = 1)
+    roughness: float            # weight of Σ (Δ trajectory)² in the cost
+
+    @property
+    def search_half_px(self) -> int:
+        return int(round(2 * self.centroid_radius_px))
+
+
+PARAMETERS = {
+    2: WindowCorrelationParameters(centroid_radius_px=10.0, weight_far=0.5, roughness=0.1),
+    3: WindowCorrelationParameters(centroid_radius_px=8.0, weight_far=0.2, roughness=0.01),
+}
+
+#: Automatic time window: at most this many windows …
+AUTO_MAX_WINDOWS = 20
+#: … provided 80 % of them hold at least this many localizations.
+AUTO_MIN_LOCS_PER_WINDOW = {2: 1000, 3: 3000}
+_AUTO_COVERAGE_PERCENTILE = 20.0
 
 
 @dataclass
 class DriftResult:
-    """Result of a drift estimation.
-
-    ``dx``/``dy``/``dz`` are per-localization drift in nm (subtract to correct).
-    ``dxt``/``dyt``/``dzt`` are the drift at the ``ti`` window-center times, i.e.
-    the estimated trajectory before interpolation. ``dz*`` are ``None`` in 2D.
-    """
-
+    """A drift estimate. ``dx/dy/dz`` are per localization (nm) and are to be
+    *subtracted* from the coordinates; ``ti`` are the window centres (s) and
+    ``dxt/dyt/dzt`` the trajectory there; ``curve_t``/``curve`` a dense sampling
+    of the interpolant for plotting."""
     dims: int
     dx: np.ndarray
     dy: np.ndarray
@@ -85,376 +121,184 @@ class DriftResult:
     resolution_nm: float
     rx: tuple
     ry: tuple
-    rz: Optional[tuple] = None
-    rms: tuple = field(default_factory=tuple)
+    rz: Optional[tuple]
+    rms: tuple
+    method: str = "time-window cross-correlation"
+    auto_window: bool = False
+    locs_per_window: np.ndarray = field(default_factory=lambda: np.empty(0, int))
+    curve_t: np.ndarray = field(default_factory=lambda: np.empty(0))
+    curve: np.ndarray = field(default_factory=lambda: np.empty((0, 0)))
+
+
+class DriftCancelled(Exception):
+    """Raised at a progress checkpoint once the caller asked to stop."""
 
 
 # ---------------------------------------------------------------------------
-# Time-window heuristic
+# Time windows
 # ---------------------------------------------------------------------------
 
-def default_time_window(
-    t: np.ndarray,
-    tid: np.ndarray,
-    rx: tuple,
-    ry: tuple,
-) -> float:
-    """pyMINFLUX heuristic for the analysis time window ``T`` (seconds).
+@dataclass(frozen=True)
+class AutoWindow:
+    time_window_s: float
+    n_windows: int
+    locs_per_window: np.ndarray
+    sparse: bool          # True: even two windows fall short of the target
 
-    ``T = n_traces * width * height / 3e6`` clipped so there are at least two
-    windows (``<= span/2``, ``<= 3600``) and each is at least 10 minutes long.
-    """
-    t = np.asarray(t)
-    tid = np.asarray(tid)
-    rt = (t[0], t[-1])
-    span = float(rt[1] - rt[0])
-    n_traces = len(np.unique(tid))
-    T = n_traces * (rx[1] - rx[0]) * (ry[1] - ry[0]) / 3e6
-    T = float(np.min([T, span / 2.0, _MAX_AUTO_WINDOW_S]))
-    T = float(max(T, _MIN_AUTO_WINDOW_S))
-    return T
+
+def _window_counts(t: np.ndarray, t0: float, T: float, n: int) -> np.ndarray:
+    k = np.floor((t - t0) / T).astype(np.int64)
+    k = k[(k >= 0) & (k < n)]
+    return np.bincount(k, minlength=n)
+
+
+def auto_time_window(t: np.ndarray, dims: int = 2) -> AutoWindow:
+    """Our proposal for ``T`` (see the module docstring)."""
+    t = np.asarray(t, dtype=float)
+    t = t[np.isfinite(t)]
+    if t.size < 2 or np.ptp(t) <= 0:
+        raise ValueError("The localizations span no time range.")
+    t0, span = float(t.min()), float(np.ptp(t))
+    need = AUTO_MIN_LOCS_PER_WINDOW.get(int(dims), AUTO_MIN_LOCS_PER_WINDOW[2])
+    for n in range(AUTO_MAX_WINDOWS, 1, -1):
+        # A hair under span/n so floor(span/T) is n, not n − 1, in floating point.
+        T = span / n * (1.0 - 1e-9)
+        counts = _window_counts(t, t0, T, n)
+        if np.percentile(counts, _AUTO_COVERAGE_PERCENTILE) >= need:
+            return AutoWindow(T, n, counts, sparse=False)
+    T = span / 2 * (1.0 - 1e-9)
+    return AutoWindow(T, 2, _window_counts(t, t0, T, 2), sparse=True)
+
+
+def default_time_window(t, tid=None, rx=None, ry=None, *, dims: int = 2) -> float:
+    """``T`` of :func:`auto_time_window` (the extra arguments are accepted for
+    backward compatibility and unused)."""
+    return auto_time_window(np.sort(np.asarray(t, dtype=float)), dims).time_window_s
 
 
 # ---------------------------------------------------------------------------
-# Rendering (histogram + Gaussian blur, pyMINFLUX orientation)
+# Rendering and correlation
 # ---------------------------------------------------------------------------
 
-def _round_edges(r0: float, n: int, s: float) -> np.ndarray:
-    """Bin edges that reproduce round-to-nearest binning of ``(v - r0) / s``."""
-    return r0 + (np.arange(n + 1) - 0.5) * s
+def _render(points: np.ndarray, s: float, lows, shape, sigma_px: float) -> np.ndarray:
+    """Sub-pixel histogram of ``points`` (n × d, nm) on an ``s``-nm grid starting
+    at ``lows``, blurred by a Gaussian of ``sigma_px`` pixels. Axis k of the
+    image is coordinate k (x first), as in the reference implementation."""
+    from scipy.ndimage import gaussian_filter
+
+    d = len(shape)
+    size = int(np.prod(shape))
+    if points.shape[0]:
+        pos = (points - np.asarray(lows, dtype=float)) / s - 0.5   # pixel-centre coords
+        base = np.floor(pos).astype(np.int64)
+        frac = pos - base
+        flats, weights = [], []
+        for corner in range(1 << d):
+            offs = np.array([(corner >> k) & 1 for k in range(d)])
+            idx = base + offs
+            w = np.prod(np.where(offs == 1, frac, 1.0 - frac), axis=1)
+            ok = np.all((idx >= 0) & (idx < np.asarray(shape)), axis=1)
+            if ok.any():
+                flats.append(np.ravel_multi_index(tuple(idx[ok].T), shape))
+                weights.append(w[ok])
+        if flats:          # one accumulation, not one full-size array per corner
+            img = np.bincount(np.concatenate(flats), weights=np.concatenate(weights),
+                              minlength=size).astype(np.float32).reshape(shape)
+        else:
+            img = np.zeros(shape, dtype=np.float32)
+    else:
+        img = np.zeros(shape, dtype=np.float32)
+    if sigma_px > 0:
+        img = gaussian_filter(img, sigma_px, mode="constant").astype(np.float32)
+    return img
 
 
 def _render_2d(x, y, s, rx, ry, nx, ny, sigma_px) -> np.ndarray:
-    """Gaussian-smoothed 2D render, oriented like pyMINFLUX (row 0 = max y)."""
-    counts, _, _ = np.histogram2d(
-        x, y, bins=[_round_edges(rx[0], nx, s), _round_edges(ry[0], ny, s)]
-    )
-    # counts is (nx, ny) indexed [ix, iy]; pyMINFLUX image is (ny, nx) with
-    # row = ny - iy - 1 (image y increases downward).
-    h = counts.T[::-1, :].astype(np.float64)
-    if sigma_px > 0:
-        h = gaussian_filter(h, sigma=sigma_px, mode="constant")
-    return h
+    """2-D convenience wrapper of :func:`_render` (image axis 0 is x)."""
+    pts = np.column_stack([np.asarray(x, float), np.asarray(y, float)])
+    return _render(pts, s, (rx[0], ry[0]), (nx, ny), sigma_px)
 
 
-def _render_3d(x, y, z, s, rx, ry, rz, nx, ny, nz, sigma_px) -> np.ndarray:
-    """Gaussian-smoothed 3D render, oriented like pyMINFLUX (y flipped, z direct)."""
-    counts, _ = np.histogramdd(
-        np.column_stack([x, y, z]),
-        bins=[_round_edges(rx[0], nx, s),
-              _round_edges(ry[0], ny, s),
-              _round_edges(rz[0], nz, s)],
-    )
-    # counts is (nx, ny, nz) indexed [ix, iy, iz]; target is (nz, ny, nx) with
-    # the y axis flipped (image convention), z direct.
-    h = np.transpose(counts, (2, 1, 0))[:, ::-1, :].astype(np.float64)
-    if sigma_px > 0:
-        h = gaussian_filter(h, sigma=sigma_px, mode="constant")
-    return h
+def _centroid_shift(corr: np.ndarray, params: WindowCorrelationParameters) -> np.ndarray:
+    """Displacement (px) at the cross-correlation peak near zero shift.
 
-
-# ---------------------------------------------------------------------------
-# Regularised least-squares cost (verbatim port)
-# ---------------------------------------------------------------------------
-
-def lse_distance(x, a, b, s, w, l):
-    """Least-squares error of predicted pairwise shifts with a roughness penalty.
-
-    ``a``/``b`` index the window pairs, ``s`` the measured shifts, ``w`` the
-    distance weights and ``l`` the roughness regularisation weight. Port of the
-    pyMINFLUX ``lse_distance`` cost.
+    ``corr`` is fftshift-ed, so zero shift sits at ``n // 2`` on each axis. The
+    search box is ±2·CR around it; inside, an iterative Gaussian-weighted
+    centroid (FWHM = CR, 20 iterations, starting at zero shift) locates the peak
+    — the reference implementation's estimator.
     """
-    x = np.concatenate(([0], x))
-    dx = x[b] - x[a]
-    y = w[b - a] * (dx - s) ** 2
-    y = np.mean(y)
-    r = l * np.sum(np.diff(x) ** 2)
-    return y + r
-
-
-def _refine_centroid_nd(hj, c, grid_axes, CR):
-    """Iterative weighted-centroid refinement of a cross-correlation peak.
-
-    ``grid_axes`` is a list of the 1D integer sample ranges per axis (already
-    clamped in-bounds); returns the refined centroid coordinates in the same
-    axis order as ``c``.
-    """
-    mesh = np.meshgrid(*grid_axes, indexing="ij")
-    d = hj[tuple(mesh)].astype(np.float64)
-    flat = [m.flatten() for m in mesh]
-    d = d.flatten()
-    d = d - np.min(d)
-    total = np.sum(d)
+    d = corr.ndim
+    centre = np.array([n // 2 for n in corr.shape], dtype=float)
+    half = params.search_half_px
+    axes = [np.arange(max(0, int(c) - half), min(n, int(c) + half + 1))
+            for c, n in zip(centre, corr.shape)]
+    grids = np.meshgrid(*axes, indexing="ij")
+    vals = corr[np.ix_(*axes)].astype(np.float64).ravel()
+    coords = [g.ravel().astype(np.float64) for g in grids]
+    vals = vals - vals.min()
+    total = vals.sum()
     if total <= 0:
-        return np.array([float(v) for v in c])
-    d = d / total
-    ctr = [float(v) for v in c]           # start at geometric center
+        return np.zeros(d)
+    vals /= total
+    c = centre.copy()
+    cr2 = params.centroid_radius_px ** 2
     for _ in range(20):
-        sq = np.zeros_like(d)
-        for axis_vals, cv in zip(flat, ctr):
-            sq = sq + (cv - axis_vals) ** 2
-        wc = np.exp(-4.0 * np.log(2.0) * sq / CR ** 2)
-        n = np.sum(wc * d)
-        if n <= 0:
+        r2 = sum((c[k] - coords[k]) ** 2 for k in range(d))
+        wc = np.exp(-4.0 * np.log(2.0) * r2 / cr2) * vals
+        norm = wc.sum()
+        if norm <= 0:
             break
-        ctr = [float(np.sum(av * d * wc) / n) for av in flat]
-    return np.array(ctr)
+        c = np.array([np.sum(coords[k] * wc) / norm for k in range(d)])
+    return c - centre
 
 
-def _clamped_range(center, half, n):
-    """Integer sample range ``[center-half, center+half]`` clamped to ``[0, n)``."""
-    lo = int(max(0, np.floor(center - half)))
-    hi = int(min(n - 1, np.ceil(center + half)))
-    if hi <= lo:
-        lo = 0
-        hi = n - 1
-    return np.arange(lo, hi + 1)
+def _trajectory(n_windows: int, a: np.ndarray, b: np.ndarray, shifts: np.ndarray,
+                params: WindowCorrelationParameters) -> np.ndarray:
+    """Per-window positions (px, first window = 0) best matching the measured
+    pairwise ``shifts`` (window ``b`` relative to window ``a``)."""
+    from scipy.optimize import minimize
+
+    # Pair weight: 1 for adjacent windows, falling linearly to weight_far for
+    # the most distant pair (MATLAB's w(b − a), 1-based).
+    w = np.linspace(1.0, params.weight_far, n_windows)[(b - a) - 1]
+    lam = params.roughness
+
+    def cost(free):
+        x = np.concatenate(([0.0], free))
+        resid = x[b] - x[a] - shifts
+        return np.mean(w * resid ** 2) + lam * np.sum(np.diff(x) ** 2)
+
+    adjacent = (b - a) == 1
+    order = np.argsort(a[adjacent])
+    start = np.cumsum(shifts[adjacent][order])
+    if start.size != n_windows - 1:
+        start = np.zeros(n_windows - 1)
+    res = minimize(cost, start, method="BFGS", options={"maxiter": 100_000})
+    return np.concatenate(([0.0], res.x))
 
 
-# ---------------------------------------------------------------------------
-# 2D / 3D drift correction
-# ---------------------------------------------------------------------------
+def _spline(ti: np.ndarray, values: np.ndarray):
+    """Cubic (not-a-knot) spline through ``(ti, values)``, linear outside — the
+    reference's ``griddedInterpolant(ti, v, 'spline', 'linear')``."""
+    from scipy.interpolate import CubicSpline
 
-def drift_correction_time_windows_2d(
-    x: np.ndarray,
-    y: np.ndarray,
-    t: np.ndarray,
-    resolution_nm: float,
-    rx: Optional[tuple] = None,
-    ry: Optional[tuple] = None,
-    T: Optional[float] = None,
-    tid: Optional[np.ndarray] = None,
-):
-    """Estimate 2D drift by time-window auto-correlation (pyMINFLUX port).
+    if ti.size == 2:
+        slope = (values[1] - values[0]) / (ti[1] - ti[0])
+        return lambda t: values[0] + slope * (np.asarray(t, float) - ti[0])
+    cs = CubicSpline(ti, values, bc_type="not-a-knot", extrapolate=True)
+    d0, d1 = float(cs(ti[0], 1)), float(cs(ti[-1], 1))
 
-    Returns ``(dx, dy, dxt, dyt, ti, T)`` — see module docstring for units.
-    """
-    if T is None and tid is None:
-        raise ValueError("If the time window T is not given, tid must be provided.")
-
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    t = np.asarray(t, dtype=float)
-    s = float(resolution_nm)
-
-    if rx is None:
-        rx = (float(x.min()), float(x.max()))
-    if ry is None:
-        ry = (float(y.min()), float(y.max()))
-
-    if T is None:
-        T = default_time_window(t, tid, rx, ry)
-    T = float(T)
-
-    Rt = [float(t[0]), float(t[-1])]
-    Ns = int(np.floor((Rt[1] - Rt[0]) / T))
-    if Ns <= 1:
-        raise ValueError(
-            "At least two time windows are needed; reduce the time window T "
-            f"(current T={T:.1f}s gives {Ns} window(s) over a "
-            f"{Rt[1] - Rt[0]:.1f}s acquisition).")
-
-    CR = 10                              # centroid sampling radius (px)
-    D = Ns                               # max window separation in the cross-corr
-    w = np.linspace(1, 0.5, D)           # distance weights
-    l = 0.1                              # roughness regularisation
-
-    nx = int(np.ceil((rx[1] - rx[0]) / s))
-    ny = int(np.ceil((ry[1] - ry[0]) / s))
-    if nx < 4 or ny < 4:
-        raise ValueError(
-            "Render resolution too coarse for the data extent; reduce the "
-            "resolution value (nm).")
-    if nx * ny > _MAX_RENDER_CELLS:
-        raise ValueError(
-            f"Render grid too large ({nx}x{ny} px); increase the resolution "
-            "value (nm) so the grid fits in memory.")
-    c = np.round(np.array([ny, nx]) / 2)
-    sigma_px = (3.0 * s) * _FWHM_TO_SIGMA / s   # fwhm = 3*s -> sigma in px
-
-    # Render + FFT every window.
-    h = [None] * Ns
-    ti = np.zeros(Ns)
-    for j in range(Ns):
-        t0 = Rt[0] + j * T
-        idx = (t >= t0) & (t < t0 + T)
-        ti[j] = np.mean(t[idx]) if np.any(idx) else (t0 + T / 2)
-        h[j] = fftn(_render_2d(x[idx], y[idx], s, rx, ry, nx, ny, sigma_px))
-
-    dx = np.zeros((Ns, Ns))
-    dy = np.zeros((Ns, Ns))
-    dm = np.zeros((Ns, Ns), dtype=bool)
-    dx0 = np.zeros(Ns - 1)
-    dy0 = np.zeros(Ns - 1)
-
-    for i in range(Ns - 1):
-        hi = np.conj(h[i])
-        for j in range(i + 1, min(Ns, i + D)):
-            cc = ifftshift(np.real(ifftn(hi * h[j])))
-            gy = _clamped_range(c[0], 2 * CR, ny)
-            gx = _clamped_range(c[1], 2 * CR, nx)
-            yc, xc = _refine_centroid_nd(cc, c, [gy, gx], CR)
-            sh = np.array([-1.0, 1.0]) * (np.array([yc, xc]) - c)
-            dy[i, j] = sh[0]
-            dx[i, j] = sh[1]
-            dm[i, j] = True
-            if j == i + 1:
-                dy0[i] = sh[0]
-                dx0[i] = sh[1]
-
-    a, b = np.nonzero(dm)
-    dx = dx[dm]
-    dy = dy[dm]
-    sx0 = np.cumsum(dx0)
-    sy0 = np.cumsum(dy0)
-
-    options = {"disp": False, "maxiter": int(1e5)}
-    res = minimize(lambda v: lse_distance(v, a, b, dx, w, l), sx0,
-                   options=options, method="BFGS")
-    sx = np.concatenate(([0], res.x))
-    res = minimize(lambda v: lse_distance(v, a, b, dy, w, l), sy0,
-                   options=options, method="BFGS")
-    sy = np.concatenate(([0], res.x))
-
-    sx = (sx - np.mean(sx)) * s          # center + scale to nm
-    sy = (sy - np.mean(sy)) * s
-
-    fx = interp1d(ti, sx, kind="slinear", fill_value="extrapolate")
-    fy = interp1d(ti, sy, kind="slinear", fill_value="extrapolate")
-
-    return fx(t), fy(t), fx(ti), fy(ti), ti, T
-
-
-def drift_correction_time_windows_3d(
-    x: np.ndarray,
-    y: np.ndarray,
-    z: np.ndarray,
-    t: np.ndarray,
-    resolution_nm: float,
-    rx: Optional[tuple] = None,
-    ry: Optional[tuple] = None,
-    rz: Optional[tuple] = None,
-    T: Optional[float] = None,
-    tid: Optional[np.ndarray] = None,
-):
-    """Estimate 3D drift by time-window auto-correlation (pyMINFLUX port).
-
-    Returns ``(dx, dy, dz, dxt, dyt, dzt, ti, T)`` — see module docstring.
-    """
-    if T is None and tid is None:
-        raise ValueError("If the time window T is not given, tid must be provided.")
-
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    z = np.asarray(z, dtype=float)
-    t = np.asarray(t, dtype=float)
-    s = float(resolution_nm)
-
-    if rx is None:
-        rx = (float(x.min()), float(x.max()))
-    if ry is None:
-        ry = (float(y.min()), float(y.max()))
-    if rz is None:
-        rz = (float(z.min()), float(z.max()))
-
-    if T is None:
-        T = default_time_window(t, tid, rx, ry)
-    T = float(T)
-
-    Rt = [float(t[0]), float(t[-1])]
-    Ns = int(np.floor((Rt[1] - Rt[0]) / T))
-    if Ns <= 1:
-        raise ValueError(
-            "At least two time windows are needed; reduce the time window T "
-            f"(current T={T:.1f}s gives {Ns} window(s) over a "
-            f"{Rt[1] - Rt[0]:.1f}s acquisition).")
-
-    CR = 8                               # centroid sampling radius (px), 3D
-    D = Ns
-    w = np.linspace(1, 0.2, D)
-    l = 0.01
-
-    nx = int(np.ceil((rx[1] - rx[0]) / s))
-    ny = int(np.ceil((ry[1] - ry[0]) / s))
-    nz = int(np.ceil((rz[1] - rz[0]) / s))
-    if nx < 4 or ny < 4 or nz < 4:
-        raise ValueError(
-            "Render resolution too coarse for the data extent; reduce the "
-            "resolution value (nm).")
-    if nx * ny * nz > _MAX_RENDER_CELLS:
-        raise ValueError(
-            f"Render grid too large ({nx}x{ny}x{nz} voxels); increase the "
-            "resolution value (nm) so the grid fits in memory.")
-    c = np.round(np.array([nz, ny, nx]) / 2)
-    sigma_px = (3.0 * s) * _FWHM_TO_SIGMA / s
-
-    h = [None] * Ns
-    ti = np.zeros(Ns)
-    for j in range(Ns):
-        t0 = Rt[0] + j * T
-        idx = (t >= t0) & (t < t0 + T)
-        ti[j] = np.mean(t[idx]) if np.any(idx) else (t0 + T / 2)
-        h[j] = fftn(_render_3d(x[idx], y[idx], z[idx], s,
-                               rx, ry, rz, nx, ny, nz, sigma_px))
-
-    dx = np.zeros((Ns, Ns))
-    dy = np.zeros((Ns, Ns))
-    dz = np.zeros((Ns, Ns))
-    dm = np.zeros((Ns, Ns), dtype=bool)
-    dx0 = np.zeros(Ns - 1)
-    dy0 = np.zeros(Ns - 1)
-    dz0 = np.zeros(Ns - 1)
-
-    for i in range(Ns - 1):
-        hi = np.conj(h[i])
-        for j in range(i + 1, min(Ns, i + D)):
-            cc = ifftshift(np.real(ifftn(hi * h[j])))
-            gz = _clamped_range(c[0], 2 * CR, nz)
-            gy = _clamped_range(c[1], 2 * CR, ny)
-            gx = _clamped_range(c[2], 2 * CR, nx)
-            zc, yc, xc = _refine_centroid_nd(cc, c, [gz, gy, gx], CR)
-            sh = np.array([1.0, -1.0, 1.0]) * (np.array([zc, yc, xc]) - c)
-            dz[i, j] = sh[0]
-            dy[i, j] = sh[1]
-            dx[i, j] = sh[2]
-            dm[i, j] = True
-            if j == i + 1:
-                dz0[i] = sh[0]
-                dy0[i] = sh[1]
-                dx0[i] = sh[2]
-
-    a, b = np.nonzero(dm)
-    dx = dx[dm]
-    dy = dy[dm]
-    dz = dz[dm]
-    sx0 = np.cumsum(dx0)
-    sy0 = np.cumsum(dy0)
-    sz0 = np.cumsum(dz0)
-
-    options = {"disp": False, "maxiter": int(1e5)}
-    res = minimize(lambda v: lse_distance(v, a, b, dx, w, l), sx0,
-                   options=options, method="BFGS")
-    sx = np.concatenate(([0], res.x))
-    res = minimize(lambda v: lse_distance(v, a, b, dy, w, l), sy0,
-                   options=options, method="BFGS")
-    sy = np.concatenate(([0], res.x))
-    res = minimize(lambda v: lse_distance(v, a, b, dz, w, l), sz0,
-                   options=options, method="BFGS")
-    sz = np.concatenate(([0], res.x))
-
-    sx = (sx - np.mean(sx)) * s
-    sy = (sy - np.mean(sy)) * s
-    sz = (sz - np.mean(sz)) * s
-
-    fx = interp1d(ti, sx, kind="slinear", fill_value="extrapolate")
-    fy = interp1d(ti, sy, kind="slinear", fill_value="extrapolate")
-    fz = interp1d(ti, sz, kind="slinear", fill_value="extrapolate")
-
-    return fx(t), fy(t), fz(t), fx(ti), fy(ti), fz(ti), ti, T
+    def f(t):
+        t = np.asarray(t, dtype=float)
+        out = cs(t)
+        lo, hi = t < ti[0], t > ti[-1]
+        out = np.where(lo, values[0] + d0 * (t - ti[0]), out)
+        return np.where(hi, values[-1] + d1 * (t - ti[-1]), out)
+    return f
 
 
 # ---------------------------------------------------------------------------
-# High-level entry point
+# Estimation
 # ---------------------------------------------------------------------------
 
 def estimate_drift(
@@ -462,7 +306,7 @@ def estimate_drift(
     y: np.ndarray,
     z: Optional[np.ndarray],
     t: np.ndarray,
-    tid: np.ndarray,
+    tid: Optional[np.ndarray] = None,
     *,
     resolution_nm: float,
     time_window_s: Optional[float] = None,
@@ -470,48 +314,116 @@ def estimate_drift(
     rx: Optional[tuple] = None,
     ry: Optional[tuple] = None,
     rz: Optional[tuple] = None,
+    progress: Optional[Callable[[float], None]] = None,
 ) -> DriftResult:
-    """Estimate drift for a set of localizations, dispatching to 2D or 3D.
+    """Estimate the drift of a set of localizations (nm, seconds).
 
-    ``dims`` forces the analysis dimensionality; if ``None`` it is 3 when a
-    non-degenerate ``z`` is supplied, else 2. ``time_window_s=None`` uses the
-    pyMINFLUX heuristic (needs ``tid``).
+    ``dims`` forces 2 or 3; ``None`` picks 3 when a non-degenerate ``z`` is
+    given. ``time_window_s=None`` uses :func:`auto_time_window`. ``progress``
+    receives a fraction in [0, 1]; raising :class:`DriftCancelled` from it
+    stops the estimate. ``tid`` is accepted for backward compatibility.
     """
     x = np.asarray(x, dtype=float).ravel()
     y = np.asarray(y, dtype=float).ravel()
     t = np.asarray(t, dtype=float).ravel()
-    tid = np.asarray(tid).ravel()
-
+    zarr = None if z is None else np.asarray(z, dtype=float).ravel()
     if dims is None:
-        z_arr = None if z is None else np.asarray(z, dtype=float).ravel()
-        finite_z = z_arr[np.isfinite(z_arr)] if z_arr is not None else np.empty(0)
-        z_ok = bool(finite_z.size and np.ptp(finite_z) > 0)
-        dims = 3 if z_ok else 2
+        fz = zarr[np.isfinite(zarr)] if zarr is not None else np.empty(0)
+        dims = 3 if (fz.size and np.ptp(fz) > 0) else 2
+    dims = int(dims)
+    if dims == 3 and zarr is None:
+        raise ValueError("3-D drift correction requires z coordinates.")
+    params = PARAMETERS[dims]
+    s = float(resolution_nm)
+    if not s > 0:
+        raise ValueError("The render resolution must be positive.")
 
-    if dims == 3:
-        if z is None:
-            raise ValueError("3D drift correction requires z coordinates.")
-        z = np.asarray(z, dtype=float).ravel()
-        dx, dy, dz, dxt, dyt, dzt, ti, T = drift_correction_time_windows_3d(
-            x, y, z, t, resolution_nm, rx=rx, ry=ry, rz=rz,
-            T=time_window_s, tid=tid)
-        rms = (float(np.std(dx)), float(np.std(dy)), float(np.std(dz)))
-        return DriftResult(
-            dims=3, dx=dx, dy=dy, dz=dz, ti=ti, dxt=dxt, dyt=dyt, dzt=dzt,
-            time_window_s=float(T), n_windows=len(ti), resolution_nm=float(resolution_nm),
-            rx=_range_of(rx, x), ry=_range_of(ry, y), rz=_range_of(rz, z), rms=rms)
+    cols = [x, y] + ([zarr] if dims == 3 else [])
+    coords = np.column_stack(cols)
+    ok = np.all(np.isfinite(coords), axis=1) & np.isfinite(t)
+    if ok.sum() < 2:
+        raise ValueError("Too few localizations with finite coordinates and time.")
+    pts, tt = coords[ok], t[ok]
 
-    dx, dy, dxt, dyt, ti, T = drift_correction_time_windows_2d(
-        x, y, t, resolution_nm, rx=rx, ry=ry, T=time_window_s, tid=tid)
-    rms = (float(np.std(dx)), float(np.std(dy)))
+    auto = time_window_s is None
+    if auto:
+        aw = auto_time_window(tt, dims)
+        T = aw.time_window_s
+    else:
+        T = float(time_window_s)
+    t0, span = float(tt.min()), float(np.ptp(tt))
+    n_win = int(np.floor(span / T)) if T > 0 else 0
+    if n_win < 2:
+        raise ValueError(
+            f"A time window of {T:.0f} s leaves fewer than two windows in the "
+            f"{span:.0f} s acquisition; shorten it.")
+
+    ranges = [rx, ry] + ([rz] if dims == 3 else [])
+    ranges = [(float(r[0]), float(r[1])) if r is not None
+              else (float(pts[:, k].min()), float(pts[:, k].max()))
+              for k, r in enumerate(ranges)]
+    shape = tuple(max(1, int(np.ceil((hi - lo) / s))) for lo, hi in ranges)
+    cells = int(np.prod(shape))
+    if cells > _MAX_RENDER_CELLS:
+        raise ValueError(
+            f"The render grid would hold {cells:,} cells (over {_MAX_RENDER_CELLS:,}); "
+            "use a coarser resolution.")
+    spectra_bytes = n_win * cells * 4        # one half-spectrum (complex64) per window
+    if spectra_bytes > _MAX_SPECTRA_BYTES:
+        raise ValueError(
+            f"{n_win} windows of a {cells:,}-cell grid need "
+            f"{spectra_bytes / 2**30:.1f} GiB of spectra (limit "
+            f"{_MAX_SPECTRA_BYTES / 2**30:.0f} GiB); use a coarser resolution or a "
+            "longer time window.")
+    lows = [lo for lo, _ in ranges]
+    sigma_px = 3.0 * _FWHM_TO_SIGMA        # FWHM = 3 pixels, as in the reference
+
+    from scipy import fft as sfft
+
+    def _tick(frac):
+        if progress is not None:
+            progress(float(frac))
+
+    win = np.floor((tt - t0) / T).astype(np.int64)
+    ti = np.zeros(n_win)
+    counts = np.zeros(n_win, dtype=np.int64)
+    spectra = []
+    for j in range(n_win):
+        sel = win == j
+        counts[j] = int(sel.sum())
+        ti[j] = float(tt[sel].mean()) if counts[j] else t0 + (j + 0.5) * T
+        img = _render(pts[sel], s, lows, shape, sigma_px)
+        spectra.append(sfft.rfftn(img, workers=-1).astype(np.complex64))
+        _tick(0.25 * (j + 1) / n_win)
+
+    pairs = [(i, j) for i in range(n_win - 1) for j in range(i + 1, n_win)]
+    shifts = np.zeros((len(pairs), dims))
+    for p, (i, j) in enumerate(pairs):
+        corr = sfft.irfftn(np.conj(spectra[i]) * spectra[j], s=shape, workers=-1)
+        shifts[p] = _centroid_shift(np.fft.fftshift(corr), params)
+        _tick(0.25 + 0.7 * (p + 1) / len(pairs))
+    del spectra
+    a = np.array([p[0] for p in pairs])
+    b = np.array([p[1] for p in pairs])
+
+    traj = np.zeros((n_win, dims))
+    for k in range(dims):
+        traj[:, k] = _trajectory(n_win, a, b, shifts[:, k], params)
+    traj = (traj - traj.mean(axis=0)) * s          # mean removed, in nm
+
+    funcs = [_spline(ti, traj[:, k]) for k in range(dims)]
+    per_loc = [f(t) for f in funcs]                 # every localization, even unused
+    curve_t = np.arange(t0, t0 + span + T / 20.0, T / 10.0)
+    curve = np.column_stack([f(curve_t) for f in funcs])
+    _tick(1.0)
+
+    rng = tuple(ranges)
     return DriftResult(
-        dims=2, dx=dx, dy=dy, dz=None, ti=ti, dxt=dxt, dyt=dyt, dzt=None,
-        time_window_s=float(T), n_windows=len(ti), resolution_nm=float(resolution_nm),
-        rx=_range_of(rx, x), ry=_range_of(ry, y), rz=None, rms=rms)
-
-
-def _range_of(r, v) -> tuple:
-    if r is not None:
-        return (float(r[0]), float(r[1]))
-    v = np.asarray(v, dtype=float)
-    return (float(v.min()), float(v.max()))
+        dims=dims,
+        dx=per_loc[0], dy=per_loc[1], dz=per_loc[2] if dims == 3 else None,
+        ti=ti, dxt=traj[:, 0], dyt=traj[:, 1], dzt=traj[:, 2] if dims == 3 else None,
+        time_window_s=T, n_windows=n_win, resolution_nm=s,
+        rx=rng[0], ry=rng[1], rz=rng[2] if dims == 3 else None,
+        rms=tuple(float(np.std(v[np.isfinite(v)])) for v in per_loc),
+        auto_window=auto, locs_per_window=counts, curve_t=curve_t, curve=curve,
+    )

@@ -59,6 +59,15 @@ def stamp_msr_dataset(ds, *, entry: dict, msr_path, key: str,
             # m2205 'tms' epoch), NOT the MFXDTA container timestamp, which is
             # when the file was saved.
             stamp_dataset_acquisition(ds, acquisition_date_from_zattrs(mfx_attrs))
+            # The bead naming and the recorded bead selection, when the caller
+            # did not resolve them itself: ``mbm/.zattrs["used"]`` is the set
+            # the drift correction in this file was computed with — the online
+            # set, or an Imspector post-hoc selection — and only it says which.
+            if mbm_points is not None and not mbm_used:
+                mbm_used = list((read_zarr_attrs(zroot, "mbm") or {}).get("used") or [])
+            if mbm_points is not None and not mbm_points_by_gri:
+                mbm_points_by_gri = dict(
+                    (read_zarr_attrs(zroot, "grd/mbm/points") or {}).get("points_by_gri") or {})
         except Exception as exc:                            # noqa: BLE001
             if log is not None:
                 log(f"[warn] '{key}': native metadata could not be read: {exc}")
