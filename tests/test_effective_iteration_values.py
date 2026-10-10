@@ -259,3 +259,58 @@ def test_filter_dialog_update_and_finish_copy_histogram_controls():
     finally:
         dialog.close()
         hist.close()
+
+
+# ---------------------------------------------------------------------------
+# Exports and derived datasets built from the last-valid rows
+# ---------------------------------------------------------------------------
+def _with_invalid_final_rows(mfx, n_itr, every=7):
+    """Mark the final iteration of every *every*-th localization invalid, so the
+    last-valid rows are a strict subset of the localizations."""
+    final = np.flatnonzero(mfx["itr"] == n_itr - 1)
+    mfx["vld"][final[::every]] = False
+    return mfx
+
+
+def test_last_valid_attr_values_reads_cfr_efc_at_their_measured_iteration():
+    n_itr = 5
+    mfx, _ = _make_m2410_with_effective_cfr(n_itr=n_itr)
+    mfx = _with_invalid_final_rows(mfx, n_itr)
+    ds = loader.load_from_mfx_array(mfx, "eff")
+    n_last = np.asarray(loader.mfx_get(ds, "tid", itr="last", vld_only=True)).size
+    assert 0 < n_last < 60                                # the subset is real
+
+    # itr="last" is the placeholder the old export wrote: zeros / NaN.
+    assert np.count_nonzero(loader.mfx_get(ds, "cfr", itr="last", vld_only=True)) == 0
+    for name, lo, hi in (("cfr", 0.3, 0.8), ("efc", 1e4, 1e5)):
+        vals = np.asarray(loader.last_valid_attr_values(ds, name), dtype=float)
+        assert vals.shape == (n_last,)                    # aligned to the last-valid rows
+        assert np.isfinite(vals).all() and vals.min() >= lo and vals.max() <= hi
+        # the same values the Filter dialog and the Histogram read
+        np.testing.assert_array_equal(vals, np.asarray(loader.attr_values_1d(ds, name)))
+    # every other attribute is unchanged from the last-valid read
+    np.testing.assert_array_equal(
+        loader.last_valid_attr_values(ds, "efo"),
+        loader.mfx_get(ds, "efo", itr="last", vld_only=True))
+
+
+def test_snapshot_and_custom_csv_export_carry_the_measured_cfr(tmp_path):
+    import csv
+
+    from minflux_viewer.core.save import build_snapshot_table, write_spreadsheet_csv
+
+    mfx, _ = _make_m2410_with_effective_cfr()
+    ds = loader.load_from_mfx_array(mfx, "eff")
+    expected = np.asarray(loader.attr_values_1d(ds, "cfr"), dtype=float)
+
+    cols, _ = build_snapshot_table(ds, include_attrs=True)
+    np.testing.assert_array_equal(np.asarray(cols["cfr"], dtype=float), expected)
+    assert np.isfinite(np.asarray(cols["efc"], dtype=float)).all()
+
+    path = write_spreadsheet_csv(ds, tmp_path / "custom.csv",
+                                 column_headers=[("xnm", "x"), ("cfr", "CFR")])
+    with path.open(encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    written = np.array([float(r["CFR"]) for r in rows])
+    np.testing.assert_allclose(written, expected)
+    assert np.count_nonzero(written) == written.size
