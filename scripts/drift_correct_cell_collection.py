@@ -12,8 +12,8 @@ Drift is estimated by image autocorrelation over time windows, in two 2-D passes
 path renders a full volume per window (hundreds of MiB here) and is not needed for
 a trajectory; the shared ``x`` of the two passes doubles as a consistency check.
 
-The window count is **forced**, not left to the pyMINFLUX heuristic: on these
-small, sparse fields that heuristic returns 2-4 windows, which is an offset rather
+The window count is **forced**, not left to an automatic rule: on these small,
+sparse fields an automatic window returns 2-4 windows, which is an offset rather
 than a trajectory. Fewer than ``--min-windows`` is refused rather than applied.
 
 MBM fiducial beads are NOT used by default. These acquisitions carry a bead track

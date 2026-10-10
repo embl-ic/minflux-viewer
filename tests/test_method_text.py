@@ -655,3 +655,58 @@ def test_empty_events():
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# --- drift correction -------------------------------------------------------
+DRIFT_BEADS_MSG = (
+    "Drift correction (MBM beads) on 'ds1': 4 of 6 beads (R12, R15, R50, R7), mean "
+    "consensus, smoothing 1.2 bead samples; drift removed peak-to-peak x/y/z = "
+    "57.1/140.2/36.0 nm; moves the file's coordinates by median 6.65 nm, at most 10.83 nm.")
+DRIFT_RECORDED_MSG = (
+    "Drift correction (MBM beads) on 'ds1': 6 of 6 beads (R1, R2, R3, R4, R5, R6), "
+    "median consensus, smoothing 1.2 bead samples; drift removed peak-to-peak x/y = "
+    "55.0/140.0 nm; reproduces the file's recorded correction to 0.14/0.17 nm rms.")
+DRIFT_WINDOWS_MSG = (
+    "Drift correction (time windows) on 'ds1': 3-D, 20 windows of 344 s (automatic), "
+    "render 10 nm; residual drift peak-to-peak x/y/z = 23.4/14.5/24.1 nm, rms "
+    "5.33/3.15/4.21 nm.")
+DRIFT_OLD_MSG = ("Estimated 2-D drift for 'ds1': 9 time windows of 400s, resolution "
+                 "5 nm; RMS drift: x=2.10, y=1.30 nm.")
+
+
+def test_drift_by_beads_cites_the_instrument_and_names_the_beads():
+    txt = mt.generate_method_text(_state(), [_ev(DRIFT_BEADS_MSG)])
+    assert "4 of the 6 tracked beads (R12, R15, R50, R7)" in txt
+    assert "median of 6.65 nm" in txt
+    assert mt.CITE_MINFLUX_STABILISATION[0] in txt
+
+
+def test_drift_by_beads_with_recorded_set_states_the_reproduction():
+    txt = mt.generate_method_text(_state(), [_ev(DRIFT_RECORDED_MSG)])
+    assert "reproduces the file's own coordinates to 0.14/0.17 nm rms" in txt
+    assert "median (robust" in txt
+
+
+def test_drift_by_time_windows_cites_ostersehlt_and_says_residual():
+    txt = mt.generate_method_text(_state(), [_ev(DRIFT_WINDOWS_MSG)])
+    assert "Residual drift not captured by the fiducial beads" in txt
+    assert "20 consecutive windows of 344 s" in txt and "at most 20" in txt
+    assert mt.CITE_DRIFT_TIME_WINDOWS[0] in txt
+    assert "pyMINFLUX" not in txt
+    assert "passed the filter" not in txt          # unfiltered: no filter sentence
+
+
+def test_drift_by_time_windows_states_the_filter_it_was_estimated_under():
+    msg = DRIFT_WINDOWS_MSG[:-1] + (
+        "; estimated from 133,287 of 182,792 localizations passing the active filter "
+        "on cfr, efo.")
+    txt = mt.generate_method_text(_state(), [_ev(msg)])
+    assert "rms 5.33/3.15/4.21 nm" in txt            # the rest still parses
+    assert ("only the 133,287 of 182,792 localizations that passed the filter on "
+            "cfr, efo") in txt
+
+
+def test_old_drift_lines_still_generate_text():
+    txt = mt.generate_method_text(_state(), [_ev(DRIFT_OLD_MSG)])
+    assert "9 windows of 400 s" in txt
+

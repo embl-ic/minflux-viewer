@@ -1,13 +1,15 @@
 """
 minflux_viewer.plugins.drift_correction
 =========================================
-**Drift Correction** plugin — time-window auto-correlation drift correction for
-MINFLUX localizations, reimplemented from pyMINFLUX (``pyminflux.correct``).
+**Drift Correction** plugin — MINFLUX drift correction by the instrument's
+fiducial (MBM) beads, as Imspector computes it, and/or fiducial-free by
+time-window cross-correlation of the localizations (Ostersehlt et al. 2022).
 
-Opens a modeless window where the user estimates the drift trajectory (2D/3D)
-and, if satisfied, creates a new drift-corrected dataset (the original is kept
-for comparison). See :mod:`minflux_viewer.analysis.drift_correction` for the
-algorithm and :mod:`.drift_correction_window` for the UI.
+Opens a modeless window where the user estimates the drift (2D/3D) and, if
+satisfied, creates a new drift-corrected dataset (the original is kept for
+comparison). See :mod:`minflux_viewer.analysis.bead_drift`,
+:mod:`minflux_viewer.analysis.drift_correction` and
+:mod:`.drift_correction_window`.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ def _launch(state, parent=None) -> None:
 
 register(PluginEntry(
     name="Drift Correction",
-    tooltip="Estimate and correct drift by time-window auto-correlation "
-            "(2D/3D, reimplemented from pyMINFLUX).",
+    tooltip="Correct drift with the fiducial beads (as Imspector) and/or by "
+            "time-window cross-correlation of the localizations (2D/3D).",
     launch=_launch,
 ))
