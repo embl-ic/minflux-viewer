@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import csv
 import json
 import os
@@ -2798,6 +2799,16 @@ class _ParsedExportTask(QRunnable):
         self.signals.finished.emit(0 if failures else 1, failures, self._cancelled)
 
 
+from ...ui.background_tasks import BackgroundTaskCancelled
+from ...ui.background_tasks import BackgroundTaskSignals as _BackgroundTaskSignals
+
+
+class _ViewerOpenSignals(_BackgroundTaskSignals):
+    """``BackgroundTask`` signals plus a ``(fraction, dataset name)`` progress."""
+
+    progress = pyqtSignal(float, str)
+
+
 class _ExportEstimateSignals(QObject):
     done = pyqtSignal(int, object)
 
@@ -2968,6 +2979,9 @@ class MsrReaderDialog(QWidget):
         self._last_batch_pct = -1
         self._estimate_generation = 0
         self._estimate_task: _ExportEstimateTask | None = None
+        # The background build behind "Open in MINFLUX viewer" (one at a time).
+        self._viewer_open_task = None
+        self._viewer_open_context: dict | None = None
         self._export_estimates: dict = {}
         self.resize(980, 860)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -3165,6 +3179,18 @@ class MsrReaderDialog(QWidget):
                 [self._estimate_task], signal_names=("done",)
             )
             self._estimate_task = None
+        # Closing the reader mid-open abandons the open: nothing has been added
+        # to the viewer yet (datasets are added only when the build delivers).
+        if self._viewer_open_task is not None:
+            retire_background_tasks(
+                [self._viewer_open_task],
+                signal_names=("stage", "done", "failed", "cancelled", "finished"),
+            )
+            self._viewer_open_task = None
+            if self._viewer_open_context is not None and self._state is not None:
+                self._state.log_progress("Opening datasets: cancelled.", final=True)
+                self._state.status_message.emit("Opening datasets: cancelled.")
+            self._viewer_open_context = None
         for win in list(self._plot_windows):
             try:
                 win.close()
@@ -6000,12 +6026,13 @@ class MsrReaderDialog(QWidget):
 
     def _on_open_in_viewer(self):
         MFSTATE = self._msr_state()
-        from ...core.loader import load_from_mfx_array
-        from ...msr.import_stamp import stamp_msr_dataset
         from ...core.overlay import overlay_color_cycle
 
         if self._state is None:
             QMessageBox.warning(self, "Not connected", "Not connected to a viewer instance.")
+            return
+        if self._viewer_open_task is not None:
+            self.log("[viewer] datasets from this file are still being opened.")
             return
 
         # Image series selected in "Datasets / Fields included…" open in the
@@ -6057,7 +6084,6 @@ class MsrReaderDialog(QWidget):
             return
         individual = align_choice is _OPEN_INDIVIDUAL
         confocal_options = getattr(self, "_pending_confocal_options", None)
-        confocal_transform_cache: dict = {}
         if align_choice and not individual:
             alignment_mode, reference_name = align_choice
             try:
@@ -6073,6 +6099,311 @@ class MsrReaderDialog(QWidget):
                     f"Channel alignment could not be computed and will be skipped:\n\n{exc}",
                 )
 
+        # ------------------------------------------------------------------
+        # Everything the build needs is gathered here, on the GUI thread, so
+        # the worker below reads nothing from this dialog. The build itself
+        # (field copy, normalisation, derived attributes, provenance) is
+        # Qt-free and runs off the UI thread -- the same split as opening a
+        # .mat / .npy / .zarr from the main window. Only the steps that touch
+        # widgets or may ask a question (confocal mapping, add_dataset and
+        # the windows it opens) run back here when the build delivers.
+        # ------------------------------------------------------------------
+        jobs = []
+        for ds in datasets_info:
+            key = ds.get("display_name") or ds.get("did") or "dataset"
+            if key not in import_plan:
+                continue
+            pbg, used = (self._mbm_naming_metadata(key, ds.get("zroot"))
+                         if key in MFSTATE.mbm_map else ({}, []))
+            jobs.append({
+                "key": key,
+                "entry": ds,
+                "mfx": MFSTATE.mfx_map.get(key),
+                "field_sel": import_plan.get(key),
+                "display_name": f"{msr_path.name} | {key}" if msr_path.name else key,
+                "mbm_points": MFSTATE.mbm_map.get(key),
+                "mbm_points_by_gri": pbg,
+                "mbm_used": used,
+                "transform": viewer_transforms.get(key),
+            })
+
+        prefs = copy.deepcopy(self._state.prefs)
+        n_jobs = len(jobs)
+        n_datasets_total = len(datasets_info)
+        signals = _ViewerOpenSignals()
+        # Resolved here so the worker never reaches into this (deletable) dialog.
+        build = self._build_viewer_dataset
+
+        def work(report):
+            built = []
+            n_built = 0
+            for i, job in enumerate(jobs):
+                key = job["key"]
+                logs: list[str] = []
+                report(f"Opening dataset '{key}' ({i + 1}/{n_jobs})")
+                last_pct = [-1]
+
+                def on_progress(fraction, _i=i, _key=key):
+                    overall = (_i + max(0.0, min(1.0, fraction))) / max(n_jobs, 1)
+                    pct = int(overall * 100)
+                    if pct != last_pct[0]:
+                        last_pct[0] = pct
+                        signals.progress.emit(overall, _key)
+                    report(f"Opening dataset '{_key}'")       # cancellation checkpoint
+
+                on_progress(0.0)
+                try:
+                    dataset = build(
+                        job, msr_path=msr_path, prefs=prefs, logs=logs,
+                        progress=on_progress,
+                        overlay=None if individual else {
+                            "id": render_group_id,
+                            "index": overlay_index,
+                            "order": n_built + 1,
+                            "lut": overlay_cycle[n_built % len(overlay_cycle)],
+                        },
+                        n_datasets_total=n_datasets_total,
+                    )
+                except BackgroundTaskCancelled:
+                    raise
+                except Exception as exc:                     # noqa: BLE001
+                    built.append({"key": key, "dataset": None, "logs": logs,
+                                  "error": str(exc)})
+                    continue
+                if dataset is None:
+                    built.append({"key": key, "dataset": None, "logs": logs,
+                                  "error": None})
+                    continue
+                n_built += 1
+                built.append({"key": key, "dataset": dataset, "logs": logs,
+                              "error": None})
+            signals.progress.emit(1.0, "")
+            return built
+
+        from ...ui.background_tasks import BackgroundTask, shared_thread_pool
+
+        source_name = msr_path.name or "MSR data"
+        task = BackgroundTask(
+            work, description=f"Opening {n_jobs} dataset(s) from {source_name}",
+            category="load")
+        task.signals = signals
+        context = {
+            "msr_path": msr_path,
+            "individual": individual,
+            "viewer_transforms": viewer_transforms,
+            "align_choice": align_choice,
+            "confocal_options": confocal_options,
+            "n_jobs": n_jobs,
+            "last_pct": -1,
+        }
+        signals.progress.connect(self._on_viewer_open_progress)
+        signals.done.connect(self._on_viewer_open_built)
+        signals.failed.connect(self._on_viewer_open_failed)
+        signals.cancelled.connect(self._on_viewer_open_cancelled)
+        signals.finished.connect(self._on_viewer_open_finished)
+        self._viewer_open_task = task
+        self._viewer_open_context = context
+        self._set_viewer_open_running(True)
+        self.log(f"[viewer] opening {n_jobs} dataset(s) from '{source_name}' "
+                 "in the background…")
+        shared_thread_pool("msr-open", max_threads=1).start(task)
+
+    # -- the per-dataset build (worker thread; Qt-free) --------------------
+
+    @staticmethod
+    def _build_viewer_dataset(job, *, msr_path, prefs, logs, progress,
+                              overlay, n_datasets_total):
+        """Build one dataset from its parsed ``mfx`` array, fully stamped.
+
+        Runs on a worker thread, so it must not touch a widget or this
+        dialog's state: everything it needs is in *job*, and messages go to
+        *logs* (delivered to the Log on the GUI thread). Returns ``None`` when
+        the dataset has nothing importable; raises on a genuine failure.
+        """
+        from ...core.loader import load_from_mfx_array
+        from ...msr.import_stamp import stamp_msr_dataset
+
+        key = job["key"]
+        mfx = job["mfx"]
+        if mfx is None:
+            raise ValueError("mfx array not in memory — skipped.")
+        field_sel = job["field_sel"]
+        if field_sel is not None:
+            names = set(getattr(getattr(mfx, "dtype", None), "names", []) or [])
+            if "loc" in names and "loc" not in field_sel:
+                field_sel = set(field_sel)
+                field_sel.add("loc")
+                logs.append(f"[viewer] added required 'loc' field for '{key}' so it can render.")
+            mfx_to_load = subset_struct_fields(mfx, field_sel)
+            if mfx_to_load is None:
+                raise ValueError("selected fields contain no importable mfx data — skipped.")
+        else:
+            mfx_to_load = mfx
+        display_name = job["display_name"]
+        dataset = load_from_mfx_array(
+            mfx=mfx_to_load,
+            name=display_name,
+            folder=str(msr_path.parent),
+            datetime_str=datetime.now().strftime("%Y-%b-%d, %H:%M:%S"),
+            recent_path=str(msr_path),
+            prefs=prefs,
+            progress=lambda f: progress(0.95 * f),
+        )
+        if overlay is not None:
+            dataset.state["overlay_id"] = overlay["id"]
+            dataset.state["render_group_id"] = overlay["id"]
+            dataset.state["overlay_index"] = overlay["index"]
+            dataset.state["overlay_order"] = overlay["order"]
+            dataset.state["overlay_lut"] = overlay["lut"]
+            dataset.state["render_channel_lut"] = overlay["lut"]
+        # Provenance + the small native payloads that travel with a
+        # dataset. Shared with the direct open of a .msr we wrote
+        # (msr/quick_open.py), so the two import routes cannot drift.
+        stamp_msr_dataset(
+            dataset, entry=job["entry"], msr_path=msr_path, key=key,
+            mbm_points=job["mbm_points"],
+            mbm_points_by_gri=job["mbm_points_by_gri"], mbm_used=job["mbm_used"],
+            log=logs.append)
+        if overlay is not None:
+            dataset.metadata["overlay_id"] = overlay["id"]
+            dataset.metadata["overlay_index"] = overlay["index"]
+        transform = job["transform"]
+        if transform is not None:
+            dataset.state["overlay_transform"] = transform
+            dataset.state["render_transform_2d"] = transform
+            dataset.metadata["overlay_transform"] = transform
+            dataset.metadata["render_transform_2d"] = transform
+            dataset.metadata["transformed"] = bool(transform.get("moving_channel") != transform.get("reference_channel"))
+        # Processing state embedded in the file itself, by our own
+        # .msr writer. Applied LAST of the in-file sources so a saved
+        # overlay id, LUT or transform wins over the defaults the
+        # import invents, and before add_dataset so a restored Z
+        # scaling factor is in place before the post-load chain runs
+        # its auto-estimate.
+        try:
+            from ...msr.viewer_state import (
+                apply_viewer_state, read_viewer_state,
+            )
+            _vs = read_viewer_state(job["entry"].get("zroot"))
+            if _vs:
+                _done = apply_viewer_state(dataset, _vs)
+                if _done:
+                    logs.append(f"[viewer] restored saved state for "
+                                f"'{display_name}': {', '.join(_done)}")
+        except Exception as _exc:                       # noqa: BLE001
+            logs.append(f"[warn] embedded viewer state in "
+                        f"'{msr_path.name}' could not be applied: {_exc}")
+        # A recipe sidecar saved beside this .msr (File > Save As >
+        # .msr writes one) was previously written and never read:
+        # `apply_metadata_sidecar` is wired into the load_* functions,
+        # and .msr opens through this plugin instead, so Z scaling factor, filters
+        # and the channel transform silently evaporated on reopen.
+        # Applied before add_dataset so the Z scaling factor pin is in place before
+        # the post-load chain runs its auto-estimate.
+        try:
+            from ...core.loader import apply_metadata_recipe
+            from ...core.save import (
+                is_metadata_json_payload, metadata_sidecar_path,
+            )
+            _side = metadata_sidecar_path(msr_path)
+            if _side.is_file():
+                _recipe = json.loads(_side.read_text(encoding="utf-8"))
+                # One sidecar sits beside a file that may hold several
+                # channels, so only apply it to the dataset it names —
+                # or when this import produced a single dataset.
+                _named = str(_recipe.get("name") or "")
+                if is_metadata_json_payload(_recipe) and (
+                    not _named or _named == display_name
+                    or n_datasets_total == 1
+                ):
+                    _applied = apply_metadata_recipe(dataset, _recipe)
+                    if _applied:
+                        logs.append(f"[viewer] applied '{_side.name}' to "
+                                    f"'{display_name}': {', '.join(_applied)}")
+        except Exception as _exc:
+            logs.append(f"[warn] recipe sidecar beside '{msr_path.name}' "
+                        f"could not be applied: {_exc}")
+        progress(1.0)
+        return dataset
+
+    # -- delivery (GUI thread) ----------------------------------------------
+
+    _VIEWER_OPEN_HEADER = "Opening dataset"
+
+    def _set_viewer_open_running(self, running: bool) -> None:
+        # The whole reader is inert while its arrays are being read on the
+        # worker (a drift correction rewrites them in place). The window can
+        # still be moved or closed, which abandons the open.
+        for widget in self.findChildren(QPushButton):
+            if running:
+                widget.setProperty("_open_was_enabled", widget.isEnabled())
+                widget.setEnabled(False)
+            else:
+                was = widget.property("_open_was_enabled")
+                widget.setEnabled(True if was is None else bool(was))
+        if self._state is None:
+            return
+        if running:
+            self._state.log_progress(f"{self._VIEWER_OPEN_HEADER}…  0%")  # same as below
+            self._state.status_progress(self._VIEWER_OPEN_HEADER, 0.0)
+
+    def _on_viewer_open_progress(self, fraction: float, key: str) -> None:
+        context = self._viewer_open_context
+        if context is None or self._state is None:
+            return
+        pct = int(round(max(0.0, min(1.0, fraction)) * 100))
+        if pct == context.get("last_pct"):
+            return
+        context["last_pct"] = pct
+        if key:
+            context["last_key"] = key
+        name = key or context.get("last_key") or ""
+        header = f"{self._VIEWER_OPEN_HEADER}: '{name}'" if name else self._VIEWER_OPEN_HEADER
+        # Same wording in the Log's refreshing line and the status bar.
+        self._state.log_progress(f"{header}…  {pct}%")
+        self._state.status_progress(header, fraction)
+
+    def _on_viewer_open_failed(self, message: str) -> None:
+        if self._state is not None:
+            self._state.log_progress(f"{self._VIEWER_OPEN_HEADER}: failed.", final=True)
+            self._state.status_message.emit(f"{self._VIEWER_OPEN_HEADER}: failed.")
+        self.log(f"[error] open in viewer failed: {message}")
+        self._viewer_open_context = None
+        QMessageBox.warning(self, "Open in MINFLUX viewer", f"Opening failed:\n\n{message}")
+
+    def _on_viewer_open_cancelled(self) -> None:
+        if self._state is not None:
+            self._state.log_progress(f"{self._VIEWER_OPEN_HEADER}: cancelled.", final=True)
+            self._state.status_message.emit(f"{self._VIEWER_OPEN_HEADER}: cancelled.")
+        self._viewer_open_context = None
+
+    def _on_viewer_open_finished(self) -> None:
+        self._viewer_open_task = None
+        try:
+            self._set_viewer_open_running(False)
+        except RuntimeError:          # the dialog is already being torn down
+            pass
+
+    def _on_viewer_open_built(self, built) -> None:
+        """Install the built datasets, on the GUI thread."""
+        context = self._viewer_open_context
+        self._viewer_open_context = None
+        if context is None or self._state is None:
+            return
+        parent = self._owner
+        if parent is not None and getattr(parent, "_is_shutting_down", False):
+            return
+        msr_path = context["msr_path"]
+        individual = context["individual"]
+        viewer_transforms = context["viewer_transforms"]
+        align_choice = context["align_choice"]
+        confocal_options = context["confocal_options"]
+        confocal_transform_cache: dict = {}
+        imported = []
+        imported_indices = []
+        errors = []
+
+        self._state.log_progress(f"{self._VIEWER_OPEN_HEADER}: added to the viewer.", final=True)
         previous_suspend_auto_render = getattr(self._state, "suspend_auto_render", False)
         # Overlay mode groups channels into one render view, so suppress the
         # per-dataset auto-render and open one grouped view at the end. Individual
@@ -6080,65 +6411,20 @@ class MsrReaderDialog(QWidget):
         # leaves the auto-open behaviour untouched.
         self._state.suspend_auto_render = previous_suspend_auto_render if individual else True
         try:
-            for ds in datasets_info:
-                key = ds.get("display_name") or ds.get("did") or "dataset"
-                if key not in import_plan:
+            for item in built:
+                key = item["key"]
+                for line in item["logs"]:
+                    self.log(line)
+                if item["error"] is not None:
+                    errors.append(f"Dataset '{key}': {item['error']}")
+                    self.log(f"[error] {key}: {item['error']}")
                     continue
-                mfx = MFSTATE.mfx_map.get(key)
-
-                if mfx is None:
-                    errors.append(f"Dataset '{key}': mfx array not in memory — skipped.")
+                dataset = item["dataset"]
+                if dataset is None:
                     continue
-
                 try:
-                    field_sel = import_plan.get(key)
-                    if field_sel is not None:
-                        names = set(getattr(getattr(mfx, "dtype", None), "names", []) or [])
-                        if "loc" in names and "loc" not in field_sel:
-                            field_sel = set(field_sel)
-                            field_sel.add("loc")
-                            self.log(f"[viewer] added required 'loc' field for '{key}' so it can render.")
-                        mfx_to_load = self._subset_struct_fields(mfx, field_sel)
-                        if mfx_to_load is None:
-                            errors.append(f"Dataset '{key}': selected fields contain no importable mfx data — skipped.")
-                            continue
-                    else:
-                        mfx_to_load = mfx
-                    display_name = f"{msr_path.name} | {key}" if msr_path.name else key
-                    dataset = load_from_mfx_array(
-                        mfx=mfx_to_load,
-                        name=display_name,
-                        folder=str(msr_path.parent),
-                        datetime_str=datetime.now().strftime("%Y-%b-%d, %H:%M:%S"),
-                        recent_path=str(msr_path),
-                        prefs=self._state.prefs,
-                    )
-                    if not individual:
-                        dataset.state["overlay_id"] = render_group_id
-                        dataset.state["render_group_id"] = render_group_id
-                        dataset.state["overlay_index"] = overlay_index
-                        dataset.state["overlay_order"] = len(imported_indices) + 1
-                        dataset.state["overlay_lut"] = overlay_cycle[len(imported_indices) % len(overlay_cycle)]
-                        dataset.state["render_channel_lut"] = dataset.state["overlay_lut"]
-                    # Provenance + the small native payloads that travel with a
-                    # dataset. Shared with the direct open of a .msr we wrote
-                    # (msr/quick_open.py), so the two import routes cannot drift.
-                    _pbg, _used = (self._mbm_naming_metadata(key, ds.get("zroot"))
-                                   if key in MFSTATE.mbm_map else ({}, []))
-                    stamp_msr_dataset(
-                        dataset, entry=ds, msr_path=msr_path, key=key,
-                        mbm_points=MFSTATE.mbm_map.get(key),
-                        mbm_points_by_gri=_pbg, mbm_used=_used, log=self.log)
-                    if not individual:
-                        dataset.metadata["overlay_id"] = render_group_id
-                        dataset.metadata["overlay_index"] = overlay_index
-                    if key in viewer_transforms:
-                        transform = viewer_transforms[key]
-                        dataset.state["overlay_transform"] = transform
-                        dataset.state["render_transform_2d"] = transform
-                        dataset.metadata["overlay_transform"] = transform
-                        dataset.metadata["render_transform_2d"] = transform
-                        dataset.metadata["transformed"] = bool(transform.get("moving_channel") != transform.get("reference_channel"))
+                    # Confocal mapping stays on this thread: its manual
+                    # alignment is a modal dialog parented to this reader.
                     if confocal_options is not None and confocal_options.choices:
                         from ...ui.confocal_mapping_dialog import apply_confocal_mapping_options
 
@@ -6154,55 +6440,6 @@ class MsrReaderDialog(QWidget):
                                 f"[viewer confocal] '{result.attribute_name}' on '{key}': "
                                 f"{result.finite_count:,}/{result.total_count:,} localizations in bounds"
                             )
-                    # Processing state embedded in the file itself, by our own
-                    # .msr writer. Applied LAST of the in-file sources so a saved
-                    # overlay id, LUT or transform wins over the defaults the
-                    # import invents, and before add_dataset so a restored Z
-                    # scaling factor is in place before the post-load chain runs
-                    # its auto-estimate.
-                    try:
-                        from ...msr.viewer_state import (
-                            apply_viewer_state, read_viewer_state,
-                        )
-                        _vs = read_viewer_state(ds.get("zroot"))
-                        if _vs:
-                            _done = apply_viewer_state(dataset, _vs)
-                            if _done:
-                                self.log(f"[viewer] restored saved state for "
-                                         f"'{display_name}': {', '.join(_done)}")
-                    except Exception as _exc:                       # noqa: BLE001
-                        self.log(f"[warn] embedded viewer state in "
-                                 f"'{msr_path.name}' could not be applied: {_exc}")
-                    # A recipe sidecar saved beside this .msr (File > Save As >
-                    # .msr writes one) was previously written and never read:
-                    # `apply_metadata_sidecar` is wired into the load_* functions,
-                    # and .msr opens through this plugin instead, so Z scaling factor, filters
-                    # and the channel transform silently evaporated on reopen.
-                    # Applied before add_dataset so the Z scaling factor pin is in place before
-                    # the post-load chain runs its auto-estimate.
-                    try:
-                        from ...core.loader import apply_metadata_recipe
-                        from ...core.save import (
-                            is_metadata_json_payload, metadata_sidecar_path,
-                        )
-                        _side = metadata_sidecar_path(msr_path)
-                        if _side.is_file():
-                            _recipe = json.loads(_side.read_text(encoding="utf-8"))
-                            # One sidecar sits beside a file that may hold several
-                            # channels, so only apply it to the dataset it names —
-                            # or when this import produced a single dataset.
-                            _named = str(_recipe.get("name") or "")
-                            if is_metadata_json_payload(_recipe) and (
-                                not _named or _named == display_name
-                                or len(datasets_info) == 1
-                            ):
-                                _applied = apply_metadata_recipe(dataset, _recipe)
-                                if _applied:
-                                    self.log(f"[viewer] applied '{_side.name}' to "
-                                             f"'{display_name}': {', '.join(_applied)}")
-                    except Exception as _exc:
-                        self.log(f"[warn] recipe sidecar beside '{msr_path.name}' "
-                                 f"could not be applied: {_exc}")
                     # Everything above was written onto `dataset` itself, and
                     # add_dataset appends that same object -- so nothing may be
                     # re-stamped here. A second pass used to repeat the overlay
@@ -6225,6 +6462,10 @@ class MsrReaderDialog(QWidget):
                     self.log(f"[error] {key}: {exc}")
         finally:
             self._state.suspend_auto_render = previous_suspend_auto_render
+
+        self._state.status_message.emit(
+            f"Opened {len(imported)} dataset(s) from {msr_path.name or 'MSR data'}."
+            if imported else f"{self._VIEWER_OPEN_HEADER}: nothing opened.")
 
         # A single imported dataset is standalone, not an overlay channel — drop
         # the provisional overlay assignment as well as the channel color. The

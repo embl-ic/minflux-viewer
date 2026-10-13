@@ -440,7 +440,9 @@ def test_the_reader_restacks_after_it_closes():
 
     from minflux_viewer.plugins.msr_reader import msr_reader_dialog as mrd
 
-    source = inspect.getsource(mrd.MsrReaderDialog._on_open_in_viewer)
+    # The datasets are built off-thread; the windows are installed (and the
+    # reader closed) when the build delivers.
+    source = inspect.getsource(mrd.MsrReaderDialog._on_viewer_open_built)
     assert "restack_import_windows" in source
     assert mrd.RESTACK_DELAY_MS > 0, "a zero delay races the close"
     # scheduled, not called inline -- the singleShot wraps the call
