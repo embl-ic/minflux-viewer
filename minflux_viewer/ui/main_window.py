@@ -3365,7 +3365,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Process › ROI › Fit  (data-point fits + spline/interpolate)
     # ------------------------------------------------------------------
-    _REGION_ROI_TYPES = {"rectangle", "oval", "polygon", "freehand"}
+    _REGION_ROI_TYPES = {"rectangle", "oval", "polygon", "freehand", "composite"}
 
     def _roi_highlighted_points(self, record, ds):
         """(M, 2) localizations the region *record* highlights, in the ROI's plane

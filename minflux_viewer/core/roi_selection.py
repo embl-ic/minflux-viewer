@@ -147,10 +147,37 @@ def polygon_mask(x, y, record, *, base_mask=None) -> np.ndarray:
     return out
 
 
+def composite_mask(x, y, record, *, base_mask=None) -> np.ndarray:
+    """Points inside a composite ROI: inside an odd number of its rings (even-odd),
+    so a ring inside another is a hole and separate rings are separate pieces."""
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    n = min(x.size, y.size)
+    out = np.zeros(n, dtype=bool)
+    rings = [np.asarray([[float(p[0]), float(p[1])] for p in ring], dtype=float)
+             for ring in (record.geometry or {}).get("rings", []) if len(ring) >= 3]
+    if n == 0 or not rings:
+        return out
+    allpts = np.vstack(rings)
+    (x0, y0), (x1, y1) = allpts.min(axis=0), allpts.max(axis=0)
+    cand = (np.isfinite(x[:n]) & np.isfinite(y[:n])
+            & (x[:n] >= x0) & (x[:n] <= x1) & (y[:n] >= y0) & (y[:n] <= y1))
+    if np.any(cand):
+        inside = np.zeros(int(cand.sum()), dtype=bool)
+        for ring in rings:
+            inside ^= _point_in_polygon(x[:n][cand], y[:n][cand], ring)
+        out[cand] = inside
+    if base_mask is not None:
+        base = np.asarray(base_mask, dtype=bool).ravel()
+        if base.size == n:
+            out &= base
+    return out
+
+
 #: ROI types that enclose an area, so they can select localizations. Line, point
 #: and angle ROIs have no interior. Every view that turns a ROI into a row
 #: selection gates on this set, so they agree on what "a region" is.
-REGION_ROI_TYPES = frozenset({"rectangle", "oval", "polygon", "freehand"})
+REGION_ROI_TYPES = frozenset({"rectangle", "oval", "polygon", "freehand", "composite"})
 
 #: Volume (3-D) ROI types. Their membership needs all three coordinates, so they
 #: are deliberately NOT in ``REGION_ROI_TYPES`` -- every 2-D consumer gates on
@@ -182,6 +209,8 @@ def roi_region_mask(x, y, record, *, base_mask=None) -> np.ndarray:
         return oval_mask(x, y, record, base_mask=base_mask)
     if kind in ("polygon", "freehand"):
         return polygon_mask(x, y, record, base_mask=base_mask)
+    if kind == "composite":
+        return composite_mask(x, y, record, base_mask=base_mask)
     n = min(np.asarray(x).size, np.asarray(y).size)
     return np.zeros(n, dtype=bool)
 
