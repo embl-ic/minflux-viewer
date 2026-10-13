@@ -3002,7 +3002,7 @@ class MainWindow(QMainWindow):
         fresh = win is None
         if fresh:
             win = ScatterWindow(self._state, dataset_idx=idx)
-            win.destroyed.connect(lambda _=None, i=idx: self._scatter_windows.pop(i, None))
+            self._unregister_when_destroyed(self._scatter_windows, win)
             self._scatter_windows[idx] = win
         self._scatter_win = win
         self._install_window_shortcuts(win)
@@ -3026,8 +3026,7 @@ class MainWindow(QMainWindow):
         if fresh:
             from .tracking_window import TrackingWindow
             win = TrackingWindow(self._state, dataset_idx=idx)
-            win.destroyed.connect(
-                lambda _=None, i=idx: self._tracking_windows.pop(i, None))
+            self._unregister_when_destroyed(self._tracking_windows, win)
             self._tracking_windows[idx] = win
         self._install_window_shortcuts(win)
         win.show()
@@ -3051,8 +3050,7 @@ class MainWindow(QMainWindow):
             from .tracking_analysis_window import MsdAnalysisWindow
 
             win = MsdAnalysisWindow(self._state, idx, owner=self)
-            win.destroyed.connect(
-                lambda _=None, i=idx: self._msd_windows.pop(i, None))
+            self._unregister_when_destroyed(self._msd_windows, win)
             self._msd_windows[idx] = win
             show_modeless(win, self)
         else:
@@ -3072,7 +3070,7 @@ class MainWindow(QMainWindow):
         fresh = win is None
         if fresh:
             win = HistogramWindow(self._state, dataset_idx=idx)
-            win.destroyed.connect(lambda _=None, i=idx: self._histogram_windows.pop(i, None))
+            self._unregister_when_destroyed(self._histogram_windows, win)
             self._histogram_windows[idx] = win
         self._histogram_win = win
         self._install_window_shortcuts(win)
@@ -3094,7 +3092,7 @@ class MainWindow(QMainWindow):
         fresh = win is None
         if fresh:
             win = AttributeWindow(self._state, dataset_idx=idx)
-            win.destroyed.connect(lambda _=None, i=idx: self._attr_windows.pop(i, None))
+            self._unregister_when_destroyed(self._attr_windows, win)
             self._attr_windows[idx] = win
         self._attr_win = win
         self._install_window_shortcuts(win)
@@ -3131,7 +3129,7 @@ class MainWindow(QMainWindow):
         # QWidget parent makes Windows keep it above that owner, so it can
         # obscure the main window whenever the two overlap.
         win = FilterDialog(self._state, parent=None, dataset_idx=idx)
-        win.destroyed.connect(lambda _=None, key=idx: self._filter_dlgs.pop(key, None))
+        self._unregister_when_destroyed(self._filter_dlgs, win)
         self._filter_dlgs[idx] = win
         self._filter_dlg = win
         show_modeless(win, self)
@@ -7472,9 +7470,7 @@ class MainWindow(QMainWindow):
         from .precision_render_window import PrecisionRenderWindow
         win = PrecisionRenderWindow(self._state, dataset_idx=idx)
         self._install_window_shortcuts(win)
-        win.destroyed.connect(
-            lambda _=None, i=idx: self._render_windows.pop(i, None)
-        )
+        self._unregister_when_destroyed(self._render_windows, win)
         self._render_windows[idx] = win
         win.show()
         self._place_new_window(win, idx)
@@ -8864,6 +8860,35 @@ class MainWindow(QMainWindow):
         # Restore ROI's per-dataset memory is keyed by index too.
         self._roi_last_active = remap_dataset_keyed(self._roi_last_active, idx)
         self._notify_view_state_changed()
+
+    def _unregister_when_destroyed(self, registry: dict, window) -> None:
+        """Remove *window* from *registry* when Qt destroys it -- by identity.
+
+        The index a window was opened at goes stale as soon as an earlier
+        dataset closes (``_reindex_window_map_after_remove`` moves the window
+        down), so removing by that index took out whichever window had moved
+        into it. The registry is also what keeps a parentless window's Python
+        wrapper alive: a window dropped from it while still on screen was
+        destroyed by the next garbage collection, without a close event, and
+        its pyqtgraph views took the process down with it.
+        """
+        from PyQt6 import sip
+
+        ref = weakref.ref(window)
+
+        def deleted(value) -> bool:
+            try:
+                return sip.isdeleted(value)
+            except TypeError:               # not a Qt object (a test double)
+                return False
+
+        def forget(_obj=None) -> None:
+            target = ref()
+            for key, value in list(registry.items()):
+                if value is target or deleted(value):
+                    registry.pop(key, None)
+
+        window.destroyed.connect(forget)
 
     def _reindex_window_map_after_remove(self, mapping: dict[int, QWidget], removed_idx: int) -> None:
         moved = {}
