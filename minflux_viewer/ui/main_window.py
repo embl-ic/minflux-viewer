@@ -7470,10 +7470,13 @@ class MainWindow(QMainWindow):
         win = self._render_windows.get(idx) or self._render_window_for_dataset(idx)
         if win is not None:
             self._install_window_shortcuts(win)
-            try:
-                win._refresh_from_dataset()
-            except Exception:
-                pass
+            # _refresh_from_dataset CANCELS an open manual alignment, so merely
+            # raising the window (Ctrl+R) would silently discard it.
+            if getattr(win, "_overlay_alignment_panel", None) is None:
+                try:
+                    win._refresh_from_dataset()
+                except Exception:
+                    pass
             win.show()
             win.raise_()
             win.activateWindow()

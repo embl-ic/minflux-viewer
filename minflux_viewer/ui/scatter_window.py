@@ -56,6 +56,7 @@ from ..core.overlay import (
     manual_alignment_matrix4,
     matrix4_to_xy3,
     overlay_members,
+    sync_transform_decomposition,
     transform_key,
     transform_to_matrix4,
 )
@@ -2474,6 +2475,7 @@ class ScatterWindow(QWidget):
             record = dict(base_transform or {})
             record["matrix_4x4"] = matrix.tolist()
             record["matrix_3x3"] = matrix4_to_xy3(matrix).tolist()
+            sync_transform_decomposition(record)
             record["alignment_mode"] = "manual"
             provenance = dict(record.get("provenance") or {})
             provenance["manual_alignment"] = {
@@ -2486,6 +2488,12 @@ class ScatterWindow(QWidget):
             ch["loc_transform"] = record
             ch["transform"] = {}
             changed_dataset_indices.append(ds_idx)
+        # The panel's channel checkboxes are temporary (hide one channel to see
+        # the other); Apply commits the move, not the hiding -- otherwise the
+        # channel stayed hidden while the channel list still showed it ticked.
+        if self._overlay_alignment_original_visibility is not None:
+            for ch, visible in zip(self._channels, self._overlay_alignment_original_visibility):
+                ch["visible"] = bool(visible)
         self._cached_dataset_idx = None
         self._cached_locs_nm = None
         self._redraw_current(save_state=False)

@@ -84,6 +84,7 @@ from ..core.overlay import (
     identity_matrix4,
     manual_alignment_matrix4,
     matrix4_to_xy3,
+    sync_transform_decomposition,
     transform_key,
 )
 from ..core.roi_selection import REGION_ROI_TYPES, roi_region_mask
@@ -134,6 +135,12 @@ _LOCALIZATION_AUTO_HIGH_PERCENTILE = 95.0
 _SIGMA_SLIDER_STEP_NM = 0.1
 _ALIGNMENT_PREVIEW_MAX_DIM = 512
 _ALIGNMENT_PREVIEW_INTERVAL_MS = 16
+#: Settle delay before a manual-alignment preview re-renders its channel
+#: sources at the new view (after a zoom, a pan, or a channel moved far).
+_ALIGNMENT_SOURCE_REFRESH_MS = 150
+#: Extra source area rendered on each side, as a fraction of the view span,
+#: so a channel can be moved a little before its source must be re-rendered.
+_ALIGNMENT_SOURCE_MARGIN = 0.25
 _CUSTOM_SOLID_PREFIX = "solid:custom:"
 
 
@@ -1008,6 +1015,15 @@ class RenderWindow(QWidget):
         self._overlay_alignment_original_visibility: list[bool] | None = None
         self._overlay_alignment_auto_levels: dict[int, tuple[float, float] | None] = {}
         self._overlay_alignment_preview_scalar: np.ndarray | None = None
+        # ⚠ A preview raster is only meaningful together with the world
+        # rectangle it was rendered for. Each channel's source raster carries
+        # its own geometry; the displayed frame is resampled from them onto an
+        # output grid that follows the view (see _render_overlay_alignment_preview).
+        self._overlay_alignment_preview_geometry: tuple[float, float, float, float] | None = None
+        self._overlay_alignment_sources: dict[int, tuple[np.ndarray, tuple[float, float, float, float]]] = {}
+        self._overlay_alignment_output: tuple | None = None
+        self._overlay_alignment_warped: dict[int, np.ndarray] = {}
+        self._alignment_tile_plans: dict = {}
         self._overlay_alignment_preview_rgb: dict[int, np.ndarray] = {}
         self._overlay_alignment_preview_dirty: set[int] = set()
         self._overlay_alignment_preview_timer = QTimer(self)
@@ -1015,6 +1031,12 @@ class RenderWindow(QWidget):
         self._overlay_alignment_preview_timer.setInterval(_ALIGNMENT_PREVIEW_INTERVAL_MS)
         self._overlay_alignment_preview_timer.timeout.connect(
             self._render_overlay_alignment_preview
+        )
+        self._overlay_alignment_source_timer = QTimer(self)
+        self._overlay_alignment_source_timer.setSingleShot(True)
+        self._overlay_alignment_source_timer.setInterval(_ALIGNMENT_SOURCE_REFRESH_MS)
+        self._overlay_alignment_source_timer.timeout.connect(
+            self._refresh_alignment_sources
         )
         self._export_workers: list = []  # live TIFF-export QThreads (kept from GC)
 
@@ -1887,6 +1909,15 @@ class RenderWindow(QWidget):
         """
         saved_channels = self._channels
         saved_manual = self._manual_levels
+        # ⚠ A channel's pending manual-alignment move is a warp in the PRIMARY
+        # pane's world rectangle; applied to a side projection it drew the
+        # channel in a false place (the XZ raster mapped through XY geometry).
+        # Rotation in XY cannot be shown on an XZ/YZ raster at all, so the side
+        # panes show the committed position until Apply.
+        channels = [
+            dict(ch, transform={}) if ch.get("transform") else ch
+            for ch in channels
+        ]
         try:
             if auto:
                 channels = [
@@ -2206,6 +2237,9 @@ class RenderWindow(QWidget):
         self._root_layout.insertWidget(self._channel_area_layout_index, self._overlay_alignment_panel)
         self._redraw_timer.stop()
         self._prepare_overlay_alignment_preview()
+        if self._overlay_alignment_preview_scalar is None:
+            # No frame yet to snapshot: have the sources rendered directly.
+            self._overlay_alignment_source_timer.start()
         self._overlay_alignment_panel.show()
         self._overlay_alignment_panel.setFocus()
 
@@ -2292,6 +2326,7 @@ class RenderWindow(QWidget):
         transform["dy_nm"] = float(transform.get("dy_nm", 0.0)) + dy_nm
         transform["angle"] = float(transform.get("angle", 0.0)) + rotation
         self._request_overlay_alignment_preview(ch_idx)
+        self._schedule_alignment_source_refresh_if_needed(ch_idx)
 
     def _overlay_alignment_status(self, ch_idx: int) -> str:
         if not (0 <= ch_idx < len(self._channels)):
@@ -2313,21 +2348,42 @@ class RenderWindow(QWidget):
                 else {}
             )
         self._request_overlay_alignment_preview(ch_idx, immediate=True)
+        # After a long move the channel's source was re-rendered over the
+        # region it was being brought in from; back at its own position it
+        # needs a source covering the view again, or the preview shows nothing.
+        self._schedule_alignment_source_refresh_if_needed(ch_idx)
         panel.refresh_status()
         panel.setFocus()
 
     def _overlay_alignment_apply(self) -> None:
         if self._overlay_alignment_panel is None:
             return
+        # The preview is exactly what Apply commits, so it becomes the frame
+        # shown (and the coarse base the next render fills in over) until the
+        # exact render lands. Without this the last exact frame -- taken before
+        # the channel was moved -- briefly drew it back at its old position.
+        self._capture_alignment_result_frame()
         for ch_idx, ch in enumerate(self._channels):
             transform = ch.get("transform") or {}
             if not any(abs(float(transform.get(key, 0.0))) > 1e-12 for key in ("dx_nm", "dy_nm", "angle")):
                 continue
             self._apply_manual_channel_transform(ch_idx)
+        # The panel's channel checkboxes are a temporary aid for aligning (hide
+        # one channel to see the other). Apply commits the MOVE, not the
+        # hiding: a channel left unticked stayed hidden after Apply while the
+        # channel list below still showed it ticked -- it simply vanished.
+        self._restore_alignment_visibility()
         self._end_overlay_alignment()
-        # Also covers Apply with no transform change (or visibility-only
-        # changes): replace the capped preview with the exact render.
+        # Also covers Apply with no transform change: replace the capped
+        # preview with the exact render.
         self._schedule_render()
+
+    def _restore_alignment_visibility(self) -> None:
+        original = self._overlay_alignment_original_visibility
+        if original is None:
+            return
+        for ch, visible in zip(self._channels, original):
+            ch["visible"] = bool(visible)
 
     def _overlay_alignment_cancel(self) -> None:
         if self._overlay_alignment_original is not None:
@@ -2403,6 +2459,7 @@ class RenderWindow(QWidget):
         record = dict(previous or {})
         record["matrix_4x4"] = np.asarray(matrix, dtype=np.float64).tolist()
         record["matrix_3x3"] = matrix4_to_xy3(matrix).tolist()
+        sync_transform_decomposition(record)
         record["alignment_mode"] = "manual"
         provenance = dict(record.get("provenance") or {})
         provenance["manual_alignment"] = {
@@ -2851,9 +2908,11 @@ class RenderWindow(QWidget):
         self._scheduler.cancel()
         # Ortho is a mode, not a projection: resetting the view inside it must
         # re-fit the panes, not drop back to a single XY view.
-        if self._orientation not in ("XY", ORTHO_AXIS):
+        if self._orientation not in ("XY", ORTHO_AXIS) and self._overlay_alignment_panel is None:
             self._set_orientation("XY")
         else:
+            # While aligning, Reset View re-fits the CURRENT projection: a
+            # switch to XY would change the plane the pending move belongs to.
             self._apply_orientation()
             self._rebuild_all_grids()
             self._schedule_render()
@@ -2871,6 +2930,8 @@ class RenderWindow(QWidget):
     def _render(self) -> None:
         """Timer callback: dispatch to tiled or direct render based on zoom."""
         self._apply_y_axis_direction()
+        if self._render_alignment_view_change():
+            return
         if self._render_mode == "image":
             self._render_image_mode()
             return
@@ -3616,23 +3677,59 @@ class RenderWindow(QWidget):
         return np.asarray(resized[:, :target_h, :target_w], dtype=np.float32)
 
     def _prepare_overlay_alignment_preview(self) -> None:
+        """Snapshot the last exact frame as the alignment preview's source.
+
+        ⚠ The snapshot is stored WITH the geometry it was rendered for. It used
+        to be drawn and warped at whatever ``_last_tile_geometry`` the latest
+        render left behind, and any render while the panel was open -- the
+        panel's own insertion resizing the view, a wheel zoom, a pan, Reset
+        View -- changed that, so the preview showed both channels stretched and
+        offset. A user aligning by eye then committed a transform scaled by the
+        zoom ratio, and after Apply the channel landed micrometres from where
+        the preview had shown it.
+        """
         scalar = self._last_scalar_tile
         self._overlay_alignment_preview_rgb = {}
         self._overlay_alignment_preview_dirty = set()
+        self._overlay_alignment_sources = {}
+        self._overlay_alignment_warped = {}
+        self._overlay_alignment_output = None
         if scalar is None:
             self._overlay_alignment_preview_scalar = None
+            self._overlay_alignment_preview_geometry = None
             return
+        geometry = self._last_tile_geometry
+        if geometry is None:
+            (x0, x1), (y0, y1) = self._view_box.viewRange()
+            geometry = (float(x0), float(x1), float(y0), float(y1))
+        geometry = tuple(float(value) for value in geometry)
         preview = self._alignment_preview_scalar(scalar)
         self._overlay_alignment_preview_scalar = preview
-        self._overlay_alignment_preview_dirty = set(
-            range(min(preview.shape[0], len(self._channels)))
-        )
+        self._overlay_alignment_preview_geometry = geometry
+        count = min(preview.shape[0], len(self._channels))
+        self._overlay_alignment_sources = {
+            index: (preview[index], geometry) for index in range(count)
+        }
+        self._overlay_alignment_preview_dirty = set(range(count))
 
     def _clear_overlay_alignment_preview(self) -> None:
-        timer = getattr(self, "_overlay_alignment_preview_timer", None)
-        if timer is not None:
-            timer.stop()
+        for name in ("_overlay_alignment_preview_timer", "_overlay_alignment_source_timer"):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                timer.stop()
+        if getattr(self, "_alignment_tile_plans", None):
+            # ⚠ Source tiles still in flight would land after the panel has
+            # closed, be judged against the PRE-alignment tile plan (whose
+            # cache entries Apply has just evicted) and compose an all-zero
+            # frame -- which the next render then used as its placeholder, so
+            # the whole view went black after Apply. Drop them here.
+            self._cancel_alignment_source_work()
         self._overlay_alignment_preview_scalar = None
+        self._overlay_alignment_preview_geometry = None
+        self._overlay_alignment_sources = {}
+        self._overlay_alignment_output = None
+        self._overlay_alignment_warped = {}
+        self._alignment_tile_plans = {}
         self._overlay_alignment_preview_rgb = {}
         self._overlay_alignment_preview_dirty = set()
 
@@ -3649,14 +3746,18 @@ class RenderWindow(QWidget):
         if preview is None and self._last_scalar_tile is not None:
             self._prepare_overlay_alignment_preview()
             preview = self._overlay_alignment_preview_scalar
-        if preview is None:
+        if preview is not None:
+            count = min(preview.shape[0], len(self._channels))
+        elif getattr(self, "_overlay_alignment_sources", None):
+            # No snapshot (alignment began before the first frame), but the
+            # precision engine has rendered sources from scratch.
+            count = len(self._channels)
+        else:
             return
         if invalidate:
             if ch_idx is None:
-                self._overlay_alignment_preview_dirty.update(
-                    range(min(preview.shape[0], len(self._channels)))
-                )
-            elif 0 <= ch_idx < min(preview.shape[0], len(self._channels)):
+                self._overlay_alignment_preview_dirty.update(range(count))
+            elif 0 <= ch_idx < count:
                 self._overlay_alignment_preview_dirty.add(int(ch_idx))
         if immediate:
             self._overlay_alignment_preview_timer.stop()
@@ -3664,13 +3765,267 @@ class RenderWindow(QWidget):
         elif not self._overlay_alignment_preview_timer.isActive():
             self._overlay_alignment_preview_timer.start()
 
-    def _alignment_preview_channel_rgb(self, ch_idx: int) -> np.ndarray:
+    def _render_alignment_view_change(self) -> bool:
+        """While aligning, answer a view change with the preview, not a render.
+
+        An exact render replaces ``_last_scalar_tile`` with a raster cropped to
+        the new view, in which a channel being moved in from outside the view
+        has no source pixels at all -- the second way a channel vanished. The
+        preview follows the view instead (its sources keep their own geometry),
+        and the sources are re-rendered for the new view once it settles.
+        Returns True when the render was handled here.
+        """
+        if self._overlay_alignment_panel is None:
+            return False
+        no_frame_yet = (
+            self._overlay_alignment_preview_scalar is None
+            and not self._overlay_alignment_sources
+            and self._last_scalar_tile is None
+        )
+        if no_frame_yet and not self._alignment_sources_renderable():
+            # Alignment began before the first frame (e.g. Dataset Information
+            # › Manual align opening a fresh view). With nothing to preview,
+            # let one exact render through; the preview snapshots it next.
+            return False
+        self._request_overlay_alignment_preview(invalidate=False, immediate=True)
+        self._overlay_alignment_source_timer.start()
+        return True
+
+    def _alignment_sources_renderable(self) -> bool:
+        """Whether this engine can render preview sources from scratch."""
+        return False
+
+    def _cancel_alignment_source_work(self) -> None:
+        """Drop preview-source renders still in flight (the base engine has none)."""
+
+    def _alignment_output_grid(self):
+        """``(geometry, (height, width))`` of the preview's output: the view."""
+        try:
+            (x0, x1), (y0, y1) = self._view_box.viewRange()
+        except Exception:
+            return None
+        x0, x1, y0, y1 = float(x0), float(x1), float(y0), float(y1)
+        if not all(np.isfinite(v) for v in (x0, x1, y0, y1)) or x1 <= x0 or y1 <= y0:
+            return None
+        pixel = max(x1 - x0, y1 - y0) / float(_ALIGNMENT_PREVIEW_MAX_DIM)
+        width = max(1, int(round((x1 - x0) / pixel)))
+        height = max(1, int(round((y1 - y0) / pixel)))
+        return ((x0, x1, y0, y1), (height, width))
+
+    def _alignment_channel_source(self, ch_idx: int):
+        """``(raster, geometry)`` the preview draws channel *ch_idx* from."""
+        source = self._overlay_alignment_sources.get(ch_idx)
+        if source is not None:
+            return source
         preview = self._overlay_alignment_preview_scalar
-        if preview is None or not (0 <= ch_idx < preview.shape[0]):
-            return np.zeros((1, 1, 3), dtype=np.uint8)
+        geometry = self._overlay_alignment_preview_geometry
+        if preview is None or geometry is None or not (0 <= ch_idx < preview.shape[0]):
+            return None
+        return preview[ch_idx], geometry
+
+    def _alignment_warped_channel(self, ch_idx: int) -> np.ndarray | None:
+        """Channel *ch_idx* resampled onto the output grid with its temporary move."""
+        source = self._alignment_channel_source(ch_idx)
+        grid = self._overlay_alignment_output
+        if source is None or grid is None or not (0 <= ch_idx < len(self._channels)):
+            return None
+        raster, geometry = source
+        out_geometry, out_shape = grid
+        warped = self._alignment_warp(
+            raster,
+            geometry,
+            out_geometry,
+            out_shape,
+            self._channels[ch_idx].get("transform") or {},
+            order=1,
+            prefilter=False,
+            pixel_size_nm=self._current_render_pixel_size_nm(),
+        )
+        self._overlay_alignment_warped[ch_idx] = warped
+        return warped
+
+    def _alignment_source_bounds(
+        self, ch_idx: int, view: tuple[float, float, float, float],
+        margin: float = _ALIGNMENT_SOURCE_MARGIN,
+    ) -> tuple[float, float, float, float]:
+        """World box channel *ch_idx* must be sampled from to fill *view*.
+
+        The inverse of its temporary move applied to the view's corners; for a
+        channel being brought in from elsewhere this lies outside the view.
+        """
+        x0, x1, y0, y1 = view
+        corners = np.array([[x0, y0], [x1, y0], [x0, y1], [x1, y1]], dtype=np.float64)
+        transform = {}
+        if 0 <= ch_idx < len(self._channels):
+            transform = self._channels[ch_idx].get("transform") or {}
+        dx = float(transform.get("dx_nm", 0.0))
+        dy = float(transform.get("dy_nm", 0.0))
+        angle = float(transform.get("angle", 0.0))
+        if abs(dx) > 1e-9 or abs(dy) > 1e-9 or abs(angle) > 1e-9:
+            anchor = np.array([
+                float(transform.get("anchor_x_nm", 0.5 * (x0 + x1))),
+                float(transform.get("anchor_y_nm", 0.5 * (y0 + y1))),
+            ])
+            theta = np.deg2rad(angle)
+            c, s = float(np.cos(theta)), float(np.sin(theta))
+            inv_rot = np.array([[c, s], [-s, c]], dtype=np.float64)
+            corners = (inv_rot @ (corners - anchor - np.array([dx, dy])).T).T + anchor
+        lo = corners.min(axis=0)
+        hi = corners.max(axis=0)
+        pad = margin * max(x1 - x0, y1 - y0)
+        return (float(lo[0] - pad), float(hi[0] + pad), float(lo[1] - pad), float(hi[1] + pad))
+
+    def _schedule_alignment_source_refresh_if_needed(self, ch_idx: int) -> None:
+        """Re-render a channel's source once it has been moved past its edge."""
+        if self._overlay_alignment_panel is None:
+            return
+        grid = self._overlay_alignment_output
+        source = self._alignment_channel_source(ch_idx)
+        if grid is None or source is None:
+            return
+        need = self._alignment_source_bounds(ch_idx, grid[0], margin=0.0)
+        have = source[1]
+        if need[0] >= have[0] and need[1] <= have[1] and need[2] >= have[2] and need[3] <= have[3]:
+            return
+        self._overlay_alignment_source_timer.start()
+
+    def _refresh_alignment_sources(self) -> None:
+        """Re-render each channel's source raster for the current view.
+
+        The base engine keeps the alignment-start snapshot: it is drawn at its
+        own geometry, so it stays truthful, only coarser after a zoom-in. The
+        precision engine overrides this to render sharp per-channel sources.
+        """
+
+    def _set_alignment_source(
+        self, ch_idx: int, raster: np.ndarray, geometry: tuple[float, float, float, float]
+    ) -> None:
+        """Replace channel *ch_idx*'s preview source (and its frozen auto levels)."""
+        if self._overlay_alignment_panel is None or not (0 <= ch_idx < len(self._channels)):
+            return
+        raster = np.asarray(raster, dtype=np.float32)
+        self._overlay_alignment_sources[ch_idx] = (
+            raster, tuple(float(value) for value in geometry)
+        )
         channel = self._channels[ch_idx]
-        tile = self._transformed_tile(preview[ch_idx], channel)
-        norm = self._normalized_tile(tile, channel)
+        if channel.get("levels") is None:
+            # Counts per pixel depend on the pixel size, which a re-rendered
+            # source changes; frozen levels from the old raster would dim or
+            # saturate the channel.
+            self._overlay_alignment_auto_levels[id(channel)] = (
+                self._compute_render_auto_levels(raster)
+            )
+        self._overlay_alignment_preview_dirty.add(int(ch_idx))
+
+    def _capture_alignment_result_frame(self) -> None:
+        """Make the current preview the displayed frame, as Apply commits it."""
+        if self._overlay_alignment_panel is None:
+            return
+        if self._overlay_alignment_preview_scalar is None and not self._overlay_alignment_sources:
+            return
+        grid = self._overlay_alignment_output or self._alignment_output_grid()
+        if grid is None:
+            return
+        self._overlay_alignment_output = grid
+        geometry, shape = grid
+        layers = []
+        for ch_idx in range(len(self._channels)):
+            warped = self._alignment_warped_channel(ch_idx)
+            layers.append(
+                warped if warped is not None else np.zeros(shape, dtype=np.float32)
+            )
+        if not layers:
+            return
+        self._last_scalar_tile = np.stack(layers, axis=0).astype(np.float32, copy=False)
+        self._last_tile_geometry = geometry
+        self._last_px_nm = max(geometry[1] - geometry[0], geometry[3] - geometry[2]) / float(
+            max(shape)
+        )
+        if hasattr(self, "_last_frame_orientation"):
+            self._last_frame_orientation = self._orientation
+
+    @staticmethod
+    def _alignment_warp(
+        source: np.ndarray,
+        source_geometry: tuple[float, float, float, float],
+        out_geometry: tuple[float, float, float, float],
+        out_shape: tuple[int, int],
+        transform: dict,
+        *,
+        order: int,
+        prefilter: bool,
+        pixel_size_nm: float = 1.0,
+    ) -> np.ndarray:
+        """Resample *source* (covering *source_geometry*) onto an output grid.
+
+        The temporary manual move -- ``dx_nm``/``dy_nm`` and ``angle`` about
+        ``anchor_*_nm`` -- is applied in world coordinates, the same convention
+        :func:`manual_alignment_matrix4` commits on Apply. Pixel centres sit at
+        ``origin + (index + 0.5) * pixel`` in both grids, so the two may differ
+        in extent and resolution. Array rows follow world Y, columns world X.
+        """
+        out_shape = (int(out_shape[0]), int(out_shape[1]))
+        tile = np.asarray(source, dtype=np.float32)
+        transform = transform or {}
+        dx_nm = float(transform.get("dx_nm", float(transform.get("dx", 0.0)) * pixel_size_nm))
+        dy_nm = float(transform.get("dy_nm", float(transform.get("dy", 0.0)) * pixel_size_nm))
+        angle = float(transform.get("angle", 0.0))
+        moved = abs(dx_nm) > 1e-9 or abs(dy_nm) > 1e-9 or abs(angle) > 1e-9
+        same_grid = (
+            tuple(source_geometry) == tuple(out_geometry) and tile.shape == out_shape
+        )
+        if not moved and same_grid:
+            return tile
+        if tile.ndim != 2 or tile.size == 0:
+            return np.zeros(out_shape, dtype=np.float32)
+        sx0, sx1, sy0, sy1 = (float(v) for v in source_geometry)
+        ox0, ox1, oy0, oy1 = (float(v) for v in out_geometry)
+        sh, sw = tile.shape
+        oh, ow = out_shape
+        ssx, ssy = (sx1 - sx0) / max(sw, 1), (sy1 - sy0) / max(sh, 1)
+        osx, osy = (ox1 - ox0) / max(ow, 1), (oy1 - oy0) / max(oh, 1)
+        if min(ssx, ssy, osx, osy) <= 0.0 or not np.isfinite([ssx, ssy, osx, osy]).all():
+            return np.zeros(out_shape, dtype=np.float32)
+        theta = np.deg2rad(angle)
+        cos_t, sin_t = float(np.cos(theta)), float(np.sin(theta))
+        inv_rot = np.array([[cos_t, sin_t], [-sin_t, cos_t]], dtype=np.float64)
+        # (row, col) -> (x, y) for the output grid, and back for the source.
+        out_to_world = np.array([[0.0, osx], [osy, 0.0]], dtype=np.float64)
+        out_origin = np.array([ox0 + 0.5 * osx, oy0 + 0.5 * osy], dtype=np.float64)
+        world_to_src = np.array([[0.0, 1.0 / ssy], [1.0 / ssx, 0.0]], dtype=np.float64)
+        src_origin = np.array([sx0 + 0.5 * ssx, sy0 + 0.5 * ssy], dtype=np.float64)
+        anchor = np.array([
+            float(transform.get("anchor_x_nm", 0.5 * (ox0 + ox1))),
+            float(transform.get("anchor_y_nm", 0.5 * (oy0 + oy1))),
+        ], dtype=np.float64)
+        shift = np.array([dx_nm, dy_nm], dtype=np.float64)
+        matrix = world_to_src @ inv_rot @ out_to_world
+        offset = world_to_src @ (inv_rot @ (out_origin - anchor - shift) + anchor - src_origin)
+        out = affine_transform(
+            tile,
+            matrix,
+            offset=offset,
+            output_shape=out_shape,
+            order=order,
+            mode="constant",
+            cval=0.0,
+            prefilter=prefilter,
+        ).astype(np.float32, copy=False)
+        out[~np.isfinite(out)] = 0.0
+        out[out < 0.0] = 0.0
+        vmax = float(np.nanmax(out)) if out.size else 0.0
+        if vmax > 0.0:
+            out[out < vmax * 1e-6] = 0.0
+        return out
+
+    def _alignment_preview_channel_rgb(self, ch_idx: int) -> np.ndarray:
+        warped = self._alignment_warped_channel(ch_idx)
+        if warped is None:
+            grid = self._overlay_alignment_output
+            shape = grid[1] if grid is not None else (1, 1)
+            return np.zeros(tuple(shape) + (3,), dtype=np.uint8)
+        channel = self._channels[ch_idx]
+        norm = self._normalized_tile(warped, channel)
         if self._white_bg:
             rgb = self._channel_rgb_white(norm, channel["lut"], invert=_channel_invert(channel))
         else:
@@ -3705,10 +4060,27 @@ class RenderWindow(QWidget):
         return rgba
 
     def _render_overlay_alignment_preview(self) -> None:
-        preview = self._overlay_alignment_preview_scalar
-        if self._overlay_alignment_panel is None or preview is None or preview.size == 0:
+        if self._overlay_alignment_panel is None:
             return
-        count = min(preview.shape[0], len(self._channels))
+        preview = self._overlay_alignment_preview_scalar
+        if preview is not None and preview.size:
+            count = min(preview.shape[0], len(self._channels))
+        elif getattr(self, "_overlay_alignment_sources", None):
+            preview = None
+            count = len(self._channels)
+        else:
+            return
+        grid = self._alignment_output_grid()
+        if grid is None:
+            geometry = self._overlay_alignment_preview_geometry
+            if geometry is None or preview is None:
+                return
+            grid = (geometry, tuple(int(v) for v in preview.shape[-2:]))
+        if grid != self._overlay_alignment_output:
+            # The view moved: every channel is resampled onto the new grid,
+            # each from its own source geometry, so the picture stays true.
+            self._overlay_alignment_output = grid
+            self._overlay_alignment_preview_dirty.update(range(count))
         dirty = set(self._overlay_alignment_preview_dirty)
         self._overlay_alignment_preview_dirty.clear()
         for ch_idx in dirty:
@@ -3725,17 +4097,13 @@ class RenderWindow(QWidget):
                     self._alignment_preview_channel_rgb(ch_idx)
                 )
             visible_rgb.append(self._overlay_alignment_preview_rgb[ch_idx])
+        (x0, x1, y0, y1), (height, width) = grid
         if visible_rgb:
             rgba = self._alignment_preview_rgba(visible_rgb, white_bg=self._white_bg)
         else:
-            height, width = preview.shape[-2:]
             value = 255 if self._white_bg else 0
             rgba = np.full((height, width, 4), value, dtype=np.uint8)
             rgba[..., 3] = 255
-        if self._last_tile_geometry is None:
-            (x0, x1), (y0, y1) = self._view_box.viewRange()
-        else:
-            x0, x1, y0, y1 = self._last_tile_geometry
         height, width = rgba.shape[:2]
         self._image_view.setImage(
             rgba,
@@ -3819,49 +4187,19 @@ class RenderWindow(QWidget):
 
     def _transformed_tile(self, tile: np.ndarray, ch: dict) -> np.ndarray:
         transform = ch.get("transform") or {}
-        pixel_size_nm = self._current_render_pixel_size_nm()
-        dx_nm = float(transform.get("dx_nm", float(transform.get("dx", 0.0)) * pixel_size_nm))
-        dy_nm = float(transform.get("dy_nm", float(transform.get("dy", 0.0)) * pixel_size_nm))
-        angle = float(transform.get("angle", 0.0))
-        if abs(dx_nm) < 1e-9 and abs(dy_nm) < 1e-9 and abs(angle) < 1e-9:
-            return tile
         if self._last_tile_geometry is None:
             return tile
-        x0, x1, y0, y1 = self._last_tile_geometry
-        h, w = tile.shape
-        sx = (x1 - x0) / max(w, 1)
-        sy = (y1 - y0) / max(h, 1)
-        if sx == 0.0 or sy == 0.0:
-            return tile
-        theta = np.deg2rad(angle)
-        cos_t, sin_t = float(np.cos(theta)), float(np.sin(theta))
-        inv_rot_world = np.array([[cos_t, sin_t], [-sin_t, cos_t]], dtype=np.float64)
-        tile_to_world = np.array([[0.0, sx], [sy, 0.0]], dtype=np.float64)
-        world_to_tile = np.array([[0.0, 1.0 / sy], [1.0 / sx, 0.0]], dtype=np.float64)
-        world_origin = np.array([x0, y0], dtype=np.float64)
-        anchor = np.array([
-            float(transform.get("anchor_x_nm", (x0 + x1) / 2.0)),
-            float(transform.get("anchor_y_nm", (y0 + y1) / 2.0)),
-        ], dtype=np.float64)
-        shift = np.array([dx_nm, dy_nm], dtype=np.float64)
-        matrix = world_to_tile @ inv_rot_world @ tile_to_world
-        offset = world_to_tile @ (inv_rot_world @ (world_origin - anchor - shift) + anchor - world_origin)
-        out = affine_transform(
+        geometry = tuple(float(value) for value in self._last_tile_geometry)
+        return self._alignment_warp(
             tile,
-            matrix,
-            offset=offset,
-            output_shape=tile.shape,
+            geometry,
+            geometry,
+            tile.shape,
+            transform,
             order=1 if self._overlay_alignment_panel is not None else 3,
-            mode="constant",
-            cval=0.0,
             prefilter=self._overlay_alignment_panel is None,
-        ).astype(np.float32, copy=False)
-        out[~np.isfinite(out)] = 0.0
-        out[out < 0.0] = 0.0
-        vmax = float(np.nanmax(out)) if out.size else 0.0
-        if vmax > 0.0:
-            out[out < vmax * 1e-6] = 0.0
-        return out
+            pixel_size_nm=self._current_render_pixel_size_nm(),
+        )
 
     def _normalized_tile(self, tile: np.ndarray, ch: dict) -> np.ndarray:
         if tile.size == 0 or not np.any(np.isfinite(tile)):
@@ -4427,6 +4765,21 @@ class RenderWindow(QWidget):
             return
         if text == ORTHO_AXIS and not self._ortho_available():
             return
+        if self._overlay_alignment_panel is not None:
+            # ⚠ A pending move is stored as dx/dy/angle IN THE PLANE it was
+            # made in; switching projection reinterpreted it in the new one, so
+            # a move along Z in XZ was committed along Y in XY. Ortho-View keeps
+            # the XY primary plane, so XY <-> Ortho-View is harmless.
+            new_plane = "XY" if text == ORTHO_AXIS else text
+            if new_plane != self._active_plane():
+                message = (
+                    "Apply or Cancel the manual alignment before changing the "
+                    "projection: the pending move belongs to the "
+                    f"{self._active_plane()} plane."
+                )
+                self._state.status_message.emit(message)
+                self._state.log(message, "WARN")
+                return
         # Entering ortho from XZ/YZ must land on the same region: the panes
         # are always XY/YZ/XZ in the same places, so the view is carried across
         # as X/Y/Z rather than as "whatever this projection happened to show".
