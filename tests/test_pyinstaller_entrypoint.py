@@ -41,7 +41,19 @@ def _evaluate_spec():
         **{name: _stub(name) for name in ("Analysis", "PYZ", "EXE", "COLLECT", "BUNDLE")},
     }
     code = compile(SPEC.read_text(encoding="utf-8"), str(SPEC), "exec")
-    exec(code, namespace)  # noqa: S102 - the spec is first-party build config
+    # resources/pip is a generated, gitignored build input (tools/vendor_pip.py),
+    # so a fresh clone -- and CI -- does not have it, and the spec stops at its
+    # guard. That guard has its own test below; here the payload is reported
+    # present so the packaging decisions after it can be checked anywhere.
+    vendored_pip = ROOT / "resources" / "pip" / "pip"
+    real_is_dir = Path.is_dir
+
+    def is_dir(self, *args, **kwargs):
+        return self == vendored_pip or real_is_dir(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "is_dir", is_dir)
+        exec(code, namespace)  # noqa: S102 - the spec is first-party build config
     return namespace, calls
 
 
