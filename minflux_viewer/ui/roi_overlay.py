@@ -7,8 +7,8 @@ from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
-from PyQt6.QtGui import QPainter, QPainterPath
+from PyQt6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer
+from PyQt6.QtGui import QPainter, QPainterPath, QPainterPathStroker, QPolygonF
 from PyQt6.QtWidgets import QApplication
 from pyqtgraph.graphicsItems.ROI import Handle
 
@@ -21,6 +21,7 @@ from ..colors import (
     viewer_color,
 )
 from ..core import roi_scope
+from ..core import roi_logic
 from ..core.roi import RoiRecord, RoiStore
 from ..core.roi_selection import ROI_MASKS_STATE_KEY, VOLUME_ROI_TYPES, store_roi_mask
 from ..core.roi_volume import volume_geometry_text
@@ -430,6 +431,48 @@ class FilledPolyLineROI(pg.PolyLineROI):
             pass
 
 
+class CompositeROI(pg.ROI):
+    """A composite ROI — several pieces and/or holes, filled even-odd.
+
+    Like ImageJ's composite selection it has no vertex handles: it is moved as a
+    whole, and reshaped by drawing another area over it with **Shift** (add) or
+    **Alt** (remove). The path is built in data coordinates with the item at
+    the origin, so a drag shows up as the item's position, which
+    :func:`item_to_geometry` adds to the rings.
+    """
+
+    def __init__(self, rings, *, fill_color="#ffff00", **kwargs) -> None:
+        path = QPainterPath()
+        for ring in rings:
+            if len(ring) >= 3:
+                path.addPolygon(QPolygonF([QPointF(float(q[0]), float(q[1])) for q in ring]))
+                path.closeSubpath()
+        path.setFillRule(Qt.FillRule.OddEvenFill)
+        self._path = path
+        rect = path.boundingRect()
+        super().__init__([0.0, 0.0], [max(rect.width(), 1e-9), max(rect.height(), 1e-9)],
+                         **kwargs)
+        self._fill_color = pg.mkColor(fill_color)
+        self._fill_color.setAlpha(32)
+
+    def setFillColor(self, color, alpha: int = 32) -> None:
+        self._fill_color = pg.mkColor(color)
+        self._fill_color.setAlpha(alpha)
+        self.update()
+
+    def boundingRect(self) -> QRectF:
+        return self._path.boundingRect()
+
+    def shape(self) -> QPainterPath:
+        return self._path
+
+    def paint(self, p, opt, widget) -> None:
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(self.currentPen)
+        p.setBrush(pg.mkBrush(self._fill_color))
+        p.drawPath(self._path)
+
+
 class MultiPointItem(pg.ScatterPlotItem):
     """Every marker of a ``points`` (multi-point) ROI, as ONE plot item.
 
@@ -571,6 +614,12 @@ class RoiOverlayController(QObject):
         self._lasso_points: list[list[float]] = []          # committed snapped vertices
         self._angle_points: list[list[float]] = []
         self._pending_selection_record: RoiRecord | None = None
+        # ImageJ-style shape operation in progress: (op, previous draft) captured
+        # when an area shape is started with Shift (add) or Alt (remove), applied
+        # when that shape is finished. The previous outline stays on screen,
+        # dashed, until then.
+        self._shape_op: tuple[str, RoiRecord] | None = None
+        self._shape_op_preview = None
         # One-shot callback invoked with the next finished rectangle draft (used
         # by the Scale Bar "At Selection" draw-then-place flow).
         self._rect_request = None
@@ -1074,6 +1123,9 @@ class RoiOverlayController(QObject):
                 if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                     self._finish_polygon()
                 else:
+                    if not self._polygon_points:
+                        # Shift/Alt at the FIRST vertex decides, as in ImageJ.
+                        self._begin_shape_op(event, tool)
                     self._polygon_points.append(list(pos))
                     self._update_polygon_draft()
                 return True
@@ -1100,7 +1152,11 @@ class RoiOverlayController(QObject):
                 else:
                     self._update_angle_draft()
                 return True
-            if self._record_at(pos) is not None:
+            # Shift/Alt with an area tool starts a shape operation on the
+            # current selection — even (especially, for Alt) when the press lands
+            # on it, where a plain press would edit it instead.
+            starts_op = self._begin_shape_op(event, tool)
+            if not starts_op and self._record_at(pos) is not None:
                 return False
             if tool == "magic_wand":
                 # One click grows a region; the tool stays armed so several
@@ -1177,6 +1233,7 @@ class RoiOverlayController(QObject):
                     self._polygon_points = []
                     self._polyline_points = []
                     self._lasso_points = []
+                    self._cancel_shape_op()
                     self._clear_draft()
                     return True
         return False
@@ -1702,6 +1759,8 @@ class RoiOverlayController(QObject):
         it cannot double-file.
         """
         current = tool or ""
+        if current != self._last_tool:
+            self._cancel_shape_op()
         if (self._last_tool == "multi_point" and current != "multi_point"
                 and self._session_points):
             self._add_session_points_as_multi_point()
@@ -2274,6 +2333,16 @@ class RoiOverlayController(QObject):
             x1, y1 = arr.max(axis=0)
             return (f"Points  {len(marks)} points  Bounding Box "
                     f"X={x0:.0f}, Y={y0:.0f}, W={x1 - x0:.0f}, H={y1 - y0:.0f}")
+        if roi_type == "composite":
+            rings = g.get("rings") or []
+            flat = [q for ring in rings for q in ring]
+            if not flat:
+                return "Composite  (empty)"
+            arr = np.asarray([[float(q[0]), float(q[1])] for q in flat], dtype=float)
+            x0, y0 = arr.min(axis=0)
+            x1, y1 = arr.max(axis=0)
+            return (f"Composite  {len(rings)} outlines  Bounding Box "
+                    f"X={x0:.0f}, Y={y0:.0f}, W={x1 - x0:.0f}, H={y1 - y0:.0f}")
         pts = g.get("points") or []                     # line/polyline/polygon/freehand…
         if roi_type == "line" and len(pts) >= 2:
             # Straight line: start point, length, and the vector's angle from the
@@ -2405,6 +2474,9 @@ class RoiOverlayController(QObject):
         if record.type == "points":
             return MultiPointItem(self._project_points(record),
                                   color=record.stroke_color)
+        if record.type == "composite":
+            return CompositeROI(g.get("rings", []), fill_color=record.stroke_color,
+                                movable=True)
         if record.type in VOLUME_ROI_TYPES:
             # A volume ROI is drawn as its SILHOUETTE in whichever plane this
             # view shows, asked for by data-axis columns rather than a plane
@@ -2520,7 +2592,7 @@ class RoiOverlayController(QObject):
             item.setPen(pg.mkPen(edge, width=width))
         except Exception:
             pass
-        if record.type in {"rectangle", "oval", "polygon", "freehand"}:
+        if record.type in {"rectangle", "oval", "polygon", "freehand", "composite"}:
             try:
                 if hasattr(item, "setFillColor"):
                     item.setFillColor(face, alpha=face.alpha())
@@ -2657,7 +2729,7 @@ class RoiOverlayController(QObject):
             self.draft.geometry = self._open_line_geometry_from_item(item, self.draft.geometry, self.draft.type)
             return
         self.draft.geometry = item_to_geometry(self.draft.type, item, prev=self.draft.geometry)
-        if self.draft.type in {"rectangle", "oval", "polygon", "freehand"}:
+        if self.draft.type in {"rectangle", "oval", "polygon", "freehand", "composite"}:
             self._finalize_draft_selection(update_item=True)
 
     def _notify_overlay_changed(self) -> None:
@@ -2675,8 +2747,95 @@ class RoiOverlayController(QObject):
             except Exception:
                 pass
 
+    def _begin_shape_op(self, event, tool) -> bool:
+        """Capture an ImageJ-style shape operation at the start of a new shape.
+
+        **Shift** adds the shape about to be drawn to the current selection,
+        **Alt** removes it. Only an area tool (or the magic wand) does this, and
+        only over an area, composite or line selection — ImageJ's own rules (see
+        :mod:`minflux_viewer.core.roi_logic`). Returns whether one started.
+        """
+        if self._shape_op is not None:
+            if self._polygon_points:      # started at this polygon's first vertex
+                return True
+            self._cancel_shape_op()       # left over from an interrupted gesture
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            op = "or"
+        elif mods & Qt.KeyboardModifier.AltModifier:
+            op = "not"
+        else:
+            return False
+        previous = self.draft
+        if not roi_logic.can_combine(previous, tool):
+            return False
+        self._shape_op = (op, copy.deepcopy(previous))
+        self._show_shape_op_preview(previous)
+        return True
+
+    def _show_shape_op_preview(self, record) -> None:
+        """Keep the selection being added to / cut from visible, dashed."""
+        from PyQt6.QtWidgets import QGraphicsPathItem
+
+        self._remove_shape_op_preview()
+        try:
+            path = roi_logic.record_path(record)
+        except ValueError:
+            return
+        item = QGraphicsPathItem(path)
+        pen = pg.mkPen(pg_safe_hex(record.stroke_color or "#ffff00"), width=1.5,
+                       style=Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        item.setPen(pen)
+        item.setZValue(9)
+        self.plot_item.addItem(item, ignoreBounds=True)
+        self._shape_op_preview = item
+
+    def _remove_shape_op_preview(self) -> None:
+        item, self._shape_op_preview = self._shape_op_preview, None
+        if item is not None:
+            try:
+                self.plot_item.removeItem(item)
+            except Exception:
+                pass
+
+    def _cancel_shape_op(self) -> None:
+        self._shape_op = None
+        self._remove_shape_op_preview()
+
+    def _apply_shape_op(self) -> bool:
+        """Combine the finished draft with the selection captured at its start.
+
+        Returns False when nothing is left (Alt removed everything): the draft
+        is then cleared, as ImageJ deletes the selection.
+        """
+        op, previous = self._shape_op
+        self._cancel_shape_op()
+        new = self.draft
+        if new is None or new.type not in roi_logic.AREA_TYPES:
+            return True
+        result = roi_logic.combine(previous, new, op)
+        if result is None:
+            self._clear_draft()
+            self._emit_status("the selection is empty")
+            return False
+        if self.draft_item is not None:
+            try:
+                self.plot_item.removeItem(self.draft_item)
+            except Exception:
+                pass
+        self.draft = result
+        self.draft_item = self._make_item(result)
+        self._style_item(self.draft_item, result, True)
+        self._connect_draft_edit(self.draft_item)
+        self.plot_item.addItem(self.draft_item)
+        self._report_roi_status(result)
+        return True
+
     def _finalize_draft_selection(self, *, update_item: bool) -> None:
         if self.draft is None:
+            return
+        if self._shape_op is not None and not self._apply_shape_op():
             return
         record = self._normalize_record(self.draft)
         self.draft = record
@@ -2823,6 +2982,16 @@ class RoiOverlayController(QObject):
             x, y, w, h = box
             return (x - tolerance <= pos[0] <= x + w + tolerance
                     and y - tolerance <= pos[1] <= y + h + tolerance)
+        if record.type == "composite":
+            # Inside its area (holes excluded), or within tolerance of an edge —
+            # never merely inside the bounding box, most of which may be holes.
+            path = roi_logic.area_path(record)
+            pt = QPointF(float(pos[0]), float(pos[1]))
+            if path.contains(pt):
+                return True
+            stroker = QPainterPathStroker()
+            stroker.setWidth(max(2.0 * float(tolerance), 1e-9))
+            return stroker.createStroke(path).contains(pt)
         if record.type not in {"rectangle", "oval"}:
             x, y, w, h = _bounds(record.geometry)
             return x - tolerance <= pos[0] <= x + w + tolerance and y - tolerance <= pos[1] <= y + h + tolerance
@@ -3208,7 +3377,7 @@ class RoiOverlayController(QObject):
             return datasets[idx]
         return getattr(getattr(self.owner, "_state", None), "active_dataset", None)
 
-    _REGION_TYPES = {"rectangle", "oval", "polygon", "freehand"}
+    _REGION_TYPES = {"rectangle", "oval", "polygon", "freehand", "composite"}
     #: Every shape that encloses localizations, so has a selection and a count.
     #: ⚠ A volume ROI is NOT in _REGION_TYPES, so any gate meaning "this shape
     #: selects rows" has to be this set instead -- three of them missed volume
@@ -3329,6 +3498,14 @@ class RoiOverlayController(QObject):
 
 
 def item_to_geometry(roi_type: str, item, prev: dict[str, Any] | None = None) -> dict[str, Any]:
+    if roi_type == "composite":
+        # The rings were laid out with the item at the origin; a drag moved it.
+        pos = item.pos()
+        rings = (prev or {}).get("rings", [])
+        out = {"rings": roi_logic.translate_rings(rings, float(pos.x()), float(pos.y()))}
+        if "polygonal" in (prev or {}):
+            out["polygonal"] = bool(prev["polygonal"])
+        return out
     if roi_type == "point":
         pos = item.pos()                     # PointMarkerItem (TargetItem): centre
         return {"point": [float(pos.x()), float(pos.y())]}
@@ -3379,6 +3556,8 @@ def _bounds(geometry: dict[str, Any]) -> tuple[float, float, float, float]:
         pt = geometry["point"]                       # may carry a 3rd (depth) coord
         return float(pt[0]), float(pt[1]), 0.0, 0.0
     raw = geometry.get("points", [])
+    if not len(raw) and "rings" in geometry:         # composite
+        raw = [q for ring in geometry["rings"] for q in ring]
     if not len(raw):
         return 0.0, 0.0, 0.0, 0.0
     # Take (x, y) from each vertex explicitly — robust to a mix of 2-D / 3-D

@@ -20,6 +20,9 @@ from PyQt6.QtGui import QPainterPath, QPolygonF
 ROI_TYPES = {
     "rectangle", "oval", "polygon", "freehand", "line", "point", "points", "angle",
     "polyline", "freehand_line", "magnetic_lasso",
+    # Several pieces and/or holes — the result of ImageJ-style shape operations
+    # (Shift adds a drawn shape, Alt removes it); see core/roi_logic.py.
+    "composite",
     # Volume (3-D) shapes. Listed literally rather than imported from
     # roi_selection.VOLUME_ROI_TYPES to keep this module free of that import;
     # tests/test_roi_volume.py asserts the two agree.
@@ -288,6 +291,11 @@ class RoiStore(QObject):
 
 
 def record_to_path(record: RoiRecord) -> QPainterPath:
+    # Areas — rotation and composite rings included — come from the one area
+    # builder the shape operations use, so a Combine of rotated shapes is right.
+    if record.type in {"rectangle", "oval", "polygon", "freehand", "composite"}:
+        from .roi_logic import area_path
+        return area_path(record)
     path = QPainterPath()
     g = record.geometry
     if record.type in {"rectangle", "oval"}:
@@ -329,6 +337,8 @@ def record_to_points(record: RoiRecord) -> np.ndarray:
         pt = g.get("point", [0.0, 0.0])
         return np.asarray([[float(pt[0]), float(pt[1])]], dtype=float)
     raw = g.get("points", [])
+    if not len(raw) and record.type == "composite":
+        raw = [p for ring in g.get("rings", []) for p in ring]
     if not len(raw):
         return np.empty((0, 2), dtype=float)
     # Take (x, y) per vertex — robust to a mix of 2-D / 3-D points (drops depth).
@@ -375,6 +385,16 @@ def record_to_imagej(record: RoiRecord):
         )
 
     g = record.geometry or {}
+    if record.type == "composite":
+        # ImageJ's composite ("shape") ROI: a RECT carrying a MOVETO/LINETO/CLOSE
+        # path in absolute coordinates (RoiDecoder.getShapeRoi).
+        from .roi_logic import imagej_path
+        x, y, w, h = _bounds(g)
+        path = imagej_path(record)
+        return ImagejRoi(roitype=ROI_TYPE.RECT, left=int(np.floor(x)), top=int(np.floor(y)),
+                         right=int(np.ceil(x + w)), bottom=int(np.ceil(y + h)),
+                         shape_roi_size=int(path.size), multi_coordinates=path,
+                         name=record.name)
     rotated = abs(float(g.get("angle", 0.0) or 0.0)) > 1e-9
     if record.type == "rectangle" and not rotated:
         x, y, w, h = _bounds(g)
@@ -490,6 +510,10 @@ def record_from_imagej(roi) -> RoiRecord:
     elif roi_type_name == "oval":
         roi_type = "oval"
         geometry = {"bounds": [float(roi.left), float(roi.top), float(roi.right - roi.left), float(roi.bottom - roi.top)]}
+    elif roi_type_name == "rect" and getattr(roi, "multi_coordinates", None) is not None:
+        from .roi_logic import rings_from_imagej_path
+        roi_type = "composite"
+        geometry = {"rings": rings_from_imagej_path(roi.multi_coordinates)}
     elif roi_type_name == "rect":
         roi_type = "rectangle"
         geometry = {"bounds": [float(roi.left), float(roi.top), float(roi.right - roi.left), float(roi.bottom - roi.top)]}
@@ -504,6 +528,8 @@ def _bounds(geometry: dict[str, Any]) -> tuple[float, float, float, float]:
         x, y, w, h = geometry["bounds"]
         return float(x), float(y), float(w), float(h)
     raw = geometry.get("points", [])
+    if not len(raw) and "rings" in geometry:          # composite
+        raw = [p for ring in geometry["rings"] for p in ring]
     if not len(raw):
         return 0.0, 0.0, 0.0, 0.0
     # (x, y) per vertex — robust to a mix of 2-D / 3-D points (a raw np.asarray on

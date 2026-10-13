@@ -126,6 +126,10 @@ def available_conversions(record: RoiRecord) -> list[str]:
         out.append("region")  # line → buffered region
         if t in OPEN_LINE_TYPES or t == "magnetic_lasso":
             out.append("polygon")
+    elif t == "composite":
+        # The enclosing fits work on the outline vertices of every ring (a hole
+        # lies inside the outer ring, so it changes none of them).
+        out += ["bounding_box", "rectangle", "oval", "ellipse", "convex_hull"]
     elif t == "point":
         out.append("bounding_box")            # size-based box / oval (no extent to fit)
         out.append("oval")
