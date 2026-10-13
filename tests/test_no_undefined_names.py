@@ -25,13 +25,10 @@ import pytest
 
 import minflux_viewer
 
-#: Modules whose import needs a package this application does not depend on.
-#: They are developer tools, not part of the viewer, and are reported as
-#: skipped rather than silently passed.
-OPTIONAL_IMPORTS = {
-    "minflux_viewer.msr.cli": "click",
-    "minflux_viewer.msr.msr_test_parser": "rich",
-}
+#: Modules whose import needs a package this application does not depend on,
+#: mapped to that package. They are reported as skipped rather than silently
+#: passed. Empty since the msr CLI and test parser (click, rich) were removed.
+OPTIONAL_IMPORTS: dict[str, str] = {}
 
 _BUILTINS = frozenset(dir(builtins))
 

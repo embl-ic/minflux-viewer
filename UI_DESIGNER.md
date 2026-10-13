@@ -1,23 +1,20 @@
 # Editing the UI with Qt Designer
 
-Several windows in this project have their layout defined in Qt Designer
-`.ui` files instead of being hand-built in Python. This document
-describes the workflow for editing them.
+The main window's menus, toolbar and status bar are defined in a Qt
+Designer `.ui` file instead of being hand-built in Python. This document
+describes the workflow for editing it. Every other window is built in
+Python. (The Data window, Filter dialog and Dataset Manager once had
+reference `.ui` shells too; they had drifted from the real windows,
+nothing imported them, and they were removed.)
 
 ## Files
 
 ```
 resources/ui/                    ← human-edited .ui (XML) files
     main_window.ui               ← menus, toolbar, status bar
-    data_window.ui               ← per-dataset info card (reference)
-    filter_dialog.ui             ← filter dialog shell (reference)
-    dataset_manager.ui           ← dataset manager shell (reference)
 
 minflux_viewer/ui/generated/     ← AUTO-GENERATED — do not hand-edit
     main_window_ui.py            ← produced by pyuic6 from main_window.ui
-    data_window_ui.py
-    filter_dialog_ui.py
-    dataset_manager_ui.py
 
 tools/
     compile_ui.py                ← script that runs pyuic6 on every .ui
