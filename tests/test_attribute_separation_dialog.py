@@ -461,4 +461,3 @@ def test_assignment_follows_a_single_iteration_choice(qtbot):
     dlg._iter_combo.setCurrentText("3rd")
     assert np.allclose(dlg._per_loc_selected(), mfx["dcr"][mfx["itr"] == 2])
     assert dlg.basis_description() == "3rd iteration"
-

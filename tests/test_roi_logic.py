@@ -178,4 +178,3 @@ def test_a_composite_offers_the_enclosing_fits():
     assert hull.type == "polygon"
     box = convert_roi(comp, "bounding_box")
     assert box.geometry["bounds"] == pytest.approx([0, 0, 45, 35], abs=0.1)
-

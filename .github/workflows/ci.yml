@@ -50,6 +50,11 @@ jobs:
           poetry sync
       - name: Ruff and mypy may not gain findings
         run: poetry run python tools/lint_ratchet.py
+      - name: No whitespace errors anywhere in the tree
+        shell: bash
+        # Against the empty tree, so every committed file is checked, not only
+        # the files a push happens to touch. Markdown hard breaks use "\".
+        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
 
   pure-tests:
     name: Pure tests (Python ${{ matrix.python }})

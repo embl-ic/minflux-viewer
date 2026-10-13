@@ -36,4 +36,3 @@ def test_histogram_draws_vertical_minimum_and_maximum_level_markers(qapp):
     assert image.pixelColor(x_lo, y_mid) == QColor("black")
     assert image.pixelColor(x_hi, y_mid) == QColor("black")
     assert image.pixelColor(x_lo + 5, y_mid) == QColor("white")
-

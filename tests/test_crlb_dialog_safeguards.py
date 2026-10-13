@@ -150,4 +150,3 @@ def test_expanded_3d_report_fits_default_width_and_scrolls_vertically(qtbot):
     qtbot.waitUntil(lambda: scroll.verticalScrollBar().maximum() > 0)
     assert scroll.horizontalScrollBar().maximum() == 0
     assert "Histogram report could not be created" not in _text(dialog)
-
