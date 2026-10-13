@@ -257,6 +257,34 @@ def test_remapping_leaves_an_unscoped_roi_alone():
     assert record.context == {}
 
 
+def test_a_selection_result_keeps_what_was_recorded_when_the_roi_was_drawn():
+    """store_roi_mask replaces the context with the selection's. The facts
+    stamped at drawing time -- the plane, the depth a flat ROI sits at, the Z
+    scaling factor -- are not part of a selection and must survive it: the
+    side panes draw a flat ROI edge-on at ``depth_value``, and Scale Z
+    pre-fills from ``z_scaling_factor``, which cannot be recovered later."""
+    drawn = {"source_view": "render", "dataset_idx": 0, "view_plane": "XZ",
+             "depth_axis": "Y", "depth_value": 12.5, "z_scaling_factor": 0.67}
+    selection = {"source_view": "render", "dataset_idx": 0, "orientation": "XZ",
+                 "depth_axis": "Y", "depth_range": None,
+                 "depth_inclusive": [True, True]}
+
+    merged = roi_scope.scope_context(drawn, selection)
+
+    assert merged["view_plane"] == "XZ"
+    assert merged["depth_value"] == 12.5
+    assert merged["z_scaling_factor"] == 0.67
+    # ...while the selection's own details still come from the selection.
+    assert merged["orientation"] == "XZ" and merged["depth_range"] is None
+
+
+def test_a_fresh_selection_detail_wins_over_a_stale_one():
+    old = {"dataset_idx": 0, "depth_range": [10.0, 20.0], "view_plane": "XY"}
+    new = {"dataset_idx": 0, "depth_range": None}
+    merged = roi_scope.scope_context(old, new)
+    assert merged["depth_range"] is None and merged["view_plane"] == "XY"
+
+
 def test_a_per_dataset_roi_cache_follows_its_datasets_when_one_closes():
     """*Restore ROI* remembers each dataset's last draft, keyed by index.
 
