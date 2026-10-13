@@ -20,11 +20,15 @@ LUT/color. Channels are produced three ways —
 contains its attribute value. This mirrors the time-window model but on an
 arbitrary attribute axis.
 
-Also here: :func:`eco_weighted_group_mean` / :func:`pooled_dcr_per_loc`, the
-photon-weighted DCR pooling (``Σ dcr·eco / Σ eco`` over the final-scale
-iterations) that makes the DCR peaks separate more cleanly — pyMINFLUX's
-"Pool DCR values (ECO-weighted)", but weighted over *our* detected final-scale
-iterations rather than a single last iteration.
+Also here: :func:`eco_weighted_group_mean` / :func:`pooled_dcr_per_loc`, DCR
+pooled over a localization's **photon-bearing iterations**, weighted by their
+photon counts: ``Σ dcr·eco / Σ eco``. Because ``dcr`` is the fraction of a
+localization's photons in the first detection channel, that weighted mean is
+exactly the channel fraction of the *summed* photons — photon counting, not a
+heuristic weighting — and in a 3-D sequence, whose final position is fixed by a
+lateral and an axial iteration, it uses both and narrows the DCR peaks. With a
+single photon-bearing iteration (a 2-D sequence) it equals the last value. It is
+offered for DCR only, in the channel-separation dialog.
 
 Pure NumPy where possible; the ``ds``-level helpers read the raw store through
 :mod:`minflux_viewer.core.loader`.
@@ -156,11 +160,11 @@ def assign_traces(
 ) -> np.ndarray:
     """Per-localization channel labels where **a whole trace shares one label**.
 
-    * ``"mean"`` / ``"median"`` — collapse the trace's attribute to one value
-      (NaN-ignoring), assign that value's containing channel.
-    * ``"majority"`` / ``"vote"`` — assign each localization, then the trace takes
-      the majority channel; ``min_confidence`` is the required vote-agreement
-      fraction (below it, or on a tie, the trace is unassigned).
+    ``mode`` ``"mean"`` / ``"median"`` collapses the trace's attribute to one
+    value (NaN-ignoring) and assigns that value's containing channel. (A per-trace
+    majority vote was removed: over channel windows it is the trace-wise mode,
+    which adds nothing the median does not give.) ``min_confidence`` is accepted
+    for backward compatibility and ignored.
 
     Returns an int array aligned to *values* (channel index, or -1). Falls back to
     per-localization :func:`assign_values` if *tid* does not align.
@@ -178,26 +182,6 @@ def assign_traces(
     ends = np.concatenate([bnd, [s_inv.size]])
 
     m = str(mode).lower()
-    if "major" in m or "vote" in m:
-        per_loc = assign_values(v, channels)             # -1 for out-of-window / NaN
-        s_lab = per_loc[order]
-        n_ch = len(channels)
-        trace_label = np.full(uniq.size, -1, dtype=int)
-        for k, (a, b) in enumerate(zip(starts, ends)):
-            grp = s_lab[a:b]
-            grp = grp[grp >= 0]
-            if grp.size == 0:
-                continue
-            counts = np.bincount(grp, minlength=n_ch)
-            top = int(counts.argmax())
-            best = int(counts[top])
-            # ambiguous tie → unassigned
-            if np.count_nonzero(counts == best) > 1:
-                continue
-            if best / grp.size >= float(min_confidence):
-                trace_label[k] = top
-        return trace_label[inv]
-
     fn = np.nanmedian if ("median" in m) else np.nanmean
     trace_val = np.full(uniq.size, np.nan)
     with np.errstate(all="ignore"):
@@ -281,8 +265,8 @@ def pooled_dcr_per_loc(ds) -> np.ndarray | None:
     """Photon-weighted DCR per localization, aligned to ``ds.attr`` rows.
 
     For each localization, ``dcr`` is pooled over its **final-scale (photon-
-    bearing) iterations** weighted by ``eco``: ``Σ dcr·eco / Σ eco``
-    (pyMINFLUX's ECO-weighted pooling, over
+    bearing) iterations** weighted by ``eco``: ``Σ dcr·eco / Σ eco``, the channel
+    fraction of the summed photons (iterations from
     :func:`~minflux_viewer.core.mfx_sequence.photon_iterations_for_dataset`).
     Returns ``None`` when the raw store, ``eco``, or the last-valid alignment is
     unavailable (caller then uses the plain materialized DCR).
@@ -323,3 +307,22 @@ def pooled_dcr_per_loc(ds) -> np.ndarray | None:
     if order.shape[0] != int(getattr(ds.prop, "num_loc", -1)):
         return None
     return per_loc[order]
+
+
+def photon_weighting_status(ds) -> tuple[bool, str]:
+    """Whether photon-weighted DCR pooling can differ from the last value.
+
+    ``(True, "")`` when the dataset carries ``eco`` and at least two photon-bearing
+    iterations; otherwise ``(False, reason)`` — with one such iteration the pooled
+    value *is* the last one, so offering it would be a no-op.
+    """
+    from ..core.mfx_sequence import photon_iterations_for_dataset
+
+    raw = getattr(ds, "mfx_raw", None)
+    if raw is None or raw.get("eco") is None or raw.get("dcr") is None:
+        return False, "needs per-iteration dcr and eco (photon counts)"
+    iters = photon_iterations_for_dataset(ds).photon_iters
+    if len(iters) < 2:
+        return False, ("only one iteration carries the localization photons "
+                       "(2-D sequence), so the pooled value equals the last one")
+    return True, ""

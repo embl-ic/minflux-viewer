@@ -68,18 +68,6 @@ def test_assign_traces_mean_keeps_trace_together():
     assert lab[3] == 0                                  # noisy 0.80 follows its trace
 
 
-def test_assign_traces_majority_vote_and_confidence():
-    ch = place_evenly(0.0, 1.0, 2)
-    # trace 10: 3 in ch0 + 1 in ch1 (frac 0.75); trace 20: 2/2 tie.
-    vals = np.array([0.2, 0.3, 0.4, 0.8,   0.2, 0.3, 0.8, 0.9])
-    tid = np.array([10, 10, 10, 10,        20, 20, 20, 20])
-    lab_lo = assign_traces(vals, tid, ch, mode="majority", min_confidence=0.5)
-    assert set(lab_lo[:4]) == {0}
-    assert set(lab_lo[4:]) == {-1}                      # tie → unassigned
-    lab_hi = assign_traces(vals, tid, ch, mode="majority", min_confidence=0.8)
-    assert set(lab_hi[:4]) == {-1}                      # 0.75 < 0.80
-
-
 # --------------------------------------------------------------------------- eco weighting
 def test_eco_weighted_group_mean():
     # group 0: values 0,1 with weights 1,3 → 0.75 ; group 1: value 1 weight 5 → 1.0

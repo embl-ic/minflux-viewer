@@ -55,7 +55,9 @@ from ..analysis.attribute_channels import (
     Channel,
     channels_from_boundaries,
     channels_from_fit,
+    photon_weighting_status,
     place_evenly,
+    pooled_dcr_per_loc,
 )
 from ..analysis.distribution_fit import (
     DISTRIBUTION_LABELS,
@@ -65,13 +67,36 @@ from ..analysis.distribution_fit import (
 )
 from ..colormaps import channel_colormap_names, representative_rgb
 from ..colors import is_solid_color, rgba_hex, solid_color_rgb
-from ..core.iteration import FLATTEN_LABEL, iteration_labels, ordinal, parse_iteration_label
-from ..core.loader import attr_values_1d, is_value_pool_selector, mfx_get
+from ..core.iteration import (
+    AVERAGE_LABEL,
+    FLATTEN_LABEL,
+    iteration_labels,
+    ordinal,
+    parse_iteration_label,
+)
+from ..core.loader import (
+    attr_values_1d,
+    attr_values_for_selection,
+    is_value_pool_selector,
+    mfx_get,
+)
 from ..utils.filters import raw_trace_aggregate
 from .attribute_help import apply_attribute_tooltips
 from .plot_format import apply_spatial_y_direction
 
 _DISPLAY_AGG = ["per loc", "trace mean", "trace median"]
+
+#: Iteration choice offered for **DCR only**: each localization's DCR pooled over
+#: its photon-bearing iterations, weighted by their photon counts (eco) — the
+#: detection-channel fraction of the summed photons. See
+#: :func:`~minflux_viewer.analysis.attribute_channels.pooled_dcr_per_loc`.
+PHOTON_WEIGHTED_LABEL = "final [photon-weighted]"
+_PHOTON_WEIGHTED_TIP = (
+    "DCR of each localization pooled over the iterations that collect its photons\n"
+    "(a 3-D sequence's final lateral and axial steps), weighted by their photon\n"
+    "counts: Σ dcr·eco / Σ eco, i.e. the channel fraction of the summed photons.\n"
+    "More photons per value, so the DCR peaks are narrower. The channels are\n"
+    "assigned on this value too.")
 
 #: Channel colours, in the order channels are created: R, G, B, M, C, Y. Solid
 #: colours rather than colormaps — a channel is one population, so one hue reads
@@ -171,6 +196,10 @@ class AttributeSeparationDialog(QDialog):
         self._synchronizing = False
         self._suspend = False
         self._closing = False
+        # (key, per-localization values) of the current Iteration choice — the
+        # photon-weighted pooling reads the whole raw store, so it is not
+        # recomputed on every count refresh.
+        self._basis_cache = None
 
         self._build_ui()
         self._recompute_values(reset_bin=True)
@@ -385,6 +414,7 @@ class AttributeSeparationDialog(QDialog):
         else:
             self._iter_combo.setVisible(False)
         self._iter_combo.blockSignals(False)
+        self._sync_photon_weighted_item()
 
         self._populate_sources()
         # A ROI added or a filter applied while this dialog is open must show up
@@ -432,6 +462,7 @@ class AttributeSeparationDialog(QDialog):
         if self._suspend or not name:
             return
         self._attribute = name
+        self._sync_photon_weighted_item()
         self._plot.setLabel("bottom", name.upper())
         self._update_title()
         self._fit_result = None
@@ -440,7 +471,82 @@ class AttributeSeparationDialog(QDialog):
         self._refresh_counts()
 
     def _selection(self):
+        if self._iter_combo.currentText() == PHOTON_WEIGHTED_LABEL:
+            return "photon", "single"
         return parse_iteration_label(self._iter_combo.currentText())
+
+    def _sync_photon_weighted_item(self) -> None:
+        """Offer *final [photon-weighted]* for DCR only — disabled, with the reason,
+        when it could not differ from the last value."""
+        combo = self._iter_combo
+        i = combo.findText(PHOTON_WEIGHTED_LABEL)
+        ds = self._dataset()
+        if self._attribute != "dcr" or combo.count() == 0 or ds is None:
+            if i >= 0:
+                blocked = combo.blockSignals(True)
+                was_current = combo.currentIndex() == i
+                combo.removeItem(i)
+                if was_current:
+                    combo.setCurrentText(FLATTEN_LABEL)
+                combo.blockSignals(blocked)
+            return
+        if i < 0:
+            after = combo.findText(AVERAGE_LABEL)
+            i = after + 1 if after >= 0 else combo.count()
+            blocked = combo.blockSignals(True)
+            combo.insertItem(i, PHOTON_WEIGHTED_LABEL)
+            combo.blockSignals(blocked)
+        ok, reason = photon_weighting_status(ds)
+        item = combo.model().item(i) if hasattr(combo.model(), "item") else None
+        if item is not None:
+            item.setEnabled(ok)
+        combo.setItemData(
+            i, _PHOTON_WEIGHTED_TIP if ok else f"Not available: {reason}.",
+            Qt.ItemDataRole.ToolTipRole)
+
+    def _per_loc_selected(self):
+        """Per-localization values (``ds.attr`` rows) of the current Iteration choice.
+
+        A choice that yields one value per localization — last, one iteration,
+        all [sum], all [average], final [photon-weighted] — is what the channels
+        are assigned on, so a window drawn on that histogram selects the values it
+        shows. The render-pooling choices (flatten, stacked) have one value per
+        raw row, so the assignment then uses the ordinary per-localization value.
+        """
+        ds = self._dataset()
+        if ds is None:
+            return None
+        text = self._iter_combo.currentText() if self._iter_combo.count() else ""
+        key = (id(ds), self._attribute, text)
+        if self._basis_cache is not None and self._basis_cache[0] == key:
+            return self._basis_cache[1]
+        v = None
+        if text == PHOTON_WEIGHTED_LABEL:
+            v = pooled_dcr_per_loc(ds)
+        elif text:
+            itr_sel, render = parse_iteration_label(text)
+            if render == "single":
+                v = attr_values_for_selection(ds, self._attribute, itr=itr_sel)
+        if v is None:
+            v = attr_values_1d(ds, self._attribute)
+        v = None if v is None else np.asarray(v, dtype=float).ravel()
+        self._basis_cache = (key, v)
+        return v
+
+    def basis_description(self) -> str:
+        """Which per-localization value the channels were assigned on."""
+        text = self._iter_combo.currentText() if self._iter_combo.count() else ""
+        if text == PHOTON_WEIGHTED_LABEL:
+            return "final iterations, photon-weighted"
+        if text:
+            itr_sel, render = parse_iteration_label(text)
+            if render == "single":
+                if itr_sel == "last":
+                    return "last iteration"
+                if itr_sel in ("sum", "average"):
+                    return f"all iterations, {itr_sel}"
+                return f"{ordinal(int(itr_sel) + 1)} iteration"
+        return "last valid iteration"
 
     def _log_on(self) -> bool:
         return self._log_chk.isChecked()
@@ -463,12 +569,9 @@ class AttributeSeparationDialog(QDialog):
         return vals
 
     def _per_loc_raw(self):
-        """Per-localization attribute values (num_loc), un-transformed."""
-        ds = self._dataset()
-        if ds is None:
-            return None
-        v = attr_values_1d(ds, self._attribute)
-        return None if v is None else np.asarray(v, dtype=float).ravel()
+        """Per-localization attribute values (num_loc), un-transformed, of the
+        current Iteration choice (see :meth:`_per_loc_selected`)."""
+        return self._per_loc_selected()
 
     def _display_values(self) -> np.ndarray:
         """Transformed values driving the histogram + fit."""
@@ -476,11 +579,20 @@ class AttributeSeparationDialog(QDialog):
         if ds is None:
             return np.empty(0)
         itr_sel, _ = self._selection()
+        agg = self._agg_combo.currentText()
+        if itr_sel == "photon":
+            vals = self._per_loc_selected()
+            if vals is None:
+                return np.empty(0)
+            if agg != "per loc":
+                tid = attr_values_1d(ds, "tid")
+                if tid is not None:
+                    vals = raw_trace_aggregate(vals, np.asarray(tid).ravel(), agg)
+            return self._transform_drop(vals)
         vals = mfx_get(ds, self._attribute, itr=itr_sel, vld_only=True)
         if vals is None:
             return np.empty(0)
         vals = np.asarray(vals).ravel().astype(float)
-        agg = self._agg_combo.currentText()
         if agg != "per loc":
             # tid identifies a ROW, so a value-pooling selector uses the `last`
             # rows its pooled values are laid on (a summed tid is meaningless).
@@ -1308,9 +1420,11 @@ class AttributeSeparationDialog(QDialog):
         if self._owner is None or not hasattr(self._owner, "apply_channel_separation"):
             return
         keep_unassigned = self._unassigned_combo.currentText() == UNASSIGNED_KEEP
+        windows = any(row["kind"] == "window" for row in self._rows)
         ok = self._owner.apply_channel_separation(
             self._idx, None, channels, attribute=self._attribute,
             method_label=f"{self._attribute} channel separation",
-            masks=masks, include_unassigned=keep_unassigned)
+            masks=masks, include_unassigned=keep_unassigned,
+            basis=self.basis_description() if windows else "")
         if ok:
             self.close()

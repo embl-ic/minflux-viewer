@@ -77,8 +77,10 @@ class _FakeOwner:
         self.applied = None
 
     def apply_channel_separation(self, idx, labels, channels, *, attribute="",
-                                 method_label="", masks=None, include_unassigned=True):
+                                 method_label="", masks=None, include_unassigned=True,
+                                 basis=""):
         self.applied = {
+            "basis": basis,
             "idx": idx,
             "labels": labels,
             "channels": list(channels),
@@ -384,3 +386,80 @@ def test_fit_updates_channels(qtbot):
     assert len(dlg._rows) == 2
     masks, _overlap, _unassigned = dlg._resolve_assignment()
     assert all(m.any() for m in masks)
+
+
+# ------------------------------------------------- photon-weighted DCR pooling
+def _make_two_photon_iters(n_loc=400, seed=0):
+    """3-D-like data: the last two iterations (8, 9) both carry photons, and the
+    DCR measured in each is noisy around the trace's true value; iteration 9 has
+    twice the photons of iteration 8 (eco 100 vs 50)."""
+    rng = np.random.default_rng(seed)
+    n_itr = 10
+    n = n_loc * n_itr
+    itr = np.tile(np.arange(n_itr), n_loc)
+    dt = np.dtype([
+        ("vld", "?"), ("itr", "<i4"), ("tid", "<i4"),
+        ("loc", "<f8", (3,)), ("dcr", "<f8"), ("eco", "<f8"),
+    ])
+    mfx = np.zeros(n, dtype=dt)
+    mfx["itr"], mfx["vld"] = itr, True
+    mfx["tid"] = np.repeat(np.arange(n_loc) // 3, n_itr)
+    mfx["loc"][:, 0] = np.repeat(rng.uniform(0, 1e-6, n_loc), n_itr)
+    mfx["loc"][:, 1] = np.repeat(rng.uniform(0, 1e-6, n_loc), n_itr)
+    mfx["loc"][:, 2] = np.repeat(rng.uniform(0, 4e-7, n_loc), n_itr)
+    truth = np.repeat(np.where(np.arange(n_loc) % 2 == 0, 0.3, 0.7), n_itr)
+    mfx["dcr"] = np.clip(truth + rng.normal(0, 0.08, n), 0, 1)
+    mfx["eco"] = np.where(itr == 9, 100.0, 50.0)
+    return mfx
+
+
+def test_photon_weighted_entry_is_offered_for_dcr_only(qtbot):
+    from minflux_viewer.ui.attribute_separation_dialog import PHOTON_WEIGHTED_LABEL
+
+    dlg, _ds, _owner = _dialog(qtbot, mfx=_make_two_photon_iters(), pick_attribute=True)
+    i = dlg._iter_combo.findText(PHOTON_WEIGHTED_LABEL)
+    assert i >= 0
+    assert dlg._iter_combo.model().item(i).isEnabled()
+    if dlg._attr_combo.findText("eco") >= 0:
+        dlg._attr_combo.setCurrentText("eco")
+        assert dlg._iter_combo.findText(PHOTON_WEIGHTED_LABEL) < 0
+
+
+def test_photon_weighted_entry_is_disabled_with_one_photon_iteration(qtbot):
+    from minflux_viewer.ui.attribute_separation_dialog import PHOTON_WEIGHTED_LABEL
+
+    dlg, _ds, _owner = _dialog(qtbot, mfx=_make_multi_iter_dcr())   # 2-D: one such iteration
+    i = dlg._iter_combo.findText(PHOTON_WEIGHTED_LABEL)
+    assert i >= 0
+    assert not dlg._iter_combo.model().item(i).isEnabled()
+    assert "Not available" in dlg._iter_combo.itemData(i, 3)        # ToolTipRole
+
+
+def test_photon_weighted_values_are_the_summed_photon_fraction(qtbot):
+    from minflux_viewer.ui.attribute_separation_dialog import PHOTON_WEIGHTED_LABEL
+
+    mfx = _make_two_photon_iters()
+    dlg, ds, owner = _dialog(qtbot, mfx=mfx)
+    dlg._iter_combo.setCurrentText(PHOTON_WEIGHTED_LABEL)
+    basis = dlg._per_loc_selected()
+    d8 = mfx["dcr"][mfx["itr"] == 8]
+    d9 = mfx["dcr"][mfx["itr"] == 9]
+    expected = (d8 * 50.0 + d9 * 100.0) / 150.0
+    assert basis.size == ds.prop.num_loc
+    assert np.allclose(basis, expected)
+    # pooling two measurements narrows each population around its true value
+    last = mfx["dcr"][mfx["itr"] == 9]
+    low = np.arange(basis.size) % 2 == 0
+    assert np.std(basis[low]) < np.std(last[low])
+    # and the channels are assigned on it, then reported as such
+    dlg._apply()
+    assert owner.applied["basis"] == "final iterations, photon-weighted"
+
+
+def test_assignment_follows_a_single_iteration_choice(qtbot):
+    mfx = _make_two_photon_iters()
+    dlg, _ds, _owner = _dialog(qtbot, mfx=mfx)
+    dlg._iter_combo.setCurrentText("3rd")
+    assert np.allclose(dlg._per_loc_selected(), mfx["dcr"][mfx["itr"] == 2])
+    assert dlg.basis_description() == "3rd iteration"
+

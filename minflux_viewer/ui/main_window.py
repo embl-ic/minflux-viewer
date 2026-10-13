@@ -7349,7 +7349,8 @@ class MainWindow(QMainWindow):
 
     def apply_channel_separation(self, src_idx: int, labels, channels, *,
                                  attribute: str = "", method_label: str = "channel separation",
-                                 masks=None, include_unassigned: bool = True) -> bool:
+                                 masks=None, include_unassigned: bool = True,
+                                 basis: str = "") -> bool:
         """Build one truncated dataset per channel (+ a hidden *unassigned*) and
         combine them as a render overlay. *channels* is a list of carriers exposing
         ``.name`` and ``.lut`` (see :class:`analysis.attribute_channels.Channel`).
@@ -7360,7 +7361,9 @@ class MainWindow(QMainWindow):
         per channel. Masks are the general form: they can **overlap**, which is
         how "keep a contested localization in both channels" is expressed, and a
         label array cannot say that. ``include_unassigned=False`` drops the rows
-        no channel claims instead of keeping them as a hidden channel.
+        no channel claims instead of keeping them as a hidden channel. ``basis``
+        names the per-localization value the channel windows were drawn on (e.g.
+        "final iterations, photon-weighted"); it is recorded and logged.
         """
         import uuid
 
@@ -7418,7 +7421,7 @@ class MainWindow(QMainWindow):
                     lut=lut, source_dataset_idx=idx, alignment_mode="stage origin",
                     matrix_4x4=identity_matrix4(),
                     provenance={"method": method_label, "source_dataset": base_name,
-                                "attribute": attribute})
+                                "attribute": attribute, "basis": basis})
                 ds.state["overlay_id"] = overlay_id
                 ds.state["render_group_id"] = overlay_id
                 ds.state["overlay_index"] = overlay_index
@@ -7448,6 +7451,8 @@ class MainWindow(QMainWindow):
         self._show_render(anchor)
         self._notify_view_state_changed()
         by = attribute or method_label
+        if basis:
+            by += f" [{basis}]"
         self._state.log(
             f"Separated '{base_name}' into {len(new_indices)} channel(s) by {by} (overlay {overlay_index}).")
         return True
