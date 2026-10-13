@@ -119,12 +119,22 @@ def stage_update(archive_path, *, exe_name: str = APP_EXE_NAME) -> tuple[Path, P
     files to copy over the install); ``extract_dir`` is its temp parent (deleted
     by the helper after the swap).
     """
-    extract_dir = Path(tempfile.mkdtemp(prefix="mfv_update_"))
     name = str(archive_path).lower()
-    if name.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tar")):
+    is_tar = name.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tar"))
+    if is_tar:
         import tarfile
+        # Unfiltered, a member named "../x" or "/x" is written outside the
+        # staging folder (on Windows an absolute name lands on the drive root).
+        # The "data" filter refuses those, and links or devices that escape;
+        # a Python too old to have it is refused rather than trusted.
+        if not hasattr(tarfile, "data_filter"):
+            raise RuntimeError(
+                "This Python cannot extract a .tar archive safely (no tarfile "
+                "data filter); download the update from the release page.")
+    extract_dir = Path(tempfile.mkdtemp(prefix="mfv_update_"))
+    if is_tar:
         with tarfile.open(archive_path) as tf:
-            tf.extractall(extract_dir)
+            tf.extractall(extract_dir, filter="data")
     else:
         with zipfile.ZipFile(archive_path) as zf:
             zf.extractall(extract_dir)

@@ -57,7 +57,9 @@ _RELEASE = {
     "published_at": "2026-06-16T00:00:00Z",
     "assets": [
         {"name": "minflux_viewer-0.3.1-windows.zip",
-         "browser_download_url": "https://example/win.zip", "size": 123},
+         "browser_download_url": "https://example/win.zip", "size": 123,
+         # GitHub's own field, as the v0.4.4 release reports it.
+         "digest": "sha256:" + "ab" * 32},
         {"name": "minflux_viewer-0.3.1-linux.AppImage",
          "browser_download_url": "https://example/linux.AppImage", "size": 456},
     ],
@@ -71,6 +73,9 @@ def test_check_update_available(monkeypatch):
     assert res.latest.tag == "v0.3.1"
     assert res.latest.version == "0.3.1"
     assert len(res.latest.assets) == 2
+    win, linux = res.latest.assets
+    assert U.asset_sha256(win) == "ab" * 32
+    assert U.asset_sha256(linux) == ""        # none published: not verifiable
 
 
 def test_check_up_to_date(monkeypatch):

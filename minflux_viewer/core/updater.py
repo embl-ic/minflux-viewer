@@ -30,6 +30,8 @@ class ReleaseAsset:
     name: str
     url: str
     size: int = 0
+    #: GitHub's digest for the asset, ``"sha256:<hex>"`` (empty if not given).
+    digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,7 @@ def fetch_latest_release(*, timeout: float = _TIMEOUT) -> ReleaseInfo:
             name=a.get("name", ""),
             url=a.get("browser_download_url", ""),
             size=int(a.get("size", 0) or 0),
+            digest=str(a.get("digest") or ""),
         )
         for a in (data.get("assets") or [])
     )
@@ -136,14 +139,18 @@ def check_for_update(current_version: str, *, timeout: float = _TIMEOUT) -> Upda
 
 
 def download_url(url: str, dest, *, progress=None, expected_size: int = 0,
-                 timeout: float = 60.0, chunk: int = 1 << 16):
+                 expected_sha256: str = "", timeout: float = 60.0,
+                 chunk: int = 1 << 16):
     """Stream *url* to *dest*, calling ``progress(done, total)`` as it goes.
 
     Follows redirects (GitHub asset URLs redirect to a signed CDN URL). When
-    *expected_size* is given it is verified against the written byte count and a
-    mismatch raises ``ValueError`` — so a truncated download is never applied.
+    *expected_size* is given it is verified against the written byte count, and
+    when *expected_sha256* (hex) is given, against the SHA-256 of the bytes
+    written. A mismatch deletes the file and raises ``ValueError`` -- so a
+    truncated or altered download is never applied.
     Returns the destination :class:`~pathlib.Path`.
     """
+    import hashlib
     from pathlib import Path
 
     dest = Path(dest)
@@ -156,6 +163,7 @@ def download_url(url: str, dest, *, progress=None, expected_size: int = 0,
     )
     dest.parent.mkdir(parents=True, exist_ok=True)
     done = 0
+    hasher = hashlib.sha256()
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
         total = int(resp.headers.get("Content-Length") or expected_size or 0)
         if progress:
@@ -166,22 +174,51 @@ def download_url(url: str, dest, *, progress=None, expected_size: int = 0,
                 if not block:
                     break
                 fh.write(block)
+                hasher.update(block)
                 done += len(block)
                 if progress:
                     progress(done, total)
+    problem = None
     if expected_size and dest.stat().st_size != int(expected_size):
-        raise ValueError(
-            f"Downloaded size {dest.stat().st_size} != expected {expected_size} "
-            "(incomplete download)."
-        )
+        problem = (f"Downloaded size {dest.stat().st_size} != expected "
+                   f"{expected_size} (incomplete download).")
+    elif expected_sha256 and hasher.hexdigest() != expected_sha256.lower():
+        problem = (f"Downloaded file does not match its published checksum "
+                   f"(SHA-256 {hasher.hexdigest()}, expected {expected_sha256}).")
+    if problem:
+        dest.unlink(missing_ok=True)
+        raise ValueError(problem)
     return dest
 
 
+def asset_sha256(asset: ReleaseAsset) -> str:
+    """The asset's published SHA-256 (hex), or ``""`` when GitHub gave none."""
+    algo, _, value = str(getattr(asset, "digest", "") or "").partition(":")
+    if algo.strip().lower() != "sha256":
+        return ""
+    value = value.strip().lower()
+    if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+        return ""
+    return value
+
+
 def download_asset(asset: ReleaseAsset, dest, *, progress=None, timeout: float = 60.0):
-    """Download a :class:`ReleaseAsset` to *dest*, verifying its known size."""
+    """Download a :class:`ReleaseAsset` to *dest*, verifying size and SHA-256.
+
+    GitHub publishes a SHA-256 digest for every release asset. The self-updater
+    replaces the running executable with what it downloads, so an asset without
+    one is refused rather than installed unverified; the caller then offers
+    the release page instead.
+    """
+    sha256 = asset_sha256(asset)
+    if not sha256:
+        raise ValueError(
+            f"{asset.name} has no published SHA-256 checksum, so it cannot be "
+            "verified and will not be installed automatically. Download it from "
+            "the release page instead.")
     return download_url(asset.url, dest, progress=progress,
                         expected_size=int(getattr(asset, "size", 0) or 0),
-                        timeout=timeout)
+                        expected_sha256=sha256, timeout=timeout)
 
 
 def select_asset_for_platform(
