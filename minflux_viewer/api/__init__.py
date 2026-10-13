@@ -31,6 +31,7 @@ Namespaces
 ``run``      background execution, progress, cancellation
 ``journal``  record a step so it reaches *Generate Method Text*
 ``record``   record viewer work as a reusable Python script
+``plugins``  list plugins, write up or re-run their last run (since 1.3)
 
 Scripts do not import this package directly. ``minflux_viewer.scripting``
 binds these namespaces to the live :class:`AppState` and installs the result as
