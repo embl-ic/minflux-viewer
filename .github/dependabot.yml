@@ -1,0 +1,20 @@
+# Weekly update proposals. Dependabot opens pull requests; nothing merges by
+# itself. The pinned action commits in the workflows carry their release in a
+# trailing comment, which Dependabot updates along with the commit.
+#
+# Not covered here: the pip shipped inside the frozen app
+# (tools/vendor_pip.py, DEFAULT_PIP_VERSION) is a constant in a script, not a
+# declared dependency. dependency-audit.yml checks that version instead.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip          # reads pyproject.toml + poetry.lock
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
