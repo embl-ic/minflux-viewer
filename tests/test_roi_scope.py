@@ -257,3 +257,49 @@ def test_remapping_leaves_an_unscoped_roi_alone():
     record = _rect()
     assert roi_scope.remap_dataset_indices([record], 0) == 0
     assert record.context == {}
+
+
+def test_a_per_dataset_roi_cache_follows_its_datasets_when_one_closes():
+    """*Restore ROI* remembers each dataset's last draft, keyed by index.
+
+    Without re-keying, closing dataset 0 left dataset 2's draft under key 2,
+    where *Restore ROI* on whatever then sat at index 2 brought it back.
+    """
+    first = _rect("first", source_view="render", dataset_idx=0)
+    closed = _rect("closed", source_view="render", dataset_idx=1)
+    later = _rect("later", source_view="scatter", dataset_idx=2)
+    cache = {0: first, 1: closed, 2: later}
+
+    remapped = roi_scope.remap_dataset_keyed(cache, 1)
+
+    assert remapped == {0: first, 1: later}
+    assert roi_scope.roi_owner_dataset(later) == 1   # its scope moves with it
+    assert roi_scope.roi_owner_dataset(first) == 0
+    assert cache == {0: first, 1: closed, 2: later}  # input left untouched
+
+
+def test_closing_a_dataset_re_keys_the_restore_roi_memory(qapp):
+    """The main window's removal handler applies it (a stand-in, not a real
+    MainWindow: constructing one per test drags in every child window)."""
+    from minflux_viewer.ui.main_window import MainWindow
+
+    later = _rect("later", source_view="render", dataset_idx=2)
+    calls = []
+    window = SimpleNamespace(
+        _state=SimpleNamespace(rois=SimpleNamespace(
+            records=[], changed=SimpleNamespace(emit=lambda: None))),
+        _roi_last_active={1: _rect("closed", dataset_idx=1), 2: later},
+        _notify_view_state_changed=lambda: calls.append("notified"),
+    )
+    for name in ("_data_windows", "_render_windows", "_scatter_windows",
+                 "_tracking_windows", "_msd_windows", "_histogram_windows",
+                 "_attr_windows", "_filter_dlgs"):
+        setattr(window, name, {})
+    window._reindex_window_map_after_remove = (
+        MainWindow._reindex_window_map_after_remove.__get__(window))
+
+    MainWindow._on_dataset_removed(window, 1)
+
+    assert window._roi_last_active == {1: later}
+    assert roi_scope.roi_owner_dataset(later) == 1
+    assert calls == ["notified"]

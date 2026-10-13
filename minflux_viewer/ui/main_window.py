@@ -8857,10 +8857,12 @@ class MainWindow(QMainWindow):
         # ROI scopes hold absolute dataset indices, and removing a dataset
         # shifts every later one — without this a ROI would silently be
         # re-attributed to whatever now sits at its index.
-        from ..core.roi_scope import remap_dataset_indices
+        from ..core.roi_scope import remap_dataset_indices, remap_dataset_keyed
 
         if remap_dataset_indices(self._state.rois.records, idx):
             self._state.rois.changed.emit()
+        # Restore ROI's per-dataset memory is keyed by index too.
+        self._roi_last_active = remap_dataset_keyed(self._roi_last_active, idx)
         self._notify_view_state_changed()
 
     def _reindex_window_map_after_remove(self, mapping: dict[int, QWidget], removed_idx: int) -> None:
