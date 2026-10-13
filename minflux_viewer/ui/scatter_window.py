@@ -3738,6 +3738,12 @@ class ScatterWindow(QWidget):
         from .qt_lifecycle import dispose_plot_widgets
         for _plane in SIDE_PLANES:
             dispose_plot_widgets(self._pane_plots[_plane])
+        # The rotating projection in the fourth cell is a plot too. Left out,
+        # its ViewBox stayed in pyqtgraph's process-wide registry after the
+        # window was deleted, and the next garbage collection that destroyed a
+        # named ViewBox walked that registry into freed memory: an access
+        # violation, reproduced by closing a dataset with a scatter open.
+        dispose_plot_widgets(getattr(self, "_rotation_holder", None))
         close_plot_widgets(self._plot_2d)
         super().closeEvent(event)
 

@@ -1614,3 +1614,21 @@ def test_the_play_button_swaps_a_triangle_for_a_solid_square(_qt_app):
         assert button.size() == idle_size
     finally:
         win.close()
+
+
+def test_closing_the_window_unregisters_the_rotating_panes_view(_qt_app):
+    """The rotating pane is a plot too. Left out of closeEvent's disposal, its
+    ViewBox stayed in pyqtgraph's process-wide registry after the window was
+    deleted, where the next walk of that registry reached freed memory."""
+    import pyqtgraph as pg
+    from PyQt6.QtCore import QCoreApplication, QEvent
+
+    win = _window(_qt_app, _state())
+    box = win._rotation_plot.getPlotItem().getViewBox()
+    assert box in pg.ViewBox.AllViews
+
+    win.close()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    _settle(_qt_app)
+
+    assert box not in pg.ViewBox.AllViews
