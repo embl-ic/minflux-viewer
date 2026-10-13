@@ -1,4 +1,6 @@
-"""Tests for the localization-precision estimators (StdDev per trace + FRC)."""
+"""Tests for the localization-precision estimators (StdDev per trace + FRC).
+
+The CRLB has its own file, tests/test_crlb.py."""
 
 import numpy as np
 import pytest
@@ -7,7 +9,6 @@ from minflux_viewer.analysis.localization_precision import (
     FRC_DEFAULT_REPEATS,
     FRC_THRESHOLD,
     MIN_LOCS_PER_TRACE,
-    crlb_precision,
     excess_precision,
     frc_resolution,
     stddev_per_trace,
@@ -168,117 +169,7 @@ def test_frc_too_few_localizations():
 
 
 # ---------------------------------------------------------------------------
-# CRLB — MINFLUX Cramér-Rao bound (Marin & Ries 2024, 2-D donut, Eq. 44/45)
-# ---------------------------------------------------------------------------
-
-def test_crlb_ideal_formula():
-    eco = np.array([100.0, 400.0, 900.0])
-    L, sq = 50.0, 250.0
-    r = crlb_precision(eco, L_nm=L, sigma_q_nm=sq)
-    grad = 1.0 - L * L * np.log(2.0) / (sq * sq)
-    expected = L / (2.0 * np.sqrt(2.0 * eco)) / grad     # Eq. 45
-    assert np.allclose(r.per_loc_sigma_ideal, expected)
-    assert r.median_sigma_ideal == pytest.approx(np.median(expected))
-    assert not r.has_background
-    assert np.allclose(r.per_loc_sigma_bg, r.per_loc_sigma_ideal)   # no bg data
-    assert r.median_n == pytest.approx(400.0)
-    assert r.sigma_q_nm == pytest.approx(sq)
-
-
-def test_crlb_increases_with_L_and_psf_correction():
-    eco = np.array([150.0, 200.0])
-    r1 = crlb_precision(eco, L_nm=40.0, sigma_q_nm=250.0)
-    r2 = crlb_precision(eco, L_nm=80.0, sigma_q_nm=250.0)
-    assert r2.median_sigma_ideal > r1.median_sigma_ideal          # larger L → worse
-    # a tighter σ_q strengthens the (1 − L²ln2/σ_q²)⁻¹ correction → worse precision
-    r_tight = crlb_precision(eco, L_nm=80.0, sigma_q_nm=120.0)
-    assert r_tight.median_sigma_ideal > r2.median_sigma_ideal
-
-
-def test_crlb_background_degradation():
-    eco = np.full(5, 100.0)
-    efo = np.full(5, 100_000.0)
-    fbg = np.full(5, 20_000.0)                # SBR = (efo − fbg)/fbg = 4
-    r = crlb_precision(eco, L_nm=50.0, sigma_q_nm=250.0, efo=efo, fbg=fbg)
-    assert r.has_background
-    assert r.median_sbr == pytest.approx(4.0)
-    factor = np.sqrt((1.0 + 1.0 / 4.0) * (1.0 + 3.0 / (4.0 * 4.0)))   # Eq. 44 factor
-    assert np.allclose(r.per_loc_sigma_bg, r.per_loc_sigma_ideal * factor)
-    assert r.median_sigma_bg > r.median_sigma_ideal
-
-
-def test_crlb_high_sbr_approaches_ideal():
-    eco = np.full(4, 150.0)
-    efo = np.full(4, 1.0e7)
-    fbg = np.full(4, 1.0)                      # SBR ~ 1e7 → factor → 1
-    r = crlb_precision(eco, L_nm=50.0, sigma_q_nm=250.0, efo=efo, fbg=fbg)
-    assert np.allclose(r.per_loc_sigma_bg, r.per_loc_sigma_ideal, rtol=1e-5)
-
-
-def test_crlb_sigma_q_too_small_is_invalid():
-    eco = np.full(4, 200.0)
-    r = crlb_precision(eco, L_nm=100.0, sigma_q_nm=50.0)   # L > σ_q·√ln2
-    assert not np.isfinite(r.median_sigma_ideal)
-    assert "quadratic" in r.status.lower()
-
-
-def test_crlb_axial_z_formula():
-    eco = np.array([100.0, 400.0])
-    Lz = 60.0
-    r = crlb_precision(eco, L_nm=50.0, sigma_q_nm=250.0, L_z_nm=Lz)   # no bg
-    assert r.has_z and r.L_z_nm == pytest.approx(Lz)
-    # σ_z = L_z/(4√N), no σ_q, no (1−L²ln2/σq²) correction (1-D quadratic)
-    assert np.allclose(r.per_loc_sigma_z_ideal, Lz / (4.0 * np.sqrt(eco)))
-    assert np.allclose(r.per_loc_sigma_z_bg, r.per_loc_sigma_z_ideal)   # no bg
-
-
-def test_crlb_axial_background_factor():
-    eco = np.full(5, 100.0)
-    efo = np.full(5, 100_000.0)
-    fbg = np.full(5, 20_000.0)                  # SBR = 4
-    r = crlb_precision(eco, L_nm=50.0, sigma_q_nm=250.0, efo=efo, fbg=fbg, L_z_nm=60.0)
-    factor_z = np.sqrt((1.0 + 1.0 / 4.0) * (1.0 + 2.0 / (3.0 * 4.0)))   # Eq. 28 form
-    assert np.allclose(r.per_loc_sigma_z_bg, r.per_loc_sigma_z_ideal * factor_z)
-    assert r.median_sigma_z_bg > r.median_sigma_z_ideal
-
-
-def test_crlb_per_dimension_photons():
-    """N_xy (lateral) drives σ_xy; N_z (axial) drives σ_z — independently."""
-    eco_xy = np.full(4, 200.0)          # final lateral iteration photons
-    eco_z = np.full(4, 100.0)           # final axial iteration photons
-    r = crlb_precision(eco_xy, L_nm=50.0, sigma_q_nm=250.0, L_z_nm=60.0, eco_z=eco_z)
-    assert r.per_dimension_photons is True
-    assert r.median_n == pytest.approx(200.0)          # N_xy
-    assert r.median_n_z == pytest.approx(100.0)        # N_z
-    # σ_xy uses N_xy=200, σ_z uses N_z=100.
-    assert np.allclose(r.per_loc_sigma_ideal, 50.0 / (2.0 * np.sqrt(2.0 * 200.0)
-                       * (1.0 - 50.0**2 * np.log(2.0) / 250.0**2)))
-    assert np.allclose(r.per_loc_sigma_z_ideal, 60.0 / (4.0 * np.sqrt(100.0)))
-
-
-def test_crlb_backward_compatible_single_eco():
-    """Without eco_z, N_z equals N_xy (old behaviour) and per_dimension is False."""
-    eco = np.full(4, 150.0)
-    r = crlb_precision(eco, L_nm=50.0, sigma_q_nm=250.0, L_z_nm=60.0)
-    assert r.per_dimension_photons is False
-    assert np.allclose(r.per_loc_sigma_z_ideal, 60.0 / (4.0 * np.sqrt(150.0)))
-
-
-def test_crlb_no_axial_when_lz_absent():
-    r = crlb_precision(np.full(4, 150.0), L_nm=50.0, sigma_q_nm=250.0)
-    assert not r.has_z
-    assert r.per_loc_sigma_z_ideal.size == 0
-
-
-def test_crlb_no_valid_counts():
-    r = crlb_precision(np.array([0.0, -1.0, np.nan]), L_nm=50.0)
-    assert r.n_locs == 0
-    assert not np.isfinite(r.median_sigma_ideal)
-    assert r.status
-
-
-# ---------------------------------------------------------------------------
-# Precision budget — STD² = σ_fl² + σ_CRB² (Marin & Ries 2026 decomposition)
+# Legacy quadrature arithmetic — not a physical precision-budget inference
 # ---------------------------------------------------------------------------
 
 def test_excess_precision_decomposition():
@@ -289,9 +180,8 @@ def test_excess_precision_decomposition():
     assert np.hypot(crb, excess_precision(10.0, crb)) == pytest.approx(10.0)
 
 
-def test_excess_precision_photon_limited_clamps_to_zero():
-    # measured spread at/below the bound → no excess (photon-limited)
-    assert excess_precision(6.0, 10.0) == 0.0
+def test_excess_precision_below_bound_is_unresolved():
+    assert np.isnan(excess_precision(6.0, 10.0))
     assert excess_precision(5.0, 5.0) == 0.0
 
 

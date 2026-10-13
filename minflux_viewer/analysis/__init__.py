@@ -16,6 +16,9 @@ from .local_density import (
     run_local_density,
 )
 from .localization_precision import (
+    crlb_from_inputs,
+    crlb_inputs_for_dataset,
+    crlb_inputs_from_arrays,
     crlb_precision,
     frc_resolution,
     run_crlb,
@@ -65,6 +68,9 @@ __all__ = [
     "run_frc",
     "frc_resolution",
     "run_crlb",
+    "crlb_from_inputs",
+    "crlb_inputs_for_dataset",
+    "crlb_inputs_from_arrays",
     "crlb_precision",
     "run_stddev_per_trace",
     "stddev_per_trace",

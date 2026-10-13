@@ -17,25 +17,26 @@ Precision* menu, all fully implemented:
 * **CRLB** — the *theoretical* MINFLUX Cramér-Rao bound for the targeted-donut
   measurement model (Balzarotti et al., *Science* 355:606, 2017; Marin & Ries,
   arXiv:2410.12427, 2024) — **not** the camera/Gaussian bound (Mortensen 2010).
-  Per-localization σ from the photon count (``eco``), the measured SBR
-  (``efo``/``fbg``) and the user's pattern diameter ``L`` / donut steepness ``σ_q``.
+  Per-localization σ from the photons of all exposures (``eco`` + ``ecc``), the
+  background measured by the centre exposure (``efc``/``efo``) or the
+  instrument's estimate (``fbg``), and the pattern size ``L`` read from the
+  acquisition sequence (assumed, and said so, when the file has none).
 
 * **FRC** — Fourier Ring Correlation (Banterle et al., *J. Struct. Biol.*
   183:363, 2013; Nieuwenhuizen et al., *Nat. Methods* 10:557, 2013): the radial
   Fourier ring correlation of two independent half-images, resolution read off at
   the 1/7 crossing.
 
-The CRLB dialog also reports a **precision budget** relating the two: by the
-variance decomposition of Marin & Ries (*Nat. Commun.* 17:246, 2026, SimuFLUX),
-``STD(measured)² = σ_fl² + σ_CRB²``, so the excess ``σ_fl = √(STD² − σ_CRB²)``
-is the photon-count-independent error (flickering / drift / vibration /
-misalignment) beyond the photon-limited bound (see :func:`excess_precision`).
+The CRLB dialog compares measured spread with per-trace RMS model bounds on
+matched rows. This is descriptive, not a physical variance decomposition. A
+below-bound spread remains unexplained; tracking motion is not precision.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import lru_cache
+import json
 
 import numpy as np
 from PyQt6.QtCore import Qt
@@ -51,9 +52,12 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
+
+from ..core.mfx_sequence import DEFAULT_FINAL_GEO_FACTOR, PATTERN_SCALE_NM
 
 # ---------------------------------------------------------------------------
 # Constants & data class
@@ -195,7 +199,7 @@ def stddev_per_trace(
 # resolution read off at the frequency q_c where the (smoothed) correlation
 # first drops below the fixed 1/7 threshold; resolution = 1/q_c.
 #
-# This mirrors the Ries-group MINFLUX implementation of Gwosch et al. (Nat.
+# This mirrors the MINFLUX implementation of Stefan Hell's group: Gwosch et al. (Nat.
 # Methods 17:217, 2020, Fig. 2d) and Ostersehlt et al. (Nat. Methods 19:1072,
 # 2022): per-localization random split, ~1 nm histogram render, the FRC curve
 # averaged over several splits, ring-binned FRC = Σ F1·conj(F2) / √(Σ|F1|²·Σ|F2|²)
@@ -276,7 +280,8 @@ def _radial_frc(img1: np.ndarray, img2: np.ndarray,
 
 
 def _smooth_frc(y: np.ndarray) -> np.ndarray:
-    """Savitzky-Golay smoothing of the radial FRC curve (Ries-group default)."""
+    """Savitzky-Golay smoothing of the radial FRC curve (as in the reference
+    implementation of Ostersehlt et al. 2022)."""
     if y.size < 7:
         return y
     try:
@@ -315,7 +320,7 @@ def frc_resolution(
 ) -> FRCResult:
     """Estimate image resolution by Fourier Ring Correlation.
 
-    Follows the Ries-group MINFLUX method (Gwosch et al. 2020; Ostersehlt et al.
+    Follows the MINFLUX method of Stefan Hell's group (Gwosch et al. 2020; Ostersehlt et al.
     2022): a per-localization random 50/50 split into two images, the radial FRC
     curve averaged over ``repeats`` splits, Savitzky-Golay smoothed, tail cut at
     0.8·q_max, resolution = 1/q_c at the 1/7 crossing.
@@ -449,49 +454,95 @@ def frc_resolution(
 #
 # The MINFLUX CRB is *not* the camera/Gaussian-PSF bound (Mortensen 2010): it
 # follows from the targeted-illumination (donut) measurement model of Balzarotti
-# et al. (Science 355:606, 2017). We use the background-aware closed form of
-# Marin & Ries (arXiv:2410.12427, 2024) for the standard 2-D donut (K = 4 TCPs)
-# with the emitter at the pattern centre (their Eq. 44 / 45):
+# et al. (Science 355:606, 2017). We use the closed forms of Marin & Ries
+# (arXiv:2410.12427), evaluated with the emitter at the pattern centre:
 #
-#   σ_CRB = L / (2·√(2N)) · (1 − L²·ln2/σ_q²)⁻¹ · √[(1 + 1/SBR)(1 + 3/(4·SBR))]
-#   σ_ideal (no background, SBR→∞) = L / (2·√(2N)) · (1 − L²·ln2/σ_q²)⁻¹
+#   lateral  σ_xy,ideal = L / √(8N) · (1 − L² / (8σ_q²))⁻¹      (Eq. 45)
+#   axial    σ_z,ideal  = L_z / (4√N)                             (Eq. 29)
 #
-# Parameters and where each comes from:
-#   N    photons per localization                       — taken from data (eco)
-#   SBR  signal-to-background ratio = (efo − fbg)/fbg    — computed from data
-#   L    targeted-pattern diameter of the last iteration — user input (default)
-#   σ_q  excitation-PSF steepness / donut FWHM (≳250 nm) — user input (default)
+# where σ_q is the width of their donut model I ∝ e·r²/(2σ_q²)·exp(−r²/(2σ_q²))
+# (Eq. 42) and N is the total number of photons over ALL exposures of the
+# iteration, centre included. The default σ_q is SimuFLUX's analytic 2-D donut
+# (FWHM 310 nm → σ_q = FWHM/√(8 ln 2) ≈ 131.6 nm); it enters only through the
+# envelope term, ≈1 % at L = 40 nm.
 #
-# σ_q sets the PSF-gradient correction (1 − L²·ln2/σ_q²)⁻¹; it requires L < σ_q.
-# The bound is the per-coordinate lateral precision at the centre (best case →
-# a genuine lower bound). Background enters through the measured SBR — replacing
-# the earlier ad-hoc effective-photon (1 − fbg/efo) correction.
+# Other patterns follow from the same Fisher information: with K equal-dwell
+# exposures at radius L/2, σ_axis = L·G·F/(4√N), G² = K·(L/2)²/Σ p_axis² — √2
+# for any planar orbit (the lateral form above), 1 for a z-line pair, √3 on every
+# axis for an octahedron (``PatternGeometry.geometry_factors``).
 #
-# Axial (z) channel — 3-D only. The z position is probed with a 1-D quadratic
-# minimum (K = 3 points at −L_z/2, 0, +L_z/2; Marin & Ries Eq. 28). Factoring L_z
-# out and substituting b = L_z²/(12·σ_qz²·SBR) makes σ_qz cancel, leaving
+# Verified, same inputs: SimuFLUX's numerical CRB (``calculateCRBpattern``) for
+# 3/4/6-point orbits with and without a centre exposure, L 40–150 nm, ρ 0–3,
+# agrees with these closed forms to ≤ 0.16 % (180 scenarios; the residual is its
+# 1-nm finite difference and the 1e-4 it adds to each probability).
 #
-#   σ_z = L_z/(4·√N) · √[(1 + 1/SBR)(1 + 2/(3·SBR))]   ;  σ_z,ideal = L_z/(4·√N).
+# Background. Their Eq. 44 (lateral) and Eq. 28 (axial) multiply the ideal bound
+# by √[(1 + 1/SBR)(1 + w/SBR)], with SBR the total signal over the total
+# background summed over the exposures and w the orbit's share of the total
+# dwell (3/4 for Eq. 44's triangle + centre, 2/3 for Eq. 28's two points +
+# centre). Re-deriving the multinomial Fisher information for the same quadratic
+# minimum shows the factor depends on the pattern only through that share, so
+# it holds for every Abberior pattern (hexagon, square, zline2) once w is taken
+# from the recorded centre dwell. Written with ρ = background ÷ signal rate at an
+# orbit position and c = centre dwell ÷ orbit dwell (0 without a centre):
 #
-# It reuses the same N and the same measured (lateral) SBR — an approximation,
-# since the axial exposures may carry a different SBR — and an editable axial
-# pattern size L_z. No σ_qz is needed (it cancels in the SBR form).
+#   σ = σ_ideal · √[(1 + ρ)(1 + ρ(1 + c))],   SBR = 1 / (ρ(1 + c)),   w = 1/(1 + c).
+#
+# ρ comes from the data, per localization, as a background RATE b set against
+# the photon iteration's orbit rate: ρ = b / (efo − b). b is, in order:
+#   * the photon iteration's own centre exposure, b = efc. With the emitter at
+#     the pattern centre the centre exposure sees no fluorescence signal, so
+#     everything it records is background — including the light that leaks
+#     through an imperfect donut zero, which Marin & Ries identify as a
+#     background that limits precision. This is the preferred estimate.
+#   * the latest EARLIER centre exposure, scaled by the laser power: a 3-D
+#     imaging sequence probes the centre at an intermediate lateral iteration
+#     (ccrLimit set) and not in its final pair, at a lower power (pwrFactor 4
+#     against 6). Background — autofluorescence and the zero leakage alike —
+#     scales with the excitation power, so b = efc_k · P_final / P_k. The
+#     instrument's own estimate obeys the same scaling (3_Bonly: fbg rises
+#     3.62e4 → 5.42e4 Hz, ×1.50, between those iterations — exactly the power
+#     ratio — and fbg ≈ efc where both are recorded).
+#   * the instrument's background estimate, b = fbg — only with background
+#     sensing on (``bgcSense``); with it off fbg is 0 or a placeholder.
+#   * none → no background information: the bound reported is the ideal one
+#     and is labelled as such, never as "background-limited".
+#
+# The pattern size comes from the acquisition sequence (L = patGeoFactor ×
+# 360 nm, the conversion SimuFLUX uses for Abberior sequences); the centre dwell
+# from ``ctrDwellFactor`` — or, without a sequence, from the counts themselves:
+# c = (ecc/eco) ÷ (efc/efo).
 
-CRLB_DEFAULT_L_NM: float = 50.0        # last-iteration pattern diameter L (editable)
-CRLB_DEFAULT_SIGMA_Q_NM: float = 250.0  # donut steepness σ_q, diffraction-bounded
-CRLB_DEFAULT_LZ_NM: float = 50.0       # axial pattern size L_z (editable, 3-D)
-_LN2 = float(np.log(2.0))
+CRLB_DEFAULT_L_NM: float = DEFAULT_FINAL_GEO_FACTOR * PATTERN_SCALE_NM  # 39.6 nm, assumed
+#: σ_q of SimuFLUX's analytic 2-D donut (``PsfDonut2D``: FWHM 310 nm, which its
+#: authors matched to their vectorial PSF) written as Marin & Ries' σ_q. The
+#: paper's ~250 nm is an illustrative value for its 1-D quadratic; σ_q enters only
+#: the envelope term (1 − L²/8σ_q²)⁻¹, ≈1 % at L = 40 nm and ≈4 % at 76 nm.
+CRLB_DEFAULT_SIGMA_Q_NM: float = float(310.0 / np.sqrt(8.0 * np.log(2.0)))  # ≈ 131.6 nm
+_SQRT2 = float(np.sqrt(2.0))
+CRLB_DEFAULT_LZ_NM: float = DEFAULT_FINAL_GEO_FACTOR * PATTERN_SCALE_NM  # 39.6 nm, assumed
+_CENTRE_DWELL_RANGE = (0.0, 20.0)       # sanity clip for a dwell ratio read off the counts
+#: An earlier centre exposure is borrowed only when it was recorded for at least
+#: this share of the photon iteration's localizations.
+_REFERENCE_MIN_COVERAGE = 0.5
+
+#: Per-localization background sources (``CRLBResult.per_loc_bg_source``).
+BG_NONE, BG_CENTRE, BG_FBG, BG_CENTRE_EARLIER = 0, 1, 2, 3
+# Plain tokens (no parentheses, commas or semicolons): they are written into the
+# Log line that the method-text generator parses.
+_BG_SOURCE_TEXT = {BG_CENTRE: "centre exposure", BG_FBG: "fbg estimate",
+                   BG_CENTRE_EARLIER: "earlier centre exposure"}
 
 
 @dataclass
 class CRLBResult:
-    per_loc_sigma_ideal: np.ndarray   # lateral σ_xy at SBR→∞ (no background), nm
-    per_loc_sigma_bg: np.ndarray      # lateral σ_xy with the measured per-loc SBR, nm
-    per_loc_n_total: np.ndarray       # N_xy = eco at the final lateral iteration
-    per_loc_sbr: np.ndarray           # (efo − fbg)/fbg per localization
+    per_loc_sigma_ideal: np.ndarray   # lateral σ_xy without background, nm
+    per_loc_sigma_bg: np.ndarray      # lateral σ_xy with the measured background, nm (NaN: unknown)
+    per_loc_n_total: np.ndarray       # N_xy = eco + ecc at the final lateral iteration
+    per_loc_sbr: np.ndarray           # SBR as Marin & Ries define it (NaN: unknown)
     median_sigma_ideal: float
     mean_sigma_ideal: float
-    median_sigma_bg: float
+    median_sigma_bg: float            # over localizations WITH background information
     mean_sigma_bg: float
     median_n: float
     median_sbr: float                 # NaN if no background data
@@ -509,10 +560,181 @@ class CRLBResult:
     mean_sigma_z_ideal: float = float("nan")
     median_sigma_z_bg: float = float("nan")
     mean_sigma_z_bg: float = float("nan")
-    # N_z = eco at the final axial iteration (equals median_n unless a distinct
-    # per-dimension photon count was supplied).
+    # N_z = eco + ecc at the final axial iteration (equals median_n unless a
+    # distinct per-dimension photon count was supplied).
     median_n_z: float = float("nan")
     per_dimension_photons: bool = False   # True when N_xy and N_z differ by design
+    # Background provenance (lateral, and axial when has_z).
+    per_loc_bg_source: np.ndarray = field(default_factory=lambda: np.empty(0, np.int8))
+    background_source: str = "none"      # "centre exposure", "fbg estimate", or both joined by " + "
+    background_coverage: float = 0.0      # fraction of localizations with background info
+    centre_dwell_ratio: float = 0.0       # median c used for the centre exposure (0 = none)
+    has_background_z: bool = False
+    background_source_z: str = "none"
+    background_coverage_z: float = 0.0
+    median_sbr_z: float = float("nan")
+    centre_dwell_ratio_z: float = 0.0
+    # Where the pattern sizes came from ("acquisition sequence" / "assumed ...").
+    L_source: str = "user input"
+    L_z_source: str = "user input"
+    pattern: str = ""
+    pattern_z: str = ""
+    counts_centre: bool = False         # N includes the centre exposure (ecc)
+    # Where an earlier centre exposure was borrowed from, e.g. "iteration 7 scaled
+    # x1.50 by the laser power" ("" when not used), per channel.
+    centre_reference: str = ""
+    centre_reference_z: str = ""
+    # σ = L·G·F/(4√N) per axis, and whether the 2-D donut envelope term applies.
+    geometry_factor: float = _SQRT2
+    geometry_factor_z: float = 1.0
+    donut_envelope: bool = True
+    # Things about the inputs the reader should know (e.g. an fbg not used).
+    background_notes: tuple = ()
+    background_pooled: bool = False     # rates pooled per trace before ρ
+    axis_status: str = "ideal_only"
+    axis_status_z: str = "ideal_only"
+    count_convention: str = "detected"
+    issues: tuple = ()
+    invalid_background_fraction: float = 0.0
+    invalid_background_fraction_z: float = 0.0
+    input_rows: int = 0
+    source_indices: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    excluded_photon_rows: int = 0
+    provenance: dict = field(default_factory=dict)
+
+    @property
+    def primary_sigma(self) -> float:
+        """Conditional headline; inconsistent inputs never fall back to ideal."""
+        if self.axis_status in {"invalid_input", "unsupported_geometry", "background_inconsistent"}:
+            return float("nan")
+        return self.median_sigma_bg if self.has_background else self.median_sigma_ideal
+
+    @property
+    def primary_sigma_z(self) -> float:
+        if self.axis_status_z in {"invalid_input", "unsupported_geometry", "background_inconsistent"}:
+            return float("nan")
+        return self.median_sigma_z_bg if self.has_background_z else self.median_sigma_z_ideal
+
+
+def _aligned(arr, finite: np.ndarray) -> np.ndarray | None:
+    """Restrict an aligned input; a malformed vector is never treated as absent."""
+    if arr is None:
+        return None
+    a = np.asarray(arr, dtype=float)
+    if a.shape != finite.shape:
+        raise ValueError("CRLB input arrays must be one-dimensional and row-aligned with eco.")
+    return a[finite]
+
+
+def _group_median(values: np.ndarray, groups: np.ndarray) -> np.ndarray:
+    """Each element replaced by the median of the finite values in its group.
+
+    Elements of a group with no finite value stay NaN. Vectorised: one sort by
+    (group, value), then each group's middle element(s).
+    """
+    out = np.full(values.shape, np.nan)
+    fin = np.isfinite(values)
+    if not fin.any():
+        return out
+    keys, inverse = np.unique(groups, return_inverse=True)
+    g, v = inverse[fin], values[fin]
+    order = np.lexsort((v, g))
+    g_sorted, v_sorted = g[order], v[order]
+    starts = np.r_[0, np.flatnonzero(np.diff(g_sorted)) + 1]
+    counts = np.diff(np.r_[starts, g_sorted.size])
+    lo = starts + (counts - 1) // 2
+    hi = starts + counts // 2
+    med = np.full(keys.size, np.nan)
+    med[g_sorted[starts]] = 0.5 * (v_sorted[lo] + v_sorted[hi])
+    out[:] = med[inverse]
+    return out
+
+
+def _channel_background(eco, ecc, efo, fbg, efc, centre_dwell_ratio, efc_ref=None,
+                        groups=None, fbg_zero_measured=False):
+    """Per-localization (ρ, c, source) for one channel; see the module comment.
+
+    ``eco``/``ecc``/``efo``/``fbg``/``efc``/``efc_ref`` are already restricted to
+    the valid rows (all but ``eco`` may be ``None``). ``efc_ref`` is an earlier
+    iteration's centre rate, already scaled to this iteration's laser power.
+    ``centre_dwell_ratio`` is the recorded centre dwell ÷ orbit dwell, or ``None``
+    to read it off the counts.
+
+    ``groups`` (trace ids): the background rate b and the orbit rate are pooled
+    per trace (median) before ρ = b / (efo − b). One localization's rates rest on
+    ~100 photons, so its own ρ is noisy — and F is convex in ρ, so the noise
+    inflates σ, while every localization whose noisy b reaches its efo is lost,
+    and those are the worst-SBR ones. Pooling assumes stable rates within a
+    trace; it does not establish that the background really is constant.
+    """
+    n = eco.size
+    rho = np.full(n, np.nan)
+    c = np.zeros(n)
+    src = np.zeros(n, dtype=np.int8)
+    inconsistent = np.zeros(n, dtype=bool)
+    if efo is None:
+        return rho, c, src, float("nan"), inconsistent
+    pooled = groups is not None and np.shape(groups) == (n,)
+
+    # Centre dwell ratio read off the counts: (ecc/eco) ÷ (efc/efo).
+    c_data = float("nan")
+    if efc is not None and ecc is not None:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            est = (ecc * efo) / (eco * efc)
+        est = est[np.isfinite(est) & (est > 0)]
+        if est.size:
+            c_data = float(np.clip(np.median(est), *_CENTRE_DWELL_RANGE))
+    c_centre = (float(centre_dwell_ratio) if centre_dwell_ratio is not None
+                else (c_data if np.isfinite(c_data) else 1.0))
+
+    def _own_centre_share(ok):
+        # This iteration's centre exposure, when it has one, still costs dwell
+        # (and collects background) even where its rate is unusable.
+        if centre_dwell_ratio is not None:
+            return float(centre_dwell_ratio)
+        centre_seen = ecc is not None and (ecc[ok] > 0)
+        return np.where(centre_seen, c_centre, 0.0)
+
+    # Select the first recorded source, then judge consistency. A contradictory
+    # centre rate must not silently turn into a lower fbg or an ideal bound.
+    b = np.full(n, np.nan)
+    for rate, kind in ((efc, BG_CENTRE), (efc_ref, BG_CENTRE_EARLIER), (fbg, BG_FBG)):
+        if rate is None:
+            continue
+        nonnegative = rate >= 0 if kind == BG_FBG and fbg_zero_measured else rate > 0
+        ok = (src == BG_NONE) & np.isfinite(rate) & nonnegative
+        b[ok] = rate[ok]
+        c[ok] = c_centre if kind == BG_CENTRE else _own_centre_share(ok)
+        src[ok] = kind
+
+    orbit = efo
+    if pooled:
+        known = src != BG_NONE
+        b = np.where(known, _group_median(np.where(known, b, np.nan), groups), np.nan)
+        orbit = _group_median(np.where(np.isfinite(efo), efo, np.nan), groups)
+    ok = (src != BG_NONE) & np.isfinite(orbit) & np.isfinite(b) & (orbit > b)
+    inconsistent = ((src != BG_NONE) & np.isfinite(orbit) & np.isfinite(b)
+                    & (b >= orbit))
+    rho[ok] = b[ok] / (orbit[ok] - b[ok])
+    src[~ok] = BG_NONE
+    c[~ok] = 0.0
+    for kind in (BG_CENTRE, BG_CENTRE_EARLIER, BG_FBG):
+        used = src == kind
+        if used.any():
+            return rho, c, src, float(np.median(c[used])), inconsistent
+    return rho, c, src, 0.0, inconsistent
+
+
+def _source_text(src: np.ndarray, centre_reference: str = "") -> str:
+    kinds = [k for k in (BG_CENTRE, BG_CENTRE_EARLIER, BG_FBG) if np.any(src == k)]
+    if not kinds:
+        return "none"
+
+    def _text(k):
+        if k == BG_CENTRE_EARLIER and centre_reference:
+            return f"centre exposure of {centre_reference}"
+        return _BG_SOURCE_TEXT[k]
+    return " + ".join(_text(k) for k in kinds)
 
 
 def crlb_precision(
@@ -522,55 +744,114 @@ def crlb_precision(
     sigma_q_nm: float = CRLB_DEFAULT_SIGMA_Q_NM,
     efo: np.ndarray | None = None,
     fbg: np.ndarray | None = None,
+    ecc: np.ndarray | None = None,
+    efc: np.ndarray | None = None,
+    centre_dwell_ratio: float | None = None,
     L_z_nm: float | None = None,
     eco_z: np.ndarray | None = None,
     efo_z: np.ndarray | None = None,
     fbg_z: np.ndarray | None = None,
+    ecc_z: np.ndarray | None = None,
+    efc_z: np.ndarray | None = None,
+    centre_dwell_ratio_z: float | None = None,
+    L_source: str = "user input",
+    L_z_source: str = "user input",
+    pattern: str = "",
+    pattern_z: str = "",
+    efc_ref: np.ndarray | None = None,
+    efc_ref_z: np.ndarray | None = None,
+    centre_reference: str = "",
+    centre_reference_z: str = "",
+    geometry_factor_xy: float = _SQRT2,
+    geometry_factor_z: float = 1.0,
+    donut_envelope: bool = True,
+    background_notes: tuple = (),
+    groups: np.ndarray | None = None,
+    fbg_zero_measured: bool = False,
+    fbg_zero_measured_z: bool = False,
+    count_convention: str = "detected",
+    unsupported_xy: str = "",
+    unsupported_z: str = "",
 ) -> CRLBResult:
     """Background-aware MINFLUX Cramér-Rao precision bound, per localization.
 
-    Lateral (xy) — 2-D donut (K = 4), emitter at the centre (Marin & Ries 2024,
-    Eq. 44 / 45):
+    Lateral (Marin & Ries, Eq. 45 × the background factor of Eq. 44, generalised
+    to the recorded centre dwell)::
 
-        σ_xy = L/(2√(2N)) · (1 − L²·ln2/σ_q²)⁻¹ · √[(1+1/SBR)(1+3/(4·SBR))].
+        σ_xy = L/√(8N) · (1 − L²/(8σ_q²))⁻¹ · √[(1+ρ)(1+ρ(1+c))]
 
-    Axial (z), when ``L_z_nm`` is given (3-D) — 1-D quadratic minimum, K = 3
-    (Eq. 28 → SBR form):
+    Axial, when ``L_z_nm`` is given (Eq. 29 × the factor of Eq. 28)::
 
-        σ_z = L_z/(4√N) · √[(1+1/SBR)(1+2/(3·SBR))].
+        σ_z = L_z/(4√N) · √[(1+ρ)(1+ρ(1+c))]
 
     Parameters
     ----------
-    eco : (N,) float
-        Photon count per localization (effective counts) → N.
+    eco, ecc : (N,) float
+        Photons at the offset (pattern) positions and at the centre exposure;
+        N = eco + ecc. ``ecc`` may be omitted (no centre exposure).
     L_nm : float
-        Targeted-pattern diameter L of the (last) iteration, in nm.
+        Lateral pattern diameter L of the final iteration, nm.
     sigma_q_nm : float
-        Excitation-PSF steepness / donut FWHM σ_q (diffraction-bounded), in nm.
-        Must exceed L·√ln2 for the quadratic approximation to hold.
-    efo, fbg : (N,) float, optional
-        Photon rate and background rate. When both are present the per-loc
-        SBR = (efo − fbg)/fbg degrades the bound; otherwise only σ_ideal is given.
-    L_z_nm : float, optional
-        Axial pattern size L_z. When given (> 0) the axial z bound is also
-        computed (reusing N and the lateral SBR; σ_qz cancels in the SBR form).
+        Donut width σ_q of the Marin & Ries PSF model (default 131.6 nm). Requires
+        L < 2√2·σ_q.
+    efo, efc, fbg : (N,) float, optional
+        Rate at the offset positions, rate at the centre, and the instrument's
+        background estimate. The background-to-signal ratio ρ is taken from the
+        centre exposure when recorded, else from ``fbg``; without either the
+        background-limited bound is NaN and only the ideal one is reported.
+    centre_dwell_ratio : float, optional
+        Centre dwell ÷ whole-orbit dwell (``ctrDwellFactor`` when the centre is
+        probed, 0 when it is not). ``None`` reads it off the counts.
+    L_z_nm, eco_z, ecc_z, efo_z, efc_z, fbg_z, centre_dwell_ratio_z
+        The same for the final axial iteration. Without ``eco_z`` the axial
+        channel reuses the lateral inputs.
+    efc_ref, efc_ref_z : (N,) float, optional
+        An earlier iteration's centre rate, already scaled to this iteration's
+        laser power — used where the iteration has no centre exposure of its own,
+        ahead of ``fbg``. ``centre_reference`` names where it came from.
+    geometry_factor_xy, geometry_factor_z, donut_envelope
+        The pattern's G (σ = L·G·F/(4√N)) and whether the 2-D donut envelope
+        term applies; the defaults are a planar orbit and a z-line pair.
+    groups : (N,) array, optional
+        Trace ids: the background and orbit rates are then pooled per trace
+        (median) before ρ is formed — see :func:`_channel_background`.
+    fbg_zero_measured, fbg_zero_measured_z : bool
+        Include exact fbg zeros as observations (also in trace pooling), only
+        when background sensing is known to be on. This never promotes a zero
+        centre exposure to a measured zero background.
+    count_convention : {"detected", "unknown"}
+        Direct callers supply detected counts/total rates by contract. Dataset
+        inputs remain conditional until instrument conventions are established;
+        no count-restoration conversion is performed.
     """
-    n_full = np.asarray(eco, dtype=float).ravel()
+    n_full = np.asarray(eco, dtype=float)
+    if n_full.ndim != 1:
+        raise ValueError("eco must be a one-dimensional photon-count vector.")
+    if count_convention not in {"detected", "unknown"}:
+        raise ValueError("count_convention must be 'detected' or 'unknown'.")
+    for value in (ecc, efo, fbg, efc, efc_ref, eco_z, ecc_z, efo_z, fbg_z, efc_z,
+                  efc_ref_z, groups):
+        if value is not None and np.shape(value) != n_full.shape:
+            raise ValueError("CRLB input arrays must be one-dimensional and row-aligned with eco.")
     finite = np.isfinite(n_full) & (n_full > 0)
-    n = n_full[finite]
-    n_locs = int(n.size)
-    # Axial photon count N_z (final axial iteration). Defaults to the lateral N
-    # → backward-compatible single-eco behaviour. Per-dimension when a distinct
-    # eco_z is supplied (final lateral vs final axial iteration photons differ).
-    per_dim = eco_z is not None
-    if per_dim:
-        n_z_full = np.asarray(eco_z, dtype=float).ravel()
-        n_z = n_z_full[finite] if n_z_full.shape == finite.shape else n
-    else:
-        n_z = n
+    eco_v = n_full[finite]
+    n_locs = int(eco_v.size)
+
+    ecc_v = _aligned(ecc, finite)
+    n = eco_v + (np.where(np.isfinite(ecc_v) & (ecc_v > 0), ecc_v, 0.0)
+                 if ecc_v is not None else 0.0)
+
     L = float(L_nm)
     sq = float(sigma_q_nm)
     Lz = None if L_z_nm is None or L_z_nm <= 0 else float(L_z_nm)
+    issues = list(background_notes)
+    if count_convention == "unknown":
+        issues.append("Input count/rate convention is not fully established; values are conditional, "
+                      "with no automatic background restoration into eco/efo.")
+    if ecc_v is not None and np.any(np.isfinite(ecc_v) & (ecc_v < 0)):
+        issues.append("Negative ecc values indicate correction/bookkeeping rather than detected "
+                      "centre photons; they are not added to N. The count convention is uncertain.")
+        count_convention = "unknown"
 
     def _empty(status: str) -> CRLBResult:
         z = np.empty(0)
@@ -582,104 +863,160 @@ def crlb_precision(
             median_sbr=float("nan"), has_background=False, L_nm=L,
             sigma_q_nm=sq, n_locs=n_locs, status=status,
             has_z=Lz is not None, L_z_nm=Lz or 0.0,
+            L_source=L_source, L_z_source=L_z_source, pattern=pattern,
+            pattern_z=pattern_z,
+            axis_status="invalid_input", axis_status_z="invalid_input",
+            count_convention=count_convention, issues=tuple(issues + [status]),
+            input_rows=n_full.size, source_indices=np.flatnonzero(finite),
+            excluded_photon_rows=int((~finite).sum()),
         )
 
     if n_locs == 0:
         return _empty("No localizations with a positive photon count (eco).")
-    if not (L > 0):
+    if not (np.isfinite(L) and L > 0):
         return _empty("Pattern diameter L must be positive.")
-    if not (sq > 0):
-        return _empty("PSF steepness σ_q must be positive.")
+    if not (np.isfinite(sq) and sq > 0):
+        return _empty("Donut width σ_q must be positive.")
 
-    # PSF-gradient correction (1 − L²·ln2/σ_q²)⁻¹ — requires L < σ_q/√ln2.
-    grad_denom = 1.0 - (L * L * _LN2) / (sq * sq)
-    status = ""
+    # PSF-gradient correction (1 − L²/(8σ_q²))⁻¹ of the 2-D donut — requires
+    # L < 2√2·σ_q.
+    grad_denom = 1.0 - (L * L) / (8.0 * sq * sq) if donut_envelope else 1.0
     if grad_denom <= 0:
         return _empty(
             f"σ_q ({sq:.0f} nm) is too small relative to L ({L:.0f} nm): the "
-            "quadratic-PSF approximation requires L < σ_q·√ln2 ≈ "
-            f"{sq * np.sqrt(_LN2):.0f} nm. Increase σ_q or decrease L.")
+            "donut model requires L < 2√2·σ_q ≈ "
+            f"{2.0 * np.sqrt(2.0) * sq:.0f} nm. Increase σ_q or decrease L.")
+    if Lz is not None and not np.isfinite(Lz):
+        return _empty("Axial pattern diameter must be finite.")
+    for ratio in (centre_dwell_ratio, centre_dwell_ratio_z):
+        if ratio is not None and (not np.isfinite(ratio) or ratio < 0):
+            return _empty("Centre dwell ratio must be finite and nonnegative.")
+    G = float(geometry_factor_xy)
+    Gz = float(geometry_factor_z)
+    if not (np.isfinite(G) and G > 0):
+        unsupported_xy = unsupported_xy or "No supported lateral geometry factor."
+    if Lz is not None and not (np.isfinite(Gz) and Gz > 0):
+        unsupported_z = unsupported_z or "No supported axial geometry factor."
 
-    # σ_ideal: no-background limit (Eq. 45), per localization via N.
-    sigma_ideal = L / (2.0 * np.sqrt(2.0 * n) * grad_denom)
+    sigma_ideal = L * G / (4.0 * np.sqrt(n) * grad_denom)
 
-    # SBR from the measured rates (per localization). Lateral uses efo/fbg;
-    # axial uses efo_z/fbg_z when given (final axial iteration rates), else efo/fbg.
-    def _sbr(efo_arr, fbg_arr):
-        has = False
-        sbr_p = np.full(n_locs, np.nan)
-        okm = np.zeros(n_locs, dtype=bool)
-        vals = np.empty(0)
-        if efo_arr is not None and fbg_arr is not None:
-            ef = np.asarray(efo_arr, dtype=float).ravel()
-            bg = np.asarray(fbg_arr, dtype=float).ravel()
-            if ef.shape == finite.shape and bg.shape == finite.shape:
-                ef = ef[finite]
-                bg = bg[finite]
-                okm = np.isfinite(ef) & np.isfinite(bg) & (bg > 0) & (ef > bg)
-                if okm.any():
-                    has = True
-                    vals = np.clip((ef[okm] - bg[okm]) / bg[okm], 1e-3, None)
-                    sbr_p[okm] = vals
-        return has, okm, vals, sbr_p
+    groups_v = None
+    if groups is not None:
+        g = np.asarray(groups).ravel()
+        groups_v = g[finite] if g.shape == finite.shape else None
+    rho, c, src, c_used, inconsistent = _channel_background(
+        eco_v, ecc_v, _aligned(efo, finite), _aligned(fbg, finite),
+        _aligned(efc, finite), centre_dwell_ratio, _aligned(efc_ref, finite), groups_v,
+        fbg_zero_measured)
+    known = np.isfinite(rho) & np.isfinite(sigma_ideal)
+    factor = np.sqrt((1.0 + rho) * (1.0 + rho * (1.0 + c)))
+    sigma_bg = np.where(known, sigma_ideal * factor, np.nan)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sbr = np.where(known, 1.0 / (rho * (1.0 + c)), np.nan)
+    has_bg = bool(known.any())
 
-    has_bg, ok, sbr, sbr_per = _sbr(efo, fbg)
-    if per_dim and (efo_z is not None or fbg_z is not None):
-        has_bg_z, ok_z, sbr_z, _ = _sbr(
-            efo_z if efo_z is not None else efo, fbg_z if fbg_z is not None else fbg)
-    else:
-        has_bg_z, ok_z, sbr_z = has_bg, ok, sbr
-
-    # Lateral xy bound — background degradation (Eq. 44).
-    sigma_bg = sigma_ideal.copy()
-    if has_bg:
-        factor_xy = np.sqrt((1.0 + 1.0 / sbr) * (1.0 + 3.0 / (4.0 * sbr)))
-        sigma_bg[ok] = sigma_ideal[ok] * factor_xy
-
-    # Axial z bound (1-D quadratic minimum, Eq. 28 → SBR form), 3-D only.
+    # Axial z bound (Eq. 29 × Eq. 28's factor), 3-D only.
+    z_fields: dict = {"per_dimension_photons": eco_z is not None}
     if Lz is not None:
+        if eco_z is not None:
+            ez = _aligned(eco_z, finite)
+            ecc_zv = _aligned(ecc_z, finite)
+            efo_zv, fbg_zv, efc_zv = (_aligned(efo_z, finite), _aligned(fbg_z, finite),
+                                      _aligned(efc_z, finite))
+            efc_ref_zv = _aligned(efc_ref_z, finite)
+            c_ratio_z = centre_dwell_ratio_z
+            ref_z = centre_reference_z
+        else:   # reuse the lateral inputs (single-iteration data)
+            ez, ecc_zv = eco_v, ecc_v
+            efo_zv, fbg_zv, efc_zv = (_aligned(efo, finite), _aligned(fbg, finite),
+                                      _aligned(efc, finite))
+            efc_ref_zv = _aligned(efc_ref, finite)
+            c_ratio_z = centre_dwell_ratio
+            ref_z = centre_reference
+        n_z = ez + (np.where(np.isfinite(ecc_zv) & (ecc_zv > 0), ecc_zv, 0.0)
+                    if ecc_zv is not None else 0.0)
         with np.errstate(invalid="ignore", divide="ignore"):
-            sigma_z_ideal = Lz / (4.0 * np.sqrt(n_z))     # NaN where N_z invalid
-        sigma_z_bg = sigma_z_ideal.copy()
-        if has_bg_z:
-            factor_z = np.sqrt((1.0 + 1.0 / sbr_z) * (1.0 + 2.0 / (3.0 * sbr_z)))
-            sigma_z_bg[ok_z] = sigma_z_ideal[ok_z] * factor_z
+            sigma_z_ideal = np.where(n_z > 0, Lz * Gz / (4.0 * np.sqrt(n_z)), np.nan)
+        rho_z, c_z, src_z, c_used_z, inconsistent_z = _channel_background(
+            ez, ecc_zv, efo_zv, fbg_zv, efc_zv, c_ratio_z, efc_ref_zv, groups_v,
+            fbg_zero_measured_z if eco_z is not None else fbg_zero_measured)
+        known_z = np.isfinite(rho_z) & np.isfinite(sigma_z_ideal)
+        sigma_z_bg = np.where(
+            known_z, sigma_z_ideal * np.sqrt((1.0 + rho_z) * (1.0 + rho_z * (1.0 + c_z))),
+            np.nan)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sbr_z = np.where(known_z, 1.0 / (rho_z * (1.0 + c_z)), np.nan)
         with np.errstate(invalid="ignore"):
-            z_fields = dict(
+            z_fields.update(
                 has_z=True, L_z_nm=Lz,
                 per_loc_sigma_z_ideal=sigma_z_ideal,
                 per_loc_sigma_z_bg=sigma_z_bg,
-                median_sigma_z_ideal=float(np.nanmedian(sigma_z_ideal)),
-                mean_sigma_z_ideal=float(np.nanmean(sigma_z_ideal)),
-                median_sigma_z_bg=float(np.nanmedian(sigma_z_bg)),
-                mean_sigma_z_bg=float(np.nanmean(sigma_z_bg)),
-                median_n_z=float(np.nanmedian(n_z)) if n_z.size else float("nan"),
-                per_dimension_photons=bool(per_dim),
+                median_sigma_z_ideal=(float(np.nanmedian(sigma_z_ideal))
+                                      if np.isfinite(sigma_z_ideal).any() else float("nan")),
+                mean_sigma_z_ideal=(float(np.nanmean(sigma_z_ideal))
+                                    if np.isfinite(sigma_z_ideal).any() else float("nan")),
+                median_sigma_z_bg=(float(np.nanmedian(sigma_z_bg)) if known_z.any()
+                                   else float("nan")),
+                mean_sigma_z_bg=(float(np.nanmean(sigma_z_bg)) if known_z.any()
+                                 else float("nan")),
+                median_n_z=float(np.nanmedian(n_z)) if np.isfinite(n_z).any() else float("nan"),
+                has_background_z=bool(known_z.any()),
+                background_source_z=_source_text(src_z, ref_z),
+                centre_reference_z=ref_z if np.any(src_z == BG_CENTRE_EARLIER) else "",
+                background_coverage_z=float(known_z.mean()) if n_z.size else 0.0,
+                median_sbr_z=(float(np.nanmedian(sbr_z)) if known_z.any() else float("nan")),
+                centre_dwell_ratio_z=c_used_z,
+                invalid_background_fraction_z=float(inconsistent_z.mean()),
+                axis_status_z=("unsupported_geometry" if unsupported_z else
+                               "background_estimated" if known_z.any() else
+                               "background_inconsistent" if inconsistent_z.any() else
+                               "invalid_input" if not np.isfinite(sigma_z_ideal).any() else
+                               "ideal_only"),
             )
-    else:
-        z_fields = dict(
-            has_z=False, L_z_nm=0.0,
-            median_n_z=float(np.nanmedian(n_z)) if (per_dim and n_z.size) else float("nan"),
-            per_dimension_photons=bool(per_dim),
-        )
+    elif eco_z is not None:
+        ez = _aligned(eco_z, finite)
+        if ez is not None and ez.size:
+            z_fields["median_n_z"] = float(np.nanmedian(ez))
 
-    sbr_finite = sbr_per[np.isfinite(sbr_per)]
     return CRLBResult(
         per_loc_sigma_ideal=sigma_ideal,
         per_loc_sigma_bg=sigma_bg,
         per_loc_n_total=n,
-        per_loc_sbr=sbr_per,
+        per_loc_sbr=sbr,
         median_sigma_ideal=float(np.median(sigma_ideal)),
         mean_sigma_ideal=float(sigma_ideal.mean()),
-        median_sigma_bg=float(np.median(sigma_bg)),
-        mean_sigma_bg=float(sigma_bg.mean()),
+        median_sigma_bg=float(np.nanmedian(sigma_bg)) if has_bg else float("nan"),
+        mean_sigma_bg=float(np.nanmean(sigma_bg)) if has_bg else float("nan"),
         median_n=float(np.median(n)),
-        median_sbr=float(np.median(sbr_finite)) if sbr_finite.size else float("nan"),
+        median_sbr=float(np.nanmedian(sbr)) if has_bg else float("nan"),
         has_background=has_bg,
         L_nm=L,
         sigma_q_nm=sq,
         n_locs=n_locs,
-        status=status,
+        status="",
+        per_loc_bg_source=src,
+        background_source=_source_text(src, centre_reference),
+        centre_reference=centre_reference if np.any(src == BG_CENTRE_EARLIER) else "",
+        geometry_factor=G,
+        geometry_factor_z=Gz,
+        donut_envelope=bool(donut_envelope),
+        background_notes=tuple(background_notes),
+        background_pooled=groups_v is not None,
+        background_coverage=float(known.mean()),
+        centre_dwell_ratio=c_used,
+        L_source=L_source,
+        L_z_source=L_z_source,
+        pattern=pattern,
+        pattern_z=pattern_z,
+        counts_centre=bool(ecc_v is not None and np.any(np.isfinite(ecc_v) & (ecc_v > 0))),
+        axis_status=("unsupported_geometry" if unsupported_xy else
+                     "background_estimated" if has_bg else
+                     "background_inconsistent" if inconsistent.any() else "ideal_only"),
+        count_convention=count_convention,
+        issues=tuple(dict.fromkeys(issues + [v for v in (unsupported_xy, unsupported_z) if v])),
+        invalid_background_fraction=float(inconsistent.mean()),
+        input_rows=n_full.size, source_indices=np.flatnonzero(finite),
+        excluded_photon_rows=int((~finite).sum()),
         **z_fields,
     )
 
@@ -689,22 +1026,15 @@ def crlb_precision(
 # ---------------------------------------------------------------------------
 
 def excess_precision(std_nm: float, crb_nm: float) -> float:
-    """Excess (non-photon-limited) localization error σ_fl beyond the CRB.
+    """Legacy arithmetic helper, not an identified noise component.
 
-    From the variance decomposition of Marin & Ries (*Nat. Commun.* 17:246,
-    2026, SimuFLUX), the measured per-localization spread combines the
-    photon-limited Cramér-Rao bound with a photon-count-**independent** error
-    from fluorophore flickering, drift, vibration and misalignment:
-
-        STD(r, N)² = σ_fl(r)² + σ_CRB(N)²   ⇒   σ_fl = √( STD² − σ_CRB² ).
-
-    Returns σ_fl in nm — ``0`` when the measured spread is at or below the bound
-    (i.e. the localization is essentially photon-limited), or NaN if either input
-    is not finite / not positive.
+    A quadrature difference is meaningful only for matched variances and a
+    justified additive, independent, attained-bound model. It is not used by
+    CRLB reporting. A below-bound value is unresolved (NaN), not zero error.
     """
     s = float(std_nm)
     c = float(crb_nm)
-    if not (np.isfinite(s) and np.isfinite(c)) or s <= 0.0:
+    if not (np.isfinite(s) and np.isfinite(c)) or s <= 0.0 or c < 0 or s < c:
         return float("nan")
     return float(np.sqrt(max(s * s - c * c, 0.0)))
 
@@ -713,9 +1043,46 @@ def excess_precision(std_nm: float, crb_nm: float) -> float:
 # UI launchers — these are what the menu items call
 # ---------------------------------------------------------------------------
 
+def _precision_role(ds, prefs=None) -> tuple[str | None, str]:
+    """Conservative static-analysis gate, including datasets never viewed as tracks.
+
+    The displacement classifier is a heuristic, not an acquisition-mode proof.
+    A tracking-like sequence name also withholds static inference (closed paths
+    can end near their start). An explicit user role takes precedence.
+    """
+    from ..core.loader import attr_values_1d
+    from ..core.mfx_sequence import sequence_for_dataset
+    from ..core.tracks import dataset_tracking_role, build_track_set, looks_like_tracking
+    role, reason, explicit = dataset_tracking_role(ds)
+    if explicit or role == "Tracking":
+        return role, reason
+    seq = sequence_for_dataset(ds) or {}
+    name = str(seq.get("id", seq.get("name", "")))
+    if "track" in name.lower() or "seqtrk" in name.lower():
+        return "Tracking", f"tracking-like sequence name '{name}' (hint, not confirmed acquisition mode)"
+    values = [attr_values_1d(ds, key) for key in ("loc_x", "loc_y", "tid", "tim")]
+    if any(v is None for v in values):
+        return None, "insufficient coordinates, trace IDs or times to exclude tracking"
+    x, y, tid, tim = values
+    z = attr_values_1d(ds, "loc_z")
+    coords = np.column_stack([x, y, np.zeros_like(x) if z is None else z]) * 1e9
+    opts = (prefs or {}).get("tracking", {})
+    try:
+        tracks = build_track_set(coords, tid, tim)
+        moving, reason = looks_like_tracking(
+            tracks, displacement_nm=opts.get("role_displacement_nm", 25.0),
+            min_median_locs=opts.get("role_min_median_locs", 5))
+    except ValueError as exc:
+        return None, str(exc)
+    return ("Tracking" if moving else "Structure"), "fresh-load heuristic: " + reason
+
+
 def _measured_trace_precision(ds) -> dict | None:
     """Median per-trace measured σ (StdDev per trace, raw z) for the CRLB dialog's
-    precision budget; ``None`` when there are no usable traces / no trace IDs."""
+    descriptive use only; tracking or an unknown role returns ``None``."""
+    role, _reason = _precision_role(ds)
+    if role != "Structure":
+        return None
     try:
         from ..core.loader import attr_values_1d
         lx = np.asarray(attr_values_1d(ds, "loc_x"), dtype=float)
@@ -741,15 +1108,352 @@ def _measured_trace_precision(ds) -> dict | None:
     }
 
 
+_CRLB_FIELDS = ("eco", "ecc", "efo", "efc", "fbg")
+
+
+def crlb_inputs_for_dataset(ds, *, prefs=None) -> dict | None:
+    """Everything the CRB needs, read from *ds* (Qt-free).
+
+    Photon counts and rates are gathered per channel from the iteration that
+    localized it — the final lateral iteration for σ_xy, the final axial one for
+    σ_z — and laid onto the last-valid localizations. When ``ds.attr`` *is* that
+    materialization the interactive filter applies. The pattern geometry comes
+    from the acquisition sequence when the file records it, otherwise it is
+    assumed and reported as such. ``None`` when the dataset has no photon counts.
+    """
+    from ..core.loader import attr_matches_last_valid, iteration_attr_values_1d, mfx_get
+    from ..core.mfx_sequence import (
+        background_sensing, centre_reference_iteration, crlb_geometry_for_dataset,
+        iteration_power, sequence_for_dataset)
+
+    if ds.attr.get("eco") is None and ds.mfx_raw.get("eco") is None:
+        return None
+    use_attr = attr_matches_last_valid(ds) and ds.attr.get("eco") is not None
+    ftr = np.asarray(ds.filter_mask, dtype=bool) if use_attr else None
+    has_raw = len(ds.mfx_raw) > 0
+
+    def _materialized(name: str):
+        if use_attr:
+            v = ds.attr.get(name)
+            if v is None:
+                return None
+            v = np.asarray(v, dtype=float).ravel()
+            return v[ftr] if ftr.shape[0] == v.shape[0] else v
+        v = mfx_get(ds, name, itr="last", vld_only=True)
+        return None if v is None else np.asarray(v, dtype=float).ravel()
+
+    def _at(name: str, iteration):
+        if iteration is not None and has_raw:
+            v = iteration_attr_values_1d(ds, name, iteration, itr="last", vld_only=True)
+            if v is not None:
+                v = np.asarray(v, dtype=float).ravel()
+                if ftr is not None and ftr.shape[0] == v.shape[0]:
+                    v = v[ftr]
+                return v
+            return None   # never substitute an effective/materialized OTHER iteration
+        return _materialized(name)
+
+    def _strict(name: str, iteration: int):
+        # This iteration's values only — no fallback to the materialized view.
+        try:
+            v = iteration_attr_values_1d(ds, name, iteration, itr="last", vld_only=True)
+        except Exception:
+            return None
+        if v is None:
+            return None
+        v = np.asarray(v, dtype=float).ravel()
+        if ftr is not None and ftr.shape[0] == v.shape[0]:
+            v = v[ftr]
+        return v
+
+    sequence = sequence_for_dataset(ds)
+    sensing = background_sensing(sequence)
+
+    def _channel(iteration) -> dict:
+        ch = {k: _at(k, iteration) for k in _CRLB_FIELDS}
+        ch["efc_ref"], ch["centre_reference"], ch["notes"] = None, "", []
+        ch["fbg_zero_measured"] = sensing is True
+        ch["iteration"] = iteration
+        if sensing is False and ch.get("fbg") is not None:
+            ch["fbg"] = None
+            ch["notes"].append(
+                "fbg not used: background sensing (bgcSense) was off in this sequence, "
+                "so the file's fbg is a placeholder, not a measurement")
+        own = ch.get("efc")
+        own_ok = own is not None and bool(np.any(np.isfinite(own) & (own > 0)))
+        k = centre_reference_iteration(sequence, iteration)
+        if not own_ok and k is not None and iteration is not None and k != iteration:
+            ref = _strict("efc", k)
+            p_now, p_ref = iteration_power(sequence, iteration), iteration_power(sequence, k)
+            # The reference must actually cover the localizations: an m2205
+            # file keeps hardly any values from its intermediate iterations, and
+            # a few stray rows must not stand in for the whole dataset.
+            if (ref is not None and p_now and p_ref
+                    and float(np.mean(np.isfinite(ref) & (ref > 0))) >= _REFERENCE_MIN_COVERAGE):
+                scale = p_now / p_ref
+                ch["efc_ref"] = ref * scale
+                ch["centre_reference"] = (
+                    f"iteration {k + 1} scaled x{scale:.2f} by the laser power")
+                ch["notes"].append(
+                    "Earlier centre transfer assumes background scales with laser power; "
+                    "dark counts and emitter motion/brightness changes may violate this.")
+                if sensing is True:
+                    ref_counts = _strict("ecc", k)
+                    ref_bg = _strict("fbg", k)
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        dwell = None if ref_counts is None else ref_counts / ref
+                    dt = (dwell[np.isfinite(dwell) & (dwell > 0)]
+                          if dwell is not None else np.empty(0))
+                    low = np.zeros(ref.shape, dtype=bool)
+                    if dt.size and ref_bg is not None:
+                        expected = ref_bg * float(np.median(dt))
+                        low = ((ref_counts > 0) & (ref_counts < 0.5 * expected)
+                               & (expected >= 10))
+                    zeros = np.isfinite(ref) & (ref == 0)
+                    if zeros.any() or low.any():
+                        ch["notes"].append(
+                            f"bgcSense-on centre exposure at iteration {k + 1}: "
+                            f"{int(zeros.sum())} exact zeros and {int(low.sum())} low-tail rows "
+                            "(0 < ecc < half fbg-predicted counts, expected >= 10). "
+                            "Centre count/rate convention and zero meaning are unresolved; "
+                            "zeros are not used as centre background estimates.")
+        return ch
+
+    pit, geo_xy, geo_z = crlb_geometry_for_dataset(ds)
+    num_dim = int(getattr(ds.prop, "num_dim", 2) or 2)
+    tid = _materialized("tid")
+    xy = _channel(pit.lateral_iter)
+    z = None
+    if num_dim >= 3 and geo_z is not None:
+        # One iteration localizing every axis (an octahedron) serves both.
+        z = xy if pit.axial_iter == pit.lateral_iter else _channel(pit.axial_iter)
+    else:
+        geo_z = None
+    role, reason = _precision_role(ds, prefs)
+    result = {"xy": xy, "z": z, "geometry_xy": geo_xy, "geometry_z": geo_z,
+              "photon_iterations": pit, "num_dim": num_dim, "tid": tid,
+              "count_convention": "unknown", "source_version": ds.metadata.get("source_version"),
+              "comparison_role": role, "comparison_reason": reason}
+    if role == "Structure" and tid is not None:
+        x, y, zz = (_materialized(k) for k in ("loc_x", "loc_y", "loc_z"))
+        if x is not None and y is not None:
+            result["comparison_loc_xyz"] = np.column_stack(
+                [x, y, np.zeros_like(x) if zz is None else zz])
+            result["comparison_tid"] = tid
+    return result
+
+
+def _recorded_centre_ratio(geometry) -> float | None:
+    """The sequence's centre dwell ratio when it says the centre was probed.
+
+    ``None`` otherwise, so the counts decide (a recorded centre exposure is
+    used whatever the sequence claims; its dwell is then read off the counts).
+    """
+    if geometry is not None and geometry.from_sequence and geometry.centre_probed:
+        return geometry.centre_dwell_ratio
+    return None
+
+
+def crlb_from_inputs(inputs: dict, *, L_nm: float | None = None,
+                     sigma_q_nm: float = CRLB_DEFAULT_SIGMA_Q_NM,
+                     L_z_nm: float | None = None) -> CRLBResult:
+    """:func:`crlb_precision` on :func:`crlb_inputs_for_dataset`'s output.
+
+    ``L_nm`` / ``L_z_nm`` override the recorded (or assumed) pattern sizes; an
+    override that differs from the recorded value is reported as user input.
+    """
+    gxy, gz = inputs["geometry_xy"], inputs["geometry_z"]
+    xy, z = inputs["xy"], inputs["z"]
+
+    def _size(override, geometry):
+        if override is None or abs(float(override) - geometry.L_nm) < 1e-6:
+            return geometry.L_nm, geometry.source
+        return float(override), "user input"
+
+    L, L_src = _size(L_nm, gxy)
+    g_xy = gxy.geometry_factors[0]
+    notes = list(xy.get("notes") or ())
+    kwargs = dict(L_nm=L, sigma_q_nm=sigma_q_nm, efo=xy["efo"], fbg=xy["fbg"],
+                  ecc=xy["ecc"], efc=xy["efc"],
+                  centre_dwell_ratio=_recorded_centre_ratio(gxy),
+                  L_source=L_src, pattern=gxy.pattern,
+                  efc_ref=xy.get("efc_ref"), centre_reference=xy.get("centre_reference", ""),
+                  geometry_factor_xy=g_xy, unsupported_xy=gxy.unsupported_reason,
+                  donut_envelope=gxy.donut_envelope,
+                  fbg_zero_measured=xy.get("fbg_zero_measured", False),
+                  count_convention=inputs.get("count_convention", "detected"))
+    if z is not None and gz is not None:
+        Lz, Lz_src = _size(L_z_nm, gz)
+        g_z = gz.geometry_factors[1]
+        kwargs.update(L_z_nm=Lz, L_z_source=Lz_src, pattern_z=gz.pattern,
+                      geometry_factor_z=g_z,
+                      unsupported_z=gz.unsupported_reason)
+        # Plain array inputs deliberately assume a z-line; they do not record a pattern.
+        if not gz.pattern and gz.supported:
+            kwargs["geometry_factor_z"] = 1.0
+        if z is not xy:     # a distinct axial iteration — its own photons/background
+            kwargs.update(eco_z=(z["eco"] if z.get("eco") is not None else
+                                 np.full(np.shape(xy["eco"]), np.nan)),
+                          efo_z=z["efo"], fbg_z=z["fbg"],
+                          ecc_z=z["ecc"], efc_z=z["efc"],
+                          centre_dwell_ratio_z=_recorded_centre_ratio(gz),
+                          efc_ref_z=z.get("efc_ref"),
+                          fbg_zero_measured_z=z.get("fbg_zero_measured", False),
+                          centre_reference_z=z.get("centre_reference", ""))
+            notes += [n for n in (z.get("notes") or ()) if n not in notes]
+    kwargs["background_notes"] = tuple(notes)
+    kwargs["groups"] = inputs.get("tid")
+    result = crlb_precision(xy["eco"], **kwargs)
+    result.provenance = {
+        "source_version": inputs.get("source_version"),
+        "comparison_reason": inputs.get("comparison_reason", ""),
+        "xy_iteration": xy.get("iteration"),
+        "z_iteration": z.get("iteration") if z else None,
+        "orbit_interpretation": "detected counts and total rates; no background restoration",
+        "centre_interpretation": "conditional; bgcSense-on zero/low-tail convention unresolved",
+    }
+    return result
+
+
+def crlb_matched_comparison(result: CRLBResult, inputs: dict) -> dict | None:
+    """Descriptive matched trace medians, never a variance decomposition.
+
+    For each axis select rows with finite coordinates AND a finite bound, then
+    keep traces with at least five such rows. Compare each trace's sample SD
+    with sqrt(mean(bound**2)) on exactly those rows, and take equal-weight
+    trace medians. Filtering, invalid photons and missing background therefore
+    affect both sides identically. XY is per-coordinate RMS, not radial SD.
+    """
+    loc = inputs.get("comparison_loc_xyz")
+    tid = inputs.get("comparison_tid")
+    if loc is None or tid is None or result.status:
+        return None
+    loc, tid = np.asarray(loc, float), np.asarray(tid)
+    if loc.shape != (result.input_rows, 3) or tid.shape != (result.input_rows,):
+        raise ValueError("CRLB comparison coordinates and trace IDs must match the input rows.")
+    loc, tid = loc[result.source_indices], tid[result.source_indices]
+    out = {}
+    channels = [("xy", result.axis_status, result.has_background,
+                 result.per_loc_sigma_bg, result.per_loc_sigma_ideal, (0, 1))]
+    if result.has_z:
+        channels.append(("z", result.axis_status_z, result.has_background_z,
+                         result.per_loc_sigma_z_bg, result.per_loc_sigma_z_ideal, (2,)))
+    for axis, status, has_bg, bg, ideal, columns in channels:
+        if status in {"invalid_input", "unsupported_geometry", "background_inconsistent"}:
+            continue
+        sig = bg if has_bg else ideal
+        valid = np.all(np.isfinite(loc[:, columns]), axis=1) & np.isfinite(sig)
+        if not valid.any():
+            continue
+        coords = np.zeros((int(valid.sum()), 3))
+        coords[:, columns] = loc[valid][:, columns]
+        ids, codes = np.unique(tid[valid], return_inverse=True)
+        count = np.bincount(codes)
+        keep = count >= MIN_LOCS_PER_TRACE
+        if not keep.any():
+            continue
+        bounds = np.sqrt(np.bincount(codes, weights=np.square(sig[valid])) / count)
+        spread = stddev_per_trace(coords, tid[valid])
+        measured = spread["per_trace_sigma_r"] if axis == "xy" else spread["per_trace_sigma_xyz"][:, 2]
+        m, b = float(np.median(measured)), float(np.median(bounds[keep]))
+        n_locs = int(count[keep].sum())
+        out[axis] = {"measured_nm": m, "bound_nm": b, "ratio": m / b if b > 0 else None,
+                     "n_traces": int(keep.sum()), "n_locs": n_locs,
+                     "coverage": n_locs / result.input_rows if result.input_rows else 0.0,
+                     "bound_kind": "background estimated" if has_bg else "ideal only"}
+    return out or None
+
+
+def _bound_kind(has_background: bool, source: str, coverage: float,
+                pooled: bool = False, status: str = "ideal_only") -> str:
+    """Either 'background-limited; background from the …' or 'no background information'."""
+    if status == "background_inconsistent":
+        return "background >= orbit; no finite consistent bound"
+    if status in {"unsupported_geometry", "invalid_input"}:
+        return status.replace("_", " ")
+    if not has_background:
+        return "no background information"
+    kind = f"background-limited; background from the {source}"
+    if pooled:
+        kind += " pooled per trace"
+    if coverage < 0.995:
+        kind += f" for {100.0 * coverage:.0f}% of localizations"
+    return kind
+
+
+def crlb_log_line(result: CRLBResult, measured: dict | None = None) -> str:
+    """The Log line the method-text generator parses.
+
+    Keep it parse-safe: no commas inside the σ_z parenthesis and no nested
+    parentheses inside the σ_xy one.
+    """
+    z_txt = ""
+    if result.has_z:
+        z_kind = _bound_kind(result.has_background_z, result.background_source_z,
+                             result.background_coverage_z, result.background_pooled, result.axis_status_z)
+        z_txt = (f", σ_z = {result.primary_sigma_z:.2f} nm "
+                 f"(L_z = {result.L_z_nm:.1f} nm; {z_kind})")
+    # Legacy callers may still pass unmatched sigma_r/sigma_z; never reinterpret
+    # those old medians as the new matched comparison.
+    comparison = (measured if isinstance(measured, dict)
+                  and any(axis in measured for axis in ("xy", "z")) else None)
+    budget_txt = ""
+    if comparison and "xy" in comparison:
+        m = comparison["xy"]
+        budget_txt = (f"; matched trace comparison: measured σ_r = {m['measured_nm']:.2f} nm, "
+                      f"RMS bound = {m['bound_nm']:.2f} nm, measured/bound = {m['ratio']:.3f}")
+    n_def = "eco + ecc" if result.counts_centre else "eco"
+    if result.has_z and result.per_dimension_photons and np.isfinite(result.median_n_z):
+        n_txt = (f"median N = {result.median_n:.0f} photons ({n_def}; final lateral "
+                 f"iteration; axial N_z = {result.median_n_z:.0f})")
+    else:
+        n_txt = f"median N = {result.median_n:.0f} photons ({n_def})"
+    xy_kind = _bound_kind(result.has_background, result.background_source,
+                          result.background_coverage, result.background_pooled, result.axis_status)
+    def number(value):
+        return float(value) if np.isfinite(value) else None
+
+    def axis_info(z=False):
+        return {
+            "status": result.axis_status_z if z else result.axis_status,
+            "primary_sigma_nm": number(result.primary_sigma_z if z else result.primary_sigma),
+            "median_ideal_nm": number(result.median_sigma_z_ideal if z else result.median_sigma_ideal),
+            "background_coverage": result.background_coverage_z if z else result.background_coverage,
+            "invalid_background_fraction": (result.invalid_background_fraction_z if z
+                                            else result.invalid_background_fraction),
+            "background_source": result.background_source_z if z else result.background_source,
+            "geometry_source": result.L_z_source if z else result.L_source,
+            "pattern": result.pattern_z if z else result.pattern,
+            "iteration": result.provenance.get("z_iteration" if z else "xy_iteration"),
+            "issues": list(result.issues),
+        }
+    payload = dict(result.provenance, schema="crlb/v2", xy=axis_info(),
+                   z=axis_info(True) if result.has_z else None,
+                   count_convention=result.count_convention, issues=list(result.issues),
+                   comparison=comparison, L_nm=number(result.L_nm), sigma_q_nm=number(result.sigma_q_nm),
+                   median_n=number(result.median_n), input_rows=result.input_rows,
+                   excluded_photon_rows=result.excluded_photon_rows)
+    return (
+        f"Localization precision (CRLB, Marin-Ries): median σ_xy = "
+        f"{result.primary_sigma:.2f} nm ({xy_kind}), "
+        f"{result.median_sigma_ideal:.2f} nm (ideal){z_txt}, "
+        f"L = {result.L_nm:.1f} nm ({result.L_source}), σ_q = {result.sigma_q_nm:.0f} nm, "
+        f"{n_txt}{budget_txt}; crlb_provenance="
+        + json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    )
+
+
 def run_crlb(parent, state) -> None:
     """Compute the MINFLUX CRB precision for the active dataset, show a dialog."""
-    from ..core.loader import attr_matches_last_valid, mfx_get
-
     ds = state.active_dataset
     if ds is None:
         return
-
-    if ds.attr.get("eco") is None and ds.mfx_raw.get("eco") is None:
+    try:
+        inputs = crlb_inputs_for_dataset(ds, prefs=getattr(state, "prefs", None))
+    except ValueError as exc:
+        _show_info_dialog(parent, "CRLB — invalid inputs", str(exc))
+        return
+    if inputs is None or inputs["xy"]["eco"] is None:
         _show_info_dialog(
             parent, "CRLB — Cramér-Rao bound",
             "Dataset has no photon-count attribute (<b>eco</b>), which the "
@@ -757,97 +1461,16 @@ def run_crlb(parent, state) -> None:
             "carries effective counts.")
         return
 
-    # N (eco) and the rates (efo, fbg) must come from the SAME measurement —
-    # the last (smallest-L) iteration, valid only, consistent with L. When the
-    # materialized ``ds.attr`` already IS that selection we use it (so the
-    # interactive filter applies); otherwise route through the raw store's
-    # last-valid selection (as the anisotropy estimator does).
-    use_attr = attr_matches_last_valid(ds) and ds.attr.get("eco") is not None
-    ftr = np.asarray(ds.filter_mask, dtype=bool) if use_attr else None
-
-    if use_attr:
-        def _col(name: str):
-            v = ds.attr.get(name)
-            if v is None:
-                return None
-            v = np.asarray(v, dtype=float).ravel()
-            return v[ftr] if ftr.shape[0] == v.shape[0] else v
-    else:
-        def _col(name: str):
-            v = mfx_get(ds, name, itr="last", vld_only=True)
-            return None if v is None else np.asarray(v, dtype=float).ravel()
-
-    # ``_col`` gives the materialized (final = axial iteration) per-loc values.
-    eco = _col("eco")          # N_z: photons at the final axial (z) iteration
-    efo = _col("efo")
-    fbg = _col("fbg")
-    num_dim = int(getattr(ds.prop, "num_dim", 2) or 2)
-
-    # Per-dimension photon budget: the lateral (xy) CRLB must use the photons of
-    # the final LATERAL iteration, not the materialized final (axial) one. Detect
-    # the lateral/axial iterations and gather the lateral eco aligned to the same
-    # last-valid rows; fall back to the single materialized eco otherwise.
-    eco_xy = None
     try:
-        from ..core.loader import iteration_attr_values_1d
-        from ..core.mfx_sequence import photon_iterations_for_dataset
-        pit = photon_iterations_for_dataset(ds)
-        if (pit.lateral_iter is not None and pit.axial_iter is not None
-                and pit.lateral_iter != pit.axial_iter):
-            v = iteration_attr_values_1d(ds, "eco", pit.lateral_iter,
-                                         itr="last", vld_only=True)
-            if v is not None:
-                v = np.asarray(v, dtype=float).ravel()
-                if use_attr and ftr is not None and ftr.shape[0] == v.shape[0]:
-                    v = v[ftr]
-                eco_xy = v
-    except Exception:
-        eco_xy = None
-
-    if eco_xy is not None and eco is not None and eco_xy.shape == eco.shape:
-        # N_xy = final lateral iteration photons; N_z = final axial (materialized).
-        result = crlb_precision(
-            eco_xy, L_nm=CRLB_DEFAULT_L_NM, sigma_q_nm=CRLB_DEFAULT_SIGMA_Q_NM,
-            efo=efo, fbg=fbg,
-            L_z_nm=CRLB_DEFAULT_LZ_NM if num_dim >= 3 else None,
-            eco_z=eco)
-        eco = eco_xy      # display / budget use the lateral photon count
-    else:
-        result = crlb_precision(
-            eco, L_nm=CRLB_DEFAULT_L_NM, sigma_q_nm=CRLB_DEFAULT_SIGMA_Q_NM,
-            efo=efo, fbg=fbg,
-            L_z_nm=CRLB_DEFAULT_LZ_NM if num_dim >= 3 else None)
-    # Measured per-trace spread → the CRLB dialog's precision budget (measured vs
-    # the photon-limited bound; excess σ_fl per Marin & Ries 2026).
-    measured = _measured_trace_precision(ds)
-
-    if np.isfinite(result.median_sigma_bg):
-        z_txt = (f", σ_z = {result.median_sigma_z_bg:.2f} nm (L_z = "
-                 f"{result.L_z_nm:.0f} nm)" if result.has_z else "")
-        budget_txt = ""
-        if measured is not None:
-            fl_r = excess_precision(measured["sigma_r"], result.median_sigma_bg)
-            budget_txt = (f"; measured σ_r = {measured['sigma_r']:.2f} nm "
-                          f"(StdDev/trace) → excess σ_fl = {fl_r:.2f} nm")
-        if result.per_dimension_photons and np.isfinite(result.median_n_z):
-            n_txt = (f"median N = {result.median_n:.0f} photons (final lateral "
-                     f"iteration; axial N_z = {result.median_n_z:.0f})")
-        else:
-            n_txt = f"median N = {result.median_n:.0f} photons"
-        _try_journal(
-            state,
-            f"Localization precision (CRLB, Marin-Ries): median σ_xy = "
-            f"{result.median_sigma_bg:.2f} nm (background-limited), "
-            f"{result.median_sigma_ideal:.2f} nm (ideal){z_txt}, "
-            f"L = {result.L_nm:.0f} nm, σ_q = {result.sigma_q_nm:.0f} nm, "
-            f"{n_txt}{budget_txt}."
-        )
+        result = crlb_from_inputs(inputs)
+        measured = crlb_matched_comparison(result, inputs)
+    except ValueError as exc:
+        _show_info_dialog(parent, "CRLB — invalid inputs", str(exc))
+        return
+    _try_journal(state, crlb_log_line(result, measured))
 
     from ..ui.modeless import show_modeless
-    show_modeless(
-        CRLBResultDialog(result, eco, efo, fbg, num_dim=num_dim, measured=measured),
-        parent,
-    )
+    show_modeless(CRLBResultDialog(result, inputs, measured=measured), parent)
 
 
 def run_frc(parent, state) -> None:
@@ -855,8 +1478,7 @@ def run_frc(parent, state) -> None:
     ds = state.active_dataset
     if ds is None:
         return
-    from ..core.tracks import dataset_tracking_role
-    role, reason, _explicit = dataset_tracking_role(ds)
+    role, reason = _precision_role(ds, getattr(state, "prefs", None))
     if role == "Tracking":
         _show_info_dialog(
             parent,
@@ -910,8 +1532,7 @@ def run_stddev_per_trace(parent, state) -> None:
     ds = state.active_dataset
     if ds is None:
         return
-    from ..core.tracks import dataset_tracking_role
-    role, reason, _explicit = dataset_tracking_role(ds)
+    role, reason = _precision_role(ds, getattr(state, "prefs", None))
     if role == "Tracking":
         _show_info_dialog(
             parent,
@@ -1269,8 +1890,9 @@ class FRCResultDialog(QDialog):
             "<i>FRC mode</i>: <b>per localization</b> uses every localization and is "
             "kept as the default for continuity, but can be optimistic when emitters "
             "are localized many times; <b>per-trace combined</b> first collapses each "
-            "trace to its mean position and is closer to the endpoint image-resolution "
-            "number reported by pyMINFLUX."
+            "trace to its mean position, so it measures the resolution of the molecule "
+            "positions themselves (one point per emitter) — the value Ostersehlt "
+            "<i>et al.</i> report beside the per-localization one."
             + _references_html(
                 "<a href='https://www.nature.com/articles/s41592-019-0688-0'>Gwosch "
                 "<i>et al.</i>, <i>Nat. Methods</i> 17:217 (2020)</a>",
@@ -1385,92 +2007,187 @@ def _clear_layout(layout) -> None:
 
 
 
+def crlb_inputs_from_arrays(
+    eco, *, efo=None, fbg=None, ecc=None, efc=None, num_dim: int = 2,
+    L_nm: float = CRLB_DEFAULT_L_NM, L_z_nm: float = CRLB_DEFAULT_LZ_NM,
+    eco_z=None, efo_z=None, fbg_z=None, ecc_z=None, efc_z=None, tid=None,
+) -> dict:
+    """Inputs in :func:`crlb_inputs_for_dataset`'s shape, from plain arrays.
+
+    For scripting and tests: no sequence is involved, so the pattern sizes are
+    reported as assumed and the centre dwell (if any) is read off the counts.
+    ``tid`` (trace ids) pools the background per trace, as for a dataset.
+    """
+    from ..core.mfx_sequence import PatternGeometry
+
+    def _arr(v):
+        return None if v is None else np.asarray(v, dtype=float)
+
+    xy = {"eco": _arr(eco), "ecc": _arr(ecc), "efo": _arr(efo), "efc": _arr(efc),
+          "fbg": _arr(fbg)}
+    z = None
+    gz = None
+    if int(num_dim) >= 3:
+        # Without axial arrays the axial channel reuses the lateral ones —
+        # the very same dict, which crlb_from_inputs recognises.
+        z = xy if eco_z is None else {
+            "eco": _arr(eco_z), "ecc": _arr(ecc_z), "efo": _arr(efo_z),
+            "efc": _arr(efc_z), "fbg": _arr(fbg_z)}
+        gz = PatternGeometry(L_nm=float(L_z_nm))
+    return {"xy": xy, "z": z, "geometry_xy": PatternGeometry(L_nm=float(L_nm)),
+            "geometry_z": gz, "photon_iterations": None, "num_dim": int(num_dim),
+            "tid": None if tid is None else np.asarray(tid).ravel()}
+
+
+def _pattern_text(pattern: str, centre_ratio: float, counts_centre: bool) -> str:
+    """'hexagon + centre', 'square', … for the info line ('' when unknown)."""
+    if not pattern:
+        return "with centre exposure" if counts_centre else ""
+    return f"{pattern} + centre" if (centre_ratio > 0 or counts_centre) else pattern
+
+
 class CRLBResultDialog(QDialog):
     """MINFLUX Cramér-Rao bound report, anisotropy-plugin style.
 
-    Holds the source photon counts / rates so the user can recompute with a
-    different pattern diameter L from the dialog.
+    Holds the per-channel inputs (:func:`crlb_inputs_for_dataset`) so the user
+    can recompute with a different L / σ_q / L_z — the axial photon count and
+    background are kept, not replaced by the lateral ones.
     """
 
-    def __init__(self, result: "CRLBResult", eco: np.ndarray,
-                 efo: np.ndarray | None = None, fbg: np.ndarray | None = None,
-                 num_dim: int = 2, measured: dict | None = None, parent=None) -> None:
+    def __init__(self, result: "CRLBResult", inputs: dict, *,
+                 measured: dict | None = None, parent=None) -> None:
         super().__init__(parent)
-        self._eco, self._efo, self._fbg = eco, efo, fbg
-        self._num_dim = int(num_dim)
-        # Measured per-trace σ (StdDev/trace) for the precision budget, or None.
+        self._inputs = inputs
+        self._num_dim = int(inputs.get("num_dim", 2) or 2)
+        # Matched per-trace comparison, or None for tracking/ineligible data.
         self._measured = measured
         self.setWindowTitle("Localization Precision — CRLB (MINFLUX)")
         self.setModal(False)
-        self.resize(1120 if self._num_dim >= 3 else 880, 680)
+        self.resize(1120 if self._num_dim >= 3 else 880, 720)
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        root = QVBoxLayout(content)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
         self._root = root
         self._build(result)
 
     def _build(self, result: "CRLBResult") -> None:
+        from html import escape
+        from ..ui.qt_lifecycle import dispose_plot_widgets
+
+        # Recompute replaces the plots; retire their ViewBoxes before deletion.
+        dispose_plot_widgets(self)
         _clear_layout(self._root)
         root = self._root
 
-        if result.n_locs == 0 or not np.isfinite(result.median_sigma_ideal):
-            warn = QLabel(f"<b>{result.status or 'CRLB could not be computed.'}</b>")
+        if result.status:
+            warn = QLabel(f"<b>{escape(result.status)}</b>")
             warn.setWordWrap(True)
             root.addWidget(warn)
-            self._add_controls(root, result)
-            return
 
-        sbr_txt = (f" &nbsp;|&nbsp; median SBR = {result.median_sbr:.1f}"
-                   if result.has_background and np.isfinite(result.median_sbr) else "")
-        if result.per_dimension_photons and np.isfinite(result.median_n_z):
+        n_def = "eco + ecc" if result.counts_centre else "eco"
+        if result.has_z and result.per_dimension_photons and np.isfinite(result.median_n_z):
             n_txt = (f"median N<sub>xy</sub> = <b>{result.median_n:.0f}</b>, "
-                     f"N<sub>z</sub> = <b>{result.median_n_z:.0f}</b> photons")
+                     f"N<sub>z</sub> = <b>{result.median_n_z:.0f}</b> photons ({n_def})")
         else:
-            n_txt = f"median N = <b>{result.median_n:.0f}</b> photons"
+            n_value = f"{result.median_n:.0f}" if np.isfinite(result.median_n) else "unavailable"
+            n_txt = f"median N = <b>{n_value}</b> input counts ({n_def})"
+        pat = _pattern_text(result.pattern, result.centre_dwell_ratio, result.counts_centre)
+        pat_txt = f", {pat}" if pat else ""
         info = QLabel(
-            f"<b>{result.n_locs:,}</b> localizations &nbsp;|&nbsp; "
-            f"{n_txt} &nbsp;|&nbsp; "
-            f"L = <b>{result.L_nm:.0f}</b> nm &nbsp;|&nbsp; "
-            f"σ<sub>q</sub> = <b>{result.sigma_q_nm:.0f}</b> nm{sbr_txt}"
+            f"<b>{result.n_locs:,}</b> localizations &nbsp;|&nbsp; {n_txt} &nbsp;|&nbsp; "
+            f"L = <b>{result.L_nm:.1f}</b> nm ({result.L_source}{pat_txt}) &nbsp;|&nbsp; "
+            f"σ<sub>q</sub> = <b>{result.sigma_q_nm:.0f}</b> nm"
         )
+        info.setWordWrap(True)
         info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(info)
 
-        primary = result.median_sigma_bg if result.has_background else result.median_sigma_ideal
-        kind = "background-limited" if result.has_background else "ideal (no background data)"
+        primary = result.primary_sigma
+        def bound_value(value):
+            return _res(value) if np.isfinite(value) else "unavailable"
+
         if result.has_z:
-            z_primary = result.median_sigma_z_bg if result.has_background else result.median_sigma_z_ideal
-            head_value = (f"σ<sub>xy</sub> = {_res(primary)}, "
-                          f"σ<sub>z</sub> = {_res(z_primary)}")
+            head_value = (f"σ<sub>xy</sub> = {bound_value(primary)}, "
+                          f"σ<sub>z</sub> = {bound_value(result.primary_sigma_z)}")
         else:
-            head_value = _res(primary)
+            head_value = bound_value(primary)
         headline = QLabel(
-            f"<span style='font-size:18px'><b>CRLB precision (median σ): "
+            f"<span style='font-size:18px'><b>Conditional model bound (median σ): "
             f"{head_value}</b></span>"
-            f"<span style='color:gray'> &nbsp;({kind})</span>"
         )
+        headline.setWordWrap(True)
         headline.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(headline)
+        self._add_validity_report(root, result)
 
+        # Caveats the user must see before reading the numbers.
+        caveats = [
+            "Centred-emitter model bound, conditional on the input conventions and "
+            "background model; not a measured localization precision or image resolution. "
+            "σ<sub>xy</sub> is per-coordinate RMS, √[(σ<sub>x</sub>² + σ<sub>y</sub>²)/2], "
+            "not a radial displacement uncertainty."
+        ]
+        if result.count_convention != "detected":
+            caveats.append(
+                "Input count convention unknown: the displayed numbers assume detected "
+                "orbit counts. Do not interpret them as calibrated experimental precision "
+                "or automatically restore background counts.")
+        ideal_axes = [name for name, status in (
+            ("lateral", result.axis_status),
+            ("axial", result.axis_status_z if result.has_z else ""))
+            if status == "ideal_only"]
+        if ideal_axes:
+            caveats.append(
+                "No usable background estimate for " + " and ".join(ideal_axes)
+                + ": only a hypothetical zero-background bound is available; "
+                "missing background is not evidence of zero background.")
+        refs_used = [r for r in (result.centre_reference,
+                                 result.centre_reference_z if result.has_z else "") if r]
+        if refs_used:
+            caveats.append(
+                "The photon iteration does not probe the centre, so the background "
+                "rate is the centre exposure of " + " and ".join(dict.fromkeys(refs_used))
+                + " — assuming the effective background scales with excitation power. "
+                "This is a model assumption, not an independently calibrated background.")
+        caveats.extend(escape(str(note)) for note in result.background_notes)
+        caveats.extend(escape(str(issue)) for issue in result.issues)
+        if "assumed" in result.L_source or (result.has_z and "assumed" in result.L_z_source):
+            caveats.append(
+                f"The pattern size was not recorded in this file; L = "
+                f"{CRLB_DEFAULT_L_NM:.1f} nm (patGeoFactor {DEFAULT_FINAL_GEO_FACTOR} × "
+                f"{PATTERN_SCALE_NM:.0f} nm, the final pattern of Abberior's standard "
+                "imaging sequences) is assumed. Edit L below if the acquisition used "
+                "another sequence — the bound scales linearly with it.")
         if self._num_dim >= 3 and result.has_z:
-            caveat = QLabel(
-                "3-D dataset: lateral (xy) from the 2-D donut; axial (z) from the "
-                "1-D quadratic-minimum estimator (Eq. 28), reusing N and the measured "
-                "(lateral) SBR with an axial pattern size L_z."
-            )
-            caveat.setWordWrap(True)
-            caveat.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            caveat.setStyleSheet("color: #d2a24a; font-size: 11px;")
-            root.addWidget(caveat)
+            caveats.append(
+                "3-D: σ<sub>xy</sub> uses the photons, background and pattern of the final "
+                "lateral iteration; σ<sub>z</sub> those of the final axial iteration.")
+        if result.pattern == "octahedron":
+            caveats.append(
+                "Octahedral result: isotropic quadratic-minimum approximation; real axial "
+                "and lateral optical curvature can differ and is not calibrated here.")
+        for text in dict.fromkeys(caveats):
+            lbl = QLabel(text)
+            lbl.setWordWrap(True)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("color: #d2a24a; font-size: 11px;")
+            root.addWidget(lbl)
 
         # σ_CRB table — ideal vs background-limited (per channel for 3-D).
-        grp = QGroupBox("Cramér-Rao bound σ_CRB across localizations  (nm)")
+        grp = QGroupBox("Conditional Cramér-Rao bounds across localizations  (nm)")
         grid = QGridLayout(grp)
         grid.setHorizontalSpacing(20)
         grid.setVerticalSpacing(4)
-        for col, h in enumerate(("", "ideal (no bg)", "background-limited")):
+        for col, h in enumerate(("", "hypothetical zero background", "estimated-background model")):
             lbl = QLabel(f"<b>{h}</b>")
+            lbl.setWordWrap(True)
             lbl.setAlignment(Qt.AlignmentFlag.AlignLeft if col == 0
                              else Qt.AlignmentFlag.AlignCenter)
             grid.addWidget(lbl, 0, col)
@@ -1490,7 +2207,7 @@ class CRLBResultDialog(QDialog):
             name = QLabel(f"<b>{row_lbl}:</b>" if bold else f"{row_lbl}:")
             grid.addWidget(name, r, 0)
             for col, v in enumerate((v_ideal, v_bg), start=1):
-                t = _res(v)
+                t = _res(v) if np.isfinite(v) else "n/a"
                 cell = QLabel(f"<b>{t}</b>" if bold else t)
                 cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 grid.addWidget(cell, r, col)
@@ -1498,8 +2215,7 @@ class CRLBResultDialog(QDialog):
             grid.setColumnStretch(col, 1)
         root.addWidget(grp)
 
-        # Precision budget — measured spread vs the photon-limited bound.
-        self._add_precision_budget(root, result)
+        self._add_matched_comparison(root, result)
 
         # Distributions — σ_xy [· σ_z for 3-D] · photon count N, in one row.
         try:
@@ -1508,23 +2224,30 @@ class CRLBResultDialog(QDialog):
             row = QHBoxLayout(hist_group)
             row.setContentsMargins(8, 8, 8, 8)
             sigma = result.per_loc_sigma_bg if result.has_background else result.per_loc_sigma_ideal
+            if not np.isfinite(primary):
+                sigma = np.empty(0)
             row.addWidget(_value_hist_plot(
-                "σ<sub>xy</sub> per localization (lateral)", sigma, _precision_color("CRLB lateral"),
+                "Conditional σ<sub>xy</sub> bound" if np.isfinite(primary)
+                else "Lateral bound unavailable", sigma, _precision_color("CRLB lateral"),
                 marker=float(primary), marker_label=f"median = {primary:.2f} nm",
                 x_label="σ<sub>xy</sub> (nm)", y_label="localizations",
+                clip_percentile=99.0,
             ))
             if result.has_z:
-                sigma_z = (result.per_loc_sigma_z_bg if result.has_background
+                sigma_z = (result.per_loc_sigma_z_bg if result.has_background_z
                            else result.per_loc_sigma_z_ideal)
-                z_primary = (result.median_sigma_z_bg if result.has_background
-                             else result.median_sigma_z_ideal)
+                z_primary = result.primary_sigma_z
+                if not np.isfinite(z_primary):
+                    sigma_z = np.empty(0)
                 row.addWidget(_value_hist_plot(
-                    "σ<sub>z</sub> per localization (axial)", sigma_z, _precision_color("CRLB axial"),
+                    "Conditional σ<sub>z</sub> bound" if np.isfinite(z_primary)
+                    else "Axial bound unavailable", sigma_z, _precision_color("CRLB axial"),
                     marker=float(z_primary), marker_label=f"median = {z_primary:.2f} nm",
                     x_label="σ<sub>z</sub> (nm)", y_label="localizations",
+                clip_percentile=99.0,
                 ))
             row.addWidget(_value_hist_plot(
-                "photon count N per localization", result.per_loc_n_total, _precision_color("Photon count"),
+                "Input count N per localization", result.per_loc_n_total, _precision_color("Photon count"),
                 marker=float(result.median_n), marker_label=f"median = {result.median_n:.0f}",
                 x_label="N (photons)", y_label="localizations",
             ))
@@ -1535,56 +2258,62 @@ class CRLBResultDialog(QDialog):
             root.addWidget(warn)
 
         z_formula = (
-            "&nbsp;&nbsp;σ<sub>z</sub> = L<sub>z</sub> ∕ ( 4·√N ) · "
-            "√[ ( 1 + 1∕SBR )( 1 + 2∕(3·SBR) ) ] &nbsp;&nbsp;(axial, 1-D quadratic "
-            "minimum, K = 3; ideal = L<sub>z</sub> ∕ (4·√N))<br>"
+            "&nbsp;&nbsp;σ<sub>z</sub> = L<sub>z</sub> ∕ ( 4·√N ) · F &nbsp;&nbsp;(axial, "
+            "1-D quadratic minimum; Eq. 29 × the background factor of Eq. 28)<br>"
         ) if result.has_z else ""
         z_param = (
-            "&nbsp;&nbsp;L<sub>z</sub> — axial pattern size &nbsp;(user input; σ<sub>qz</sub> "
-            "cancels in the SBR form, so the axial PSF width is not needed)<br>"
+            f"&nbsp;&nbsp;L<sub>z</sub> — axial pattern size &nbsp;({result.L_z_source})<br>"
         ) if result.has_z else ""
 
-        # References + an optional precision-budget note (its decomposition source).
+        # References describe the model, not an attribution of observed errors.
         refs = [
             "<a href='https://arxiv.org/abs/2410.12427'>Marin &amp; Ries, "
-            "<i>arXiv</i>:2410.12427 (2024)</a> (Eq. 44/45 lateral, Eq. 28 axial)",
+            "<i>arXiv</i>:2410.12427 (2024)</a> (Eq. 44/45 lateral, Eq. 28/29 axial)",
             "<a href='https://doi.org/10.1126/science.aak9913'>Balzarotti "
             "<i>et al.</i>, <i>Science</i> 355:606 (2017)</a>",
         ]
-        budget_note = ""
-        if self._measured:
-            budget_note = (
-                "<br><b>Precision budget</b>: the measured per-trace spread and this "
-                "bound combine as STD² = σ<sub>fl</sub>² + σ<sub>CRB</sub>², so the "
-                "excess σ<sub>fl</sub> = √(STD² − σ<sub>CRB</sub>²) is the "
-                "photon-count-independent error (flickering / drift / vibration / "
-                "misalignment) beyond the photon limit."
-            )
-            refs.append(
-                "<a href='https://www.nature.com/articles/s41467-025-66952-w'>Marin "
-                "&amp; Ries, <i>Nat. Commun.</i> 17:246 (2026)</a> (SimuFLUX; precision "
-                "decomposition)"
-            )
+        if result.donut_envelope and abs(result.geometry_factor - _SQRT2) < 1e-9:
+            xy_formula = (
+                "&nbsp;&nbsp;σ<sub>xy</sub> = L ∕ √(8N) · ( 1 − L² ∕ (8σ<sub>q</sub>²) )"
+                "<sup>−1</sup> · F &nbsp;&nbsp;(lateral; Eq. 45 × the background factor of "
+                "Eq. 44)<br>")
+        else:
+            xy_formula = (
+                f"&nbsp;&nbsp;σ<sub>xy</sub> = L · G ∕ (4√N) · F, G = "
+                f"{result.geometry_factor:.3f} &nbsp;&nbsp;({result.pattern or 'pattern'}: "
+                "G² = K·(L∕2)² ∕ Σ p<sub>axis</sub>² over its exposure positions — the same "
+                "Fisher information as Eq. 26/45, photons shared by every axis it "
+                "localizes)<br>")
+            if result.has_z:
+                z_formula = (f"&nbsp;&nbsp;σ<sub>z</sub> = L<sub>z</sub> · G<sub>z</sub> ∕ "
+                             f"(4√N) · F, G<sub>z</sub> = {result.geometry_factor_z:.3f}<br>")
         note = QLabel(
             "<b>Formulas</b> (emitter at the pattern centre):<br>"
-            "&nbsp;&nbsp;σ<sub>xy</sub> = L ∕ ( 2·√(2N) ) · "
-            "( 1 − L²·ln2 ∕ σ<sub>q</sub>² )<sup>−1</sup> · "
-            "√[ ( 1 + 1∕SBR )( 1 + 3∕(4·SBR) ) ] &nbsp;&nbsp;(lateral, 2-D donut, "
-            "K = 4; ideal drops the SBR factor)<br>"
+            + xy_formula
             + z_formula +
+            "&nbsp;&nbsp;F = √[ (1 + ρ)(1 + ρ(1 + c)) ] = √[ (1 + 1∕SBR)(1 + w∕SBR) ], "
+            "w = 1∕(1 + c) &nbsp;(F = 1 without background)<br>"
             "<b>Parameters</b><br>"
-            "&nbsp;&nbsp;N — photons per localization = <i>eco</i> &nbsp;(taken from data)<br>"
-            "&nbsp;&nbsp;SBR — signal-to-background ratio = ( <i>efo</i> − <i>fbg</i> ) ∕ "
-            "<i>fbg</i> &nbsp;(computed per localization from data)<br>"
-            "&nbsp;&nbsp;L — lateral targeted-pattern diameter of the last iteration "
-            "&nbsp;(user input; not stored in the file)<br>"
-            "&nbsp;&nbsp;σ<sub>q</sub> — excitation-PSF steepness / donut FWHM, "
-            "diffraction-bounded ≳ 250 nm &nbsp;(user input)<br>"
+            f"&nbsp;&nbsp;N — input counts assumed to be detected photons over all "
+            f"exposures of the iteration = <i>{n_def}</i><br>"
+            "&nbsp;&nbsp;ρ — background ÷ signal rate at a pattern position, "
+            "b ∕ (<i>efo</i> − b) with the background rate b from the centre exposure "
+            "(<i>efc</i>, treated as effective background under the centred-emitter "
+            "assumption) — this iteration's, else the "
+            "latest earlier one scaled by the laser power (<i>pwrFactor</i>) — else "
+            "<i>fbg</i> when background sensing was on; b and <i>efo</i> are the medians of "
+            "each trace when trace ids are known<br>"
+            "&nbsp;&nbsp;c — centre dwell ÷ whole-orbit dwell (<i>ctrDwellFactor</i>, or "
+            "(<i>ecc</i>∕<i>eco</i>) ∕ (<i>efc</i>∕<i>efo</i>) from the counts; 0 without a "
+            "centre exposure)<br>"
+            f"&nbsp;&nbsp;L — lateral pattern diameter of the final iteration "
+            f"&nbsp;({result.L_source}; patGeoFactor × {PATTERN_SCALE_NM:.0f} nm)<br>"
+            "&nbsp;&nbsp;σ<sub>q</sub> — donut width of the PSF model; default "
+            f"{CRLB_DEFAULT_SIGMA_Q_NM:.1f} nm = SimuFLUX's analytic donut (FWHM 310 nm "
+            "∕ √(8 ln 2)) &nbsp;(user input)<br>"
             + z_param +
-            "Per-coordinate precision at the centre — a best-case lower bound; background "
-            "enters through the measured SBR. The axial channel reuses N and the lateral "
-            "SBR (an approximation, since the z exposures may carry a different SBR)."
-            + budget_note
+            "A per-coordinate bound at the pattern centre; motion, offsets and "
+            "uncalibrated optics are not modelled."
             + _references_html(*refs)
         )
         note.setWordWrap(True)
@@ -1595,66 +2324,120 @@ class CRLBResultDialog(QDialog):
 
         self._add_controls(root, result)
 
-    def _add_precision_budget(self, root, result: "CRLBResult") -> None:
-        """Measured spread (StdDev/trace) vs the photon-limited bound → the excess
-        error σ_fl = √(STD² − σ_CRB²) (Marin & Ries 2026 decomposition). Shown only
-        when per-trace measured precision is available; recomputes with L/σ_q."""
+    def _add_validity_report(self, root, result: "CRLBResult") -> None:
+        """Keep missing information distinct from contradictory measurements."""
+        from html import escape
+
+        names = {
+            "ideal_only": "ideal only — no usable background estimate",
+            "background_estimated": "background estimated",
+            "background_inconsistent": "background ≥ orbit rate — finite bound unavailable",
+            "invalid_input": "invalid input — bound unavailable",
+            "unsupported_geometry": "unsupported geometry — bound unavailable",
+        }
+        axes = [("Lateral", result.axis_status, result.background_source,
+                 result.background_coverage, result.invalid_background_fraction)]
+        if result.has_z:
+            axes.append(("Axial", result.axis_status_z, result.background_source_z,
+                         result.background_coverage_z, result.invalid_background_fraction_z))
+        lines = []
+        for name, status, source, coverage, invalid in axes:
+            line = f"<b>{name}:</b> {escape(names.get(status, status))}"
+            line += f"; usable background coverage {100.0 * coverage:.1f}%"
+            if source != "none":
+                line += f"; source: {escape(source)}"
+            if invalid > 0:
+                line += (f"; {100.0 * invalid:.1f}% with background ≥ orbit rate "
+                         "(excluded, not treated as zero background)")
+            lines.append(line)
+        if result.background_pooled:
+            lines.append("Rates pooled by trace median; assumes approximately constant "
+                         "effective background within each trace.")
+        if result.input_rows or result.excluded_photon_rows:
+            lines.append(f"Input rows: {result.input_rows:,}; excluded photon rows: "
+                         f"{result.excluded_photon_rows:,}.")
+        label = QLabel("<br>".join(lines))
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(label)
+
+    def _add_matched_comparison(self, root, result: "CRLBResult") -> None:
+        """Describe matched spread/bound summaries without decomposing errors."""
         m = self._measured
         if not m:
-            return
-        crb_xy = result.median_sigma_bg if result.has_background else result.median_sigma_ideal
-        if not np.isfinite(crb_xy):
-            return
-        rows = [("lateral (xy)", m.get("sigma_r"), crb_xy,
-                 excess_precision(m.get("sigma_r"), crb_xy))]
-        if result.has_z:
-            crb_z = (result.median_sigma_z_bg if result.has_background
-                     else result.median_sigma_z_ideal)
-            if np.isfinite(crb_z):
-                rows.append(("axial (z)", m.get("sigma_z"), crb_z,
-                             excess_precision(m.get("sigma_z"), crb_z)))
+            reason = result.provenance.get("comparison_reason") or self._inputs.get("comparison_reason")
+            if reason:
+                from html import escape
 
-        grp = QGroupBox(
-            f"Precision budget — measured vs photon limit  "
-            f"({m.get('n_traces', 0):,} traces, ≥ {MIN_LOCS_PER_TRACE} loc, raw z)")
+                label = QLabel("Trace comparison omitted: " + escape(str(reason)))
+                label.setWordWrap(True)
+                root.addWidget(label)
+            return
+        rows = []
+        for axis, label in (("xy", "lateral (xy)"), ("z", "axial (z)")):
+            values = m.get(axis)
+            if axis == "z" and not result.has_z:
+                continue
+            if not isinstance(values, dict):
+                continue
+            measured = values.get("measured_nm")
+            bound = values.get("bound_nm")
+            if measured is None or bound is None or not np.isfinite([measured, bound]).all():
+                continue
+            primary = result.primary_sigma_z if axis == "z" else result.primary_sigma
+            if np.isfinite(primary):
+                rows.append((label, values))
+        if not rows:
+            return
+
+        grp = QGroupBox("Matched trace comparison — descriptive, not an error decomposition")
         grid = QGridLayout(grp)
         grid.setHorizontalSpacing(20)
         grid.setVerticalSpacing(4)
-        for col, h in enumerate(("", "measured σ (StdDev/trace)",
-                                 "σ<sub>CRB</sub> (photon limit)", "excess σ<sub>fl</sub>")):
+        for col, h in enumerate(("", "median measured SD", "median trace RMS bound",
+                                 "measured / bound", "matched sample")):
             lbl = QLabel(f"<b>{h}</b>")
+            lbl.setWordWrap(True)
             lbl.setAlignment(Qt.AlignmentFlag.AlignLeft if col == 0
                              else Qt.AlignmentFlag.AlignCenter)
             grid.addWidget(lbl, 0, col)
-        for r, (name, meas, crb, fl) in enumerate(rows, start=1):
+        for r, (name, values) in enumerate(rows, start=1):
             grid.addWidget(QLabel(f"<b>{name}:</b>"), r, 0)
-            for col, v in enumerate((meas, crb, fl), start=1):
+            for col, v in enumerate((values["measured_nm"], values["bound_nm"]), start=1):
                 cell = QLabel(_res(v))
                 cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 grid.addWidget(cell, r, col)
-        for col in (1, 2, 3):
+            ratio = values.get("ratio")
+            ratio_text = f"{ratio:.2f}" if ratio is not None and np.isfinite(ratio) else "unavailable"
+            grid.addWidget(QLabel(ratio_text), r, 3)
+            sample = QLabel(
+                f"{values.get('n_traces', 0):,} traces; {values.get('n_locs', 0):,} locs; "
+                f"{100.0 * values.get('coverage', 0.0):.1f}% coverage")
+            sample.setWordWrap(True)
+            grid.addWidget(sample, r, 4)
+        for col in (1, 2, 3, 4):
             grid.setColumnStretch(col, 1)
         root.addWidget(grp)
-
-        # One-line interpretation of the lateral budget.
-        meas_r, fl_r = rows[0][1], rows[0][3]
-        if np.isfinite(fl_r) and meas_r and meas_r > 0:
-            if fl_r <= 0.15 * crb_xy:
-                verdict = "measured precision is essentially photon-limited (at the bound)"
-            else:
-                frac = 100.0 * fl_r / float(meas_r)
-                verdict = (f"an excess of σ<sub>fl</sub> = {fl_r:.1f} nm "
-                           f"(~{frac:.0f}% of the measured spread) is <b>not</b> "
-                           "photon-limited — attributable to flickering, drift, "
-                           "vibration or misalignment (not reducible by more photons)")
-            tip = QLabel(f"Lateral: {verdict}.")
-            tip.setWordWrap(True)
-            tip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            tip.setStyleSheet("color: #8ab4d8; font-size: 11px;")
-            root.addWidget(tip)
+        note = (
+            f"Each trace has ≥ {MIN_LOCS_PER_TRACE} eligible localizations. Its measured SD "
+            "and RMS model bound use the same coordinates and localizations; both columns "
+            "are then summarized by the median across the same traces (raw, unscaled z). "
+            "These summaries do not identify a physical error component or establish "
+            "photon-limited performance.")
+        below = [name for name, values in rows if values["measured_nm"] < values["bound_nm"]]
+        if below:
+            note += (" Measured spread below the conditional bound (" + ", ".join(below)
+                     + "): unexplained disagreement; input conventions and model assumptions "
+                     "require investigation. No cause is assigned.")
+        if any(values.get("bound_kind") in {"ideal_only", "ideal only", "ideal", "background-free"}
+               for _, values in rows):
+            note += " The ideal-only comparison assumes zero background, not measured zero background."
+        tip = QLabel(note)
+        tip.setWordWrap(True)
+        root.addWidget(tip)
 
     def _add_controls(self, root, result: "CRLBResult") -> None:
-        """Editable L + σ_q + Recompute row (also shown on the error path)."""
+        """Editable L + σ_q (+ L_z) + Recompute row (also shown on the error path)."""
         btn_row = QHBoxLayout()
         self._status_lbl = QLabel("")
         self._status_lbl.setStyleSheet("color: #6c6;")
@@ -1666,8 +2449,9 @@ class CRLBResultDialog(QDialog):
         self._l_spin.setDecimals(1)
         self._l_spin.setSingleStep(5.0)
         self._l_spin.setValue(result.L_nm)
-        self._l_spin.setToolTip("Targeted-coordinate pattern diameter L of the "
-                                "last MINFLUX iteration (sequence parameter).")
+        self._l_spin.setToolTip(
+            "Lateral pattern diameter L of the final iteration. Read from the "
+            "acquisition sequence (patGeoFactor × 360 nm) when the file records it.")
         btn_row.addWidget(self._l_spin)
         btn_row.addSpacing(8)
         btn_row.addWidget(QLabel("σ_q (nm):"))
@@ -1676,21 +2460,23 @@ class CRLBResultDialog(QDialog):
         self._sq_spin.setDecimals(0)
         self._sq_spin.setSingleStep(10.0)
         self._sq_spin.setValue(result.sigma_q_nm)
-        self._sq_spin.setToolTip("Excitation-PSF steepness / donut FWHM σ_q "
-                                 "(diffraction-bounded, ~250 nm). Requires L < σ_q.")
+        self._sq_spin.setToolTip(
+            "Donut width parameter σ_q of the Marin & Ries PSF model, not its FWHM. "
+            f"Default {CRLB_DEFAULT_SIGMA_Q_NM:.1f} nm = 310 nm / √(8 ln 2). "
+            "Requires L < 2√2·σ_q for the planar donut envelope.")
         btn_row.addWidget(self._sq_spin)
         # Axial pattern size L_z — only for 3-D (when an axial bound is computed).
         self._lz_spin = None
-        if result.has_z or self._num_dim >= 3:
+        if self._inputs.get("geometry_z") is not None:
             btn_row.addSpacing(8)
             btn_row.addWidget(QLabel("L_z (nm):"))
             self._lz_spin = QDoubleSpinBox()
             self._lz_spin.setRange(1.0, 2000.0)
             self._lz_spin.setDecimals(1)
             self._lz_spin.setSingleStep(5.0)
-            self._lz_spin.setValue(result.L_z_nm if result.L_z_nm > 0 else CRLB_DEFAULT_LZ_NM)
-            self._lz_spin.setToolTip("Axial targeted-pattern size L_z of the last "
-                                     "iteration (3-D z channel).")
+            self._lz_spin.setValue(result.L_z_nm if result.L_z_nm > 0
+                                   else self._inputs["geometry_z"].L_nm)
+            self._lz_spin.setToolTip("Axial pattern size L_z of the final axial iteration.")
             btn_row.addWidget(self._lz_spin)
         recompute = QPushButton("Recompute")
         recompute.clicked.connect(self._recompute)
@@ -1705,16 +2491,15 @@ class CRLBResultDialog(QDialog):
         sq = float(self._sq_spin.value())
         lz = float(self._lz_spin.value()) if self._lz_spin is not None else None
         try:
-            result = crlb_precision(
-                self._eco, L_nm=L, sigma_q_nm=sq, efo=self._efo, fbg=self._fbg,
-                L_z_nm=lz)
+            result = crlb_from_inputs(self._inputs, L_nm=L, sigma_q_nm=sq, L_z_nm=lz)
+            self._measured = crlb_matched_comparison(result, self._inputs)
         except Exception as exc:
             self._status_lbl.setText(f"failed: {exc}")
             return
         self._build(result)
-        msg = f"recomputed @ L = {L:.0f} nm, σ_q = {sq:.0f} nm"
+        msg = f"recomputed @ L = {L:.1f} nm, σ_q = {sq:.0f} nm"
         if lz is not None:
-            msg += f", L_z = {lz:.0f} nm"
+            msg += f", L_z = {lz:.1f} nm"
         self._status_lbl.setText(msg)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
