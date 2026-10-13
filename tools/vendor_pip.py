@@ -20,7 +20,7 @@ from typing import BinaryIO
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TARGET = REPO_ROOT / "resources" / "pip"
-DEFAULT_PIP_VERSION = "26.0.1"
+DEFAULT_PIP_VERSION = "26.2.1"
 
 
 class VendorPipError(RuntimeError):

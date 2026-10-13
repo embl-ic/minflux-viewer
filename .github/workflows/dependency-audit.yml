@@ -1,0 +1,70 @@
+# Known vulnerabilities in what the application ships.
+#
+# Two inputs, both checked with pip-audit against the PyPI advisory database:
+#   locked   every package poetry.lock installs, including the PyInstaller
+#            "build" group. Read with `pip freeze` from the synced environment,
+#            which leaves out the environment's own pip/setuptools tooling and
+#            the project itself; neither is part of the lock.
+#   vendored the pip that the frozen app carries for its plugin package
+#            installer (tools/vendor_pip.py, DEFAULT_PIP_VERSION). It is not a
+#            declared dependency, so Dependabot does not see it; it is vendored
+#            here exactly as a build would do it and audited as installed.
+#
+# Runs on every push and weekly, because an advisory can appear for a version
+# that has not changed. Windows, like the release builds, so the lock resolves
+# the same platform markers the shipped app does.
+
+name: Dependency audit
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 5 * * 1"            # Mondays 05:17 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  POETRY_VERSION: "2.3.2"
+  PIP_AUDIT_VERSION: "2.10.1"
+  PYTHONUTF8: "1"
+
+jobs:
+  audit:
+    name: pip-audit (locked and vendored)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Install Poetry and pip-audit
+        run: |
+          pipx install "poetry==${{ env.POETRY_VERSION }}"
+          pipx install "pip-audit==${{ env.PIP_AUDIT_VERSION }}"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        id: python
+        with:
+          python-version: "3.12"
+          cache: poetry
+      - name: Install dependencies from poetry.lock
+        run: |
+          poetry env use "${{ steps.python.outputs.python-path }}"
+          poetry sync --with build
+      - name: Audit the locked dependencies
+        run: |
+          poetry run python -m pip freeze --exclude-editable > "$RUNNER_TEMP/locked.txt"
+          grep -c "==" "$RUNNER_TEMP/locked.txt"
+          pip-audit --requirement "$RUNNER_TEMP/locked.txt" --no-deps --disable-pip \
+            --progress-spinner off
+      - name: Audit the pip shipped inside the app
+        run: |
+          poetry run python tools/vendor_pip.py --target "$RUNNER_TEMP/vendored-pip"
+          pip-audit --path "$RUNNER_TEMP/vendored-pip" --progress-spinner off

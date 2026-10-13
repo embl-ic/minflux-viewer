@@ -10,7 +10,9 @@
 #               platform (tools/run_qt_tests.py explains why: in one process
 #               they abort natively at a moving target).
 # Dependencies come from poetry.lock, including the PyInstaller "build" group,
-# which the packaging tests need.
+# which the packaging tests need. Actions are pinned to a commit, with the
+# release in a comment; Dependabot (.github/dependabot.yml) proposes updates.
+# Known vulnerabilities are checked by dependency-audit.yml.
 
 name: CI
 
@@ -36,10 +38,10 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - name: Install Poetry
         run: pipx install "poetry==${{ env.POETRY_VERSION }}"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         id: python
         with:
           python-version: "3.12"
@@ -65,10 +67,10 @@ jobs:
       matrix:
         python: ["3.10", "3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - name: Install Poetry
         run: pipx install "poetry==${{ env.POETRY_VERSION }}"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         id: python
         with:
           python-version: ${{ matrix.python }}
@@ -91,10 +93,10 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - name: Install Poetry
         run: pipx install "poetry==${{ env.POETRY_VERSION }}"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         id: python
         with:
           python-version: ${{ matrix.python }}
