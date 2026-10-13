@@ -642,7 +642,6 @@
    "E702": 2
   },
   "minflux_viewer/analysis/localization_precision.py": {
-   "F401": 1,
    "I001": 4,
    "UP037": 8
   },
