@@ -266,3 +266,19 @@ def test_help_menu_has_one_monitor_entry_named_task_monitor(qtbot):
         assert not hasattr(window, "_show_memory_monitor")
     finally:
         window.close()
+
+
+def test_the_thread_count_covers_every_pool_the_application_owns(_app):
+    """Render tiles, plugin tasks and the MSR reader run on named pools, not on
+    Qt's global one; a count of the global pool alone would read them as idle."""
+    from PyQt6.QtCore import QThreadPool
+
+    from minflux_viewer.ui.background_tasks import shared_thread_pool, shared_thread_pools
+    from minflux_viewer.ui.task_monitor import TaskMonitor, summary_text
+
+    shared_thread_pool("test-monitor-pool", max_threads=3)
+    pools = [QThreadPool.globalInstance(), *shared_thread_pools()]
+    active, most = TaskMonitor._pool_counts()
+    assert most == sum(pool.maxThreadCount() for pool in pools)
+    assert active == sum(pool.activeThreadCount() for pool in pools)
+    assert "Qt thread pools 0/8 active" in summary_text([], 0, 8, 3)
