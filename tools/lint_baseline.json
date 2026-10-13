@@ -1,0 +1,850 @@
+{
+ "mypy": {
+  "minflux_viewer/__main__.py": {
+   "assignment": 1
+  },
+  "minflux_viewer/analysis/aggregation.py": {
+   "assignment": 3,
+   "misc": 1,
+   "var-annotated": 2
+  },
+  "minflux_viewer/analysis/bead_drift.py": {
+   "assignment": 1,
+   "list-item": 4,
+   "union-attr": 1
+  },
+  "minflux_viewer/analysis/conv_segmentation.py": {
+   "assignment": 1
+  },
+  "minflux_viewer/analysis/curvilinear_segmentation.py": {
+   "assignment": 1
+  },
+  "minflux_viewer/analysis/dcr_em.py": {
+   "misc": 1
+  },
+  "minflux_viewer/analysis/drift_correction.py": {
+   "arg-type": 4,
+   "misc": 2
+  },
+  "minflux_viewer/analysis/hlyb_clustering.py": {
+   "assignment": 2
+  },
+  "minflux_viewer/analysis/hlyb_pairwise.py": {
+   "arg-type": 3,
+   "assignment": 6,
+   "operator": 5,
+   "type-var": 3,
+   "union-attr": 6
+  },
+  "minflux_viewer/analysis/hlyb_staged.py": {
+   "arg-type": 2,
+   "assignment": 5,
+   "call-overload": 6,
+   "misc": 1,
+   "operator": 8,
+   "type-var": 2,
+   "var-annotated": 2
+  },
+  "minflux_viewer/analysis/image_assisted_segmentation.py": {
+   "return-value": 1
+  },
+  "minflux_viewer/analysis/local_density.py": {
+   "union-attr": 4
+  },
+  "minflux_viewer/analysis/localization_precision.py": {
+   "arg-type": 9,
+   "assignment": 2,
+   "list-item": 2,
+   "operator": 1,
+   "union-attr": 7
+  },
+  "minflux_viewer/analysis/npc_geomfit.py": {
+   "arg-type": 1
+  },
+  "minflux_viewer/analysis/npc_wanlu.py": {
+   "var-annotated": 1
+  },
+  "minflux_viewer/analysis/particle_fusion.py": {
+   "assignment": 1,
+   "attr-defined": 1,
+   "index": 1
+  },
+  "minflux_viewer/analysis/shape_segmentation.py": {
+   "arg-type": 9,
+   "assignment": 4
+  },
+  "minflux_viewer/analysis/spatial_line_pattern.py": {
+   "assignment": 1
+  },
+  "minflux_viewer/analysis/straightened_volume.py": {
+   "assignment": 1
+  },
+  "minflux_viewer/analysis/trace_analysis.py": {
+   "arg-type": 6,
+   "assignment": 1,
+   "name-defined": 1
+  },
+  "minflux_viewer/analysis/tracking_advanced.py": {
+   "assignment": 1
+  },
+  "minflux_viewer/analysis/tracking_export.py": {
+   "arg-type": 1,
+   "index": 1,
+   "var-annotated": 1
+  },
+  "minflux_viewer/analysis/tracking_stats.py": {
+   "arg-type": 3,
+   "assignment": 1,
+   "var-annotated": 1
+  },
+  "minflux_viewer/analysis/voronoi_density.py": {
+   "assignment": 1
+  },
+  "minflux_viewer/api/_recording.py": {
+   "attr-defined": 1,
+   "exit-return": 1
+  },
+  "minflux_viewer/api/data.py": {
+   "assignment": 1
+  },
+  "minflux_viewer/api/plot.py": {
+   "assignment": 2
+  },
+  "minflux_viewer/api/plugins.py": {
+   "misc": 1
+  },
+  "minflux_viewer/api/results.py": {
+   "arg-type": 1,
+   "assignment": 1,
+   "attr-defined": 1
+  },
+  "minflux_viewer/api/roi.py": {
+   "arg-type": 1,
+   "valid-type": 1
+  },
+  "minflux_viewer/api/ui.py": {
+   "assignment": 4,
+   "attr-defined": 6
+  },
+  "minflux_viewer/api/view.py": {
+   "operator": 1
+  },
+  "minflux_viewer/colormaps.py": {
+   "arg-type": 3,
+   "assignment": 1,
+   "return-value": 2
+  },
+  "minflux_viewer/colors.py": {
+   "return-value": 1
+  },
+  "minflux_viewer/core/channel_flatten.py": {
+   "arg-type": 1
+  },
+  "minflux_viewer/core/confocal_mapping.py": {
+   "arg-type": 3,
+   "misc": 1,
+   "return-value": 1,
+   "union-attr": 1
+  },
+  "minflux_viewer/core/dataset.py": {
+   "arg-type": 1
+  },
+  "minflux_viewer/core/format_sniff.py": {
+   "arg-type": 2
+  },
+  "minflux_viewer/core/iteration.py": {
+   "call-overload": 1
+  },
+  "minflux_viewer/core/loader.py": {
+   "arg-type": 2,
+   "assignment": 13,
+   "return-value": 2
+  },
+  "minflux_viewer/core/mbm_file.py": {
+   "assignment": 1
+  },
+  "minflux_viewer/core/mfx_sequence.py": {
+   "arg-type": 2
+  },
+  "minflux_viewer/core/min_enclosing.py": {
+   "assignment": 1
+  },
+  "minflux_viewer/core/minflux_zarr.py": {
+   "arg-type": 3,
+   "assignment": 2,
+   "attr-defined": 2,
+   "call-overload": 1,
+   "no-redef": 1
+  },
+  "minflux_viewer/core/obf_image_source.py": {
+   "arg-type": 3,
+   "assignment": 1
+  },
+  "minflux_viewer/core/overlay.py": {
+   "arg-type": 1,
+   "attr-defined": 1
+  },
+  "minflux_viewer/core/overlay_save.py": {
+   "var-annotated": 1
+  },
+  "minflux_viewer/core/particle_extract.py": {
+   "index": 1
+  },
+  "minflux_viewer/core/post_load.py": {
+   "assignment": 8
+  },
+  "minflux_viewer/core/roi.py": {
+   "attr-defined": 1
+  },
+  "minflux_viewer/core/roi_convert.py": {
+   "assignment": 1,
+   "attr-defined": 2
+  },
+  "minflux_viewer/core/roi_logic.py": {
+   "attr-defined": 1,
+   "var-annotated": 1
+  },
+  "minflux_viewer/core/roi_volume.py": {
+   "arg-type": 6,
+   "assignment": 4,
+   "attr-defined": 8,
+   "call-overload": 7,
+   "no-redef": 2
+  },
+  "minflux_viewer/core/sample_presets.py": {
+   "arg-type": 1
+  },
+  "minflux_viewer/core/save.py": {
+   "assignment": 5,
+   "attr-defined": 1
+  },
+  "minflux_viewer/core/self_update.py": {
+   "arg-type": 2,
+   "unused-ignore": 1
+  },
+  "minflux_viewer/core/simulate.py": {
+   "misc": 1
+  },
+  "minflux_viewer/core/spreadsheet_loader.py": {
+   "assignment": 2,
+   "index": 1,
+   "union-attr": 1
+  },
+  "minflux_viewer/core/task_registry.py": {
+   "assignment": 1,
+   "exit-return": 1,
+   "misc": 1
+  },
+  "minflux_viewer/core/tiff_export.py": {
+   "arg-type": 21
+  },
+  "minflux_viewer/core/tiff_roi.py": {
+   "arg-type": 1,
+   "return-value": 1
+  },
+  "minflux_viewer/core/tiff_source.py": {
+   "arg-type": 1,
+   "union-attr": 3
+  },
+  "minflux_viewer/core/user_libs.py": {
+   "arg-type": 2,
+   "assignment": 1,
+   "attr-defined": 1,
+   "operator": 2
+  },
+  "minflux_viewer/msr/alignment.py": {
+   "operator": 2
+  },
+  "minflux_viewer/msr/export.py": {
+   "arg-type": 2
+  },
+  "minflux_viewer/msr/io.py": {
+   "index": 1
+  },
+  "minflux_viewer/msr/writer.py": {
+   "arg-type": 1
+  },
+  "minflux_viewer/msr/zarr2.py": {
+   "arg-type": 1,
+   "call-overload": 1,
+   "func-returns-value": 1,
+   "index": 2
+  },
+  "minflux_viewer/plugins/drift_correction/drift_correction_window.py": {
+   "arg-type": 1,
+   "assignment": 1,
+   "union-attr": 9
+  },
+  "minflux_viewer/plugins/generate_method_text/__init__.py": {
+   "union-attr": 4
+  },
+  "minflux_viewer/plugins/msr_reader/beads_drift.py": {
+   "assignment": 1
+  },
+  "minflux_viewer/plugins/msr_reader/beads_drift_dialog.py": {
+   "arg-type": 1,
+   "union-attr": 12
+  },
+  "minflux_viewer/plugins/msr_reader/drift_correction_dialog.py": {
+   "union-attr": 5
+  },
+  "minflux_viewer/plugins/msr_reader/msr_reader_dialog.py": {
+   "arg-type": 8,
+   "assignment": 5,
+   "dict-item": 1,
+   "index": 2,
+   "union-attr": 26,
+   "var-annotated": 5
+  },
+  "minflux_viewer/plugins/spatial_line_pattern/spatial_line_pattern_window.py": {
+   "arg-type": 1,
+   "assignment": 1,
+   "union-attr": 2
+  },
+  "minflux_viewer/plugins/trace_viewer/trace_data.py": {
+   "operator": 1
+  },
+  "minflux_viewer/plugins/trace_viewer/trace_viewer_window.py": {
+   "arg-type": 6,
+   "assignment": 3,
+   "union-attr": 5
+  },
+  "minflux_viewer/scripting.py": {
+   "arg-type": 1,
+   "assignment": 3,
+   "attr-defined": 12
+  },
+  "minflux_viewer/ui/attribute_cpu.py": {
+   "assignment": 4,
+   "call-arg": 1,
+   "operator": 2,
+   "return-value": 1
+  },
+  "minflux_viewer/ui/attribute_separation_dialog.py": {
+   "assignment": 1,
+   "attr-defined": 1,
+   "call-overload": 1,
+   "return-value": 2,
+   "union-attr": 7
+  },
+  "minflux_viewer/ui/attribute_window.py": {
+   "arg-type": 1,
+   "assignment": 6,
+   "attr-defined": 32,
+   "index": 4,
+   "misc": 1,
+   "no-redef": 2,
+   "return-value": 2,
+   "union-attr": 50,
+   "var-annotated": 1
+  },
+  "minflux_viewer/ui/brightness_contrast_dialog.py": {
+   "assignment": 2
+  },
+  "minflux_viewer/ui/channel_combine_dialog.py": {
+   "union-attr": 3
+  },
+  "minflux_viewer/ui/colormap_combo.py": {
+   "union-attr": 5
+  },
+  "minflux_viewer/ui/colormap_order_dialog.py": {
+   "union-attr": 3
+  },
+  "minflux_viewer/ui/command_finder.py": {
+   "attr-defined": 1,
+   "union-attr": 3
+  },
+  "minflux_viewer/ui/console_window.py": {
+   "union-attr": 3
+  },
+  "minflux_viewer/ui/conv_segmentation_dialog.py": {
+   "arg-type": 1
+  },
+  "minflux_viewer/ui/crop_dialog.py": {
+   "assignment": 3,
+   "attr-defined": 7
+  },
+  "minflux_viewer/ui/curvilinear_segmentation_dialog.py": {
+   "arg-type": 2,
+   "assignment": 3
+  },
+  "minflux_viewer/ui/custom_colormap_dialog.py": {
+   "arg-type": 2,
+   "attr-defined": 1,
+   "call-overload": 1
+  },
+  "minflux_viewer/ui/data_simulator_window.py": {
+   "arg-type": 3,
+   "assignment": 1,
+   "attr-defined": 1
+  },
+  "minflux_viewer/ui/dataset_manager.py": {
+   "union-attr": 20
+  },
+  "minflux_viewer/ui/export_dialogs.py": {
+   "union-attr": 11
+  },
+  "minflux_viewer/ui/figure_export.py": {
+   "attr-defined": 1,
+   "call-overload": 1
+  },
+  "minflux_viewer/ui/filter_dialog.py": {
+   "override": 3,
+   "union-attr": 66
+  },
+  "minflux_viewer/ui/floating_colorbar.py": {
+   "arg-type": 1,
+   "call-overload": 1,
+   "override": 4,
+   "union-attr": 11
+  },
+  "minflux_viewer/ui/floating_legend.py": {
+   "call-overload": 1,
+   "misc": 1,
+   "override": 3
+  },
+  "minflux_viewer/ui/global_color_dialog.py": {
+   "attr-defined": 1,
+   "return-value": 1,
+   "union-attr": 14
+  },
+  "minflux_viewer/ui/histogram_window.py": {
+   "arg-type": 1,
+   "assignment": 3,
+   "attr-defined": 2,
+   "union-attr": 12,
+   "var-annotated": 1
+  },
+  "minflux_viewer/ui/hlyb_clustering_dialog.py": {
+   "arg-type": 1,
+   "assignment": 15,
+   "attr-defined": 56,
+   "misc": 1,
+   "return-value": 1,
+   "union-attr": 42,
+   "var-annotated": 3
+  },
+  "minflux_viewer/ui/hlyb_collection_dialog.py": {
+   "union-attr": 2
+  },
+  "minflux_viewer/ui/hlyb_pairwise_dialog.py": {
+   "attr-defined": 6,
+   "union-attr": 3
+  },
+  "minflux_viewer/ui/hlyb_staged_dialog.py": {
+   "assignment": 4,
+   "attr-defined": 28,
+   "return-value": 1
+  },
+  "minflux_viewer/ui/image_roi_overlay.py": {
+   "assignment": 1,
+   "attr-defined": 4
+  },
+  "minflux_viewer/ui/layer_brightness.py": {
+   "assignment": 1,
+   "attr-defined": 3
+  },
+  "minflux_viewer/ui/log_window.py": {
+   "union-attr": 7
+  },
+  "minflux_viewer/ui/lut_dialog.py": {
+   "attr-defined": 1,
+   "return-value": 1,
+   "union-attr": 8
+  },
+  "minflux_viewer/ui/macro_recorder_window.py": {
+   "override": 1,
+   "union-attr": 4
+  },
+  "minflux_viewer/ui/main_window.py": {
+   "arg-type": 13,
+   "assignment": 28,
+   "attr-defined": 36,
+   "index": 1,
+   "list-item": 2,
+   "operator": 2,
+   "override": 2,
+   "return-value": 2,
+   "union-attr": 42,
+   "unused-ignore": 1,
+   "var-annotated": 3
+  },
+  "minflux_viewer/ui/mbm_info_window.py": {
+   "arg-type": 1,
+   "union-attr": 2
+  },
+  "minflux_viewer/ui/memory_monitor.py": {
+   "override": 1,
+   "var-annotated": 3
+  },
+  "minflux_viewer/ui/metadata_save_dialog.py": {
+   "union-attr": 1
+  },
+  "minflux_viewer/ui/metadata_viewer.py": {
+   "arg-type": 2,
+   "union-attr": 7
+  },
+  "minflux_viewer/ui/modeless.py": {
+   "attr-defined": 1,
+   "union-attr": 2,
+   "var-annotated": 1
+  },
+  "minflux_viewer/ui/ortho_view.py": {
+   "assignment": 1,
+   "attr-defined": 1,
+   "union-attr": 1
+  },
+  "minflux_viewer/ui/overlay_alignment.py": {
+   "call-overload": 1,
+   "union-attr": 3
+  },
+  "minflux_viewer/ui/particle_average_dialog.py": {
+   "assignment": 2,
+   "attr-defined": 3,
+   "union-attr": 3
+  },
+  "minflux_viewer/ui/plot_profile_dialog.py": {
+   "assignment": 1,
+   "union-attr": 1
+  },
+  "minflux_viewer/ui/precision_render.py": {
+   "assignment": 4,
+   "attr-defined": 1
+  },
+  "minflux_viewer/ui/precision_render_window.py": {
+   "arg-type": 3,
+   "assignment": 2,
+   "attr-defined": 5,
+   "call-overload": 2,
+   "return-value": 1,
+   "union-attr": 1
+  },
+  "minflux_viewer/ui/preferences_dialog.py": {
+   "call-overload": 1,
+   "union-attr": 6
+  },
+  "minflux_viewer/ui/prefs_plugin_paths.py": {
+   "union-attr": 2,
+   "var-annotated": 2
+  },
+  "minflux_viewer/ui/prefs_python_packages.py": {
+   "override": 1,
+   "union-attr": 3
+  },
+  "minflux_viewer/ui/qt_lifecycle.py": {
+   "var-annotated": 1
+  },
+  "minflux_viewer/ui/render_window.py": {
+   "arg-type": 6,
+   "assignment": 5,
+   "attr-defined": 10,
+   "index": 1,
+   "method-assign": 1,
+   "misc": 1,
+   "union-attr": 70,
+   "var-annotated": 1
+  },
+  "minflux_viewer/ui/results_table.py": {
+   "union-attr": 4
+  },
+  "minflux_viewer/ui/roi_convert_dialog.py": {
+   "assignment": 1
+  },
+  "minflux_viewer/ui/roi_manager.py": {
+   "union-attr": 7
+  },
+  "minflux_viewer/ui/roi_overlay.py": {
+   "arg-type": 6,
+   "assignment": 4,
+   "attr-defined": 2,
+   "index": 1,
+   "misc": 1,
+   "union-attr": 9
+  },
+  "minflux_viewer/ui/save_dialog.py": {
+   "union-attr": 2
+  },
+  "minflux_viewer/ui/scatter_window.py": {
+   "arg-type": 7,
+   "assignment": 5,
+   "attr-defined": 28,
+   "index": 2,
+   "method-assign": 1,
+   "misc": 1,
+   "operator": 2,
+   "union-attr": 63
+  },
+  "minflux_viewer/ui/script_editor_window.py": {
+   "union-attr": 13
+  },
+  "minflux_viewer/ui/script_plot.py": {
+   "assignment": 1
+  },
+  "minflux_viewer/ui/spreadsheet_import_dialog.py": {
+   "assignment": 2,
+   "attr-defined": 1,
+   "union-attr": 4
+  },
+  "minflux_viewer/ui/straightened_volume_dialog.py": {
+   "attr-defined": 9
+  },
+  "minflux_viewer/ui/task_monitor.py": {
+   "assignment": 1,
+   "misc": 2,
+   "union-attr": 5
+  },
+  "minflux_viewer/ui/tiff_export_dialog.py": {
+   "union-attr": 1
+  },
+  "minflux_viewer/ui/tiff_viewer_window.py": {
+   "assignment": 3,
+   "attr-defined": 9,
+   "union-attr": 30
+  },
+  "minflux_viewer/ui/time_channel_dialog.py": {
+   "return-value": 1,
+   "union-attr": 5
+  },
+  "minflux_viewer/ui/time_slider.py": {
+   "attr-defined": 2,
+   "union-attr": 1
+  },
+  "minflux_viewer/ui/tracking_analysis_window.py": {
+   "union-attr": 4
+  },
+  "minflux_viewer/ui/tracking_window.py": {
+   "assignment": 3,
+   "call-overload": 1,
+   "return-value": 1,
+   "union-attr": 39,
+   "var-annotated": 1
+  },
+  "minflux_viewer/ui/transform_dialog.py": {
+   "union-attr": 2
+  },
+  "minflux_viewer/ui/update_dialog.py": {
+   "union-attr": 19
+  },
+  "minflux_viewer/ui/volume_window.py": {
+   "arg-type": 3,
+   "attr-defined": 10,
+   "union-attr": 6
+  },
+  "minflux_viewer/ui/zarr_save_dialog.py": {
+   "union-attr": 1
+  }
+ },
+ "ruff": {
+  "minflux_viewer/analysis/distribution_fit.py": {
+   "E702": 2
+  },
+  "minflux_viewer/analysis/geometry.py": {
+   "E702": 2
+  },
+  "minflux_viewer/analysis/localization_precision.py": {
+   "F401": 1,
+   "I001": 4,
+   "UP037": 8
+  },
+  "minflux_viewer/analysis/method_text.py": {
+   "F541": 3,
+   "F841": 1
+  },
+  "minflux_viewer/analysis/npc_geomfit.py": {
+   "E702": 2
+  },
+  "minflux_viewer/analysis/particle_fusion.py": {
+   "E702": 3,
+   "F841": 1
+  },
+  "minflux_viewer/analysis/trace_analysis.py": {
+   "F401": 3,
+   "F821": 1,
+   "I001": 2,
+   "UP037": 1
+  },
+  "minflux_viewer/core/mfx_sequence.py": {
+   "UP045": 23
+  },
+  "minflux_viewer/core/min_enclosing.py": {
+   "E702": 2
+  },
+  "minflux_viewer/core/roi_convert.py": {
+   "F841": 1
+  },
+  "minflux_viewer/msr/__init__.py": {
+   "E402": 4
+  },
+  "minflux_viewer/msr/mbm_drift.py": {
+   "UP031": 3
+  },
+  "minflux_viewer/plugins/msr_reader/msr_reader_dialog.py": {
+   "E402": 2,
+   "F841": 7
+  },
+  "minflux_viewer/ui/curvilinear_segmentation_dialog.py": {
+   "E702": 2
+  },
+  "minflux_viewer/ui/data_simulator_window.py": {
+   "E702": 27
+  },
+  "minflux_viewer/ui/hlyb_staged_dialog.py": {
+   "UP031": 1
+  },
+  "minflux_viewer/ui/lut_dialog.py": {
+   "E702": 8
+  },
+  "minflux_viewer/ui/main_window.py": {
+   "E402": 1,
+   "E701": 15,
+   "E702": 16,
+   "E731": 1
+  },
+  "minflux_viewer/ui/particle_average_dialog.py": {
+   "E702": 7,
+   "F841": 1
+  },
+  "minflux_viewer/ui/particle_inspector.py": {
+   "E702": 6
+  },
+  "minflux_viewer/ui/render_scheduler.py": {
+   "I001": 1
+  },
+  "minflux_viewer/ui/render_window.py": {
+   "E702": 3,
+   "E731": 1
+  },
+  "minflux_viewer/ui/scatter_window.py": {
+   "E731": 1
+  },
+  "minflux_viewer/utils/paraview_export.py": {
+   "F841": 1
+  },
+  "tests/test_aggregation.py": {
+   "E702": 4
+  },
+  "tests/test_attribute_cpu_renderer.py": {
+   "I001": 1
+  },
+  "tests/test_attribute_help.py": {
+   "I001": 1
+  },
+  "tests/test_attribute_multidim.py": {
+   "I001": 1
+  },
+  "tests/test_brightness_contrast_close.py": {
+   "I001": 1
+  },
+  "tests/test_command_finder.py": {
+   "I001": 1
+  },
+  "tests/test_crlb_count_contract.py": {
+   "I001": 1
+  },
+  "tests/test_dataset_manager_preference.py": {
+   "F841": 1
+  },
+  "tests/test_hlyb_clustering.py": {
+   "E702": 4
+  },
+  "tests/test_hlyb_pairwise.py": {
+   "E702": 13
+  },
+  "tests/test_hlyb_pairwise_window.py": {
+   "E702": 2,
+   "I001": 1
+  },
+  "tests/test_image_source.py": {
+   "F841": 1
+  },
+  "tests/test_local_density_window.py": {
+   "E702": 5,
+   "I001": 1
+  },
+  "tests/test_localization_precision.py": {
+   "E702": 4,
+   "F841": 1
+  },
+  "tests/test_log_window.py": {
+   "I001": 1
+  },
+  "tests/test_magic_wand.py": {
+   "I001": 1
+  },
+  "tests/test_min_enclosing.py": {
+   "E702": 2
+  },
+  "tests/test_msr_alignment_used_beads.py": {
+   "F841": 1
+  },
+  "tests/test_npc_geomfit.py": {
+   "E702": 1
+  },
+  "tests/test_ortho_roi.py": {
+   "I001": 1
+  },
+  "tests/test_ortho_view.py": {
+   "I001": 1
+  },
+  "tests/test_overlay_bc_independent.py": {
+   "I001": 1
+  },
+  "tests/test_overlay_brightness_contrast.py": {
+   "I001": 1
+  },
+  "tests/test_particle_average.py": {
+   "F841": 1
+  },
+  "tests/test_particle_inspector.py": {
+   "I001": 1
+  },
+  "tests/test_phase2.py": {
+   "E702": 13,
+   "E741": 1
+  },
+  "tests/test_precision_histograms.py": {
+   "I001": 1
+  },
+  "tests/test_render_fit_view.py": {
+   "I001": 1
+  },
+  "tests/test_render_ortho.py": {
+   "I001": 1
+  },
+  "tests/test_render_ortho_floating.py": {
+   "E702": 16,
+   "I001": 1
+  },
+  "tests/test_roi_convert.py": {
+   "E702": 1
+  },
+  "tests/test_roi_depth.py": {
+   "E702": 5
+  },
+  "tests/test_roi_highlight.py": {
+   "I001": 1
+  },
+  "tests/test_route_dispatch.py": {
+   "E702": 2
+  },
+  "tests/test_scatter_color_coords.py": {
+   "I001": 1
+  },
+  "tests/test_status_progress.py": {
+   "I001": 1
+  },
+  "tests/test_tiff_roi.py": {
+   "I001": 1,
+   "UP031": 1
+  },
+  "tests/test_time_channel_dialog.py": {
+   "I001": 1
+  },
+  "tests/test_time_channel_integration.py": {
+   "I001": 1
+  },
+  "tests/test_window_stacking.py": {
+   "I001": 1
+  }
+ }
+}
