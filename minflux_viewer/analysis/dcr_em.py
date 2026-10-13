@@ -228,15 +228,11 @@ def assign_per_trace(
 ) -> np.ndarray:
     """Per-localization channel labels where **a whole trace shares one label**.
 
-    Three ways to collapse a trace's localizations to one channel (``mode``):
-
-    * ``"mean"`` / ``"median"`` — aggregate the trace's DCR (NaN-ignoring) to one
-      value, then assign that value via :func:`assign`. ``min_confidence`` is the
-      GMM posterior threshold on that aggregated value.
-    * ``"majority"`` / ``"vote"`` — assign **each** localization to its most-likely
-      component (pure Bayes), then the trace takes the **majority** label
-      (pyMINFLUX-style). Here ``min_confidence`` is the required *vote agreement*:
-      a trace whose winning fraction is below it goes to the unassigned channel.
+    ``mode`` ``"mean"`` / ``"median"`` aggregates the trace's DCR (NaN-ignoring)
+    to one value, then assigns that value via :func:`assign`; ``min_confidence``
+    is the GMM posterior threshold on that aggregated value. (A per-trace
+    majority vote was removed: it is the trace-wise mode of the per-localization
+    labels and adds nothing the median does not give.)
 
     Returns an int array aligned to *values* (0 red, 1 green, -1 = overlap /
     unassigned). Falls back to per-localization :func:`assign` if *tid* does not
@@ -255,25 +251,6 @@ def assign_per_trace(
     ends = np.concatenate([bnd, [s_inv.size]])
 
     m = str(mode).lower()
-    if "major" in m or "vote" in m:
-        # Per-localization Bayes labels, then a per-trace majority vote.
-        loc_vals = vals if transform is None else np.asarray(transform(vals), dtype=float)
-        per_loc = assign(loc_vals, gmm, min_confidence=0.5)   # 0/1, NaN→-1
-        s_lab = per_loc[order]
-        trace_label = np.full(uniq.size, -1, dtype=int)
-        for k, (a, b) in enumerate(zip(starts, ends)):
-            grp = s_lab[a:b]
-            c0 = int(np.count_nonzero(grp == 0))
-            c1 = int(np.count_nonzero(grp == 1))
-            total = c0 + c1
-            if total == 0:
-                continue
-            winner = 0 if c0 > c1 else (1 if c1 > c0 else -1)
-            frac = max(c0, c1) / total
-            if winner != -1 and frac >= float(min_confidence):
-                trace_label[k] = winner
-        return trace_label[inv]
-
     fn = np.nanmedian if m.startswith("median") or "median" in m else np.nanmean
     trace_val = np.full(uniq.size, np.nan)
     with np.errstate(all="ignore"):
