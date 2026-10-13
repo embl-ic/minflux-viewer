@@ -6,14 +6,14 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
-from PyQt6.QtWidgets import QApplication, QDialog
+from PyQt6.QtWidgets import QDialog
 
 from minflux_viewer.ui.zarr_save_dialog import ZarrSaveFileDialog
 
 
 @pytest.fixture(scope="module")
-def _app():
-    yield QApplication.instance() or QApplication([])
+def _app(qapp):
+    yield qapp
 
 
 def test_save_accepts_existing_zarr_directory_instead_of_entering_it(_app, tmp_path):

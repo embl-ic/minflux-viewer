@@ -5,7 +5,7 @@ import pytest
 pytest.importorskip("PyQt6")
 
 from PyQt6.QtCore import QEvent
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import QWidget
 
 from minflux_viewer.core.roi import RoiStore
 from minflux_viewer.ui.qt_lifecycle import close_view_boxes, image_view_boxes
@@ -13,8 +13,8 @@ from minflux_viewer.ui.roi_overlay import RoiOverlayController
 
 
 @pytest.fixture(scope="module")
-def _app():
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def test_image_view_boxes_are_closed_and_unregistered_idempotently(_app):

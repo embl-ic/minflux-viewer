@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import os
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,10 +35,8 @@ _qtw = _Lazy("PyQt6.QtWidgets")
 
 
 @pytest.fixture
-def _qt_app():
-    if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-        pytest.skip("No display available for Qt tests")
-    return _qtw.QApplication.instance() or _qtw.QApplication(sys.argv)
+def _qt_app(qapp):
+    return qapp
 
 
 # ---------------------------------------------------------------------------

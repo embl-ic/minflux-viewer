@@ -136,11 +136,8 @@ def test_reading_a_non_bead_file_says_so_instead_of_returning_nothing(tmp_path):
 # --- the MBM info window opened from a companion -------------------------
 
 @pytest.fixture(scope="module")
-def _app():
-    pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def _window(qtbot, *, data_bounds_nm=None):

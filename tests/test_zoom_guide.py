@@ -73,11 +73,8 @@ def test_an_unknown_mode_falls_back_to_the_rectangle():
 # ------------------------------------------------------- the live plots
 
 @pytest.fixture(scope="module")
-def _app():
-    pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def _state_with_data():

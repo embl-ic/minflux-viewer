@@ -225,7 +225,7 @@ def test_millisecond_time_rescaled_to_seconds(tmp_path):
 
 # ------------------------------------------------------------- dialog pre-fill
 
-def test_dialog_prefills_roles_units_and_builds(tmp_path):
+def test_dialog_prefills_roles_units_and_builds(qapp, tmp_path):
     pytest.importorskip("PyQt6")
     from PyQt6.QtWidgets import QApplication
 
@@ -271,7 +271,7 @@ def _plain_xy(tmp_path):
                        [np.linspace(0.0, 500.0, n), np.linspace(0.0, 900.0, n)])
 
 
-def test_dialog_opens_simple_and_expands_to_the_full_parameter_set(tmp_path):
+def test_dialog_opens_simple_and_expands_to_the_full_parameter_set(qapp, tmp_path):
     pytest.importorskip("PyQt6")
     app, dlg = _open_dialog(_plain_xy(tmp_path))
 
@@ -295,7 +295,7 @@ def test_dialog_opens_simple_and_expands_to_the_full_parameter_set(tmp_path):
     app.processEvents()
 
 
-def test_the_folded_view_owns_up_to_the_parameters_it_hides(tmp_path):
+def test_the_folded_view_owns_up_to_the_parameters_it_hides(qapp, tmp_path):
     """The dialog opens folded, so a guessed parameter the simple view does not
     show (here the trace id) is counted in the group title rather than lost."""
     pytest.importorskip("PyQt6")
@@ -318,7 +318,7 @@ def test_the_folded_view_owns_up_to_the_parameters_it_hides(tmp_path):
     app.processEvents()
 
 
-def test_the_dialog_opens_on_the_folded_mapping_and_ten_preview_rows(tmp_path):
+def test_the_dialog_opens_on_the_folded_mapping_and_ten_preview_rows(qapp, tmp_path):
     pytest.importorskip("PyQt6")
     from minflux_viewer.ui.spreadsheet_import_dialog import PREVIEW_ROWS
 
@@ -334,7 +334,7 @@ def test_the_dialog_opens_on_the_folded_mapping_and_ten_preview_rows(tmp_path):
     app.processEvents()
 
 
-def test_add_parameter_offers_only_free_attributes_and_imports_the_column(tmp_path):
+def test_add_parameter_offers_only_free_attributes_and_imports_the_column(qapp, tmp_path):
     pytest.importorskip("PyQt6")
     rng = np.random.default_rng(0)
     tid, x, y, z, tim, ph = _minflux_like(rng)
@@ -371,7 +371,7 @@ def test_add_parameter_offers_only_free_attributes_and_imports_the_column(tmp_pa
     app.processEvents()
 
 
-def test_a_removed_parameter_leaves_the_mapping(tmp_path):
+def test_a_removed_parameter_leaves_the_mapping(qapp, tmp_path):
     pytest.importorskip("PyQt6")
     app, dlg = _open_dialog(_plain_xy(tmp_path))
     dlg._toggle_advanced()

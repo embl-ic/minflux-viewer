@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +11,6 @@ pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
 import pyqtgraph as pg
-from PyQt6.QtWidgets import QApplication
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
@@ -24,8 +22,8 @@ from minflux_viewer.plugins.spatial_line_pattern.spatial_line_pattern_window imp
 
 
 @pytest.fixture(scope="module")
-def _app():
-    return QApplication.instance() or QApplication(sys.argv)
+def _app(qapp):
+    return qapp
 
 
 class _LineOverlay:

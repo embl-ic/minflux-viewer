@@ -11,7 +11,7 @@ def _app() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
-def test_histogram_draws_vertical_minimum_and_maximum_level_markers():
+def test_histogram_draws_vertical_minimum_and_maximum_level_markers(qapp):
     app = _app()
     preview = HistogramPreview()
     preview.resize(202, 82)

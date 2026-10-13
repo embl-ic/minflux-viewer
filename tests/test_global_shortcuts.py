@@ -9,15 +9,15 @@ pytest.importorskip("PyQt6")
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QDialog, QLineEdit, QVBoxLayout
+from PyQt6.QtWidgets import QDialog, QLineEdit, QVBoxLayout
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.ui.main_window import MainWindow
 
 
 @pytest.fixture(scope="module")
-def _app():
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def test_preference_shortcut_reaches_focused_modeless_dialog(_app):

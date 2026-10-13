@@ -1,7 +1,6 @@
 """Multi-dataset accumulator behind the direct HlyB/D plugin item."""
 
 import os
-import sys
 
 import numpy as np
 import pytest
@@ -9,7 +8,6 @@ import pytest
 pytest.importorskip("PyQt6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from minflux_viewer.core.dataset import build_localization_dataset  # noqa: E402
 from minflux_viewer.core.roi import RoiRecord, RoiStore  # noqa: E402
@@ -19,8 +17,8 @@ from minflux_viewer.ui.hlyb_collection_dialog import (  # noqa: E402
 
 
 @pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication(sys.argv[:1])
+def app(qapp):
+    return qapp
 
 
 def _rod(centre_nm, seed, *, n_sites=160, locs_per_trace=14):

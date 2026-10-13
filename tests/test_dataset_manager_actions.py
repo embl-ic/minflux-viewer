@@ -19,7 +19,7 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtCore import QMimeData, QPoint, QPointF, QUrl
 from PyQt6.QtGui import QDropEvent
-from PyQt6.QtWidgets import QApplication, QMenu
+from PyQt6.QtWidgets import QMenu
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
@@ -29,8 +29,8 @@ from minflux_viewer.ui.main_window import MainWindow
 
 
 @pytest.fixture(scope="module")
-def _app():
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def _dataset(name: str = "ds0"):

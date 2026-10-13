@@ -26,8 +26,8 @@ from minflux_viewer.ui.roi_overlay import item_to_geometry
 
 
 @pytest.fixture(scope="module")
-def _app():
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def _render_with_line(_app):

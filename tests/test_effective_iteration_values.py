@@ -110,7 +110,7 @@ def test_mfx_filter_mask_broadcasts_cfr_across_browse_iterations():
     assert 0 < int(fmask.sum()) < fmask.size       # not zeroed out by cfr==0
 
 
-def test_histogram_auto_switches_to_effective_iteration():
+def test_histogram_auto_switches_to_effective_iteration(qapp):
     try:
         from PyQt6.QtWidgets import QApplication
     except Exception:
@@ -137,7 +137,7 @@ def test_histogram_auto_switches_to_effective_iteration():
         win.close()
 
 
-def test_filter_edit_on_cfr_displays_effective_iteration():
+def test_filter_edit_on_cfr_displays_effective_iteration(qapp):
     try:
         from PyQt6.QtWidgets import QApplication
     except Exception:
@@ -167,7 +167,7 @@ def test_filter_edit_on_cfr_displays_effective_iteration():
         win.close()
 
 
-def test_filter_edit_survives_manual_iteration_browse_and_reports_state():
+def test_filter_edit_survives_manual_iteration_browse_and_reports_state(qapp):
     try:
         from PyQt6.QtWidgets import QApplication
     except Exception:
@@ -215,7 +215,7 @@ def test_filter_edit_survives_manual_iteration_browse_and_reports_state():
         win.close()
 
 
-def test_filter_dialog_update_and_finish_copy_histogram_controls():
+def test_filter_dialog_update_and_finish_copy_histogram_controls(qapp):
     try:
         from PyQt6.QtWidgets import QApplication
     except Exception:

@@ -285,12 +285,8 @@ def test_direct_open_restores_the_session(tmp_path):
 
 # ------------------------------------------------- the MainWindow route itself
 @pytest.fixture
-def _app():
-    pytest.importorskip("PyQt6")
-    import sys
-
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication(sys.argv)
+def _app(qapp):
+    return qapp
 
 
 @pytest.mark.skipif(not SAMPLE.is_file(), reason="reference .msr not present")

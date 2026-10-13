@@ -10,7 +10,6 @@ apart, and a writer can be kept while its menu entry is withdrawn.
 from __future__ import annotations
 
 import pathlib
-import sys
 import types
 from pathlib import Path
 
@@ -18,10 +17,8 @@ import pytest
 
 
 @pytest.fixture
-def _app():
-    pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication(sys.argv)
+def _app(qapp):
+    return qapp
 
 
 def _real_window(_app):

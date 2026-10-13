@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pytest
@@ -13,7 +11,7 @@ pytest.importorskip("pyqtgraph")
 
 from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QContextMenuEvent
-from PyQt6.QtWidgets import QApplication, QComboBox, QMenu
+from PyQt6.QtWidgets import QComboBox, QMenu
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.attributes import attribute_description
@@ -25,10 +23,8 @@ from minflux_viewer.ui.attribute_help import (
 
 
 @pytest.fixture
-def _qt_app():
-    if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-        pytest.skip("No display available for Qt tests")
-    return QApplication.instance() or QApplication(sys.argv)
+def _qt_app(qapp):
+    return qapp
 
 
 def _state() -> AppState:

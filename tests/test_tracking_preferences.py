@@ -6,15 +6,14 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
-from PyQt6.QtWidgets import QApplication
 
 from minflux_viewer.core.app_state import DEFAULT_PREFS, AppState
 from minflux_viewer.ui.preferences_dialog import PreferencesDialog
 
 
 @pytest.fixture(scope="module")
-def _app():
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def test_preference_categories_have_requested_order(_app) -> None:

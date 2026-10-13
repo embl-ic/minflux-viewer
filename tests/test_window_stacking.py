@@ -8,7 +8,6 @@ and neither positions itself, so Qt opened them at the same spot.
 
 from __future__ import annotations
 
-import sys
 
 import pytest
 
@@ -150,10 +149,8 @@ def test_tiling_clamps_a_window_taller_than_the_screen():
 
 # -------------------------------------------------------------------- Qt side
 @pytest.fixture
-def _app():
-    pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication(sys.argv)
+def _app(qapp):
+    return qapp
 
 
 def _window(app, x, y, w=300, h=200, title=""):

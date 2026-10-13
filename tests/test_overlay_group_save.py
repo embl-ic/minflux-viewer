@@ -8,7 +8,6 @@ several files. What makes them a set again is the folder they share plus an
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -208,10 +207,8 @@ def test_group_round_trip_through_the_real_writers(tmp_path):
 
 # -------------------------------------------------------------- the dialog
 @pytest.fixture
-def _app():
-    pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication(sys.argv)
+def _app(qapp):
+    return qapp
 
 
 def test_the_dialog_names_every_channel_and_the_folder(_app):

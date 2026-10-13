@@ -16,8 +16,6 @@ had no source pixels and vanished from the preview altogether.
 
 from __future__ import annotations
 
-import os
-import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -34,12 +32,8 @@ GREEN_OFFSET = (1500.0, 0.0)
 
 
 @pytest.fixture
-def _qt_app():
-    if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-        pytest.skip("No display available for Qt tests")
-    from PyQt6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication(sys.argv)
+def _qt_app(qapp):
+    return qapp
 
 
 def _blob_dataset(name: str, offset: tuple[float, float], seed: int):

@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import sys
 
 import pytest
 
 
 @pytest.fixture
-def _app():
-    pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication(sys.argv)
+def _app(qapp):
+    return qapp
 
 
 def _menubar(_app):

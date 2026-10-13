@@ -9,8 +9,6 @@ every point with bin 0 (one color regardless of colormap).
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pytest
@@ -46,12 +44,8 @@ def _make_ds(n: int = 30, n_traces: int = 3) -> MinfluxDataset:
 
 
 @pytest.fixture
-def _qt_app():
-    pytest.importorskip("PyQt6")
-    if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-        pytest.skip("No display available for Qt tests")
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication(sys.argv)
+def _qt_app(qapp):
+    return qapp
 
 
 @pytest.mark.parametrize("coord", ["xnm", "ynm", "znm"])

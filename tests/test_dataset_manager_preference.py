@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_dataset_manager_preference_roundtrips_in_data_show_section():
+def test_dataset_manager_preference_roundtrips_in_data_show_section(qapp):
     pytest.importorskip("PyQt6")
     from PyQt6.QtWidgets import QApplication
 
@@ -70,7 +70,7 @@ def test_auto_show_leaves_visible_manager_untouched():
     assert manager.show_calls == 0
 
 
-def test_load_option_tooltips_explain_themselves():
+def test_load_option_tooltips_explain_themselves(qapp):
     """Both "When opening data file:" controls carry their rationale as hover help.
 
     Neither is self-evident: the vld checkbox is a structural no-op on m2410 data,

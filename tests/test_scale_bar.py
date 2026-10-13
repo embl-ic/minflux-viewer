@@ -48,10 +48,8 @@ def test_anchor_at_selection_centres_on_roi():
 # -- Qt construction smoke ------------------------------------------------
 
 @pytest.fixture(scope="module")
-def _app():
-    pytest.importorskip("pyqtgraph")
-    from PyQt6.QtWidgets import QApplication
-    yield QApplication.instance() or QApplication([])
+def _app(qapp):
+    yield qapp
 
 
 def _viewbox():

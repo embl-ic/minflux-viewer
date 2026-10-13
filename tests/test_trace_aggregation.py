@@ -171,7 +171,7 @@ def test_all_nan_trace_statistics_are_missing_without_runtime_warnings():
             assert raw_mask.tolist() == mask.tolist(), mode
 
 
-def test_histogram_trace_mean_and_median_accept_fully_unmapped_traces():
+def test_histogram_trace_mean_and_median_accept_fully_unmapped_traces(qapp):
     _qapp()
     win, ds, _state = _histogram()
     try:
@@ -187,7 +187,7 @@ def test_histogram_trace_mean_and_median_accept_fully_unmapped_traces():
         win.close()
 
 
-def test_every_dispatch_path_agrees_for_every_mode():
+def test_every_dispatch_path_agrees_for_every_mode(qapp):
     """The four aggregation entry points must produce identical trace values —
     a mode missing from one of them used to fall through to per-row values."""
     _qapp()
@@ -214,7 +214,7 @@ def test_every_dispatch_path_agrees_for_every_mode():
         win.close()
 
 
-def test_mask_builders_support_every_mode():
+def test_mask_builders_support_every_mode(qapp):
     """``raw_spec_mask`` / ``compute_filter_mask`` previously lacked median and
     the positional read-outs and silently tested per-row values instead."""
     _qapp()
@@ -259,7 +259,7 @@ def test_mask_builders_reject_unknown_modes():
 # (2) all [flatten] is an unweighted pool
 # ---------------------------------------------------------------------------
 
-def test_flatten_pools_every_raw_row_with_equal_weight():
+def test_flatten_pools_every_raw_row_with_equal_weight(qapp):
     """`all [flatten]` is a plain pool of all rows — it does NOT weight a row by
     its iteration index."""
     _qapp()
@@ -286,7 +286,7 @@ def test_flatten_pools_every_raw_row_with_equal_weight():
 # (3) filter parity with the histogram
 # ---------------------------------------------------------------------------
 
-def test_filter_dialog_offers_the_same_trace_read_outs_as_the_histogram():
+def test_filter_dialog_offers_the_same_trace_read_outs_as_the_histogram(qapp):
     _qapp()
     from minflux_viewer.ui import filter_dialog as fd
     from minflux_viewer.ui.histogram_window import _TRACE_AGG_MODES
@@ -296,7 +296,7 @@ def test_filter_dialog_offers_the_same_trace_read_outs_as_the_histogram():
         assert mode in fd._AGG_MODES
 
 
-def test_filter_can_bound_every_trace_read_out_end_to_end():
+def test_filter_can_bound_every_trace_read_out_end_to_end(qapp):
     """A spec on any trace read-out keeps exactly the traces whose value is in
     range, and keeps/drops whole traces."""
     _qapp()
@@ -316,7 +316,7 @@ def test_filter_can_bound_every_trace_read_out_end_to_end():
         _win.close()
 
 
-def test_filter_spinner_values_cover_every_trace_read_out():
+def test_filter_spinner_values_cover_every_trace_read_out(qapp):
     _qapp()
     from minflux_viewer.ui.filter_dialog import _filter_spinner_values
 
@@ -334,7 +334,7 @@ def test_filter_spinner_values_cover_every_trace_read_out():
 # (1) trace values ignore the filter; save-a-copy is the documented workaround
 # ---------------------------------------------------------------------------
 
-def test_trace_read_outs_ignore_the_active_filter():
+def test_trace_read_outs_ignore_the_active_filter(qapp):
     _qapp()
     win, ds, _state = _histogram()
     try:
@@ -351,7 +351,7 @@ def test_trace_read_outs_ignore_the_active_filter():
 
 
 @pytest.mark.parametrize("fmt", ["csv", "mat"])
-def test_saving_a_filtered_copy_then_reloading_gives_filtered_trace_values(fmt, tmp_path):
+def test_saving_a_filtered_copy_then_reloading_gives_filtered_trace_values(qapp, fmt, tmp_path):
     """The documented way to get filter-aware trace values: save the filtered
     view as a snapshot (rows dropped) and reload it as ordinary data."""
     _qapp()

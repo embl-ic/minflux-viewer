@@ -7,7 +7,6 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
-from PyQt6.QtWidgets import QApplication
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.ui.dataset_manager import DatasetManager
@@ -15,8 +14,8 @@ from minflux_viewer.ui.save_dialog import _ALL_FORMATS, SaveProcessedDataDialog
 
 
 @pytest.fixture(scope="module")
-def _app():
-    yield QApplication.instance() or QApplication([])
+def _app(qapp):
+    yield qapp
 
 
 def test_msr_offered_in_save_dialog(_app):

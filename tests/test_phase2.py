@@ -201,15 +201,8 @@ class TestFastDensity:
 
 class TestDatasetManagerLogic:
     @pytest.fixture(autouse=True)
-    def _qt_app(self):
-        pytest.importorskip("PyQt6")
-        import os
-        import sys
-        # Skip in headless environments where QApplication would abort
-        if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-            pytest.skip("No display available for Qt tests")
-        from PyQt6.QtWidgets import QApplication
-        self._app = QApplication.instance() or QApplication(sys.argv)
+    def _qt_app(self, qapp):
+        self._app = qapp
 
     def test_remove_updates_state(self):
         from minflux_viewer.core.app_state import AppState
@@ -473,14 +466,8 @@ class TestLoadCsv:
 
 class TestAppStateLog:
     @pytest.fixture(autouse=True)
-    def _qt(self):
-        pytest.importorskip("PyQt6")
-        import os
-        import sys
-        if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-            pytest.skip("No display available for Qt tests")
-        from PyQt6.QtWidgets import QApplication
-        self._app = QApplication.instance() or QApplication(sys.argv)
+    def _qt(self, qapp):
+        self._app = qapp
 
     def test_log_emits_signal(self):
         from minflux_viewer.core.app_state import AppState
@@ -838,7 +825,7 @@ class TestPlugins:
         names = [e.name for e in plugins.available()]
         assert "MSR Reader" in names
 
-    def test_state_log_adapter_severity(self):
+    def test_state_log_adapter_severity(self, qapp):
         pytest.importorskip("PyQt6")
         import os
         import sys
@@ -870,14 +857,8 @@ class TestMainWindowCleanup:
     """All child windows and ParaView subprocesses terminate on close."""
 
     @pytest.fixture(autouse=True)
-    def _qt(self):
-        pytest.importorskip("PyQt6")
-        import os
-        import sys
-        if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-            pytest.skip("No display available for Qt tests")
-        from PyQt6.QtWidgets import QApplication
-        self._app = QApplication.instance() or QApplication(sys.argv)
+    def _qt(self, qapp):
+        self._app = qapp
 
     def test_close_terminates_tracked_paraview_process(self):
         import subprocess
@@ -1071,14 +1052,8 @@ class TestMinZRangeThreshold:
 
 class TestPreferencesDialog:
     @pytest.fixture(autouse=True)
-    def _qt(self):
-        pytest.importorskip("PyQt6")
-        import os
-        import sys
-        if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-            pytest.skip("No display available for Qt tests")
-        from PyQt6.QtWidgets import QApplication
-        self._app = QApplication.instance() or QApplication(sys.argv)
+    def _qt(self, qapp):
+        self._app = qapp
 
     def test_roundtrip_preserves_values(self):
         from minflux_viewer.core.app_state import AppState
@@ -1167,14 +1142,8 @@ class TestPreferencesDialog:
 
 class TestDuplicate:
     @pytest.fixture(autouse=True)
-    def _qt(self):
-        pytest.importorskip("PyQt6")
-        import os
-        import sys
-        if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-            pytest.skip("No display available for Qt tests")
-        from PyQt6.QtWidgets import QApplication
-        self._app = QApplication.instance() or QApplication(sys.argv)
+    def _qt(self, qapp):
+        self._app = qapp
 
     def test_duplicate_prefixes_name_and_adds_to_state(self):
         from minflux_viewer.core.app_state import AppState
@@ -1327,7 +1296,7 @@ class TestGenerateMethodText:
 # ---------------------------------------------------------------------------
 
 class TestLutColormaps:
-    def test_single_color_red_ramp(self):
+    def test_single_color_red_ramp(self, qapp):
         pytest.importorskip("PyQt6")
         import os
         import sys
@@ -1343,7 +1312,7 @@ class TestLutColormaps:
         assert lut[-1, 0] == 255
         assert lut[-1, 1] == 0 and lut[-1, 2] == 0
 
-    def test_invert_flag(self):
+    def test_invert_flag(self, qapp):
         pytest.importorskip("PyQt6")
         import os
         import sys

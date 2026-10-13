@@ -52,7 +52,7 @@ def test_align_channel_filters_raw_mbm_points_to_metadata_used_beads():
     assert {int(g) for g in np.unique(moving["gri"])} == {1, 3}
 
 
-def test_alignment_plot_3d_builds_visible_gl_layers():
+def test_alignment_plot_3d_builds_visible_gl_layers(qapp):
     pytest.importorskip("PyQt6")
     pytest.importorskip("pyqtgraph.opengl")
     from PyQt6.QtWidgets import QApplication

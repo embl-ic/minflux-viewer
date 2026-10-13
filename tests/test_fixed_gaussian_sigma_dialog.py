@@ -37,7 +37,7 @@ def test_sigma_limits_use_single_minimum_step_for_flat_z():
     assert fixed_gaussian_sigma_limits_nm(locs) == (20.0, 0.1)
 
 
-def test_sigma_dialog_modeless_controls_sync_and_apply_without_closing():
+def test_sigma_dialog_modeless_controls_sync_and_apply_without_closing(qapp):
     app = _app()
     applied = []
     accepted = []

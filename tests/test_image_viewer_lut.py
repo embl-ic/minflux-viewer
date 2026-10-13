@@ -18,10 +18,8 @@ pytest.importorskip("tifffile")
 
 
 @pytest.fixture(scope="module")
-def _app():
-    from PyQt6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def _viewer(tmp_path, qtbot, *, rgb=False, name="plain.tif"):
