@@ -6,14 +6,18 @@
 # a .app. Build on the platform you are shipping for; there is no cross-build.
 #
 # Build (Windows):
+#   poetry sync --with build
 #   .\.venv\Scripts\python.exe tools\vendor_pip.py
-#   .\.venv\Scripts\python.exe -m pip install pyinstaller==6.19.0
 #   .\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm minflux_viewer.spec
 #
 # Build (macOS / Linux):
+#   poetry sync --with build
 #   .venv/bin/python tools/vendor_pip.py
-#   .venv/bin/python -m pip install pyinstaller==6.19.0
 #   .venv/bin/python -m PyInstaller --clean --noconfirm minflux_viewer.spec
+#
+# PyInstaller is pinned in pyproject.toml's optional "build" group and locked
+# in poetry.lock with everything else, so a build is reproducible from the
+# lock; ``poetry sync --with build`` installs exactly that set.
 #
 # The vendor_pip step is required and is NOT optional on a fresh clone -- see
 # the resources/pip guard below. Do not use a global ``pyinstaller`` command;
@@ -64,9 +68,9 @@ if missing_build_packages:
         "Cannot build MINFLUX Viewer: the build interpreter is missing "
         f"{', '.join(missing_build_packages)}.\n"
         f"Build interpreter: {sys.executable}\n"
-        "Run `poetry sync`, then use the project interpreter: "
-        f"`{VENV_PYTHON} -m pip install pyinstaller==6.19.0` and "
-        f"`{VENV_PYTHON} -m PyInstaller --clean --noconfirm minflux_viewer.spec`."
+        "Run `poetry sync --with build`, then build with the project "
+        f"interpreter: `{VENV_PYTHON} -m PyInstaller --clean --noconfirm "
+        "minflux_viewer.spec`."
     )
 
 # pip is a GENERATED build input (tools/vendor_pip.py) and is deliberately not
