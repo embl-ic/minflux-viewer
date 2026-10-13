@@ -64,6 +64,8 @@ CITE_SIMUFLUX = (
     "Marin & Ries, Nat. Commun. 17:246 (2026)",
     "https://doi.org/10.1038/s41467-025-66952-w",
 )
+#: The default σ_q of the CRLB: SimuFLUX's analytic 2-D donut, FWHM 310 nm.
+_SIMUFLUX_DONUT_SIGMA_Q_NM = 310.0 / math.sqrt(8.0 * math.log(2.0))
 CITE_FRC_BANTERLE = (
     "Banterle et al., J. Struct. Biol. 183:363 (2013)",
     "https://doi.org/10.1016/j.jsb.2013.05.004",
@@ -557,6 +559,23 @@ def _render_crlb_provenance(m, ev, state):
         s += f" Lateral pattern diameter L = {_method_number(L)} nm."
     if sigma_q is not None:
         s += f" Gaussian-envelope model width σ_q = {_method_number(sigma_q)} nm."
+    # Two of these numbers follow SimuFLUX's conventions, so they are cited where
+    # used: L converted from the sequence's patGeoFactor (recorded or assumed,
+    # i.e. anything but a typed value), and the default σ_q of its 2-D donut.
+    xy_info = provenance.get("xy") if isinstance(provenance.get("xy"), dict) else {}
+    geometry_source = str(xy_info.get("geometry_source") or "")
+    from_pattern_scale = bool(geometry_source) and geometry_source != "user input"
+    default_donut = (sigma_q is not None
+                     and abs(float(sigma_q) - _SIMUFLUX_DONUT_SIGMA_Q_NM) < 0.05)
+    if from_pattern_scale:
+        s += (" The pattern diameter was converted from the sequence's patGeoFactor as "
+              "L = patGeoFactor × 360 nm, the conversion SimuFLUX uses for Abberior "
+              "sequences.")
+    if default_donut:
+        s += (" σ_q is the width of SimuFLUX's analytic 2-D donut (FWHM 310 nm), an "
+              "assumed model parameter rather than a calibration of this microscope.")
+    if from_pattern_scale or default_donut:
+        cites.append(CITE_SIMUFLUX)
     if median_n is not None:
         s += f" Median modeled lateral count N = {_method_number(median_n)}."
 

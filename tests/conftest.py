@@ -49,13 +49,7 @@ _QT_FIXTURES = frozenset({"qapp", "qtbot"})
 #: module wholesale -- marked, and given the application -- until its tests ask
 #: for it themselves; then its entry goes. Found by running every module's
 #: ``-m "not qt"`` tests in a process of its own (only these aborted).
-_QT_MODULES = {
-    # Three plot-helper tests (test_value_hist_plot_accepts_every_colour_form_
-    # the_app_produces, test_plot_color_and_fill_brush_normalise_consistently,
-    # test_an_empty_distribution_returns_a_plot_rather_than_raising). Not
-    # edited here: the module is part of unfinished CRLB work.
-    "test_precision_histograms.py",
-}
+_QT_MODULES: set[str] = set()   # empty: test_precision_histograms.py now asks for qapp
 
 
 def pytest_configure(config):
