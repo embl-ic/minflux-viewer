@@ -49,7 +49,7 @@ Qt's :class:`QPainterPath` does the polygon clipping (the counterpart of the
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 import numpy as np
 from PyQt6.QtCore import QPointF, Qt

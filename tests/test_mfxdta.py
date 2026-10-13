@@ -8,7 +8,6 @@ import pytest
 
 from minflux_viewer.msr.mfxdta import (
     MFXDTA_MAGIC,
-    SOURCE_FORMAT,
     container_version,
     extract_zarr_store,
     parse_mfxdta_entries,
@@ -195,9 +194,9 @@ _SAMPLE = Path(r"D:\Workspace\Microscopes\MINFLUX\sample data"
 def test_specpy_free_path_reads_early_file(tmp_path):
     """The pure-Python msr-reader path recovers the same localizations."""
     pytest.importorskip("msr_reader")
+    from minflux_viewer.msr import state as MFSTATE
     from minflux_viewer.msr.mfxdta import read_obf_mfxdta_stacks
     from minflux_viewer.msr.msr_parser import GeneralMSRParser
-    from minflux_viewer.msr import state as MFSTATE
 
     stacks = read_obf_mfxdta_stacks(_SAMPLE)
     assert len(stacks) == 1
@@ -217,6 +216,7 @@ def test_specpy_free_path_reads_early_file(tmp_path):
 
     # the in-memory store drives the tree view and the .zarr export
     import zarr
+
     from minflux_viewer.msr.io import read_zarr_attrs
     from minflux_viewer.msr.mfxdta import unpack_zarr_store_to_dir
 

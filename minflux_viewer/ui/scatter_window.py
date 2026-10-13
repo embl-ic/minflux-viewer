@@ -66,9 +66,9 @@ from .gl_3d_reference import nice_step, three_plane_grid_positions, tick_values
 from .ortho_view import (
     AXIS_COLUMNS,
     ORTHO_AXIS,
+    SIDE_PLANES,
     OrthoCrosshair,
     OrthoPanes,
-    SIDE_PLANES,
     axis_columns,
     axis_labels,
     ortho_pane_labels,
@@ -3486,7 +3486,7 @@ class ScatterWindow(QWidget):
         k = {"XY": 2, "XZ": 1, "YZ": 0}[axis]
         return weighted_depths(points, locs[:, i], locs[:, j], locs[:, k])
 
-    def roi_dataset_indices(self) -> "set[int]":
+    def roi_dataset_indices(self) -> set[int]:
         """Datasets this scatter displays — every overlay channel, not just the
         anchor it is keyed by."""
         indices = {ch["dataset_idx"] for ch in getattr(self, "_channels", [])

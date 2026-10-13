@@ -11,7 +11,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
-from minflux_viewer.core.cell_collection import CellCollection  # noqa: E402
 from minflux_viewer.core.dataset import build_localization_dataset  # noqa: E402
 from minflux_viewer.core.roi import RoiRecord, RoiStore  # noqa: E402
 from minflux_viewer.ui.hlyb_collection_dialog import (  # noqa: E402

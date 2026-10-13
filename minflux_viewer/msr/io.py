@@ -1,6 +1,7 @@
 # minflux_msr/io.py
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any
+
 import numpy as np
 
 from . import zarr2
@@ -8,17 +9,17 @@ from .descriptions import describe_dtype, describe_path
 
 
 # -------- collect_zarr_fields --------
-def collect_zarr_fields(store) -> List[Dict[str, Any]]:
+def collect_zarr_fields(store) -> list[dict[str, Any]]:
     """Enumerate a zarr group's fields. *store* is anything ``zarr2.open`` accepts
     — a directory path or an in-memory ``{key: bytes}`` store."""
     g = zarr2.open(store, mode="r")
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     def visitor(path, obj):
         if path == "":
             return
         is_array = hasattr(obj, "shape") and hasattr(obj, "dtype")
         kind = "array" if is_array else "group"
-        ent: Dict[str, Any] = {"path": path, "kind": kind}
+        ent: dict[str, Any] = {"path": path, "kind": kind}
         if is_array:
             ent["shape"] = tuple(getattr(obj, "shape", ()))
             ent["length"] = int(obj.shape[0]) if obj.shape else 0
@@ -84,7 +85,7 @@ def _dtype_fields_tree(dt: np.dtype, n_rows: int):
         return []
     out = []
     for name in names:
-        
+
         sub_dt = dt.fields[name][0]
         base, subshape = _dtype_base_and_shape(sub_dt)
         node = {
@@ -107,7 +108,7 @@ def _dtype_fields_tree(dt: np.dtype, n_rows: int):
 
 
 # -------- NEW: unified parse for UI --------
-def parse_msr_general(msr_file: str, tmp_dir: str, log=print) -> Dict[str, Any]:
+def parse_msr_general(msr_file: str, tmp_dir: str, log=print) -> dict[str, Any]:
     from .msr_parser import parse_general
 
     return parse_general(msr_file, tmp_dir, log=log)
@@ -127,7 +128,7 @@ def parse_msr_to_tree(msr_file: str, tmp_dir: str, log=print):
 
 
 # --- Back-compat: find a single .msr from a path (file or folder) ---
-def pick_one_msr(input_path: Optional[str]) -> Optional[str]:
+def pick_one_msr(input_path: str | None) -> str | None:
     """
     Return a single .msr path from `input_path`.
       - If input_path is an .msr file, return it.

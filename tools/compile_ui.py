@@ -112,7 +112,7 @@ def cmd_check() -> int:
 
 def cmd_watch() -> int:
     try:
-        from watchdog.events   import FileSystemEventHandler
+        from watchdog.events import FileSystemEventHandler
         from watchdog.observers import Observer
     except ImportError:
         print("The --watch mode requires the 'watchdog' package.")

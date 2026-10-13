@@ -190,7 +190,7 @@ def test_live_sync_preserves_reset_baseline(qtbot):
 def test_viewbox_left_drag_routes_to_gamma(qtbot):
     """A left-drag anywhere on the plot (not the dot/lines) reaches the gamma
     fitter through the custom viewbox — the whole plot is grabbable."""
-    from PyQt6.QtCore import Qt, QPointF
+    from PyQt6.QtCore import QPointF, Qt
 
     dlg, rec = _dialog(qtbot)
     ymax = dlg._hist_ymax

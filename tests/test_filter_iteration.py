@@ -15,15 +15,12 @@ across iteration browsing and JSON round-trips:
 
 from __future__ import annotations
 
-import json
 import sys
 
 import numpy as np
 import pytest
 
-from minflux_viewer.core import loader
-from minflux_viewer.core import filter_io
-
+from minflux_viewer.core import filter_io, loader
 
 N_LOC = 10
 N_ITR = 4
@@ -241,12 +238,11 @@ def _make_dialog_with_dataset():
 
 def test_apply_all_persists_iteration_selector():
     try:
-        from PyQt6.QtWidgets import QApplication, QCheckBox
+        from PyQt6.QtWidgets import QApplication
     except Exception:
         pytest.skip("PyQt6 not available")
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
 
-    from minflux_viewer.ui.filter_dialog import _COL_ENABLED, _COL_ATTR
 
     dlg, ds = _make_dialog_with_dataset()
     try:

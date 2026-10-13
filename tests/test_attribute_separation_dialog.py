@@ -294,8 +294,7 @@ def test_bin_step_adapts_to_the_attribute_being_plotted(qtbot):
 
 
 def test_channel_colours_are_transparent_solids_in_rgbmcy_order(qtbot):
-    from minflux_viewer.ui.attribute_separation_dialog import (
-        CHANNEL_ALPHA, encoded_channel_lut)
+    from minflux_viewer.ui.attribute_separation_dialog import CHANNEL_ALPHA, encoded_channel_lut
 
     dlg, _ds, _owner = _dialog(qtbot)
     assert dlg._lut_cycle()[:6] == ["Red", "Green", "Blue", "Magenta", "Cyan", "Yellow"]

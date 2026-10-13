@@ -22,12 +22,10 @@ import gc
 import time
 from collections import deque
 
-from PyQt6.QtCore import QTimer, Qt
+import pyqtgraph as pg
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
-
-import pyqtgraph as pg
-
 
 # ---------------------------------------------------------------------------
 # Constants

@@ -89,7 +89,7 @@ class WandResult:
     n_candidates: int
 
 
-def describe_wand(result: "WandResult", field: str) -> str:
+def describe_wand(result: WandResult, field: str) -> str:
     """One status line both views share, so the wand reads the same everywhere.
 
     It names the field, the counts and both tolerances in the units they were

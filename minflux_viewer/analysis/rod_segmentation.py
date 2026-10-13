@@ -345,7 +345,7 @@ def _region_at(labels, x_edges, y_edges, xy: np.ndarray) -> np.ndarray:
     return np.where(inside, out, 0)
 
 
-def assign_points(result: "RodSegmentationResult", xy_nm) -> tuple[np.ndarray, np.ndarray]:
+def assign_points(result: RodSegmentationResult, xy_nm) -> tuple[np.ndarray, np.ndarray]:
     """Assign an arbitrary point set to an existing detection.
 
     Returns ``(region_of_point, component_of_point)`` with the same conventions

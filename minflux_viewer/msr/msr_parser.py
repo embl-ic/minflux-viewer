@@ -1,9 +1,10 @@
-from typing import Any, Dict
+from typing import Any
 
 import numpy as np
 
 from . import zarr2
-from .state import reset as reset_state, set_mfx_for, set_mbm_for, set_mbm_meta_for
+from .state import reset as reset_state
+from .state import set_mbm_for, set_mbm_meta_for, set_mfx_for
 
 
 def _ome_xml_metadata(msr_file: str) -> str | None:
@@ -118,7 +119,7 @@ class GeneralMSRParser:
     def __init__(self):
         self.legacy = LegacyMSRParser()
 
-    def parse(self, msr_file: str, tmp_dir=None, log=print) -> Dict[str, Any]:
+    def parse(self, msr_file: str, tmp_dir=None, log=print) -> dict[str, Any]:
         """Recover MINFLUX data from the embedded MFXDTA stacks (early single-
         channel + modern multi-channel). Files with no MINFLUX data fall back to
         a legacy image-series tree.
@@ -254,5 +255,5 @@ class GeneralMSRParser:
         }
 
 
-def parse_general(msr_file: str, tmp_dir: str, log=print) -> Dict[str, Any]:
+def parse_general(msr_file: str, tmp_dir: str, log=print) -> dict[str, Any]:
     return GeneralMSRParser().parse(msr_file, tmp_dir, log=log)

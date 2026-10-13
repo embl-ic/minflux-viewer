@@ -58,9 +58,9 @@ pipeline; they are intentionally left untouched.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from math import ceil, pi
-from typing import Callable, Sequence
 
 import numpy as np
 from scipy import ndimage as ndi
@@ -434,7 +434,7 @@ class ShapePrior:
     size_hi: tuple[float, ...] = (3400.0, 1150.0)
 
     @classmethod
-    def defaults(cls, model_key: str) -> "ShapePrior":
+    def defaults(cls, model_key: str) -> ShapePrior:
         """The prior a model declares for itself, from its :class:`SizeSpec`s."""
         specs = get_shape_model(model_key).size_specs
         return cls(model_key,
@@ -443,20 +443,20 @@ class ShapePrior:
 
     @classmethod
     def capsule(cls, *, length_nm: tuple[float, float],
-                width_nm: tuple[float, float]) -> "ShapePrior":
+                width_nm: tuple[float, float]) -> ShapePrior:
         return cls("capsule", (length_nm[0], width_nm[0]),
                    (length_nm[1], width_nm[1]))
 
     @classmethod
     def arc_capsule(cls, *, length_nm: tuple[float, float],
                     width_nm: tuple[float, float],
-                    bend_deg: tuple[float, float] = (-75.0, 75.0)) -> "ShapePrior":
+                    bend_deg: tuple[float, float] = (-75.0, 75.0)) -> ShapePrior:
         return cls("arc_capsule",
                    (length_nm[0], width_nm[0], bend_deg[0]),
                    (length_nm[1], width_nm[1], bend_deg[1]))
 
     @classmethod
-    def disk(cls, *, diameter_nm: tuple[float, float]) -> "ShapePrior":
+    def disk(cls, *, diameter_nm: tuple[float, float]) -> ShapePrior:
         return cls("disk", (diameter_nm[0],), (diameter_nm[1],))
 
     @property
@@ -1220,7 +1220,7 @@ def segment_shapes(field_obj: ScalarField, *, prior: ShapePrior | None = None,
             stats["reason"] = (
                 f"{len(component_report)} blob(s) were fitted but no instance "
                 f"reached the minimum overlap of {cfg.min_instance_iou:g}")
-    
+
     return ShapeSegmentationResult(
         instances=instances, masks=masks, labels=labels, union_mask=overlap > 0,
         overlap_count=overlap, foreground=foreground, detection_field=detection,

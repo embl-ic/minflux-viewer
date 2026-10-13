@@ -8,7 +8,6 @@ from __future__ import annotations
 import numpy as np
 
 from minflux_viewer.analysis.attribute_channels import (
-    Channel,
     assign_traces,
     assign_values,
     channels_from_boundaries,

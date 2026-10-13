@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtWidgets import (
     QAbstractItemView,

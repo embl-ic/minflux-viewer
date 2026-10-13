@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PyQt6.QtCore import QObject, QPointF, pyqtSignal
-from PyQt6.QtGui import QPainterPath, QPolygonF
+from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtGui import QPainterPath
 
 ROI_TYPES = {
     "rectangle", "oval", "polygon", "freehand", "line", "point", "points", "angle",
@@ -79,7 +79,7 @@ class RoiRecord:
         stroke_color: str = "#ffff00",
         line_width: float = 1.5,
         context: dict[str, Any] | None = None,
-    ) -> "RoiRecord":
+    ) -> RoiRecord:
         roi_id = uuid.uuid4().hex
         # Leave the name empty for auto-named ROIs; RoiStore.add assigns a
         # human-friendly 1-based name (e.g. "rectangle-1") when the ROI is stored.

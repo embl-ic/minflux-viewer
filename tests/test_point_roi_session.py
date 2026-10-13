@@ -10,7 +10,7 @@ pytest.importorskip("pyqtgraph")
 import pyqtgraph as pg
 from PyQt6.QtWidgets import QApplication, QWidget
 
-from minflux_viewer.core.roi import RoiRecord, RoiStore
+from minflux_viewer.core.roi import RoiStore
 from minflux_viewer.ui.roi_overlay import RoiOverlayController, _bounds
 
 

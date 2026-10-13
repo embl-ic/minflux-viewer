@@ -156,7 +156,6 @@ class ParticleInspectorWindow(QWidget):
 
     def _build_3d(self):
         try:
-            import pyqtgraph as pg
             import pyqtgraph.opengl as gl
         except Exception:
             return None

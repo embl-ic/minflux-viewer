@@ -33,10 +33,10 @@ from .obf_compat import apply_obf_reader_patches
 # OBFFile is constructed (see obf_compat for details).
 apply_obf_reader_patches()
 
-from .io import parse_msr_general, pick_one_msr, collect_zarr_fields
-from .export import export_arrays
-from .utils import slug
 from . import state
+from .export import export_arrays
+from .io import collect_zarr_fields, parse_msr_general, pick_one_msr
+from .utils import slug
 
 __all__ = [
     "parse_msr_general",

@@ -19,20 +19,18 @@ from __future__ import annotations
 
 import io
 import sys
-from datetime import datetime
 
-from PyQt6.QtCore import QThread, Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontDatabase, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (
-    QHBoxLayout,
     QApplication,
+    QHBoxLayout,
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-
 
 # ---------------------------------------------------------------------------
 # Stream capture — sends writes to the viewer Console only
@@ -101,7 +99,7 @@ class ConsoleWindow(QWidget):
     _stdout_written = pyqtSignal(str)
     _stderr_written = pyqtSignal(str)
 
-    _instance: "ConsoleWindow | None" = None
+    _instance: ConsoleWindow | None = None
     _buffered_stdout: list[str] = []
     _buffered_stderr: list[str] = []
 
@@ -199,7 +197,7 @@ class ConsoleWindow(QWidget):
         QApplication.clipboard().setText(self._text.toPlainText())
 
     @classmethod
-    def _ensure_visible_for_stderr(cls) -> "ConsoleWindow | None":
+    def _ensure_visible_for_stderr(cls) -> ConsoleWindow | None:
         app = QApplication.instance()
         if app is None:
             return None

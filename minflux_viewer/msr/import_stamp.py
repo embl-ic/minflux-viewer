@@ -42,7 +42,8 @@ def stamp_msr_dataset(ds, *, entry: dict, msr_path, key: str,
     if zroot is not None:
         try:
             from ..core.acquisition_time import (
-                acquisition_date_from_zattrs, stamp_dataset_acquisition,
+                acquisition_date_from_zattrs,
+                stamp_dataset_acquisition,
             )
             from ..core.mfx_sequence import extract_sequence_from_zattrs
             from ..core.minflux_zarr import capture_native_zarr_metadata

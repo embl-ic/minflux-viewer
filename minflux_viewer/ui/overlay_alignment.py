@@ -14,7 +14,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-
 ALIGNMENT_HELP_TEXT = (
     "mouse drag in the view, or use arrow keys ↔↕ to move horizontally/vertically; "
     "comma ⸴ = ↺ period · = ↻ to rotate"

@@ -399,11 +399,12 @@ def test_multichannel_project_roundtrip_preserves_overlay_rois_and_images(
     tmp_path, monkeypatch
 ):
     from dataclasses import asdict
+
     import zarr
 
-    from minflux_viewer.core.roi import RoiRecord
     import minflux_viewer.core.obf_image_source as obf_module
     import minflux_viewer.core.tiff_export as tiff_export
+    from minflux_viewer.core.roi import RoiRecord
 
     first = _dataset(tmp_path)
     second = _dataset(tmp_path)
@@ -527,6 +528,7 @@ def test_main_window_reopens_project_as_overlay_and_restores_roi(
 ):
     pytest.importorskip("PyQt6")
     from dataclasses import asdict
+
     from PyQt6.QtWidgets import QApplication
 
     from minflux_viewer.core.app_state import AppState
@@ -577,10 +579,10 @@ def test_save_context_expands_overlay_and_captures_roi_and_linked_images(
     pytest.importorskip("PyQt6")
     from PyQt6.QtWidgets import QApplication
 
+    import minflux_viewer.core.obf_image_source as image_module
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.core.roi import RoiRecord
     from minflux_viewer.ui.main_window import MainWindow
-    import minflux_viewer.core.obf_image_source as image_module
 
     source = tmp_path / "three-channel.msr"
     source.write_bytes(b"fake")
@@ -1170,7 +1172,10 @@ def test_chunks_use_a_zarr_v3_core_codec_and_arrays_round_trip_exactly():
     import numpy as np
 
     from minflux_viewer.core.minflux_zarr import (
-        CHUNK_CLEVEL, CHUNK_CODEC, load_minflux_zarr, write_minflux_zarr,
+        CHUNK_CLEVEL,
+        CHUNK_CODEC,
+        load_minflux_zarr,
+        write_minflux_zarr,
     )
 
     assert CHUNK_CODEC == "zstd"

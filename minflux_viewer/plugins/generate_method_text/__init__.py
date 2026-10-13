@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QMimeData, QUrl
+from PyQt6.QtCore import QMimeData, Qt, QUrl
 from PyQt6.QtGui import QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import (
     QDialog,
@@ -51,8 +51,8 @@ def _launch(state, parent=None) -> None:
     if not events:
         QMessageBox.information(parent, "Generate Method Text", "No events were selected.")
         return
-    from ...analysis.method_text import generate_method_text, generate_method_html
     from ... import __version__
+    from ...analysis.method_text import generate_method_html, generate_method_text
     text = generate_method_text(state, events, version=__version__)
     html = generate_method_html(state, events, version=__version__)
     out = MethodTextDialog(text, html, parent=parent)

@@ -137,11 +137,12 @@ def test_square_padding_matches_the_vendor_layout():
 # ------------------------------------------------------- real file round trip
 @pytest.mark.skipif(not SAMPLE.is_file(), reason="reference .msr not present")
 def test_round_trip_keeps_the_imspector_container_and_the_state(tmp_path):
+    from msr_reader.obffile import OBFFile, _read_file_header
+
     from minflux_viewer.core.loader import load_from_mfx_array
     from minflux_viewer.core.save import save_processed
     from minflux_viewer.msr.msr_parser import parse_general
     from minflux_viewer.msr.viewer_state import apply_viewer_state, read_viewer_state
-    from msr_reader.obffile import OBFFile, _read_file_header
 
     parsed = parse_general(str(SAMPLE), str(tmp_path), log=lambda *_a: None)
     datasets = []
@@ -287,6 +288,7 @@ def test_direct_open_restores_the_session(tmp_path):
 def _app():
     pytest.importorskip("PyQt6")
     import sys
+
     from PyQt6.QtWidgets import QApplication
     return QApplication.instance() or QApplication(sys.argv)
 

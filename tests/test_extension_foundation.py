@@ -10,9 +10,8 @@ See ``docs/extension-layer/PLAN.md`` section 5.
 
 from __future__ import annotations
 
-import re
-
 import importlib
+import re
 
 import numpy as np
 import pytest

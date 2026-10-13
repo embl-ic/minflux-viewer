@@ -323,7 +323,7 @@ def geometry_template_image(kind: str, params: dict, box_nm: float,
         for k in range(fold):
             ang = 2.0 * np.pi * k / fold
             cx0, cy0 = r0 * np.cos(ang), r0 * np.sin(ang)
-            img = img + np.exp(-(((xx - cx0) ** 2 + (yy - cy0) ** 2)) / (2.0 * corner ** 2))
+            img = img + np.exp(-((xx - cx0) ** 2 + (yy - cy0) ** 2) / (2.0 * corner ** 2))
     else:  # gaussian
         fwhm = max(float(params.get("fwhm_nm", 40.0)), pixel_nm)
         sigma = fwhm / 2.3548200450309493

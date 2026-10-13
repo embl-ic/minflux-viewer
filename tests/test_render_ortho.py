@@ -569,6 +569,7 @@ def test_closing_the_render_window_takes_the_floating_windows_with_it(_qt_app):
 def _screen_pos(win, plane, point):
     """Where a 3-D point lands on screen in one pane, in global pixels."""
     from PyQt6.QtCore import QPointF
+
     from minflux_viewer.ui.ortho_view import ORTHO_AXIS_COLUMNS
 
     view_box = win._ortho.view_box(plane)

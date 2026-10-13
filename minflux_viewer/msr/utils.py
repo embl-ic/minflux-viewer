@@ -1,5 +1,7 @@
 import re
+
 import numpy as np
+
 
 def slug(s: str) -> str:
     s = (s or "").strip()

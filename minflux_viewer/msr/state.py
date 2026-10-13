@@ -1,18 +1,18 @@
 # minflux_msr/state.py
-from typing import Optional, Dict
+
 import numpy as np
 
 # Back-compat singletons (first dataset loaded)
-mfx: Optional[np.ndarray] = None
-mbm: Optional[np.ndarray] = None
+mfx: np.ndarray | None = None
+mbm: np.ndarray | None = None
 
 # New: hold multiple datasets, keyed by dataset label (or DID fallback)
-mfx_map: Dict[str, np.ndarray] = {}
-mbm_map: Dict[str, np.ndarray] = {}
+mfx_map: dict[str, np.ndarray] = {}
+mbm_map: dict[str, np.ndarray] = {}
 # Translated MBM metadata per dataset key — ``{"points_by_gri": {...}, "used": [...]}``.
 # Populated when a legacy bead layout is normalized to the model ``points`` array
 # (see msr/legacy_mbm.py); consumers prefer it over the in-store zarr attrs.
-mbm_meta_map: Dict[str, dict] = {}
+mbm_meta_map: dict[str, dict] = {}
 
 def reset():
     """Clear all global data holders."""

@@ -45,8 +45,8 @@ Pure NumPy/SciPy — Qt-free and unit-testable. Distances are in nm.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 import numpy as np
 

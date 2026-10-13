@@ -10,14 +10,13 @@ from math import isfinite
 import numpy as np
 
 from .dataset import (
-    AttrStore,
     AttributeComponent,
+    AttrStore,
     DatasetComponents,
     FileInfo,
     MinfluxDataset,
 )
 from .loader import _build_channel, _compute_properties
-
 
 _OVERLAY_KEYS = (
     "overlay_id",

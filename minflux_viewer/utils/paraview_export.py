@@ -27,7 +27,6 @@ import numpy as np
 
 from ..core.dataset import MinfluxDataset
 
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -116,7 +115,7 @@ def _write_vtp_ascii(
         '<VTKFile type="PolyData" version="1.0" '
         'byte_order="LittleEndian" header_type="UInt64">'
     )
-    lines.append(f'  <PolyData>')
+    lines.append('  <PolyData>')
     lines.append(
         f'    <Piece NumberOfPoints="{n}" NumberOfVerts="{n}" '
         f'NumberOfLines="0" NumberOfStrips="0" NumberOfPolys="0">'

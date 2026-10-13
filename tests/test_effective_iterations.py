@@ -10,7 +10,6 @@ real values for the current attribute.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from minflux_viewer.core import loader
 from minflux_viewer.core.iteration import iteration_bold_flags, iteration_labels
@@ -85,6 +84,7 @@ def test_effective_iterations_unknown_attr_all_true():
 # --------------------------------------------------------------------------- UI
 def test_histogram_bolds_effective_iterations(qtbot):
     from PyQt6.QtCore import Qt
+
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.ui.histogram_window import HistogramWindow
 

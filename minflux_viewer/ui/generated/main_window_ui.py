@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # AUTO-GENERATED FROM .ui — DO NOT EDIT BY HAND.
 # Re-run: poetry run python tools/compile_ui.py
 # Form implementation generated from reading ui file 'resources\ui\main_window.ui'
@@ -12,7 +11,7 @@
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 
-class Ui_MainWindow(object):
+class Ui_MainWindow:
     def setupUi(self, MainWindow):
         MainWindow.setObjectName("MainWindow")
         MainWindow.resize(720, 120)

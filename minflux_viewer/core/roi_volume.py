@@ -1698,7 +1698,7 @@ def _convex_level(plane_pts: np.ndarray, pad: float) -> list | None:
     if plane_pts.shape[0] < 3:
         return None
     try:
-        from scipy.spatial import ConvexHull, QhullError
+        from scipy.spatial import ConvexHull
         hull = ConvexHull(plane_pts)
     except Exception:
         return None

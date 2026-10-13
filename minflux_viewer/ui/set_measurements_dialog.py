@@ -14,8 +14,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..core.app_state import AppState, DEFAULT_PREFS
-
+from ..core.app_state import DEFAULT_PREFS, AppState
 
 _MEASUREMENT_OPTIONS = [
     ("area", "Area"),

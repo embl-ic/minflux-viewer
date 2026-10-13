@@ -340,7 +340,7 @@ def test_render_wand_refuses_when_the_view_shows_an_image(_qt_app):
 
 
 # ------------------------------------------------------------- the overlay
-from PyQt6.QtWidgets import QWidget                          # noqa: E402
+from PyQt6.QtWidgets import QWidget  # noqa: E402
 
 
 class _WandOwner(QWidget):
@@ -646,10 +646,10 @@ def test_an_ortho_side_pane_serves_the_click_on_its_own_axes():
     """⚠ Reaching the window's hook through __getattr__ binds it to the WINDOW,
     whose _active_plane() is XY in orthogonal mode -- so a click in the XZ pane
     would be read as an XY click."""
+    from PyQt6.QtCore import QObject
+
     from minflux_viewer.ui.ortho_roi import OrthoPaneOwner
     from minflux_viewer.ui.ortho_view import ORTHO_AXIS_COLUMNS
-
-    from PyQt6.QtCore import QObject
 
     class _Window(QObject):
         def __init__(self):

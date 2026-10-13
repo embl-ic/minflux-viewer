@@ -8,10 +8,9 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
-
 from PyQt6.QtCore import QObject, QRunnable, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
@@ -641,15 +640,15 @@ class FieldDialog(QDialog):
     stack indices, and the default empty set means none.
     """
 
-    def __init__(self, datasets: list[dict], prechecked: Optional[dict[str, dict]] = None,
-                 parent=None, image_series: Optional[list[dict]] = None,
-                 prechecked_images: Optional[set] = frozenset()):
+    def __init__(self, datasets: list[dict], prechecked: dict[str, dict] | None = None,
+                 parent=None, image_series: list[dict] | None = None,
+                 prechecked_images: set | None = frozenset()):
         super().__init__(parent)
         self.setWindowTitle("Datasets / Fields included…")
         self.resize(max(560, 320 * max(1, len(datasets))), 560)
         self._vars: dict[str, dict[str, Any]] = {}
         self._image_checks: dict[int, QCheckBox] = {}
-        self._image_all: Optional[QCheckBox] = None
+        self._image_all: QCheckBox | None = None
 
         root = QVBoxLayout(self)
         outer = QHBoxLayout()
@@ -758,7 +757,7 @@ class FieldDialog(QDialog):
             }
         return out
 
-    def image_payload(self) -> Optional[set]:
+    def image_payload(self) -> set | None:
         """The chosen image series: ``None`` for *all*, else raw stack indices.
 
         ``None`` is not the same as "every box happens to be ticked" — it is the
@@ -2445,9 +2444,15 @@ def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
     _log = log if log is not None else (lambda _m: None)
 
     from ...msr.export import (
-        IMAGE_WORK_WEIGHT, WORK_ROWS_UNIT as _WORK_ROWS_UNIT, canonical_dataset,
-        dataset_prepare_weight, dataset_work_weight, export_arrays,
+        IMAGE_WORK_WEIGHT,
+        canonical_dataset,
+        dataset_prepare_weight,
+        dataset_work_weight,
+        export_arrays,
         format_work_weight,
+    )
+    from ...msr.export import (
+        WORK_ROWS_UNIT as _WORK_ROWS_UNIT,
     )
 
     # Pair each dataset with its own arrays.  A .msr can carry two entries under
@@ -2575,7 +2580,8 @@ def export_parsed_result(parsed, msr_state, out_dir: str, formats: list[str], *,
 
     if zarr_requested and zarr_members:
         from ...core.minflux_zarr import (
-            write_minflux_zarr, write_minflux_zarr_project,
+            write_minflux_zarr,
+            write_minflux_zarr_project,
         )
         from ...core.overlay import overlay_color_cycle
 
@@ -3003,7 +3009,7 @@ class MsrReaderDialog(QWidget):
         # Image series to export / open as images: ``None`` = all of whatever
         # each file has, a set of raw OBF stack indices = exactly those,
         # empty set = none.
-        self.image_field_selection: Optional[set] = set()
+        self.image_field_selection: set | None = set()
         # gri-IDs the user excluded via "Show Beads Drift". Alignment always
         # starts from metadata-marked used beads; these exclusions further
         # narrow that set after the user applies a manual selection.
@@ -5235,7 +5241,7 @@ class MsrReaderDialog(QWidget):
     # ------------------------------------------------------------------
 
     def _ensure_single_file_parsed(self) -> bool:
-        from ...msr import pick_one_msr, parse_msr_general
+        from ...msr import parse_msr_general, pick_one_msr
         ipath = self.input_path_edit.text().strip()
         tmp = self._temp_dir()
         if self.mode_folder.isChecked():
@@ -5654,7 +5660,6 @@ class MsrReaderDialog(QWidget):
         channel's beads + the data region as a scatter and a per-bead **drift**
         table (peak-to-peak per axis; resid columns are N/A). Skips the
         save-outputs dialog."""
-        import numpy as np
 
         from .beads_drift import gather_msr_bead_drift, single_channel_bead_summary
         MFSTATE = self._msr_state()
@@ -5691,7 +5696,6 @@ class MsrReaderDialog(QWidget):
         some files failed both end in a dialog, because the alternative is a
         button that visibly does nothing.
         """
-        from ...msr import parse_msr_general
 
         recursive = bool(self.recursive_check.isChecked())
         reproduce_tree = bool(self.reproduce_tree_check.isChecked())
@@ -5959,7 +5963,7 @@ class MsrReaderDialog(QWidget):
             self._run_batch_export(ipath, out_dir, formats, tmp)
             return
         if not self.parsed:
-            from ...msr import pick_one_msr, parse_msr_general
+            from ...msr import parse_msr_general, pick_one_msr
             msr = pick_one_msr(ipath)
             if not msr:
                 self.log("no msr file found!")
@@ -6282,7 +6286,8 @@ class MsrReaderDialog(QWidget):
         # its auto-estimate.
         try:
             from ...msr.viewer_state import (
-                apply_viewer_state, read_viewer_state,
+                apply_viewer_state,
+                read_viewer_state,
             )
             _vs = read_viewer_state(job["entry"].get("zroot"))
             if _vs:
@@ -6303,7 +6308,8 @@ class MsrReaderDialog(QWidget):
         try:
             from ...core.loader import apply_metadata_recipe
             from ...core.save import (
-                is_metadata_json_payload, metadata_sidecar_path,
+                is_metadata_json_payload,
+                metadata_sidecar_path,
             )
             _side = metadata_sidecar_path(msr_path)
             if _side.is_file():

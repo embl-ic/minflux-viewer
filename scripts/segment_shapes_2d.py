@@ -116,7 +116,10 @@ def _acquisition_bounds_by_did(path: Path) -> dict[str, tuple]:
     """
     try:
         from minflux_viewer.msr.acquisition_roi import (
-            group_by_dataset, read_acquisition_rois, union_bounds)
+            group_by_dataset,
+            read_acquisition_rois,
+            union_bounds,
+        )
         rois = read_acquisition_rois(str(path))
     except Exception:
         return {}

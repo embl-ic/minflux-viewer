@@ -33,11 +33,11 @@ from PyQt6.QtWidgets import (
 from scipy.ndimage import gaussian_filter
 
 from .. import resource_path
-from ..colormaps import map_to_rgba, named_colormap_names, representative_rgb
 from ..analysis.voronoi_density import (
     Voronoi3DField,
     build_voronoi_3d_field,
 )
+from ..colormaps import map_to_rgba, named_colormap_names, representative_rgb
 from ..core.app_state import AppState
 
 _DEFAULT_MAX_VOXELS = 8_000_000

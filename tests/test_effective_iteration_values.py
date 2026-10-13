@@ -223,7 +223,7 @@ def test_filter_dialog_update_and_finish_copy_histogram_controls():
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.filter_dialog import FilterDialog, _COL_ATTR, _COL_ITER, _COL_MODE
+    from minflux_viewer.ui.filter_dialog import _COL_ATTR, _COL_ITER, _COL_MODE, FilterDialog
     from minflux_viewer.ui.histogram_window import HistogramWindow
 
     mfx, _eff = _make_m2410_with_effective_cfr()

@@ -364,6 +364,7 @@ def test_a_filed_contour_can_be_corrected_by_hand_and_committed(app, monkeypatch
     Update reads the edited geometry back (ImageJ RoiManager semantics).
     """
     import pyqtgraph as pg
+
     from minflux_viewer.core.roi import RoiStore
     from minflux_viewer.ui.roi_overlay import RoiOverlayController
 

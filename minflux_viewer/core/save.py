@@ -31,10 +31,9 @@ from typing import Any
 
 import numpy as np
 
-from .acquisition_time import acquisition_metadata
-
 from . import formats as _formats
 from . import overlay_save as _ov_save
+from .acquisition_time import acquisition_metadata
 
 #: Tag identifying the metadata sidecar JSON (a dict; filter/data JSON are lists).
 METADATA_JSON_MARKER = "minflux_viewer_metadata"
@@ -91,7 +90,7 @@ def is_metadata_json_payload(payload: Any) -> bool:
 def is_metadata_json_file(path) -> bool:
     """True if *path* is a metadata sidecar written by :func:`save_processed`."""
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             return is_metadata_json_payload(json.load(fh))
     except Exception:
         return False

@@ -48,9 +48,11 @@ def open_in_paraview(state, parent=None) -> None:
 
     # Imports kept local so the plugin doesn't pull in vtk-style helpers
     # at viewer startup.
-    from ...utils.paraview_export   import export_to_vtp
+    from ...utils.paraview_export import export_to_vtp
     from ...utils.paraview_launcher import (
-        launch_paraview, ParaViewNotFoundError, not_found_instructions,
+        ParaViewNotFoundError,
+        launch_paraview,
+        not_found_instructions,
     )
 
     stem = Path(ds.name).stem.replace("/", "_").replace("\\", "_")

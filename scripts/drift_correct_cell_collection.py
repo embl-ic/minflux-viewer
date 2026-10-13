@@ -208,8 +208,7 @@ def merge_statistic(collection: CellCollection, *, z_scaling_factor: float,
     Removing real drift gathers a molecule's repeated visits into one site, so a
     good correction *lowers* ``n_sites`` and *raises* ``n_merged``.
     """
-    from minflux_viewer.analysis.hlyb_staged import (
-        Staged3DConfig, _pool_cell_sites)
+    from minflux_viewer.analysis.hlyb_staged import Staged3DConfig, _pool_cell_sites
 
     cfg = Staged3DConfig(z_scaling_factor=float(z_scaling_factor), run_sensitivity=False,
                          run_stratum_profile=False)

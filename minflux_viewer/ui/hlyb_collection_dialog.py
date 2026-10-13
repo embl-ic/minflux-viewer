@@ -38,7 +38,6 @@ from PyQt6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
-    QWidget,
 )
 
 from ..core.cell_collection import (
@@ -280,8 +279,8 @@ class HlyBCollectionWindow(QDialog):
 
     # --------------------------------------------------------------- run
     def _run(self) -> None:
-        from ..analysis.hlyb_staged import Staged3DConfig, analyze_hlyb_staged_pooled
         from ..analysis.hlyb_reporting import PROJECT_Z_SCALING_FACTOR
+        from ..analysis.hlyb_staged import Staged3DConfig, analyze_hlyb_staged_pooled
         from .hlyb_staged_dialog import HlyBStagedDialog, HlyBStagedWindow
         from .modeless import show_modeless
 

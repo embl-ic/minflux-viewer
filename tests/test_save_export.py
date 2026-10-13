@@ -246,7 +246,7 @@ def test_snapshot_csv_roundtrips_without_double_z_scaling_factor(tmp_path):
 
 # --- .msr as a first-class save format ----------------------------------------
 def test_msr_is_a_data_format():
-    from minflux_viewer.core.save import DATA_FORMATS, _EXT
+    from minflux_viewer.core.save import _EXT, DATA_FORMATS
     assert "msr" in DATA_FORMATS and _EXT["msr"] == ".msr"
 
 

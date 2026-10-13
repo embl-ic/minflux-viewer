@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 
 from minflux_viewer.core.spreadsheet_loader import (
-    DEFAULT_PIXEL_SIZE_NM,
     auto_import,
     bracket_unit,
     build_dataset_from_mapping,
@@ -14,7 +13,6 @@ from minflux_viewer.core.spreadsheet_loader import (
     read_table,
     representative_row_indices,
 )
-
 
 # ---------------------------------------------------------------------------
 # Synthetic exports

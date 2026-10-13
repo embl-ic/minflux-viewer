@@ -64,8 +64,8 @@ Pure NumPy/SciPy, Qt-free.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
 import numpy as np
 
@@ -111,17 +111,17 @@ class DriftResult:
     dims: int
     dx: np.ndarray
     dy: np.ndarray
-    dz: Optional[np.ndarray]
+    dz: np.ndarray | None
     ti: np.ndarray
     dxt: np.ndarray
     dyt: np.ndarray
-    dzt: Optional[np.ndarray]
+    dzt: np.ndarray | None
     time_window_s: float
     n_windows: int
     resolution_nm: float
     rx: tuple
     ry: tuple
-    rz: Optional[tuple]
+    rz: tuple | None
     rms: tuple
     method: str = "time-window cross-correlation"
     auto_window: bool = False
@@ -304,17 +304,17 @@ def _spline(ti: np.ndarray, values: np.ndarray):
 def estimate_drift(
     x: np.ndarray,
     y: np.ndarray,
-    z: Optional[np.ndarray],
+    z: np.ndarray | None,
     t: np.ndarray,
-    tid: Optional[np.ndarray] = None,
+    tid: np.ndarray | None = None,
     *,
     resolution_nm: float,
-    time_window_s: Optional[float] = None,
-    dims: Optional[int] = None,
-    rx: Optional[tuple] = None,
-    ry: Optional[tuple] = None,
-    rz: Optional[tuple] = None,
-    progress: Optional[Callable[[float], None]] = None,
+    time_window_s: float | None = None,
+    dims: int | None = None,
+    rx: tuple | None = None,
+    ry: tuple | None = None,
+    rz: tuple | None = None,
+    progress: Callable[[float], None] | None = None,
 ) -> DriftResult:
     """Estimate the drift of a set of localizations (nm, seconds).
 

@@ -43,21 +43,21 @@ import pyqtgraph as pg
 from PyQt6.QtCore import QRectF, QSignalBlocker, Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtWidgets import (
-    QGridLayout,
     QApplication,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSlider,
     QSizePolicy,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -89,14 +89,6 @@ from ..core.overlay import (
 )
 from ..core.roi_selection import REGION_ROI_TYPES, roi_region_mask
 from ..core.spatial_grid import SpatialGrid
-from .render_config import (
-    DIRECT_RENDER_THRESHOLD_NM,
-    PER_LOC_SWITCH_COUNT,
-    PHYSICAL_TILE_NM,
-    actual_pixel_size_nm,
-    lod_for_pixel_size,
-    render_tile_px,
-)
 from .ortho_view import (
     ORTHO_AXIS,
     ORTHO_AXIS_COLUMNS,
@@ -106,8 +98,6 @@ from .ortho_view import (
     ortho_pane_labels,
 )
 from .plot_format import plot_widget
-from .render_scheduler import RenderScheduler
-from .tile_cache import PhysicalTileCache, TileKey
 from .precision_render import (
     RENDER_METHOD_BASIC,
     RENDER_METHOD_FIXED_GAUSSIAN,
@@ -115,6 +105,16 @@ from .precision_render import (
     RENDER_METHOD_MENU_ORDER,
     RENDER_METHOD_TIPS,
 )
+from .render_config import (
+    DIRECT_RENDER_THRESHOLD_NM,
+    PER_LOC_SWITCH_COUNT,
+    PHYSICAL_TILE_NM,
+    actual_pixel_size_nm,
+    lod_for_pixel_size,
+    render_tile_px,
+)
+from .render_scheduler import RenderScheduler
+from .tile_cache import PhysicalTileCache, TileKey
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -2933,7 +2933,6 @@ class RenderWindow(QWidget):
         only appears when individual localizations are so sparse that blank
         pixels are physically correct.
         """
-        from scipy.ndimage import gaussian_filter
 
         self._scheduler.cancel()
         self._pending_tile_keys.clear()
@@ -5376,7 +5375,7 @@ class RenderWindow(QWidget):
         lo, hi = self._depth_range
         return 0.5 * (float(lo) + float(hi))
 
-    def roi_depth_range(self) -> "tuple[float, float] | None":
+    def roi_depth_range(self) -> tuple[float, float] | None:
         """Visible range of the out-of-plane axis — what a volume ROI's third
         dimension is seeded from and clamped to. The depth slider *is* that
         range here. ``None`` for 2-D datasets."""
@@ -5466,7 +5465,7 @@ class RenderWindow(QWidget):
         sc, sr = snap_density_centroid(density, col, row, window=win, iterations=iterations)
         return (x0 + sc * px, y0 + sr * px)
 
-    def roi_dataset_indices(self) -> "set[int]":
+    def roi_dataset_indices(self) -> set[int]:
         """Datasets this render displays — every visible localization channel.
 
         An overlay window is keyed by its anchor but draws several datasets, so
@@ -5504,7 +5503,7 @@ class RenderWindow(QWidget):
         record.context = ctx
         return record
 
-    def _wand_depth_mask(self, locs, columns) -> "np.ndarray":
+    def _wand_depth_mask(self, locs, columns) -> np.ndarray:
         """The depth-slider gate as a row mask over *locs*.
 
         ⚠ A ROI's *stored* mask deliberately spans the whole depth axis (see
