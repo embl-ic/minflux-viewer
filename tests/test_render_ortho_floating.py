@@ -586,6 +586,21 @@ def test_the_ortho_coordinate_is_reported_in_the_status_line(_qt_app):
         win.close()
 
 
+def test_a_tiled_render_keeps_the_ortho_coordinate_in_the_status_line(_qt_app, qtbot):
+    """Every writer of the status line appends the 3-D point in Ortho-View
+    except, once, the tiled composite: a tile landing after a crosshair toggle
+    wiped the coordinate, which showed up as the test above failing under
+    parallel load. Driven directly here, so it does not depend on timing."""
+    win = _window(_qt_app)
+    try:
+        win._set_orientation(ORTHO_AXIS)
+        qtbot.waitUntil(lambda: win._last_tile_geometry is not None, timeout=10_000)
+        win._recomposite_from_tiles()
+        assert "crosshair X=" in win._info_label.text()
+    finally:
+        win.close()
+
+
 def test_activating_a_floating_pane_raises_the_whole_set(_qt_app):
     """Three windows that belong to one view should not be separated by another
     window landing between them."""
