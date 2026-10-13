@@ -104,4 +104,4 @@ jobs:
           poetry env use "${{ steps.python.outputs.python-path }}"
           poetry sync --with build
       - name: Qt tests, one module per process
-        run: poetry run python tools/run_qt_tests.py -j 4
+        run: poetry run python tools/run_qt_tests.py -j 4 --strict

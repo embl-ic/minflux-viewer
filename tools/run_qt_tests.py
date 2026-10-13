@@ -11,7 +11,10 @@ aborted on every attempt (four of four, native display and offscreen alike).
 Even alone, a module very occasionally dies the same way under parallel load
 (once in a 125-module run; never in ten runs of that module on its own). So a
 module that CRASHES is run once more, and a pass on the retry is reported as
-such rather than hidden. A module whose tests FAIL is never retried.
+such rather than hidden. A module whose tests FAIL is never retried. With
+``--strict`` (what CI runs) a crash fails the run even when its retry passes:
+the application is one long-lived process, so a crash is a defect wherever a
+fresh process happens to get past it. Locally the retry stays a diagnostic.
 
 The pure tests do not need any of this; run them in one process with
 ``pytest -m "not qt"``.
@@ -21,6 +24,7 @@ Usage::
     python tools/run_qt_tests.py              # offscreen, 4 workers
     python tools/run_qt_tests.py -j 8
     python tools/run_qt_tests.py --native     # use the real display
+    python tools/run_qt_tests.py --strict     # a recovered crash still fails (CI)
     python tools/run_qt_tests.py -- -x -k lut  # extra pytest arguments
 
 ``QT_QPA_PLATFORM=offscreen`` is the default because it makes the results
@@ -70,6 +74,11 @@ def outcome(returncode: int, output: str = "") -> str:
     return "crashed"           # killed by a native fault (negative, 139, ...)
 
 
+def exit_status(*, failed: int, recovered: int, strict: bool) -> int:
+    """1 when any module failed, or -- in strict mode -- crashed even once."""
+    return 1 if failed or (strict and recovered) else 0
+
+
 def _collect(python: str, env: dict) -> list[str]:
     result = subprocess.run(
         [python, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
@@ -95,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-j", "--jobs", type=int,
                         default=min(4, os.cpu_count() or 1),
                         help="modules run at once (default: %(default)s)")
+    parser.add_argument("--strict", action="store_true",
+                        help="fail when a module crashed, even if its retry passed (CI)")
     parser.add_argument("--native", action="store_true",
                         help="use the real display instead of QT_QPA_PLATFORM=offscreen")
     parser.add_argument("pytest_args", nargs="*",
@@ -151,7 +162,9 @@ def main(argv: list[str] | None = None) -> int:
     if recovered:
         summary += f", {len(recovered)} of them only after a native crash was retried"
     print(summary + ".")
-    return 1 if bad else 0
+    if recovered and args.strict:
+        print("Strict mode: a crash fails the run even when its retry passed.")
+    return exit_status(failed=len(bad), recovered=len(recovered), strict=args.strict)
 
 
 if __name__ == "__main__":
