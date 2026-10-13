@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-
 from PyQt6.QtCore import QObject, Qt
 
 from ..core.roi_projection import DEGENERATE_POINT, project_flat_record

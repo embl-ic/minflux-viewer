@@ -13,8 +13,8 @@ pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
 import pyqtgraph as pg
-from pyqtgraph.graphicsItems.ROI import Handle
 from PyQt6.QtWidgets import QApplication, QWidget
+from pyqtgraph.graphicsItems.ROI import Handle
 
 from minflux_viewer.core.roi import RoiRecord, RoiStore
 from minflux_viewer.ui.roi_overlay import RoiOverlayController, _mark_line_end_handle

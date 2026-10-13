@@ -61,7 +61,7 @@ def mfv(state):
 # ---------------------------------------------------------------------------
 
 def test_facade_exposes_every_published_namespace(mfv):
-    from minflux_viewer.api import NAMESPACES, __api_version__
+    from minflux_viewer.api import NAMESPACES
 
     for name in NAMESPACES:
         assert hasattr(mfv, name), name

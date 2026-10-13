@@ -40,8 +40,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..colormaps import colormap_lut
 from ..analysis import curvilinear_segmentation as cv
+from ..colormaps import colormap_lut
 
 _MAX_IMAGE_PX = 40_000_000
 _RIDGE_CMAP = "inferno"

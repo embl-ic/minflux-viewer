@@ -34,13 +34,13 @@ This is exactly how Fiji's B&C dialog works.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QGridLayout,
@@ -136,7 +136,7 @@ class LutDialog(QDialog):
         on_gamma_changed:  Callable[[float], None] | None = None,
         parent: QWidget | None = None,
         on_auto: Callable[[], tuple[float, float] | None] | None = None,
-        state: "AppState | None" = None,
+        state: AppState | None = None,
     ) -> None:
         super().__init__(parent)
         self._cb_levels  = on_levels_changed
@@ -202,7 +202,7 @@ class LutDialog(QDialog):
         on_reset:          Callable[[], None] | None = None,
         on_gamma_changed:  Callable[[float], None] | None = None,
         on_auto: Callable[[], tuple[float, float] | None] | None = None,
-        state: "AppState | None" = None,
+        state: AppState | None = None,
     ) -> None:
         """Point this dialog at a different view without rebuilding it.
 
@@ -906,7 +906,7 @@ class LutDialog(QDialog):
 # One LUT dialog, application-wide
 # ---------------------------------------------------------------------------
 
-def shared_lut_dialog(owner, **callbacks) -> "LutDialog":
+def shared_lut_dialog(owner, **callbacks) -> LutDialog:
     """The single application-wide LUT dialog, rebound to *owner*.
 
     One instance rather than one per view: the previous design left a hidden

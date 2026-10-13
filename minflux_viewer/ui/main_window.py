@@ -8126,7 +8126,7 @@ class MainWindow(QMainWindow):
         """Offer to rebuild an overlay whose channels are all loaded."""
         if self._is_shutting_down:
             return
-        from ..core.overlay_save import group_saved_datasets, resolve_siblings
+        from ..core.overlay_save import group_saved_datasets
 
         for group_id, found in group_saved_datasets(self._state.datasets).items():
             if len(found) < 2:

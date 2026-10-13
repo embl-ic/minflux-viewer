@@ -44,7 +44,7 @@ from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, QSizeF
-from PyQt6.QtGui import QColor, QImage, QPainter, QPageSize, QPdfWriter, QRegion
+from PyQt6.QtGui import QColor, QImage, QPageSize, QPainter, QPdfWriter, QRegion
 from PyQt6.QtWidgets import QWidget
 
 PIXEL_FORMATS = {"png": ("PNG image", ".png"),
@@ -409,9 +409,21 @@ class FigureExportDialog:
 
     def __init__(self, parent, figure: Figure, state=None, memory: dict | None = None) -> None:
         from PyQt6.QtWidgets import (
-            QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-            QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QRadioButton,
-            QSpinBox, QVBoxLayout)
+            QButtonGroup,
+            QCheckBox,
+            QComboBox,
+            QDialog,
+            QDialogButtonBox,
+            QFileDialog,
+            QGridLayout,
+            QHBoxLayout,
+            QLabel,
+            QLineEdit,
+            QPushButton,
+            QRadioButton,
+            QSpinBox,
+            QVBoxLayout,
+        )
 
         from .file_manager import reveal_in_file_manager
 

@@ -85,7 +85,9 @@ def template_for(datasets) -> Path | None:
 
 def _stacks(path: Path):
     from msr_reader.obffile import (
-        _read_file_header, _read_stack_footer, _read_stack_header,
+        _read_file_header,
+        _read_stack_footer,
+        _read_stack_header,
     )
 
     with open(path, "rb") as handle:

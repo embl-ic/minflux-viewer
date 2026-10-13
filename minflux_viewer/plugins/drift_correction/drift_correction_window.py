@@ -83,15 +83,15 @@ class DriftEstimate:
     dataset_id: int
     dims: int
     coords_nm: np.ndarray                  # (n, dims) corrected display coordinates
-    beads: "bd.BeadCorrection | None" = None
-    windows: "dc.DriftResult | None" = None
+    beads: bd.BeadCorrection | None = None
+    windows: dc.DriftResult | None = None
     bead_names: list = field(default_factory=list)
     n_beads_usable: int = 0
     recorded: bool = False                 # bead selection == the file's recorded one
     # The active filter the estimate was made under. ``row_mask`` selects the
     # rows of ``coords_nm`` out of the last-valid rows (None = every row passed);
     # the corrected dataset holds exactly those rows.
-    row_mask: "np.ndarray | None" = None
+    row_mask: np.ndarray | None = None
     n_source: int = 0                      # last-valid rows before the filter
     filter_attrs: list = field(default_factory=list)
     filter_skipped: list = field(default_factory=list)   # specs that could not be evaluated

@@ -78,6 +78,7 @@ def test_dialog_builds_and_returns_a_config(_app):
 
 def test_window_is_an_unparented_modeless_dialog(result, _app):
     from PyQt6.QtWidgets import QDialog
+
     from minflux_viewer.ui.hlyb_pairwise_dialog import HlyBPairwiseWindow
 
     win = HlyBPairwiseWindow(result, title="t")

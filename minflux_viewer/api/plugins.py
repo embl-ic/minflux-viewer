@@ -10,8 +10,6 @@ and the run repeats exactly. The same declaration -- the ``[method]`` block of
 
 from __future__ import annotations
 
-from typing import Any
-
 from ._base import ApiError, Namespace
 
 

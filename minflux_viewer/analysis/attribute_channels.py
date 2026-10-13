@@ -43,6 +43,7 @@ import numpy as np
 from ..colors import solid_color_names
 from .distribution_fit import MixtureResult
 
+
 @dataclass
 class Channel:
     """One channel carrier: a named ``[lo, hi]`` attribute window + LUT color."""

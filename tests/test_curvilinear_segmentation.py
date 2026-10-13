@@ -6,7 +6,6 @@ synthetic filament.
 """
 
 import numpy as np
-import pytest
 
 from minflux_viewer.analysis import curvilinear_segmentation as cv
 

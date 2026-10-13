@@ -36,7 +36,6 @@ from minflux_viewer.utils.filters import (
     trace_agg_func,
 )
 
-
 N_LOC, N_ITR = 6, 3
 #: value(loc, itr) = BASE[loc] + itr — every read-out is hand-checkable. The two
 #: traces are deliberately spaced *differently* so that even ``stdev``/``range``

@@ -131,7 +131,7 @@ def test_a_retired_stop_is_dropped_even_from_a_customised_palette():
     kept the surplus row forever. The stop count is part of the contract, not a
     preference, so it is pruned unconditionally.
     """
-    from minflux_viewer.core.app_state import _merge, _migrate_prefs, DEFAULT_PREFS
+    from minflux_viewer.core.app_state import DEFAULT_PREFS, _merge, _migrate_prefs
 
     rainbow = {
         "1st": [0, 0, 255, 255], "2nd": [0, 102, 255, 255],
@@ -157,7 +157,7 @@ def test_a_retired_stop_is_dropped_even_from_a_customised_palette():
 
 def test_the_prune_runs_after_the_replacement_not_before():
     """Order matters: pruning first would stop v045 recognising the rainbow."""
-    from minflux_viewer.core.app_state import _merge, _migrate_prefs, DEFAULT_PREFS
+    from minflux_viewer.core.app_state import DEFAULT_PREFS, _merge, _migrate_prefs
 
     rainbow = {
         "1st": [0, 0, 255, 255], "2nd": [0, 102, 255, 255],

@@ -20,7 +20,6 @@ each behaviour rather than two that can drift.
 from __future__ import annotations
 
 import contextlib
-
 import sys
 import types
 from typing import TYPE_CHECKING, Any

@@ -6,8 +6,7 @@ Run with:  poetry run pytest
 import numpy as np
 import pytest
 
-from minflux_viewer.core.dataset import AttrStore, MinfluxDataset, FileInfo, DataProp
-
+from minflux_viewer.core.dataset import AttrStore, DataProp, FileInfo, MinfluxDataset
 
 # ---------------------------------------------------------------------------
 # AttrStore
@@ -113,7 +112,7 @@ class TestMinfluxDataset:
 
 class TestLoaderHelpers:
     def test_compute_properties_2d(self):
-        from minflux_viewer.core.loader import _compute_properties, _add_derived_attributes
+        from minflux_viewer.core.loader import _compute_properties
 
         n = 6
         attrs = AttrStore({
@@ -129,7 +128,7 @@ class TestLoaderHelpers:
         assert prop.num_loc_per_trace.tolist() == [3, 3]
 
     def test_derived_attributes_added(self):
-        from minflux_viewer.core.loader import _compute_properties, _add_derived_attributes
+        from minflux_viewer.core.loader import _add_derived_attributes, _compute_properties
 
         n = 4
         attrs = AttrStore({

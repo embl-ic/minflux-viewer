@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-
 # Note: the iteration selector is stored under "iteration", NOT "itr" — "itr"
 # is a raw MINFLUX data-column name (see MINFLUX_DATA_KEYS below), so a filter
 # row keyed "itr" would be misclassified as a data row and rejected.

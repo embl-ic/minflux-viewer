@@ -39,7 +39,9 @@ def test_fresh_prefs_are_exactly_the_declared_defaults():
     ``use_fixed_z_scaling_factor`` back to True, defeating any change to ``DEFAULT_PREFS``).
     Changing a default must be enough on its own."""
     from minflux_viewer.core.app_state import (
-        DEFAULT_PREFS, _MIGRATION_KEYS, default_prefs,
+        _MIGRATION_KEYS,
+        DEFAULT_PREFS,
+        default_prefs,
     )
 
     fresh = default_prefs()

@@ -8,7 +8,6 @@ It does not attempt Imspector/Abberior byte-compatibility (see the backlog).
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from minflux_viewer.core.dataset import build_localization_dataset
 from minflux_viewer.core.save import dataset_to_mfx_array

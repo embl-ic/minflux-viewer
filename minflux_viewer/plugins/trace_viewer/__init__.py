@@ -6,8 +6,8 @@ from .. import PluginEntry, register
 
 
 def _launch(state, parent=None) -> None:
-    from .trace_viewer_window import TraceViewerWindow
     from ...ui import modeless
+    from .trace_viewer_window import TraceViewerWindow
 
     active = state.active_dataset
     if active is None:

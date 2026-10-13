@@ -216,7 +216,6 @@ def test_the_bead_companion_formats_cannot_carry_a_data_region():
     take a second variable and ``.json`` could be wrapped in an object, but a
     field only two of the four formats can hold is not a uniform one.)
     """
-    import numpy as np
 
     from minflux_viewer.core.save import _EXT, _write_npy
 

@@ -17,7 +17,7 @@ unit-testable without a running QApplication.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 
@@ -27,7 +27,7 @@ ApplyFn = Callable[[float, float], None]
 
 
 def percentile_levels(pixels, lo_pct: float = 0.0, hi_pct: float = 99.5,
-                      *, positive_only: bool = False) -> "tuple[float, float] | None":
+                      *, positive_only: bool = False) -> tuple[float, float] | None:
     """Auto contrast levels from a pixel sample (Fiji-style percentile stretch)."""
     vals = np.asarray(pixels, dtype=float).ravel()
     vals = vals[np.isfinite(vals)]
@@ -51,7 +51,7 @@ class _Layer:
         self.apply = apply
         self.auto = auto
         self.default = default
-        self.levels: "tuple[float, float] | None" = None   # user-set levels
+        self.levels: tuple[float, float] | None = None   # user-set levels
 
 
 class LayerBrightness:
@@ -72,7 +72,7 @@ class LayerBrightness:
     def names(self) -> list[str]:
         return list(self._layers)
 
-    def effective_levels(self, name: str) -> "tuple[float, float] | None":
+    def effective_levels(self, name: str) -> tuple[float, float] | None:
         """Current levels for *name*: the user-set levels, else the default."""
         lay = self._layers.get(name)
         if lay is None:
@@ -122,7 +122,7 @@ class LayerBrightness:
             self._refresh()
 
     # ------------------------------------------------------------- internals
-    def _cur(self) -> "_Layer | None":
+    def _cur(self) -> _Layer | None:
         return self._layers.get(self._target) if self._target else None
 
     def _refresh(self) -> None:

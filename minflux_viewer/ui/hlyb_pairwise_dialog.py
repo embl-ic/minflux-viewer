@@ -889,7 +889,7 @@ def pairwise_report(result: dict) -> str:
     add("INTERPRETATION")
     trimer = fits.get("trimer_six_site")
     if trimer is not None and r.get("best_hypothesis", "").startswith("dimer"):
-        add(f"  A single broad inter-subunit distance describes the data better than")
+        add("  A single broad inter-subunit distance describes the data better than")
         add(f"  the published six-site trimer by {trimer.get('delta_aic', 0.0):.0f} AIC units.")
         add("  That is consistent with the trimer not surviving sample preparation,")
         add("  leaving dimers whose separation is neither fixed at the tabulated")

@@ -6,7 +6,6 @@ asymmetric particles.
 """
 
 import numpy as np
-import pytest
 
 from minflux_viewer.analysis import particle_average as pa
 

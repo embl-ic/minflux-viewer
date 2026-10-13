@@ -21,7 +21,7 @@ import numpy as np
 
 from .loader import attr_values_1d
 from .overlay import transform_to_matrix4
-from .particle_set import ParticleData, _RESERVED_COLUMNS
+from .particle_set import _RESERVED_COLUMNS, ParticleData
 from .roi_crop import display_coords
 from .roi_selection import rectangle_bounds, rectangle_mask
 

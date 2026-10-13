@@ -61,10 +61,10 @@ from .attribute_cpu import (
     spatial_representative_indices,
 )
 from .attribute_help import apply_attribute_menu_tooltips, apply_attribute_tooltips
-from .gpu_capabilities import point_limit_from_memory
 from .gl_3d_reference import three_plane_grid_positions, tick_values
-from .zoom_guide import zoom_guide_points
+from .gpu_capabilities import point_limit_from_memory
 from .plot_format import plot_widget
+from .zoom_guide import zoom_guide_points
 
 _VIEW_DIMENSIONS = {
     "XY": ("X", "Y"),

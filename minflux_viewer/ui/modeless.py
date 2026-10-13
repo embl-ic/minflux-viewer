@@ -68,7 +68,7 @@ def corner_position(avail, size, *, align="center", margin: int = 24):
 
 def ensure_on_screen(window: QWidget, owner: QWidget | None = None, *,
                      margin: int = 24,
-                     align: "str | tuple[float, float]" = "center") -> None:
+                     align: str | tuple[float, float] = "center") -> None:
     """Cap *window* to the available screen area and place it fully on-screen.
 
     Unparented top-level windows (the MSR reader, Dataset Manager, modeless

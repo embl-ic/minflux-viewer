@@ -7,7 +7,7 @@ Fiji-style Brightness & Contrast dialog for rendered scalar tiles.
 from __future__ import annotations
 
 import sys
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 from PyQt6.QtCore import Qt
@@ -25,7 +25,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-
 _SLIDER_RES = 1000
 
 
@@ -42,7 +41,7 @@ class HistogramPreview(QWidget):
         self._bar_rgb: tuple[float, float, float] | None = None  # single bar color
         self.setMinimumSize(150, 70)
 
-    def set_bar_color(self, rgb: "tuple[float, float, float] | None") -> None:
+    def set_bar_color(self, rgb: tuple[float, float, float] | None) -> None:
         """Single representative fill color for the bars (None → red default)."""
         if rgb is None:
             self._bar_rgb = None
@@ -256,7 +255,7 @@ class BrightnessContrastDialog(QDialog):
             self._lo, self._hi = self._data_min, self._data_max
         self._update_controls_from_levels()
 
-    def set_bar_color(self, rgb: "tuple[float, float, float] | None") -> None:
+    def set_bar_color(self, rgb: tuple[float, float, float] | None) -> None:
         """Color the histogram bars with a single representative LUT color."""
         self._histogram.set_bar_color(rgb)
 

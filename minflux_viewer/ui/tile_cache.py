@@ -104,8 +104,9 @@ class PhysicalTileCache:
 
         Returns a float32 array of shape (target_px, target_px) or None.
         """
-        from .render_config import PHYSICAL_TILE_NM, render_tile_px
         from scipy.ndimage import zoom as ndimage_zoom
+
+        from .render_config import render_tile_px
 
         for coarser_lod in range(key.lod - 1, -1, -1):
             coarser_key = TileKey(

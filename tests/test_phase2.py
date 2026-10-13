@@ -20,7 +20,6 @@ from minflux_viewer.core.dataset import (
     MinfluxDataset,
 )
 
-
 # ---------------------------------------------------------------------------
 # Shared fixture
 # ---------------------------------------------------------------------------
@@ -204,7 +203,8 @@ class TestDatasetManagerLogic:
     @pytest.fixture(autouse=True)
     def _qt_app(self):
         pytest.importorskip("PyQt6")
-        import os, sys
+        import os
+        import sys
         # Skip in headless environments where QApplication would abort
         if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
             pytest.skip("No display available for Qt tests")
@@ -258,7 +258,7 @@ class TestDatasetManagerLogic:
 class TestLoadFromMfxArray:
     """Test the mfx-array-to-MinfluxDataset adapter."""
 
-    def _make_mfx(self, n: int = 20) -> "np.ndarray":
+    def _make_mfx(self, n: int = 20) -> np.ndarray:
         """Build a synthetic structured mfx array matching the m2410 layout."""
         dt = np.dtype([
             ("vld",  np.bool_),
@@ -340,7 +340,8 @@ class TestLoadFromMfxArray:
 class TestLoadNpy:
     def _write_npy_structured(self, tmp_path, n: int = 10):
         """Write a structured .npy file (mfx layout)."""
-        import tempfile, os
+        import os
+        import tempfile
         dt = np.dtype([
             ("tid",  np.int32),
             ("tim",  np.float64),
@@ -357,7 +358,8 @@ class TestLoadNpy:
         return path
 
     def _write_npy_plain(self, tmp_path, n: int = 10):
-        import tempfile, os
+        import os
+        import tempfile
         arr = np.column_stack([
             np.linspace(0, 1e-6, n),
             np.linspace(0, 1e-6, n),
@@ -395,7 +397,9 @@ class TestLoadNpy:
 
 class TestLoadCsv:
     def _write_csv(self, n: int = 8, has_z: bool = True) -> str:
-        import tempfile, os, csv
+        import csv
+        import os
+        import tempfile
         path = os.path.join(tempfile.gettempdir(), "test_minflux.csv")
         cols = ["loc_x", "loc_y", "loc_z", "tid", "efo"] if has_z else ["loc_x", "loc_y", "tid", "efo"]
         with open(path, "w", newline="") as f:
@@ -415,7 +419,9 @@ class TestLoadCsv:
 
     def _write_csv_aliases(self, n: int = 6) -> str:
         """CSV using 'x', 'y', 'z' column aliases."""
-        import tempfile, os, csv
+        import csv
+        import os
+        import tempfile
         path = os.path.join(tempfile.gettempdir(), "test_aliases.csv")
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["x", "y", "z"])
@@ -447,7 +453,10 @@ class TestLoadCsv:
         assert "loc_x" in ds.attr
 
     def test_csv_missing_xy_raises(self):
-        import tempfile, os, csv
+        import csv
+        import os
+        import tempfile
+
         from minflux_viewer.core.loader import load_csv
         path = os.path.join(tempfile.gettempdir(), "bad.csv")
         with open(path, "w", newline="") as f:
@@ -466,7 +475,8 @@ class TestAppStateLog:
     @pytest.fixture(autouse=True)
     def _qt(self):
         pytest.importorskip("PyQt6")
-        import os, sys
+        import os
+        import sys
         if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
             pytest.skip("No display available for Qt tests")
         from PyQt6.QtWidgets import QApplication
@@ -524,6 +534,7 @@ class TestLoaderRegressions:
         Must not assume any field name is xyz — detect by shape instead.
         """
         from scipy.io import savemat
+
         from minflux_viewer.core.loader import load_dataset
 
         n = 20
@@ -565,6 +576,7 @@ class TestLoaderRegressions:
         nested dicts produces m2205 format).
         """
         from scipy.io import savemat
+
         from minflux_viewer.core.loader import load_dataset
 
         n, k = 30, 3
@@ -605,7 +617,7 @@ class TestLoaderRegressions:
 class TestParaViewExport:
     """Tests for ``utils.paraview_export.export_to_vtp``."""
 
-    def _make_dataset(self, n: int = 20, three_d: bool = True) -> "MinfluxDataset":
+    def _make_dataset(self, n: int = 20, three_d: bool = True) -> MinfluxDataset:
         prop = DataProp(
             num_loc=n, num_itr=1, num_dim=3 if three_d else 2, num_traces=2,
             trace_idx=np.array([[0, n // 2 - 1], [n // 2, n - 1]]),
@@ -637,6 +649,7 @@ class TestParaViewExport:
     def test_vtp_xml_valid(self, tmp_path):
         """The resulting file should be parseable as XML."""
         import xml.etree.ElementTree as ET
+
         from minflux_viewer.utils.paraview_export import export_to_vtp
         ds = self._make_dataset(20)
         out = tmp_path / "test.vtp"
@@ -648,6 +661,7 @@ class TestParaViewExport:
 
     def test_vtp_contains_n_points(self, tmp_path):
         import xml.etree.ElementTree as ET
+
         from minflux_viewer.utils.paraview_export import export_to_vtp
         ds = self._make_dataset(20)
         out = tmp_path / "test.vtp"
@@ -659,6 +673,7 @@ class TestParaViewExport:
 
     def test_vtp_includes_scalar_fields(self, tmp_path):
         import xml.etree.ElementTree as ET
+
         from minflux_viewer.utils.paraview_export import export_to_vtp
         ds = self._make_dataset(20)
         out = tmp_path / "test.vtp"
@@ -675,6 +690,7 @@ class TestParaViewExport:
 
     def test_filter_mask_applied(self, tmp_path):
         import xml.etree.ElementTree as ET
+
         from minflux_viewer.utils.paraview_export import export_to_vtp
         ds = self._make_dataset(20)
         # mask out half the points
@@ -688,6 +704,7 @@ class TestParaViewExport:
 
     def test_no_filter_exports_all(self, tmp_path):
         import xml.etree.ElementTree as ET
+
         from minflux_viewer.utils.paraview_export import export_to_vtp
         ds = self._make_dataset(20)
         mask = np.zeros(20, dtype=bool); mask[:10] = True
@@ -823,7 +840,8 @@ class TestPlugins:
 
     def test_state_log_adapter_severity(self):
         pytest.importorskip("PyQt6")
-        import os, sys
+        import os
+        import sys
         if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
             pytest.skip("No display available for Qt tests")
         from PyQt6.QtWidgets import QApplication
@@ -854,14 +872,18 @@ class TestMainWindowCleanup:
     @pytest.fixture(autouse=True)
     def _qt(self):
         pytest.importorskip("PyQt6")
-        import os, sys
+        import os
+        import sys
         if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
             pytest.skip("No display available for Qt tests")
         from PyQt6.QtWidgets import QApplication
         self._app = QApplication.instance() or QApplication(sys.argv)
 
     def test_close_terminates_tracked_paraview_process(self):
-        import subprocess, sys, time
+        import subprocess
+        import sys
+        import time
+
         from minflux_viewer.core.app_state import AppState
         from minflux_viewer.ui.main_window import MainWindow
 
@@ -884,7 +906,10 @@ class TestMainWindowCleanup:
         assert proc.returncode != 0    # non-zero because killed
 
     def test_close_paraview_on_exit_pref_disables_termination(self):
-        import subprocess, sys, time
+        import subprocess
+        import sys
+        import time
+
         from minflux_viewer.core.app_state import AppState
         from minflux_viewer.ui.main_window import MainWindow
 
@@ -903,13 +928,12 @@ class TestMainWindowCleanup:
 
     def test_close_closes_every_tool_window(self):
         from minflux_viewer.core.app_state import AppState
-        from minflux_viewer.core.loader import load_dataset
         from minflux_viewer.ui.main_window import MainWindow
 
         state = AppState()
         w = MainWindow(state)
         # Need an active dataset for most tool windows to open
-        from minflux_viewer.core.dataset import MinfluxDataset, FileInfo, DataProp, AttrStore
+        from minflux_viewer.core.dataset import AttrStore, DataProp, FileInfo, MinfluxDataset
         n = 10
         prop = DataProp(
             num_loc=n, num_itr=1, num_dim=3, num_traces=1,
@@ -1016,6 +1040,7 @@ class TestMinZRangeThreshold:
 
     def test_nan_z_values_do_not_mark_a_planar_dataset_as_3d(self, tmp_path):
         from scipy.io import savemat
+
         from minflux_viewer.core.loader import load_dataset
 
         n = 12
@@ -1048,7 +1073,8 @@ class TestPreferencesDialog:
     @pytest.fixture(autouse=True)
     def _qt(self):
         pytest.importorskip("PyQt6")
-        import os, sys
+        import os
+        import sys
         if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
             pytest.skip("No display available for Qt tests")
         from PyQt6.QtWidgets import QApplication
@@ -1093,7 +1119,7 @@ class TestPreferencesDialog:
         assert dlg._draft["plot"]["scatter_xy_origin"] == "top_left"
 
     def test_reset_current_tab_only_resets_visible(self):
-        from minflux_viewer.core.app_state import AppState, DEFAULT_PREFS
+        from minflux_viewer.core.app_state import DEFAULT_PREFS, AppState
         from minflux_viewer.ui.preferences_dialog import PreferencesDialog
 
         state = AppState()
@@ -1143,7 +1169,8 @@ class TestDuplicate:
     @pytest.fixture(autouse=True)
     def _qt(self):
         pytest.importorskip("PyQt6")
-        import os, sys
+        import os
+        import sys
         if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
             pytest.skip("No display available for Qt tests")
         from PyQt6.QtWidgets import QApplication
@@ -1151,7 +1178,7 @@ class TestDuplicate:
 
     def test_duplicate_prefixes_name_and_adds_to_state(self):
         from minflux_viewer.core.app_state import AppState
-        from minflux_viewer.core.dataset import MinfluxDataset, FileInfo, DataProp, AttrStore
+        from minflux_viewer.core.dataset import AttrStore, DataProp, FileInfo, MinfluxDataset
         from minflux_viewer.ui.main_window import MainWindow
 
         n = 10
@@ -1302,7 +1329,8 @@ class TestGenerateMethodText:
 class TestLutColormaps:
     def test_single_color_red_ramp(self):
         pytest.importorskip("PyQt6")
-        import os, sys
+        import os
+        import sys
         if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
             pytest.skip("No display available for Qt tests")
         from PyQt6.QtWidgets import QApplication
@@ -1317,7 +1345,8 @@ class TestLutColormaps:
 
     def test_invert_flag(self):
         pytest.importorskip("PyQt6")
-        import os, sys
+        import os
+        import sys
         if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
             pytest.skip("No display available for Qt tests")
         from PyQt6.QtWidgets import QApplication

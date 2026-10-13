@@ -11,12 +11,10 @@ import pytest
 from minflux_viewer.analysis.aggregation import (
     aggregate_dataset,
     aggregate_localizations,
-    event_ids,
     localization_photons,
     raw_dict_from_dataset,
 )
 from minflux_viewer.core import mfx_sequence as seq
-
 
 # ---------------------------------------------------------------------------
 # Sequence detection

@@ -23,21 +23,18 @@ after cancel() are silently dropped.
 from __future__ import annotations
 
 import os
-from typing import Callable
 
 import numpy as np
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal, pyqtSlot
 
 from .render_config import (
-    PHYSICAL_TILE_NM,
     PER_LOC_SWITCH_COUNT,
-    PREFETCH_PRIORITY,
+    PHYSICAL_TILE_NM,
     WORKER_THREAD_COUNT,
     actual_pixel_size_nm,
     render_tile_px,
 )
 from .tile_cache import TileKey
-
 
 # ---------------------------------------------------------------------------
 # Worker signals helper (QRunnable can't emit signals directly)
@@ -64,7 +61,7 @@ class TileWorker(QRunnable):
         self,
         key: TileKey,
         generation: int,
-        scheduler: "RenderScheduler",
+        scheduler: RenderScheduler,
         xnm: np.ndarray,
         ynm: np.ndarray,
         znm: np.ndarray,

@@ -20,8 +20,7 @@ from ..colors import (
     rgba_hex,
     viewer_color,
 )
-from ..core import roi_scope
-from ..core import roi_logic
+from ..core import roi_logic, roi_scope
 from ..core.roi import RoiRecord, RoiStore
 from ..core.roi_selection import ROI_MASKS_STATE_KEY, VOLUME_ROI_TYPES, store_roi_mask
 from ..core.roi_volume import volume_geometry_text

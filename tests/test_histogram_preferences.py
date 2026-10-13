@@ -29,7 +29,6 @@ from minflux_viewer.core.iteration import (
     iteration_labels,
 )
 
-
 N_LOC = 12
 N_ITR = 4
 
@@ -380,8 +379,8 @@ def test_main_window_broadcasts_preferences_to_histogram_windows():
     so the Histogram Plot options needed a window reopen to take effect."""
     import inspect
 
-    from minflux_viewer.ui.main_window import MainWindow
     from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.main_window import MainWindow
 
     src = inspect.getsource(MainWindow._refresh_plot_preferences)
     assert "_histogram_windows" in src

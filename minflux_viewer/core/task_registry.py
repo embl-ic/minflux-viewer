@@ -86,7 +86,7 @@ class TaskHandle:
     bookkeeping, so every method swallows a registry that has gone away.
     """
 
-    def __init__(self, registry: "TaskRegistry", task_id: int) -> None:
+    def __init__(self, registry: TaskRegistry, task_id: int) -> None:
         self._registry = registry
         self.id = int(task_id)
 

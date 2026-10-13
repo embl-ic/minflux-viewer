@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 #: The one group in a .msr that is ours rather than Abberior's.
 VIEWER_PATH = "viewer"
 

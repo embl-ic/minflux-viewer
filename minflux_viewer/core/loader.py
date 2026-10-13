@@ -68,7 +68,7 @@ _FLAT_Z = ("znm", "z")
 
 def _flat_table_from_dict(
     raw: dict, name: str, folder: str, prefs: dict | None
-) -> "MinfluxDataset | None":
+) -> MinfluxDataset | None:
     """Build a dataset from a flat localization table, or return None.
 
     A flat table is a dict of 1-D columns with ``xnm``/``ynm`` (or ``x``/``y``)
@@ -387,7 +387,7 @@ def _effective_iteration_metadata(source: Any) -> dict[str, int]:
 _EFFECTIVE_ITER_META = {"cfr": "cfr_iteration", "efc": "efc_iteration"}
 
 
-def effective_iteration_for_attr(ds: "MinfluxDataset", attr: str) -> "int | None":
+def effective_iteration_for_attr(ds: MinfluxDataset, attr: str) -> int | None:
     """0-based iteration index where *attr* (cfr/efc) is actually measured.
 
     Returns ``None`` when *attr* has no special effective iteration, the
@@ -411,7 +411,7 @@ def effective_iteration_for_attr(ds: "MinfluxDataset", attr: str) -> "int | None
     return idx0
 
 
-def effective_iterations_for_attr(ds: "MinfluxDataset", attr: str) -> np.ndarray:
+def effective_iterations_for_attr(ds: MinfluxDataset, attr: str) -> np.ndarray:
     """Boolean array (length ``n_itr``, 0-based) marking iterations that hold
     **real** (finite, non-zero) values for *attr*.
 
@@ -899,7 +899,7 @@ def _parse_m2205_unwrapped(
 # mfx_raw builders — all-iteration, all-vld, no filtering
 # ---------------------------------------------------------------------------
 
-def _build_mfx_raw_m2410(raw: dict) -> "AttrStore":
+def _build_mfx_raw_m2410(raw: dict) -> AttrStore:
     """
     Build flat all-itr, all-vld mfx_raw from m2410 raw dict.
 
@@ -951,7 +951,7 @@ def _build_mfx_raw_m2410(raw: dict) -> "AttrStore":
     return mfx
 
 
-def _build_mfx_raw_m2205_unwrapped(merged: dict, n_loc: int, n_itr: int) -> "AttrStore":
+def _build_mfx_raw_m2205_unwrapped(merged: dict, n_loc: int, n_itr: int) -> AttrStore:
     """
     Build flat all-itr, all-vld mfx_raw from m2205 (unwrapped) format.
 
@@ -1044,7 +1044,7 @@ def _build_mfx_raw_m2205_unwrapped(merged: dict, n_loc: int, n_itr: int) -> "Att
     return mfx
 
 
-def _build_mfx_raw_from_raw(raw: dict) -> "AttrStore":
+def _build_mfx_raw_from_raw(raw: dict) -> AttrStore:
     """Format-dispatch: build mfx_raw from a loaded .mat raw dict."""
     if "itr" not in raw:
         return AttrStore()
@@ -1095,7 +1095,7 @@ def _build_mfx_raw_from_raw(raw: dict) -> "AttrStore":
     return AttrStore()
 
 
-def _build_mfx_raw_from_json_records(records: list) -> "AttrStore":
+def _build_mfx_raw_from_json_records(records: list) -> AttrStore:
     """Build mfx_raw from ALL JSON records (no vld/itr filtering)."""
     n = len(records)
     if n == 0:
@@ -1172,7 +1172,7 @@ _DERIVED_BROADCAST_ATTRS = frozenset(
 )
 
 
-def _mfx_raw_len(raw: "AttrStore") -> int:
+def _mfx_raw_len(raw: AttrStore) -> int:
     """Number of rows in the flattened raw store (0 if empty)."""
     arr = raw.get("itr")
     if arr is None:
@@ -1185,7 +1185,7 @@ def _mfx_raw_len(raw: "AttrStore") -> int:
 _LOC_ID_PUBLISH_LOCK = threading.Lock()
 
 
-def _raw_loc_id(raw: "AttrStore") -> "np.ndarray | None":
+def _raw_loc_id(raw: AttrStore) -> np.ndarray | None:
     """Per-row localization-group id over the flattened raw store (cached).
 
     A group is the set of raw rows belonging to one localization: its
@@ -1234,8 +1234,8 @@ def _raw_loc_id(raw: "AttrStore") -> "np.ndarray | None":
 
 
 def _derived_last_from_raw(
-    raw: "AttrStore", num_itr: int, prefs: dict | None,
-) -> "AttrStore":
+    raw: AttrStore, num_itr: int, prefs: dict | None,
+) -> AttrStore:
     """Compute broadcastable derived attributes at the last-valid selection.
 
     Re-materializes ``loc``/``tid``/``tim`` from the raw store at
@@ -1274,11 +1274,11 @@ def _derived_last_from_raw(
 
 
 def mfx_row_mask(
-    raw: "AttrStore",
+    raw: AttrStore,
     *,
-    itr: "str | int" = "last",
+    itr: str | int = "last",
     vld_only: bool = True,
-) -> "np.ndarray | None":
+) -> np.ndarray | None:
     """Boolean row selection over the flattened raw store for one (itr, vld_only).
 
     Rows are the m2410-style flat ``(localization, iteration)`` events. ``itr``
@@ -1302,11 +1302,11 @@ def mfx_row_mask(
 
 
 def _broadcast_derived(
-    ds: "MinfluxDataset",
+    ds: MinfluxDataset,
     attr: str,
-    raw: "AttrStore",
+    raw: AttrStore,
     mask: np.ndarray,
-) -> "np.ndarray | None":
+) -> np.ndarray | None:
     """Duplicate a derived attribute's per-localization (last-valid) values
     onto the raw rows selected by ``mask``.
 
@@ -1335,11 +1335,11 @@ def _broadcast_derived(
 
 
 def _gather_iteration_values(
-    raw: "AttrStore",
+    raw: AttrStore,
     attr: str,
     source_mask: np.ndarray,
-    target_mask: "np.ndarray | None",
-) -> "np.ndarray | None":
+    target_mask: np.ndarray | None,
+) -> np.ndarray | None:
     """Per-localization value of *attr* taken from ``source_mask`` rows, indexed
     onto ``target_mask`` rows.
 
@@ -1363,7 +1363,7 @@ def _gather_iteration_values(
     return per_loc[loc_id[target_mask]]
 
 
-def effective_attr_values_1d(ds: "MinfluxDataset", attr: str) -> "np.ndarray | None":
+def effective_attr_values_1d(ds: MinfluxDataset, attr: str) -> np.ndarray | None:
     """``ds.attr``-aligned values of *attr* (cfr/efc) at its effective iteration.
 
     cfr/efc are only measured at one loop iteration; their materialized
@@ -1394,13 +1394,13 @@ def effective_attr_values_1d(ds: "MinfluxDataset", attr: str) -> "np.ndarray | N
 
 
 def iteration_attr_values_1d(
-    ds: "MinfluxDataset",
+    ds: MinfluxDataset,
     attr: str,
     iter_index: int,
     *,
-    itr: "str | int" = "last",
+    itr: str | int = "last",
     vld_only: bool = True,
-) -> "np.ndarray | None":
+) -> np.ndarray | None:
     """Per-localization value of *attr* taken from a **specific iteration**.
 
     Gathers each localization's value of *attr* from its ``itr == iter_index``
@@ -1423,7 +1423,7 @@ def iteration_attr_values_1d(
     return _gather_iteration_values(raw, attr, source_mask, target_mask)
 
 
-def last_valid_attr_values(ds: "MinfluxDataset", attr: str) -> "np.ndarray | None":
+def last_valid_attr_values(ds: MinfluxDataset, attr: str) -> np.ndarray | None:
     """Per-localization *attr* on the last-valid rows, cfr/efc at their measured
     iteration.
 
@@ -1456,18 +1456,18 @@ def last_valid_attr_values(ds: "MinfluxDataset", attr: str) -> "np.ndarray | Non
 VALUE_POOL_SELECTORS = ("sum", "average")
 
 
-def is_value_pool_selector(itr: "str | int | None") -> bool:
+def is_value_pool_selector(itr: str | int | None) -> bool:
     """True for the ``"sum"`` / ``"average"`` per-localization pooling selectors."""
     return isinstance(itr, str) and itr.strip().lower() in VALUE_POOL_SELECTORS
 
 
 def _pooled_loc_values(
-    ds: "MinfluxDataset",
+    ds: MinfluxDataset,
     attr: str,
     *,
     how: str,
     vld_only: bool,
-) -> "np.ndarray | None":
+) -> np.ndarray | None:
     """Per-localization pooling of *attr* over **all** of its iterations::
 
         sum      ->  Σ a_i
@@ -1511,12 +1511,12 @@ def _pooled_loc_values(
 
 
 def mfx_get(
-    ds: "MinfluxDataset",
+    ds: MinfluxDataset,
     attr: str,
     *,
-    itr: "str | int" = "last",
+    itr: str | int = "last",
     vld_only: bool = True,
-) -> "np.ndarray | None":
+) -> np.ndarray | None:
     """
     Retrieve an attribute from a dataset's raw mfx store.
 
@@ -1555,12 +1555,12 @@ def mfx_get(
 
 
 def _mfx_get_rows(
-    ds: "MinfluxDataset",
+    ds: MinfluxDataset,
     attr: str,
     *,
-    itr: "str | int" = "last",
+    itr: str | int = "last",
     vld_only: bool = True,
-) -> "np.ndarray | None":
+) -> np.ndarray | None:
     """Row-wise retrieval for a non-pooled selection.
 
     The body of :func:`mfx_get`; kept separate so the pooling layer can reuse it
@@ -1610,7 +1610,7 @@ def _mfx_get_rows(
     return arr[mask] if arr.ndim == 1 else arr[mask, :]
 
 
-def resolve_spec_iteration(ds: "MinfluxDataset", spec: dict) -> "str | int":
+def resolve_spec_iteration(ds: MinfluxDataset, spec: dict) -> str | int:
     """Resolve a filter spec's iteration selector to a concrete evaluation token.
 
     A filter spec may carry an optional ``"itr"`` key recording *which*
@@ -1648,14 +1648,14 @@ def resolve_spec_iteration(ds: "MinfluxDataset", spec: dict) -> "str | int":
 
 
 def _broadcast_iteration_to_rows(
-    ds: "MinfluxDataset",
+    ds: MinfluxDataset,
     attr: str,
     *,
-    src_itr: "str | int",
+    src_itr: str | int,
     src_vld: bool,
     browse_mask: np.ndarray,
-    raw: "AttrStore",
-) -> "np.ndarray | None":
+    raw: AttrStore,
+) -> np.ndarray | None:
     """Per-localization value of *attr* at ``(src_itr, src_vld)`` duplicated onto
     the ``browse_mask`` rows by localization id.
 
@@ -1687,14 +1687,14 @@ def _broadcast_iteration_to_rows(
 
 
 def _spec_filter_values(
-    ds: "MinfluxDataset",
+    ds: MinfluxDataset,
     spec: dict,
     *,
-    itr: "str | int",
+    itr: str | int,
     vld_only: bool,
-    raw: "AttrStore | None",
-    browse_mask: "np.ndarray | None",
-) -> "np.ndarray | None":
+    raw: AttrStore | None,
+    browse_mask: np.ndarray | None,
+) -> np.ndarray | None:
     """Values to test a single filter spec's bound against, aligned to the
     ``(itr, vld_only)`` browse selection and honouring the spec's own ``"itr"``.
 
@@ -1723,11 +1723,11 @@ def _spec_filter_values(
 
 
 def mfx_filter_mask(
-    ds: "MinfluxDataset",
+    ds: MinfluxDataset,
     *,
-    itr: "str | int" = "last",
+    itr: str | int = "last",
     vld_only: bool = True,
-) -> "tuple[np.ndarray, list[str]] | None":
+) -> tuple[np.ndarray, list[str]] | None:
     """Re-evaluate the dataset's persisted filter specs over a raw-store selection.
 
     The dataset's active filters are stored as re-evaluable specs in
@@ -1787,7 +1787,7 @@ def mfx_filter_mask(
     return mask, unevaluable
 
 
-def evaluate_saved_filters(ds: "MinfluxDataset") -> np.ndarray | None:
+def evaluate_saved_filters(ds: MinfluxDataset) -> np.ndarray | None:
     """Return the persisted-filter mask without mutating *ds*.
 
     When a raw store aligned with ``ds.attr`` is available, this delegates to
@@ -1845,7 +1845,7 @@ def evaluate_saved_filters(ds: "MinfluxDataset") -> np.ndarray | None:
     return mask if applied else None
 
 
-def apply_saved_filters(ds: "MinfluxDataset") -> bool:
+def apply_saved_filters(ds: MinfluxDataset) -> bool:
     """Apply ``ds.state['filter_specs']`` and report whether any were usable."""
     mask = evaluate_saved_filters(ds)
     if mask is None:
@@ -1854,7 +1854,7 @@ def apply_saved_filters(ds: "MinfluxDataset") -> bool:
     return True
 
 
-def _restore_filter_mask(ds: "MinfluxDataset", saved_ftr) -> bool:
+def _restore_filter_mask(ds: MinfluxDataset, saved_ftr) -> bool:
     """Apply a saved ``ftr`` column as ``ds.filter_mask``.
 
     A processed snapshot saved with ``filter_mode="flag"`` keeps every row and
@@ -1905,7 +1905,7 @@ def _transform_record_from_recipe(tf) -> dict | None:
     }
 
 
-def apply_metadata_recipe(ds: "MinfluxDataset", meta: dict) -> list[str]:
+def apply_metadata_recipe(ds: MinfluxDataset, meta: dict) -> list[str]:
     """Apply an already-parsed metadata-sidecar payload to *ds*.
 
     Restores Z scaling factor (pinned via ``ds.derived['z_scaling_factor']`` so post-load auto-estimation
@@ -2029,7 +2029,7 @@ def apply_metadata_recipe(ds: "MinfluxDataset", meta: dict) -> list[str]:
     return applied
 
 
-def read_metadata_file(path: "str | Path") -> "dict | None":
+def read_metadata_file(path: str | Path) -> dict | None:
     """Parse *path* itself as a metadata sidecar, or ``None`` if it is not one.
 
     ⚠ Distinct from :func:`read_metadata_sidecar`, which derives a *sibling*
@@ -2046,7 +2046,7 @@ def read_metadata_file(path: "str | Path") -> "dict | None":
     return meta if is_metadata_json_payload(meta) else None
 
 
-def read_metadata_sidecar(data_path: "str | Path") -> "tuple[Path, dict] | None":
+def read_metadata_sidecar(data_path: str | Path) -> tuple[Path, dict] | None:
     """The ``<stem>_viewer_metadata.json`` beside *data_path*, and its payload.
 
     Split out of :func:`apply_metadata_sidecar` so the UI can *find* a recipe
@@ -2065,7 +2065,7 @@ def read_metadata_sidecar(data_path: "str | Path") -> "tuple[Path, dict] | None"
     return None if meta is None else (side, meta)
 
 
-def apply_metadata_sidecar(ds: "MinfluxDataset", data_path: "str | Path") -> bool:
+def apply_metadata_sidecar(ds: MinfluxDataset, data_path: str | Path) -> bool:
     """Restore the processing recipe from a ``<stem>_viewer_metadata.json`` file.
 
     If a metadata sidecar sits next to *data_path*, its recipe is applied via
@@ -2078,7 +2078,7 @@ def apply_metadata_sidecar(ds: "MinfluxDataset", data_path: "str | Path") -> boo
     return True
 
 
-def apply_metadata_sidecar_file(ds: "MinfluxDataset", sidecar_path: "str | Path") -> list[str]:
+def apply_metadata_sidecar_file(ds: MinfluxDataset, sidecar_path: str | Path) -> list[str]:
     """Apply a metadata sidecar addressed **by its own path** to *ds*.
 
     :func:`apply_metadata_sidecar` finds the sidecar beside a data file; this is
@@ -2094,7 +2094,7 @@ def apply_metadata_sidecar_file(ds: "MinfluxDataset", sidecar_path: "str | Path"
     return apply_metadata_recipe(ds, meta)
 
 
-def _attrs_include_invalid(attrs: "AttrStore") -> bool:
+def _attrs_include_invalid(attrs: AttrStore) -> bool:
     """True when the materialized store retains rows with ``vld == False``."""
     vld = attrs.get("vld")
     if vld is None:
@@ -2105,7 +2105,7 @@ def _attrs_include_invalid(attrs: "AttrStore") -> bool:
         return False
 
 
-def _attrs_valid_count(attrs: "AttrStore", fallback: int) -> int:
+def _attrs_valid_count(attrs: AttrStore, fallback: int) -> int:
     """Number of vld rows in the materialized store (= loaded rows when the
     load was valid-only)."""
     vld = attrs.get("vld")
@@ -2117,7 +2117,7 @@ def _attrs_valid_count(attrs: "AttrStore", fallback: int) -> int:
         return int(fallback)
 
 
-def attr_materialized_selection(ds: "MinfluxDataset") -> tuple[str, bool]:
+def attr_materialized_selection(ds: MinfluxDataset) -> tuple[str, bool]:
     """The raw-store selection ``(itr, vld_only)`` that ``ds.attr`` materializes.
 
     Derived from the load metadata: ``iteration_load_mode`` ("last"/"all")
@@ -2131,7 +2131,7 @@ def attr_materialized_selection(ds: "MinfluxDataset") -> tuple[str, bool]:
 
 
 def _selection_rows_match_attr(
-    ds: "MinfluxDataset", itr: "str | int", vld_only: bool,
+    ds: MinfluxDataset, itr: str | int, vld_only: bool,
 ) -> bool:
     """True when the raw-store selection's row count equals ``ds.attr`` rows."""
     raw = getattr(ds, "mfx_raw", None)
@@ -2143,7 +2143,7 @@ def _selection_rows_match_attr(
     return int(mask.sum()) == int(getattr(ds.prop, "num_loc", 0))
 
 
-def _attr_row_selection(ds: "MinfluxDataset") -> "tuple[str, bool] | None":
+def _attr_row_selection(ds: MinfluxDataset) -> tuple[str, bool] | None:
     """The raw-store selection whose rows align 1:1 with ``ds.attr`` rows.
 
     Usually the materialized selection from the load metadata; m2205-style
@@ -2159,9 +2159,9 @@ def _attr_row_selection(ds: "MinfluxDataset") -> "tuple[str, bool] | None":
 
 
 def attr_matches_selection(
-    ds: "MinfluxDataset",
+    ds: MinfluxDataset,
     *,
-    itr: "str | int" = "last",
+    itr: str | int = "last",
     vld_only: bool = True,
 ) -> bool:
     """True when ``ds.attr`` rows ARE the given raw-store selection.
@@ -2174,7 +2174,7 @@ def attr_matches_selection(
     return _attr_row_selection(ds) == (itr, bool(vld_only))
 
 
-def attr_values_1d(ds: "MinfluxDataset", attr: str) -> "np.ndarray | None":
+def attr_values_1d(ds: MinfluxDataset, attr: str) -> np.ndarray | None:
     """1-D values of *attr* aligned to ``ds.attr`` rows.
 
     Returns ``ds.attr[attr]`` when it is already 1-D — except for derived
@@ -2237,12 +2237,12 @@ def attr_values_1d(ds: "MinfluxDataset", attr: str) -> "np.ndarray | None":
 
 
 def _values_on_attr_rows(
-    ds: "MinfluxDataset",
+    ds: MinfluxDataset,
     attr: str,
     *,
-    src_itr: "str | int",
+    src_itr: str | int,
     src_vld: bool,
-) -> "np.ndarray | None":
+) -> np.ndarray | None:
     """*attr* at ``(src_itr, src_vld)`` gathered onto ``ds.attr`` rows.
 
     The materialized-view counterpart of :func:`_broadcast_iteration_to_rows`:
@@ -2276,11 +2276,11 @@ def _values_on_attr_rows(
 
 
 def attr_values_for_selection(
-    ds: "MinfluxDataset",
+    ds: MinfluxDataset,
     attr: str,
     *,
-    itr: "str | int | None" = "auto",
-) -> "np.ndarray | None":
+    itr: str | int | None = "auto",
+) -> np.ndarray | None:
     """1-D values of *attr* aligned to ``ds.attr`` rows for one iteration selection.
 
     This is the per-localization accessor the Filter dialog and the Histogram's
@@ -2304,7 +2304,7 @@ def attr_values_for_selection(
     """
     if ds is None:
         return None
-    sel: "str | int" = itr if itr is not None else "auto"
+    sel: str | int = itr if itr is not None else "auto"
     if isinstance(sel, str):
         sel = sel.strip().lower() or "auto"
     if sel in ("auto", "browse"):
@@ -2333,7 +2333,7 @@ def attr_values_for_selection(
     return None if base is None else np.asarray(base)
 
 
-def attr_matches_last_valid(ds: "MinfluxDataset") -> bool:
+def attr_matches_last_valid(ds: MinfluxDataset) -> bool:
     """True when ``ds.attr`` is the last-iteration, valid-only materialization.
 
     This holds for the normal last-valid materialization, where the default plot
@@ -2694,14 +2694,14 @@ def _normalize_mfx_attrs(
     )
 
 def load_from_mfx_array(
-    mfx: "np.ndarray",
+    mfx: np.ndarray,
     name: str,
     folder: str = "",
     datetime_str: str = "",
     recent_path: str | None = None,
     prefs: dict | None = None,
     progress=None,
-) -> "MinfluxDataset":
+) -> MinfluxDataset:
     """
     Build a :class:`MinfluxDataset` directly from a structured ``mfx``
     numpy array produced by ``minflux_msr``.
@@ -2856,7 +2856,7 @@ def load_from_mfx_array(
 # ---------------------------------------------------------------------------
 
 def load_npy(path: str | Path, prefs: dict | None = None, *,
-             apply_sidecar: bool = True) -> "MinfluxDataset":
+             apply_sidecar: bool = True) -> MinfluxDataset:
     """
     Load a ``.npy`` file exported from the MSR reader or the viewer itself.
 
@@ -2966,7 +2966,7 @@ def load_npy(path: str | Path, prefs: dict | None = None, *,
 # ---------------------------------------------------------------------------
 
 def load_npz(path: str | Path, prefs: dict | None = None, *,
-             apply_sidecar: bool = True) -> "MinfluxDataset":
+             apply_sidecar: bool = True) -> MinfluxDataset:
     """Load a ``.npz`` flat-column export.
 
     ``.npz`` is offered by the save dialog and enabled by default in
@@ -3015,7 +3015,7 @@ def load_npz(path: str | Path, prefs: dict | None = None, *,
 # .zarr loader — marked, self-contained MINFLUX Viewer Zarr v2 dataset
 # ---------------------------------------------------------------------------
 
-def load_zarr(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
+def load_zarr(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
     """Load the first supported MINFLUX Viewer Zarr dataset schema.
 
     No legacy user data exists for the former experimental flat-column layout,
@@ -3025,7 +3025,6 @@ def load_zarr(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
     """
     from .minflux_zarr import (
         PROJECT_FORMAT_ID,
-        FORMAT_ATTR,
         MinfluxZarrError,
         load_minflux_zarr,
         load_minflux_zarr_project,
@@ -3132,7 +3131,7 @@ def _canonical_csv_dtype(headers: list[str]) -> np.dtype:
 
 
 def load_csv(path: str | Path, prefs: dict | None = None, *,
-             apply_sidecar: bool = True) -> "MinfluxDataset":
+             apply_sidecar: bool = True) -> MinfluxDataset:
     """
     Load a ``.csv`` file exported from the MSR reader or Imspector.
 
@@ -3356,7 +3355,7 @@ def load_csv(path: str | Path, prefs: dict | None = None, *,
 
 
 def load_json(path: str | Path, prefs: dict | None = None, *,
-              apply_sidecar: bool = True) -> "MinfluxDataset":
+              apply_sidecar: bool = True) -> MinfluxDataset:
     """
     Load Abberior-style MINFLUX JSON localization records.
 
@@ -3593,7 +3592,7 @@ def _iter_json_array_records(path: Path):
 
 
 def _load_json_streaming_canonical(path: Path, prefs: dict | None, *,
-                                   apply_sidecar: bool = True) -> "MinfluxDataset":
+                                   apply_sidecar: bool = True) -> MinfluxDataset:
     """Load the large flat JSON representation emitted by the canonical saver."""
     from array import array
 
@@ -3811,7 +3810,7 @@ def _json_scalar_array(values: list[Any]) -> np.ndarray | None:
     return arr
 
 
-def load_tiff(path: str | Path, prefs: dict | None = None) -> "MinfluxDataset":
+def load_tiff(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:
     """Load a TIFF image as an image-backed dataset for the render window."""
     path = Path(path).resolve()
     if not path.exists():

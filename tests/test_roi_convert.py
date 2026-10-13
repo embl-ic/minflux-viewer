@@ -124,7 +124,7 @@ def test_freehand_to_rectangle_is_min_area_oriented_and_encloses():
 
 
 def test_freehand_to_ellipse_is_rotated_oval_and_encloses():
-    from minflux_viewer.core.min_enclosing import min_enclosing_ellipsoid, ellipse_from_matrix
+    from minflux_viewer.core.min_enclosing import min_enclosing_ellipsoid
 
     poly = _rotated_polygon(120, 40, 25.0)
     pts = np.asarray(poly.geometry["points"], float)

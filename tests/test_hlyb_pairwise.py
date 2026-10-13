@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 
 from minflux_viewer.analysis.hlyb_pairwise import (
-    HLYB_CLASS_DISTANCES_NM,
     PairFitConfig,
     analyze_hlyb_pairwise,
     calibrate_repeat_kernel,
@@ -14,7 +13,6 @@ from minflux_viewer.analysis.hlyb_pairwise import (
     pair_distance_profile,
     trace_centroids,
 )
-
 
 # -- building blocks -------------------------------------------------------
 
@@ -97,8 +95,7 @@ def test_uniform_band_is_differentiable_so_the_optimiser_can_move_it():
 def test_distance_summary_describes_a_broad_population_honestly():
     """A Gaussian centred at 7 nm with a 9 nm spread is not "a 7 nm distance";
     the reported percentiles must show the population is broad."""
-    from minflux_viewer.analysis.hlyb_pairwise import (
-        distance_grid, structure_distance_summary)
+    from minflux_viewer.analysis.hlyb_pairwise import distance_grid, structure_distance_summary
 
     grid = distance_grid(0.25, 60.0)
     narrow = structure_distance_summary("dimer_gaussian", [12.0, 0.5], grid)
@@ -544,8 +541,8 @@ def test_two_d_recovers_the_distance_that_projection_would_shorten():
     """The point of the 2-D variant: a projected distance is systematically too
     short, so a fit that ignores the foreshortening under-reports it."""
     from minflux_viewer.analysis.hlyb_pairwise import (
-        analyze_hlyb_pairwise_2d, blurred_distance_matrix, distance_grid,
-        structure_profile, tilt_projection_factors)
+        analyze_hlyb_pairwise_2d,
+    )
 
     loc, tid, tim = _simulate_membrane_dimers(900, distance_nm=16.0, seed=31)
     res = analyze_hlyb_pairwise_2d(
@@ -564,7 +561,10 @@ def test_ignoring_the_projection_would_bias_the_distance_short():
     """Direct check on the model itself: the projected profile for a given true
     distance peaks below it, which is exactly the bias the kernel removes."""
     from minflux_viewer.analysis.hlyb_pairwise import (
-        blurred_distance_matrix, structure_profile, tilt_projection_factors)
+        blurred_distance_matrix,
+        structure_profile,
+        tilt_projection_factors,
+    )
 
     centres = np.arange(0.25, 60, 0.5)
     grid = np.arange(1.0, 60, 0.25)

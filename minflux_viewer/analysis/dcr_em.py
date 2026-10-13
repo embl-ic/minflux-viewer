@@ -64,7 +64,7 @@ class GaussianMixture1D:
     def weight2(self) -> float:
         return float(self.weight[1])
 
-    def with_means(self, mu1: float, mu2: float) -> "GaussianMixture1D":
+    def with_means(self, mu1: float, mu2: float) -> GaussianMixture1D:
         """Return a copy with overridden means (for the editable centre fields),
         keeping sigmas/weights and re-sorting so component 0 stays the lower one."""
         mu = np.array([float(mu1), float(mu2)], dtype=float)
@@ -75,7 +75,7 @@ class GaussianMixture1D:
             n_iter=self.n_iter, converged=self.converged,
         )
 
-    def with_params(self, mu1: float, mu2: float, sigma1: float, sigma2: float) -> "GaussianMixture1D":
+    def with_params(self, mu1: float, mu2: float, sigma1: float, sigma2: float) -> GaussianMixture1D:
         """Return a copy with user-overridden centres **and** widths for the two
         components (component 0 = red, component 1 = green). Order is preserved
         (no re-sort), so the red/green spin boxes map directly to the two

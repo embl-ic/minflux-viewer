@@ -36,7 +36,6 @@ from minflux_viewer.core.iteration import (
     parse_iteration_label,
 )
 
-
 N_LOC = 8
 N_ITR = 4
 

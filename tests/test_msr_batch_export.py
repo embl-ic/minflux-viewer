@@ -855,7 +855,9 @@ def test_progress_weights_track_the_measured_cost_of_each_format():
     single tick.
     """
     from minflux_viewer.msr.export import (
-        dataset_prepare_weight, dataset_work_weight, format_work_weight,
+        dataset_prepare_weight,
+        dataset_work_weight,
+        format_work_weight,
     )
 
     assert format_work_weight("json") > format_work_weight("csv")
@@ -886,8 +888,8 @@ def test_progress_weights_track_the_measured_cost_of_each_format():
 
 
 def test_batch_task_runs_files_and_reports_progress(tmp_path, monkeypatch):
-    from minflux_viewer.plugins.msr_reader import msr_reader_dialog as mod
     import minflux_viewer.msr as msr_mod
+    from minflux_viewer.plugins.msr_reader import msr_reader_dialog as mod
 
     files = [tmp_path / f"{i}.msr" for i in range(3)]
     for f in files:
@@ -914,8 +916,8 @@ def test_batch_task_runs_files_and_reports_progress(tmp_path, monkeypatch):
 
 
 def test_batch_task_cancel_stops_at_the_next_file(tmp_path, monkeypatch):
-    from minflux_viewer.plugins.msr_reader import msr_reader_dialog as mod
     import minflux_viewer.msr as msr_mod
+    from minflux_viewer.plugins.msr_reader import msr_reader_dialog as mod
 
     files = [tmp_path / f"{i}.msr" for i in range(4)]
     for f in files:
@@ -943,8 +945,8 @@ def test_batch_task_cancel_stops_at_the_next_file(tmp_path, monkeypatch):
 
 
 def test_batch_task_records_a_failure_without_stopping(tmp_path, monkeypatch):
-    from minflux_viewer.plugins.msr_reader import msr_reader_dialog as mod
     import minflux_viewer.msr as msr_mod
+    from minflux_viewer.plugins.msr_reader import msr_reader_dialog as mod
 
     files = [tmp_path / f"{i}.msr" for i in range(3)]
     for f in files:

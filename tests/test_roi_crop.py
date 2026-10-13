@@ -5,9 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from minflux_viewer.core import roi_crop as RC
 from minflux_viewer.core.dataset import build_localization_dataset
 from minflux_viewer.core.roi import RoiRecord
-from minflux_viewer.core import roi_crop as RC
 
 
 def _rect(x, y, w, h, angle=0.0):

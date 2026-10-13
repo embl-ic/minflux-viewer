@@ -26,8 +26,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..colormaps import colormap_lut
 from ..analysis.straightened_volume import StraightenedVolumeResult, straightened_count_volume
+from ..colormaps import colormap_lut
 from ..core.roi import OPEN_LINE_TYPES, RoiRecord
 from .plot_format import plot_widget
 

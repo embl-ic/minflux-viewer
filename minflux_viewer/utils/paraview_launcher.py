@@ -33,9 +33,8 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
-
 
 # ---------------------------------------------------------------------------
 # Location hints — searched in order

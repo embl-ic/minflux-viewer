@@ -19,7 +19,7 @@ from minflux_viewer.core.formats import OpenAction, resolve_open
 # Agreement with the tables it replaces
 # --------------------------------------------------------------------------- #
 def test_matches_the_writer_table():
-    from minflux_viewer.core.save import DATA_FORMATS, _RAW_ONLY_FORMATS
+    from minflux_viewer.core.save import _RAW_ONLY_FORMATS, DATA_FORMATS
 
     assert {spec.key for spec in F.save_formats()} == set(DATA_FORMATS)
     assert F.raw_only_formats() == _RAW_ONLY_FORMATS
@@ -347,8 +347,9 @@ def test_dropping_a_sealed_package_opens_it_as_a_dataset(_app, tmp_path):
         before = len(window._state.datasets)
         window._route_file(str(package))
         # Opening a store runs on a worker thread now.
-        from PyQt6.QtWidgets import QApplication
         import time
+
+        from PyQt6.QtWidgets import QApplication
 
         deadline = time.time() + 60.0
         while time.time() < deadline and getattr(window, "_zarr_io_tasks", []):

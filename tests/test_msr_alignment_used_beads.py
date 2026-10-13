@@ -5,7 +5,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-
 _POINT_DTYPE = np.dtype([("gri", "<i4"), ("xyz", "<f8", (3,))])
 
 

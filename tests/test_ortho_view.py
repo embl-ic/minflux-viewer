@@ -1255,8 +1255,7 @@ def test_the_crosshair_entry_appears_only_while_the_mode_is_on(_qt_app):
     """Same place the render view keeps it, so one habit serves both."""
     import pytest as _pytest
 
-    from tests.test_view_context_menus import (
-        _capture_context_menu, _menu_texts, _submenu)
+    from tests.test_view_context_menus import _capture_context_menu, _menu_texts, _submenu
 
     def view_entries(win):
         monkeypatch = _pytest.MonkeyPatch()

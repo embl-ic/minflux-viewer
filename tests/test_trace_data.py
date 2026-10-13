@@ -4,13 +4,13 @@ import numpy as np
 
 from minflux_viewer.core.dataset import build_localization_dataset
 from minflux_viewer.plugins.trace_viewer.trace_data import (
+    _movmean,
     bbox_diagonal_nm,
     build_trace_table,
     moving_rms,
     remove_trace_tail,
     trace_ids,
     trace_time_series,
-    _movmean,
 )
 
 

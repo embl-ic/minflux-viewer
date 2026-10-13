@@ -10,7 +10,6 @@ loader and File > Save writers.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
 
 import numpy as np
 
@@ -194,9 +193,9 @@ def dataset_work_weight(n_rows, formats) -> float:
 def export_arrays(
     out_dir: str,
     base_name: str,
-    formats: List[str],
-    mfx: Optional[np.ndarray],
-    mbm: Optional[np.ndarray],
+    formats: list[str],
+    mfx: np.ndarray | None,
+    mbm: np.ndarray | None,
     log=print,
     json_chunk_rows: int = 100_000,
     *,
@@ -205,7 +204,7 @@ def export_arrays(
     overwrite: bool = False,
     on_format=None,
     on_prepared=None,
-) -> List[str]:
+) -> list[str]:
     """Export parsed MSR components through the canonical File > Save writers.
 
     The mfx output is always normalized to a flat m2410 structured array before

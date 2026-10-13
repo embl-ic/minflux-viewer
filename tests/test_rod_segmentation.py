@@ -146,8 +146,7 @@ def test_width_window_is_enforced_in_both_directions():
 def test_mask_width_overshoots_the_structure_and_the_tolerance_absorbs_it():
     """The width gate is stated in *structure* width, but measured on the
     smoothed density mask, which envelopes the structure a little wider."""
-    from minflux_viewer.analysis.rod_segmentation import (
-        resolve_smoothing, width_tolerance_for)
+    from minflux_viewer.analysis.rod_segmentation import resolve_smoothing, width_tolerance_for
 
     rng = np.random.default_rng(8)
     # Sites on the membrane of a 1000 nm rod: the projected density peaks at
@@ -375,8 +374,7 @@ def test_staged_analysis_runs_through_the_shape_prior_component_route():
 
 
 def test_rod_mode_takes_the_null_axis_from_the_measured_cell_axis():
-    from minflux_viewer.analysis.hlyb_staged import (
-        rod_config_for, segment_rod_components)
+    from minflux_viewer.analysis.hlyb_staged import rod_config_for, segment_rod_components
 
     rng = np.random.default_rng(12)
     # A rod along 30 degrees whose *sites* are deliberately sparse, so a
@@ -428,8 +426,7 @@ def test_link_mode_is_unchanged_and_still_the_default():
 
 
 def test_rod_mode_rejects_a_pixel_too_coarse_to_resolve_the_width():
-    from minflux_viewer.analysis.hlyb_staged import (
-        Staged3DConfig, analyze_hlyb_staged_3d)
+    from minflux_viewer.analysis.hlyb_staged import Staged3DConfig, analyze_hlyb_staged_3d
 
     rng = np.random.default_rng(14)
     loc, tid, tim = _rod_dataset(rng, centers=[(0.0, 0.0)])

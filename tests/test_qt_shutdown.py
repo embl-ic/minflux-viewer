@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 
 def test_main_window_qt_teardown_exits_cleanly():

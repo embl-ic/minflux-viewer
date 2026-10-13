@@ -33,7 +33,7 @@ Pure NumPy (no Qt) — unit-tested against the reference files.
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -269,7 +269,7 @@ def _final_flags_from_raw(raw) -> np.ndarray | None:
     return flags
 
 
-def raw_dict_from_dataset(ds) -> Optional[dict]:
+def raw_dict_from_dataset(ds) -> dict | None:
     """Assemble the raw-iteration arrays aggregation needs from ``ds.mfx_raw``.
 
     Returns ``None`` when the dataset lacks the all-iteration raw store or the
@@ -320,8 +320,8 @@ def aggregation_time_mode(ds) -> str:
 
 
 def aggregate_dataset(ds, *, photon_threshold: float,
-                      photon_iters: Optional[Sequence[int]] = None,
-                      time_mode: Optional[str] = None) -> Optional[dict]:
+                      photon_iters: Sequence[int] | None = None,
+                      time_mode: str | None = None) -> dict | None:
     """Aggregate a loaded dataset (metres coordinates in the result's ``loc``).
 
     ``photon_iters`` defaults to the dataset's detected photon iterations

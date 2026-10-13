@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import copy
 import html
+from pathlib import Path
 
 from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtWidgets import (
@@ -391,7 +390,11 @@ class RoiManagerWindow(QWidget):
         return 1.0
 
     def _property(self) -> None:
-        from .roi_convert_dialog import EDITABLE_PROPERTY_TYPES, RoiPropertyDialog, roi_property_text
+        from .roi_convert_dialog import (
+            EDITABLE_PROPERTY_TYPES,
+            RoiPropertyDialog,
+            roi_property_text,
+        )
 
         selected = self._store.selected_records()
         if not selected:

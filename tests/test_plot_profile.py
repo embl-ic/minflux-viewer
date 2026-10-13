@@ -10,7 +10,6 @@ from minflux_viewer.analysis.plot_profile import (
     resample_path,
 )
 
-
 # ------------------------------------------------------------ geometry
 
 def test_path_cumlen_straight_and_polyline():

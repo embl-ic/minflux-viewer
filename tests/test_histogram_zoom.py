@@ -21,7 +21,6 @@ import pytest
 
 from minflux_viewer.core import loader
 
-
 N_LOC = 400
 N_ITR = 2
 

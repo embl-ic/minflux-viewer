@@ -54,7 +54,7 @@ RENDER_POOL_LABELS = (FLATTEN_LABEL, STACKED_LABEL)
 #: fixed viewer order. Preferences > Appearance > Histogram Plot stores the
 #: keys ("flatten", "stacked", ...) rather than the labels, so the user-facing
 #: wording can change without invalidating a saved preference.
-POOL_LABEL_BY_KEY: "dict[str, str]" = {
+POOL_LABEL_BY_KEY: dict[str, str] = {
     "flatten": FLATTEN_LABEL,
     "stacked": STACKED_LABEL,
     "sum": SUM_LABEL,
@@ -69,7 +69,7 @@ def last_label(n_itr: int) -> str:
     return f"last ({ordinal(max(1, int(n_itr)))})"
 
 
-def iteration_labels(n_itr: int, allowed: "object | None" = None) -> list[str]:
+def iteration_labels(n_itr: int, allowed: object | None = None) -> list[str]:
     """Selector labels for a *viewer* iteration dropdown.
 
     Returns ``[]`` when there is nothing to browse (``n_itr <= 1``); callers
@@ -112,7 +112,7 @@ def filter_iteration_labels(n_itr: int) -> list[str]:
     return labels
 
 
-def parse_iteration_label(label: str) -> tuple["str | int", str]:
+def parse_iteration_label(label: str) -> tuple[str | int, str]:
     """Map a label to ``(itr_selector, render_mode)``.
 
     ``itr_selector`` is what to pass to ``mfx_get``: ``"last"``, ``"all"``,
@@ -144,7 +144,7 @@ def parse_iteration_label(label: str) -> tuple["str | int", str]:
     return "last", "single"
 
 
-def iteration_selector_label(selector: "str | int | None", n_itr: int) -> str:
+def iteration_selector_label(selector: str | int | None, n_itr: int) -> str:
     """Inverse of :func:`parse_iteration_label` for a stored filter selector.
 
     Maps a persisted spec value (``"last"``, ``"sum"``, ``"average"``, a 0-based

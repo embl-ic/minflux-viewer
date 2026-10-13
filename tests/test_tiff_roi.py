@@ -222,7 +222,9 @@ def test_only_fully_contained_rois_belong_to_an_image():
     """A rectangle half outside the image would draw clipped and read as the
     wrong acquisition area."""
     from minflux_viewer.msr.acquisition_roi import (
-        AcquisitionRoi, rois_within, union_bounds,
+        AcquisitionRoi,
+        rois_within,
+        union_bounds,
     )
 
     inside = AcquisitionRoi("d", 2e-6, 2e-6, 3e-6, 3e-6)

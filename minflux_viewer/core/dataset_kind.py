@@ -37,7 +37,7 @@ QUALITY_ATTRS = ("efo", "cfr", "dcr", "fbg")
 CAPABILITIES = ("loc", "traces", "time", "quality", "3d")
 
 
-def _coord_count(ds: "MinfluxDataset") -> int:
+def _coord_count(ds: MinfluxDataset) -> int:
     a = ds.attr
     for k in ("loc_x", "loc_x_nm", "xnm"):
         v = a.get(k)
@@ -46,12 +46,12 @@ def _coord_count(ds: "MinfluxDataset") -> int:
     return int(getattr(ds.prop, "num_loc", 0) or 0)
 
 
-def has_loc(ds: "MinfluxDataset") -> bool:
+def has_loc(ds: MinfluxDataset) -> bool:
     """Localizations (x, y) are available."""
     return _coord_count(ds) > 0
 
 
-def has_traces(ds: "MinfluxDataset") -> bool:
+def has_traces(ds: MinfluxDataset) -> bool:
     """A *real* trace id is available (not a synthetic 1..N index)."""
     md = ds.metadata
     if "has_real_tid" in md:
@@ -59,7 +59,7 @@ def has_traces(ds: "MinfluxDataset") -> bool:
     return ds.attr.get("tid") is not None       # native loaders always carry tid
 
 
-def has_time(ds: "MinfluxDataset") -> bool:
+def has_time(ds: MinfluxDataset) -> bool:
     """A non-trivial time/`tim` attribute is available."""
     tim = ds.attr.get("tim")
     if tim is None:
@@ -70,16 +70,16 @@ def has_time(ds: "MinfluxDataset") -> bool:
         return False
 
 
-def has_quality(ds: "MinfluxDataset") -> bool:
+def has_quality(ds: MinfluxDataset) -> bool:
     """At least one MINFLUX quality attribute (efo/cfr/dcr/fbg) is available."""
     return any(ds.attr.get(k) is not None for k in QUALITY_ATTRS)
 
 
-def is_3d(ds: "MinfluxDataset") -> bool:
+def is_3d(ds: MinfluxDataset) -> bool:
     return int(getattr(ds.prop, "num_dim", 2) or 2) >= 3
 
 
-def is_minflux(ds: "MinfluxDataset") -> bool:
+def is_minflux(ds: MinfluxDataset) -> bool:
     """A dataset is MINFLUX when it has localizations **and** a real trace id.
 
     Honours an explicit ``metadata['is_minflux']`` flag (set by importers);
@@ -103,12 +103,12 @@ _CAP_FUNCS = {
 }
 
 
-def capabilities(ds: "MinfluxDataset") -> dict[str, bool]:
+def capabilities(ds: MinfluxDataset) -> dict[str, bool]:
     """Boolean map of every capability for *ds*."""
     return {name: fn(ds) for name, fn in _CAP_FUNCS.items()}
 
 
-def require(ds: "MinfluxDataset", *caps: str) -> list[str]:
+def require(ds: MinfluxDataset, *caps: str) -> list[str]:
     """Return the names of the requested capabilities that *ds* lacks.
 
     Empty list ⇒ all satisfied. Use to gate a plugin::
