@@ -1060,7 +1060,25 @@ class HistogramWindow(QWidget):
             "(the same as the Reset button)."
         )
         reset_action.triggered.connect(self._reset_view)
+        figure_action = menu.addAction("Export figure…")
+        figure_action.setToolTip("The histogram exactly as shown, as a pixel image "
+                                 "(PNG/TIFF/JPEG) or a vector figure (SVG/PDF).")
+        figure_action.triggered.connect(self.export_figure)
         menu.exec(self._plot.mapToGlobal(pos))
+
+    def figure_for_export(self):
+        """The view as displayed, for File-quality export (see ui/figure_export)."""
+        from .figure_export import dataset_identity, figure_of
+
+        # A histogram has no projection; the attribute is what tells two apart.
+        return figure_of(self._plot_page, name=self.windowTitle(),
+                         kind="attribute_histogram", view=self._attr_combo.currentText(),
+                         **dataset_identity(self._state, self._dataset_idx))
+
+    def export_figure(self) -> None:
+        from .figure_export import export_figure_interactive
+
+        export_figure_interactive(self, self.figure_for_export(), self._state)
 
     def _toggle_zoom_mode(self, mode: str) -> None:
         """Arm a zoom drag mode; selecting the armed mode again disarms it.

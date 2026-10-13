@@ -4751,9 +4751,36 @@ class RenderWindow(QWidget):
 
         export_action = menu.addAction("Export to TIFF…", self._export_to_tiff)
         export_action.setEnabled(self._render_mode == "localizations")
+        export_action.setToolTip("The localizations as a multi-page OME-TIFF: Z planes, "
+                                 "channels and voxel size (data, not a picture).")
+        figure_action = menu.addAction("Export figure…", self.export_figure)
+        figure_action.setToolTip("The view exactly as shown, as a pixel image "
+                                 "(PNG/TIFF/JPEG) or a vector figure (SVG/PDF).")
+        menu.setToolTipsVisible(True)
 
         menu.addAction("Reset View", self._reset_view)
         menu.exec(self._image_view.ui.graphicsView.mapToGlobal(pos))
+
+    def figure_for_export(self):
+        """The view as displayed, for File-quality export (see ui/figure_export)."""
+        from .figure_export import dataset_identity, figure_of, ortho_figure
+
+        identity = dict(dataset_identity(self._state, self._idx), kind="render_view",
+                        view=str(self._orientation))
+        ortho = getattr(self, "_ortho", None)
+        panes = getattr(self, "_pane_widgets", {}) or {}
+        if (ortho is not None and getattr(ortho, "active", False)
+                and getattr(ortho, "placement", "") == "floating"
+                and all(p in panes for p in ("XY", "YZ", "XZ"))):
+            # The side panes live in their own windows: stack the three tightly.
+            return ortho_figure(panes["XY"], panes["YZ"], panes["XZ"],
+                                name=self.windowTitle(), **identity)
+        return figure_of(self._plot_page, name=self.windowTitle(), **identity)
+
+    def export_figure(self) -> None:
+        from .figure_export import export_figure_interactive
+
+        export_figure_interactive(self, self.figure_for_export(), self._state)
 
     def _set_render_method(self, method: str) -> None:
         """Set a reconstruction method on the unified renderer subclass."""

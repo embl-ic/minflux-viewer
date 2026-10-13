@@ -89,6 +89,7 @@ def test_adding_z_offers_the_attribute_list_and_shows_the_top_row_control(
             "add new attribute as Z",
             "add new attribute as C",
             "",
+            "Export figure…",
             "Reset View",
         ]
         # The attribute is chosen in the same gesture.
@@ -114,6 +115,7 @@ def test_adding_z_offers_the_attribute_list_and_shows_the_top_row_control(
             "remove Z attribute",
             "swap Z / C",
             "",
+            "Export figure…",
             "Reset View",
         ]
         assert _texts(_submenu(menu, "View"))[:4] == ["XY", "XZ", "YZ", "3D"]
@@ -133,6 +135,7 @@ def test_default_context_menu_has_view_controls_and_reset(monkeypatch, _qt_app):
             "add new attribute as Z",
             "add new attribute as C",
             "",
+            "Export figure…",
             "Reset View",
         ]
         view_menu = _submenu(menu, "View")
@@ -189,6 +192,7 @@ def test_c_can_exist_without_z_and_each_is_removed_on_its_own(
             "remove C attribute",
             "swap Z / C",
             "",
+            "Export figure…",
             "Reset View",
         ]
 
@@ -209,6 +213,7 @@ def test_c_can_exist_without_z_and_each_is_removed_on_its_own(
             "remove C attribute",
             "swap Z / C",
             "",
+            "Export figure…",
             "Reset View",
         ]
 
@@ -1245,7 +1250,7 @@ def test_attribute_3d_bounding_box_menu_is_linked_and_persistent(
         window._set_view_mode("3D")
         menu = _capture_context_menu(monkeypatch, window)
         texts = _texts(menu)
-        assert texts[-4:] == ["", "Bounding Box", "", "Reset View"]
+        assert texts[-5:] == ["", "Bounding Box", "", "Export figure…", "Reset View"]
         action = next(
             action for action in menu.actions()
             if action.text() == "Bounding Box"
