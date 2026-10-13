@@ -32,7 +32,11 @@ zarr      = ">=2.17,<3.0"
 tifffile  = ">=2024.2"
 openpyxl  = ">=3.1"
 psutil    = ">=5.9"
-msr-reader = ">=0.2.1"   # pure-Python, cross-platform OBF/.msr reader
+msr-reader = ">=0.2.1,<0.3"   # pure-Python, cross-platform OBF/.msr reader
+# Capped below the next minor release: msr/obf_compat.py patches its private
+# _read_file_header, and msr/transplant.py and the image sources call its
+# private _parse_dtype and footer readers. Raising the cap means re-checking
+# those against the new release, not just refreshing the lock.
 
 # ---------------------------------------------------------------------------
 # .msr reading is fully cross-platform via msr-reader: MINFLUX localizations
