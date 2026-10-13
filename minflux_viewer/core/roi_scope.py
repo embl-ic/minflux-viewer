@@ -170,6 +170,12 @@ def unshare_dataset(record, index: int | None = None) -> bool:
     return True
 
 
+#: Facts stamped on a ROI when it is DRAWN (the views' ``normalize_roi_record``)
+#: that a later selection pass does not compute. A selection result that lacks
+#: one keeps the drawn value; a selection detail it does compute always wins.
+DRAWN_CONTEXT_KEYS = ("view_plane", "depth_axis", "depth_value", "z_scaling_factor")
+
+
 def scope_context(previous, new) -> dict:
     """Merge a freshly computed selection context over the record's own scope.
 
@@ -177,10 +183,15 @@ def scope_context(previous, new) -> dict:
     whatever the view returned. That is right for the selection details, but it
     would drop the user's manual sharing list — and, when a selection is computed
     against a *shared* dataset, would silently retarget the ROI's owner to it.
-    Both are preserved here.
+    Both are preserved here. So are the facts recorded when the ROI was drawn
+    (``DRAWN_CONTEXT_KEYS``): without them a flat ROI loses the depth the
+    side panes draw it at, and Scale Z the factor it pre-fills from.
     """
     merged = dict(new or {})
     old = previous if isinstance(previous, dict) else {}
+    for key in DRAWN_CONTEXT_KEYS:
+        if key in old and key not in merged:
+            merged[key] = old[key]
     shared = old.get(SHARED_DATASETS_KEY)
     if shared:
         merged[SHARED_DATASETS_KEY] = list(shared)
