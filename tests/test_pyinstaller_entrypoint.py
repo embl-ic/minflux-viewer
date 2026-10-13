@@ -13,6 +13,12 @@ ENTRYPOINT = ROOT / "run_app.py"
 SPEC = ROOT / "minflux_viewer.spec"
 
 
+def _need_pyinstaller() -> None:
+    """The spec imports PyInstaller, which is the optional "build" group."""
+    pytest.importorskip(
+        "PyInstaller", reason="the spec needs PyInstaller: poetry sync --with build")
+
+
 def _evaluate_spec():
     """Run the spec with PyInstaller's heavy builders stubbed out.
 
@@ -20,6 +26,7 @@ def _evaluate_spec():
     ``(args, kwargs)`` it was invoked with, so the packaging decisions the spec
     makes can be asserted without running a real build.
     """
+    _need_pyinstaller()
     calls: dict[str, list] = {}
 
     def _stub(name):
@@ -128,7 +135,10 @@ def test_windows_executable_carries_the_application_version() -> None:
 
 def test_package_version_matches_pyproject() -> None:
     """The executable and package metadata must advertise the same release."""
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:     # Python 3.10
+        import tomli as tomllib
 
     from minflux_viewer import __version__
 
@@ -143,6 +153,7 @@ def test_spec_refuses_a_fresh_clone_without_the_vendored_pip() -> None:
     '...resources/pip'", which says nothing about how to fix it. The spec has to
     stop first, naming the command, on every platform it builds for.
     """
+    _need_pyinstaller()
     source = SPEC.read_text(encoding="utf-8")
     assert 'PIP_PAYLOAD / "pip"' in source
     assert "tools/vendor_pip.py" in source

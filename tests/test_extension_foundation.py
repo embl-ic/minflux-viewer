@@ -216,7 +216,8 @@ def test_spec_collects_the_stdlib_modules_external_code_needs():
             except Exception:
                 continue
 
-    for missing_in_0_4_2 in (
-        "logging.handlers", "html.parser", "configparser", "tomllib", "__future__",
-    ):
-        assert missing_in_0_4_2 in names, missing_in_0_4_2
+    missing_in_0_4_2 = ["logging.handlers", "html.parser", "configparser", "__future__"]
+    if sys.version_info >= (3, 11):      # tomllib is 3.11+; releases build on 3.12
+        missing_in_0_4_2.append("tomllib")
+    for name in missing_in_0_4_2:
+        assert name in names, name
