@@ -3251,7 +3251,7 @@ class RenderWindow(QWidget):
         suffix = f"  |  {pending} tiles loading…" if pending else ""
         self._info_label.setText(
             f"{self._dataset_dim_label}  |  {n_vis} ch  |  "
-            f"LOD {lod}  |  px={px_nm:.1f} nm{suffix}"
+            f"LOD {lod}  |  px={px_nm:.1f} nm{suffix}{self.ortho_info_suffix()}"
         )
 
         if self._bc_dialog is not None and self._bc_dialog.isVisible():
