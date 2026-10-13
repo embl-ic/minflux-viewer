@@ -2558,6 +2558,39 @@ def _add_mfx_attr(attrs: AttrStore, field_name: str, val: np.ndarray, num_raw: i
         attrs[field_name] = arr.ravel() if arr.ndim == 1 else arr
 
 
+#: Rows copied per block by :func:`_mfx_columns`. Small enough that one block
+#: of a ~100-byte MINFLUX row stays in cache while every field is copied out.
+_FIELD_COPY_BLOCK_ROWS = 4096
+
+
+def _mfx_columns(mfx: np.ndarray, progress=None) -> dict[str, np.ndarray]:
+    """Every field of a flat structured *mfx* as its own contiguous array.
+
+    Copying field by field (``mfx[name]`` then ``ravel``) walks the whole
+    record buffer once **per field**, because each field is strided by the full
+    row size -- on a 14 M-row acquisition that was ~2 s per pass. Copying all
+    fields of a cache-sized block of rows at a time reads the buffer once
+    (~0.5 s on the same data) and returns identical values.
+
+    ``progress(fraction)``, when given, is called every few hundred blocks.
+    """
+    fields = mfx.dtype.fields or {}
+    n = int(mfx.shape[0])
+    out = {
+        name: np.empty((n,) + tuple(fields[name][0].shape), dtype=fields[name][0].base)
+        for name in (mfx.dtype.names or ())
+    }
+    step = _FIELD_COPY_BLOCK_ROWS
+    report_every = step * 256
+    for start in range(0, n, step):
+        block = mfx[start:start + step]
+        for name, dst in out.items():
+            dst[start:start + step] = block[name]
+        if progress is not None and start % report_every == 0:
+            progress(start / max(n, 1))
+    return out
+
+
 def _is_legacy_nested_itr_mfx(mfx: np.ndarray) -> bool:
     fields = getattr(getattr(mfx, "dtype", None), "fields", None) or {}
     if "itr" not in fields:
@@ -2582,8 +2615,13 @@ def _normalize_mfx_attrs(
     mfx: np.ndarray,
     *,
     load_all_itr: bool,
+    progress=None,
 ) -> tuple[AttrStore, int, int, str, str]:
-    """Normalize modern flat or legacy nested-iteration mfx tables."""
+    """Normalize modern flat or legacy nested-iteration mfx tables.
+
+    ``progress(fraction)`` is reported only for the flat layout, whose field
+    copy is the bulk of the work.
+    """
     attrs = AttrStore()
     field_names = list(getattr(mfx.dtype, "names", []) or [])
     num_measurements = int(mfx.shape[0])
@@ -2641,9 +2679,12 @@ def _normalize_mfx_attrs(
         return attrs, num_raw, num_itr, "m2205", detail
 
     # The mfx array is in m2410-style flat format (already flattened per-loc).
+    if mfx.ndim == 1 and field_names:
+        columns = _mfx_columns(mfx, progress)
+    else:
+        columns = {name: mfx[name] for name in field_names}
     for field_name in field_names:
-        val = mfx[field_name]
-        _add_mfx_attr(attrs, field_name, val, num_measurements)
+        _add_mfx_attr(attrs, field_name, columns.pop(field_name), num_measurements)
     return (
         attrs,
         num_measurements,
@@ -2659,10 +2700,15 @@ def load_from_mfx_array(
     datetime_str: str = "",
     recent_path: str | None = None,
     prefs: dict | None = None,
+    progress=None,
 ) -> "MinfluxDataset":
     """
     Build a :class:`MinfluxDataset` directly from a structured ``mfx``
     numpy array produced by ``minflux_msr``.
+
+    Qt-free, so it may run on a worker thread. ``progress(fraction)`` (0..1),
+    when given, is called as the build advances; it is a plain callback and is
+    also a natural cancellation checkpoint for the caller (it may raise).
 
     This avoids writing a temporary ``.mat`` file — the array is already
     in memory after parsing the ``.msr``.
@@ -2695,7 +2741,16 @@ def load_from_mfx_array(
     )
 
     # Build mfx_raw: all iterations, no vld filtering
-    attrs_all, num_raw_all, _, _, _ = _normalize_mfx_attrs(mfx, load_all_itr=True)
+    def _report(fraction: float) -> None:
+        if progress is not None:
+            progress(float(fraction))
+
+    _report(0.0)
+    # The field copy dominates the build (~70 % of it on a flat table).
+    (attrs_all, num_raw_all, all_num_itr,
+     all_version, all_version_detail) = _normalize_mfx_attrs(
+        mfx, load_all_itr=True, progress=lambda f: _report(0.7 * f))
+    _report(0.7)
     mfx_raw_store = AttrStore()
     for _k, _v in attrs_all.items():
         mfx_raw_store[_k] = np.asarray(_v)
@@ -2704,10 +2759,22 @@ def load_from_mfx_array(
     if "itr" not in mfx_raw_store:
         mfx_raw_store["itr"] = np.zeros(num_raw_all, dtype=np.int16)
 
-    attrs, num_raw, detected_num_itr, source_version, source_version_detail = _normalize_mfx_attrs(
-        mfx,
-        load_all_itr=load_all_itr,
-    )
+    if _is_legacy_nested_itr_mfx(mfx):
+        attrs, num_raw, detected_num_itr, source_version, source_version_detail = _normalize_mfx_attrs(
+            mfx,
+            load_all_itr=load_all_itr,
+        )
+    else:
+        # A flat (m2410) table ignores ``load_all_itr``, so a second pass would
+        # copy every field out of the record buffer again for an identical
+        # result. Reuse the first: the row selection below replaces each
+        # per-row column with a new masked array, so mfx_raw keeps its own
+        # unfiltered columns.
+        attrs = AttrStore()
+        for _k, _v in attrs_all.items():
+            attrs[_k] = _v
+        num_raw, detected_num_itr = num_raw_all, all_num_itr
+        source_version, source_version_detail = all_version, all_version_detail
 
     valid_mask = np.ones(num_raw, dtype=bool)
     if only_valid and "vld" in attrs:
@@ -2745,10 +2812,12 @@ def load_from_mfx_array(
             attrs[key] = arr[valid_mask]
 
     num_loc = int(valid_mask.sum())
+    _report(0.8)
 
     prop = _compute_properties(attrs, num_loc, num_itr, prefs=prefs)
     attrs = _add_derived_attributes(attrs, prop, prefs=prefs)
     prop.attr_names = attrs.keys()
+    _report(0.9)
 
     cali = Calibration()
     channel = _build_channel(attrs, prop)
@@ -2778,6 +2847,7 @@ def load_from_mfx_array(
     dataset.components.mfx_raw = mfx_raw_store
     if not attr_matches_last_valid(dataset):
         dataset.components.derived_last = _derived_last_from_raw(mfx_raw_store, num_itr, prefs)
+    _report(1.0)
     return dataset
 
 
