@@ -238,3 +238,20 @@ def remap_dataset_indices(records, removed: int) -> int:
             record.context = new_context
             changed += 1
     return changed
+
+
+def remap_dataset_keyed(mapping, removed: int) -> dict:
+    """A copy of an index-keyed ROI cache, re-keyed after *removed* closed.
+
+    The closed dataset's entry is dropped, later keys shift down by one, and
+    each kept record's own scope is remapped by :func:`remap_dataset_indices`
+    so the record agrees with the key it is filed under.
+    """
+    removed = int(removed)
+    out = {}
+    for key, record in (mapping or {}).items():
+        if key == removed:
+            continue
+        out[key - 1 if key > removed else key] = record
+    remap_dataset_indices(list(out.values()), removed)
+    return out
