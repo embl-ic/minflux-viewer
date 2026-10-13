@@ -41,7 +41,7 @@ if ds is not None:
 """
 
 
-_API_HELP = """MINFLUX Viewer scripting API 1.2
+_API_HELP = """MINFLUX Viewer scripting API 1.3
 
 Scripts run inside the current viewer session. The runtime module `mfv` is
 bound to the live application state, and is the same object a plugin receives
@@ -67,6 +67,7 @@ mfv.ui        log, status, parameter dialogs, file pickers
 mfv.run       background execution, progress, cancellation
 mfv.journal   record a step so it reaches Generate Method Text
 mfv.record    record viewer work as a reusable Python script
+mfv.plugins   list plugins, write up or re-run their last run
 
 mfv.data
 
@@ -111,7 +112,7 @@ mfv.run   -- long work belongs here, not on the GUI thread
 
   The worker must touch no Qt widget and no viewer state: capture what you need
   first, and apply the result in on_done, which runs on the GUI thread. The task
-  appears in Help > Monitor Tasks with a working Request stop button.
+  appears in Help > Task Monitor with a working Request stop button.
 
 mfv.journal
 
@@ -127,6 +128,14 @@ mfv.record
 
   A plugin can contribute an exact replay statement while recording is active.
   gui_class is "gui_free", "gui_result" or "gui_only".
+
+mfv.plugins
+
+  list() | find(id) | method(id) | method_text(id) | last_run(id)
+  run(id, answers={"min_locs": 10})
+
+  run(answers=...) answers the plugin's next ask() dialog from the given
+  values; keys it does not ask for are ignored, missing keys keep its defaults.
 
 Compatibility
 
@@ -153,6 +162,7 @@ _COMPLETION_MAP = {
         "run",
         "journal",
         "record",
+        "plugins",
         "viewer",
         "ScriptError",
         "get_active_dataset()",
@@ -244,6 +254,14 @@ _COMPLETION_MAP = {
         "steps()",
         "script()",
         "step()",
+    ],
+    "mfv.plugins": [
+        "list()",
+        "find()",
+        "run()",
+        "method()",
+        "method_text()",
+        "last_run()",
     ],
     "mfv.viewer": [
         "render()",

@@ -40,7 +40,11 @@ claude.md
 BACKLOG.md
 .claude/
 .codex_backups/
-docs/
+# docs/ holds working notes and is ignored, except the published API reference.
+# "docs/*" rather than "docs/": git cannot re-include a file whose directory is
+# itself ignored.
+docs/*
+!docs/scripting-api.md
 
 # MATLAB remnants
 *.asv
