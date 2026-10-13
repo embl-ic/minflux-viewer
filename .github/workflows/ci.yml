@@ -1,0 +1,102 @@
+# Continuous integration.
+#
+# Three jobs, all on Windows, the platform the releases are built and mostly
+# used on:
+#   lint        Ruff and mypy may not gain findings (tools/lint_ratchet.py);
+#               mypy evaluates sys.platform branches as the machine it runs
+#               on, and the baseline was measured on Windows.
+#   pure-tests  every test that does not need a QApplication, in one process.
+#   qt-tests    the Qt tests, one module per process under the offscreen
+#               platform (tools/run_qt_tests.py explains why: in one process
+#               they abort natively at a moving target).
+# Dependencies come from poetry.lock, including the PyInstaller "build" group,
+# which the packaging tests need.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  POETRY_VERSION: "2.3.2"
+  PYTHONUTF8: "1"
+
+jobs:
+  lint:
+    name: Ruff and mypy ratchet
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Poetry
+        run: pipx install "poetry==${{ env.POETRY_VERSION }}"
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.12"
+          cache: poetry
+      - name: Install dependencies from poetry.lock
+        run: |
+          poetry env use "${{ steps.python.outputs.python-path }}"
+          poetry sync
+      - name: Ruff and mypy may not gain findings
+        run: poetry run python tools/lint_ratchet.py
+
+  pure-tests:
+    name: Pure tests (Python ${{ matrix.python }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Poetry
+        run: pipx install "poetry==${{ env.POETRY_VERSION }}"
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: ${{ matrix.python }}
+          cache: poetry
+      - name: Install dependencies from poetry.lock
+        run: |
+          poetry env use "${{ steps.python.outputs.python-path }}"
+          poetry sync --with build
+      - name: Tests that need no QApplication
+        run: poetry run pytest -m "not qt" -p no:cacheprovider
+
+  qt-tests:
+    name: Qt tests (Python ${{ matrix.python }})
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Poetry
+        run: pipx install "poetry==${{ env.POETRY_VERSION }}"
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: ${{ matrix.python }}
+          cache: poetry
+      - name: Install dependencies from poetry.lock
+        run: |
+          poetry env use "${{ steps.python.outputs.python-path }}"
+          poetry sync --with build
+      - name: Qt tests, one module per process
+        run: poetry run python tools/run_qt_tests.py -j 4
