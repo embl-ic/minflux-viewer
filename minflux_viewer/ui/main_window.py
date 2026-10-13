@@ -436,6 +436,12 @@ class MainWindow(QMainWindow):
         # Right-click a recent file → "Open file location" (a QMenu doesn't emit
         # customContextMenuRequested for its items, so use an event filter).
         self._recent_menu.installEventFilter(self)
+        # Rebuilt only when it is about to be shown: checking which recent
+        # files still exist stats every entry, and on a missing network or
+        # removable drive each stat can take tens of ms -- measured 2.2 s on
+        # the GUI thread, once per opened dataset, for a menu nobody had open.
+        self._recent_menu_stale = False
+        self._recent_menu.aboutToShow.connect(self._refresh_recent_menu_if_stale)
 
         # Remember the last plot window (render/scatter) the user focused, so the
         # LUT toolbar button targets it — clicking the toolbar activates the MAIN
@@ -2578,7 +2584,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self._state._record_recent(resolved)
-            self._populate_recent_menu()
+            self._mark_recent_menu_stale()
         except Exception:
             pass
         self._status_label.setText(f"TIFF opened: {Path(path).name}")
@@ -2644,7 +2650,16 @@ class MainWindow(QMainWindow):
         self._state.log(f"Loaded {len(records)} ROI(s) from {Path(path).name}.")
         self._status_label.setText("Ready.")
 
+    def _mark_recent_menu_stale(self) -> None:
+        "The recent-file list changed; rebuild the menu when it is next shown."
+        self._recent_menu_stale = True
+
+    def _refresh_recent_menu_if_stale(self) -> None:
+        if getattr(self, "_recent_menu_stale", False):
+            self._populate_recent_menu()
+
     def _populate_recent_menu(self) -> None:
+        self._recent_menu_stale = False
         self._recent_menu.clear()
         recent = self._state.prefs["file"].get("recent_files", [])
         limit = int(self._state.prefs["file"].get("num_file_history", 5) or 5)
@@ -5010,7 +5025,7 @@ class MainWindow(QMainWindow):
         if self._is_shutting_down:
             return
         self._apply_shortcuts()
-        self._populate_recent_menu()
+        self._mark_recent_menu_stale()
         self._refresh_plot_preferences()
 
     def _refresh_plot_preferences(self) -> None:
@@ -8289,7 +8304,7 @@ class MainWindow(QMainWindow):
         offset = idx * 22
         win.move(120 + offset, 600 - offset)
         self._data_windows[idx] = win
-        self._populate_recent_menu()
+        self._mark_recent_menu_stale()
 
         data_prefs = self._state.prefs.get("data", {})
         if data_prefs.get("show_dataset_manager", False):
