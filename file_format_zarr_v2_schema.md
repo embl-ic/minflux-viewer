@@ -2,9 +2,9 @@
 
 **Status:** adopted as the MINFLUX Viewer application format. The separate
 OME-NGFF / Zarr v3 export (`core/ome_zarr.py`) is the forward-looking,
-interoperability-facing format and evolves independently of this one.  
-**Schema:** `1.0.0`  
-**Physical storage:** Zarr v2 directory store  
+interoperability-facing format and evolves independently of this one.\
+**Schema:** `1.0.0`\
+**Physical storage:** Zarr v2 directory store\
 **Format ids:** `org.minflux-viewer.dataset` (single dataset) and
 `org.minflux-viewer.project` (multi-dataset acquisition/overlay)
 

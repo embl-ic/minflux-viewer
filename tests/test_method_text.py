@@ -710,4 +710,3 @@ def test_drift_by_time_windows_states_the_filter_it_was_estimated_under():
 def test_old_drift_lines_still_generate_text():
     txt = mt.generate_method_text(_state(), [_ev(DRIFT_OLD_MSG)])
     assert "9 windows of 400 s" in txt
-

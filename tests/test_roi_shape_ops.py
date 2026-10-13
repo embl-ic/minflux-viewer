@@ -161,4 +161,3 @@ def test_shift_combining_rectangle_and_oval_is_drawn_the_same_in_either_order(
     assert ctrl.draft.type == "composite"
     assert isinstance(ctrl.draft_item, CompositeROI)
     assert not getattr(ctrl.draft_item, "handles", [])
-

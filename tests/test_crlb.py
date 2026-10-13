@@ -674,4 +674,3 @@ def test_real_m2205_without_usable_background_says_why():
     assert r.L_nm == pytest.approx(75.6)            # the file name says L75nm
     assert not r.has_background
     assert any("bgcSense" in note for note in r.background_notes)
-
