@@ -1,7 +1,7 @@
 # Continuous integration.
 #
-# Three jobs, all on Windows, the platform the releases are built and mostly
-# used on:
+# Windows, the platform the releases are built and mostly used on, runs
+# everything:
 #   lint        Ruff and mypy may not gain findings (tools/lint_ratchet.py);
 #               mypy evaluates sys.platform branches as the machine it runs
 #               on, and the baseline was measured on Windows.
@@ -9,6 +9,9 @@
 #   qt-tests    the Qt tests, one module per process under the offscreen
 #               platform (tools/run_qt_tests.py explains why: in one process
 #               they abort natively at a moving target).
+# Linux and macOS (other-platforms) run the import smoke and the pure tests
+# on one Python. Path separators, case-sensitive file names and Qt's system
+# libraries are what differ there, and the pure tests are where they show.
 # Dependencies come from poetry.lock, including the PyInstaller "build" group,
 # which the packaging tests need. Actions are pinned to a commit, with the
 # release in a comment; Dependabot (.github/dependabot.yml) proposes updates.
@@ -107,3 +110,43 @@ jobs:
           poetry sync --with build
       - name: Qt tests, one module per process
         run: poetry run python tools/run_qt_tests.py -j 4 --strict
+
+  other-platforms:
+    name: Pure tests (${{ matrix.os }}, Python 3.12)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Qt's system libraries
+        if: runner.os == 'Linux'
+        # The PyQt6 wheels carry Qt itself, not the X/GL/font libraries it
+        # links against; the offscreen platform still needs these.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libfontconfig1 libfreetype6 libdbus-1-3
+      - name: Install Poetry
+        run: pipx install "poetry==${{ env.POETRY_VERSION }}"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        id: python
+        with:
+          python-version: "3.12"
+          cache: poetry
+      - name: Install dependencies from poetry.lock
+        run: |
+          poetry env use "${{ steps.python.outputs.python-path }}"
+          poetry sync --with build
+      - name: Import smoke
+        # Fails early and plainly when a Qt library is missing, before the
+        # same error repeats through the test modules.
+        run: >-
+          poetry run python -c "import minflux_viewer.ui.main_window,
+          minflux_viewer.scripting, minflux_viewer.plugins; print('imports ok')"
+      - name: Tests that need no QApplication
+        run: poetry run pytest -m "not qt" -p no:cacheprovider
