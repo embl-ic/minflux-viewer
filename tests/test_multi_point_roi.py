@@ -7,14 +7,12 @@ not become a screenful of Manager rows.
 from __future__ import annotations
 
 import os
-import sys
 
 import pytest
 
 pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
-from PyQt6.QtWidgets import QApplication
 
 from minflux_viewer.core.roi import (
     MULTI_POINT_TYPES,
@@ -28,10 +26,8 @@ from minflux_viewer.core.roi import (
 
 
 @pytest.fixture
-def _qt_app():
-    if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-        pytest.skip("No display available for Qt tests")
-    return QApplication.instance() or QApplication(sys.argv)
+def _qt_app(qapp):
+    return qapp
 
 
 def _marks(n=4):

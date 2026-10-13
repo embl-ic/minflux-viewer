@@ -6,8 +6,6 @@ responsive during dataset open.
 
 from __future__ import annotations
 
-import os
-import sys
 import time
 
 import numpy as np
@@ -178,12 +176,8 @@ def test_stddev_per_trace_grouping_matches_reference():
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def _qt_app():
-    pytest.importorskip("PyQt6")
-    if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-        pytest.skip("No display available for Qt tests")
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication(sys.argv)
+def _qt_app(qapp):
+    return qapp
 
 
 def _pump_until(app, predicate, timeout_s: float = 10.0) -> bool:

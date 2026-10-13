@@ -6,8 +6,6 @@ closes together with the main window, not left orphaned on screen.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pytest
@@ -36,12 +34,8 @@ def _make_ds(n: int = 60, n_traces: int = 6) -> MinfluxDataset:
 
 
 @pytest.fixture
-def _qt_app():
-    pytest.importorskip("PyQt6")
-    if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-        pytest.skip("No display available for Qt tests")
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication(sys.argv)
+def _qt_app(qapp):
+    return qapp
 
 
 def test_local_density_window_registered_and_closes_with_owner(_qt_app, monkeypatch):

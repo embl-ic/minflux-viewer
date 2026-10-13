@@ -8,8 +8,6 @@ existing ROI consumer can read.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pytest
@@ -24,11 +22,8 @@ from minflux_viewer.core.roi_selection import polygon_mask
 
 
 @pytest.fixture
-def _qt_app():
-    from PyQt6.QtWidgets import QApplication
-    if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-        pytest.skip("No display available for Qt tests")
-    return QApplication.instance() or QApplication(sys.argv)
+def _qt_app(qapp):
+    return qapp
 
 
 # --------------------------------------------------------------- the data

@@ -8,8 +8,6 @@ recognised, and that a frame stays cheap.
 
 from __future__ import annotations
 
-import os
-import sys
 import time
 
 import numpy as np
@@ -17,13 +15,8 @@ import pytest
 
 
 @pytest.fixture
-def _qt_app():
-    pytest.importorskip("PyQt6")
-    pytest.importorskip("pyqtgraph")
-    if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-        pytest.skip("No display available for Qt tests")
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication(sys.argv)
+def _qt_app(qapp):
+    return qapp
 
 
 def _pump(app, n: int = 6):

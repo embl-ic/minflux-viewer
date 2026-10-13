@@ -3,7 +3,6 @@ of the plain 2-D / 3-D menu entries."""
 
 from __future__ import annotations
 
-import sys
 
 import numpy as np
 import pyqtgraph as pg
@@ -11,10 +10,8 @@ import pytest
 
 
 @pytest.fixture
-def _app():
-    pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication(sys.argv)
+def _app(qapp):
+    return qapp
 
 
 @pytest.fixture(scope="module")

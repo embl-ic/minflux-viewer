@@ -142,10 +142,8 @@ def _controller(source_view, dataset_indices, store, qtbot=None):
 
 
 @pytest.fixture(scope="module")
-def _app():
-    from PyQt6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def test_views_draw_only_the_rois_in_their_own_scope(_app, qtbot):

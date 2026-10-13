@@ -1,7 +1,6 @@
 """Analyze › Segmentation › Shape Model… — dialog wiring and ROI hand-off."""
 
 import os
-import sys
 
 import numpy as np
 import pytest
@@ -9,7 +8,6 @@ import pytest
 pytest.importorskip("PyQt6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from minflux_viewer.analysis.shape_segmentation import (  # noqa: E402
     SHAPE_MODELS,
@@ -25,8 +23,8 @@ _KEEP_ALIVE: list = []
 
 
 @pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication(sys.argv[:1])
+def app(qapp):
+    return qapp
 
 
 def _two_touching_cells(seed=7):

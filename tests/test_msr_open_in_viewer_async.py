@@ -80,10 +80,8 @@ pytest.importorskip("PyQt6")
 
 
 @pytest.fixture(scope="module")
-def _app():
-    from PyQt6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def test_reader_opens_datasets_off_the_ui_thread_with_progress(_app, monkeypatch):

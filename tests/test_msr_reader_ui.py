@@ -13,7 +13,6 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
-from PyQt6.QtWidgets import QApplication
 
 from minflux_viewer.plugins.msr_reader.msr_reader_dialog import (
     MsrReaderDialog,
@@ -22,8 +21,8 @@ from minflux_viewer.plugins.msr_reader.msr_reader_dialog import (
 
 
 @pytest.fixture(scope="module")
-def _app():
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def test_register_msr_dialog_supports_multiple(_app):

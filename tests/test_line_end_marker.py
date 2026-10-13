@@ -13,7 +13,7 @@ pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
 import pyqtgraph as pg
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import QWidget
 from pyqtgraph.graphicsItems.ROI import Handle
 
 from minflux_viewer.core.roi import RoiRecord, RoiStore
@@ -21,8 +21,8 @@ from minflux_viewer.ui.roi_overlay import RoiOverlayController, _mark_line_end_h
 
 
 @pytest.fixture(scope="module")
-def _app():
-    yield QApplication.instance() or QApplication([])
+def _app(qapp):
+    yield qapp
 
 
 class _Owner(QWidget):

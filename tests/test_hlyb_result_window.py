@@ -9,7 +9,7 @@ pytest.importorskip("pyqtgraph")
 
 import pyqtgraph as pg
 from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtWidgets import QApplication, QDialog, QMenu, QWidget
+from PyQt6.QtWidgets import QDialog, QMenu, QWidget
 
 from minflux_viewer.analysis.hlyb_clustering import HlyBConfig, analyze_hlyb
 from minflux_viewer.ui.hlyb_clustering_dialog import HlyBClusteringDialog, HlyBResultWindow
@@ -17,9 +17,8 @@ from minflux_viewer.ui.modeless import show_modeless
 
 
 @pytest.fixture(scope="module")
-def _app():
-    app = QApplication.instance() or QApplication([])
-    yield app
+def _app(qapp):
+    yield qapp
 
 
 def _synthetic_result():

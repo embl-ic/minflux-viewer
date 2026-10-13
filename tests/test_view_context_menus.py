@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import copy
-import os
-import sys
 
 import numpy as np
 import pytest
@@ -15,7 +13,7 @@ pytest.importorskip("pyqtgraph")
 from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QColor, QContextMenuEvent
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QMenu
+from PyQt6.QtWidgets import QMenu
 
 from minflux_viewer.colors import configure_colors
 from minflux_viewer.core.app_state import AppState, default_prefs
@@ -23,10 +21,8 @@ from minflux_viewer.core.dataset import build_localization_dataset
 
 
 @pytest.fixture
-def _qt_app():
-    if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-        pytest.skip("No display available for Qt tests")
-    return QApplication.instance() or QApplication(sys.argv)
+def _qt_app(qapp):
+    return qapp
 
 
 def _state() -> AppState:

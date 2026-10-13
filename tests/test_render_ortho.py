@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pytest
@@ -12,7 +10,6 @@ pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
 from PyQt6.QtCore import QPointF, Qt
-from PyQt6.QtWidgets import QApplication
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
@@ -20,10 +17,8 @@ from minflux_viewer.ui.ortho_view import ORTHO_AXIS, ortho_pane_labels
 
 
 @pytest.fixture
-def _qt_app():
-    if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-        pytest.skip("No display available for Qt tests")
-    return QApplication.instance() or QApplication(sys.argv)
+def _qt_app(qapp):
+    return qapp
 
 
 def _state(*, three_d: bool = True, n: int = 8000) -> AppState:

@@ -523,7 +523,7 @@ def test_project_processing_update_matches_reordered_channels_and_remaps_rois(tm
     assert not list(tmp_path.glob(".reorder.zarr.viewer-tmp-*"))
 
 
-def test_main_window_reopens_project_as_overlay_and_restores_roi(
+def test_main_window_reopens_project_as_overlay_and_restores_roi(qapp,
     tmp_path, monkeypatch
 ):
     pytest.importorskip("PyQt6")
@@ -573,7 +573,7 @@ def test_main_window_reopens_project_as_overlay_and_restores_roi(
         win.close()
 
 
-def test_save_context_expands_overlay_and_captures_roi_and_linked_images(
+def test_save_context_expands_overlay_and_captures_roi_and_linked_images(qapp,
     tmp_path, monkeypatch
 ):
     pytest.importorskip("PyQt6")
@@ -894,7 +894,7 @@ def test_zarr_dataset_never_borrows_images_from_the_source_msr(tmp_path, monkeyp
     assert shown and "carries its own images" in shown[0]
 
 
-def test_opening_a_store_does_not_block_the_ui(tmp_path, monkeypatch):
+def test_opening_a_store_does_not_block_the_ui(qapp, tmp_path, monkeypatch):
     """Reading a store is CPU-bound, so it must not run on the UI thread.
 
     On a 20.6 M-row acquisition it costs ~10 s (2.0 s decompressing, 8.2 s
@@ -933,7 +933,7 @@ def test_opening_a_store_does_not_block_the_ui(tmp_path, monkeypatch):
         window.close()
 
 
-def test_a_failed_background_load_reports_instead_of_vanishing(tmp_path, monkeypatch):
+def test_a_failed_background_load_reports_instead_of_vanishing(qapp, tmp_path, monkeypatch):
     """An error on the worker must still reach the user."""
     pytest.importorskip("PyQt6")
 

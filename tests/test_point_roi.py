@@ -6,16 +6,14 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
-from PyQt6.QtWidgets import QApplication
 
 from minflux_viewer.core.roi import RoiRecord, record_from_imagej, record_to_imagej
 from minflux_viewer.ui.roi_overlay import PointMarkerItem, item_to_geometry
 
 
 @pytest.fixture(scope="module")
-def _app():
-    app = QApplication.instance() or QApplication([])
-    yield app
+def _app(qapp):
+    yield qapp
 
 
 def test_point_marker_construction_and_geometry(_app):

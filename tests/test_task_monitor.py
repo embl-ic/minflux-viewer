@@ -129,11 +129,8 @@ def test_registering_from_a_worker_thread_is_safe():
 # ----------------------------------------------------------------- the window
 
 @pytest.fixture(scope="module")
-def _app():
-    pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def test_window_lists_tasks_and_arms_stop_only_where_it_can_work(_app, qtbot):

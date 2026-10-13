@@ -90,7 +90,7 @@ def test_zoom_modes_are_the_three_documented_ones_in_order():
     assert HistogramWindow.ZOOM_MODES == ("horizontal", "vertical", "unconstrained")
 
 
-def test_arming_and_disarming_a_zoom_mode():
+def test_arming_and_disarming_a_zoom_mode(qapp):
     _qapp()
     win, _ds, _state = _histogram()
     try:
@@ -147,7 +147,7 @@ def _drive_drag(win, view_start, view_end):
         vb.mouseDragEvent(_FakeDrag(s, e if phase != "start" else s, phase))
 
 
-def test_finishing_a_drag_releases_the_zoom_tool():
+def test_finishing_a_drag_releases_the_zoom_tool(qapp):
     """One-shot: after the drag completes the tool disarms, so the next
     left-drag pans instead of starting another zoom."""
     _qapp()
@@ -170,7 +170,7 @@ def test_finishing_a_drag_releases_the_zoom_tool():
         win.close()
 
 
-def test_a_second_drag_after_release_pans_instead_of_zooming():
+def test_a_second_drag_after_release_pans_instead_of_zooming(qapp):
     _qapp()
     win, _ds, _state = _histogram()
     try:
@@ -196,7 +196,7 @@ def test_a_second_drag_after_release_pans_instead_of_zooming():
         win.close()
 
 
-def test_releasing_also_happens_for_a_degenerate_drag():
+def test_releasing_also_happens_for_a_degenerate_drag(qapp):
     """A stray click is still a completed gesture — it must not leave the tool
     armed (that was the reported annoyance)."""
     _qapp()
@@ -213,7 +213,7 @@ def test_releasing_also_happens_for_a_degenerate_drag():
         win.close()
 
 
-def test_escape_disarms_the_zoom():
+def test_escape_disarms_the_zoom(qapp):
     _qapp()
     from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QKeyEvent
@@ -239,7 +239,7 @@ def _preview_xy(win):
     return np.asarray(data[0], dtype=float), np.asarray(data[1], dtype=float)
 
 
-def test_horizontal_preview_is_an_H_at_the_cursor():
+def test_horizontal_preview_is_an_H_at_the_cursor(qapp):
     """The guide is a horizontal line with end caps riding at the *mouse's* y,
     not the middle of the view, so it can be lined up against the bars."""
     _qapp()
@@ -265,7 +265,7 @@ def test_horizontal_preview_is_an_H_at_the_cursor():
         win.close()
 
 
-def test_vertical_preview_rides_at_the_cursor_x():
+def test_vertical_preview_rides_at_the_cursor_x(qapp):
     _qapp()
     import pyqtgraph as pg
 
@@ -286,7 +286,7 @@ def test_vertical_preview_rides_at_the_cursor_x():
         win.close()
 
 
-def test_guides_follow_the_cursor_as_the_drag_moves():
+def test_guides_follow_the_cursor_as_the_drag_moves(qapp):
     """Both guides track the mouse live, so the same drag start with a different
     cursor position puts the guide somewhere else."""
     _qapp()
@@ -306,7 +306,7 @@ def test_guides_follow_the_cursor_as_the_drag_moves():
         win.close()
 
 
-def test_unconstrained_preview_is_a_closed_rectangle():
+def test_unconstrained_preview_is_a_closed_rectangle(qapp):
     _qapp()
     import pyqtgraph as pg
 
@@ -338,7 +338,7 @@ def _visible_peak(win, x0, x1):
     return float(np.max(h[inside])) if inside.any() else 0.0
 
 
-def test_horizontal_zoom_remaps_x_refines_bins_and_refits_the_height():
+def test_horizontal_zoom_remaps_x_refines_bins_and_refits_the_height(qapp):
     """Re-binning splits each bar's counts, so the pre-zoom height would leave
     the zoomed peak squashed near the axis; the height is re-fitted instead."""
     _qapp()
@@ -361,7 +361,7 @@ def test_horizontal_zoom_remaps_x_refines_bins_and_refits_the_height():
         win.close()
 
 
-def test_vertical_zoom_remaps_y_and_keeps_x_and_the_bin_size():
+def test_vertical_zoom_remaps_y_and_keeps_x_and_the_bin_size(qapp):
     _qapp()
     win, _ds, _state = _histogram()
     try:
@@ -378,7 +378,7 @@ def test_vertical_zoom_remaps_y_and_keeps_x_and_the_bin_size():
         win.close()
 
 
-def test_unconstrained_zoom_remaps_x_and_refits_the_height():
+def test_unconstrained_zoom_remaps_x_and_refits_the_height(qapp):
     _qapp()
     win, _ds, _state = _histogram()
     try:
@@ -403,7 +403,7 @@ def test_unconstrained_zoom_remaps_x_and_refits_the_height():
 # The zero floor
 # ---------------------------------------------------------------------------
 
-def test_vertical_zoom_clamps_a_below_zero_drag_to_the_axis():
+def test_vertical_zoom_clamps_a_below_zero_drag_to_the_axis(qapp):
     """Counts are never negative, so the band below zero is always empty."""
     _qapp()
     win, _ds, _state = _histogram()
@@ -419,7 +419,7 @@ def test_vertical_zoom_clamps_a_below_zero_drag_to_the_axis():
         win.close()
 
 
-def test_no_zoom_mode_puts_the_view_below_zero():
+def test_no_zoom_mode_puts_the_view_below_zero(qapp):
     _qapp()
     win, _ds, _state = _histogram()
     try:
@@ -441,7 +441,7 @@ def test_no_zoom_mode_puts_the_view_below_zero():
         win.close()
 
 
-def test_panning_may_still_show_the_region_below_zero():
+def test_panning_may_still_show_the_region_below_zero(qapp):
     """The floor is a zoom constraint only — a plain pan/setRange is untouched."""
     _qapp()
     win, _ds, _state = _histogram()
@@ -454,7 +454,7 @@ def test_panning_may_still_show_the_region_below_zero():
         win.close()
 
 
-def test_a_degenerate_drag_is_ignored():
+def test_a_degenerate_drag_is_ignored(qapp):
     """A click without a drag must not collapse the view to zero width."""
     _qapp()
     win, _ds, _state = _histogram()
@@ -469,7 +469,7 @@ def test_a_degenerate_drag_is_ignored():
         win.close()
 
 
-def test_zoom_actually_puts_more_bars_in_the_zoomed_window():
+def test_zoom_actually_puts_more_bars_in_the_zoomed_window(qapp):
     """The point of re-binning: the zoomed span must show *more* detail than it
     did before. Re-running Freedman-Diaconis on the subset does not achieve this
     (it trades span for sample size), so this guards the bin-count targeting."""
@@ -532,7 +532,7 @@ def _bars_in(win, x0, x1):
     return h[inside]
 
 
-def test_zoom_over_a_sharp_peak_does_not_flood_the_window_with_bars():
+def test_zoom_over_a_sharp_peak_does_not_flood_the_window_with_bars(qapp):
     """Regression: consulting Freedman-Diaconis on the zoom window let a sharp
     concentration (tiny IQR over a wide span) collapse the bin width, producing
     ~2000 sub-pixel bars that were 91% count<=1 — a solid block of equal-height
@@ -557,7 +557,7 @@ def test_zoom_over_a_sharp_peak_does_not_flood_the_window_with_bars():
         win.close()
 
 
-def test_zoom_bin_width_ignores_freedman_diaconis():
+def test_zoom_bin_width_ignores_freedman_diaconis(qapp):
     """The window bin count is set by the target rule alone, so it is
     predictable regardless of the shape inside the window."""
     _qapp()
@@ -577,7 +577,7 @@ def test_zoom_bin_width_ignores_freedman_diaconis():
         win.close()
 
 
-def test_zoom_bin_width_scales_with_the_zoom_and_respects_the_bin_cap():
+def test_zoom_bin_width_scales_with_the_zoom_and_respects_the_bin_cap(qapp):
     _qapp()
     win, _ds, _state = _histogram()
     try:
@@ -605,7 +605,7 @@ def test_zoom_bin_width_scales_with_the_zoom_and_respects_the_bin_cap():
 # Reset View
 # ---------------------------------------------------------------------------
 
-def test_reset_view_matches_the_reset_button():
+def test_reset_view_matches_the_reset_button(qapp):
     """Reset View is the context-menu twin of the top-right Reset button: both
     drop the manual bin width, re-draw and re-fit."""
     _qapp()
@@ -633,7 +633,7 @@ def test_reset_view_matches_the_reset_button():
 # The runaway zoom-out
 # ---------------------------------------------------------------------------
 
-def test_auto_button_is_routed_to_the_deterministic_fit():
+def test_auto_button_is_routed_to_the_deterministic_fit(qapp):
     """The floating 'A' calls PlotItem.autoBtnClicked, which pyqtgraph wires to
     the *continuous* enableAutoRange - not to vb.autoRange. It must be routed to
     the same fit the Reset button uses, or it re-enables an auto-range that keeps
@@ -651,7 +651,7 @@ def test_auto_button_is_routed_to_the_deterministic_fit():
         win.close()
 
 
-def test_repeated_auto_range_clicks_do_not_grow_the_view():
+def test_repeated_auto_range_clicks_do_not_grow_the_view(qapp):
     """Regression: with a filter edit open, every 'A' click used to enlarge the
     view (the report label is anchored to the view corner and is re-positioned on
     sigRangeChanged, so including it in the auto-range bounds fed back on
@@ -674,7 +674,7 @@ def test_repeated_auto_range_clicks_do_not_grow_the_view():
         win.close()
 
 
-def test_filter_report_label_is_excluded_from_auto_range_bounds():
+def test_filter_report_label_is_excluded_from_auto_range_bounds(qapp):
     """The view-anchored label must not contribute to the auto-range bounds."""
     _qapp()
     win, _ds, _state = _histogram()

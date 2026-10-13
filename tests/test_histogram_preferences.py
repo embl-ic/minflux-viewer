@@ -159,7 +159,7 @@ def test_iteration_labels_still_empty_for_single_iteration_data():
 # The trace read-outs
 # ---------------------------------------------------------------------------
 
-def test_trace_first_and_last_read_the_positional_values():
+def test_trace_first_and_last_read_the_positional_values(qapp):
     """'1st'/'last' are the trace's first and last localization in stored (time)
     order - not an order statistic like min/max."""
     _qapp()
@@ -183,7 +183,7 @@ def test_trace_first_and_last_read_the_positional_values():
         win.close()
 
 
-def test_trace_first_and_last_follow_time_order_not_value_order():
+def test_trace_first_and_last_follow_time_order_not_value_order(qapp):
     _qapp()
     win, ds, _state = _histogram()
     try:
@@ -200,7 +200,7 @@ def test_trace_first_and_last_follow_time_order_not_value_order():
         win.close()
 
 
-def test_as_dropdown_lists_enabled_trace_values_in_preferences_order():
+def test_as_dropdown_lists_enabled_trace_values_in_preferences_order(qapp):
     _qapp()
     win, _ds, _state = _histogram({
         "histogram_values": ["trace range", "trace 1st", "trace mean"],
@@ -214,7 +214,7 @@ def test_as_dropdown_lists_enabled_trace_values_in_preferences_order():
         win.close()
 
 
-def test_disabled_trace_values_are_absent_from_the_dropdown():
+def test_disabled_trace_values_are_absent_from_the_dropdown(qapp):
     _qapp()
     win, _ds, _state = _histogram({"histogram_values": ["trace mean"]})
     try:
@@ -226,7 +226,7 @@ def test_disabled_trace_values_are_absent_from_the_dropdown():
         win.close()
 
 
-def test_trace_read_outs_work_on_the_raw_iteration_path_too():
+def test_trace_read_outs_work_on_the_raw_iteration_path_too(qapp):
     """Regression: ``trace 1st``/``trace last`` were added to the materialized
     aggregation but not to ``utils.filters.raw_trace_aggregate``, whose dispatch
     silently returned the values unchanged. Selecting them with a raw-path
@@ -263,7 +263,7 @@ def test_raw_trace_aggregate_rejects_an_unknown_mode():
     assert raw_trace_aggregate(vals, tid, "per loc") == pytest.approx(vals)
 
 
-def test_every_histogram_trace_mode_is_supported_on_both_paths():
+def test_every_histogram_trace_mode_is_supported_on_both_paths(qapp):
     """The materialized (_aggregate) and raw (raw_trace_aggregate) paths must
     cover the same set of read-outs, or the plot changes meaning with the
     iteration selection."""
@@ -299,7 +299,7 @@ def test_new_trace_modes_have_tooltips():
 # The Iter dropdown
 # ---------------------------------------------------------------------------
 
-def test_iter_dropdown_shows_all_pooled_modes_by_default():
+def test_iter_dropdown_shows_all_pooled_modes_by_default(qapp):
     _qapp()
     win, _ds, _state = _histogram()
     try:
@@ -311,7 +311,7 @@ def test_iter_dropdown_shows_all_pooled_modes_by_default():
         win.close()
 
 
-def test_iter_dropdown_honours_the_preference():
+def test_iter_dropdown_honours_the_preference(qapp):
     _qapp()
     win, _ds, _state = _histogram({"histogram_iterations": ["sum", "average"]})
     try:
@@ -322,7 +322,7 @@ def test_iter_dropdown_honours_the_preference():
         win.close()
 
 
-def test_turning_every_pooled_mode_off_keeps_the_plain_iterations():
+def test_turning_every_pooled_mode_off_keeps_the_plain_iterations(qapp):
     _qapp()
     win, _ds, _state = _histogram({"histogram_iterations": []})
     try:
@@ -337,7 +337,7 @@ def test_turning_every_pooled_mode_off_keeps_the_plain_iterations():
 # Live refresh after Preferences OK
 # ---------------------------------------------------------------------------
 
-def test_refresh_preferences_repopulates_both_dropdowns():
+def test_refresh_preferences_repopulates_both_dropdowns(qapp):
     _qapp()
     win, _ds, state = _histogram()
     try:
@@ -357,7 +357,7 @@ def test_refresh_preferences_repopulates_both_dropdowns():
         win.close()
 
 
-def test_refresh_preferences_keeps_a_still_valid_selection():
+def test_refresh_preferences_keeps_a_still_valid_selection(qapp):
     _qapp()
     # Pin the enabled read-outs so the test does not ride on the defaults.
     win, _ds, state = _histogram({"histogram_values": ["trace mean", "trace median"]})
@@ -397,7 +397,7 @@ def _prefs_dialog(state):
     return PreferencesDialog(state)
 
 
-def test_preferences_dialog_round_trips_both_rows():
+def test_preferences_dialog_round_trips_both_rows(qapp):
     _qapp()
     from minflux_viewer.core.app_state import AppState
 
@@ -429,7 +429,7 @@ def test_preferences_dialog_round_trips_both_rows():
         dlg.close()
 
 
-def test_preferences_dialog_offers_every_documented_option():
+def test_preferences_dialog_offers_every_documented_option(qapp):
     _qapp()
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.ui.histogram_window import _TRACE_AGG_MODES
@@ -445,7 +445,7 @@ def test_preferences_dialog_offers_every_documented_option():
         dlg.close()
 
 
-def test_unchecking_every_trace_value_keeps_a_usable_dropdown():
+def test_unchecking_every_trace_value_keeps_a_usable_dropdown(qapp):
     """A trace-wise attribute is forced onto a trace read-out, so the "As" list
     must never be reduced to just "per loc"."""
     _qapp()

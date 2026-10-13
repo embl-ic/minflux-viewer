@@ -236,7 +236,7 @@ def _make_dialog_with_dataset():
     return dlg, ds
 
 
-def test_apply_all_persists_iteration_selector():
+def test_apply_all_persists_iteration_selector(qapp):
     try:
         from PyQt6.QtWidgets import QApplication
     except Exception:
@@ -262,7 +262,7 @@ def test_apply_all_persists_iteration_selector():
         dlg.close()
 
 
-def test_dialog_restores_persisted_filter_rows():
+def test_dialog_restores_persisted_filter_rows(qapp):
     try:
         from PyQt6.QtWidgets import QApplication, QCheckBox
     except Exception:
@@ -322,7 +322,7 @@ def test_dialog_restores_persisted_filter_rows():
         dialog.close()
 
 
-def test_loaded_iteration_survives_reapply(tmp_path):
+def test_loaded_iteration_survives_reapply(qapp, tmp_path):
     try:
         from PyQt6.QtWidgets import QApplication
     except Exception:

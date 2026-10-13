@@ -26,8 +26,96 @@ redirected the same way.
 from __future__ import annotations
 
 import json
+import os
+import sys
 
 import pytest
+
+# --------------------------------------------------------------------- Qt tests
+#
+# There is ONE QApplication: pytest-qt's session-wide ``qapp`` fixture (and
+# ``qtbot``, which depends on it). Test modules request it, or alias it under a
+# local name, rather than each creating the application its own way. Every test
+# that does is marked ``qt`` automatically, so the pure tests can run as a
+# separate job, out of reach of the native Qt teardown crash (CLAUDE.md, "Qt
+# lifecycle"). A module whose tests start Qt in a child process marks itself
+# with ``pytestmark = pytest.mark.qt``.
+
+QT_MARK = "qt"
+_QT_FIXTURES = frozenset({"qapp", "qtbot"})
+
+#: Modules where some tests build widgets without requesting ``qapp``, relying
+#: on an earlier test having created the application. Each is treated as a Qt
+#: module wholesale -- marked, and given the application -- until its tests ask
+#: for it themselves; then its entry goes. Found by running every module's
+#: ``-m "not qt"`` tests in a process of its own (only these aborted).
+_QT_MODULES = {
+    # Three plot-helper tests (test_value_hist_plot_accepts_every_colour_form_
+    # the_app_produces, test_plot_color_and_fill_brush_normalise_consistently,
+    # test_an_empty_distribution_returns_a_plot_rather_than_raising). Not
+    # edited here: the module is part of unfinished CRLB work.
+    "test_precision_histograms.py",
+}
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "qt: needs a QApplication. Applied automatically to every test that uses "
+        "the qapp or qtbot fixture; select with -m qt / -m 'not qt'.")
+
+
+def _no_display() -> bool:
+    """Linux with no display server and no Qt platform chosen: creating a
+    QApplication would abort the whole run, so the Qt tests are skipped.
+    ``QT_QPA_PLATFORM=offscreen`` runs them instead."""
+    return (sys.platform.startswith("linux")
+            and not os.environ.get("DISPLAY")
+            and not os.environ.get("WAYLAND_DISPLAY")
+            and not os.environ.get("QT_QPA_PLATFORM"))
+
+
+def _in_listed_qt_module(item) -> bool:
+    return os.path.basename(str(getattr(item, "fspath", ""))) in _QT_MODULES
+
+
+@pytest.hookimpl(tryfirst=True)   # before -m deselects by marker
+def pytest_collection_modifyitems(config, items):
+    skip = pytest.mark.skip(
+        reason="No display for Qt tests (set QT_QPA_PLATFORM=offscreen to run them)")
+    no_display = _no_display()
+    for item in items:
+        if (_QT_FIXTURES & set(getattr(item, "fixturenames", ()))
+                or _in_listed_qt_module(item)):
+            item.add_marker(QT_MARK)
+        if no_display and item.get_closest_marker(QT_MARK) is not None:
+            item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _listed_qt_modules_get_the_application(request):
+    """The application for a module in ``_QT_MODULES`` (see there)."""
+    if _in_listed_qt_module(request.node):
+        request.getfixturevalue("qapp")
+
+
+@pytest.fixture(autouse=True)
+def _only_qt_tests_start_qt(request):
+    """A test that brings the QApplication into existence must be a ``qt`` test.
+
+    Otherwise ``-m 'not qt'`` would quietly start Qt, and the pure-test job
+    would be exposed to exactly the crash it exists to avoid. Request ``qapp``
+    (or ``qtbot``) instead of constructing the application.
+    """
+    from PyQt6.QtCore import QCoreApplication
+
+    existed = QCoreApplication.instance() is not None
+    yield
+    if (not existed and QCoreApplication.instance() is not None
+            and request.node.get_closest_marker(QT_MARK) is None):
+        pytest.fail(
+            f"{request.node.nodeid} created a QApplication without being a qt "
+            "test: request the qapp (or qtbot) fixture instead.", pytrace=False)
 
 
 @pytest.fixture(scope="session", autouse=True)

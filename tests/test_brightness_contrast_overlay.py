@@ -9,8 +9,6 @@ Tests for the Brightness/Contrast dialog over overlay (multi-channel) renders:
 
 from __future__ import annotations
 
-import os
-import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -43,12 +41,8 @@ def _make_ds(name: str, seed: int, n: int = 30, n_traces: int = 3) -> MinfluxDat
 
 
 @pytest.fixture(scope="module")
-def _qt_app():
-    pytest.importorskip("PyQt6")
-    if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-        pytest.skip("No display available for Qt tests")
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication(sys.argv)
+def _qt_app(qapp):
+    return qapp
 
 
 def _seed_scalar_tile(win, n_channels: int) -> None:

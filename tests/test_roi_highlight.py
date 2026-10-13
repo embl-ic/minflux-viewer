@@ -9,8 +9,6 @@ histogram's second bar series carrying true in-ROI counts.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pytest
@@ -18,7 +16,6 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
-from PyQt6.QtWidgets import QApplication
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
@@ -30,10 +27,8 @@ from minflux_viewer.ui.roi_highlight import decimate, highlight_masks, union_mas
 
 
 @pytest.fixture(scope="module")
-def _app():
-    if not os.environ.get("DISPLAY") and os.name != "nt" and sys.platform != "darwin":
-        pytest.skip("No display available for Qt tests")
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def _state(efo=None, n: int = 12) -> AppState:

@@ -29,10 +29,8 @@ def facade(qt_app):
 
 
 @pytest.fixture(scope="module")
-def qt_app():
-    from PyQt6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
+def qt_app(qapp):
+    return qapp
 
 
 def test_named_table_data_operations_and_validation(facade):

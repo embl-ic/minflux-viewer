@@ -286,7 +286,7 @@ def _dialog(ds=None):
     return FilterDialog(state, dataset_idx=0), ds, state
 
 
-def test_dialog_has_an_iter_column_and_no_weighted_column():
+def test_dialog_has_an_iter_column_and_no_weighted_column(qapp):
     _qapp()
     from minflux_viewer.ui import filter_dialog as fd
 
@@ -302,7 +302,7 @@ def test_dialog_has_an_iter_column_and_no_weighted_column():
         dlg.close()
 
 
-def test_dialog_row_defaults_last_and_effective_for_cfr():
+def test_dialog_row_defaults_last_and_effective_for_cfr(qapp):
     _qapp()
     from minflux_viewer.ui import filter_dialog as fd
 
@@ -318,7 +318,7 @@ def test_dialog_row_defaults_last_and_effective_for_cfr():
         dlg.close()
 
 
-def test_dialog_persists_the_iteration_into_specs():
+def test_dialog_persists_the_iteration_into_specs(qapp):
     _qapp()
     from minflux_viewer.ui import filter_dialog as fd
 
@@ -335,7 +335,7 @@ def test_dialog_persists_the_iteration_into_specs():
         dlg.close()
 
 
-def test_dialog_changing_iter_reranges_the_bounds():
+def test_dialog_changing_iter_reranges_the_bounds(qapp):
     """Iter changes the value space, so the Min/Max auto-range must follow —
     keeping the old numbers would silently mis-filter."""
     _qapp()
@@ -353,7 +353,7 @@ def test_dialog_changing_iter_reranges_the_bounds():
         dlg.close()
 
 
-def test_dialog_json_round_trips_the_iteration(tmp_path):
+def test_dialog_json_round_trips_the_iteration(qapp, tmp_path):
     _qapp()
     from minflux_viewer.core import filter_io
     from minflux_viewer.ui import filter_dialog as fd
@@ -374,7 +374,7 @@ def test_dialog_json_round_trips_the_iteration(tmp_path):
         dlg.close()
 
 
-def test_dialog_loads_a_json_carrying_the_obsolete_weighted_key(tmp_path):
+def test_dialog_loads_a_json_carrying_the_obsolete_weighted_key(qapp, tmp_path):
     """Presets written while the option existed still load; the key is ignored."""
     _qapp()
     from minflux_viewer.core import filter_io
@@ -394,7 +394,7 @@ def test_dialog_loads_a_json_carrying_the_obsolete_weighted_key(tmp_path):
         dlg.close()
 
 
-def test_dialog_loads_a_legacy_json_without_the_iteration_key(tmp_path):
+def test_dialog_loads_a_legacy_json_without_the_iteration_key(qapp, tmp_path):
     """Backward compatibility: no 'iteration' -> last (effective for cfr/efc)."""
     _qapp()
     from minflux_viewer.core import filter_io
@@ -439,7 +439,7 @@ def _histogram(ds=None):
     return HistogramWindow(state, dataset_idx=0), ds, state
 
 
-def test_histogram_has_no_photon_weight_checkbox():
+def test_histogram_has_no_photon_weight_checkbox(qapp):
     """Regression: the 'photon weighted' checkbox and its helpers are gone."""
     _qapp()
     win, _ds, _state = _histogram()
@@ -459,7 +459,7 @@ def test_histogram_has_no_photon_weight_checkbox():
         win.close()
 
 
-def test_histogram_iter_dropdown_offers_the_pooled_modes():
+def test_histogram_iter_dropdown_offers_the_pooled_modes(qapp):
     _qapp()
     win, _ds, _state = _histogram()
     try:
@@ -472,7 +472,7 @@ def test_histogram_iter_dropdown_offers_the_pooled_modes():
         win.close()
 
 
-def test_histogram_pooled_view_stays_on_the_materialized_path():
+def test_histogram_pooled_view_stays_on_the_materialized_path(qapp):
     """`all [sum]`/`all [average]` yield one value per localization, so they must
     NOT fall back to the raw path — that is what keeps filter editing alive."""
     _qapp()
@@ -488,7 +488,7 @@ def test_histogram_pooled_view_stays_on_the_materialized_path():
         win.close()
 
 
-def test_histogram_value_label_is_the_plain_attribute():
+def test_histogram_value_label_is_the_plain_attribute(qapp):
     _qapp()
     win, _ds, _state = _histogram()
     try:
@@ -499,7 +499,7 @@ def test_histogram_value_label_is_the_plain_attribute():
         win.close()
 
 
-def test_start_filter_edit_applies_the_iteration():
+def test_start_filter_edit_applies_the_iteration(qapp):
     """The filter row's Iter travels to the histogram when the eye button opens
     it, and the region stays editable (materialized path)."""
     _qapp()
@@ -514,7 +514,7 @@ def test_start_filter_edit_applies_the_iteration():
         win.close()
 
 
-def test_start_filter_edit_on_a_specific_iteration_keeps_the_region():
+def test_start_filter_edit_on_a_specific_iteration_keeps_the_region(qapp):
     """A row filtering on one specific iteration is edited on that iteration's
     values gathered onto the materialized rows, so the drag region survives."""
     _qapp()
@@ -530,7 +530,7 @@ def test_start_filter_edit_on_a_specific_iteration_keeps_the_region():
         win.close()
 
 
-def test_start_filter_edit_without_selection_keeps_previous_behaviour():
+def test_start_filter_edit_without_selection_keeps_previous_behaviour(qapp):
     """No itr given -> the historical default view (cfr on its effective
     iteration), unchanged."""
     _qapp()

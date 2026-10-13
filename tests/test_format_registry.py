@@ -296,11 +296,8 @@ def test_a_real_xlsx_is_still_a_spreadsheet(tmp_path):
 # The GUI route: what a dropped file actually does
 # --------------------------------------------------------------------------- #
 @pytest.fixture(scope="module")
-def _app():
-    pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
+def _app(qapp):
+    return qapp
 
 
 def _minflux_raw(n_loc=8, n_itr=2):

@@ -7,7 +7,6 @@ read back, display in nm, and the ``.msr`` acquisition rectangle that seeds it.
 
 from __future__ import annotations
 
-import sys
 
 import numpy as np
 import pytest
@@ -26,10 +25,8 @@ from minflux_viewer.core.tiff_source import TiffImageSource
 
 
 @pytest.fixture
-def _app():
-    pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication(sys.argv)
+def _app(qapp):
+    return qapp
 
 
 # --- pure encode / decode -------------------------------------------------
