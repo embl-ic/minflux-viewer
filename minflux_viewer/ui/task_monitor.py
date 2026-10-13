@@ -10,8 +10,10 @@ Two panes, because they answer different questions:
   what it is, which subsystem started it, how long it has run, how far it has
   got, and whether it can be stopped.
 * **Threads** — the raw picture underneath: Python's ``threading.enumerate()``
-  and the Qt global thread pool's active/maximum count. Nothing registers these;
-  they are the ground truth a tracked task list can drift from.
+  and the active/maximum thread count summed over Qt's global pool and every
+  named pool the application owns (render tiles, plugin tasks, the MSR
+  reader, ...). Nothing registers these; they are the ground truth a tracked
+  task list can drift from.
 
 ⚠ **Stopping is a request, not a kill.** ``QThread.terminate()`` is documented as
 unsafe, ``QRunnable`` has no terminate, and Python threads cannot be killed at
@@ -86,7 +88,7 @@ def summary_text(tasks, pool_active: int, pool_max: int, n_threads: int) -> str:
         head = f"No task running · {len(tasks)} recently finished"
     else:
         head = f"{len(active)} task(s) in flight · {running} running"
-    return (f"{head}   |   Qt thread pool {pool_active}/{pool_max} active"
+    return (f"{head}   |   Qt thread pools {pool_active}/{pool_max} active"
             f"   |   {n_threads} Python thread(s)")
 
 
@@ -207,11 +209,15 @@ class TaskMonitor(QWidget):
 
     @staticmethod
     def _pool_counts() -> tuple[int, int]:
+        """Active and maximum threads over the global pool and the named ones."""
         try:
             from PyQt6.QtCore import QThreadPool
 
-            pool = QThreadPool.globalInstance()
-            return int(pool.activeThreadCount()), int(pool.maxThreadCount())
+            from .background_tasks import shared_thread_pools
+
+            pools = [QThreadPool.globalInstance(), *shared_thread_pools()]
+            return (sum(int(p.activeThreadCount()) for p in pools),
+                    sum(int(p.maxThreadCount()) for p in pools))
         except Exception:                                       # noqa: BLE001
             return 0, 0
 
