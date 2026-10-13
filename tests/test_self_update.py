@@ -16,6 +16,20 @@ from minflux_viewer.core import self_update as su
 from minflux_viewer.core.updater import ReleaseAsset, download_asset, download_url
 
 
+@pytest.fixture(autouse=True)
+def _stage_inside_tmp_path(tmp_path, monkeypatch):
+    """``stage_update`` stages in the system temp folder. Redirect it into
+    ``tmp_path`` so the tests' staging folders do not pile up there (484 had)
+    and anything a hostile archive member would write beside one stays here."""
+    import tempfile
+
+    root = tmp_path / "staging"
+    root.mkdir()
+    real = tempfile.mkdtemp
+    monkeypatch.setattr(su.tempfile, "mkdtemp",
+                        lambda *a, **k: real(*a, **{**k, "dir": str(root)}))
+
+
 # --- download (via file:// so no network) -----------------------------------
 def test_download_url_writes_and_reports_progress(tmp_path):
     src = tmp_path / "payload.bin"
@@ -38,12 +52,41 @@ def test_download_url_rejects_truncated(tmp_path):
         download_url(src.as_uri(), tmp_path / "o.bin", expected_size=999)
 
 
-def test_download_asset_verifies_size(tmp_path):
+def _sha256(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def test_download_asset_verifies_size_and_checksum(tmp_path):
     src = tmp_path / "a.zip"
     src.write_bytes(b"zipbytes-here")
-    asset = ReleaseAsset(name="a.zip", url=src.as_uri(), size=src.stat().st_size)
+    asset = ReleaseAsset(name="a.zip", url=src.as_uri(), size=src.stat().st_size,
+                         digest="sha256:" + _sha256(b"zipbytes-here"))
     out = download_asset(asset, tmp_path / "got.zip")
     assert out.read_bytes() == b"zipbytes-here"
+
+
+def test_a_download_whose_checksum_differs_is_refused_and_removed(tmp_path):
+    """GitHub publishes a SHA-256 per release asset; a self-updater replaces
+    the running executable, so bytes that do not match it are never kept."""
+    src = tmp_path / "a.zip"
+    src.write_bytes(b"tampered")
+    asset = ReleaseAsset(name="a.zip", url=src.as_uri(), size=8,
+                         digest="sha256:" + _sha256(b"original"))
+    dest = tmp_path / "got.zip"
+    with pytest.raises(ValueError, match="checksum"):
+        download_asset(asset, dest)
+    assert not dest.exists()
+
+
+@pytest.mark.parametrize("digest", ["", "md5:0123", "sha256:"])
+def test_an_asset_without_a_sha256_is_not_installed(tmp_path, digest):
+    src = tmp_path / "a.zip"
+    src.write_bytes(b"zipbytes-here")
+    asset = ReleaseAsset(name="a.zip", url=src.as_uri(), size=13, digest=digest)
+    with pytest.raises(ValueError, match="cannot be verified"):
+        download_asset(asset, tmp_path / "got.zip")
+    assert not (tmp_path / "got.zip").exists()
 
 
 # --- find_app_root / stage_update -------------------------------------------
@@ -150,6 +193,46 @@ def test_stage_update_handles_tarball(tmp_path):
     finally:
         import shutil
         shutil.rmtree(extract_dir, ignore_errors=True)
+
+
+def _evil_tarball(tmp_path, member):
+    import io
+    import tarfile
+
+    tgz = tmp_path / "MINFLUX-Viewer-9.9-linux.tar.gz"
+    with tarfile.open(tgz, "w:gz") as tf:
+        info = tarfile.TarInfo(member)
+        info.size = 4
+        tf.addfile(info, io.BytesIO(b"evil"))
+    return tgz
+
+
+def test_a_tarball_member_climbing_out_of_the_staging_folder_is_refused(tmp_path):
+    """``tarfile.extractall`` without a filter writes wherever a member's name
+    points; a release archive must only ever fill its own staging folder.
+    (Staging sits in ``tmp_path``, see the autouse fixture, so a regression
+    writes there rather than next to the real temp folder.)"""
+    import tarfile
+
+    tgz = _evil_tarball(tmp_path, "../../escaped.txt")
+    with pytest.raises(tarfile.FilterError):
+        su.stage_update(tgz, exe_name="minflux_viewer")
+    assert not (tmp_path / "escaped.txt").exists()
+
+
+def test_a_tarball_member_with_an_absolute_path_cannot_land_there(tmp_path):
+    """Unfiltered, an absolute name is joined onto the drive root on Windows
+    (it was: a red run of this test wrote ``C:\\abs\\escaped.txt``). The
+    target here is inside ``tmp_path`` so a regression stays harmless."""
+    import tarfile
+
+    target = tmp_path / "absolute_escape.txt"
+    tgz = _evil_tarball(tmp_path, target.as_posix())
+    # Refused outright on Windows (a drive path); on POSIX the leading slash
+    # is stripped, the member lands inside staging, and there is no exe.
+    with pytest.raises((tarfile.FilterError, FileNotFoundError)):
+        su.stage_update(tgz, exe_name="minflux_viewer")
+    assert not target.exists()
 
 
 def test_is_writable(tmp_path):
