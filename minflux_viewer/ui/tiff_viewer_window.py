@@ -1014,15 +1014,25 @@ class TiffViewerWindow(QWidget):
                 self, "Image export", "This image is already being exported."
             )
             return
-        from ..core.tiff_export import export_image_series_to_tiff
+        from ..core.tiff_export import export_image_series_to_tiff, ome_tiff_path
         from .background_tasks import BackgroundTask, shared_thread_pool
 
         stem = self._source.metadata.image_name or Path(self._source_name()).stem
-        suggested = f"{stem}.tif"
-        path, _filter = QFileDialog.getSaveFileName(
-            self, "Save image as OME-TIFF", suggested, "TIFF image (*.tif *.tiff)")
-        if not path:
+        suggested = str(ome_tiff_path(f"{stem}.tif"))
+        chosen, _filter = QFileDialog.getSaveFileName(
+            self, "Save image as OME-TIFF", suggested,
+            "OME-TIFF (*.ome.tif *.ome.tiff *.tif *.tiff)")
+        if not chosen:
             return
+        # Always an OME-TIFF name: Fiji opens anything else with ImageJ's own
+        # reader, which drops the channel/Z structure and the Z calibration.
+        path = str(ome_tiff_path(chosen))
+        if Path(path) != Path(chosen) and Path(path).exists():
+            answer = QMessageBox.question(
+                self, "Save image as OME-TIFF",
+                f"{Path(path).name} already exists. Replace it?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         roi = self._roi_overlay.current_roi() if self._roi_overlay is not None else None
         self._source_lease.acquire()
 

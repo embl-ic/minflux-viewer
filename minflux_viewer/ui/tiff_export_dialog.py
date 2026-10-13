@@ -21,12 +21,13 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from ..core.tiff_export import TiffExportChannel, export_render_to_tiff
+from ..core.tiff_export import TiffExportChannel, export_render_to_tiff, ome_tiff_path
 
 
 def _coord_spin(value: float) -> QDoubleSpinBox:
@@ -168,12 +169,25 @@ class TiffExportDialog(QDialog):
             current,
             "OME-TIFF (*.ome.tif *.ome.tiff *.tif *.tiff);;All files (*)",
         )
-        if path:
-            self._path_edit.setText(path)
+        if not path:
+            return
+        normalized = ome_tiff_path(path)
+        # The file dialog confirmed an overwrite of the name it was given; ask
+        # again when the OME suffix makes it a different, existing file.
+        if normalized != Path(path) and normalized.exists():
+            answer = QMessageBox.question(
+                self, "Export render to TIFF",
+                f"{normalized.name} already exists. Replace it?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self._path_edit.setText(str(normalized))
 
     def params(self) -> dict:
+        # Always an OME-TIFF name: Fiji opens anything else with ImageJ's own
+        # reader, which flattens the channels and Z into one stack.
+        path = self._path_edit.text().strip()
         return {
-            "path": self._path_edit.text().strip(),
+            "path": str(ome_tiff_path(path)) if path else "",
             "pixel_size_nm": float(self._pixel_spin.value()),
             "voxel_depth_nm": float(self._voxel_spin.value()),
             "z_scaling_factor": float(self._z_scaling_factor_spin.value()) if self._z_scaling_factor_spin is not None else None,
@@ -210,9 +224,11 @@ class TiffExportWorker(QThread):
         x_range: tuple[float, float] | None = None,
         y_range: tuple[float, float] | None = None,
         z_range: tuple[float, float] | None = None,
+        image_name: str | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
+        self._image_name = image_name
         self._channels = channels
         self._path = path
         self._pixel_size_nm = pixel_size_nm
@@ -254,6 +270,7 @@ class TiffExportWorker(QThread):
                 y_range=self._y_range,
                 z_range=self._z_range,
                 progress=report,
+                image_name=self._image_name,
             )
             handle.finish("done")
             self.completed.emit(result)

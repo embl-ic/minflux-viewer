@@ -4928,7 +4928,11 @@ class RenderWindow(QWidget):
             ds = self._state.datasets[ch["dataset_idx"]]
             xyz = self._dataset_locs(ds)
             if xyz.shape[0] > 0:
-                out.append(TiffExportChannel(name=str(ch.get("name") or ds.name), xyz=xyz))
+                # A solid-colour channel carries its colour into the OME-TIFF;
+                # a colormap has no single colour to give.
+                color = _render_solid_rgb(str(ch.get("lut") or self._active_cmap or ""))
+                out.append(TiffExportChannel(name=str(ch.get("name") or ds.name), xyz=xyz,
+                                             color=color))
         return out
 
     def _export_to_tiff(self) -> None:
@@ -5038,6 +5042,7 @@ class RenderWindow(QWidget):
             x_range=params["x_range"],
             y_range=params["y_range"],
             z_range=params["z_range"],
+            image_name=str(getattr(ds0, "name", "") or "") or None,
             parent=None,
         )
         from .background_tasks import retain_qthread
