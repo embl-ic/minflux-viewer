@@ -32,9 +32,11 @@ def _dataset(name, did="", index=0, lut="Red", source=""):
 
 
 def _group():
-    return [_dataset("ch1", "did-1", 0, "Red", r"D:\data\run.msr"),
-            _dataset("ch2", "did-2", 1, "Green", r"D:\data\run.msr"),
-            _dataset("ch3", "did-3", 2, "Blue", r"D:\data\run.msr")]
+    # Forward slashes: a backslash is a path separator only on Windows, and
+    # on Linux or macOS the whole of "D:\data\run.msr" would be one file name.
+    return [_dataset("ch1", "did-1", 0, "Red", "D:/data/run.msr"),
+            _dataset("ch2", "did-2", 1, "Green", "D:/data/run.msr"),
+            _dataset("ch3", "did-3", 2, "Blue", "D:/data/run.msr")]
 
 
 # ---------------------------------------------------------------- naming
@@ -53,7 +55,7 @@ def test_the_folder_is_named_after_what_identifies_the_set():
     assert OS.default_group_name(_group()) == "run"
     # different sources: fall back to the first channel's own name
     mixed = _group()
-    mixed[1].metadata["msr_source_path"] = r"D:\data\other.msr"
+    mixed[1].metadata["msr_source_path"] = "D:/data/other.msr"
     assert OS.default_group_name(mixed) == "ch1"
     assert OS.default_group_name([]) == "overlay"
 
@@ -216,7 +218,7 @@ def test_the_dialog_names_every_channel_and_the_folder(_app):
 
     names = ["1_anti_ELYS", "2_anti_GFP", "3_anti_Nup153"]
     dlg = SaveProcessedDataDialog(names[0], members=names,
-                                  default_dir=r"D:\out\run",
+                                  default_dir="D:/out/run",
                                   prefs={"data": {}, "file": {}})
     try:
         dlg._format.setCurrentIndex(dlg._format.findData("mat"))
