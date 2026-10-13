@@ -26,6 +26,22 @@ def _qt_app(qapp):
     return qapp
 
 
+def _delete_now(win) -> None:
+    """Close *win* and destroy it before the test ends.
+
+    A closed window that still holds an OpenGL view must not be left for the
+    garbage collector: destroyed at an arbitrary later moment, inside another
+    test's event processing, it aborted the process (8 runs of 8 for the 3-D
+    test followed by the next scatter test; 0 of 8 when deleted here).
+    """
+    from PyQt6.QtCore import QCoreApplication, QEvent
+
+    win.close()
+    win.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+    QCoreApplication.processEvents()
+
+
 # --------------------------------------------------------------- the data
 def _two_clusters(n_per: int = 60, gap_nm: float = 800.0, seed: int = 0):
     """Two spatially separate clusters with distinct ``efo``, in nm."""
@@ -236,7 +252,7 @@ def test_scatter_wand_refuses_in_3d_with_the_reason(_qt_app):
         assert kind is None
         assert "2-D" in message
     finally:
-        win.close()
+        _delete_now(win)        # it built an OpenGL view
 
 
 def test_scatter_wand_refuses_a_solid_colour_with_the_reason(_qt_app):
