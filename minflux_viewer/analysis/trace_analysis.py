@@ -984,6 +984,7 @@ def _value_hist_plot(
     x_label: str = "value (nm)",
     y_label: str = "count",
     n_bins: int = 40,
+    clip_percentile: float | None = None,
 ):
     """Anisotropy-style histogram panel of a value distribution (linear axis).
 
@@ -991,6 +992,9 @@ def _value_hist_plot(
     (e.g. localization precision = median per-trace sigma) rather than a
     log-normal fit. Optionally draws a dashed marker at ``marker``. ``y_label``
     must match what each row of ``values`` is (e.g. "traces" vs "localizations").
+    ``clip_percentile`` bins only up to that percentile, so a long sparse tail
+    cannot squeeze the distribution into one bar; the title says how much is
+    shown.
     """
     import pyqtgraph as pg
 
@@ -1006,7 +1010,14 @@ def _value_hist_plot(
     vals = vals[np.isfinite(vals)]
     if vals.size == 0:
         return pw
-    counts, edges = np.histogram(vals, bins=n_bins)
+    hist_range = None
+    if clip_percentile is not None and vals.size > 1:
+        hi = float(np.percentile(vals, clip_percentile))
+        lo = float(vals.min())
+        if hi > lo and hi < float(vals.max()):
+            hist_range = (lo, hi)
+            pw.setTitle(f"{title} ({clip_percentile:g}% shown)")
+    counts, edges = np.histogram(vals, bins=n_bins, range=hist_range)
     centers = 0.5 * (edges[:-1] + edges[1:])
     pw.plot(
         centers, counts,

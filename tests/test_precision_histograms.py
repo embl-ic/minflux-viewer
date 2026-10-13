@@ -22,7 +22,8 @@ pytest.importorskip("pyqtgraph")
 from minflux_viewer.analysis.localization_precision import (  # noqa: E402
     CRLBResultDialog,
     StdDevResultDialog,
-    crlb_precision,
+    crlb_from_inputs,
+    crlb_inputs_from_arrays,
     stddev_per_trace,
 )
 from minflux_viewer.analysis.trace_analysis import (  # noqa: E402
@@ -69,9 +70,10 @@ def test_crlb_dialog_draws_its_three_histograms(qtbot):
     eco = rng.poisson(300, n).astype(float)
     efo = rng.normal(2e4, 2e3, n)
     fbg = np.full(n, 500.0)
-    result = crlb_precision(eco, efo=efo, fbg=fbg, L_nm=75.0,
-                            sigma_q_nm=180.0, L_z_nm=75.0)
-    dialog = CRLBResultDialog(result, eco, efo, fbg, num_dim=3)
+    inputs = crlb_inputs_from_arrays(eco, efo=efo, fbg=fbg, num_dim=3,
+                                     L_nm=75.0, L_z_nm=75.0)
+    result = crlb_from_inputs(inputs, sigma_q_nm=180.0)
+    dialog = CRLBResultDialog(result, inputs)
     qtbot.addWidget(dialog)
     assert _fallback_labels(dialog) == []
     # σ_xy, σ_z (3-D) and the photon count N.

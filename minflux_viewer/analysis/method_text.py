@@ -20,6 +20,7 @@ Pure Python (no Qt) → unit-testable.
 from __future__ import annotations
 
 import html as _html
+import json
 import math
 import re
 from datetime import datetime
@@ -354,6 +355,36 @@ def _render_drift_old(m, ev, state):
             "subtracted."), [CITE_DRIFT_TIME_WINDOWS]
 
 
+_SEPARATION_BASIS = {
+    "final iterations, photon-weighted": (
+        "on its DCR pooled over the iterations that collect its photons, weighted by "
+        "their photon counts (Σ dcr·eco / Σ eco) — the detection-channel fraction of "
+        "the summed photons"),
+    "last iteration": "on its value at the last iteration",
+    "last valid iteration": "on its value at the last valid iteration",
+    "all iterations, sum": "on the sum of its values over all iterations",
+    "all iterations, average": "on the mean of its values over all iterations",
+}
+
+
+def _render_channel_separation(m, ev, state):
+    attr = m.group("by").strip()
+    basis = (m.groupdict().get("basis") or "").strip()
+    what = ("DCR (the fraction of a localization's photons detected in the first "
+            "spectral detection channel)" if attr.lower() == "dcr" else f"'{attr}'")
+    s = (f"Dataset '{m.group('name')}' was separated into {m.group('n')} channel(s) by "
+         f"{what}: each localization was assigned to the channel(s) whose value window "
+         "contains its value")
+    if basis:
+        phrase = _SEPARATION_BASIS.get(basis)
+        if phrase is None and basis.endswith(" iteration"):
+            phrase = f"on its value at the {basis}"
+        s += f", evaluated {phrase or basis}"
+    s += (", and the channels were combined as an overlay of separate datasets "
+          "(no localization coordinates were changed).")
+    return s, []
+
+
 def _render_aggregation(m, ev, state):
     time_mode = m.group("time_mode")
     if time_mode == "first":
@@ -406,23 +437,232 @@ def _render_stddev_auto(m, ev, state):
 
 
 def _render_crlb(m, ev, state):
+    """Read historical logs without repeating their former causal attribution."""
     name = _ds_name(state, ev)
-    s = (
-        f"The theoretical localization precision of '{name}' was computed as the MINFLUX "
-        f"Cramér-Rao lower bound: the median background-limited lateral precision (σ_xy) was "
-        f"{m.group('sxy')} nm ({m.group('ideal')} nm in the ideal, background-free limit)"
-    )
+    background = m.group("kind") == "background-limited"
+    if background:
+        s = (
+            f"A conditional MINFLUX Cramér-Rao lower bound was computed for '{name}' "
+            f"under the targeted-donut model, evaluated per "
+            f"localization with the emitter at the pattern centre: the median "
+            f"background-estimated lateral bound (σ_xy) was {m.group('sxy')} nm "
+            f"({m.group('ideal')} nm in the background-free limit)"
+        )
+    else:
+        s = (
+            f"A conditional MINFLUX Cramér-Rao lower bound was computed for '{name}' "
+            f"under the targeted-donut model, evaluated per localization with the emitter "
+            f"at the pattern centre. No usable background estimate was reported, so only "
+            f"the background-free benchmark was given: a median lateral bound (σ_xy) of "
+            f"{m.group('sxy')} nm; this does not establish zero experimental background"
+        )
     if m.group("sz"):
-        s += f", with an axial precision (σ_z) of {m.group('sz')} nm"
-    s += (f", for a targeting-pattern diameter L = {m.group('L')} nm and a median of "
-          f"{m.group('N')} detected photons.")
+        s += f", with an axial bound (σ_z) of {m.group('sz')} nm"
+    lsrc = m.groupdict().get("lsrc") or ""
+    l_note = f" ({lsrc})" if lsrc else ""
+    ndef = (m.groupdict().get("ndef") or "").split(";")[0].strip()
+    n_note = (" summed over all exposures of the final iteration, the centre included"
+              if ndef == "eco + ecc" else "")
+    s += (f", for a targeted-pattern diameter L = {m.group('L')} nm{l_note} and a median of "
+          f"{m.group('N')} counts treated as detected photons{n_note}. The historical log "
+          "does not verify the instrument's count/rate convention. This is a model lower "
+          "bound, not achieved experimental precision or image resolution.")
+    bgsrc = m.groupdict().get("bgsrc") or ""
+    if background and "centre exposure" in bgsrc:
+        s += (" The centre exposure was used as a background estimate under the centred-"
+              "emitter approximation; emitter offset, imperfect beam zeros and instrument "
+              "count corrections can affect that interpretation.")
+        if "pooled per trace" in bgsrc:
+            s += (" The background and pattern-position rates were pooled per trace "
+                  "(median over its localizations), assuming sufficiently stable background "
+                  "over the trace; this assumption was not established by the pooling.")
+        earlier = re.search(r"centre exposure of iteration (\d+) scaled x([\d.]+)", bgsrc)
+        if earlier:
+            s += (f" The final iteration does not probe the centre, so the rate measured at "
+                  f"iteration {earlier.group(1)} was used, scaled by the ratio of the "
+                  f"excitation powers ({earlier.group(2)}), on the assumption that the "
+                  "transferred background scales with the excitation power. Dark counts "
+                  "and changing emitter signal need not follow that scaling.")
+    elif background and "fbg" in bgsrc:
+        s += " The background was taken from the instrument's background-rate estimate."
+    if background and m.groupdict().get("cov"):
+        s += (f" Background information was available for {m.group('cov')}% of the "
+              "localizations; the median is over those.")
     cites = [CITE_CRLB, CITE_CRLB_MARIN]
     if m.groupdict().get("fl"):
-        s += (f" Relative to the measured per-trace spread (σ_r = {m.group('mr')} nm), an "
-              f"excess error of σ_fl = {m.group('fl')} nm beyond the photon-limited bound "
-              "was identified (STD² = σ_fl² + σ_CRB²), attributable to fluorophore "
-              "flickering, drift, vibration or misalignment rather than photon statistics.")
-        cites.append(CITE_SIMUFLUX)
+        s += (f" The historical event also records a median per-trace spread of "
+              f"{m.group('mr')} nm. Its former quadrature subtraction is not a validated "
+              "physical precision budget: a median trace spread and a median per-"
+              "localization bound do not form an additive variance decomposition. Their "
+              "difference does not identify a noise source or estimator bias.")
+        if float(m.group("mr")) < float(m.group("sxy")):
+            s += " The reported below-bound spread remains unexplained by this comparison."
+    return s, cites
+
+
+def _crlb_finite(value):
+    """A finite recorded number, without treating a missing value as zero."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _crlb_summary_value(provenance, key, summary, pattern):
+    """Prefer structured values; parse the human prefix for transitional logs."""
+    if key in provenance:
+        return _crlb_finite(provenance[key])
+    match = re.search(pattern, summary)
+    return _crlb_finite(match.group(1)) if match else None
+
+
+def _crlb_issues(value):
+    if not isinstance(value, (tuple, list)):
+        return []
+    return [item for item in value if isinstance(item, str) and item.strip()]
+
+
+def _render_crlb_provenance(m, ev, state):
+    """Render a self-contained CRLB v2 snapshot, including refused estimates."""
+    name = _ds_name(state, ev)
+    cites = [CITE_CRLB, CITE_CRLB_MARIN]
+    try:
+        provenance = json.loads(m.group("provenance"))
+    except (TypeError, ValueError):
+        provenance = None
+    if not isinstance(provenance, dict) or provenance.get("schema") != "crlb/v2":
+        return (f"A MINFLUX CRLB calculation was recorded for '{name}', but its "
+                "provenance is invalid or uses an unsupported schema. The numerical "
+                "result cannot be interpreted as a validated precision estimate."), cites
+
+    summary = m.group("summary")
+    s = (f"Conditional MINFLUX Cramér-Rao lower bounds were evaluated for '{name}' "
+         "under a centred-emitter model. These model bounds are not achieved "
+         "experimental precision or image resolution. Lateral σ_xy denotes the "
+         "per-coordinate RMS standard deviation, sqrt((Var(x) + Var(y))/2), "
+         "not lateral radial RMS error.")
+    convention = provenance.get("count_convention")
+    if convention == "detected":
+        s += (" The calculation treats the supplied counts as detected photon counts "
+              "and the supplied total rates as including background.")
+    else:
+        s += (" The input count/rate convention is unknown or incompletely verified; "
+              "numerical bounds remain conditional on the detected-count/total-rate "
+              "interpretation. No automatic background restoration is implied.")
+    L = _crlb_summary_value(provenance, "L_nm", summary, r"\bL = ([^ ]+) nm")
+    sigma_q = _crlb_summary_value(provenance, "sigma_q_nm", summary, r"σ_q = ([^ ]+) nm")
+    median_n = _crlb_summary_value(provenance, "median_n", summary, r"median N = ([^ ]+)")
+    if L is not None:
+        s += f" Lateral pattern diameter L = {_method_number(L)} nm."
+    if sigma_q is not None:
+        s += f" Gaussian-envelope model width σ_q = {_method_number(sigma_q)} nm."
+    if median_n is not None:
+        s += f" Median modeled lateral count N = {_method_number(median_n)}."
+
+    issues = _crlb_issues(provenance.get("issues"))
+    octahedral = False
+    estimated_background = False
+    for axis, symbol in (("xy", "σ_xy"), ("z", "σ_z")):
+        info = provenance.get(axis)
+        if not isinstance(info, dict):
+            continue
+        status = str(info.get("status") or "not recorded")
+        s += f" {axis.upper()} status: {status.replace('_', ' ')}."
+        value = _crlb_summary_value(
+            info, "primary_sigma_nm", summary, rf"{symbol} = ([^ ]+) nm")
+        ideal = _crlb_finite(info.get("median_ideal_nm"))
+        if status in {"invalid_input", "unsupported_geometry", "background_inconsistent"}:
+            s += f" No interpretable {symbol} headline bound is reported for this axis."
+        elif value is not None:
+            s += f" Median {symbol} = {value:.2f} nm."
+        else:
+            s += f" The {symbol} numerical result is unavailable."
+        if ideal is not None and status not in {"invalid_input", "unsupported_geometry"}:
+            s += f" Background-free benchmark {symbol} = {ideal:.2f} nm."
+        if status == "ideal_only":
+            s += " No usable background estimate was available; zero background is not established."
+        geometry_source = info.get("geometry_source")
+        pattern = info.get("pattern")
+        if geometry_source:
+            s += f" Geometry: {geometry_source}."
+        if pattern:
+            s += f" Pattern: {pattern}."
+            octahedral = octahedral or "oct" in str(pattern).lower()
+        iteration = info.get("iteration")
+        if isinstance(iteration, int) and not isinstance(iteration, bool) and iteration >= 0:
+            s += f" Photon iteration: {iteration + 1} (one-based)."
+        coverage = _crlb_finite(info.get("background_coverage"))
+        if coverage is not None:
+            s += (f" Usable background coverage: {100 * coverage:.1f}% of localizations; "
+                  "background-aware medians use that covered subset.")
+            estimated_background = estimated_background or coverage > 0
+        inconsistent = _crlb_finite(info.get("invalid_background_fraction"))
+        if inconsistent is not None and inconsistent > 0:
+            s += (f" Background ≥ orbit rate affected {100 * inconsistent:.1f}% of "
+                  "localizations; these are inconsistent/unbounded background inputs, "
+                  "not evidence of zero background.")
+        issues.extend(_crlb_issues(info.get("issues")))
+    if octahedral:
+        s += (" The octahedral result uses an isotropic three-dimensional quadratic-field "
+              "approximation, not a calibrated anisotropic optical model.")
+    if estimated_background:
+        # Keep the human-readable source, including any centre-reference and
+        # pooling provenance, but do not promote its assumptions to observations.
+        source = re.search(r"background from the ([^);]+)", summary)
+        source_text = source.group(1) if source else ""
+        if source:
+            s += f" Background source: {source_text}."
+        if "centre exposure" in source_text:
+            s += (" Centre exposures are background estimates under the centred-emitter "
+                  "approximation; off-centre fluorescence and count corrections can "
+                  "affect them.")
+        if "centre exposure of iteration" in source_text:
+            s += (" Earlier-centre transfer assumes suitable excitation-power scaling; "
+                  "dark counts and changing emitter signal need not follow that scaling.")
+        if "pooled per trace" in source_text:
+            s += (" Per-trace pooling assumes sufficiently stable background; this "
+                  "assumption is not established by the calculation.")
+
+    comparison = provenance.get("comparison")
+    if isinstance(comparison, dict) and comparison:
+        s += (" Descriptive matched comparison: within each eligible trace, the measured "
+              "coordinate SD and the RMS of its per-localization bounds use the same "
+              "localizations; the reported summaries are medians over the same traces. "
+              "This comparison is not a variance decomposition or a validation of "
+              "stationarity, the observation model, or attainment of the bound.")
+        for axis in ("xy", "z"):
+            item = comparison.get(axis)
+            if not isinstance(item, dict):
+                continue
+            measured = _crlb_finite(item.get("measured_nm"))
+            bound = _crlb_finite(item.get("bound_nm"))
+            if measured is None or bound is None or bound <= 0:
+                s += f" The matched {axis.upper()} comparison is unavailable."
+                continue
+            ratio = _crlb_finite(item.get("ratio"))
+            ratio_text = f", measured/bound = {ratio:.3f}" if ratio is not None else ""
+            s += (f" {axis.upper()}: measured spread {measured:.2f} nm versus matched "
+                  f"bound {bound:.2f} nm{ratio_text}, over "
+                  f"{_method_count(item.get('n_traces'))} traces and "
+                  f"{_method_count(item.get('n_locs'))} localizations.")
+            coverage = _crlb_finite(item.get("coverage"))
+            if coverage is not None:
+                s += f" Matched input-row coverage: {100 * coverage:.1f}%."
+            kind = item.get("bound_kind")
+            if kind:
+                s += f" Comparison bound: {str(kind).replace('_', ' ')}."
+            if measured < bound:
+                s += (" The measured spread is below the modeled bound; this discrepancy "
+                      "is unexplained by the comparison and does not identify its cause.")
+        s += (" No photon-independent error term is inferred, and no quadrature "
+              "subtraction of these summaries is performed.")
+    else:
+        reason = provenance.get("comparison_reason")
+        if isinstance(reason, str) and reason.strip():
+            s += f" Matched comparison omitted: {reason.strip().rstrip('.')}."
+    for issue in dict.fromkeys(issues):
+        s += f" Limitation: {issue.rstrip('.')}."
     return s, cites
 
 
@@ -1490,10 +1730,22 @@ RULES = [
     (re.compile(r"Localization precision \(StdDev per trace\): combined \(n-weighted\) "
                 r"sigma_r = (?P<sr>[\d.]+) nm, sigma_z = (?P<sz>[\d.]+) nm over "
                 r"(?P<used>[\d,]+) of (?P<total>[\d,]+) traces"), "analysis", _render_stddev),
+    # Match structured provenance first, including refused/NaN headline values.
+    # Otherwise a legacy numeric prefix could discard the recorded limitations.
+    (re.compile(r"Localization precision \(CRLB[^)]*\): (?P<summary>.*?); "
+                r"crlb_provenance=(?P<provenance>.+)$"),
+     "analysis", _render_crlb_provenance),
+    # Old lines read "(background-limited)"; current ones name the background
+    # source and coverage, "(no background information)" when there is none, and
+    # the provenance of L and of N in parentheses.
     (re.compile(r"Localization precision \(CRLB[^)]*\): median σ_xy = (?P<sxy>[\d.]+) nm "
-                r"\(background-limited\), (?P<ideal>[\d.]+) nm \(ideal\)"
-                r"(?:, σ_z = (?P<sz>[\d.]+) nm[^,]*)?, L = (?P<L>[\d.]+) nm.*?"
-                r"median N = (?P<N>[\d.]+) photons"
+                r"\((?P<kind>background-limited|no background information)"
+                r"(?:; background from the (?P<bgsrc>[^);]+?)"
+                r"(?: for (?P<cov>\d+)% of localizations)?)?\), "
+                r"(?P<ideal>[\d.]+) nm \(ideal\)"
+                r"(?:, σ_z = (?P<sz>[\d.]+) nm[^,]*)?, L = (?P<L>[\d.]+) nm"
+                r"(?: \((?P<lsrc>[^)]*)\))?.*?"
+                r"median N = (?P<N>[\d.]+) photons(?: \((?P<ndef>[^)]*)\))?"
                 r"(?:; measured σ_r = (?P<mr>[\d.]+) nm \(StdDev/trace\) → "
                 r"excess σ_fl = (?P<fl>[\d.]+) nm)?"), "analysis", _render_crlb),
     (re.compile(r"Localization precision \(FRC\): resolution = (?P<res>[\d.]+) nm "
@@ -1555,6 +1807,10 @@ RULES = [
     (re.compile(r"Estimated (?P<dims>[23])-D drift for '(?P<name>.+?)': (?P<n>\d+) time "
                 r"windows of (?P<T>[\d.]+)s, resolution (?P<s>[\d.]+) nm"),
      "transform", _render_drift_old),
+    # Current form: "… into N channel(s) by <attr> [<basis>] (overlay K)."
+    (re.compile(r"Separated '(?P<name>.+?)' into (?P<n>\d+) channel\(s\) by "
+                r"(?P<by>[^\[(]+?)(?: \[(?P<basis>[^\]]+)\])? \(overlay \d+\)"),
+     "transform", _render_channel_separation),
     (re.compile(r"Duplicated dataset as '(?P<name>.+?)'"), "transform",
      lambda m, ev, st: (f"Dataset '{m.group('name')}' was duplicated.", [])),
     (re.compile(r"Created overlay \d+ with (?P<n>\d+) dataset"), "transform",

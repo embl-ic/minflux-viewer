@@ -107,14 +107,14 @@ def test_crlb_with_axial():
     txt = mt.generate_method_text(_state(), [_ev(CRLB_Z_MSG)])
     assert "Cramér-Rao" in txt
     assert "5.20 nm" in txt
-    assert "axial precision (σ_z) of 12.34 nm" in txt
+    assert "axial bound (σ_z) of 12.34 nm" in txt
     assert mt.CITE_CRLB[1] in txt
 
 
 def test_crlb_without_axial():
     txt = mt.generate_method_text(_state(), [_ev(CRLB_2D_MSG)])
     assert "5.20 nm" in txt
-    assert "axial precision" not in txt  # no σ_z clause for 2-D
+    assert "axial bound" not in txt  # no σ_z clause for 2-D
     assert mt.CITE_CRLB[0] in txt
 
 
@@ -124,11 +124,12 @@ CRLB_BUDGET_MSG = ("Localization precision (CRLB, Marin-Ries): median σ_xy = 5.
                    "excess σ_fl = 7.95 nm.")
 
 
-def test_crlb_precision_budget_excess_cites_simuflux():
+def test_historical_crlb_budget_is_not_repeated_as_physical_attribution():
     txt = mt.generate_method_text(_state(), [_ev(CRLB_BUDGET_MSG)])
-    assert "excess error of σ_fl = 7.95 nm" in txt
-    assert "σ_fl² + σ_CRB²" in txt
-    assert mt.CITE_SIMUFLUX[0] in txt   # SimuFLUX cited only when the budget is present
+    assert "median per-trace spread of 9.50 nm" in txt
+    assert "not a validated physical precision budget" in txt
+    assert "excess error of" not in txt
+    assert "σ_fl² + σ_CRB²" not in txt
     # the plain CRLB line (no budget) must NOT cite SimuFLUX
     assert mt.CITE_SIMUFLUX[0] not in mt.generate_method_text(_state(), [_ev(CRLB_2D_MSG)])
 
