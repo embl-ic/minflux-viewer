@@ -19,6 +19,7 @@ optional:
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from typing import Any
 
@@ -130,6 +131,16 @@ class Run(Namespace):
         label = str(name or getattr(fn, "__name__", "script task"))
         state = self._state
 
+        # The plugin runner marks a plugin as running, and suppresses per-call
+        # macro recording, only while run(ctx) executes -- and that returns as
+        # soon as this task is submitted. The callbacks re-enter the context
+        # they were submitted from; otherwise a result journalled from on_done
+        # is not attributed to the plugin (no method text, no replay line) and
+        # its API calls are recorded as macro steps beside the plugin's own.
+        on_done = self._resumed(on_done)
+        on_error = self._resumed(on_error)
+        on_cancel = self._resumed(on_cancel)
+
         holder: dict[str, Any] = {}
 
         def work(report):
@@ -177,6 +188,27 @@ class Run(Namespace):
 
         shared_thread_pool(self.POOL).start(task)
         return TaskHandle(task)
+
+    def _resumed(self, callback):
+        """*callback*, wrapped to run in the plugin scope and recording
+        suppression that are active now. Unchanged when neither is."""
+        facade = self._facade
+        plugin = getattr(facade, "active_plugin", None)
+        calls = getattr(facade, "calls", None)
+        suppressed = bool(calls is not None and calls.suppressed())
+        if callback is None or (plugin is None and not suppressed):
+            return callback
+
+        def resumed(*args):
+            with contextlib.ExitStack() as stack:
+                if suppressed:
+                    stack.enter_context(calls.suppress())
+                if plugin is not None:
+                    stack.enter_context(facade.plugin_scope(
+                        plugin["id"], plugin.get("label", ""), plugin.get("method")))
+                return callback(*args)
+
+        return resumed
 
     def is_cancelled(self) -> bool:
         """

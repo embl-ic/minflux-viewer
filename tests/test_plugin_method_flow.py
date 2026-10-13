@@ -134,6 +134,71 @@ def test_a_recorded_run_replays_by_pre_answering_the_parameter_dialog(monkeypatc
     assert state.mfv.take_preset_answers() is None
 
 
+def test_a_result_recorded_from_a_background_callback_stays_attributed(
+        spec, monkeypatch, qtbot):
+    """The runner's scope closes when ``run(ctx)`` returns -- which, for a
+    plugin that does its work through ``mfv.run.background``, is before the
+    result exists. The callbacks must run in the scope they were submitted
+    from: attributed to the plugin, and with per-call recording still
+    suppressed, so the plugin stays ONE macro step."""
+    _registered(monkeypatch, spec)
+    state = AppState()
+    mfv = state.mfv
+    seen = {}
+
+    def done(value):
+        seen["suppressed"] = mfv.calls.suppressed()
+        mfv.journal.record("analysis", "Ran the demo",
+                           min_locs=value, band_nm=[8.0, 25.0], ratio=2.0)
+        seen["done"] = True
+
+    with mfv.calls.suppress(), mfv.plugin_scope(
+            "demo.analysis", "Demo analysis", spec):
+        mfv.run.background(lambda ctx: 7, on_done=done)
+    assert mfv.active_plugin is None          # run(ctx) has returned
+
+    qtbot.waitUntil(lambda: "done" in seen, timeout=10_000)
+
+    assert mfv.plugins.last_run("demo.analysis")["min_locs"] == 7
+    assert list(state.journal)[-1].code.startswith(
+        "mfv.plugins.run('demo.analysis', answers=")
+    assert seen["suppressed"] is True
+    # ...and the scope is left again afterwards.
+    assert mfv.active_plugin is None
+    assert not mfv.calls.suppressed()
+
+
+def test_a_background_failure_is_reported_in_the_plugins_scope(
+        spec, monkeypatch, qtbot):
+    _registered(monkeypatch, spec)
+    state = AppState()
+    mfv = state.mfv
+    seen = {}
+
+    def boom(ctx):
+        raise ValueError("no sites")
+
+    with mfv.plugin_scope("demo.analysis", "Demo analysis", spec):
+        mfv.run.background(
+            boom, on_error=lambda exc: seen.setdefault("plugin", mfv.active_plugin))
+
+    qtbot.waitUntil(lambda: "plugin" in seen, timeout=10_000)
+    assert seen["plugin"]["id"] == "demo.analysis"
+
+
+def test_a_plain_scripts_background_callback_is_not_attributed(qtbot):
+    state = AppState()
+    mfv = state.mfv
+    seen = {}
+
+    mfv.run.background(
+        lambda ctx: 1,
+        on_done=lambda _v: seen.update(plugin=mfv.active_plugin, done=True))
+
+    qtbot.waitUntil(lambda: "done" in seen, timeout=10_000)
+    assert seen["plugin"] is None
+
+
 def test_plugins_namespace_lists_describes_and_writes_up_the_last_run(
         spec, monkeypatch):
     _registered(monkeypatch, spec)
