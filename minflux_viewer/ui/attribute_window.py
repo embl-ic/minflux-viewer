@@ -656,12 +656,26 @@ class AttributeWindow(QWidget):
             box_action.triggered.connect(self._set_3d_bounding_box_visible)
 
         menu.addSeparator()
+        menu.addAction("Export figure…", self.export_figure)
         menu.addAction("Reset View", self._reset_view)
 
         source = self.sender()
         if not isinstance(source, QWidget):
             source = self
         menu.exec(source.mapToGlobal(pos))
+
+    def figure_for_export(self):
+        """The view as displayed, for File-quality export (see ui/figure_export)."""
+        from .figure_export import dataset_identity, figure_of
+
+        return figure_of(self._stack, name=self.windowTitle(), is_3d=self._view_mode == "3D",
+                         kind="attribute_plot", view=str(self._view_mode),
+                         **dataset_identity(self._state, self._dataset_idx))
+
+    def export_figure(self) -> None:
+        from .figure_export import export_figure_interactive
+
+        export_figure_interactive(self, self.figure_for_export(), self._state)
 
     def _c_mapping_names(self) -> list[str]:
         """Quantitative defaults followed by application-owned custom maps."""

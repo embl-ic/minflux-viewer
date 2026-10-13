@@ -1715,6 +1715,7 @@ class ScatterWindow(QWidget):
             box_action.triggered.connect(self._set_3d_bounding_box_visible)
 
         menu.addSeparator()
+        menu.addAction("Export figure…", self.export_figure)
         menu.addAction("Reset View", self._reset_view)
 
         sender = self.sender()
@@ -1722,6 +1723,20 @@ class ScatterWindow(QWidget):
             menu.exec(sender.mapToGlobal(pos))
         else:
             menu.exec(self.mapToGlobal(pos))
+
+    def figure_for_export(self):
+        """The view as displayed, for File-quality export (see ui/figure_export)."""
+        from .figure_export import dataset_identity, figure_of
+
+        view = self._axis_combo.currentText()
+        return figure_of(self._stack, name=self.windowTitle(), is_3d=view == "3D",
+                         kind="loc_scatter", view=view,
+                         **dataset_identity(self._state, self._dataset_idx))
+
+    def export_figure(self) -> None:
+        from .figure_export import export_figure_interactive
+
+        export_figure_interactive(self, self.figure_for_export(), self._state)
 
     # ------------------------------------------------------------------
     # Slots & lifecycle

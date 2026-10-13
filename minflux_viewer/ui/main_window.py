@@ -2701,29 +2701,10 @@ class MainWindow(QMainWindow):
 
     def open_file_location(self, path: str) -> None:
         """Reveal a file in the OS file manager (falls back to opening its
-        containing folder). Cross-platform."""
-        import subprocess
-        import sys
+        containing folder). Cross-platform; see :mod:`.file_manager`."""
+        from .file_manager import reveal_in_file_manager
 
-        from PyQt6.QtCore import QUrl
-        from PyQt6.QtGui import QDesktopServices
-
-        p = Path(path)
-        folder = p.parent
-        try:
-            if sys.platform.startswith("win"):
-                # Keep the switch separate from the path.  If they are one
-                # argument, subprocess quotes the whole string when the path
-                # contains spaces ("/select,C:\\some path\\file"), and
-                # Explorer treats it as a location instead of as /select.
-                subprocess.Popen(["explorer.exe", "/select,", str(p)])
-                return
-            if sys.platform == "darwin":
-                subprocess.Popen(["open", "-R", str(p)])
-                return
-        except Exception:
-            pass
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        reveal_in_file_manager(path)
 
     def _populate_plugins_menu(self) -> None:
         """
