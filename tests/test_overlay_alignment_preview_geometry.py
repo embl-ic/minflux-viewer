@@ -321,6 +321,7 @@ def test_apply_with_source_tiles_in_flight_never_shows_a_blank_frame(_qt_app, qt
     qtbot.waitUntil(lambda: window._last_scalar_tile is not None
                     and "(ready)" in window._info_label.text(), timeout=10000)
     target = BLOBS[1]
+    staged = 0
     for attempt in range(3):
         window._manual_align_channel(1)
         qtbot.wait(50)
@@ -329,7 +330,12 @@ def test_apply_with_source_tiles_in_flight_never_shows_a_blank_frame(_qt_app, qt
                                   yRange=(target[1] - span, target[1] + span), padding=0)
         window._update_overlay_alignment_transform(1, -GREEN_OFFSET[0] / 10, 0.0, 0.0)
         window._refresh_alignment_sources()
-        assert window._alignment_tile_plans, "the race needs source tiles in flight"
+        if not window._alignment_tile_plans:
+            # The tiles were already done, so this attempt cannot stage the
+            # race (rare, under load). Try the next span; only fail if none can.
+            window._overlay_alignment_cancel()
+            continue
+        staged += 1
         window._overlay_alignment_apply()
         last = window._last_scalar_tile
         sums = [float(last.sum())]
@@ -345,6 +351,7 @@ def test_apply_with_source_tiles_in_flight_never_shows_a_blank_frame(_qt_app, qt
             time.sleep(0.001)
         assert len(sums) >= 2, "the exact render never landed"
         assert min(sums) > 0.0, f"attempt {attempt}: a blank frame was shown after Apply ({sums})"
+    assert staged, "no attempt had source tiles in flight; the race was never staged"
 
 
 def test_reset_button_after_a_long_move_brings_the_channel_back(_qt_app, qtbot):
