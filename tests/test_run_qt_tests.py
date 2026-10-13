@@ -40,6 +40,16 @@ def test_an_abort_is_told_apart_from_an_internal_error_by_its_report():
     assert runner.outcome(1, "Windows fatal exception: access violation") == "crashed"
 
 
+def test_strict_mode_fails_on_a_crash_even_when_its_retry_passed():
+    """CI is strict: the application is one long-lived process, so a crash is a
+    defect even when a fresh process gets past it. Locally the retry stays a
+    diagnostic and a recovered module does not fail the run."""
+    assert runner.exit_status(failed=0, recovered=0, strict=True) == 0
+    assert runner.exit_status(failed=0, recovered=1, strict=False) == 0
+    assert runner.exit_status(failed=0, recovered=1, strict=True) == 1
+    assert runner.exit_status(failed=1, recovered=0, strict=False) == 1
+
+
 def test_the_report_starts_at_the_crash_not_at_the_last_lines():
     output = "\n".join([*(f"line {i}" for i in range(200)),
                         "Windows fatal exception: access violation",
