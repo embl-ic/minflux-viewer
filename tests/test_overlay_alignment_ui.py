@@ -398,6 +398,7 @@ def test_render_alignment_preview_uses_bilinear_warp_and_frozen_levels(monkeypat
         _manual_levels=None,
     )
     owner._current_render_pixel_size_nm = lambda: 1.0
+    owner._alignment_warp = module.RenderWindow._alignment_warp
     tile = np.arange(64, dtype=np.float32).reshape(8, 8)
 
     module.RenderWindow._transformed_tile(owner, tile, channel)
@@ -463,6 +464,9 @@ def test_render_alignment_preview_rebuilds_only_dirty_channel():
         _channels=[{"visible": True}, {"visible": True}],
         _white_bg=False,
         _last_tile_geometry=(10.0, 60.0, 20.0, 60.0),
+        _overlay_alignment_output=None,
+        _overlay_alignment_preview_geometry=(10.0, 60.0, 20.0, 60.0),
+        _alignment_output_grid=lambda: ((10.0, 60.0, 20.0, 60.0), (4, 5)),
         _image_view=ImageView(),
         _alignment_preview_channel_rgb=channel_rgb,
         _alignment_preview_rgba=lambda rgb, *, white_bg: (
@@ -526,6 +530,7 @@ def test_advanced_render_routes_composition_and_tile_results_behind_preview():
     assert requests == [True]
 
     cached = []
+    sources = []
     result = SimpleNamespace(generation=3, key="tile", array=np.ones((2, 2)))
     owner = SimpleNamespace(
         _precision_scheduler=SimpleNamespace(generation=3),
@@ -535,9 +540,12 @@ def test_advanced_render_routes_composition_and_tile_results_behind_preview():
         _all_active_tiles_cached=lambda: (_ for _ in ()).throw(
             AssertionError("alignment preview must suppress progressive composition")
         ),
+        _compose_alignment_sources=lambda: sources.append(True),
     )
     PrecisionRenderWindow._on_precision_tile_result(owner, result)
     assert cached[0][0] == "tile"
+    # ...and a finished tile feeds the alignment preview's re-rendered sources.
+    assert sources == [True]
 
 
 def test_render_alignment_cancel_dispatches_to_viewer_exact_compositor():

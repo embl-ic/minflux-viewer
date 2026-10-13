@@ -756,7 +756,10 @@ class PrecisionRenderWindow(RenderWindow):
         width = max(int(viewport.width()), 96)
         height = max(int(viewport.height()), 96)
         x0, x1, y0, y1 = bounds
-        target = max((x1 - x0) / width, (y1 - y0) / height)
+        return self._tile_pixel_for_target(max((x1 - x0) / width, (y1 - y0) / height))
+
+    def _tile_pixel_for_target(self, target: float) -> float:
+        """The tile pixel size (a power of two, clipped) for a wanted nm/px."""
         if not np.isfinite(target) or target <= 0.0:
             return 1.0
         pixel_nm = 2.0 ** math.floor(math.log2(target))
@@ -794,16 +797,10 @@ class PrecisionRenderWindow(RenderWindow):
             id(channel.sigma_y_nm),
         )
 
-    def _tile_plan(
-        self, bounds: tuple[float, float, float, float]
-    ) -> tuple[
-        float,
-        tuple[float, float, float, float],
-        tuple[int, int, int, int],
-        dict[int, list[tuple[int, int, tuple]]],
-        list[PrecisionTileRequest],
-    ]:
-        pixel_nm = self._tile_pixel_size_nm(bounds)
+    def _tile_grid(
+        self, bounds: tuple[float, float, float, float], pixel_nm: float
+    ) -> tuple[tuple[float, float, float, float], tuple[int, int, int, int]]:
+        """``(geometry, (row0, row1, col0, col1))`` of the tiles covering *bounds*."""
         tile_span = self._TILE_PX * pixel_nm
         x0, x1, y0, y1 = bounds
         col0 = int(math.floor(x0 / tile_span))
@@ -816,7 +813,61 @@ class PrecisionRenderWindow(RenderWindow):
             row0 * tile_span,
             (row1 + 1) * tile_span,
         )
+        return geometry, (row0, row1, col0, col1)
+
+    def _channel_tile_entries(
+        self,
+        channel: PrecisionChannelData,
+        pixel_nm: float,
+        tile_grid: tuple[int, int, int, int],
+    ) -> tuple[list[tuple[int, int, tuple]], list[PrecisionTileRequest]]:
+        """One channel's tile keys on *tile_grid*, and requests for the missing."""
+        row0, row1, col0, col1 = tile_grid
+        tile_span = self._TILE_PX * pixel_nm
         depth_range = None if self._depth_key() is None else self._depth_range
+        voronoi_field = (
+            self._voronoi_cache.get(self._voronoi_field_key(channel))
+            if self._advanced_render_method == RENDER_METHOD_VORONOI
+            else None
+        )
+        entries: list[tuple[int, int, tuple]] = []
+        missing: list[PrecisionTileRequest] = []
+        for tile_row in range(row0, row1 + 1):
+            for tile_col in range(col0, col1 + 1):
+                key = self._tile_key(channel, pixel_nm, tile_row, tile_col)
+                entries.append((tile_row, tile_col, key))
+                if self._precision_cache.get(key) is None:
+                    tile_bounds = (
+                        tile_col * tile_span,
+                        (tile_col + 1) * tile_span,
+                        tile_row * tile_span,
+                        (tile_row + 1) * tile_span,
+                    )
+                    missing.append(
+                        PrecisionTileRequest(
+                            key=key,
+                            channel=channel,
+                            bounds=tile_bounds,
+                            shape=(self._TILE_PX, self._TILE_PX),
+                            depth_range=depth_range,
+                            render_method=self._advanced_render_method,
+                            fixed_sigma_nm=self._fixed_sigma_for_orientation(),
+                            voronoi_field=voronoi_field,
+                        )
+                    )
+        return entries, missing
+
+    def _tile_plan(
+        self, bounds: tuple[float, float, float, float]
+    ) -> tuple[
+        float,
+        tuple[float, float, float, float],
+        tuple[int, int, int, int],
+        dict[int, list[tuple[int, int, tuple]]],
+        list[PrecisionTileRequest],
+    ]:
+        pixel_nm = self._tile_pixel_size_nm(bounds)
+        geometry, tile_grid = self._tile_grid(bounds, pixel_nm)
         keys_by_dataset: dict[int, list[tuple[int, int, tuple]]] = {}
         missing: list[PrecisionTileRequest] = []
         for ch in self._channels:
@@ -825,46 +876,116 @@ class PrecisionRenderWindow(RenderWindow):
             channel = self._precision_channels.get(ch["dataset_idx"])
             if channel is None or channel.grid is None:
                 continue
-            voronoi_field = (
-                self._voronoi_cache.get(self._voronoi_field_key(channel))
-                if self._advanced_render_method == RENDER_METHOD_VORONOI
-                else None
+            entries, channel_missing = self._channel_tile_entries(
+                channel, pixel_nm, tile_grid
             )
-            entries: list[tuple[int, int, tuple]] = []
-            for tile_row in range(row0, row1 + 1):
-                for tile_col in range(col0, col1 + 1):
-                    key = self._tile_key(channel, pixel_nm, tile_row, tile_col)
-                    entries.append((tile_row, tile_col, key))
-                    if self._precision_cache.get(key) is None:
-                        tile_bounds = (
-                            tile_col * tile_span,
-                            (tile_col + 1) * tile_span,
-                            tile_row * tile_span,
-                            (tile_row + 1) * tile_span,
-                        )
-                        missing.append(
-                            PrecisionTileRequest(
-                                key=key,
-                                channel=channel,
-                                bounds=tile_bounds,
-                                shape=(self._TILE_PX, self._TILE_PX),
-                                depth_range=depth_range,
-                                render_method=self._advanced_render_method,
-                                fixed_sigma_nm=self._fixed_sigma_for_orientation(),
-                                voronoi_field=voronoi_field,
-                            )
-                        )
+            missing.extend(channel_missing)
             keys_by_dataset[channel.dataset_idx] = entries
         return (
             pixel_nm,
             geometry,
-            (row0, row1, col0, col1),
+            tile_grid,
             keys_by_dataset,
             missing,
         )
 
+    # -- manual alignment: sharp per-channel preview sources ---------------
+
+    #: A channel's source region is at most this many output pixels on a
+    #: side; beyond it the preview keeps what it has rather than queue a
+    #: render bigger than the view itself warrants.
+    _ALIGNMENT_SOURCE_MAX_PX = 2048
+
+    def _alignment_sources_renderable(self) -> bool:
+        return self._precision_scheduler is not None and self._render_mode != "image"
+
+    def _cancel_alignment_source_work(self) -> None:
+        # A new generation makes the scheduler (and _on_precision_tile_result)
+        # discard every result requested for the alignment preview.
+        if self._precision_scheduler is not None:
+            self._precision_scheduler.cancel()
+        self._progressive_timer.stop()
+
+    def _refresh_alignment_sources(self) -> None:
+        """Render each channel's preview source for the current view.
+
+        Each channel is planned over its OWN source region -- the view mapped
+        back through its temporary move -- because a channel being brought in
+        from elsewhere has nothing inside the view to sample. Tiles come from
+        the same cache and workers as the exact render, at the preview's
+        output resolution, so the preview sharpens after a zoom.
+        """
+        if self._overlay_alignment_panel is None or self._precision_scheduler is None:
+            return
+        if self._render_mode == "image":
+            return
+        grid = self._overlay_alignment_output or self._alignment_output_grid()
+        if grid is None:
+            return
+        view, out_shape = grid
+        span = max(view[1] - view[0], view[3] - view[2])
+        pixel_nm = self._tile_pixel_for_target(span / float(max(out_shape)))
+        if self._advanced_render_method == RENDER_METHOD_VORONOI and not self._ensure_voronoi_fields():
+            return
+        plans: dict[int, tuple] = {}
+        missing: list[PrecisionTileRequest] = []
+        for ch_idx, ch in enumerate(self._channels):
+            if ch["kind"] != "localizations":
+                continue
+            channel = self._precision_channels.get(ch["dataset_idx"])
+            if channel is None or channel.grid is None:
+                continue
+            bounds = self._alignment_source_bounds(ch_idx, view)
+            if max(bounds[1] - bounds[0], bounds[3] - bounds[2]) / pixel_nm > self._ALIGNMENT_SOURCE_MAX_PX:
+                continue
+            geometry, tile_grid = self._tile_grid(bounds, pixel_nm)
+            entries, channel_missing = self._channel_tile_entries(
+                channel, pixel_nm, tile_grid
+            )
+            plans[ch_idx] = (geometry, tile_grid, entries)
+            missing.extend(channel_missing)
+        self._alignment_tile_plans = plans
+        if not plans:
+            return
+        if missing:
+            self._active_tile_generation = self._precision_scheduler.request(missing)
+        else:
+            self._precision_scheduler.cancel()
+            self._active_tile_generation = self._precision_scheduler.generation
+        self._compose_alignment_sources()
+
+    def _compose_alignment_sources(self) -> None:
+        """Install every planned channel source whose tiles are all ready."""
+        plans = self._alignment_tile_plans
+        if not plans or self._overlay_alignment_panel is None:
+            return
+        installed = False
+        for ch_idx, (geometry, tile_grid, entries) in list(plans.items()):
+            arrays = [self._precision_cache.get(key) for _r, _c, key in entries]
+            if any(array is None for array in arrays):
+                continue
+            row0, row1, col0, col1 = tile_grid
+            raster = np.zeros(
+                ((row1 - row0 + 1) * self._TILE_PX, (col1 - col0 + 1) * self._TILE_PX),
+                dtype=np.float32,
+            )
+            for (tile_row, tile_col, _key), value in zip(entries, arrays):
+                dst_row = (tile_row - row0) * self._TILE_PX
+                dst_col = (tile_col - col0) * self._TILE_PX
+                raster[
+                    dst_row : dst_row + self._TILE_PX,
+                    dst_col : dst_col + self._TILE_PX,
+                ] = value
+            self._set_alignment_source(ch_idx, raster, geometry)
+            plans.pop(ch_idx, None)
+            installed = True
+        if installed:
+            self._request_overlay_alignment_preview(invalidate=False)
+
     def _render(self) -> None:
         self._apply_y_axis_direction()
+        if self._render_alignment_view_change():
+            return
         if self._render_mode == "image":
             super()._render_image_mode()
             return
@@ -962,6 +1083,11 @@ class PrecisionRenderWindow(RenderWindow):
         return np.where(mask[None, :, :], out, 0.0).astype(np.float32)
 
     def _compose_precision_tiles(self, stage: str) -> None:
+        if self._overlay_alignment_panel is not None:
+            # Manual alignment owns the display, and its preview sources own
+            # _last_scalar_tile's role; a progressive re-composite must not
+            # replace either (the pending _progressive_timer reaches here).
+            return
         if self._active_tile_geometry is None or self._active_tile_grid is None:
             return
         row0, row1, col0, col1 = self._active_tile_grid
@@ -1091,6 +1217,7 @@ class PrecisionRenderWindow(RenderWindow):
             return
         self._precision_cache.put(result.key, result.array)
         if self._overlay_alignment_panel is not None:
+            self._compose_alignment_sources()
             return
         if self._all_active_tiles_cached():
             self._progressive_timer.stop()

@@ -21,6 +21,13 @@ ALIGNMENT_HELP_TEXT = (
 )
 
 
+#: How to move the VIEW while left-drag moves the channel. Kept apart from
+#: ALIGNMENT_HELP_TEXT, which the confocal alignment dialog shares.
+VIEW_NAVIGATION_HINT = (
+    "To navigate: scroll wheel zooms, middle-button drag pans, right-click › Reset View"
+)
+
+
 def alignment_help_label(parent: QWidget | None = None) -> QLabel:
     """Return the common, uniformly sized manual-alignment instruction label."""
     label = QLabel(ALIGNMENT_HELP_TEXT, parent)
@@ -101,6 +108,12 @@ class OverlayAlignmentPanel(QWidget):
         self._status = QLabel("", objectName="overlayAlignmentStatus")
         step_row.addWidget(self._status, stretch=1)
         root.addLayout(step_row)
+        # Left-drag is taken by the channel move, so say how the view itself
+        # is still navigated. The preview is redrawn truthfully at any zoom.
+        self._navigation_label = QLabel(VIEW_NAVIGATION_HINT, self)
+        self._navigation_label.setStyleSheet("color: gray; font-size: 11px;")
+        self._navigation_label.setWordWrap(True)
+        root.addWidget(self._navigation_label)
 
         button_row = QHBoxLayout()
         button_row.addStretch(1)
@@ -166,6 +179,13 @@ class OverlayAlignmentPanel(QWidget):
             event.accept()
             return True
         if event_type == QEvent.Type.MouseMove and self._drag_last is not None:
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                # The release went elsewhere (e.g. outside the window). With
+                # mouse tracking on, a plain hover would otherwise keep moving
+                # the channel.
+                self._drag_last = None
+                watched.setCursor(Qt.CursorShape.OpenHandCursor)
+                return super().eventFilter(watched, event)
             current = QPointF(event.position())
             delta_fn = getattr(self._owner, "_overlay_alignment_view_delta", None)
             drag_fn = getattr(self._owner, "_overlay_alignment_drag", None)

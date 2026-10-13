@@ -148,6 +148,32 @@ def identity_matrix4() -> np.ndarray:
     return np.eye(4, dtype=np.float64)
 
 
+def sync_transform_decomposition(record: dict) -> dict:
+    """Refresh the decomposed fields of *record* from its ``matrix_4x4``.
+
+    A bead-alignment record carries ``translation_nm`` / ``z_translation_nm``
+    / ``rotation_2x2`` beside the matrix. A manual-alignment Apply rewrites
+    only the matrix, so without this those copies kept describing the
+    pre-Apply transform -- and the Method-text generator reports them. Only
+    fields the record already has are rewritten; the matrix stays the one
+    authoritative value.
+    """
+    matrix = transform_to_matrix4(record)
+    if matrix is None:
+        return record
+    if "translation_nm" in record:
+        previous = record.get("translation_nm") or []
+        translation = [float(matrix[0, 3]), float(matrix[1, 3])]
+        if len(previous) > 2:
+            translation.append(float(matrix[2, 3]))
+        record["translation_nm"] = translation
+    if "z_translation_nm" in record:
+        record["z_translation_nm"] = float(matrix[2, 3])
+    if "rotation_2x2" in record:
+        record["rotation_2x2"] = np.asarray(matrix[:2, :2], dtype=np.float64).tolist()
+    return record
+
+
 def manual_alignment_matrix4(transform: dict | None, orientation: str = "XY") -> np.ndarray:
     """Build a temporary translation/rotation matrix for an overlay layer."""
     transform = transform if isinstance(transform, dict) else {}
