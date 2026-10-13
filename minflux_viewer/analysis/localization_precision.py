@@ -77,7 +77,7 @@ def stddev_per_trace(
     min_locs: int = MIN_LOCS_PER_TRACE,
 ) -> dict:
     """
-    Compute the per-trace localization precision (Schmidt et al. 2022).
+    Compute the per-trace localization precision (Ostersehlt et al. 2022).
 
     For every trace (one molecule observed n times) the sample standard
     deviation of each raw coordinate is
@@ -844,10 +844,10 @@ def crlb_precision(
     L = float(L_nm)
     sq = float(sigma_q_nm)
     Lz = None if L_z_nm is None or L_z_nm <= 0 else float(L_z_nm)
+    # An unknown count convention is carried by ``count_convention`` itself; the
+    # dialog and the method text state it from that field, so it is not repeated
+    # here in other words.
     issues = list(background_notes)
-    if count_convention == "unknown":
-        issues.append("Input count/rate convention is not fully established; values are conditional, "
-                      "with no automatic background restoration into eco/efo.")
     if ecc_v is not None and np.any(np.isfinite(ecc_v) & (ecc_v < 0)):
         issues.append("Negative ecc values indicate correction/bookkeeping rather than detected "
                       "centre photons; they are not added to N. The count convention is uncertain.")
@@ -897,6 +897,12 @@ def crlb_precision(
         unsupported_xy = unsupported_xy or "No supported lateral geometry factor."
     if Lz is not None and not (np.isfinite(Gz) and Gz > 0):
         unsupported_z = unsupported_z or "No supported axial geometry factor."
+    # An unsupported pattern's geometry factor is unknown, so even the
+    # zero-background benchmark is undefined: never the planar-orbit default.
+    if unsupported_xy:
+        G = float("nan")
+    if unsupported_z:
+        Gz = float("nan")
 
     sigma_ideal = L * G / (4.0 * np.sqrt(n) * grad_denom)
 
@@ -1192,11 +1198,11 @@ def crlb_inputs_for_dataset(ds, *, prefs=None) -> dict | None:
                     and float(np.mean(np.isfinite(ref) & (ref > 0))) >= _REFERENCE_MIN_COVERAGE):
                 scale = p_now / p_ref
                 ch["efc_ref"] = ref * scale
+                # The power-scaling assumption this rests on is stated by the
+                # dialog and the method text wherever ``centre_reference`` is
+                # used, so it is not added to the notes a second time.
                 ch["centre_reference"] = (
                     f"iteration {k + 1} scaled x{scale:.2f} by the laser power")
-                ch["notes"].append(
-                    "Earlier centre transfer assumes background scales with laser power; "
-                    "dark counts and emitter motion/brightness changes may violate this.")
                 if sensing is True:
                     ref_counts = _strict("ecc", k)
                     ref_bg = _strict("fbg", k)
@@ -1400,8 +1406,10 @@ def crlb_log_line(result: CRLBResult, measured: dict | None = None) -> str:
     budget_txt = ""
     if comparison and "xy" in comparison:
         m = comparison["xy"]
+        ratio = m.get("ratio")
         budget_txt = (f"; matched trace comparison: measured σ_r = {m['measured_nm']:.2f} nm, "
-                      f"RMS bound = {m['bound_nm']:.2f} nm, measured/bound = {m['ratio']:.3f}")
+                      f"RMS bound = {m['bound_nm']:.2f} nm"
+                      + (f", measured/bound = {ratio:.3f}" if ratio is not None else ""))
     n_def = "eco + ecc" if result.counts_centre else "eco"
     if result.has_z and result.per_dimension_photons and np.isfinite(result.median_n_z):
         n_txt = (f"median N = {result.median_n:.0f} photons ({n_def}; final lateral "
@@ -2271,6 +2279,10 @@ class CRLBResultDialog(QDialog):
             "<i>arXiv</i>:2410.12427 (2024)</a> (Eq. 44/45 lateral, Eq. 28/29 axial)",
             "<a href='https://doi.org/10.1126/science.aak9913'>Balzarotti "
             "<i>et al.</i>, <i>Science</i> 355:606 (2017)</a>",
+            # The parameters below name both of its conventions: L = patGeoFactor
+            # × 360 nm and the default σ_q of its analytic 2-D donut.
+            "<a href='https://doi.org/10.1038/s41467-025-66952-w'>Marin &amp; Ries, "
+            "<i>Nat. Commun.</i> 17:246 (2026)</a> (SimuFLUX: pattern scale, donut width)",
         ]
         if result.donut_envelope and abs(result.geometry_factor - _SQRT2) < 1e-9:
             xy_formula = (

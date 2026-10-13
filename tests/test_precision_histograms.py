@@ -81,7 +81,7 @@ def test_crlb_dialog_draws_its_three_histograms(qtbot):
 
 
 @pytest.mark.parametrize("colour_form", ["hex", "qcolor", "rgb", "rgba"])
-def test_value_hist_plot_accepts_every_colour_form_the_app_produces(colour_form):
+def test_value_hist_plot_accepts_every_colour_form_the_app_produces(qapp, colour_form):
     """The registry hands out QColor/tuples and the literals hand out hex; the
     helper must not care, because the alpha is its business, not the caller's."""
     from PyQt6.QtGui import QColor
@@ -96,7 +96,7 @@ def test_value_hist_plot_accepts_every_colour_form_the_app_produces(colour_form)
     assert len(curves[0].getData()[0]) == 40          # default n_bins
 
 
-def test_plot_color_and_fill_brush_normalise_consistently():
+def test_plot_color_and_fill_brush_normalise_consistently(qapp):
     from PyQt6.QtGui import QColor
 
     for spec in ("#ff0000", QColor(255, 0, 0), (255, 0, 0)):
@@ -109,7 +109,7 @@ def test_plot_color_and_fill_brush_normalise_consistently():
     assert source.alpha() == 255
 
 
-def test_an_empty_distribution_returns_a_plot_rather_than_raising():
+def test_an_empty_distribution_returns_a_plot_rather_than_raising(qapp):
     """A dialog must still lay out when a distribution is all-NaN."""
     widget = _value_hist_plot("t", np.full(10, np.nan), "#35d07f")
     assert widget is not None
