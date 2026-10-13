@@ -25,7 +25,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:     # Python 3.10: tomllib arrived in 3.11
+    import tomli as tomllib  # the same API, declared for python < 3.11
 
 from .method import MethodError, parse_method_spec
 

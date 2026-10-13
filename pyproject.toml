@@ -20,6 +20,7 @@ classifiers = [
 
 [tool.poetry.dependencies]
 python    = ">=3.10,<3.13"
+tomli     = { version = ">=1.1.0", python = "<3.11" }   # tomllib before 3.11 (plugin manifests)
 PyQt6     = ">=6.5"
 numpy     = ">=1.24"
 scipy     = ">=1.11"
