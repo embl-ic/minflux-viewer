@@ -51,10 +51,48 @@ ProgressFn = Callable[[int, int, str], None]
 
 @dataclass
 class TiffExportChannel:
-    """One render channel to export: a display name and (N, 3) XYZ in nm."""
+    """One render channel to export: a display name and (N, 3) XYZ in nm.
+
+    *color* is the channel's display colour as RGB in ``[0, 1]`` when it is drawn
+    in one solid colour, written as the OME ``Channel/@Color`` so a reader can
+    show the channels as the render did; ``None`` (a colormap) writes none.
+    """
 
     name: str
     xyz: np.ndarray
+    color: tuple[float, float, float] | None = None
+
+
+#: Suffixes that mark a TIFF as OME-TIFF, longest first.
+OME_TIFF_SUFFIXES = (".ome.tiff", ".ome.tif")
+
+
+def ome_tiff_path(path: str | Path) -> Path:
+    """*path* with an OME-TIFF suffix: ``x.tif`` → ``x.ome.tif``, ``x`` → ``x.ome.tif``.
+
+    ⚠ The suffix is not cosmetic. ImageJ's ``Opener`` hands a TIFF to
+    Bio-Formats only when its name ends in ``.ome.tif``; any other name goes to
+    ImageJ's own TIFF reader, which ignores the OME-XML and opens a ``CZYX``
+    stack as one flat stack of C×Z slices with a 1 µm Z step (verified in Fiji
+    1.54p / Bio-Formats 8.1: the same bytes named ``.ome.tif`` open as C=2, Z=6
+    with the exported voxel size). So *File › Open* and a drop onto Fiji only
+    get the channels and Z right with this suffix.
+    """
+    path = Path(path)
+    lower = path.name.lower()
+    if lower.endswith(OME_TIFF_SUFFIXES):
+        return path
+    for suffix in (".tiff", ".tif"):
+        if lower.endswith(suffix):
+            return path.with_name(path.name[: -len(suffix)] + ".ome" + path.name[-len(suffix):])
+    return path.with_name(path.name + ".ome.tif")
+
+
+def ome_color(rgb: Sequence[float]) -> int:
+    """OME ``Color``: RGBA packed into a *signed* 32-bit integer (alpha opaque)."""
+    r, g, b = (int(round(min(max(float(v), 0.0), 1.0) * 255)) for v in rgb[:3])
+    value = (r << 24) | (g << 16) | (b << 8) | 0xFF
+    return value - (1 << 32) if value >= (1 << 31) else value
 
 
 @dataclass
@@ -79,6 +117,7 @@ def write_ome_tiff(
     pixel_size_y_nm: float | None = None,
     pixel_size_z_nm: float | None = None,
     channel_names: Sequence[str] | None = None,
+    channel_colors: Sequence[Sequence[float] | None] | None = None,
     image_name: str | None = None,
     acquisition_date: str | None = None,
     description: str | None = None,
@@ -103,6 +142,11 @@ def write_ome_tiff(
     OBF image-series export both go through it, so their output carries the same
     metadata and BigTIFF handling.
 
+    *channel_colors* — one RGB in ``[0, 1]`` or ``None`` per channel — goes out
+    as each OME ``Channel/@Color``; a ``None`` entry omits it for that channel.
+    Bio-Formats applies these colours in its *Composite* and *Colorized* colour
+    modes (its *Default* mode keeps its own red/green/… sequence).
+
     *compression* defaults to :data:`TIFF_COMPRESSION` (lossless zlib). Pass
     ``None`` for an uncompressed file.
     """
@@ -116,7 +160,19 @@ def write_ome_tiff(
         if value:
             metadata[f"PhysicalSize{key}"] = float(value)
             metadata[f"PhysicalSize{key}Unit"] = "nm"
-    if channel_names:
+    if channel_colors and any(c is not None for c in channel_colors):
+        # Per-channel dicts, so a channel without a solid colour omits Color.
+        n = max(len(channel_colors), len(channel_names or ()))
+        entries: list[dict[str, object]] = []
+        for i in range(n):
+            entry: dict[str, object] = {}
+            if channel_names and i < len(channel_names):
+                entry["Name"] = str(channel_names[i])
+            if i < len(channel_colors) and channel_colors[i] is not None:
+                entry["Color"] = ome_color(channel_colors[i])
+            entries.append(entry)
+        metadata["Channel"] = entries
+    elif channel_names:
         metadata["Channel"] = {"Name": list(channel_names)}
     if image_name:
         metadata["Name"] = str(image_name)
@@ -309,6 +365,7 @@ class _ChannelBins:
     xb: np.ndarray
     yb: np.ndarray
     zb: np.ndarray
+    color: tuple[float, float, float] | None = None
 
 
 def _finite_xyz(xyz: np.ndarray) -> np.ndarray:
@@ -339,6 +396,7 @@ def export_render_to_tiff(
     y_range: tuple[float, float] | None = None,
     z_range: tuple[float, float] | None = None,
     progress: ProgressFn | None = None,
+    image_name: str | None = None,
 ) -> TiffExportResult:
     """Write the localization render of ``channels`` to a multipage OME-TIFF.
 
@@ -349,17 +407,22 @@ def export_render_to_tiff(
     spans the range; when ``None`` the data extent on that axis is used. Pages
     are streamed one at a time (the full volume is never materialized), and
     ``progress`` — when given — is called once per written page.
+
+    Every channel's name, and its colour when it has a solid one, go into the
+    OME ``Channel`` elements; *image_name* names the OME ``Image``. *path* is
+    written as given — pass it through :func:`ome_tiff_path` first if it should
+    open correctly in Fiji (see there).
     """
     pixel_size_nm = float(pixel_size_nm)
     if not np.isfinite(pixel_size_nm) or pixel_size_nm <= 0.0:
         raise ValueError("pixel_size_nm must be a positive, finite value")
 
-    finite = [(ch.name, _finite_xyz(ch.xyz)) for ch in channels]
-    finite = [(name, xyz) for name, xyz in finite if xyz.shape[0] > 0]
+    finite = [(ch.name, _finite_xyz(ch.xyz), getattr(ch, "color", None)) for ch in channels]
+    finite = [(name, xyz, color) for name, xyz, color in finite if xyz.shape[0] > 0]
     if not finite:
         raise ValueError("no finite localizations to export")
 
-    all_xyz = np.vstack([xyz for _name, xyz in finite])
+    all_xyz = np.vstack([xyz for _name, xyz, _color in finite])
     data_mins = all_xyz.min(axis=0)
     data_maxs = all_xyz.max(axis=0)
 
@@ -370,8 +433,8 @@ def export_render_to_tiff(
     use_z = bool(is_3d) and voxel_depth_nm > 0.0 and (z_hi - z_lo) > 1.0
 
     # Clip each channel to the export box; drop channels left empty.
-    clipped: list[tuple[str, np.ndarray]] = []
-    for name, xyz in finite:
+    clipped: list[tuple[str, np.ndarray, tuple[float, float, float] | None]] = []
+    for name, xyz, color in finite:
         m = (
             (xyz[:, 0] >= x_lo) & (xyz[:, 0] <= x_hi)
             & (xyz[:, 1] >= y_lo) & (xyz[:, 1] <= y_hi)
@@ -380,7 +443,7 @@ def export_render_to_tiff(
             m &= (xyz[:, 2] >= z_lo) & (xyz[:, 2] <= z_hi)
         sub = xyz[m]
         if sub.shape[0] > 0:
-            clipped.append((name, sub))
+            clipped.append((name, sub, color))
     if not clipped:
         raise ValueError("no localizations fall inside the selected export range")
     finite = clipped
@@ -402,11 +465,11 @@ def export_render_to_tiff(
 
     # Digitize once per channel; reused for the max pre-pass and the write pass.
     binned: list[_ChannelBins] = []
-    for name, xyz in finite:
+    for name, xyz, color in finite:
         xb = _bin_index(xyz[:, 0], x_edges, nx)
         yb = _bin_index(xyz[:, 1], y_edges, ny)
         zb = _bin_index(xyz[:, 2], z_edges, nz) if use_z else np.zeros(xyz.shape[0], dtype=np.int64)
-        binned.append(_ChannelBins(name=name, xb=xb, yb=yb, zb=zb))
+        binned.append(_ChannelBins(name=name, xb=xb, yb=yb, zb=zb, color=color))
 
     # Global max voxel count → bit depth (memory O(N), never builds the volume).
     max_count = 0
@@ -451,7 +514,9 @@ def export_render_to_tiff(
         path, _pages(), axes=axes, shape=shape, dtype=dtype,
         pixel_size_x_nm=pixel_size_nm, pixel_size_y_nm=pixel_size_nm,
         pixel_size_z_nm=voxel_depth_nm if use_z else None,
-        channel_names=[cb.name for cb in binned] if multi else None,
+        channel_names=[cb.name for cb in binned],
+        channel_colors=[cb.color for cb in binned],
+        image_name=image_name,
     )
 
     return TiffExportResult(

@@ -6,6 +6,8 @@ from minflux_viewer.core.tiff_export import (
     build_edges,
     choose_dtype,
     export_render_to_tiff,
+    ome_color,
+    ome_tiff_path,
     write_ome_tiff,
 )
 
@@ -247,3 +249,70 @@ def test_export_empty_raises(tmp_path):
             voxel_depth_nm=10.0,
             is_3d=False,
         )
+
+
+@pytest.mark.parametrize("given, expected", [
+    ("a/run.ome.tif", "a/run.ome.tif"),
+    ("a/run.OME.TIFF", "a/run.OME.TIFF"),
+    ("a/run.tif", "a/run.ome.tif"),
+    ("a/run.tiff", "a/run.ome.tiff"),
+    ("a/run.TIF", "a/run.ome.TIF"),
+    ("a/run", "a/run.ome.tif"),
+    ("a/run.v2", "a/run.v2.ome.tif"),
+])
+def test_ome_tiff_path_gives_the_suffix_fiji_routes_to_bio_formats(given, expected):
+    # ImageJ hands a TIFF to Bio-Formats only for a .ome.tif name; any other
+    # name opens a CZYX export as one flat stack (measured in Fiji 1.54p).
+    from pathlib import Path
+
+    assert ome_tiff_path(given) == Path(expected)
+
+
+def test_ome_color_is_signed_rgba():
+    assert ome_color((1.0, 0.0, 1.0)) == -16711681          # 0xFF00FFFF
+    assert ome_color((0.0, 1.0, 1.0)) == 0x00FFFFFF
+    assert ome_color((0.0, 0.0, 0.0)) == 0xFF                # opaque black
+    assert ome_color((2.0, -1.0, 0.5)) == ome_color((1.0, 0.0, 0.5))   # clamped
+
+
+def test_channel_names_and_solid_colours_reach_the_ome_xml(tmp_path):
+    rng = np.random.default_rng(3)
+    a = rng.normal(100.0, 20.0, (300, 3))
+    b = rng.normal(300.0, 20.0, (300, 3))
+    c = rng.normal(500.0, 20.0, (300, 3))
+    out = tmp_path / "coloured.ome.tif"
+    result = export_render_to_tiff(
+        [TiffExportChannel("magenta", a, color=(1.0, 0.0, 1.0)),
+         TiffExportChannel("hot map", b, color=None),
+         TiffExportChannel("cyan", c, color=(0.0, 1.0, 1.0))],
+        out, pixel_size_nm=10.0, voxel_depth_nm=25.0, is_3d=True,
+        image_name="my dataset",
+    )
+    assert result.axes == "CZYX" and result.n_channels == 3
+    import xml.etree.ElementTree as ET
+
+    with tifffile.TiffFile(out) as tf:
+        root = ET.fromstring(tf.ome_metadata)
+    ns = {"o": root.tag.split("}")[0].strip("{")}
+    image = root.find("o:Image", ns)
+    assert image.get("Name") == "my dataset"
+    pixels = image.find("o:Pixels", ns)
+    assert (pixels.get("SizeC"), pixels.get("DimensionOrder")) == ("3", "XYZCT")
+    channels = pixels.findall("o:Channel", ns)
+    assert [ch.get("Name") for ch in channels] == ["magenta", "hot map", "cyan"]
+    # A colormap channel has no single colour, so it omits the attribute.
+    assert [ch.get("Color") for ch in channels] == ["-16711681", None, str(0x00FFFFFF)]
+
+
+def test_single_channel_export_is_named(tmp_path):
+    xyz = np.random.default_rng(4).normal(50.0, 10.0, (200, 3))
+    out = tmp_path / "one.ome.tif"
+    export_render_to_tiff([TiffExportChannel("only", xyz)], out,
+                          pixel_size_nm=5.0, voxel_depth_nm=5.0, is_3d=False)
+    from minflux_viewer.core.tiff_source import TiffImageSource
+
+    src = TiffImageSource(out)
+    try:
+        assert src.metadata.channel_names == ("only",)
+    finally:
+        src.close()
