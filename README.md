@@ -116,11 +116,12 @@ NumPy/SciPy (computation), zarr, h5py, and tifffile (I/O), and msr-reader
 (`poetry install`) and tested with `pytest`. Releases are built with `pyinstaller`.
 
 Build the Windows one-folder executable from the Poetry environment—not from a
-global Python installation:
+global Python installation. PyInstaller is pinned in the optional `build`
+dependency group and locked in `poetry.lock`, so the build is reproducible:
 
 ```powershell
-poetry sync
-.\.venv\Scripts\python.exe -m pip install pyinstaller==6.19.0
+poetry sync --with build
+.\.venv\Scripts\python.exe tools\vendor_pip.py    # generated build input
 .\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm minflux_viewer.spec
 ```
 

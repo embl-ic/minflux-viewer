@@ -98,7 +98,9 @@ def test_spec_guards_against_incomplete_build_environment() -> None:
     assert '"PyQt6": "PyQt6"' in source
     assert "importlib.util.find_spec(module)" in source
     assert "Build interpreter: {sys.executable}" in source
-    assert "python.exe -m pip install pyinstaller==6.19.0" in source
+    # PyInstaller comes from the locked "build" group, not an ad-hoc pip install.
+    assert "poetry sync --with build" in source
+    assert "pip install pyinstaller" not in source
     assert "python.exe -m PyInstaller --clean --noconfirm" in source
 
 
