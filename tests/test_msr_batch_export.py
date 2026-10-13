@@ -1074,9 +1074,18 @@ def test_export_conflict_modes_error_skip_and_overwrite(tmp_path, monkeypatch):
     run("skip")
     assert {p: p.stat().st_mtime_ns for p in tmp_path.glob("*.mat")} == stamps
 
-    # Overwrite actually rewrites them.
+    # Overwrite actually rewrites them. The files are back-dated first: a
+    # rewrite landing in the same filesystem timestamp tick as the first write
+    # would otherwise look untouched (measured ~20 % of runs on Windows).
+    import os
+    hour_ns = 3_600_000_000_000
+    for p in tmp_path.glob("*.mat"):
+        st = p.stat()
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns - hour_ns))
+    backdated = {p: p.stat().st_mtime_ns for p in tmp_path.glob("*.mat")}
     run("overwrite")
-    assert {p: p.stat().st_mtime_ns for p in tmp_path.glob("*.mat")} != stamps
+    after = {p: p.stat().st_mtime_ns for p in tmp_path.glob("*.mat")}
+    assert all(after[p] > backdated[p] for p in backdated)
     assert sorted(p.name for p in tmp_path.glob("*.mat")) == produced
 
 
