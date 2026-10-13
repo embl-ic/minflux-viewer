@@ -8896,9 +8896,12 @@ class MainWindow(QMainWindow):
         ds = self._state.datasets[idx]
         self.setWindowTitle(f"{self.APP_NAME}  —  {ds.name}")
         # Report the active dataset to the Log (skip consecutive duplicates from
-        # window-focus re-emits).
-        if getattr(self, "_last_active_log_idx", None) != idx:
-            self._last_active_log_idx = idx
+        # window-focus re-emits). Compared by identity, not index: closing an
+        # earlier dataset shifts the active one's index without changing it.
+        # A weak reference, so a closed dataset is not kept alive by the log.
+        last = getattr(self, "_last_active_log_ds", None)
+        if last is None or last() is not ds:
+            self._last_active_log_ds = weakref.ref(ds)
             self._state.log(f"Active dataset: '{ds.name}'")
 
     # ------------------------------------------------------------------

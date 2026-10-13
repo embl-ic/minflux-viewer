@@ -923,25 +923,44 @@ class AppState(QObject):
         return idx
 
     def remove_dataset(self, idx: int) -> None:
-        """Remove the dataset at *idx* and update the active index."""
+        """Remove the dataset at *idx* and keep the active dataset tracked.
+
+        Closing a dataset listed before the active one shifts the active one
+        down; closing the active one makes the dataset that takes its place
+        (or, for the last one, the one before it) active. Either way
+        ``active_changed`` announces the new index: it carries an index, and
+        index-keyed listeners would otherwise point at the wrong dataset.
+
+        The new active index is settled BEFORE ``dataset_removed`` is emitted,
+        as ``add_dataset`` does, because its handlers read ``active_dataset``.
+        ``active_changed`` follows it, once the registries are re-keyed.
+        """
         if not (0 <= idx < len(self._datasets)):
             return
 
+        old_active = self._active_idx
         self._datasets.pop(idx)
-        self.dataset_removed.emit(idx)
 
         if not self._datasets:
             self._active_idx = None
+            self.dataset_removed.emit(idx)
             self.status_message.emit("No data loaded.")
             self.log("All datasets removed.", "INFO")
             return
 
-        # Clamp active index if it pointed at or past the removed entry
-        if self._active_idx is not None:
-            new_active = min(self._active_idx, len(self._datasets) - 1)
-            if new_active != self._active_idx:
-                self._active_idx = new_active
-                self.active_changed.emit(new_active)
+        new_active = old_active
+        if old_active is not None:
+            if idx < old_active:
+                new_active = old_active - 1
+            elif idx == old_active:
+                new_active = min(old_active, len(self._datasets) - 1)
+        self._active_idx = new_active
+        self.dataset_removed.emit(idx)
+
+        if new_active is not None and (new_active != old_active or idx == old_active):
+            self.active_changed.emit(new_active)
+            self.status_message.emit(
+                f"Active: {self._datasets[new_active].summary()}")
 
     def set_active(self, idx: int) -> None:
         """Make the dataset at *idx* the active one."""
