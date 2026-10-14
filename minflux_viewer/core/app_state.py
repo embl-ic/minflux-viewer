@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import QObject, QSettings, pyqtSignal
+from PyQt6.QtCore import QObject, QSettings, pyqtBoundSignal, pyqtSignal
 
 from ..colors import (
     DEFAULT_COLOR_PREFS,
@@ -36,6 +36,14 @@ from ..colors import (
 )
 from . import formats as _formats
 from .dataset import MinfluxDataset
+from .dataset_events import (
+    ActiveDatasetChanged,
+    ChangeAspect,
+    DatasetAdded,
+    DatasetChanged,
+    DatasetRemoved,
+    ManualAlignmentRequested,
+)
 from .dataset_key import DatasetEntry, DatasetKey
 
 if TYPE_CHECKING:
@@ -736,6 +744,27 @@ def _migrate_prefs(prefs: dict) -> dict:
 # AppState
 # ---------------------------------------------------------------------------
 
+class DatasetEvents(QObject):
+    """The typed dataset events of an ``AppState`` (``core/dataset_events.py``).
+
+    One signal for each index signal of ``AppState``, emitted right after it,
+    carrying an event that names the dataset by key rather than by position.
+    The two differ in one place, on purpose: ``active_changed`` here fires only
+    when the active *dataset* changes, not when closing an earlier dataset
+    merely shifts its position (``removed`` says what moved).
+    """
+
+    added = pyqtSignal(object)                  # DatasetAdded
+    removed = pyqtSignal(object)                # DatasetRemoved
+    active_changed = pyqtSignal(object)         # ActiveDatasetChanged
+    filter_changed = pyqtSignal(object)         # DatasetChanged
+    attributes_changed = pyqtSignal(object)     # DatasetChanged
+    roi_selection_changed = pyqtSignal(object)  # DatasetChanged
+    calibration_changed = pyqtSignal(object)    # DatasetChanged
+    overlay_transform_changed = pyqtSignal(object)  # DatasetChanged
+    overlay_manual_alignment_requested = pyqtSignal(object)  # ManualAlignmentRequested
+
+
 class AppState(QObject):
     """
     Single source of truth for all application state.
@@ -763,6 +792,10 @@ class AppState(QObject):
         between tracking-aware views. ``source`` prevents feedback loops.
     status_message(str)
         Short text for the main-window status bar.
+
+    The dataset signals above carry an index. ``dataset_events`` carries the
+    same notifications as typed events naming the dataset by key; the index
+    signals stay until every listener has moved to them.
     """
 
     dataset_added   = pyqtSignal(int)
@@ -786,6 +819,7 @@ class AppState(QObject):
     # ------------------------------------------------------------------
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        self.dataset_events = DatasetEvents(self)
         self._datasets: list[MinfluxDataset] = []
         # Each dataset's key, in list order (stabilization Phase 3). The active
         # dataset is tracked by key; ``_active_idx`` is derived from it.
@@ -910,6 +944,26 @@ class AppState(QObject):
             raise IndexError(f"no dataset at position {idx}")
         self._active_key = entries[idx].key
 
+    def _announce_active_change(self, previous: DatasetKey | None) -> None:
+        """Emit ``dataset_events.active_changed`` if the active dataset changed."""
+        key = self._active_key
+        if key != previous:
+            self.dataset_events.active_changed.emit(ActiveDatasetChanged(
+                key=key, dataset=self.dataset_for(key), previous_key=previous))
+
+    def _announce_removal(self, entry: DatasetEntry, old_index: int) -> None:
+        """Emit ``dataset_events.removed``; the registry is settled by then."""
+        self.dataset_events.removed.emit(DatasetRemoved(
+            key=entry.key, dataset=entry.dataset, old_index=old_index,
+            new_active_key=self._active_key))
+
+    def _announce_change(
+            self, signal: pyqtBoundSignal, idx: int, aspect: ChangeAspect) -> None:
+        """Emit a typed change for the dataset at *idx*, if there is one there."""
+        key = self.key_at(idx)
+        if key is not None:
+            signal.emit(DatasetChanged(key=key, dataset=self._datasets[idx], aspect=aspect))
+
     def _new_key(self) -> DatasetKey:
         return DatasetKey(next(self._key_counter))
 
@@ -964,14 +1018,18 @@ class AppState(QObject):
                 return i
 
         self._registry()
+        previous = self._active_key
+        key = self._new_key()
         self._datasets.append(dataset)
-        self._entries.append(DatasetEntry(self._new_key(), dataset))
+        self._entries.append(DatasetEntry(key, dataset))
         idx = len(self._datasets) - 1
         # IMPORTANT: set_active BEFORE dataset_added so handlers that query
         # active_dataset (e.g. MainWindow._show_render) see a valid active idx.
         self._active_idx = idx
         self.dataset_added.emit(idx)
+        self.dataset_events.added.emit(DatasetAdded(key=key, dataset=dataset, index=idx))
         self.active_changed.emit(idx)
+        self._announce_active_change(previous)
         self.status_message.emit(f"Active: {dataset.summary()}")
         recent_path = dataset.file.recent_path or dataset.file.path
         self._record_recent(recent_path)
@@ -1041,12 +1099,15 @@ class AppState(QObject):
             return
 
         old_active = self._active_idx
+        previous = self._active_key
         self._datasets.pop(idx)
-        self._entries.pop(idx)
+        entry = self._entries.pop(idx)
 
         if not self._datasets:
             self._active_idx = None
             self.dataset_removed.emit(idx)
+            self._announce_removal(entry, idx)
+            self._announce_active_change(previous)
             self.status_message.emit("No data loaded.")
             self.log("All datasets removed.", "INFO")
             return
@@ -1059,9 +1120,11 @@ class AppState(QObject):
                 new_active = min(old_active, len(self._datasets) - 1)
         self._active_idx = new_active
         self.dataset_removed.emit(idx)
+        self._announce_removal(entry, idx)
 
         if new_active is not None and (new_active != old_active or idx == old_active):
             self.active_changed.emit(new_active)
+            self._announce_active_change(previous)
             self.status_message.emit(
                 f"Active: {self._datasets[new_active].summary()}")
 
@@ -1071,8 +1134,10 @@ class AppState(QObject):
             return
         if self._active_idx == idx:
             return
+        previous = self._active_key
         self._active_idx = idx
         self.active_changed.emit(idx)
+        self._announce_active_change(previous)
         self.status_message.emit(f"Active: {self._datasets[idx].summary()}")
 
     def notify_filter_changed(self, idx: int | None = None) -> None:
@@ -1084,6 +1149,8 @@ class AppState(QObject):
             idx = self._active_idx
         if idx is not None:
             self.filter_changed.emit(idx)
+            self._announce_change(
+                self.dataset_events.filter_changed, idx, ChangeAspect.FILTER)
 
     def notify_attributes_changed(self, idx: int | None = None) -> None:
         """Notify attribute/filter windows that dataset columns changed."""
@@ -1091,6 +1158,8 @@ class AppState(QObject):
             idx = self._active_idx
         if idx is not None:
             self.attributes_changed.emit(idx)
+            self._announce_change(
+                self.dataset_events.attributes_changed, idx, ChangeAspect.ATTRIBUTES)
 
     def notify_roi_selection_changed(self, idx: int | None = None) -> None:
         """Notify views that cached ROI selection masks changed."""
@@ -1098,6 +1167,8 @@ class AppState(QObject):
             idx = self._active_idx
         if idx is not None:
             self.roi_selection_changed.emit(idx)
+            self._announce_change(
+                self.dataset_events.roi_selection_changed, idx, ChangeAspect.ROI_SELECTION)
 
     def notify_calibration_changed(self, idx: int | None = None) -> None:
         """Notify views that a dataset's Z scaling factor changed so
@@ -1106,6 +1177,8 @@ class AppState(QObject):
             idx = self._active_idx
         if idx is not None:
             self.calibration_changed.emit(idx)
+            self._announce_change(
+                self.dataset_events.calibration_changed, idx, ChangeAspect.CALIBRATION)
 
     def notify_overlay_transform_changed(self, idx: int | None = None) -> None:
         """Notify coordinate views that a dataset's live overlay transform changed."""
@@ -1113,6 +1186,8 @@ class AppState(QObject):
             idx = self._active_idx
         if idx is not None:
             self.overlay_transform_changed.emit(idx)
+            self._announce_change(
+                self.dataset_events.overlay_transform_changed, idx, ChangeAspect.OVERLAY_TRANSFORM)
 
     def request_overlay_manual_alignment(self, idx: int | None = None) -> None:
         """Ask the UI to enter interactive overlay alignment for a dataset."""
@@ -1120,6 +1195,10 @@ class AppState(QObject):
             idx = self._active_idx
         if idx is not None:
             self.overlay_manual_alignment_requested.emit(idx)
+            key = self.key_at(idx)
+            if key is not None:
+                self.dataset_events.overlay_manual_alignment_requested.emit(
+                    ManualAlignmentRequested(key=key, dataset=self._datasets[idx]))
 
     def log(
         self,
