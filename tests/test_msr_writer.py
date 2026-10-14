@@ -2,7 +2,7 @@
 
 Round-trips MINFLUX localizations (+ optional MBM beads) through *our own*
 reader: ``write_minflux_msr`` → ``GeneralMSRParser`` → ``mfx_map`` / ``mbm_map``.
-It does not attempt Imspector/Abberior byte-compatibility (see the backlog).
+It does not attempt Imspector/Abberior byte-compatibility.
 """
 
 from __future__ import annotations

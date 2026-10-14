@@ -30,7 +30,7 @@ from .roi_selection import rectangle_bounds, roi_region_mask
 
 @dataclass
 class CropOptions:
-    """User choices for an ROI duplicate/crop (see the backlog ROI-crop design).
+    """User choices for an ROI duplicate/crop.
 
     A region ROI (rectangle/oval/polygon/freehand) always crops; ``exact_shape``
     chooses the ROI's exact outline vs its (axis-aligned) bounding box.
