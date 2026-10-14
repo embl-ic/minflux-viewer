@@ -479,7 +479,8 @@ class SpatialLinePatternWindow(QDialog):
             return None, None
         idx = self._dataset_index()
         context = getattr(record, "context", {}) or {}
-        target_idx = context.get("dataset_idx")
+        from ...core.roi_scope import roi_owner_dataset
+        target_idx = roi_owner_dataset(record, self._state)
         if target_idx is not None and idx is not None and int(target_idx) != idx:
             return None, None
         plane = self._view.roi_view_plane()

@@ -217,44 +217,128 @@ def test_out_of_scope_rois_are_not_hit_tested(_app, qtbot):
     assert histogram._record_at((5.0, 5.0)) is None
 
 
-# ------------------------------------------------- dataset indices shift
+# ------------------------------------------------- held by key, written as positions
 
-def test_closing_a_dataset_shifts_roi_scopes_instead_of_re_attributing_them():
-    """``remove_dataset`` pops from a list, so every later index shifts down."""
+def _registry(*names):
+    """An AppState holding datasets named *names* (the registry ROI scopes use)."""
+    import numpy as np
+
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.core.dataset import build_localization_dataset
+
+    state = AppState()
+    for name in names:
+        x = np.linspace(0.0, 100.0, 12)
+        state.add_dataset(build_localization_dataset(name=name, x_nm=x, y_nm=x[::-1]))
+    return state
+
+
+def test_a_stored_roi_follows_its_dataset_when_an_earlier_one_closes():
+    """Positions shift when a dataset closes; a ROI in the store is held by key,
+    so it stays with its dataset and nothing has to be remapped."""
+    st = _registry("A", "B", "C", "D")
     keep_low = _rect(source_view="render", dataset_idx=0)
     closed = _rect(source_view="render", dataset_idx=1)
     later = _rect(source_view="render", dataset_idx=2, shared=[0, 3])
-    much_later = _rect(source_view="render", dataset_idx=5)
-    records = [keep_low, closed, later, much_later]
+    for record in (keep_low, closed, later):
+        st.rois.add(record)
+    assert "dataset_idx" not in later.context            # bound to keys
 
-    assert roi_scope.remap_dataset_indices(records, 1) == 3
+    st.remove_dataset(1)
 
-    assert roi_scope.roi_owner_dataset(keep_low) == 0          # before it: unchanged
-    assert roi_scope.roi_owner_dataset(later) == 1             # after it: shifted down
-    assert roi_scope.roi_owner_dataset(much_later) == 4
-    assert roi_scope.roi_shared_datasets(later) == (0, 2)      # shared list shifts too
-
+    assert roi_scope.roi_owner_dataset(keep_low, st) == 0
+    assert roi_scope.roi_owner_dataset(later, st) == 1
+    assert roi_scope.roi_shared_datasets(later, st) == (0, 2)
     # The closed dataset's own ROIs are kept and re-attachable, not deleted and
     # not silently un-scoped (which would make them reappear in every view).
-    assert roi_scope.roi_owner_dataset(closed) == roi_scope.ORPHANED_DATASET
+    assert roi_scope.roi_owner_dataset(closed, st) == roi_scope.ORPHANED_DATASET
     assert not roi_scope.roi_visible_in(
-        closed, family="coordinate", dataset_indices={0, 1, 2})
-    assert roi_scope.share_with_dataset(closed, 0) is True
-    assert roi_scope.roi_visible_in(closed, family="coordinate", dataset_indices={0})
+        closed, family="coordinate", dataset_indices={0, 1, 2}, registry=st)
+    assert roi_scope.share_with_dataset(closed, 0, st) is True
+    assert roi_scope.roi_visible_in(
+        closed, family="coordinate", dataset_indices={0}, registry=st)
 
 
-def test_a_shared_entry_on_the_closed_dataset_is_simply_dropped():
+def test_a_shared_entry_on_a_closed_dataset_is_simply_dropped():
+    st = _registry("A", "B")
     record = _rect(source_view="render", dataset_idx=0, shared=[1])
-    assert roi_scope.remap_dataset_indices([record], 1) == 1
-    assert roi_scope.roi_owner_dataset(record) == 0
-    assert roi_scope.roi_shared_datasets(record) == ()
-    assert "shared_datasets" not in record.context
+    st.rois.add(record)
+    st.remove_dataset(1)
+    assert roi_scope.roi_owner_dataset(record, st) == 0
+    assert roi_scope.roi_shared_datasets(record, st) == ()
 
 
-def test_remapping_leaves_an_unscoped_roi_alone():
+def test_an_unscoped_roi_stays_unscoped():
+    st = _registry("A")
     record = _rect()
-    assert roi_scope.remap_dataset_indices([record], 0) == 0
+    st.rois.add(record)
     assert record.context == {}
+    assert roi_scope.roi_dataset_indices(record, st) is None
+
+
+def test_a_keyed_scope_cannot_be_resolved_without_its_registry():
+    st = _registry("A")
+    record = _rect(source_view="render", dataset_idx=0)
+    st.rois.add(record)
+    with pytest.raises(ValueError, match="registry"):
+        roi_scope.roi_owner_dataset(record)
+
+
+def test_a_file_gets_positions_and_never_a_key(tmp_path):
+    import json
+
+    st = _registry("A", "B", "C")
+    owned_by_c = _rect("c", source_view="render", dataset_idx=2, shared=[0])
+    owned_by_b = _rect("b", source_view="render", dataset_idx=1)
+    for record in (owned_by_c, owned_by_b):
+        st.rois.add(record)
+    st.remove_dataset(1)                                   # B closes, C moves to 1
+
+    path = tmp_path / "rois.json"
+    st.rois.save(path)
+    text = path.read_text(encoding="utf-8")
+    assert "dataset_key" not in text and "shared_dataset_keys" not in text
+    saved = {item["name"]: item["context"] for item in json.loads(text)["rois"]}
+    assert saved["c"]["dataset_idx"] == 1 and saved["c"]["shared_datasets"] == [0]
+    assert saved["b"]["dataset_idx"] == roi_scope.ORPHANED_DATASET
+    # ... and the in-memory record still holds its key.
+    assert "dataset_key" in owned_by_c.context
+
+
+def test_a_selection_result_never_replaces_a_keyed_owner():
+    st = _registry("A", "B")
+    record = _rect(source_view="render", dataset_idx=0)
+    st.rois.add(record)
+    merged = roi_scope.scope_context(record.context, {"dataset_idx": 1, "orientation": "XY"})
+    assert merged["dataset_key"] == st.key_at(0)
+    assert "dataset_idx" not in merged and merged["orientation"] == "XY"
+
+
+def test_an_update_is_bound_too_and_a_retarget_replaces_the_key():
+    st = _registry("A", "B")
+    record = _rect(source_view="render", dataset_idx=0)
+    st.rois.add(record)
+    replacement = _rect(source_view="render", dataset_idx=1)
+    st.rois.update(record.id, replacement)
+    assert replacement.context["dataset_key"] == st.key_at(1)
+    moved = roi_scope.with_owner(replacement.context, 0, st)
+    assert moved["dataset_key"] == st.key_at(0) and "dataset_idx" not in moved
+
+
+def test_the_mask_mirror_in_dataset_state_holds_no_key():
+    """Dataset state is saved to files; a key must never reach it."""
+    import numpy as np
+
+    from minflux_viewer.core.roi_selection import ROI_MASKS_STATE_KEY, store_roi_mask
+
+    st = _registry("A")
+    record = _rect(source_view="render", dataset_idx=0)
+    st.rois.add(record)
+    ds = st.datasets[0]
+    store_roi_mask(ds, record, np.ones(12, dtype=bool), context={"dataset_idx": 0})
+    mirrored = ds.state[ROI_MASKS_STATE_KEY][record.id]["context"]
+    assert "dataset_key" not in mirrored
+    assert record.context["dataset_key"] == st.key_at(0)
 
 
 def test_a_selection_result_keeps_what_was_recorded_when_the_roi_was_drawn():
@@ -285,54 +369,35 @@ def test_a_fresh_selection_detail_wins_over_a_stale_one():
     assert merged["depth_range"] is None and merged["view_plane"] == "XY"
 
 
-def test_a_per_dataset_roi_cache_follows_its_datasets_when_one_closes():
-    """*Restore ROI* remembers each dataset's last draft, keyed by index.
-
-    Without re-keying, closing dataset 0 left dataset 2's draft under key 2,
-    where *Restore ROI* on whatever then sat at index 2 brought it back.
-    """
-    first = _rect("first", source_view="render", dataset_idx=0)
-    closed = _rect("closed", source_view="render", dataset_idx=1)
-    later = _rect("later", source_view="scatter", dataset_idx=2)
-    cache = {0: first, 1: closed, 2: later}
-
-    remapped = roi_scope.remap_dataset_keyed(cache, 1)
-
-    assert remapped == {0: first, 1: later}
-    assert roi_scope.roi_owner_dataset(later) == 1   # its scope moves with it
-    assert roi_scope.roi_owner_dataset(first) == 0
-    assert cache == {0: first, 1: closed, 2: later}  # input left untouched
-
-
-def test_closing_a_dataset_re_keys_the_restore_roi_memory(qapp):
-    """The main window's removal handler applies it (a stand-in, not a real
-    MainWindow: constructing one per test drags in every child window)."""
-    from minflux_viewer.core.app_state import AppState
+def test_closing_a_dataset_drops_only_its_restore_roi_memory(qapp):
+    """Restore ROI remembers each dataset's last draft, keyed by dataset key, so
+    the other datasets' entries need no re-keying. (A stand-in, not a real
+    MainWindow: constructing one per test drags in every child window.)"""
     from minflux_viewer.core.dataset_events import DatasetRemoved
-    from minflux_viewer.core.dataset_key import DatasetKey
     from minflux_viewer.ui.dataset_binding import DatasetWindowMap
     from minflux_viewer.ui.main_window import MainWindow
 
+    st = _registry("A", "B", "C")
+    closed_key = st.key_at(1)
     later = _rect("later", source_view="render", dataset_idx=2)
     calls = []
-    window = SimpleNamespace(
-        _state=SimpleNamespace(rois=SimpleNamespace(
-            records=[], changed=SimpleNamespace(emit=lambda: None))),
-        _roi_last_active={1: _rect("closed", dataset_idx=1), 2: later},
-        _notify_view_state_changed=lambda: calls.append("notified"),
-    )
-    registry_state = AppState()
+    window = SimpleNamespace(_state=st,
+                             _notify_view_state_changed=lambda: calls.append("notified"))
+    window._roi_last_active = DatasetWindowMap(st)
+    window._roi_last_active[1] = _rect("closed", dataset_idx=1)
+    window._roi_last_active[2] = later
     for name in ("_data_windows", "_render_windows", "_scatter_windows",
                  "_tracking_windows", "_msd_windows", "_histogram_windows",
                  "_attr_windows", "_filter_dlgs"):
-        setattr(window, name, DatasetWindowMap(registry_state))
+        setattr(window, name, DatasetWindowMap(st))
     window._retire_dataset_tasks = lambda _event: None
     window._refresh_shifted_windows = (
         MainWindow._refresh_shifted_windows.__get__(window))
 
+    closed = st.datasets[1]
+    st.remove_dataset(1)
     MainWindow._on_dataset_removed(window, DatasetRemoved(
-        key=DatasetKey(2), dataset=None, old_index=1, new_active_key=None))
+        key=closed_key, dataset=closed, old_index=1, new_active_key=st.active_key))
 
-    assert window._roi_last_active == {1: later}
-    assert roi_scope.roi_owner_dataset(later) == 1
+    assert window._roi_last_active.items() == [(1, later)]
     assert calls == ["notified"]

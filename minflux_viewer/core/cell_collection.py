@@ -161,8 +161,8 @@ def region_roi_records(store, dataset_idx: int) -> list:
     for record in records:
         if getattr(record, "type", None) not in REGION_TYPES:
             continue
-        context = getattr(record, "context", None) or {}
-        owner = context.get("dataset_idx")
+        from .roi_scope import roi_owner_dataset
+        owner = roi_owner_dataset(record, getattr(store, "registry", None))
         if owner is not None and int(owner) != int(dataset_idx):
             continue
         out.append(record)

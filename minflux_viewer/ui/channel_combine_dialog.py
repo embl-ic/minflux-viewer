@@ -71,9 +71,12 @@ class ChannelCombineDialog(QDialog):
         channel_luts = channel_colormap_names()
         for row, idx in enumerate(self._rows):
             ds = state.datasets[idx]
+            # The remembered choices are keyed by dataset key, so they stay
+            # with their datasets when an earlier one has closed since.
+            memo = state.key_at(idx)
             chk = QCheckBox()
             # A restricted list *is* the user's selection — check all of it.
-            chk.setChecked(True if restricted else (idx in selected if selected else idx < 2))
+            chk.setChecked(True if restricted else (memo in selected if selected else idx < 2))
             self._table.setCellWidget(row, 0, chk)
             self._checks.append(chk)
 
@@ -88,9 +91,9 @@ class ChannelCombineDialog(QDialog):
 
             order = QComboBox()
             order.addItems(order_values)
-            # Remembered orders/LUTs are keyed by dataset index over the *full*
-            # list, so they only apply when the full list is shown.
-            order.setCurrentText(str(row + 1) if restricted else str(orders.get(idx, idx + 1)))
+            # Remembered orders/LUTs describe the *full* list, so they only
+            # apply when the full list is shown.
+            order.setCurrentText(str(row + 1) if restricted else str(orders.get(memo, idx + 1)))
             self._table.setCellWidget(row, 3, order)
             self._orders.append(order)
 
@@ -99,7 +102,7 @@ class ChannelCombineDialog(QDialog):
             default_lut = channel_luts[row % len(channel_luts)]
             lut.setCurrentText(
                 default_lut if restricted
-                else str(luts.get(idx, channel_luts[idx % len(channel_luts)]))
+                else str(luts.get(memo, channel_luts[idx % len(channel_luts)]))
             )
             self._table.setCellWidget(row, 4, lut)
             self._luts.append(lut)
@@ -124,10 +127,15 @@ class ChannelCombineDialog(QDialog):
         root.addWidget(buttons)
 
     def session_state(self) -> dict:
+        """The choices to offer again next time, keyed by dataset key (in memory
+        only: they describe this session's datasets)."""
+        key_at = self._state.key_at
         return {
-            "selected": [self._rows[r] for r, chk in enumerate(self._checks) if chk.isChecked()],
-            "orders": {self._rows[r]: int(c.currentText()) for r, c in enumerate(self._orders)},
-            "luts": {self._rows[r]: c.currentText() for r, c in enumerate(self._luts)},
+            "selected": [key_at(self._rows[r]) for r, chk in enumerate(self._checks)
+                         if chk.isChecked()],
+            "orders": {key_at(self._rows[r]): int(c.currentText())
+                       for r, c in enumerate(self._orders)},
+            "luts": {key_at(self._rows[r]): c.currentText() for r, c in enumerate(self._luts)},
             "align_with": self.align_combo.currentText(),
             "keep_source": self.keep_source_check.isChecked(),
         }

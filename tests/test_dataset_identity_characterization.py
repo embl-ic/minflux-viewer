@@ -43,6 +43,7 @@ from minflux_viewer.core.roi import RoiRecord
 from minflux_viewer.core.roi_scope import (
     ORPHANED_DATASET,
     SHARED_DATASETS_KEY,
+    bind_scope,
     roi_owner_dataset,
     roi_shared_datasets,
 )
@@ -301,21 +302,27 @@ def test_roi_scopes_and_restore_memory_follow_their_datasets(session):
     on_c = _roi(idx["C"])
     for record in (on_a, on_b, on_c):
         state.rois.add(record)
-    win._roi_last_active = {idx["B"]: _roi(idx["B"]), idx["C"]: _roi(idx["C"])}
+    # Restore ROI's memory, filled the way the view fills it: a draft's scope is
+    # held by key from the moment it is drawn.
+    for name in ("B", "C"):
+        remembered = _roi(idx[name])
+        remembered.context = bind_scope(remembered.context, state)
+        win._roi_last_active[idx[name]] = remembered
 
     win.close_datasets([idx["A"]])
     _flush()
 
     records = {r.id: r for r in state.rois.records}
-    assert roi_owner_dataset(records[on_a.id]) == ORPHANED_DATASET
-    assert state.datasets[roi_owner_dataset(records[on_b.id])] is datasets["B"]
-    assert [state.datasets[i] for i in roi_shared_datasets(records[on_b.id])] == [datasets["D"]]
-    assert state.datasets[roi_owner_dataset(records[on_c.id])] is datasets["C"]
+    assert roi_owner_dataset(records[on_a.id], state) == ORPHANED_DATASET
+    assert state.datasets[roi_owner_dataset(records[on_b.id], state)] is datasets["B"]
+    assert [state.datasets[i] for i in roi_shared_datasets(records[on_b.id], state)] \
+        == [datasets["D"]]
+    assert state.datasets[roi_owner_dataset(records[on_c.id], state)] is datasets["C"]
 
     memory = win._roi_last_active
     assert sorted(memory) == [_index_of(win, datasets["B"]), _index_of(win, datasets["C"])]
     for key, record in memory.items():
-        assert roi_owner_dataset(record) == key
+        assert roi_owner_dataset(record, state) == key
 
 
 # --------------------------------------------------------------- the Log

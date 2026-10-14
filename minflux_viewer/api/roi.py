@@ -59,7 +59,7 @@ class Roi(Namespace):
         idx = self._dataset_index(dataset)
         out = []
         for record in self._state.rois.records:
-            owners = roi_dataset_indices(record)
+            owners = roi_dataset_indices(record, self._state)
             # ``None`` means an unscoped record — deliberately shown everywhere,
             # because hiding a user's saved work is worse than one view too many.
             if owners is not None and idx not in owners:

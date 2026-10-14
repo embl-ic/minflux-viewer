@@ -910,7 +910,7 @@ class AttributeSeparationDialog(QDialog):
         for record in getattr(self._state.rois, "records", []) or []:
             if str(getattr(record, "type", "")) not in REGION_ROI_TYPES:
                 continue
-            indices = roi_dataset_indices(record)
+            indices = roi_dataset_indices(record, self._state)
             if indices is None or self._idx in indices:
                 out.append(record)
         return out

@@ -1911,8 +1911,17 @@ class RoiOverlayController(QObject):
             context["source_view"] = self.source_view
         owner_idx = self._owner_dataset_index()
         if owner_idx is not None:
-            context["dataset_idx"] = int(owner_idx)
+            # Held by key, so the scope stays with its dataset when an earlier
+            # one closes -- a draft is not in the store, so nothing else would.
+            context = roi_scope.with_owner(context, owner_idx, self._registry())
         return context
+
+    def _registry(self):
+        """The dataset registry ROI scopes are keyed in, or None."""
+        state = getattr(self.owner, "_state", None)
+        if hasattr(state, "key_at") and hasattr(state, "index_of"):
+            return state
+        return None
 
     def _owner_dataset_index(self) -> int | None:
         """The dataset a ROI drawn in this view belongs to.
@@ -1961,7 +1970,8 @@ class RoiOverlayController(QObject):
     def _record_in_scope(self, record) -> bool:
         if not roi_scope.roi_visible_in(
                 record, family=self.view_family,
-                dataset_indices=self._view_dataset_indices()):
+                dataset_indices=self._view_dataset_indices(),
+                registry=self._registry()):
             return False
         # An owner may narrow this further: an ortho side pane shows only what
         # its two axes can express (see ortho_roi.pane_owns_record). Both the
@@ -3364,13 +3374,13 @@ class RoiOverlayController(QObject):
             dataset.derived.pop(key, None)
         if dataset.state.get("active_roi_draft_id") == record.id:
             dataset.state.pop("active_roi_draft_id", None)
-        idx = record.context.get("dataset_idx") if isinstance(record.context, dict) else None
+        idx = roi_scope.roi_owner_dataset(record, self._registry())
         notify = getattr(getattr(self.owner, "_state", None), "notify_roi_selection_changed", None)
         if callable(notify):
-            notify(idx if isinstance(idx, int) else None)
+            notify(idx if isinstance(idx, int) and idx >= 0 else None)
 
     def _dataset_for_record(self, record: RoiRecord):
-        idx = record.context.get("dataset_idx") if isinstance(record.context, dict) else None
+        idx = roi_scope.roi_owner_dataset(record, self._registry())
         datasets = getattr(getattr(self.owner, "_state", None), "datasets", [])
         if isinstance(idx, int) and 0 <= idx < len(datasets):
             return datasets[idx]

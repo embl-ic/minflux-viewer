@@ -152,7 +152,23 @@ class RoiStore(QObject):
         suffix = name[len(prefix):] if name.startswith(prefix) else ""
         return len(suffix) == 4 and all(c in "0123456789abcdef" for c in suffix)
 
+    @property
+    def registry(self):
+        """The dataset registry ROI scopes are keyed in (the owning AppState)."""
+        parent = self.parent()
+        if hasattr(parent, "key_at") and hasattr(parent, "index_of"):
+            return parent
+        return None
+
+    def _bind(self, record: RoiRecord) -> None:
+        """Hold the record's dataset scope by key while it is in the store."""
+        registry = self.registry
+        if registry is not None and isinstance(getattr(record, "context", None), dict):
+            from .roi_scope import bind_scope
+            record.context = bind_scope(record.context, registry)
+
     def add(self, record: RoiRecord) -> None:
+        self._bind(record)
         if self._is_auto_name(record):
             record.name = f"{record.type}-{self.next_type_index(record.type)}"
         self.records.append(record)
@@ -163,6 +179,7 @@ class RoiStore(QObject):
     def update(self, roi_id: str, record: RoiRecord) -> None:
         for idx, old in enumerate(self.records):
             if old.id == roi_id:
+                self._bind(record)
                 record.id = roi_id
                 if not record.name:
                     record.name = old.name
@@ -264,7 +281,7 @@ class RoiStore(QObject):
         path = Path(path)
         records = records or self.records
         if path.suffix.lower() == ".json":
-            payload = {"version": 1, "rois": [asdict(r) for r in records]}
+            payload = {"version": 1, "rois": [self._portable(r) for r in records]}
             path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             return
         from roifile import roiwrite
@@ -272,6 +289,15 @@ class RoiStore(QObject):
             raise ValueError("ImageJ .roi export requires exactly one ROI; use .zip for ROI sets.")
         rois = [record_to_imagej(r) for r in records]
         roiwrite(str(path), rois[0] if path.suffix.lower() == ".roi" and len(rois) == 1 else rois, mode="w")
+
+    def _portable(self, record: RoiRecord) -> dict:
+        """*record* as written to a file: its dataset scope as positions."""
+        payload = asdict(record)
+        registry = self.registry
+        if registry is not None:
+            from .roi_scope import portable_scope
+            payload["context"] = portable_scope(record.context, registry)
+        return payload
 
     def load(self, path: str | Path) -> list[RoiRecord]:
         path = Path(path)

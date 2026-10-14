@@ -191,20 +191,20 @@ class RoiManagerWindow(QWidget):
         Without it a ROI that is correctly hidden (it belongs to another
         dataset) looks like a Manager entry that simply does not work.
         """
-        owner = roi_scope.roi_owner_dataset(record)
+        owner = roi_scope.roi_owner_dataset(record, self._state)
         if owner is None:
             return ""
-        shared = roi_scope.roi_shared_datasets(record)
+        shared = roi_scope.roi_shared_datasets(record, self._state)
         extra = f" +{len(shared)}" if shared else ""
         return f"   [{self._dataset_name(owner)}{extra}]"
 
     def _scope_tooltip(self, record) -> str:
-        owner = roi_scope.roi_owner_dataset(record)
+        owner = roi_scope.roi_owner_dataset(record, self._state)
         family = roi_scope.roi_family(record)
         lines = []
         if owner is not None:
             lines.append(f"Drawn on: {self._dataset_name(owner)}")
-        shared = roi_scope.roi_shared_datasets(record)
+        shared = roi_scope.roi_shared_datasets(record, self._state)
         if shared:
             lines.append("Also shown on: "
                          + ", ".join(self._dataset_name(i) for i in shared))
@@ -227,15 +227,16 @@ class RoiManagerWindow(QWidget):
             f"Show on active dataset ({self._dataset_name(active)})"
             if isinstance(active, int) else "Show on active dataset")
         share.setEnabled(isinstance(active, int) and any(
-            roi_scope.roi_owner_dataset(r) != active
-            and active not in roi_scope.roi_shared_datasets(r) for r in records))
+            roi_scope.roi_owner_dataset(r, self._state) != active
+            and active not in roi_scope.roi_shared_datasets(r, self._state)
+            for r in records))
         share.setToolTip(
             "Also display the selected ROI(s) on the active dataset, so the same "
             "region can be compared across datasets. Nothing does this "
             "automatically — a ROI otherwise stays on the dataset it was drawn on."
         )
         unshare = menu.addAction("Show only on its own dataset")
-        unshare.setEnabled(any(roi_scope.roi_shared_datasets(r) for r in records))
+        unshare.setEnabled(any(roi_scope.roi_shared_datasets(r, self._state) for r in records))
         menu.setToolTipsVisible(True)
         chosen = menu.exec(self._list.viewport().mapToGlobal(pos))
         if chosen is share:
@@ -246,7 +247,8 @@ class RoiManagerWindow(QWidget):
     def _share_with_active(self, records, active) -> None:
         if not isinstance(active, int):
             return
-        changed = [r for r in records if roi_scope.share_with_dataset(r, active)]
+        changed = [r for r in records
+                   if roi_scope.share_with_dataset(r, active, self._state)]
         if not changed:
             return
         self._store.changed.emit()
@@ -255,7 +257,7 @@ class RoiManagerWindow(QWidget):
             f"'{self._dataset_name(active)}'.")
 
     def _unshare_all(self, records) -> None:
-        changed = [r for r in records if roi_scope.unshare_dataset(r)]
+        changed = [r for r in records if roi_scope.unshare_dataset(r, registry=self._state)]
         if not changed:
             return
         self._store.changed.emit()
@@ -309,8 +311,9 @@ class RoiManagerWindow(QWidget):
         self._store.delete_selected()
 
     def _notify_roi_changed(self, record) -> None:
-        idx = record.context.get("dataset_idx") if isinstance(record.context, dict) else None
-        self._state.notify_roi_selection_changed(idx if isinstance(idx, int) else None)
+        idx = roi_scope.roi_owner_dataset(record, self._state)
+        self._state.notify_roi_selection_changed(
+            idx if isinstance(idx, int) and idx >= 0 else None)
 
     def _scale_z(self) -> None:
         """Rescale the selected ROIs' Z by a factor (multi-select supported).
@@ -378,7 +381,7 @@ class RoiManagerWindow(QWidget):
         for record in records:
             context = record.context if isinstance(record.context, dict) else {}
             drawn_at = context.get("z_scaling_factor")
-            idx = context.get("dataset_idx")
+            idx = roi_scope.roi_owner_dataset(record, self._state)
             if not isinstance(drawn_at, (int, float)) or not isinstance(idx, int):
                 continue
             if not (0 <= idx < len(self._state.datasets)):

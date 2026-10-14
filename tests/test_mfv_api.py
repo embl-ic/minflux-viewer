@@ -248,8 +248,11 @@ def test_a_scripted_roi_is_scoped_to_its_dataset_and_view(mfv):
     must be stamped at creation -- a line or point never runs a selection pass
     and would otherwise stay unscoped forever.
     """
+    from minflux_viewer.core.roi_scope import roi_owner_dataset
+
     record = mfv.roi.add("rectangle", {"bounds": [0.0, 0.0, 10.0, 10.0]})
-    assert record.context["dataset_idx"] == 0
+    # In the store the dataset is held by key; it resolves to the position.
+    assert roi_owner_dataset(record, mfv._state) == 0
     assert record.context["source_view"] == "render"
 
 

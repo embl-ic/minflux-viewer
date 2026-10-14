@@ -565,7 +565,8 @@ def test_main_window_reopens_project_as_overlay_and_restores_roi(qapp,
         assert len(state.datasets) == 2
         assert state.datasets[0].state["overlay_id"] == state.datasets[1].state["overlay_id"]
         restored = next(record for record in state.rois.records if record.id == roi.id)
-        assert restored.context["dataset_idx"] == 1
+        from minflux_viewer.core.roi_scope import roi_owner_dataset
+        assert roi_owner_dataset(restored, state) == 1     # held by key in memory
         assert restored.geometry["bounds"] == [1.0, 2.0, 3.0, 4.0]
         win._populate_recent_menu()
         assert any(action.data() == str(path) for action in win._recent_menu.actions())

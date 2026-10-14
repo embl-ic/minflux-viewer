@@ -241,7 +241,7 @@ def store_roi_mask(
     context: dict[str, Any] | None = None,
 ) -> str:
     """Cache an ROI mask on a dataset and mirror it in derived attributes."""
-    from .roi_scope import scope_context
+    from .roi_scope import scope_context, without_scope_keys
 
     arr = np.asarray(mask, dtype=bool).ravel()
     key = roi_mask_key(record)
@@ -261,7 +261,9 @@ def store_roi_mask(
         "type": record.type,
         "stroke_color": record.stroke_color,
         "selected_count": record.selected_count,
-        "context": record.context,
+        # The mask belongs to this dataset; its in-memory keys are not copied
+        # into dataset state, which is saved to files.
+        "context": without_scope_keys(record.context),
     }
     return key
 

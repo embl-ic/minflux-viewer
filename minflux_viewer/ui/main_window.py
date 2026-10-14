@@ -489,7 +489,8 @@ class MainWindow(QMainWindow):
         self._roi_crop_setup: dict = {}
         # Last active ROI draft per dataset index, for Process › ROI › Restore ROI
         # (restore across views / after an accidental delete).
-        self._roi_last_active: dict = {}
+        # Restore ROI's last draft per dataset, keyed by dataset key.
+        self._roi_last_active = DatasetWindowMap(state)
 
         # Tier-A in-app update check (opt-out via Preferences > File). Delayed so
         # it never slows startup; silent unless a newer release exists.
@@ -2635,10 +2636,13 @@ class MainWindow(QMainWindow):
             self._status_label.setText("Load failed.")
             return
         idx = self._state.active_idx
+        from ..core.roi_scope import with_owner
         for r in records:
             ctx = dict(r.context) if isinstance(r.context, dict) else {}
             if isinstance(idx, int):
-                ctx["dataset_idx"] = idx
+                # The records are already in the store, held by key: retarget
+                # the key, not a position the store has already replaced.
+                ctx = with_owner(ctx, idx, self._state)
             # An ImageJ .roi/.zip carries no family, and neither does a native
             # set saved before scoping existed; both are spatial. Only fill it
             # in when absent, so a saved histogram band keeps its own family.
@@ -3204,9 +3208,9 @@ class MainWindow(QMainWindow):
     def _clear_roi_cached_mask(self, record) -> None:
         """Drop a stored ROI's cached selection mask (state + derived) so a
         converted/edited ROI doesn't leave a stale highlight behind."""
+        from ..core.roi_scope import roi_owner_dataset
         from ..core.roi_selection import ROI_MASKS_STATE_KEY
-
-        idx = record.context.get("dataset_idx") if isinstance(record.context, dict) else None
+        idx = roi_owner_dataset(record, self._state)
         datasets = self._state.datasets
         ds = datasets[idx] if isinstance(idx, int) and 0 <= idx < len(datasets) else None
         if ds is None:
@@ -3241,8 +3245,10 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
                 store.add(new_record)
-        idx = record.context.get("dataset_idx") if isinstance(record.context, dict) else None
-        self._state.notify_roi_selection_changed(idx if isinstance(idx, int) else None)
+        from ..core.roi_scope import roi_owner_dataset
+        idx = roi_owner_dataset(record, self._state)
+        self._state.notify_roi_selection_changed(
+            idx if isinstance(idx, int) and idx >= 0 else None)
 
     def _convert_active_roi(self, target: str) -> None:
         from ..core.roi_convert import available_conversions, convert_roi
@@ -6904,11 +6910,17 @@ class MainWindow(QMainWindow):
         except Exception:
             return
         clone.id = uuid.uuid4().hex
-        ctx = dict(clone.context) if isinstance(clone.context, dict) else {}
-        ctx["dataset_idx"] = new_idx
+        from ..core.roi_scope import (
+            SHARED_DATASET_KEYS_FIELD,
+            SHARED_DATASETS_KEY,
+            with_owner,
+        )
+        # The source's scope is held by key: retarget the key, not a position.
+        ctx = with_owner(clone.context, new_idx, self._state)
         # The copy belongs to the crop. Inheriting the source's manual sharing
         # list would put it on datasets the user never chose it for.
-        ctx.pop("shared_datasets", None)
+        ctx.pop(SHARED_DATASETS_KEY, None)
+        ctx.pop(SHARED_DATASET_KEYS_FIELD, None)
         clone.context = ctx
         clone.mask_key = ""
         clone.selected_count = None
@@ -7739,9 +7751,11 @@ class MainWindow(QMainWindow):
             if draft is not None and all(r.id != draft.id for r in candidates):
                 candidates.append(draft)
 
+        from ..core.roi_scope import portable_scope
         records = []
         for record in candidates:
-            context = dict(getattr(record, "context", {}) or {})
+            # Written to a file, so positions, not the in-memory keys.
+            context = portable_scope(getattr(record, "context", {}) or {}, self._state)
             owner = context.get("dataset_idx")
             if owner not in member_indices:
                 owner = mask_owner.get(record.id)
@@ -8906,15 +8920,13 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
             self._refresh_shifted_windows(mapping, idx)
-        # ROI scopes hold absolute dataset indices, and removing a dataset
-        # shifts every later one — without this a ROI would silently be
-        # re-attributed to whatever now sits at its index.
-        from ..core.roi_scope import remap_dataset_indices, remap_dataset_keyed
+        # ROI scopes are held by key, so the other datasets' ROIs need nothing;
+        # this dataset's ROIs stay listed, now resolving to "closed dataset".
+        from ..core.roi_scope import references_dataset
 
-        if remap_dataset_indices(self._state.rois.records, idx):
+        if any(references_dataset(r, event.key) for r in self._state.rois.records):
             self._state.rois.changed.emit()
-        # Restore ROI's per-dataset memory is keyed by index too.
-        self._roi_last_active = remap_dataset_keyed(self._roi_last_active, idx)
+        self._roi_last_active.pop_key(event.key)
         self._notify_view_state_changed()
 
     def _unregister_when_destroyed(
