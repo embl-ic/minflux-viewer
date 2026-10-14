@@ -1224,16 +1224,35 @@ class AppState(QObject):
         method_data:
             Optional structured, run-specific provenance retained with the log
             event for Generate Method Text. It is not shown in the Log window.
+
+        The event records its dataset (*dataset_idx*, else the active one) by
+        key, with a snapshot of what the method-text rules read
+        (``core/log_attribution.py``). ``dataset_idx`` stays in the event as
+        the position it had *then*; it is history, not a way to find the
+        dataset now.
         """
         from datetime import datetime
+
+        from .log_attribution import attribution_snapshot
         idx = self._active_idx if dataset_idx is None else dataset_idx
-        ds = self._datasets[idx] if (idx is not None and 0 <= idx < len(self._datasets)) else None
+        key = ds = snapshot = None
+        if idx is not None:
+            key = self.key_at(idx)
+        if idx is not None and key is not None:
+            ds = self._datasets[idx]
+            try:
+                snapshot = attribution_snapshot(self, idx)
+            except Exception as exc:  # noqa: BLE001 -- a log call must not fail on this
+                import sys
+                print(f"Log attribution snapshot failed for {key}: {exc!r}", file=sys.stderr)
         event = {
             "time": datetime.now(),
             "level": str(level),
             "message": str(message),
             "dataset_idx": idx,
             "dataset_name": ds.name if ds is not None else None,
+            "dataset_key": key,
+            "dataset_snapshot": snapshot,
         }
         if method_data is not None:
             event["method_data"] = copy.deepcopy(method_data)
@@ -1244,8 +1263,8 @@ class AppState(QObject):
 
     @property
     def log_history(self) -> list[dict]:
-        """All retained log events (oldest first), each tagged with the active
-        dataset at emit time."""
+        """All retained log events (oldest first), each tagged with its dataset
+        as it was when the event was written (see :meth:`log`)."""
         return list(self._log_history)
 
     def log_progress(self, text: str, *, final: bool = False) -> None:

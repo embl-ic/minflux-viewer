@@ -92,13 +92,13 @@ class MethodEventSelectionDialog(QDialog):
         self._list = QListWidget()
         root.addWidget(self._list, 1)
 
-        auto_idx = self._auto_check_indices(state)
+        auto_keys = self._auto_check_keys(state)
         for ev in state.log_history:     # oldest first (same order as the Log dialog)
             t = ev["time"].strftime("%H:%M:%S") if ev.get("time") else ""
             ds = ev.get("dataset_name") or "—"
             item = QListWidgetItem(f"[{t}]  ({ds})  {ev.get('message', '')}")
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            checked = ev.get("dataset_idx") in auto_idx
+            checked = ev.get("dataset_key") is not None and ev["dataset_key"] in auto_keys
             item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
             item.setData(Qt.ItemDataRole.UserRole, ev)
             self._list.addItem(item)
@@ -120,17 +120,25 @@ class MethodEventSelectionDialog(QDialog):
         root.addLayout(btns)
 
     @staticmethod
-    def _auto_check_indices(state) -> set:
-        """Dataset indices whose events are pre-checked: the active dataset, or —
-        if it belongs to an overlay — every channel in that overlay."""
+    def _auto_check_keys(state) -> set:
+        """Keys of the datasets whose events are pre-checked: the active dataset,
+        or -- if it belongs to an overlay -- every channel in that overlay.
+
+        Matched on the key each event recorded, not on its index: an index names
+        a position, and after an earlier dataset closes another dataset sits
+        there.
+        """
         active = getattr(state, "active_idx", None)
         if active is None:
             return set()
         try:
             from ...core.overlay import overlay_members
-            return {idx for idx, _ds in overlay_members(state, active)}
+            indices = [idx for idx, _ds in overlay_members(state, active)]
         except Exception:
-            return {active}
+            indices = [active]
+        keys = {state.key_at(idx) for idx in indices}
+        keys.discard(None)
+        return keys
 
     def _set_all(self, checked: bool) -> None:
         st = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked

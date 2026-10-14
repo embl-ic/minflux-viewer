@@ -25,6 +25,8 @@ import math
 import re
 from datetime import datetime
 
+from ..core.log_attribution import dataset_summary
+
 STAGE_ORDER = ["load", "filter", "transform", "analysis", "segmentation", "export", "other"]
 STAGE_TITLES = {
     "load": "Data loading",
@@ -95,21 +97,39 @@ CITE_NPC = (NPC_NOTE, None)
 
 
 def _ds_for(state, ev):
-    idx = ev.get("dataset_idx")
-    datasets = getattr(state, "datasets", [])
-    if isinstance(idx, int) and 0 <= idx < len(datasets):
-        return datasets[idx]
+    """The open dataset *ev* is about, or None.
+
+    An event written by ``AppState.log`` carries its dataset's key: it names
+    that dataset while it is open and nothing once it has closed. An event
+    without a key matches only the one open dataset with its exact name --
+    never its recorded index, which names a position, not a dataset.
+    """
+    key = ev.get("dataset_key")
+    if key is not None:
+        dataset_for = getattr(state, "dataset_for", None)
+        return dataset_for(key) if callable(dataset_for) else None
     name = ev.get("dataset_name")
-    for ds in datasets:
-        if getattr(ds, "name", None) == name:
-            return ds
-    return None
+    if not name:
+        return None
+    matches = [ds for ds in getattr(state, "datasets", [])
+               if getattr(ds, "name", None) == name]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _summary(state, ev):
+    """What *ev* records about its dataset: its snapshot, else the one open
+    dataset it unambiguously names, else None (the details are unavailable)."""
+    snapshot = ev.get("dataset_snapshot")
+    if snapshot:
+        return snapshot
+    ds = _ds_for(state, ev)
+    return dataset_summary(ds) if ds is not None else None
 
 
 def _ds_name(state, ev):
-    ds = _ds_for(state, ev)
-    if ds is not None and getattr(ds, "name", None):
-        return ds.name
+    summary = _summary(state, ev)
+    if summary and summary.get("name"):
+        return summary["name"]
     return ev.get("dataset_name") or "the dataset"
 
 
@@ -117,19 +137,19 @@ def _ds_name(state, ev):
 
 def _render_load(m, ev, state):
     name = m.group("name")
-    ds = _ds_for(state, ev)
-    if ds is None:
-        return f"A MINFLUX dataset '{name}' was loaded into the MINFLUX Data Viewer.", []
-    md = getattr(ds, "metadata", {})
-    container = md.get("source_format")
-    ver = md.get("source_version", "an unknown version")
+    summary = _summary(state, ev)
+    if summary is None:
+        return (f"A MINFLUX dataset '{name}' was loaded into the MINFLUX Data Viewer "
+                f"(its properties were not recorded with this event)."), []
+    container = summary.get("source_format")
+    ver = summary.get("source_version") or "an unknown version"
     ver_str = f"{ver} ({container})" if container else str(ver)
-    n_dim = int(ds.prop.num_dim)
-    n_itr = md.get("raw_num_itr", 1)
-    n_traces = int(ds.prop.num_traces)
-    valid = md.get("valid_num_loc", ds.prop.num_loc)
-    load_mode = md.get("iteration_load_mode", "last")
-    validity = "all (valid and invalid)" if md.get("includes_invalid") else "only valid"
+    n_dim = summary["num_dim"]
+    n_itr = summary["raw_num_itr"]
+    n_traces = summary["num_traces"]
+    valid = summary["valid_num_loc"]
+    load_mode = summary["iteration_load_mode"]
+    validity = "all (valid and invalid)" if summary["includes_invalid"] else "only valid"
     try:
         valid_str = f"{int(valid):,}"
     except Exception:
@@ -143,32 +163,37 @@ def _render_load(m, ev, state):
 
 
 def _overlay_members(state, ev):
-    """``[(idx, ds), ...]`` for every channel in the tagged dataset's overlay."""
-    idx = ev.get("dataset_idx")
-    if isinstance(idx, int):
-        try:
-            from ..core.overlay import overlay_members
-            members = overlay_members(state, idx)
-            if members:
-                return members
-        except Exception:
-            pass
+    """A summary per channel of the tagged dataset's overlay, in channel order.
+
+    From the event's snapshot when it has one; for an event without, from the
+    overlay of the one open dataset it unambiguously names.
+    """
+    snapshot = ev.get("dataset_snapshot")
+    if snapshot:
+        return list(snapshot.get("overlay_members") or [snapshot])
     ds = _ds_for(state, ev)
-    return [(idx if isinstance(idx, int) else 0, ds)] if ds is not None else []
+    if ds is None:
+        return []
+    datasets = list(getattr(state, "datasets", []))
+    idx = next((i for i, other in enumerate(datasets) if other is ds), None)
+    try:
+        from ..core.overlay import overlay_members
+        members = overlay_members(state, idx) if idx is not None else []
+    except Exception:
+        members = []
+    return [dataset_summary(m) for _i, m in members] or [dataset_summary(ds)]
 
 
-def _channel_desc(ds):
-    md = getattr(ds, "metadata", {}) or {}
-    name = md.get("msr_dataset_name") or getattr(ds, "name", None) or "channel"
-    prop = getattr(ds, "prop", None)
-    valid = md.get("valid_num_loc", getattr(prop, "num_loc", 0))
+def _channel_desc(summary):
+    name = summary.get("msr_dataset_name") or summary.get("name") or "channel"
+    valid = summary.get("valid_num_loc", summary.get("num_loc", 0))
     try:
         valid_s = f"{int(valid):,}"
     except Exception:
         valid_s = str(valid)
-    ndim = int(getattr(prop, "num_dim", 2) or 2)
-    ntr = int(getattr(prop, "num_traces", 0) or 0)
-    ver = md.get("source_version")
+    ndim = int(summary.get("num_dim", 2) or 2)
+    ntr = int(summary.get("num_traces", 0) or 0)
+    ver = summary.get("source_version")
     ver_s = f", {ver}" if ver else ""
     return f"'{name}' ({valid_s} valid localizations, {ndim}D, {ntr} trace(s){ver_s})"
 
@@ -216,14 +241,13 @@ def _describe_alignment(mover, ref, t):
 def _render_msr_overlay(m, ev, state):
     file = m.group("file")
     members = _overlay_members(state, ev)
-    tagged = _ds_for(state, ev)
-    md = getattr(tagged, "metadata", {}) or {}
-    ref = md.get("overlay_reference")
-    mode = md.get("overlay_alignment_mode", "none")
-    excluded = md.get("overlay_bead_excluded") or []
+    tagged = _summary(state, ev) or {}
+    ref = tagged.get("overlay_reference")
+    mode = tagged.get("overlay_alignment_mode", "none")
+    excluded = tagged.get("overlay_bead_excluded") or []
 
     n = len(members) or m.group("n")
-    chans = ", ".join(_channel_desc(ds) for _i, ds in members) if members else m.group("n") + " channel(s)"
+    chans = ", ".join(_channel_desc(s) for s in members) if members else m.group("n") + " channel(s)"
     sentences = [
         f"A multi-channel MINFLUX overlay was loaded from the .msr file '{file}' via the MSR "
         f"reader, comprising {n} channel(s): {chans}."
@@ -245,15 +269,14 @@ def _render_msr_overlay(m, ev, state):
             sentences.append(f"Channels were aligned to the reference by the '{mode}' method.")
     else:
         sentences.append("No inter-channel alignment was applied.")
-    for _i, ds in members:
-        dmd = getattr(ds, "metadata", {}) or {}
-        t = dmd.get("overlay_transform")
+    for member in members:
+        t = member.get("overlay_transform")
         if not t:
             continue
         rc, mc = t.get("reference_channel"), t.get("moving_channel")
         if rc is not None and rc == mc:
             continue   # reference identity — no transform to describe
-        mover = dmd.get("msr_dataset_name") or getattr(ds, "name", "channel")
+        mover = member.get("msr_dataset_name") or member.get("name") or "channel"
         sentences.append(_describe_alignment(f"'{mover}'", f"'{ref or rc}'", t))
     return " ".join(sentences), []
 

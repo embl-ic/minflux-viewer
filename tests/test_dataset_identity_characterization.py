@@ -11,9 +11,11 @@ Where today's behaviour is wrong the test states what it should be and is
 marked ``xfail(strict=True)`` with the slice that fixes it, so the suite stays
 green now and fails loudly the moment a fix lands without removing the mark:
 
-* 3.3 -- a Log event is matched to a dataset by the index it was written with;
 * 3.4 -- closing one dataset retires every dataset's running post-load task,
   and a delayed post-load start is scheduled with an index.
+
+(3.3 fixed the third: a Log event was matched to a dataset by the index it was
+written with. Its tests below now pin the fixed behaviour.)
 
 Writing these found a third, worse defect, fixed at once rather than marked:
 a window unregistered itself by the index it was opened at, so closing an
@@ -332,8 +334,6 @@ def test_a_log_event_names_its_dataset_while_nothing_has_closed(session):
         assert method_text._ds_for(win._state, _load_event(win._state, name)) is ds
 
 
-@pytest.mark.xfail(strict=True, reason="slice 3.3: an event is matched by the index "
-                   "it was written with, so a close re-attributes it")
 def test_a_log_event_keeps_its_dataset_after_an_earlier_one_closes(session):
     win, datasets, _opened = session
     event = _load_event(win._state, "B")
@@ -342,8 +342,6 @@ def test_a_log_event_keeps_its_dataset_after_an_earlier_one_closes(session):
     assert method_text._ds_for(win._state, event) is datasets["B"]
 
 
-@pytest.mark.xfail(strict=True, reason="slice 3.3: an event of a closed dataset is "
-                   "attributed to whichever dataset now sits at its index")
 def test_a_log_event_of_a_closed_dataset_names_no_open_dataset(session):
     win, datasets, _opened = session
     event = _load_event(win._state, "A")
