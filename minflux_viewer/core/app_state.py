@@ -6,8 +6,10 @@ object.
 
 Holds
 -----
-* The list of loaded datasets (``datasets``)
-* The active dataset index   (``active_idx``)
+* The list of loaded datasets (``datasets``), each with a stable key
+  (``entries``; see :mod:`minflux_viewer.core.dataset_key`)
+* The active dataset, tracked by key (``active_key``); ``active_idx`` is its
+  position, derived from the key
 * Application preferences    (``prefs``)
 
 Emits Qt signals when state changes so every UI component can react without
@@ -17,6 +19,7 @@ being directly coupled to any other component.
 from __future__ import annotations
 
 import copy
+import itertools
 import json
 from contextlib import contextmanager
 from pathlib import Path
@@ -33,6 +36,7 @@ from ..colors import (
 )
 from . import formats as _formats
 from .dataset import MinfluxDataset
+from .dataset_key import DatasetEntry, DatasetKey
 
 if TYPE_CHECKING:
     pass
@@ -783,7 +787,11 @@ class AppState(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._datasets: list[MinfluxDataset] = []
-        self._active_idx: int | None = None
+        # Each dataset's key, in list order (stabilization Phase 3). The active
+        # dataset is tracked by key; ``_active_idx`` is derived from it.
+        self._entries: list[DatasetEntry] = []
+        self._active_key: DatasetKey | None = None
+        self._key_counter = itertools.count(1)
         self.prefs: dict = self._load_prefs()
         configure_colors(self.prefs)
         from ..colormaps import configure_colormap_order, configure_custom_colormaps
@@ -846,6 +854,98 @@ class AppState(QObject):
         return self._datasets[idx]
 
     # ------------------------------------------------------------------
+    # Dataset keys (internal; see core/dataset_key.py)
+    # ------------------------------------------------------------------
+
+    @property
+    def entries(self) -> tuple[DatasetEntry, ...]:
+        """Every open dataset with its key, in list order."""
+        return tuple(self._registry())
+
+    @property
+    def active_key(self) -> DatasetKey | None:
+        self._registry()
+        return self._active_key
+
+    def key_at(self, idx: int) -> DatasetKey | None:
+        """The key of the dataset at position *idx*, or None past either end."""
+        entries = self._registry()
+        return entries[idx].key if 0 <= idx < len(entries) else None
+
+    def index_of(self, key: DatasetKey | None) -> int | None:
+        """The current position of the dataset with *key*, or None if closed."""
+        for index, entry in enumerate(self._registry()):
+            if entry.key == key:
+                return index
+        return None
+
+    def dataset_for(self, key: DatasetKey | None) -> MinfluxDataset | None:
+        index = self.index_of(key)
+        return None if index is None else self._datasets[index]
+
+    def key_of(self, dataset: object) -> DatasetKey | None:
+        """The key of *dataset* (matched by identity), or None if not open."""
+        for entry in self._registry():
+            if entry.dataset is dataset:
+                return entry.key
+        return None
+
+    @property
+    def _active_idx(self) -> int | None:
+        """The active dataset's position, derived from its key.
+
+        Temporary (stabilization Phase 3): code written before the keys reads
+        and assigns this; assigning selects the key at that position.
+        """
+        key = self.active_key
+        return None if key is None else self.index_of(key)
+
+    @_active_idx.setter
+    def _active_idx(self, idx: int | None) -> None:
+        if idx is None:
+            self._active_key = None
+            return
+        entries = self._registry()
+        if not 0 <= idx < len(entries):
+            raise IndexError(f"no dataset at position {idx}")
+        self._active_key = entries[idx].key
+
+    def _new_key(self) -> DatasetKey:
+        return DatasetKey(next(self._key_counter))
+
+    def _registry(self) -> list[DatasetEntry]:
+        """The key registry, brought back in line if the list was edited directly.
+
+        Only ``add_dataset`` and ``remove_dataset`` are meant to change the
+        list, and they keep the registry in step. Tests edit ``datasets``
+        directly, so an edit made that way is reconciled here: keys follow the
+        datasets by identity, anything new gets a new key (a dataset listed
+        twice gets two), and if the active dataset was replaced or removed
+        that way, its position stays active, as the index this replaces did.
+        """
+        entries = self._entries
+        if len(entries) == len(self._datasets) and all(
+                entry.dataset is ds for entry, ds in zip(entries, self._datasets)):
+            return entries
+        old_active = next(
+            (i for i, entry in enumerate(entries) if entry.key == self._active_key), None)
+        unclaimed = {id(entry.dataset): entry for entry in entries}
+        rebuilt = []
+        for ds in self._datasets:
+            entry = unclaimed.pop(id(ds), None)
+            if entry is None or entry.dataset is not ds:
+                entry = DatasetEntry(self._new_key(), ds)
+            rebuilt.append(entry)
+        self._entries = rebuilt
+        if self._active_key is not None and all(
+                entry.key != self._active_key for entry in rebuilt):
+            if old_active is not None and rebuilt:
+                self._active_key = rebuilt[min(old_active, len(rebuilt) - 1)].key
+            else:
+                self._active_key = None
+        return rebuilt
+
+    # ------------------------------------------------------------------
     # Dataset management
     # ------------------------------------------------------------------
 
@@ -863,7 +963,9 @@ class AppState(QObject):
                 self.log(f"Already loaded: {dataset.name}", "WARN")
                 return i
 
+        self._registry()
         self._datasets.append(dataset)
+        self._entries.append(DatasetEntry(self._new_key(), dataset))
         idx = len(self._datasets) - 1
         # IMPORTANT: set_active BEFORE dataset_added so handlers that query
         # active_dataset (e.g. MainWindow._show_render) see a valid active idx.
@@ -940,6 +1042,7 @@ class AppState(QObject):
 
         old_active = self._active_idx
         self._datasets.pop(idx)
+        self._entries.pop(idx)
 
         if not self._datasets:
             self._active_idx = None
