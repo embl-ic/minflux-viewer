@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
 
 from ..analysis import curvilinear_segmentation as cv
 from ..colormaps import colormap_lut
+from .dataset_binding import DatasetIndex
 
 _MAX_IMAGE_PX = 40_000_000
 _RIDGE_CMAP = "inferno"
@@ -53,6 +54,11 @@ _ROI_STROKE = "#00e5ff"
 
 class CurvilinearSegmentationWindow(QDialog):
     """Modeless interactive Hessian/Frangi filament-tracing tool."""
+
+    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
+    # position. See ui/dataset_binding.py.
+    _idx = DatasetIndex()
+    _dataset_idx = DatasetIndex()
 
     def __init__(self, state, dataset_idx: int, owner=None) -> None:
         super().__init__(None)
@@ -359,7 +365,7 @@ class CurvilinearSegmentationWindow(QDialog):
 
     # ----------------------------------------------------------- data path
     def _dataset(self):
-        if 0 <= self._idx < len(self._state.datasets):
+        if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
             return self._state.datasets[self._idx]
         return None
 

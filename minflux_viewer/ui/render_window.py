@@ -89,6 +89,7 @@ from ..core.overlay import (
 )
 from ..core.roi_selection import REGION_ROI_TYPES, roi_region_mask
 from ..core.spatial_grid import SpatialGrid
+from .dataset_binding import DatasetIndex, event_index
 from .ortho_view import (
     ORTHO_AXIS,
     ORTHO_AXIS_COLUMNS,
@@ -817,6 +818,11 @@ class RenderWindow(QWidget):
     SUPPORTS_VOLUME_3D = True
     SIGMA_MENU_TEXT = "Fixed Gaussian sigma…"
 
+    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
+    # position. See ui/dataset_binding.py.
+    _idx = DatasetIndex()
+    _dataset_idx = DatasetIndex()
+
     def __init__(
         self,
         state: AppState,
@@ -957,13 +963,13 @@ class RenderWindow(QWidget):
         self._info_shortcut.activated.connect(self._show_data_info_window)
         self._refresh_from_dataset()
 
-        state.active_changed.connect(self._on_active_changed)
-        state.filter_changed.connect(self._on_filter_changed)
+        state.dataset_events.active_changed.connect(self._on_active_changed)
+        state.dataset_events.filter_changed.connect(self._on_filter_changed)
         # Z scaling factor change: re-pull loc_nm and re-render (same as a
         # filter change — it busts tile caches and refreshes depth).
-        state.calibration_changed.connect(self._on_filter_changed)
-        state.overlay_transform_changed.connect(self._on_overlay_transform_changed)
-        state.roi_selection_changed.connect(self._on_roi_selection_changed)
+        state.dataset_events.calibration_changed.connect(self._on_filter_changed)
+        state.dataset_events.overlay_transform_changed.connect(self._on_overlay_transform_changed)
+        state.dataset_events.roi_selection_changed.connect(self._on_roi_selection_changed)
         state.rois.selection_changed.connect(self._redraw_roi_highlight)
         # The side panes' outlines follow the store, not the render debounce:
         # adding, deleting or re-selecting a ROI must show there immediately.
@@ -1415,7 +1421,7 @@ class RenderWindow(QWidget):
         would otherwise be an empty line."""
         if self._render_mode != "localizations" or self._idx is None:
             return False
-        if not (0 <= self._idx < len(self._state.datasets)):
+        if not (self._idx is not None and 0 <= self._idx < len(self._state.datasets)):
             return False
         return getattr(self._state.datasets[self._idx].prop, "num_dim", 2) == 3
 
@@ -5637,7 +5643,7 @@ class RenderWindow(QWidget):
 
         if record.type not in REGION_ROI_TYPES | VOLUME_ROI_TYPES or self._idx is None:
             return None
-        if not (0 <= self._idx < len(self._state.datasets)):
+        if not (self._idx is not None and 0 <= self._idx < len(self._state.datasets)):
             return None
         ds = self._state.datasets[self._idx]
         locs = self._raw_render_locs(ds)
@@ -5858,7 +5864,10 @@ class RenderWindow(QWidget):
     # State signals
     # ------------------------------------------------------------------
 
-    def _on_active_changed(self, idx: int) -> None:
+    def _on_active_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         # In an overlay, follow the active channel so Brightness/Contrast reads
         # and edits the dataset the user selected.
         if any(ch.get("dataset_idx") == idx for ch in self._channels):
@@ -5868,7 +5877,10 @@ class RenderWindow(QWidget):
             self._sync_bc_dialog()
             self.sync_lut_dialog()
 
-    def _on_filter_changed(self, idx: int) -> None:
+    def _on_filter_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         if any(ch["dataset_idx"] == idx for ch in self._channels):
             self._increment_mask_version(idx)
             for ch in self._channels:
@@ -5884,8 +5896,11 @@ class RenderWindow(QWidget):
             if self._volume_window is not None and self._volume_window.isVisible():
                 self._volume_window.refresh_from_dataset()
 
-    def _on_overlay_transform_changed(self, idx: int) -> None:
+    def _on_overlay_transform_changed(self, idx) -> None:
         """Reload a changed live transform and invalidate geometry caches."""
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         if not (0 <= idx < len(self._state.datasets)):
             return
         current = (
@@ -5902,6 +5917,9 @@ class RenderWindow(QWidget):
         if changed:
             self._on_filter_changed(idx)
 
-    def _on_roi_selection_changed(self, idx: int) -> None:
+    def _on_roi_selection_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         if any(ch["dataset_idx"] == idx for ch in self._channels):
             self._redraw_roi_highlight()

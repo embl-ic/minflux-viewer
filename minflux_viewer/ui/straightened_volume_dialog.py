@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 from ..analysis.straightened_volume import StraightenedVolumeResult, straightened_count_volume
 from ..colormaps import colormap_lut
 from ..core.roi import OPEN_LINE_TYPES, RoiRecord
+from .dataset_binding import DatasetIndex
 from .plot_format import plot_widget
 
 _GL_MAX_POINTS = 80_000
@@ -39,6 +40,11 @@ _CENTERLINE_COLOR = (0.1, 0.9, 1.0, 1.0)
 
 class StraightenedVolumeAlongSkeletonWindow(QDialog):
     TAG = "straightened_volume_skeleton"
+
+    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
+    # position. See ui/dataset_binding.py.
+    _idx = DatasetIndex()
+    _dataset_idx = DatasetIndex()
 
     def __init__(self, state, dataset_idx: int, owner=None) -> None:
         super().__init__(None)
@@ -223,7 +229,7 @@ class StraightenedVolumeAlongSkeletonWindow(QDialog):
 
     # ------------------------------------------------------------------ data
     def _dataset(self):
-        if 0 <= self._idx < len(self._state.datasets):
+        if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
             return self._state.datasets[self._idx]
         return None
 

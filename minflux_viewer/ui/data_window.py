@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 
 from ..core.app_state import AppState
 from ..core.dataset import MinfluxDataset
+from .dataset_binding import DatasetIndex, event_index
 from .z_scaling_widgets import ZScalingFactorDialog, format_z_scaling_factor
 
 
@@ -52,6 +53,11 @@ class DataWindow(QWidget):
         └──────────────────────────────────────────────────────────────┘
     """
 
+    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
+    # position. See ui/dataset_binding.py.
+    _idx = DatasetIndex()
+    _dataset_idx = DatasetIndex()
+
     def __init__(
         self,
         dataset: MinfluxDataset,
@@ -60,8 +66,8 @@ class DataWindow(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._idx   = dataset_idx
         self._state = state
+        self._idx   = dataset_idx
 
         self.setWindowTitle("Dataset Information")
         self.setMinimumWidth(420)
@@ -72,10 +78,10 @@ class DataWindow(QWidget):
         self._build_ui(dataset)
 
         # Track active-dataset changes so we can update the title / button
-        state.active_changed.connect(self._refresh)
+        state.dataset_events.active_changed.connect(self._refresh)
         # Refresh info values (e.g. Z scaling factor) when this dataset's calibration changes
-        state.calibration_changed.connect(self._on_calibration_changed)
-        state.overlay_transform_changed.connect(self._on_overlay_transform_changed)
+        state.dataset_events.calibration_changed.connect(self._on_calibration_changed)
+        state.dataset_events.overlay_transform_changed.connect(self._on_overlay_transform_changed)
 
     # ------------------------------------------------------------------
     # UI
@@ -171,6 +177,7 @@ class DataWindow(QWidget):
         if (
             watched in self._transform_widgets
             and event.type() == QEvent.Type.MouseButtonDblClick
+            and self._idx is not None
             and 0 <= self._idx < len(self._state.datasets)
             and _is_transformed(self._state.datasets[self._idx])
         ):
@@ -181,7 +188,7 @@ class DataWindow(QWidget):
 
     def _edit_z_scaling_factor(self) -> None:
         """Prompt for and apply a manual Z scaling factor to this 3-D dataset."""
-        if not (0 <= self._idx < len(self._state.datasets)):
+        if not (self._idx is not None and 0 <= self._idx < len(self._state.datasets)):
             return
         ds = self._state.datasets[self._idx]
         if int(ds.prop.num_dim) < 3:
@@ -207,7 +214,7 @@ class DataWindow(QWidget):
 
     def _edit_transform(self) -> None:
         """Inspect/edit this dataset's canonical overlay transform."""
-        if not (0 <= self._idx < len(self._state.datasets)):
+        if not (self._idx is not None and 0 <= self._idx < len(self._state.datasets)):
             return
         ds = self._state.datasets[self._idx]
         transform = _dataset_transform(ds)
@@ -259,26 +266,32 @@ class DataWindow(QWidget):
     # ------------------------------------------------------------------
 
     def focusInEvent(self, event) -> None:
-        if 0 <= self._idx < len(self._state.datasets):
+        if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
             self._state.set_active(self._idx)
         super().focusInEvent(event)
 
     def changeEvent(self, event) -> None:
         from PyQt6.QtCore import QEvent
         if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
-            if 0 <= self._idx < len(self._state.datasets):
+            if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
                 self._state.set_active(self._idx)
         super().changeEvent(event)
 
-    def _on_calibration_changed(self, idx: int) -> None:
+    def _on_calibration_changed(self, idx) -> None:
         """Refresh info values (e.g. the Z scaling factor row) for this dataset."""
-        if idx != self._idx or not (0 <= self._idx < len(self._state.datasets)):
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
+        if idx != self._idx or not (self._idx is not None and 0 <= self._idx < len(self._state.datasets)):
             return
         self._refresh_info_values()
 
-    def _on_overlay_transform_changed(self, idx: int) -> None:
+    def _on_overlay_transform_changed(self, idx) -> None:
         """Refresh the transformed value after matrix or interactive alignment edits."""
-        if idx != self._idx or not (0 <= self._idx < len(self._state.datasets)):
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
+        if idx != self._idx or not (self._idx is not None and 0 <= self._idx < len(self._state.datasets)):
             return
         self._refresh_info_values()
 
@@ -306,9 +319,10 @@ class DataWindow(QWidget):
             widget.setCursor(cursor)
             widget.setToolTip(tip)
 
-    def _refresh(self, active_idx: int | None) -> None:
+    def _refresh(self, active_idx) -> None:
         """Update the window title and button state."""
-        if active_idx == self._idx:
+        active_idx = event_index(self._state, active_idx)
+        if active_idx is not None and active_idx == self._idx:
             self.setWindowTitle("[ACTIVE]  Dataset Information")
             self._btn.setEnabled(False)
             self._btn.setText("Active dataset")

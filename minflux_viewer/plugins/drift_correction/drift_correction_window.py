@@ -50,6 +50,7 @@ from PyQt6.QtWidgets import (
 from ...analysis import bead_drift as bd
 from ...analysis import drift_correction as dc
 from ...colors import component_colors
+from ...ui.dataset_binding import event_index
 
 METHOD_BEADS = "beads"
 METHOD_WINDOWS = "windows"
@@ -123,8 +124,8 @@ class DriftCorrectionWindow(QDialog):
         self._build_ui()
 
         try:
-            state.active_changed.connect(self._on_active_changed)
-            state.filter_changed.connect(self._on_filter_changed)
+            state.dataset_events.active_changed.connect(self._on_active_changed)
+            state.dataset_events.filter_changed.connect(self._on_filter_changed)
         except Exception:
             pass
         self._refresh_dataset_info()
@@ -406,6 +407,9 @@ class DriftCorrectionWindow(QDialog):
         self._refresh_dataset_info()
 
     def _on_filter_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         # The estimate used the filtered rows, so another filter needs another estimate.
         if idx != self._state.active_idx:
             return

@@ -66,6 +66,7 @@ from .. import resource_path
 from ..core import formats as _formats
 from ..core.app_state import AppState
 from .data_window import DataWindow
+from .dataset_binding import DatasetWindowMap, event_index
 
 #: Everything the application will attempt to open, from the one format
 #: registry (:mod:`minflux_viewer.core.formats`).
@@ -352,17 +353,17 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._state = state
         self._apply_menu_separator_style()
-        self._data_windows: dict[int, DataWindow] = {}
+        self._data_windows = DatasetWindowMap(state)
 
         # One reusable plot window per dataset.
-        self._scatter_windows: dict[int, QWidget] = {}
-        self._histogram_windows: dict[int, QWidget] = {}
-        self._attr_windows: dict[int, QWidget] = {}
+        self._scatter_windows = DatasetWindowMap(state)
+        self._histogram_windows = DatasetWindowMap(state)
+        self._attr_windows = DatasetWindowMap(state)
         self._scatter_win   = None       # compatibility alias: most recently raised
         self._histogram_win = None       # compatibility alias: most recently raised
         self._attr_win      = None       # compatibility alias: most recently raised
         self._filter_dlg    = None
-        self._filter_dlgs: dict[int | None, QWidget] = {}
+        self._filter_dlgs = DatasetWindowMap(state)
         self._ds_manager    = None
         self._log_win       = None
         self._console_win   = None
@@ -374,12 +375,14 @@ class MainWindow(QMainWindow):
         self._shortcut_actions: dict[str, QAction] = {}
         self._roi_tool_actions: dict[str, QAction] = {}
         self._window_cycle_index = -1
-        # One render window per dataset: {dataset_idx: RenderWindow}
-        self._render_windows: dict[int, QWidget] = {}
+        # One render window per dataset. Every per-dataset registry is keyed by
+        # the dataset's key and read by position (ui/dataset_binding.py), so an
+        # earlier dataset closing leaves the others' windows where they are.
+        self._render_windows = DatasetWindowMap(state)
         # ...and one tracking view per dataset, the same contract.
-        self._tracking_windows: dict[int, QWidget] = {}
+        self._tracking_windows = DatasetWindowMap(state)
         # One modeless MSD workbench per dataset; results stay beside the views.
-        self._msd_windows: dict[int, QWidget] = {}
+        self._msd_windows = DatasetWindowMap(state)
         # Standalone TIFF viewers are not MINFLUX datasets and never appear in
         # the dataset manager.
         self._tiff_windows: dict[str, QWidget] = {}
@@ -470,15 +473,14 @@ class MainWindow(QMainWindow):
         self._bind_scripting_api()
 
         # React to application-state changes
-        state.dataset_added.connect(self._on_dataset_added)
-        state.dataset_removed.connect(self._on_dataset_removed)
-        state.dataset_events.removed.connect(self._retire_dataset_tasks)
-        state.active_changed.connect(self._on_active_changed)
+        state.dataset_events.added.connect(self._on_dataset_added)
+        state.dataset_events.removed.connect(self._on_dataset_removed)
+        state.dataset_events.active_changed.connect(self._on_active_changed)
         state.status_message.connect(self._status_label.setText)
         state.log_message.connect(self._on_log_message)
         state.colors_changed.connect(self._on_colors_changed)
         state.colormap_order_changed.connect(self._on_colormap_order_changed)
-        state.overlay_manual_alignment_requested.connect(
+        state.dataset_events.overlay_manual_alignment_requested.connect(
             self._on_overlay_manual_alignment_requested
         )
 
@@ -2918,11 +2920,12 @@ class MainWindow(QMainWindow):
     # Tool windows  — open once, raise if already open
     # ------------------------------------------------------------------
 
-    def _on_overlay_manual_alignment_requested(self, dataset_idx: int) -> None:
+    def _on_overlay_manual_alignment_requested(self, dataset_idx) -> None:
         """Enter the existing channel-row Manual align mode for a dataset."""
         from ..core.overlay import is_multichannel_overlay
 
-        if not (0 <= dataset_idx < len(self._state.datasets)):
+        dataset_idx = event_index(self._state, dataset_idx)
+        if dataset_idx is None or not (0 <= dataset_idx < len(self._state.datasets)):
             return
         if not is_multichannel_overlay(self._state, dataset_idx):
             self._state.log(
@@ -8268,7 +8271,10 @@ class MainWindow(QMainWindow):
         if dataset_overlay_block(ds):
             self._schedule_overlay_regroup()
 
-    def _on_dataset_added(self, idx: int) -> None:
+    def _on_dataset_added(self, event) -> None:
+        idx = event_index(self._state, event)
+        if idx is None:
+            return
         ds  = self._state.datasets[idx]
         # A file saved as part of an overlay says so in its recipe; offering to
         # rebuild the set waits for the rest of the batch to arrive.
@@ -8869,10 +8875,15 @@ class MainWindow(QMainWindow):
             f"'{ds.name}' was saved with {len(specs)} filter row(s), "
             f"{enabled} enabled.", dataset_idx=idx)
 
-    def _on_dataset_removed(self, idx: int) -> None:
-        # The closed dataset's own background work is retired by
-        # _retire_dataset_tasks (on the typed removal event); everyone else's
-        # keeps running and delivers by key, whatever index it lands at.
+    def _on_dataset_removed(self, event) -> None:
+        """Retire what belonged to a dataset that has closed (typed removal).
+
+        Its background work and its windows are found by key. Every other
+        dataset's windows stay registered under their own key, so nothing is
+        re-keyed, and their ``_idx`` follows their dataset by itself.
+        """
+        self._retire_dataset_tasks(event)
+        idx = event.old_index
         for mapping in (
             self._data_windows,
             self._render_windows,
@@ -8883,7 +8894,7 @@ class MainWindow(QMainWindow):
             self._attr_windows,
             self._filter_dlgs,
         ):
-            win = mapping.pop(idx, None)
+            win = mapping.pop_key(event.key)
             if win is not None:
                 try:
                     delete_on_close = win.testAttribute(
@@ -8894,7 +8905,7 @@ class MainWindow(QMainWindow):
                         win.deleteLater()
                 except Exception:
                     pass
-            self._reindex_window_map_after_remove(mapping, idx)
+            self._refresh_shifted_windows(mapping, idx)
         # ROI scopes hold absolute dataset indices, and removing a dataset
         # shifts every later one — without this a ROI would silently be
         # re-attributed to whatever now sits at its index.
@@ -8906,13 +8917,13 @@ class MainWindow(QMainWindow):
         self._roi_last_active = remap_dataset_keyed(self._roi_last_active, idx)
         self._notify_view_state_changed()
 
-    def _unregister_when_destroyed(self, registry: dict, window) -> None:
+    def _unregister_when_destroyed(
+            self, registry: dict | DatasetWindowMap, window) -> None:
         """Remove *window* from *registry* when Qt destroys it -- by identity.
 
         The index a window was opened at goes stale as soon as an earlier
-        dataset closes (``_reindex_window_map_after_remove`` moves the window
-        down), so removing by that index took out whichever window had moved
-        into it. The registry is also what keeps a parentless window's Python
+        dataset closes, so removing by that index took out whichever window had
+        moved into it. The registry is also what keeps a parentless window's Python
         wrapper alive: a window dropped from it while still on screen was
         destroyed by the next garbage collection, without a close event, and
         its pyqtgraph views took the process down with it.
@@ -8929,41 +8940,45 @@ class MainWindow(QMainWindow):
 
         def forget(_obj=None) -> None:
             target = ref()
+
+            def gone(value) -> bool:
+                return value is target or deleted(value)
+
+            discard = getattr(registry, "discard_where", None)
+            if callable(discard):           # a DatasetWindowMap: every entry
+                discard(gone)
+                return
             for key, value in list(registry.items()):
-                if value is target or deleted(value):
+                if gone(value):
                     registry.pop(key, None)
 
         window.destroyed.connect(forget)
 
-    def _reindex_window_map_after_remove(self, mapping: dict[int, QWidget], removed_idx: int) -> None:
-        moved = {}
-        for key, win in list(mapping.items()):
-            new_key = key - 1 if key > removed_idx else key
-            if new_key != key:
-                mapping.pop(key, None)
-                moved[new_key] = win
-                if hasattr(win, "_idx"):
-                    setattr(win, "_idx", new_key)
-                if hasattr(win, "_dataset_idx"):
-                    setattr(win, "_dataset_idx", new_key)
-                # The window now points to a different dataset slot — drop any
-                # per-window coordinate cache and redraw so it shows the correct
-                # (e.g. averaged, re-zeroed) localizations, not the previous ones.
-                if hasattr(win, "_cached_dataset_idx"):
-                    win._cached_dataset_idx = None
-                    win._cached_locs_nm = None
-                for refresh in ("_refresh", "_refresh_from_dataset"):
-                    fn = getattr(win, refresh, None)
-                    if callable(fn):
-                        try:
-                            fn()
-                        except Exception:
-                            pass
-                        break
-        mapping.update(moved)
+    def _refresh_shifted_windows(self, mapping, removed_idx: int) -> None:
+        """Reload the windows whose dataset moved down when an earlier one closed.
 
-    def _on_active_changed(self, idx: int) -> None:
-        if not (0 <= idx < len(self._state.datasets)):
+        They keep their registration and their ``_idx`` (both follow the key),
+        but an overlay window's channel list still records positions, and the
+        scatter loc cache is keyed by position, so each is told to reload.
+        """
+        for idx, win in list(mapping.items()):
+            if idx is None or idx < removed_idx:
+                continue
+            if hasattr(win, "_cached_dataset_idx"):
+                win._cached_dataset_idx = None
+                win._cached_locs_nm = None
+            for refresh in ("_refresh", "_refresh_from_dataset"):
+                fn = getattr(win, refresh, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+                    break
+
+    def _on_active_changed(self, event) -> None:
+        idx = event_index(self._state, event)
+        if idx is None or not (0 <= idx < len(self._state.datasets)):
             return
         ds = self._state.datasets[idx]
         self.setWindowTitle(f"{self.APP_NAME}  —  {ds.name}")
@@ -9163,7 +9178,7 @@ class MainWindow(QMainWindow):
     def _lut_capable_views(self) -> list:
         """Every view that can own a LUT dialog."""
         views: list = []
-        registries = [
+        registries: list = [
             self._render_windows,
             self._scatter_windows,
             self._attr_windows,

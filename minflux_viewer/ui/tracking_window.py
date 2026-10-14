@@ -87,6 +87,7 @@ from ..core.tracks import (
     build_track_set,
     looks_like_tracking,
 )
+from .dataset_binding import DatasetIndex, event_index
 from .plot_format import apply_spatial_y_direction, plot_widget
 from .time_slider import TimeAxisRow
 
@@ -329,6 +330,11 @@ class TrackingWindow(QWidget):
 
     TAG = "tracking_window"
 
+    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
+    # position. See ui/dataset_binding.py.
+    _idx = DatasetIndex()
+    _dataset_idx = DatasetIndex()
+
     def __init__(self, state: AppState, dataset_idx: int | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -413,10 +419,10 @@ class TrackingWindow(QWidget):
         })
         self._refresh_from_dataset()
 
-        state.filter_changed.connect(self._on_dataset_changed)
-        state.calibration_changed.connect(self._on_dataset_changed)
-        state.overlay_transform_changed.connect(self._on_dataset_changed)
-        state.attributes_changed.connect(self._on_dataset_changed)
+        state.dataset_events.filter_changed.connect(self._on_dataset_changed)
+        state.dataset_events.calibration_changed.connect(self._on_dataset_changed)
+        state.dataset_events.overlay_transform_changed.connect(self._on_dataset_changed)
+        state.dataset_events.attributes_changed.connect(self._on_dataset_changed)
         state.tracking_playhead_changed.connect(self._receive_playhead)
 
     # ------------------------------------------------------------------- UI
@@ -913,7 +919,10 @@ class TrackingWindow(QWidget):
         self._request_track_build(
             reset_window=True, fit_view=False, rebuild_rows=True)
 
-    def _on_dataset_changed(self, idx: int) -> None:
+    def _on_dataset_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         if self._closing:
             return
         if any(ch["dataset_idx"] == idx for ch in self._channels):

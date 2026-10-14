@@ -1128,9 +1128,10 @@ class AppState(QObject):
             self.status_message.emit(
                 f"Active: {self._datasets[new_active].summary()}")
 
-    def set_active(self, idx: int) -> None:
-        """Make the dataset at *idx* the active one."""
-        if not (0 <= idx < len(self._datasets)):
+    def set_active(self, idx: int | None) -> None:
+        """Make the dataset at *idx* the active one (None, or a position past
+        the end, is ignored: a window whose dataset has closed asks with None)."""
+        if idx is None or not (0 <= idx < len(self._datasets)):
             return
         if self._active_idx == idx:
             return

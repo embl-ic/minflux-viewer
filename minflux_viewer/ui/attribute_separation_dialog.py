@@ -82,6 +82,7 @@ from ..core.loader import (
 )
 from ..utils.filters import raw_trace_aggregate
 from .attribute_help import apply_attribute_tooltips
+from .dataset_binding import DatasetIndex
 from .plot_format import apply_spatial_y_direction
 
 _DISPLAY_AGG = ["per loc", "trace mean", "trace median"]
@@ -174,6 +175,11 @@ class _ChannelRegion(pg.LinearRegionItem):
 class AttributeSeparationDialog(QDialog):
     """Separate one dataset into a multi-channel overlay by an attribute's
     distribution, by ROIs, or by filters. Modeless; one instance per dataset."""
+
+    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
+    # position. See ui/dataset_binding.py.
+    _idx = DatasetIndex()
+    _dataset_idx = DatasetIndex()
 
     def __init__(self, state, dataset_idx: int, *, attribute: str = "dcr",
                  title: str | None = None, default_distribution: str = "gaussian",
@@ -421,13 +427,13 @@ class AttributeSeparationDialog(QDialog):
         # in the dropdowns.
         try:
             self._state.rois.changed.connect(self._populate_sources)
-            self._state.filter_changed.connect(lambda *_: self._populate_sources())
+            self._state.dataset_events.filter_changed.connect(self._on_filter_changed)
         except Exception:
             pass
 
     # ------------------------------------------------------------ data path
     def _dataset(self):
-        if 0 <= self._idx < len(self._state.datasets):
+        if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
             return self._state.datasets[self._idx]
         return None
 
@@ -921,6 +927,11 @@ class AttributeSeparationDialog(QDialog):
     def _filter_label(spec: dict) -> str:
         return (f"{spec.get('attribute', '?')} [{float(spec.get('lo', 0.0)):g}, "
                 f"{float(spec.get('hi', 0.0)):g}]")
+
+    def _on_filter_changed(self, _event) -> None:
+        # A bound method, not a lambda: Qt disconnects it when the dialog is
+        # destroyed, while a lambda would keep calling into a deleted dialog.
+        self._populate_sources()
 
     def _populate_sources(self, *_args) -> None:
         """Fill the ROI / filter dropdowns; an empty one reads ``-``."""

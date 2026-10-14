@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
 
 from ..core.app_state import AppState
 from ..core.dataset import dataset_source_file
+from .dataset_binding import event_index
 
 # Column indices
 _COL_ACTIVE  = 0
@@ -80,9 +81,9 @@ class DatasetManager(QDialog):
         self._build_ui()
         self._rebuild_table()
 
-        state.dataset_added.connect(self._on_dataset_added)
-        state.dataset_removed.connect(self._on_dataset_removed)
-        state.active_changed.connect(self._on_active_changed)
+        state.dataset_events.added.connect(self._on_dataset_added)
+        state.dataset_events.removed.connect(self._on_dataset_removed)
+        state.dataset_events.active_changed.connect(self._on_active_changed)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -649,7 +650,10 @@ class DatasetManager(QDialog):
             except Exception as exc:
                 self._state.log(f"Z scaling factor estimation failed: {exc}", "ERROR")
 
-    def _on_dataset_added(self, idx: int) -> None:
+    def _on_dataset_added(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         ds = self._state.datasets[idx]
         self._insert_row(idx, ds)
         self._update_info()

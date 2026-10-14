@@ -307,6 +307,10 @@ def test_a_per_dataset_roi_cache_follows_its_datasets_when_one_closes():
 def test_closing_a_dataset_re_keys_the_restore_roi_memory(qapp):
     """The main window's removal handler applies it (a stand-in, not a real
     MainWindow: constructing one per test drags in every child window)."""
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.core.dataset_events import DatasetRemoved
+    from minflux_viewer.core.dataset_key import DatasetKey
+    from minflux_viewer.ui.dataset_binding import DatasetWindowMap
     from minflux_viewer.ui.main_window import MainWindow
 
     later = _rect("later", source_view="render", dataset_idx=2)
@@ -317,14 +321,17 @@ def test_closing_a_dataset_re_keys_the_restore_roi_memory(qapp):
         _roi_last_active={1: _rect("closed", dataset_idx=1), 2: later},
         _notify_view_state_changed=lambda: calls.append("notified"),
     )
+    registry_state = AppState()
     for name in ("_data_windows", "_render_windows", "_scatter_windows",
                  "_tracking_windows", "_msd_windows", "_histogram_windows",
                  "_attr_windows", "_filter_dlgs"):
-        setattr(window, name, {})
-    window._reindex_window_map_after_remove = (
-        MainWindow._reindex_window_map_after_remove.__get__(window))
+        setattr(window, name, DatasetWindowMap(registry_state))
+    window._retire_dataset_tasks = lambda _event: None
+    window._refresh_shifted_windows = (
+        MainWindow._refresh_shifted_windows.__get__(window))
 
-    MainWindow._on_dataset_removed(window, 1)
+    MainWindow._on_dataset_removed(window, DatasetRemoved(
+        key=DatasetKey(2), dataset=None, old_index=1, new_active_key=None))
 
     assert window._roi_last_active == {1: later}
     assert roi_scope.roi_owner_dataset(later) == 1

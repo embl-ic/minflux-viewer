@@ -47,6 +47,7 @@ from PyQt6.QtWidgets import (
 
 from ..analysis import conv_segmentation as cs
 from ..colormaps import colormap_lut
+from .dataset_binding import DatasetIndex
 from .layer_brightness import LayerBrightness, percentile_levels
 from .plot_format import apply_spatial_y_direction
 from .roi_overlay import PointMarkerItem
@@ -60,6 +61,11 @@ _MARKER_PX = 26                 # on-screen diameter of the point-ROI-style mark
 
 class ConvSegmentationWindow(QDialog):
     """Modeless interactive geometry-kernel convolution segmentation tool."""
+
+    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
+    # position. See ui/dataset_binding.py.
+    _idx = DatasetIndex()
+    _dataset_idx = DatasetIndex()
 
     def __init__(self, state, dataset_idx: int, owner=None) -> None:
         super().__init__(None)
@@ -402,7 +408,7 @@ class ConvSegmentationWindow(QDialog):
 
     # ----------------------------------------------------------- data path
     def _dataset(self):
-        if 0 <= self._idx < len(self._state.datasets):
+        if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
             return self._state.datasets[self._idx]
         return None
 

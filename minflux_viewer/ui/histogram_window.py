@@ -56,6 +56,7 @@ from ..core.loader import (
 from ..core.roi_selection import rectangle_bounds, value_range_mask
 from ..utils.filters import TRACE_AGG_FUNCS, trace_agg_func
 from .attribute_help import apply_attribute_tooltips
+from .dataset_binding import DatasetIndex, event_index
 from .filter_dialog import SmartBoundsSpinBox, _filter_spinner_values
 from .plot_format import plot_widget
 from .zoom_guide import zoom_guide_points
@@ -123,6 +124,11 @@ class HistogramWindow(QWidget):
 
     TAG = "histogram_window"
 
+    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
+    # position. See ui/dataset_binding.py.
+    _idx = DatasetIndex()
+    _dataset_idx = DatasetIndex()
+
     def __init__(self, state: AppState, parent: QWidget | None = None, *, dataset_idx: int | None = None) -> None:
         super().__init__(parent)
         self._state = state
@@ -161,11 +167,11 @@ class HistogramWindow(QWidget):
         self._build_ui()
         self._refresh()
 
-        state.filter_changed.connect(self._on_filter_changed)
-        state.attributes_changed.connect(self._on_attributes_changed)
+        state.dataset_events.filter_changed.connect(self._on_filter_changed)
+        state.dataset_events.attributes_changed.connect(self._on_attributes_changed)
         # The in-ROI highlight is per-row, so a ROI from any view of this
         # dataset (render included) can be shown on this attribute's bins.
-        state.roi_selection_changed.connect(self._on_roi_selection_changed)
+        state.dataset_events.roi_selection_changed.connect(self._on_roi_selection_changed)
         state.rois.selection_changed.connect(self._redraw_roi_highlight)
 
     @property
@@ -175,7 +181,7 @@ class HistogramWindow(QWidget):
     def _dataset(self):
         if self._dataset_idx is None:
             return None
-        if not (0 <= self._dataset_idx < len(self._state.datasets)):
+        if not (self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets)):
             return None
         return self._state.datasets[self._dataset_idx]
 
@@ -2004,7 +2010,10 @@ class HistogramWindow(QWidget):
             self._agg_combo.setToolTip("")
         self._agg_combo.blockSignals(False)
 
-    def _on_filter_changed(self, idx: int) -> None:
+    def _on_filter_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         if idx == self._dataset_idx:
             if self._filter_edit:
                 self._reset_for_new_data()
@@ -2012,7 +2021,10 @@ class HistogramWindow(QWidget):
                 self._draw(preserve_histogram_frame=True)
                 self._fit_histogram_view()
 
-    def _on_attributes_changed(self, idx: int) -> None:
+    def _on_attributes_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         if idx == self._dataset_idx:
             self._refresh()
 
@@ -2021,6 +2033,7 @@ class HistogramWindow(QWidget):
             self._roi_highlight_item.setOpts(x=[], height=[], width=1)
 
     def _on_roi_selection_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
         if idx is None or idx == self._dataset_idx:
             self._redraw_roi_highlight()
 

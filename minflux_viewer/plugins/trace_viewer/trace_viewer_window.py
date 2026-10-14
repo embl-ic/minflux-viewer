@@ -49,6 +49,7 @@ from PyQt6.QtWidgets import (
 
 from ...colors import component_colors
 from ...core.loader import attr_values_1d
+from ...ui.dataset_binding import DatasetIndex
 from ...ui.plot_format import apply_spatial_y_direction, plot_widget
 from . import trace_data as td
 
@@ -70,6 +71,11 @@ def _alive(widget) -> bool:
 
 class TraceViewerWindow(QDialog):
     """Per-trace inspection window (Plugins › Trace Viewer)."""
+
+    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
+    # position. See ui/dataset_binding.py.
+    _idx = DatasetIndex()
+    _dataset_idx = DatasetIndex()
 
     def __init__(self, state, dataset_idx: int, owner=None) -> None:
         super().__init__(None)
@@ -266,7 +272,7 @@ class TraceViewerWindow(QDialog):
 
     # ------------------------------------------------------------ data path
     def _dataset(self):
-        if 0 <= self._idx < len(self._state.datasets):
+        if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
             return self._state.datasets[self._idx]
         return None
 

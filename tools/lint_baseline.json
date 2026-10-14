@@ -457,15 +457,15 @@
    "union-attr": 4
   },
   "minflux_viewer/ui/main_window.py": {
-   "arg-type": 13,
-   "assignment": 28,
-   "attr-defined": 36,
+   "arg-type": 11,
+   "assignment": 18,
+   "attr-defined": 29,
    "index": 1,
    "list-item": 2,
    "operator": 2,
    "override": 2,
-   "return-value": 2,
-   "union-attr": 42,
+   "return-value": 1,
+   "union-attr": 29,
    "unused-ignore": 1,
    "var-annotated": 3
   },
@@ -535,10 +535,9 @@
    "var-annotated": 1
   },
   "minflux_viewer/ui/render_window.py": {
-   "arg-type": 6,
+   "arg-type": 4,
    "assignment": 5,
    "attr-defined": 10,
-   "index": 1,
    "method-assign": 1,
    "misc": 1,
    "union-attr": 70,
@@ -565,7 +564,7 @@
    "union-attr": 2
   },
   "minflux_viewer/ui/scatter_window.py": {
-   "arg-type": 7,
+   "arg-type": 6,
    "assignment": 5,
    "attr-defined": 28,
    "index": 2,

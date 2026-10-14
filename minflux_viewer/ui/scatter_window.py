@@ -62,6 +62,7 @@ from ..core.overlay import (
 )
 from ..core.roi_selection import REGION_ROI_TYPES, roi_region_mask
 from .attribute_help import apply_attribute_menu_tooltips, apply_attribute_tooltips
+from .dataset_binding import DatasetIndex, event_index
 from .gl_3d_reference import nice_step, three_plane_grid_positions, tick_values
 from .ortho_view import (
     AXIS_COLUMNS,
@@ -117,6 +118,11 @@ class ScatterWindow(QWidget):
     """Interactive 2D / 3D scatter plot of MINFLUX localisations."""
 
     TAG = "scatter_window"
+
+    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
+    # position. See ui/dataset_binding.py.
+    _idx = DatasetIndex()
+    _dataset_idx = DatasetIndex()
 
     def __init__(self, state: AppState, parent: QWidget | None = None, *, dataset_idx: int | None = None) -> None:
         super().__init__(parent)
@@ -199,11 +205,11 @@ class ScatterWindow(QWidget):
         self._build_ui()
         self._refresh()
 
-        state.filter_changed.connect(self._on_filter_changed)
-        state.attributes_changed.connect(self._on_attributes_changed)
-        state.calibration_changed.connect(self._on_calibration_changed)
-        state.overlay_transform_changed.connect(self._on_overlay_transform_changed)
-        state.roi_selection_changed.connect(self._on_roi_selection_changed)
+        state.dataset_events.filter_changed.connect(self._on_filter_changed)
+        state.dataset_events.attributes_changed.connect(self._on_attributes_changed)
+        state.dataset_events.calibration_changed.connect(self._on_calibration_changed)
+        state.dataset_events.overlay_transform_changed.connect(self._on_overlay_transform_changed)
+        state.dataset_events.roi_selection_changed.connect(self._on_roi_selection_changed)
         state.rois.selection_changed.connect(self._redraw_roi_highlight)
         # The side panes' outlines follow the store, not the redraw debounce:
         # adding, deleting or re-selecting a ROI must show there immediately,
@@ -247,7 +253,7 @@ class ScatterWindow(QWidget):
     def _dataset(self):
         if self._dataset_idx is None:
             return None
-        if not (0 <= self._dataset_idx < len(self._state.datasets)):
+        if not (self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets)):
             return None
         return self._state.datasets[self._dataset_idx]
 
@@ -1941,15 +1947,24 @@ class ScatterWindow(QWidget):
     def _update_color(self) -> None:
         self._redraw_current(save_state=True)
 
-    def _on_filter_changed(self, idx: int) -> None:
+    def _on_filter_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
             self._redraw_current(save_state=False)
 
-    def _on_attributes_changed(self, idx: int) -> None:
+    def _on_attributes_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
             self._refresh()
 
-    def _on_calibration_changed(self, idx: int) -> None:
+    def _on_calibration_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         # Z scaling factor changed: the cached loc_nm (keyed only by dataset
         # index) is now stale on z — invalidate it before redrawing.
         if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
@@ -1957,8 +1972,11 @@ class ScatterWindow(QWidget):
             self._cached_locs_nm = None
             self._redraw_current(save_state=False)
 
-    def _on_overlay_transform_changed(self, idx: int) -> None:
+    def _on_overlay_transform_changed(self, idx) -> None:
         """Reload a changed live transform and redraw its overlay channel."""
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         if not (0 <= idx < len(self._state.datasets)):
             return
         current = (
@@ -1977,7 +1995,10 @@ class ScatterWindow(QWidget):
             self._cached_locs_nm = None
             self._redraw_current(save_state=False)
 
-    def _on_roi_selection_changed(self, idx: int) -> None:
+    def _on_roi_selection_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
             self._redraw_roi_highlight()
 

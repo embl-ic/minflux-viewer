@@ -61,6 +61,7 @@ from ..core.loader import (
 )
 from ..utils.filters import AGG_MODES, FLOAT_RESULT_MODES, trace_agg_func
 from .attribute_help import apply_attribute_tooltips
+from .dataset_binding import DatasetIndex, event_index
 
 #: Same set, same order as the histogram's "As" dropdown — a view the user can
 #: author in the histogram must be expressible as a filter.
@@ -209,6 +210,11 @@ class SmartBoundsSpinBox(QDoubleSpinBox):
 class FilterDialog(QDialog):
     """Non-modal filter management dialog."""
 
+    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
+    # position. See ui/dataset_binding.py.
+    _idx = DatasetIndex()
+    _dataset_idx = DatasetIndex()
+
     def __init__(
         self,
         state: AppState,
@@ -246,10 +252,13 @@ class FilterDialog(QDialog):
         self._table.setAcceptDrops(False)
         self._table.viewport().setAcceptDrops(False)
 
-        state.active_changed.connect(self._on_active_changed)
-        state.attributes_changed.connect(self._on_attributes_changed)
+        state.dataset_events.active_changed.connect(self._on_active_changed)
+        state.dataset_events.attributes_changed.connect(self._on_attributes_changed)
 
-    def _on_attributes_changed(self, idx: int) -> None:
+    def _on_attributes_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         if idx == self._dataset_idx:
             self._populate_attr_lists()
 
@@ -260,7 +269,7 @@ class FilterDialog(QDialog):
     def _dataset(self):
         if self._dataset_idx is None:
             return None
-        if not (0 <= self._dataset_idx < len(self._state.datasets)):
+        if not (self._dataset_idx is not None and 0 <= self._dataset_idx < len(self._state.datasets)):
             return None
         return self._state.datasets[self._dataset_idx]
 
@@ -1164,7 +1173,10 @@ class FilterDialog(QDialog):
     # Slots
     # ------------------------------------------------------------------
 
-    def _on_active_changed(self, _idx: int) -> None:
+    def _on_active_changed(self, _idx) -> None:
+        _idx = event_index(self._state, _idx)
+        if _idx is None:
+            return
         if self._dataset_idx is None and _idx is not None:
             self._dataset_idx = _idx
         self._populate_attr_lists()

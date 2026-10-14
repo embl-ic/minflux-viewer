@@ -563,7 +563,10 @@ def _render_stub(locs, den, num_dim, *, all_z=True, depth=(-40.0, 40.0)):
                          filter_mask=np.ones(locs.shape[0], dtype=bool),
                          prop=SimpleNamespace(num_dim=num_dim))
     win = RenderWindow.__new__(RenderWindow)
-    win._state = SimpleNamespace(datasets=[ds])
+    # The window's _idx is backed by a dataset key, so the stand-in state
+    # answers the two registry lookups as well.
+    win._state = SimpleNamespace(datasets=[ds], key_at=lambda i: "k" if i == 0 else None,
+                                 index_of=lambda k: 0 if k == "k" else None)
     win._idx = 0
     win._raw_render_locs = lambda _d: locs
     win._active_plane = lambda: "XY"

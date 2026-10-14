@@ -72,6 +72,14 @@ class _State:
     def log(self, message, *args, **kwargs):
         self.messages.append(message)
 
+    # A window holds its dataset by key; this list never changes, so a
+    # position-based key is enough.
+    def key_at(self, idx):
+        return ("ds", idx) if idx is not None and 0 <= idx < len(self.datasets) else None
+
+    def index_of(self, key):
+        return key[1] if key is not None and 0 <= key[1] < len(self.datasets) else None
+
 
 class _Owner:
     """Stands in for MainWindow, exercising the real add_polygon_rois contract."""

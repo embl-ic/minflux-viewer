@@ -44,6 +44,7 @@ from ..analysis.tracking_stats import (
     snapshot_dataset_trajectories,
 )
 from ..core.tracking_time import tracking_precision_from_prefs
+from .dataset_binding import DatasetIndex, event_index
 from .plot_format import plot_widget
 
 MSD_METHOD_ID = "minflux_viewer.tracking.msd"
@@ -154,6 +155,11 @@ class _NumericSortProxy(QSortFilterProxyModel):
 class MsdAnalysisWindow(QWidget):
     """Parameters, curves, per-segment fits and audit trail for MSD analysis."""
 
+    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
+    # position. See ui/dataset_binding.py.
+    _idx = DatasetIndex()
+    _dataset_idx = DatasetIndex()
+
     def __init__(self, state, dataset_idx: int, owner=None) -> None:
         super().__init__(None)
         self._state = state
@@ -175,14 +181,14 @@ class MsdAnalysisWindow(QWidget):
         self.resize(1040, 760)
         self._build_ui()
 
-        state.filter_changed.connect(self._on_dataset_changed)
-        state.calibration_changed.connect(self._on_dataset_changed)
-        state.attributes_changed.connect(self._on_dataset_changed)
-        state.dataset_removed.connect(self._on_dataset_removed)
+        state.dataset_events.filter_changed.connect(self._on_dataset_changed)
+        state.dataset_events.calibration_changed.connect(self._on_dataset_changed)
+        state.dataset_events.attributes_changed.connect(self._on_dataset_changed)
+        state.dataset_events.removed.connect(self._on_dataset_removed)
         QTimer.singleShot(0, self.run_analysis)
 
     def _dataset(self):
-        if 0 <= self._idx < len(self._state.datasets):
+        if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
             dataset = self._state.datasets[self._idx]
             if self._dataset_identity in {-1, id(dataset)}:
                 return dataset
@@ -668,7 +674,10 @@ class MsdAnalysisWindow(QWidget):
         self._audit.clear()
         self._status.setText(reason)
 
-    def _on_dataset_changed(self, idx: int) -> None:
+    def _on_dataset_changed(self, idx) -> None:
+        idx = event_index(self._state, idx)
+        if idx is None:
+            return
         if not self._closing and not self._installing_attributes and idx == self._idx:
             self._invalidate("The dataset changed. Run again to refresh the analysis.")
 
@@ -677,14 +686,11 @@ class MsdAnalysisWindow(QWidget):
             self._invalidate(
                 "Tracking preferences changed. Run again to refresh the analysis.")
 
-    def _on_dataset_removed(self, _removed_idx: int) -> None:
-        if self._closing:
-            return
-        for idx, dataset in enumerate(self._state.datasets):
-            if id(dataset) == self._dataset_identity:
-                self._idx = idx
-                return
-        self.close()
+    def _on_dataset_removed(self, _event) -> None:
+        # ``_idx`` follows this window's dataset by key, so another dataset
+        # closing needs nothing; this one closing leaves it without a dataset.
+        if not self._closing and self._idx is None:
+            self.close()
 
     def focusInEvent(self, event) -> None:  # noqa: N802 - Qt API
         if self._dataset() is not None:

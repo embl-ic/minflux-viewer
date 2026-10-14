@@ -39,6 +39,7 @@ from ..analysis.voronoi_density import (
 )
 from ..colormaps import map_to_rgba, named_colormap_names, representative_rgb
 from ..core.app_state import AppState
+from .dataset_binding import DatasetIndex
 
 _DEFAULT_MAX_VOXELS = 8_000_000
 
@@ -513,6 +514,11 @@ class VolumeRenderWindow(QWidget):
 
     TAG = "volume_render_window"
 
+    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
+    # position. See ui/dataset_binding.py.
+    _idx = DatasetIndex()
+    _dataset_idx = DatasetIndex()
+
     def __init__(
         self,
         state: AppState,
@@ -741,7 +747,7 @@ class VolumeRenderWindow(QWidget):
         from ..core.overlay import overlay_members
 
         self._overlay_transforms = {}
-        if not (0 <= self._idx < len(self._state.datasets)):
+        if not (self._idx is not None and 0 <= self._idx < len(self._state.datasets)):
             return
         for dataset_idx, ds in overlay_members(self._state, self._idx):
             transform = ds.state.get("overlay_transform") or ds.state.get(
@@ -760,7 +766,7 @@ class VolumeRenderWindow(QWidget):
             overlay_members,
         )
 
-        if not (0 <= self._idx < len(self._state.datasets)):
+        if not (self._idx is not None and 0 <= self._idx < len(self._state.datasets)):
             return None
         if not dataset_group_id(self._state.datasets[self._idx]):
             return None
@@ -1187,7 +1193,7 @@ class VolumeRenderWindow(QWidget):
 
     def _on_lut_cmap_changed(self, name: str, invert: bool) -> None:
         self._lut_invert = bool(invert)
-        if 0 <= self._idx < len(self._state.datasets):
+        if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
             ds = self._state.datasets[self._idx]
             ds.state["render_channel_lut"] = name
             ds.state["overlay_lut"] = name
