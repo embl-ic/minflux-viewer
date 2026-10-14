@@ -2949,7 +2949,7 @@ class ScatterWindow(QWidget):
             locs = self._locs_for_dataset(ds)
             if locs.ndim != 2 or locs.shape[1] < 3:
                 continue
-            mask = np.asarray(ds.filter_mask, dtype=bool)
+            mask = np.array(ds.filter_mask, dtype=bool)  # a copy: narrowed below, never the dataset's own mask
             if mask.shape[0] != locs.shape[0]:
                 mask = np.ones(locs.shape[0], dtype=bool)
             mask &= np.all(np.isfinite(locs[:, :3]), axis=1)
@@ -3007,7 +3007,7 @@ class ScatterWindow(QWidget):
                 continue
             ds = self._state.datasets[ch["dataset_idx"]]
             locs = self._locs_for_dataset(ds)
-            mask = np.asarray(ds.filter_mask, dtype=bool)
+            mask = np.array(ds.filter_mask, dtype=bool)  # a copy: narrowed below, never the dataset's own mask
             if mask.shape[0] != locs.shape[0]:
                 mask = np.ones(locs.shape[0], dtype=bool)
             mask &= np.all(np.isfinite(locs[:, :3]), axis=1)
@@ -3670,7 +3670,7 @@ class ScatterWindow(QWidget):
             ci, cj = AXIS_COLUMNS[axis]
         else:
             return None
-        base = np.asarray(ds.filter_mask, dtype=bool)
+        base = np.array(ds.filter_mask, dtype=bool)  # a copy: narrowed below, never the dataset's own mask
         if base.shape[0] != locs.shape[0]:
             base = np.ones(locs.shape[0], dtype=bool)
         base &= np.all(np.isfinite(locs[:, :3]), axis=1)

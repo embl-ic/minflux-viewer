@@ -5663,7 +5663,7 @@ class RenderWindow(QWidget):
         else:
             return None
 
-        base = np.asarray(ds.filter_mask, dtype=bool)
+        base = np.array(ds.filter_mask, dtype=bool)  # a copy: narrowed below, never the dataset's own mask
         if base.shape[0] != locs.shape[0]:
             base = np.ones(locs.shape[0], dtype=bool)
         base &= np.all(np.isfinite(locs[:, :3]), axis=1)

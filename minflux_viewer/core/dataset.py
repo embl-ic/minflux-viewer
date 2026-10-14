@@ -18,6 +18,7 @@ already stored in nanometres, plus optional image payloads for rendering.
 from __future__ import annotations
 
 import os
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +30,26 @@ import numpy as np
 # AttrStore — dict-backed attribute container
 # ---------------------------------------------------------------------------
 
+class _Virtual:
+    """An attribute read from its owner (a dataset property), never stored.
+
+    Holds the property name only, so a copied store carries no reference to
+    the dataset it was copied from; the dataset that receives the store binds
+    it to itself.
+    """
+
+    __slots__ = ("prop",)
+
+    def __init__(self, prop: str) -> None:
+        self.prop = prop
+
+    def __deepcopy__(self, memo) -> _Virtual:
+        return _Virtual(self.prop)
+
+    def __repr__(self) -> str:
+        return f"<virtual: dataset.{self.prop}>"
+
+
 class AttrStore:
     """
     Thin wrapper around a plain dict of numpy arrays.
@@ -37,20 +58,60 @@ class AttrStore:
 
         attrs["loc_x"]   # dict-style
         attrs.loc_x      # attribute-style  (mirrors MATLAB data.attr.loc_x)
+
+    An entry may be **virtual** (:meth:`bind_virtual`): read from the owning
+    dataset on every access, listed where it always was, and read-only -- the
+    filter mask's ``ftr`` is one, so the mask has a single owner.
     """
 
     def __init__(self, data: dict[str, np.ndarray] | None = None) -> None:
         object.__setattr__(self, "_d", data or {})
+        object.__setattr__(self, "_owner", None)
+
+    def _resolve(self, name: str, value: Any) -> Any:
+        if not isinstance(value, _Virtual):
+            return value
+        owner_ref = object.__getattribute__(self, "_owner")
+        owner = owner_ref() if owner_ref is not None else None
+        if owner is None:
+            raise RuntimeError(
+                f"Attribute {name!r} is read from a dataset this store is not bound to.")
+        return getattr(owner, value.prop)
+
+    def _refuse_virtual(self, name: str) -> None:
+        if isinstance(object.__getattribute__(self, "_d").get(name), _Virtual):
+            raise TypeError(
+                f"Attribute {name!r} is read-only: it is the dataset's "
+                f"{object.__getattribute__(self, '_d')[name].prop}; set that instead.")
+
+    def bind_virtual(self, name: str, owner: Any, prop: str) -> None:
+        """Make *name* read ``owner.<prop>`` (keeping its place in the order)."""
+        object.__setattr__(self, "_owner", weakref.ref(owner))
+        object.__getattribute__(self, "_d")[name] = _Virtual(prop)
+
+    def __deepcopy__(self, memo) -> AttrStore:
+        import copy as _copy
+        new = AttrStore(_copy.deepcopy(object.__getattribute__(self, "_d"), memo))
+        # Copied as part of its dataset: bind to the copy (deepcopy registers
+        # the new dataset in *memo* before copying its fields). Copied alone:
+        # unbound, and whichever dataset it is given to binds it.
+        owner_ref = object.__getattribute__(self, "_owner")
+        owner = owner_ref() if owner_ref is not None else None
+        if owner is not None and id(owner) in memo:
+            object.__setattr__(new, "_owner", weakref.ref(memo[id(owner)]))
+        return new
 
     # -- attribute access --------------------------------------------------
     def __getattr__(self, name: str) -> np.ndarray:
         d = object.__getattribute__(self, "_d")
         try:
-            return d[name]
+            value = d[name]
         except KeyError:
             raise AttributeError(f"AttrStore has no attribute '{name}'") from None
+        return self._resolve(name, value)
 
     def __setattr__(self, name: str, value: Any) -> None:
+        self._refuse_virtual(name)
         object.__getattribute__(self, "_d")[name] = value
 
     # -- dict-style access -------------------------------------------------
@@ -58,27 +119,34 @@ class AttrStore:
         return name in object.__getattribute__(self, "_d")
 
     def __getitem__(self, name: str) -> np.ndarray:
-        return object.__getattribute__(self, "_d")[name]
+        return self._resolve(name, object.__getattribute__(self, "_d")[name])
 
     def __setitem__(self, name: str, value: np.ndarray) -> None:
+        self._refuse_virtual(name)
         object.__getattribute__(self, "_d")[name] = value
 
     def __delitem__(self, name: str) -> None:
+        self._refuse_virtual(name)
         del object.__getattribute__(self, "_d")[name]
 
     def keys(self) -> list[str]:
         return list(object.__getattribute__(self, "_d").keys())
 
     def items(self):
-        return object.__getattribute__(self, "_d").items()
+        return [(name, self._resolve(name, value))
+                for name, value in object.__getattribute__(self, "_d").items()]
 
     def values(self):
-        return object.__getattribute__(self, "_d").values()
+        return [value for _name, value in self.items()]
 
     def get(self, name: str, default: Any = None) -> Any:
-        return object.__getattribute__(self, "_d").get(name, default)
+        d = object.__getattribute__(self, "_d")
+        if name not in d:
+            return default
+        return self._resolve(name, d[name])
 
     def pop(self, name: str, *args) -> Any:
+        self._refuse_virtual(name)
         return object.__getattribute__(self, "_d").pop(name, *args)
 
     def __len__(self) -> int:
@@ -295,6 +363,7 @@ class MinfluxDataset:
     components: DatasetComponents = field(default_factory=DatasetComponents)
 
     def __post_init__(self) -> None:
+        self._adopt_filter_attr()
         if self.components.mfx is None:
             self.components.mfx = AttributeComponent(
                 self.attr,
@@ -452,23 +521,49 @@ class MinfluxDataset:
         sy = float(self.attr.get("image_pixel_size_y_nm", self.cali.pixel_size))
         return sx, sy
 
+    def _adopt_filter_attr(self) -> None:
+        """Make ``attr["ftr"]`` the virtual, read-only view of ``filter_mask``.
+
+        A loader puts an ``ftr`` array among the attributes it builds (all
+        True, or a saved filter). It is adopted here once: a mask that filters
+        anything becomes the dataset's mask unless one is already set, and an
+        all-True one is simply the default. ``ftr`` then stays where it was in
+        the attribute order and is read from the mask from now on.
+        """
+        raw = object.__getattribute__(self.attr, "_d")
+        value = raw.get("ftr")
+        if value is not None and not isinstance(value, _Virtual):
+            arr = np.asarray(value, dtype=bool)
+            if "filter_mask" not in self.state and arr.size and not arr.all():
+                self.state["filter_mask"] = np.array(arr, dtype=bool)
+        self.attr.bind_virtual("ftr", self, "filter_mask")
+
     @property
     def filter_mask(self) -> np.ndarray:
-        """Boolean mask; True = localization passes all active filters."""
-        ftr = self.state.get("filter_mask", None)
-        if ftr is None:
-            ftr = self.derived.get("ftr", None)
-        if ftr is None:
-            ftr = self.attr.get("ftr", None)
-        if ftr is None:
-            return np.ones(self.prop.num_loc, dtype=bool)
-        return np.asarray(ftr, dtype=bool)
+        """Boolean mask; True = localization passes all active filters.
+
+        The one place the mask lives is ``state["filter_mask"]`` (absent until
+        a filter is set: everything passes). ``attr["ftr"]`` reads this. The
+        returned array is a **read-only view**: change the mask by assigning
+        ``filter_mask`` (and notifying), never by editing it in place.
+        """
+        stored = self.state.get("filter_mask", None)
+        if stored is None:
+            n = int(self.prop.num_loc)
+            default = getattr(self, "_all_pass", None)
+            if default is None or default.size != n or default.flags.writeable:
+                default = np.ones(n, dtype=bool)
+                default.flags.writeable = False
+                object.__setattr__(self, "_all_pass", default)
+            return default
+        view = np.asarray(stored, dtype=bool).view()
+        view.flags.writeable = False
+        return view
 
     @filter_mask.setter
     def filter_mask(self, mask: np.ndarray) -> None:
-        arr = np.asarray(mask, dtype=bool)
-        self.state["filter_mask"] = arr
-        self.attr["ftr"] = arr
+        # A copy: the caller's array must not be able to change the mask later.
+        self.state["filter_mask"] = np.array(mask, dtype=bool)
 
     def summary(self) -> str:
         """One-line string suitable for a status bar."""

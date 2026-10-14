@@ -1870,7 +1870,6 @@ def _restore_filter_mask(ds: MinfluxDataset, saved_ftr) -> bool:
     if mask.size != n or n == 0:
         return False
     ds.filter_mask = mask.astype(bool, copy=False)
-    ds.attr["ftr"] = ds.filter_mask
     return True
 
 

@@ -87,7 +87,8 @@ class TestMinfluxDataset:
 
     def test_filter_mask_default_all_true(self):
         ds = _make_dataset(n=8)
-        del ds.attr["ftr"]   # remove ftr to test default
+        # Until a filter is set there is no stored mask: everything passes.
+        assert "filter_mask" not in ds.state
         assert ds.filter_mask.all()
         assert ds.filter_mask.shape == (8,)
 

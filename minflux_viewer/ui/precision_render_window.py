@@ -569,7 +569,7 @@ class PrecisionRenderWindow(RenderWindow):
             )
 
         n_rows = raw_locs.shape[0]
-        keep = np.asarray(ds.filter_mask, dtype=bool)
+        keep = np.array(ds.filter_mask, dtype=bool)  # a copy: narrowed below, never the dataset's own mask
         if keep.shape != (n_rows,):
             keep = np.ones(n_rows, dtype=bool)
         if n_rows:

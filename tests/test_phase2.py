@@ -1179,7 +1179,7 @@ class TestDuplicate:
         assert len(state) == 2
         assert state.datasets[1].file.name == "DUP_original.mat"
         # Filter mask should also be duplicated, not shared
-        state.datasets[0].filter_mask[:] = False
+        state.datasets[0].filter_mask = np.zeros(n, dtype=bool)
         assert state.datasets[1].filter_mask.all(), "filter mask shouldn't be shared"
 
 
