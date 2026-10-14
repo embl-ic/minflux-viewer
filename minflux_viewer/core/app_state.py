@@ -747,11 +747,11 @@ def _migrate_prefs(prefs: dict) -> dict:
 class DatasetEvents(QObject):
     """The typed dataset events of an ``AppState`` (``core/dataset_events.py``).
 
-    One signal for each index signal of ``AppState``, emitted right after it,
-    carrying an event that names the dataset by key rather than by position.
-    The two differ in one place, on purpose: ``active_changed`` here fires only
-    when the active *dataset* changes, not when closing an earlier dataset
-    merely shifts its position (``removed`` says what moved).
+    The one way a dataset change is announced. Each event names its dataset
+    by key, never by position, because a position shifts whenever an earlier
+    dataset closes. ``active_changed`` fires only when the active *dataset*
+    changes, not when closing an earlier dataset merely shifts its position
+    (``removed`` says what moved).
     """
 
     added = pyqtSignal(object)                  # DatasetAdded
@@ -771,42 +771,19 @@ class AppState(QObject):
 
     Signals
     -------
-    dataset_added(int)
-        Emitted after a dataset is appended; carries its new index.
-    dataset_removed(int)
-        Emitted after a dataset is removed; carries the index it *had*.
-    active_changed(int)
-        Emitted when the active dataset changes; carries the new index.
-    filter_changed(int)
-        Emitted when ``dataset[idx].filter_mask`` is modified.
-    attributes_changed(int)
-        Emitted when user-visible columns are added to an existing dataset.
-    overlay_transform_changed(int)
-        Emitted when a dataset's live overlay/display transform changes.
-    overlay_manual_alignment_requested(int)
-        Requests the existing interactive Manual align mode for a dataset.
-    roi_selection_changed(int)
-        Emitted when a dataset's cached ROI selection mask is modified.
+    dataset_events
+        Every dataset notification -- added, removed, active changed, and
+        changes to a dataset's filter, attributes, ROI selection, Z scaling
+        factor or overlay transform -- as a typed event that names the dataset
+        by key (:class:`DatasetEvents`). The ``notify_*`` methods take a
+        position and announce the dataset that is there.
     tracking_playhead_changed(dataset, trace_id, trace_time, source)
         Synchronizes an explicitly selected trace and trace-relative playhead
         between tracking-aware views. ``source`` prevents feedback loops.
     status_message(str)
         Short text for the main-window status bar.
-
-    The dataset signals above carry an index. ``dataset_events`` carries the
-    same notifications as typed events naming the dataset by key; the index
-    signals stay until every listener has moved to them.
     """
 
-    dataset_added   = pyqtSignal(int)
-    dataset_removed = pyqtSignal(int)
-    active_changed  = pyqtSignal(int)
-    filter_changed  = pyqtSignal(int)
-    attributes_changed = pyqtSignal(int)
-    calibration_changed = pyqtSignal(int)   # Z scaling factor changed for a dataset
-    overlay_transform_changed = pyqtSignal(int)
-    overlay_manual_alignment_requested = pyqtSignal(int)
-    roi_selection_changed = pyqtSignal(int)
     tracking_playhead_changed = pyqtSignal(object, object, float, object)
     colors_changed = pyqtSignal(object)  # {paths, previous, current}
     #: The shared colormap list was reordered (LUT ▸ Custom ▸ Reorder…), so
@@ -924,12 +901,22 @@ class AppState(QObject):
                 return entry.key
         return None
 
+    def index_of_dataset(self, dataset: object) -> int | None:
+        """The current position of *dataset* (by identity), or None if not open.
+
+        Never ``self.datasets.index(dataset)`` or ``dataset in self.datasets``:
+        those compare datasets field by field, and for two that agree on their
+        first fields that reaches a numpy array and raises.
+        """
+        key = self.key_of(dataset)
+        return None if key is None else self.index_of(key)
+
     @property
     def _active_idx(self) -> int | None:
         """The active dataset's position, derived from its key.
 
-        Temporary (stabilization Phase 3): code written before the keys reads
-        and assigns this; assigning selects the key at that position.
+        Private: the ``notify_*`` methods and :meth:`log` take a position and
+        resolve it here. Assigning selects the key at that position.
         """
         key = self.active_key
         return None if key is None else self.index_of(key)
@@ -1023,12 +1010,11 @@ class AppState(QObject):
         self._datasets.append(dataset)
         self._entries.append(DatasetEntry(key, dataset))
         idx = len(self._datasets) - 1
-        # IMPORTANT: set_active BEFORE dataset_added so handlers that query
-        # active_dataset (e.g. MainWindow._show_render) see a valid active idx.
+        # IMPORTANT: set the active dataset BEFORE announcing the addition, so
+        # handlers that query active_dataset (e.g. MainWindow._show_render)
+        # already see it.
         self._active_idx = idx
-        self.dataset_added.emit(idx)
         self.dataset_events.added.emit(DatasetAdded(key=key, dataset=dataset, index=idx))
-        self.active_changed.emit(idx)
         self._announce_active_change(previous)
         self.status_message.emit(f"Active: {dataset.summary()}")
         recent_path = dataset.file.recent_path or dataset.file.path
@@ -1086,14 +1072,12 @@ class AppState(QObject):
         """Remove the dataset at *idx* and keep the active dataset tracked.
 
         Closing a dataset listed before the active one shifts the active one
-        down; closing the active one makes the dataset that takes its place
-        (or, for the last one, the one before it) active. Either way
-        ``active_changed`` announces the new index: it carries an index, and
-        index-keyed listeners would otherwise point at the wrong dataset.
+        down without changing which dataset it is; closing the active one makes
+        the dataset that takes its place (or, for the last one, the one before
+        it) active, and that change is announced.
 
-        The new active index is settled BEFORE ``dataset_removed`` is emitted,
-        as ``add_dataset`` does, because its handlers read ``active_dataset``.
-        ``active_changed`` follows it, once the registries are re-keyed.
+        The new active dataset is settled BEFORE the removal is announced, as
+        ``add_dataset`` does, because removal handlers read ``active_dataset``.
         """
         if not (0 <= idx < len(self._datasets)):
             return
@@ -1105,7 +1089,6 @@ class AppState(QObject):
 
         if not self._datasets:
             self._active_idx = None
-            self.dataset_removed.emit(idx)
             self._announce_removal(entry, idx)
             self._announce_active_change(previous)
             self.status_message.emit("No data loaded.")
@@ -1119,12 +1102,10 @@ class AppState(QObject):
             elif idx == old_active:
                 new_active = min(old_active, len(self._datasets) - 1)
         self._active_idx = new_active
-        self.dataset_removed.emit(idx)
         self._announce_removal(entry, idx)
 
         if new_active is not None and (new_active != old_active or idx == old_active):
-            self.active_changed.emit(new_active)
-            self._announce_active_change(previous)
+            self._announce_active_change(previous)   # nothing when only its position moved
             self.status_message.emit(
                 f"Active: {self._datasets[new_active].summary()}")
 
@@ -1137,7 +1118,6 @@ class AppState(QObject):
             return
         previous = self._active_key
         self._active_idx = idx
-        self.active_changed.emit(idx)
         self._announce_active_change(previous)
         self.status_message.emit(f"Active: {self._datasets[idx].summary()}")
 
@@ -1149,7 +1129,6 @@ class AppState(QObject):
         if idx is None:
             idx = self._active_idx
         if idx is not None:
-            self.filter_changed.emit(idx)
             self._announce_change(
                 self.dataset_events.filter_changed, idx, ChangeAspect.FILTER)
 
@@ -1158,7 +1137,6 @@ class AppState(QObject):
         if idx is None:
             idx = self._active_idx
         if idx is not None:
-            self.attributes_changed.emit(idx)
             self._announce_change(
                 self.dataset_events.attributes_changed, idx, ChangeAspect.ATTRIBUTES)
 
@@ -1167,7 +1145,6 @@ class AppState(QObject):
         if idx is None:
             idx = self._active_idx
         if idx is not None:
-            self.roi_selection_changed.emit(idx)
             self._announce_change(
                 self.dataset_events.roi_selection_changed, idx, ChangeAspect.ROI_SELECTION)
 
@@ -1177,7 +1154,6 @@ class AppState(QObject):
         if idx is None:
             idx = self._active_idx
         if idx is not None:
-            self.calibration_changed.emit(idx)
             self._announce_change(
                 self.dataset_events.calibration_changed, idx, ChangeAspect.CALIBRATION)
 
@@ -1186,7 +1162,6 @@ class AppState(QObject):
         if idx is None:
             idx = self._active_idx
         if idx is not None:
-            self.overlay_transform_changed.emit(idx)
             self._announce_change(
                 self.dataset_events.overlay_transform_changed, idx, ChangeAspect.OVERLAY_TRANSFORM)
 
@@ -1195,7 +1170,6 @@ class AppState(QObject):
         if idx is None:
             idx = self._active_idx
         if idx is not None:
-            self.overlay_manual_alignment_requested.emit(idx)
             key = self.key_at(idx)
             if key is not None:
                 self.dataset_events.overlay_manual_alignment_requested.emit(

@@ -1936,10 +1936,11 @@ class RoiOverlayController(QObject):
                 value = getter()
                 if isinstance(value, int):
                     return value
-            for attr in ("_idx", "_dataset_idx"):
-                value = getattr(self.owner, attr, None)
-                if isinstance(value, int):
-                    return value
+            from .dataset_binding import window_dataset_index
+
+            value = window_dataset_index(self.owner)
+            if value is not None:
+                return value
             # Last resort: a view that only publishes its dataset set and shows
             # exactly one dataset has no ambiguity about the owner. (An overlay
             # shows several, and its anchor -- read above -- is the owner.)

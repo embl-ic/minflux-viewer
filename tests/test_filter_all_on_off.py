@@ -112,7 +112,7 @@ def test_the_linked_views_are_notified_once_not_once_per_row(_app):
             dialog._add_row(attr="idx", mode="per loc", lo=value, hi=100.0,
                             enabled=True, auto_range=False)
         seen = []
-        state.filter_changed.connect(lambda idx: seen.append(idx))
+        state.dataset_events.filter_changed.connect(seen.append)
 
         dialog._set_all_rows_enabled(False)
 

@@ -297,7 +297,8 @@ def test_dims_row_double_click_sets_z_scaling_factor(qtbot, monkeypatch):
     state = AppState()
     state.add_dataset(ds)
     changed: list[int] = []
-    state.calibration_changed.connect(changed.append)
+    state.dataset_events.calibration_changed.connect(
+        lambda event: changed.append(state.index_of(event.key)))
     monkeypatch.setattr(
         data_window_module.ZScalingFactorDialog,
         "ask",
@@ -363,7 +364,8 @@ def test_transformed_row_double_click_edits_canonical_overlay_matrix(qtbot, monk
     state = AppState()
     state.add_dataset(ds)
     changed: list[int] = []
-    state.overlay_transform_changed.connect(changed.append)
+    state.dataset_events.overlay_transform_changed.connect(
+        lambda event: changed.append(state.index_of(event.key)))
     window = DataWindow(ds, 0, state)
     qtbot.addWidget(window)
     window.show()
@@ -422,7 +424,8 @@ def test_transform_dialog_manual_align_button_uses_state_request(qtbot, monkeypa
     state.add_dataset(ds)
     state.add_dataset(peer)
     requested: list[int] = []
-    state.overlay_manual_alignment_requested.connect(requested.append)
+    state.dataset_events.overlay_manual_alignment_requested.connect(
+        lambda event: requested.append(state.index_of(event.key)))
     window = DataWindow(ds, 0, state)
     qtbot.addWidget(window)
     window.show()

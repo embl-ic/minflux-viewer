@@ -89,7 +89,7 @@ from ..core.overlay import (
 )
 from ..core.roi_selection import REGION_ROI_TYPES, roi_region_mask
 from ..core.spatial_grid import SpatialGrid
-from .dataset_binding import DatasetIndex, event_index
+from .dataset_binding import DatasetIndex, event_index, window_dataset_index
 from .ortho_view import (
     ORTHO_AXIS,
     ORTHO_AXIS_COLUMNS,
@@ -818,10 +818,9 @@ class RenderWindow(QWidget):
     SUPPORTS_VOLUME_3D = True
     SIGMA_MENU_TEXT = "Fixed Gaussian sigma…"
 
-    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
-    # position. See ui/dataset_binding.py.
+    # The window's dataset key, read and set as a position (None once the
+    # dataset has closed). See ui/dataset_binding.py.
     _idx = DatasetIndex()
-    _dataset_idx = DatasetIndex()
 
     def __init__(
         self,
@@ -4983,7 +4982,8 @@ class RenderWindow(QWidget):
         if app is None:
             return None
         for widget in app.topLevelWidgets():
-            if widget.__class__.__name__ == "DataWindow" and getattr(widget, "_idx", None) == dataset_idx:
+            if (widget.__class__.__name__ == "DataWindow"
+                    and window_dataset_index(widget) == dataset_idx):
                 return widget
         return None
 

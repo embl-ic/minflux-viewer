@@ -1,12 +1,12 @@
 """Closing a dataset must keep track of which dataset is active.
 
-``active_changed`` carries the *index* of the active dataset, so it has to
-fire whenever that index moves, not only when it is clamped: closing a
-dataset listed before the active one shifts it down, and closing the active
-one makes another dataset active in its place. Before this, both happened
-silently. The index must also be settled before ``dataset_removed`` is
-emitted, because its handlers read ``active_dataset`` (``add_dataset`` follows
-the same order for the same reason).
+Closing a dataset listed before the active one shifts it down, and closing
+the active one makes another dataset active in its place. Before this, both
+happened silently. The active dataset is tracked by key, so a shift keeps it
+active without announcing a change; a new active dataset is announced. It must
+also be settled before the removal is announced, because removal handlers
+read ``active_dataset`` (``add_dataset`` follows the same order for the same
+reason).
 """
 
 from __future__ import annotations
@@ -32,14 +32,15 @@ def state(qapp):
         st.add_dataset(ds)
     st.set_active(1)
     st.events = []
-    st.active_changed.connect(lambda i: st.events.append(("active", i)))
+    st.dataset_events.active_changed.connect(
+        lambda event: st.events.append(("active", st.index_of(event.key))))
 
-    def on_removed(i):
-        # What a dataset_removed handler sees of the active dataset.
+    def on_removed(event):
+        # What a removal handler sees of the active dataset.
         active = st.active_dataset
-        st.events.append(("removed", i, active.name if active else None))
+        st.events.append(("removed", event.old_index, active.name if active else None))
 
-    st.dataset_removed.connect(on_removed)
+    st.dataset_events.removed.connect(on_removed)
     return st
 
 
@@ -48,8 +49,9 @@ def test_closing_a_dataset_before_the_active_one_follows_it(state):
 
     assert state.active_dataset.name == "B"
     assert state.active_idx == 0
-    # Handlers already see B active; then the new index is announced.
-    assert state.events == [("removed", 0, "B"), ("active", 0)]
+    # Handlers already see B active; B is still the active dataset, so no
+    # change is announced -- its new position is the removal's to tell.
+    assert state.events == [("removed", 0, "B")]
 
 
 def test_closing_the_active_dataset_announces_its_successor(state):
@@ -85,17 +87,18 @@ def test_handlers_never_see_an_out_of_range_active_index(state):
 
     state.remove_dataset(0)
 
-    assert state.events == [("removed", 0, "C"), ("active", 1)]
+    assert state.events == [("removed", 0, "C")]
+    assert state.active_idx == 1 and state.active_dataset.name == "C"
 
 
 def test_closing_the_only_dataset_leaves_none_active(qapp):
     st = AppState()
     st.add_dataset(_dataset("A"))
     fired = []
-    st.active_changed.connect(fired.append)
+    st.dataset_events.active_changed.connect(fired.append)
 
     st.remove_dataset(0)
 
     assert st.active_idx is None
     assert st.active_dataset is None
-    assert fired == []
+    assert [event.key for event in fired] == [None]   # nothing is active now

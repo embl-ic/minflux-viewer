@@ -3,21 +3,25 @@
 A window used to remember its dataset by index, and a close re-keyed every
 registry and rewrote every window's ``_idx`` by hand -- the code that dropped
 the next dataset's windows from their registries and let a garbage collection
-destroy them on screen. Stabilization Phase 3, slice 3.5, binds a window to its
-dataset's :class:`~minflux_viewer.core.dataset_key.DatasetKey` instead:
+destroy them on screen. Stabilization Phase 3 binds a window to its dataset's
+:class:`~minflux_viewer.core.dataset_key.DatasetKey` instead:
 
-* :class:`DatasetIndex` is the **temporary** ``_idx`` / ``_dataset_idx``
-  property: it reads as the dataset's current position and an assignment
-  rebinds the window to the dataset at that position. Existing index-based code
-  keeps working and can no longer go stale.
+* :class:`DatasetIndex` is the ``_idx`` / ``_dataset_idx`` property: it reads
+  as the dataset's current position (None once it has closed) and an
+  assignment rebinds the window to the dataset at that position, so the
+  index-based code inside a window cannot go stale. Each window declares only
+  the name it uses.
+* :func:`window_dataset_key` / :func:`window_dataset_index` are how code
+  *outside* a window asks which dataset it shows -- through the key, whichever
+  name the window uses internally.
 * :class:`DatasetWindowMap` is a registry keyed by key that still accepts a
   position wherever a dict of positions was used, so its entries never need
   re-keying when an earlier dataset closes.
-* :func:`event_index` resolves a typed dataset event (or, while the index
-  signals remain, a plain index) to the current position.
+* :func:`event_index` resolves a typed dataset event (or an index an internal
+  caller passes) to the current position.
 
-All three are retired with the index signals (slice 3.8) once their callers
-use keys directly.
+The position-backed names stay until the render engine stops keying its tiles,
+channel grids and masks by position (stabilization Phase 4).
 """
 
 from __future__ import annotations
@@ -32,7 +36,8 @@ def event_index(state: Any, payload: Any) -> int | None:
     """The current position of the dataset *payload* names.
 
     *payload* is a typed dataset event (resolved through its key, so it is
-    right whatever closed in between) or a plain index, passed through.
+    right whatever closed in between) or a plain index an internal caller
+    passes, returned as it is.
     """
     key = getattr(payload, "key", None)
     if isinstance(key, DatasetKey):
@@ -42,8 +47,48 @@ def event_index(state: Any, payload: Any) -> int | None:
     return payload
 
 
+def window_dataset_key(window: Any) -> DatasetKey | None:
+    """The key of the dataset *window* is bound to, or None.
+
+    A closed dataset's key is still returned: it names what the window showed.
+    """
+    try:
+        key = getattr(window, "_dataset_key", None)
+    except RuntimeError:                    # a window whose C++ half is gone
+        return None
+    return key if isinstance(key, DatasetKey) else None
+
+
+def window_dataset_index(window: Any) -> int | None:
+    """The current position of the dataset *window* shows, or None.
+
+    A window bound by key answers through its key, so the answer follows its
+    dataset and is None once that has closed. Any other window answers with
+    the plain index it keeps (``dataset_idx``, which may be a method,
+    ``_dataset_idx`` or ``_idx``).
+    """
+    if window is None:
+        return None
+    key = window_dataset_key(window)
+    if key is not None:
+        try:
+            return window._state.index_of(key)
+        except (AttributeError, RuntimeError):
+            return None
+    for name in ("dataset_idx", "_dataset_idx", "_idx"):
+        try:
+            value = getattr(window, name, None)
+            if callable(value):
+                value = value()
+        except (RuntimeError, TypeError):
+            continue
+        if type(value) is int:
+            return value
+    return None
+
+
 class DatasetIndex:
-    """Temporary ``_idx``-style property backed by the window's dataset key.
+    """An ``_idx``-style property backed by the window's dataset key.
 
     Reading gives the dataset's current position (None once it has closed, or
     when the window has no dataset); assigning a position binds the window to

@@ -108,7 +108,7 @@ def test_worker_snapshot_coordinates_match_the_existing_display_path() -> None:
     ds.state["overlay_transform"] = {"matrix_4x4": matrix.tolist()}
     snapshot = _TrackChannelSnapshot(
         dataset_idx=0,
-        dataset_identity=id(ds),
+        dataset_key=None,
         x_m=attr_values_1d(ds, "loc_x"),
         y_m=attr_values_1d(ds, "loc_y"),
         z_m=attr_values_1d(ds, "loc_z"),

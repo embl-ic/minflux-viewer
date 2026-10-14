@@ -143,7 +143,7 @@ class _TrackChannelSnapshot:
     """Non-Qt input captured on the GUI thread for one channel build."""
 
     dataset_idx: int
-    dataset_identity: int
+    dataset_key: object                    # DatasetKey the input was captured from
     x_m: np.ndarray | None
     y_m: np.ndarray | None
     z_m: np.ndarray | None
@@ -157,7 +157,7 @@ class _TrackChannelSnapshot:
 @dataclass(frozen=True)
 class _TrackChannelBuild:
     dataset_idx: int
-    dataset_identity: int
+    dataset_key: object                    # DatasetKey the input was captured from
     tracks: TrackSet | None
     automatic_role: str
     reason: str
@@ -216,7 +216,7 @@ def _build_track_payload(
             reason = "no 'tid', so it has no trajectories at all"
             results.append(_TrackChannelBuild(
                 snapshot.dataset_idx,
-                snapshot.dataset_identity,
+                snapshot.dataset_key,
                 None,
                 "Structure",
                 reason,
@@ -251,7 +251,7 @@ def _build_track_payload(
             automatic = "Tracking" if is_tracking else "Structure"
             results.append(_TrackChannelBuild(
                 snapshot.dataset_idx,
-                snapshot.dataset_identity,
+                snapshot.dataset_key,
                 tracks,
                 automatic,
                 reason,
@@ -272,7 +272,7 @@ def _build_track_payload(
             reason = str(exc)
             results.append(_TrackChannelBuild(
                 snapshot.dataset_idx,
-                snapshot.dataset_identity,
+                snapshot.dataset_key,
                 None,
                 "Structure",
                 reason,
@@ -330,10 +330,9 @@ class TrackingWindow(QWidget):
 
     TAG = "tracking_window"
 
-    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
-    # position. See ui/dataset_binding.py.
+    # The window's dataset key, read and set as a position (None once the
+    # dataset has closed). See ui/dataset_binding.py.
     _idx = DatasetIndex()
-    _dataset_idx = DatasetIndex()
 
     def __init__(self, state: AppState, dataset_idx: int | None = None,
                  parent: QWidget | None = None) -> None:
@@ -657,7 +656,7 @@ class TrackingWindow(QWidget):
                 tid.flags.writeable = False
             snapshots.append(_TrackChannelSnapshot(
                 dataset_idx=idx,
-                dataset_identity=id(ds),
+                dataset_key=self._state.key_of(ds),
                 x_m=read("loc_x"),
                 y_m=read("loc_y"),
                 z_m=read("loc_z"),
@@ -771,11 +770,13 @@ class TrackingWindow(QWidget):
         if generation != self._track_generation or self._closing:
             return
         channels = {ch["dataset_idx"]: ch for ch in self._channels}
+        # Each channel must still show the dataset it was built from: the
+        # channel list holds positions, so a close in between can put another
+        # dataset at the same position.
         source_is_current = all(
             built.dataset_idx in channels
-            and 0 <= built.dataset_idx < len(self._state.datasets)
-            and id(self._state.datasets[built.dataset_idx])
-            == built.dataset_identity
+            and built.dataset_key is not None
+            and self._state.key_at(built.dataset_idx) == built.dataset_key
             for built in result.channels
         )
         if not source_is_current:

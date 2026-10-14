@@ -65,8 +65,14 @@ from .. import resource_path
 # ---------------------------------------------------------------------------
 from ..core import formats as _formats
 from ..core.app_state import AppState
+from ..core.dataset_key import DatasetKey
 from .data_window import DataWindow
-from .dataset_binding import DatasetWindowMap, event_index
+from .dataset_binding import (
+    DatasetWindowMap,
+    event_index,
+    window_dataset_index,
+    window_dataset_key,
+)
 
 #: Everything the application will attempt to open, from the one format
 #: registry (:mod:`minflux_viewer.core.formats`).
@@ -1508,12 +1514,8 @@ class MainWindow(QMainWindow):
                 candidates.append(parent)
                 parent = parent.parentWidget()
         for widget in candidates:
-            idx = getattr(widget, "dataset_idx", None)
-            if idx is None:
-                idx = getattr(widget, "_dataset_idx", None)
-            if idx is None:
-                idx = getattr(widget, "_idx", None)
-            if type(idx) is int and 0 <= idx < len(self._state.datasets):
+            idx = window_dataset_index(widget)
+            if idx is not None and 0 <= idx < len(self._state.datasets):
                 self._state.set_active(idx)
                 return
 
@@ -3455,9 +3457,17 @@ class MainWindow(QMainWindow):
         """Cache the active ROI draft (called from the overlay controller) so
         Restore ROI can bring it back after a delete."""
         import copy
-        idx = getattr(window, "_idx", None)
-        if isinstance(idx, int) and record is not None:
-            self._roi_last_active[idx] = copy.deepcopy(record)
+        if record is None:
+            return
+        # By key when the window is bound to one (its dataset may move before
+        # the draft is restored); the render view reads its dataset as
+        # ``_idx`` and the scatter view as ``_dataset_idx``, so neither name
+        # can be the one asked for.
+        slot: DatasetKey | int | None = window_dataset_key(window)
+        if slot is None:
+            slot = window_dataset_index(window)
+        if slot is not None:
+            self._roi_last_active[slot] = copy.deepcopy(record)
 
     def _restore_roi(self) -> None:
         """Process › ROI › Restore ROI — put the active ROI draft onto the other
@@ -5592,20 +5602,23 @@ class MainWindow(QMainWindow):
 
         base_name = member_objs[0].metadata.get("separated_from") or "dataset"
 
-        def index_of(obj):
-            return next((i for i, d in enumerate(self._state.datasets) if d is obj), None)
+        index_of = self._state.index_of_dataset
+        member_keys = {self._state.key_of(m) for m in member_objs}
+
+        def is_member(obj) -> bool:
+            return self._state.key_of(obj) in member_keys
 
         # Prefer the still-present source (exact restore); else reconstruct.
         source = None
         for d in self._state.datasets:
-            if d in member_objs:
+            if is_member(d):
                 continue
             if group_id in (d.metadata.get("produced_overlays") or []):
                 source = d
                 break
         if source is None:                          # name-match fallback
             for d in self._state.datasets:
-                if d in member_objs or dataset_group_id(d):
+                if is_member(d) or dataset_group_id(d):
                     continue
                 if getattr(d, "name", None) == base_name:
                     source = d
@@ -5643,7 +5656,7 @@ class MainWindow(QMainWindow):
         finally:
             self._state.suspend_auto_render = previous
 
-        if source is not None and source in self._state.datasets:
+        if source is not None and index_of(source) is not None:
             try:
                 (source.metadata.get("produced_overlays") or []).remove(group_id)
             except ValueError:
@@ -7725,10 +7738,8 @@ class MainWindow(QMainWindow):
         from ..core.roi_selection import ROI_MASKS_STATE_KEY
 
         if member_indices is None:
-            try:
-                idx = next(i for i, item in enumerate(self._state.datasets)
-                           if item is ds)
-            except StopIteration:
+            idx = self._state.index_of_dataset(ds)
+            if idx is None:
                 return []
             member_indices = {idx}
             index_to_id = {idx: "d000000"}
@@ -7779,9 +7790,8 @@ class MainWindow(QMainWindow):
         """
         from ..core.overlay import overlay_members
 
-        try:
-            idx = next(i for i, item in enumerate(self._state.datasets) if item is ds)
-        except StopIteration:
+        idx = self._state.index_of_dataset(ds)
+        if idx is None:
             return [ds]
         pairs = overlay_members(self._state, idx)
         return [member for _i, member in pairs] if len(pairs) > 1 else [ds]
@@ -7791,9 +7801,8 @@ class MainWindow(QMainWindow):
 
         from ..core.overlay import overlay_members
 
-        try:
-            anchor_idx = next(i for i, item in enumerate(self._state.datasets) if item is ds)
-        except StopIteration:
+        anchor_idx = self._state.index_of_dataset(ds)
+        if anchor_idx is None:
             return {}
         pairs = overlay_members(self._state, anchor_idx)
         if len(pairs) < 2:
@@ -8582,8 +8591,7 @@ class MainWindow(QMainWindow):
 
     def _post_load_index(self, ds) -> int | None:
         """Current index of *ds* (through its key), or None if it was removed."""
-        key = self._state.key_of(ds)
-        return None if key is None else self._state.index_of(key)
+        return self._state.index_of_dataset(ds)
 
     def _post_load_next(self, ds, step) -> None:
         """Run the next post-load step from the event loop (keeps the UI live)."""
@@ -9139,12 +9147,8 @@ class MainWindow(QMainWindow):
         if view is None or idx is None:
             return view is not None
         try:
-            for attr in ("_idx", "_dataset_idx", "dataset_idx"):
-                value = getattr(view, attr, None)
-                if callable(value):
-                    value = value()
-                if value == idx:
-                    return True
+            if window_dataset_index(view) == idx:
+                return True
             return any(
                 ch.get("dataset_idx") == idx
                 for ch in getattr(view, "_channels", [])

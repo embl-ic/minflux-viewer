@@ -124,9 +124,8 @@ class HistogramWindow(QWidget):
 
     TAG = "histogram_window"
 
-    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
-    # position. See ui/dataset_binding.py.
-    _idx = DatasetIndex()
+    # The window's dataset key, read and set as a position (None once the
+    # dataset has closed). See ui/dataset_binding.py.
     _dataset_idx = DatasetIndex()
 
     def __init__(self, state: AppState, parent: QWidget | None = None, *, dataset_idx: int | None = None) -> None:

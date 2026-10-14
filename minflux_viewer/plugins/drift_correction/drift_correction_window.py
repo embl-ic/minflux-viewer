@@ -81,7 +81,7 @@ _POOL_NAME = "drift-correction"
 class DriftEstimate:
     """What *Estimate* produced, for *Create corrected dataset*."""
     method: str
-    dataset_id: int
+    dataset_key: object                    # the DatasetKey estimated (never written out)
     dims: int
     coords_nm: np.ndarray                  # (n, dims) corrected display coordinates
     beads: bd.BeadCorrection | None = None
@@ -116,7 +116,7 @@ class DriftCorrectionWindow(QDialog):
         self._owner = owner
         self._estimate: DriftEstimate | None = None
         self._task = None
-        self._bead_inputs = None               # (id(ds), BeadInputs | None, reason)
+        self._bead_inputs = None               # (dataset key, BeadInputs | None, reason)
         self._suspend = False
 
         self.setWindowTitle("Drift Correction")
@@ -331,12 +331,13 @@ class DriftCorrectionWindow(QDialog):
         """Cached :func:`bead_drift.bead_inputs_for_dataset` of the active dataset."""
         if ds is None:
             return None, "no dataset"
-        if self._bead_inputs is None or self._bead_inputs[0] != id(ds):
+        key = self._state.key_of(ds)
+        if self._bead_inputs is None or self._bead_inputs[0] != key:
             try:
                 inputs, reason = bd.bead_inputs_for_dataset(ds)
             except Exception as exc:                       # noqa: BLE001
                 inputs, reason = None, str(exc)
-            self._bead_inputs = (id(ds), inputs, reason)
+            self._bead_inputs = (key, inputs, reason)
         return self._bead_inputs[1], self._bead_inputs[2]
 
     def _gather(self, ds, dims):
@@ -598,7 +599,7 @@ class DriftCorrectionWindow(QDialog):
         smooth = float(self._smooth_spin.value())
         res_nm = float(self._res_spin.value())
         T = None if self._auto_T.isChecked() else float(self._T_spin.value())
-        ds_id = id(ds)
+        ds_key = self._state.key_of(ds)
 
         def work(report):
             coords = np.column_stack(cols)
@@ -636,7 +637,7 @@ class DriftCorrectionWindow(QDialog):
                        "filter_attrs": f_attrs, "filter_skipped": f_skipped,
                        "filter_signature": f_signature}
         task.signals.done.connect(
-            lambda result: self._on_estimated(result, method, ds_id, dims, gris, bead_inputs,
+            lambda result: self._on_estimated(result, method, ds_key, dims, gris, bead_inputs,
                                               filter_info))
         task.signals.failed.connect(self._on_estimate_failed)
         task.signals.cancelled.connect(self._on_estimate_cancelled)
@@ -667,11 +668,11 @@ class DriftCorrectionWindow(QDialog):
         self._state.status_progress("Drift estimation stopped")
         self._stats.setText("Stopped.")
 
-    def _on_estimated(self, result, method, ds_id, dims, gris, bead_inputs,
+    def _on_estimated(self, result, method, ds_key, dims, gris, bead_inputs,
                       filter_info) -> None:
         bead_corr, windows, coords = result
         ds = self._active()
-        if ds is None or id(ds) != ds_id:
+        if ds is None or self._state.key_of(ds) != ds_key:
             self._stats.setText("The active dataset changed during the estimate; "
                                 "estimate again.")
             return
@@ -684,7 +685,7 @@ class DriftCorrectionWindow(QDialog):
             names = [bead_inputs.names.get(g, f"gri {g}") for g in sorted(gris)]
             recorded = sorted(gris) == sorted(bead_inputs.recorded_gris)
         self._estimate = DriftEstimate(
-            method=method, dataset_id=ds_id, dims=dims, coords_nm=coords,
+            method=method, dataset_key=ds_key, dims=dims, coords_nm=coords,
             beads=bead_corr, windows=windows, bead_names=names,
             n_beads_usable=len(bead_inputs.beads) if bead_inputs is not None else 0,
             recorded=recorded, **filter_info)
@@ -783,7 +784,7 @@ class DriftCorrectionWindow(QDialog):
     def _on_apply(self) -> None:
         ds = self._active()
         est = self._estimate
-        if ds is None or est is None or id(ds) != est.dataset_id:
+        if ds is None or est is None or self._state.key_of(ds) != est.dataset_key:
             QMessageBox.information(self, "Drift Correction",
                                     "Estimate the drift of the active dataset first.")
             return
@@ -880,8 +881,9 @@ class DriftCorrectionWindow(QDialog):
 
     # --------------------------------------------------------------- close
     def closeEvent(self, event) -> None:
-        for signal, slot in ((self._state.active_changed, self._on_active_changed),
-                             (self._state.filter_changed, self._on_filter_changed)):
+        events = self._state.dataset_events
+        for signal, slot in ((events.active_changed, self._on_active_changed),
+                             (events.filter_changed, self._on_filter_changed)):
             try:
                 signal.disconnect(slot)
             except Exception:

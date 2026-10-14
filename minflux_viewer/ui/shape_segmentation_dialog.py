@@ -65,10 +65,9 @@ _MAX_SCATTER_POINTS = 100_000       # display-only thinning cap
 class ShapeSegmentationWindow(QDialog):
     """Modeless interactive known-geometry (shape-model) segmentation tool."""
 
-    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
-    # position. See ui/dataset_binding.py.
+    # The window's dataset key, read and set as a position (None once the
+    # dataset has closed). See ui/dataset_binding.py.
     _idx = DatasetIndex()
-    _dataset_idx = DatasetIndex()
 
     def __init__(self, state, dataset_idx: int, owner=None) -> None:
         super().__init__(None)

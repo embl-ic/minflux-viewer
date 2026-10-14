@@ -176,10 +176,9 @@ class AttributeSeparationDialog(QDialog):
     """Separate one dataset into a multi-channel overlay by an attribute's
     distribution, by ROIs, or by filters. Modeless; one instance per dataset."""
 
-    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
-    # position. See ui/dataset_binding.py.
+    # The window's dataset key, read and set as a position (None once the
+    # dataset has closed). See ui/dataset_binding.py.
     _idx = DatasetIndex()
-    _dataset_idx = DatasetIndex()
 
     def __init__(self, state, dataset_idx: int, *, attribute: str = "dcr",
                  title: str | None = None, default_distribution: str = "gaussian",

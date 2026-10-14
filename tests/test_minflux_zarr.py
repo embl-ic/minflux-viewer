@@ -1052,13 +1052,16 @@ def _roi_host(datasets, records):
     for record in records:
         store.add(record)
     shown = []
+    listed = list(datasets)
     host = types.SimpleNamespace(
         _state=types.SimpleNamespace(
-            datasets=list(datasets),
+            datasets=listed,
             rois=store,
             active_idx=0,
             log=lambda *a, **k: None,
             set_active=lambda idx: None,
+            index_of_dataset=lambda ds: next(
+                (i for i, item in enumerate(listed) if item is ds), None),
         ),
         _roi_manager_shown=shown,
     )

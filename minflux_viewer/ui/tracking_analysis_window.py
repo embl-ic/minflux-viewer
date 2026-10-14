@@ -155,19 +155,16 @@ class _NumericSortProxy(QSortFilterProxyModel):
 class MsdAnalysisWindow(QWidget):
     """Parameters, curves, per-segment fits and audit trail for MSD analysis."""
 
-    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
-    # position. See ui/dataset_binding.py.
+    # The window's dataset key, read and set as a position (None once the
+    # dataset has closed). See ui/dataset_binding.py.
     _idx = DatasetIndex()
-    _dataset_idx = DatasetIndex()
 
     def __init__(self, state, dataset_idx: int, owner=None) -> None:
         super().__init__(None)
         self._state = state
         self._owner = owner
         self._idx = int(dataset_idx)
-        self._dataset_identity = -1
         dataset = self._dataset()
-        self._dataset_identity = id(dataset) if dataset is not None else -1
         self._generation = 0
         self._tasks: dict[int, object] = {}
         self._closing = False
@@ -188,11 +185,9 @@ class MsdAnalysisWindow(QWidget):
         QTimer.singleShot(0, self.run_analysis)
 
     def _dataset(self):
-        if self._idx is not None and 0 <= self._idx < len(self._state.datasets):
-            dataset = self._state.datasets[self._idx]
-            if self._dataset_identity in {-1, id(dataset)}:
-                return dataset
-        return None
+        """The dataset this window analyses, or None once it has closed."""
+        idx = self._idx                    # through the key: None once closed
+        return None if idx is None else self._state.datasets[idx]
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)

@@ -7,7 +7,7 @@ A table of filter rows.  Each row specifies:
   attribute | aggregation mode | min | max | enabled
 
 Filters are combined with logical AND.  The result is written to
-``dataset.filter_mask`` and ``state.filter_changed`` is emitted.
+``dataset.filter_mask`` and ``state.notify_filter_changed`` announces it.
 
 Filters can be saved to / loaded from JSON (same format as the MATLAB app).
 """
@@ -61,7 +61,7 @@ from ..core.loader import (
 )
 from ..utils.filters import AGG_MODES, FLOAT_RESULT_MODES, trace_agg_func
 from .attribute_help import apply_attribute_tooltips
-from .dataset_binding import DatasetIndex, event_index
+from .dataset_binding import DatasetIndex, event_index, window_dataset_index
 
 #: Same set, same order as the histogram's "As" dropdown — a view the user can
 #: author in the histogram must be expressible as a filter.
@@ -210,9 +210,8 @@ class SmartBoundsSpinBox(QDoubleSpinBox):
 class FilterDialog(QDialog):
     """Non-modal filter management dialog."""
 
-    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
-    # position. See ui/dataset_binding.py.
-    _idx = DatasetIndex()
+    # The window's dataset key, read and set as a position (None once the
+    # dataset has closed). See ui/dataset_binding.py.
     _dataset_idx = DatasetIndex()
 
     def __init__(
@@ -357,8 +356,8 @@ class FilterDialog(QDialog):
                 channels = getattr(win, "_channels", None) or []
                 if any(ch.get("dataset_idx") == target_idx for ch in channels):
                     return win
-                win_idx = getattr(win, "_idx", getattr(win, "_dataset_idx", None))
-                if type(win_idx) is int and win_idx in group_set:
+                win_idx = window_dataset_index(win)
+                if win_idx is not None and win_idx in group_set:
                     return win
             except RuntimeError:
                 continue

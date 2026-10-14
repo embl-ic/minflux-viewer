@@ -62,10 +62,9 @@ _MARKER_PX = 26                 # on-screen diameter of the point-ROI-style mark
 class ConvSegmentationWindow(QDialog):
     """Modeless interactive geometry-kernel convolution segmentation tool."""
 
-    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
-    # position. See ui/dataset_binding.py.
+    # The window's dataset key, read and set as a position (None once the
+    # dataset has closed). See ui/dataset_binding.py.
     _idx = DatasetIndex()
-    _dataset_idx = DatasetIndex()
 
     def __init__(self, state, dataset_idx: int, owner=None) -> None:
         super().__init__(None)

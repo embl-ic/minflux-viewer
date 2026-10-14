@@ -119,9 +119,8 @@ class ScatterWindow(QWidget):
 
     TAG = "scatter_window"
 
-    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
-    # position. See ui/dataset_binding.py.
-    _idx = DatasetIndex()
+    # The window's dataset key, read and set as a position (None once the
+    # dataset has closed). See ui/dataset_binding.py.
     _dataset_idx = DatasetIndex()
 
     def __init__(self, state: AppState, parent: QWidget | None = None, *, dataset_idx: int | None = None) -> None:
@@ -2771,10 +2770,7 @@ class ScatterWindow(QWidget):
         if locs.ndim == 2 and locs.shape[1] == 2:
             locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
         transform = ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
-        ds_idx = next(
-            (index for index, candidate in enumerate(self._state.datasets) if candidate is ds),
-            None,
-        )
+        ds_idx = self._state.index_of_dataset(ds)
         channel = next(
             (ch for ch in self._channels if ch.get("dataset_idx") == ds_idx),
             None,
@@ -3578,7 +3574,7 @@ class ScatterWindow(QWidget):
 
         record = RoiRecord.create("polygon", {"points": [], "closed": True},
                                   name="magic wand", stroke_color=self._wand_mask_color())
-        idx = self._state.datasets.index(ds) if ds in self._state.datasets else None
+        idx = self._state.index_of_dataset(ds)
         store_roi_mask(ds, record, result.mask,
                        context={"source_view": "scatter", "dataset_idx": idx})
         ds.state["active_roi_draft_id"] = record.id

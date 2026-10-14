@@ -346,3 +346,24 @@ def test_bead_correction_is_applied_to_the_filtered_rows(qtbot):
     win._on_apply()
     assert state.datasets[-1].prop.num_loc == est.n_kept
     win.close()
+
+
+def test_a_closed_window_stops_listening(qtbot):
+    """closeEvent disconnected from the retired index signals, which failed
+    silently and left the closed window connected to the dataset events."""
+    from minflux_viewer.core.dataset import build_localization_dataset
+
+    rng = np.random.default_rng(0)
+    ds = build_localization_dataset(
+        name="plain", x_nm=rng.normal(size=500), y_nm=rng.normal(size=500))
+    win, state = _window(qtbot, ds)
+    events = state.dataset_events
+
+    def listeners():
+        return (events.receivers(events.active_changed),
+                events.receivers(events.filter_changed))
+
+    before = listeners()
+    win.close()
+    after = listeners()
+    assert after == (before[0] - 1, before[1] - 1)

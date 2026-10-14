@@ -41,10 +41,9 @@ _CENTERLINE_COLOR = (0.1, 0.9, 1.0, 1.0)
 class StraightenedVolumeAlongSkeletonWindow(QDialog):
     TAG = "straightened_volume_skeleton"
 
-    # Temporary (stabilization 3.5): the window's dataset key, read and set as a
-    # position. See ui/dataset_binding.py.
+    # The window's dataset key, read and set as a position (None once the
+    # dataset has closed). See ui/dataset_binding.py.
     _idx = DatasetIndex()
-    _dataset_idx = DatasetIndex()
 
     def __init__(self, state, dataset_idx: int, owner=None) -> None:
         super().__init__(None)

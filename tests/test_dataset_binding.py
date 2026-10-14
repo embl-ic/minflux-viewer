@@ -14,7 +14,13 @@ import pytest
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
 from minflux_viewer.core.dataset_events import ActiveDatasetChanged, ChangeAspect, DatasetChanged
-from minflux_viewer.ui.dataset_binding import DatasetIndex, DatasetWindowMap, event_index
+from minflux_viewer.ui.dataset_binding import (
+    DatasetIndex,
+    DatasetWindowMap,
+    event_index,
+    window_dataset_index,
+    window_dataset_key,
+)
 
 
 def _state(*names):
@@ -116,3 +122,86 @@ def test_event_index_resolves_events_and_passes_indices_through():
     assert event_index(st, event) == 0
     assert event_index(st, ActiveDatasetChanged(key=None, dataset=None, previous_key=kb)) is None
     assert event_index(st, 3) == 3 and event_index(st, None) is None
+
+
+class _KeyOnly:
+    """A window bound by key that declares no index alias at all."""
+
+    def __init__(self, state, idx):
+        self._state = state
+        self._dataset_key = state.key_at(idx)
+
+
+def test_a_bound_window_is_found_through_its_key():
+    st = _state("A", "B", "C")
+    win = _KeyOnly(st, 2)
+    key = st.key_at(2)
+    assert window_dataset_key(win) == key and window_dataset_index(win) == 2
+    st.remove_dataset(0)                      # an earlier close shifts it ...
+    assert window_dataset_index(win) == 1     # ... and it follows
+    st.remove_dataset(1)                      # its own close
+    assert window_dataset_index(win) is None and window_dataset_key(win) == key
+
+
+def test_an_unbound_window_answers_with_the_index_it_keeps():
+    class Plain:
+        pass
+
+    for name in ("dataset_idx", "_dataset_idx", "_idx"):
+        win = Plain()
+        setattr(win, name, 4)
+        assert window_dataset_index(win) == 4 and window_dataset_key(win) is None
+    called = Plain()
+    called.dataset_idx = lambda: 3           # a window may publish a method
+    assert window_dataset_index(called) == 3
+    flag = Plain()
+    flag._idx = True                          # a bool is not a position
+    assert window_dataset_index(flag) is None
+    assert window_dataset_index(Plain()) is None
+    assert window_dataset_index(None) is None
+
+
+def test_every_temporary_index_alias_is_still_used():
+    """A class declares only the alias it reads; an unused one is dead weight
+    that a generic reader could pick up instead of the one the class uses."""
+    import re
+    from pathlib import Path
+
+    import minflux_viewer
+
+    root = Path(minflux_viewer.__file__).parent
+    declared = re.compile(r"^\s+(_idx|_dataset_idx) = DatasetIndex\(\)", re.MULTILINE)
+    unused = []
+    for path in sorted(root.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for name in declared.findall(text):
+            if not re.search(rf"self\.{name}\b", text):
+                unused.append(f"{path.relative_to(root)}: {name}")
+    assert unused == []
+
+
+def test_restore_roi_remembers_a_draft_from_a_window_without_idx():
+    """The scatter view reads its dataset as ``_dataset_idx``, the render view
+    as ``_idx``. The Restore ROI memory looked only for ``_idx``, so it could
+    not remember a draft from a window declaring ``_dataset_idx`` alone."""
+    from types import SimpleNamespace
+
+    from minflux_viewer.core.roi import RoiRecord
+    from minflux_viewer.ui.main_window import MainWindow
+
+    class _Scatterish:
+        _dataset_idx = DatasetIndex()
+
+        def __init__(self, state, idx):
+            self._state = state
+            self._dataset_idx = idx
+
+    st = _state("A", "B")
+    owner = SimpleNamespace(_roi_last_active=DatasetWindowMap(st))
+    record = RoiRecord.create("rectangle", {"bounds": [0.0, 0.0, 10.0, 10.0]})
+    MainWindow._remember_roi_for_restore(owner, _Scatterish(st, 1), record)
+
+    kept = owner._roi_last_active.get(1)
+    assert kept is not None and kept is not record and kept.id == record.id
+    st.remove_dataset(0)                      # remembered by key, so it follows
+    assert owner._roi_last_active.get(0).id == record.id
