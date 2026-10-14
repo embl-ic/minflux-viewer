@@ -62,7 +62,7 @@ mypy      = ">=1.8"
 optional = true
 
 [tool.poetry.group.build.dependencies]
-pyinstaller = "6.19.0"
+pyinstaller = "6.22.3"
 
 # ---------------------------------------------------------------------------
 # Entry points
