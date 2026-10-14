@@ -472,6 +472,7 @@ class MainWindow(QMainWindow):
         # React to application-state changes
         state.dataset_added.connect(self._on_dataset_added)
         state.dataset_removed.connect(self._on_dataset_removed)
+        state.dataset_events.removed.connect(self._retire_dataset_tasks)
         state.active_changed.connect(self._on_active_changed)
         state.status_message.connect(self._status_label.setText)
         state.log_message.connect(self._on_log_message)
@@ -8319,9 +8320,25 @@ class MainWindow(QMainWindow):
         self._schedule_post_load_computations(idx)
 
     def _schedule_post_load_computations(self, idx: int) -> None:
-        """Run optional one-time computed attributes after initial windows show."""
+        """Run optional one-time computed attributes after initial windows show.
+
+        Scheduled with the dataset's key, not its index: a dataset closed before
+        the timer fires shifts every later one, and the index would then start
+        post-load for whichever dataset had moved into that position.
+        """
+        key = self._state.key_at(idx)
+        if key is None:
+            return
         delay_ms = 450 + max(0, idx) * 100
-        QTimer.singleShot(delay_ms, lambda i=idx: self._run_post_load_computations(i))
+        QTimer.singleShot(delay_ms, lambda k=key: self._run_post_load_for_key(k))
+
+    def _run_post_load_for_key(self, key) -> None:
+        """Start post-load for the dataset with *key*, wherever it is now."""
+        if self._is_shutting_down:
+            return
+        idx = self._state.index_of(key)
+        if idx is not None:
+            self._run_post_load_computations(idx)
 
     def _run_post_load_computations(self, idx: int) -> None:
         """Compute derived attributes in a worker and apply them on Qt's thread."""
@@ -8356,14 +8373,10 @@ class MainWindow(QMainWindow):
         tasks = getattr(self, "_post_load_tasks", None)
         if tasks is None:
             tasks = self._post_load_tasks = {}
-        # ⚠ Keyed by id(ds), which is only safe because the entry keeps the
-        # dataset alive: `work` closes over `ds` and every signal lambda binds
-        # it, so while `tasks[key]` exists the object cannot be freed and its
-        # id cannot be recycled onto a different dataset. If those closures are
-        # ever refactored away, key this by something stable instead, or a new
-        # dataset landing at a freed address would silently skip post-load.
-        key = id(ds)
-        if key in tasks:
+        # Keyed by the dataset's key, which is never given to another dataset,
+        # so closing one retires exactly its own work (_retire_dataset_tasks).
+        key = self._state.key_at(idx)
+        if key is None or key in tasks:
             return
         prefs = copy.deepcopy(self._state.prefs)
 
@@ -8380,10 +8393,10 @@ class MainWindow(QMainWindow):
             lambda text: self._state.status_progress(text)
         )
         task.signals.done.connect(
-            lambda result, _ds=ds: self._apply_post_load_results(_ds, result)
+            lambda result, _key=key, _ds=ds: self._on_post_load_done(_key, _ds, result)
         )
         task.signals.failed.connect(
-            lambda message, _ds=ds: self._on_post_load_failed(_ds, message)
+            lambda message, _key=key, _ds=ds: self._on_post_load_error(_key, _ds, message)
         )
         task.signals.finished.connect(
             lambda _key=key, _task=task: self._finish_post_load_task(_key, _task)
@@ -8392,10 +8405,39 @@ class MainWindow(QMainWindow):
 
         shared_thread_pool("post-load", max_threads=2).start(task)
 
-    def _finish_post_load_task(self, key: int, task) -> None:
+    def _finish_post_load_task(self, key, task) -> None:
         tasks = getattr(self, "_post_load_tasks", {})
         if tasks.get(key) is task:
             tasks.pop(key, None)
+
+    def _retire_dataset_tasks(self, event) -> None:
+        """Cancel and detach the post-load work of a dataset that has closed.
+
+        Only that dataset's: closing one dataset used to retire every running
+        post-load task, so a dataset opened just before another was closed never
+        received its density or precision. Native work already running finishes
+        on its pool; nothing it returns is delivered.
+        """
+        from .background_tasks import retire_background_tasks
+
+        task = getattr(self, "_post_load_tasks", {}).pop(event.key, None)
+        if task is not None:
+            retire_background_tasks([task])
+
+    def _on_post_load_done(self, key, ds, result: dict) -> None:
+        """Deliver a post-load result only while the dataset it started for is open.
+
+        Checked by the key the task started under: a dataset closed and opened
+        again is a new registration, and a result for the old one is not its.
+        """
+        if self._state.index_of(key) is None:
+            return
+        self._apply_post_load_results(ds, result)
+
+    def _on_post_load_error(self, key, ds, message: str) -> None:
+        if self._state.index_of(key) is None:
+            return
+        self._on_post_load_failed(ds, message)
 
     def _on_post_load_failed(self, ds, message: str) -> None:
         if self._post_load_index(ds) is None:
@@ -8457,7 +8499,8 @@ class MainWindow(QMainWindow):
         self._start_saved_filter_restore(ds)
 
     def _start_saved_filter_restore(self, ds) -> None:
-        if self._post_load_index(ds) is None:
+        key = self._state.key_of(ds)
+        if key is None:
             return
         if not ds.state.get("filter_specs"):
             self._post_load_finalize(ds)
@@ -8474,21 +8517,31 @@ class MainWindow(QMainWindow):
             category="analysis",
         )
         task.signals.done.connect(
-            lambda mask, _ds=ds: self._on_saved_filters_evaluated(_ds, mask)
+            lambda mask, _key=key, _ds=ds: self._on_saved_filters_done(_key, _ds, mask)
         )
         task.signals.failed.connect(
-            lambda message, _ds=ds: self._on_saved_filter_failed(_ds, message)
+            lambda message, _key=key, _ds=ds: self._on_saved_filters_error(_key, _ds, message)
         )
         task.signals.finished.connect(
-            lambda _t=task: self._finish_file_io(_t)
+            lambda _key=key, _t=task: self._finish_post_load_task(_key, _t)
         )
-        tasks = getattr(self, "_file_io_tasks", None)
+        # Registered with the dataset's post-load work, so closing the dataset
+        # retires it too (_retire_dataset_tasks).
+        tasks = getattr(self, "_post_load_tasks", None)
         if tasks is None:
-            tasks = self._file_io_tasks = []
-        tasks.append(task)
+            tasks = self._post_load_tasks = {}
+        tasks[key] = task
         from .background_tasks import shared_thread_pool
 
         shared_thread_pool("post-load", max_threads=2).start(task)
+
+    def _on_saved_filters_done(self, key, ds, mask) -> None:
+        if self._state.index_of(key) is not None:
+            self._on_saved_filters_evaluated(ds, mask)
+
+    def _on_saved_filters_error(self, key, ds, message: str) -> None:
+        if self._state.index_of(key) is not None:
+            self._on_saved_filter_failed(ds, message)
 
     def _on_saved_filters_evaluated(self, ds, mask) -> None:
         idx = self._post_load_index(ds)
@@ -8508,11 +8561,9 @@ class MainWindow(QMainWindow):
         self._post_load_finalize(ds)
 
     def _post_load_index(self, ds) -> int | None:
-        """Current index of *ds* by identity, or None if it was removed."""
-        for i, d in enumerate(self._state.datasets):
-            if d is ds:
-                return i
-        return None
+        """Current index of *ds* (through its key), or None if it was removed."""
+        key = self._state.key_of(ds)
+        return None if key is None else self._state.index_of(key)
 
     def _post_load_next(self, ds, step) -> None:
         """Run the next post-load step from the event loop (keeps the UI live)."""
@@ -8819,14 +8870,9 @@ class MainWindow(QMainWindow):
             f"{enabled} enabled.", dataset_idx=idx)
 
     def _on_dataset_removed(self, idx: int) -> None:
-        # A derived computation may still be reading the removed dataset. Its
-        # native call is allowed to finish, but no result may target shifted UI
-        # indices or keep updating this window.
-        from .background_tasks import retire_background_tasks
-
-        post_load_tasks = getattr(self, "_post_load_tasks", {})
-        retire_background_tasks(post_load_tasks.values())
-        post_load_tasks.clear()
+        # The closed dataset's own background work is retired by
+        # _retire_dataset_tasks (on the typed removal event); everyone else's
+        # keeps running and delivers by key, whatever index it lands at.
         for mapping in (
             self._data_windows,
             self._render_windows,

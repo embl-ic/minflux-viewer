@@ -7,15 +7,13 @@ post-load steps re-resolve their dataset by identity. Stabilization Phase 3
 replaces the position with a stable key; these tests pin today's behaviour so
 that change can be checked against it.
 
-Where today's behaviour is wrong the test states what it should be and is
-marked ``xfail(strict=True)`` with the slice that fixes it, so the suite stays
-green now and fails loudly the moment a fix lands without removing the mark:
+Where the behaviour was wrong the test stated what it should be and was marked
+``xfail(strict=True)`` with the slice that fixes it. Both are fixed now, and
+their tests below pin the fixed behaviour:
 
-* 3.4 -- closing one dataset retires every dataset's running post-load task,
-  and a delayed post-load start is scheduled with an index.
-
-(3.3 fixed the third: a Log event was matched to a dataset by the index it was
-written with. Its tests below now pin the fixed behaviour.)
+* 3.3 -- a Log event was matched to a dataset by the index it was written with;
+* 3.4 -- closing one dataset retired every dataset's running post-load task,
+  and a delayed post-load start was scheduled with an index.
 
 Writing these found a third, worse defect, fixed at once rather than marked:
 a window unregistered itself by the index it was opened at, so closing an
@@ -382,8 +380,6 @@ def test_a_closed_dataset_never_receives_its_post_load_result(qapp, qtbot, monke
         _teardown(win)
 
 
-@pytest.mark.xfail(strict=True, reason="slice 3.4: closing any dataset retires every "
-                   "dataset's running post-load task")
 def test_closing_one_dataset_leaves_another_datasets_post_load_running(qapp, qtbot,
                                                                         monkeypatch):
     import minflux_viewer.core.post_load as post_load
@@ -413,8 +409,6 @@ def test_closing_one_dataset_leaves_another_datasets_post_load_running(qapp, qtb
         _teardown(win)
 
 
-@pytest.mark.xfail(strict=True, reason="slice 3.4: the delayed post-load start is "
-                   "scheduled with the dataset's index")
 def test_a_scheduled_post_load_reaches_its_dataset_after_an_earlier_close(qapp, qtbot):
     win = _main(_DENSITY_ON)
     try:
