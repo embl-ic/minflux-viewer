@@ -73,11 +73,15 @@ def test_iso_with_offset_keeps_its_timezone():
 
 
 def test_m2205_tms_epoch_reproduces_the_imspector_label():
-    # The stack description of that file is '220601-132142_minflux'; the epoch
-    # must land on the same wall clock in local time.
+    # The stack description of that file is '220601-132142_minflux', the
+    # instrument's wall clock, which was UTC+2 on that date. An epoch carries no
+    # time zone, so it is compared in that offset rather than in the test
+    # machine's own: on a computer set to UTC (every CI runner) the local wall
+    # clock reads 11:21 for the same instant.
     when = parse_acquisition_date(REAL_TMS)
     assert when is not None
-    assert when.strftime("%y%m%d-%H%M%S")[:11] == "220601-1321"
+    instrument = timezone(timedelta(hours=2))
+    assert when.astimezone(instrument).strftime("%y%m%d-%H%M%S")[:11] == "220601-1321"
 
 
 @pytest.mark.parametrize("bad", [None, "", "   ", "not a date", True, False, 0, -1, float("nan")])
