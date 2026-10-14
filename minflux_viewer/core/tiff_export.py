@@ -1,7 +1,7 @@
 """Render localizations to a multipage (OME-)TIFF stack.
 
-Reproduces the Z-slicing histogram export of the MATLAB
-``resources/samples/interactive_render_MINFLUX.m`` script: the localization
+Reproduces the Z-slicing histogram export of the legacy MATLAB
+``interactive_render_MINFLUX.m`` script: the localization
 volume is binned into voxels (XY = pixel size, Z = voxel depth); each Z slice is
 the 2-D histogram of the localizations gated to that slice's depth. The bit
 depth is chosen from the **global** maximum voxel count over the whole stack

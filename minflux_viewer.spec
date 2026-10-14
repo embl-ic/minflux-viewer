@@ -150,7 +150,7 @@ USE_UPX = sys.platform != "darwin"
 # Data files to bundle
 # ---------------------------------------------------------------------------
 datas = [
-    # Application resources (icons, UI files, sample filters)
+    # Application resources (icons, UI files)
     (str(ROOT / "resources"), "resources"),
     # pip must remain an ordinary on-disk package, never a frozen hidden import.
     (str(ROOT / "resources" / "pip"), "resources/pip"),
