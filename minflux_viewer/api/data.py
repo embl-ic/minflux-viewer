@@ -155,10 +155,9 @@ class Data(Namespace):
         exactly as the file recorded them.
 
         ⚠ These two are NOT a unit conversion of one another, and that is the
-        point. Z scaling is a *view* (the project notes -- Z scaling factor: raw
-        ``loc_z`` is never modified), so dividing ``loc_nm`` by 1e9 yields
-        calibrated metres, silently off by the Z factor from what a caller
-        asking for metres means. Read the canonical columns instead.
+        point. Z scaling is a *view* (raw ``loc_z`` is never modified), so
+        dividing ``loc_nm`` by 1e9 yields calibrated metres, silently off by the
+        Z factor from what a caller asking for metres means. Read the canonical columns instead.
 
         ``transformed=True`` with ``unit="m"`` is refused rather than guessed:
         an overlay transform is defined in display space, so there is no

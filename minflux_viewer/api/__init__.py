@@ -12,8 +12,8 @@ here. Two rules make it a contract rather than a convenience:
    surface only. The precedent is the Dataset Manager's batch actions, which
    were deliberately routed through public ``close_datasets`` /
    ``duplicate_datasets`` / ``combine_datasets_as_overlay`` for exactly this
-   reason (see the project notes — Data model). A private name that external code
-   depends on is a promise nobody made and that will be broken by accident.
+   reason. A private name that external code depends on is a promise nobody
+   made and that will be broken by accident.
 2. **Signatures are frozen once released.** :data:`__api_version__` is what a
    plugin's ``plugin.toml`` declares in ``requires.mfv_api``; the plugin loader
    refuses to run a plugin whose requirement this version does not satisfy.

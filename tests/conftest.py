@@ -37,9 +37,9 @@ import pytest
 # ``qtbot``, which depends on it). Test modules request it, or alias it under a
 # local name, rather than each creating the application its own way. Every test
 # that does is marked ``qt`` automatically, so the pure tests can run as a
-# separate job, out of reach of the native Qt teardown crash (the project notes, "Qt
-# lifecycle"). A module whose tests start Qt in a child process marks itself
-# with ``pytestmark = pytest.mark.qt``.
+# separate job, out of reach of the native Qt teardown crash. A module whose
+# tests start Qt in a child process marks itself with
+# ``pytestmark = pytest.mark.qt``.
 
 QT_MARK = "qt"
 _QT_FIXTURES = frozenset({"qapp", "qtbot"})

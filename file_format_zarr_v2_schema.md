@@ -357,7 +357,7 @@ every image.
 
 ## Application-specific formats
 
-Deferred — see the backlog ▸ Nice to have. The supported set is this
+Deferred. The supported set is this
 application's own Zarr v2 store plus the MINFLUX default formats
 (`.msr`, `.npy`, `.mat`, `.json`), with the generic table (`.csv`) kept as the
 spreadsheet interchange path.

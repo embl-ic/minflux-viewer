@@ -2,9 +2,8 @@
 
 Every Qt test in ONE process aborts natively at a moving target -- a
 ``Fatal Python error: Aborted`` inside pytest-qt, or an access violation --
-because the failure needs the state many earlier tests leave behind
-(the project notes, "Qt lifecycle and background-work invariants"). A module in a
-process of its own does not accumulate that state: measured 2026-10-13, all
+because the failure needs the state many earlier tests leave behind. A module
+in a process of its own does not accumulate that state: measured 2026-10-13, all
 125 Qt modules passed this way, while a single-process run of the same tests
 aborted on every attempt (four of four, native display and offscreen alike).
 

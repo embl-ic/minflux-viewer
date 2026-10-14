@@ -591,7 +591,7 @@ class MainWindow(QMainWindow):
         # Picasso HDF5 is application-specific export. The writer and this
         # action are kept (scripting, and it works), but it is deliberately NOT
         # added to File > Save As: the offered set is this application's own
-        # format plus the MINFLUX defaults. See the backlog > Nice to have.
+        # format plus the MINFLUX defaults.
         self.actionSaveAsHdf5 = QAction("HDF5...", self)
         self.actionSaveAsHdf5.triggered.connect(self._save_as_picasso_hdf5)
         self.actionSaveAsOmeTiff = QAction("OME-TIFF...", self)
@@ -673,8 +673,7 @@ class MainWindow(QMainWindow):
         # deliberately KEPT (analysis/hlyb_clustering.py, analysis/hlyb_pairwise.py,
         # ui/hlyb_clustering_dialog.py, ui/hlyb_pairwise_dialog.py) together with
         # the E. coli cell delineation, so a 2-D workflow or a template
-        # comparison can be rebuilt on them.  See the project notes for why each was
-        # retired.  The handlers below them (_run_hlyb_pair_analysis,
+        # comparison can be rebuilt on them.  The handlers below them (_run_hlyb_pair_analysis,
         # _run_hlyb_pairwise_analysis) are likewise kept and remain callable.
         self.menuAnalyzeClustering.addAction(self.actionDbscan)
         self.menuAnalyzeClustering.addAction(self.actionKNearestNeighbour)

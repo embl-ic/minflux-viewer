@@ -9,8 +9,7 @@ This is deliberately **"Target A"**: the goal is a file that reopens in
 minflux-viewer (``GeneralMSRParser`` → ``load_from_mfx_array``), recovering the
 ``mfx`` array and any ``grd/mbm/points`` beads. It is **not** trying to be a
 byte-perfect Imspector/Abberior file (that would need the closed OmasIo writer
-and an Imspector license to validate — see the feasibility notes in
-the backlog). We therefore write the **simplest legal** OBF: one 1-D ``uint8``
+and an Imspector license to validate). We therefore write the **simplest legal** OBF: one 1-D ``uint8``
 stack per channel, ``format_version = 1`` (no file-level metadata block), and a
 minimal v1 stack footer.
 

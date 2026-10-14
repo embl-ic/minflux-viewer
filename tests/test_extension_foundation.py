@@ -4,8 +4,6 @@ Extension-layer **Phase 0** foundation.
 These assert the seams the four parallel tracks build against. They are
 deliberately cheap and headless: the point is that the contract exists and has
 the shape the tracks were told it has, not that any of it does real work yet.
-
-See the design notes section 5.
 """
 
 from __future__ import annotations

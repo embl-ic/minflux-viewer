@@ -93,9 +93,9 @@ class AttributeComponent:
     """
     Flexible component-level attribute table.
 
-    This is the first compatibility layer toward the canonical model described
-    in the design notes. It wraps an :class:`AttrStore` so existing code
-    can keep using ``dataset.attr`` while new code can use ``dataset.mfx`` or
+    This is the first compatibility layer toward the canonical data model. It
+    wraps an :class:`AttrStore` so existing code can keep using
+    ``dataset.attr`` while new code can use ``dataset.mfx`` or
     ``dataset.mbm`` with role and metadata lookups.
     """
 

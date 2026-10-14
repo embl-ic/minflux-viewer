@@ -3,7 +3,7 @@ Preferences > Plugin > *Plugin folders* group.
 
 Lives in its own file, rather than inside ``preferences_dialog.py``, so the
 plugin-discovery and external-library work could each add a Preferences group
-without both editing the same file. See the design notes §4.3.
+without both editing the same file.
 
 Seam contract — ``preferences_dialog.py`` calls exactly three things and must
 not need changing again:

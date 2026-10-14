@@ -1,8 +1,7 @@
 """Open, close and reopen datasets and their windows, many times, in one process.
 
 The application is one long-lived process, and its native Qt failures need the
-state that earlier work leaves behind (the project notes, "Qt lifecycle and
-background-work invariants"): a fresh process per test hides them. This module
+state that earlier work leaves behind: a fresh process per test hides them. This module
 keeps one main window through several cycles of opening four datasets with
 their windows, closing them in a different order each time (an earlier, the
 active and a later one), reopening windows for the survivors, letting the

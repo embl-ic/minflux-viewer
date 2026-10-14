@@ -14,7 +14,7 @@ pytest.importorskip("pyqtgraph")
 
 # ⚠ Everything Qt-side is imported inside the tests, not at collection: importing
 # figure_export (and the Qt widgets) while the WHOLE suite is being collected
-# reproducibly tipped the known native abort (the project notes, "Lifecycle regressions")
+# reproducibly tipped the known native abort
 # at test_attribute_separation_dialog — 2/2 with module-level imports, 0/2
 # without this file. The tests are unaffected; only collection is.
 

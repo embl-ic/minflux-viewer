@@ -193,7 +193,7 @@ DEFAULT_PREFS: dict = {
         # These keys are declared together, by the extension-layer foundation
         # phase, so the plugin-discovery and external-library work can proceed
         # in parallel without both editing this file. Each is consumed by
-        # exactly one module; see the design notes.
+        # exactly one module.
         #
         # Plugin discovery (plugins/loader.py):
         "paths": [],              # extra plugin roots, beyond the app and per-user dirs
