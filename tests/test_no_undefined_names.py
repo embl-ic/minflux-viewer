@@ -70,10 +70,16 @@ def unresolved_globals(module) -> list[tuple[str, str, int]]:
     found = []
     for fn in _functions(module):
         for code in _code_objects(fn.__code__):
+            # co_qualname and Instruction.positions are Python 3.11+.
+            name = getattr(code, "co_qualname", code.co_name)
+            line = code.co_firstlineno
             for ins in dis.get_instructions(code):
+                positions = getattr(ins, "positions", None)
+                if positions is None and ins.starts_line is not None:
+                    line = ins.starts_line
                 if ins.opname == "LOAD_GLOBAL" and ins.argval not in known:
-                    found.append((code.co_qualname, ins.argval,
-                                  ins.positions.lineno))
+                    found.append((name, ins.argval,
+                                  positions.lineno if positions is not None else line))
     return found
 
 

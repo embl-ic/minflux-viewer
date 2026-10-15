@@ -7,6 +7,7 @@ replacing an install and restarting.
 
 from __future__ import annotations
 
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -109,6 +110,15 @@ def test_find_app_root_missing_raises(tmp_path):
         su.find_app_root(tmp_path)
 
 
+#: Safe tar extraction (the ``data`` filter) arrived in Python 3.10.12 and
+#: 3.11.4. The last Windows build of 3.10 is 3.10.11, so a Windows Python 3.10
+#: never has it; the app refuses .tar updates there instead, which
+#: ``test_a_python_without_the_tar_filter_refuses_a_tarball`` checks.
+needs_tar_filter = pytest.mark.skipif(
+    not hasattr(tarfile, "data_filter"),
+    reason="this Python has no tarfile data filter, so it refuses .tar updates")
+
+
 def _make_release_zip(tmp_path) -> Path:
     """A zip shaped like `Compress-Archive dist\\minflux_viewer`."""
     build = tmp_path / "build" / "minflux_viewer"
@@ -178,6 +188,7 @@ def test_build_helper_sh_has_wait_swap_rollback_relaunch():
     assert 'rm -- "$0"' in sh                                     # self-delete
 
 
+@needs_tar_filter
 def test_stage_update_handles_tarball(tmp_path):
     import tarfile
     build = tmp_path / "build" / "minflux_viewer"
@@ -207,6 +218,7 @@ def _evil_tarball(tmp_path, member):
     return tgz
 
 
+@needs_tar_filter
 def test_a_tarball_member_climbing_out_of_the_staging_folder_is_refused(tmp_path):
     """``tarfile.extractall`` without a filter writes wherever a member's name
     points; a release archive must only ever fill its own staging folder.
@@ -220,6 +232,7 @@ def test_a_tarball_member_climbing_out_of_the_staging_folder_is_refused(tmp_path
     assert not (tmp_path / "escaped.txt").exists()
 
 
+@needs_tar_filter
 def test_a_tarball_member_with_an_absolute_path_cannot_land_there(tmp_path):
     """Unfiltered, an absolute name is joined onto the drive root on Windows
     (it was: a red run of this test wrote ``C:\\abs\\escaped.txt``). The
@@ -249,6 +262,7 @@ def test_apply_update_stages_and_launches(tmp_path, monkeypatch):
     exe.write_bytes(b"OLD")
 
     calls = {}
+    monkeypatch.setattr(su, "is_windows", lambda: True)       # take the Windows branch
     monkeypatch.setattr(su, "launch_helper",
                         lambda bat, target: calls.update(bat=Path(bat), target=Path(target)))
 
@@ -262,6 +276,7 @@ def test_apply_update_stages_and_launches(tmp_path, monkeypatch):
     bat_path.unlink(missing_ok=True)
 
 
+@needs_tar_filter
 def test_apply_update_linux_writes_sh(tmp_path, monkeypatch):
     import tarfile
     monkeypatch.setattr(su, "is_windows", lambda: False)      # take the POSIX branch
@@ -285,3 +300,19 @@ def test_apply_update_linux_writes_sh(tmp_path, monkeypatch):
     assert "kill -0 999" in text and install.as_posix() in text
     assert calls["s"] == sh_path
     sh_path.unlink(missing_ok=True)
+
+
+def test_a_python_without_the_tar_filter_refuses_a_tarball(tmp_path, monkeypatch):
+    """Without the ``data`` filter, extraction would trust member paths, so the
+    update is refused before anything is unpacked."""
+    build = tmp_path / "build" / "minflux_viewer"
+    build.mkdir(parents=True)
+    (build / "minflux_viewer").write_bytes(b"NEW")
+    tgz = tmp_path / "app-linux.tar.gz"
+    with tarfile.open(tgz, "w:gz") as tf:
+        tf.add(build, arcname="minflux_viewer")
+    monkeypatch.delattr(tarfile, "data_filter", raising=False)
+
+    with pytest.raises(RuntimeError, match="cannot extract a .tar archive safely"):
+        su.stage_update(tgz, exe_name="minflux_viewer")
+    assert not list((tmp_path / "staging").iterdir())    # nothing was staged

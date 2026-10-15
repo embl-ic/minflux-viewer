@@ -622,10 +622,14 @@ def test_update_dialog_close_does_not_destroy_a_running_download_thread() -> Non
         _DownloadWorker.run = fake_run
 
         app = QApplication([])
-        asset = ReleaseAsset(name="MINFLUX-Viewer-9.9.9-win.zip", url="http://x", size=1)
+        # One asset per platform: the dialog downloads only the one that
+        # matches the system it runs on.
+        assets = tuple(
+            ReleaseAsset(name=f"MINFLUX-Viewer-9.9.9-{tag}", url="http://x", size=1)
+            for tag in ("win.zip", "mac.zip", "linux.tar.gz"))
         release = ReleaseInfo(
             version="9.9.9", tag="v9.9.9", name="r", notes="n",
-            html_url="http://x", published_at="2026-01-01", assets=(asset,),
+            html_url="http://x", published_at="2026-01-01", assets=assets,
         )
         result = UpdateCheckResult(
             status="update_available", current_version="0.4.2", latest=release,

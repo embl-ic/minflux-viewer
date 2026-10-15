@@ -41,7 +41,9 @@ Counts = dict[str, dict[str, int]]      # {path: {rule: count}}
 
 
 def _relative(path: str) -> str:
-    p = Path(path)
+    # A backslash is a separator here on every system: on POSIX, Path would
+    # keep it as part of a file name and the counts would not match.
+    p = Path(path.replace("\\", "/"))
     try:
         p = p.resolve().relative_to(ROOT)
     except (OSError, ValueError):
