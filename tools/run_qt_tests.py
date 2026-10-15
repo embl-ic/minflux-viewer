@@ -35,6 +35,7 @@ desktop, CI runners without a GPU).
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import subprocess
 import sys
@@ -89,6 +90,26 @@ def _collect(python: str, env: dict) -> list[str]:
     return modules_from_collection(result.stdout)
 
 
+def _github_annotations():
+    """``tools/github_annotations.py``, loaded by path so tests can load this file."""
+    path = Path(__file__).resolve().parent / "github_annotations.py"
+    spec = importlib.util.spec_from_file_location("_mfv_github_annotations", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def failure_summary(output: str, verdict: str, limit: int = 25) -> str:
+    """What a module's annotation says: its FAILED/ERROR lines, else the crash
+    report (or, failing both, the end of the output)."""
+    if not verdict.startswith("passed"):
+        lines = [line for line in output.splitlines()
+                 if line.startswith(("FAILED ", "ERROR "))]
+        if lines and "crash" not in verdict:
+            return "\n".join(lines[:limit])
+    return "\n".join(_report_excerpt(output).splitlines()[:limit])
+
+
 def _report_excerpt(output: str, limit: int = 60) -> str:
     """The crash report when there is one, else the end of the output."""
     lines = output.splitlines()
@@ -114,6 +135,8 @@ def main(argv: list[str] | None = None) -> int:
     env = dict(os.environ)
     if not args.native:
         env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    annotations = _github_annotations()
+    env[annotations.QT_RUNNER_CHILD_ENV] = "1"     # the runner annotates, per module
     python = sys.executable
     modules = _collect(python, env)
     if not modules:
@@ -163,6 +186,12 @@ def main(argv: list[str] | None = None) -> int:
     print(summary + ".")
     if recovered and args.strict:
         print("Strict mode: a crash fails the run even when its retry passed.")
+    if annotations.on_github_actions():
+        reported = bad + (recovered if args.strict else [])
+        for line in annotations.error_commands(
+                (f"Qt {verdict}: {module}", failure_summary(output, verdict))
+                for module, _code, output, verdict in reported):
+            print(line, flush=True)
     return exit_status(failed=len(bad), recovered=len(recovered), strict=args.strict)
 
 

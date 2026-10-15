@@ -25,9 +25,11 @@ redirected the same way.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -50,6 +52,39 @@ _QT_FIXTURES = frozenset({"qapp", "qtbot"})
 #: for it themselves; then its entry goes. Found by running every module's
 #: ``-m "not qt"`` tests in a process of its own (only these aborted).
 _QT_MODULES: set[str] = set()   # empty: test_precision_histograms.py now asks for qapp
+
+
+def _github_annotations():
+    """``tools/github_annotations.py``, loaded by path (``tools`` is no package)."""
+    path = Path(__file__).resolve().parents[1] / "tools" / "github_annotations.py"
+    spec = importlib.util.spec_from_file_location("_mfv_github_annotations", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def pytest_terminal_summary(terminalreporter):
+    """On GitHub Actions, name every failing test in a public annotation.
+
+    A job's log needs a GitHub login to read; its annotations do not. Inside
+    the Qt runner's per-module processes the runner reports instead, once per
+    module.
+    """
+    annotations = _github_annotations()
+    if (not annotations.on_github_actions()
+            or os.environ.get(annotations.QT_RUNNER_CHILD_ENV)):
+        return
+    failures = []
+    for kind in ("failed", "error"):
+        for report in terminalreporter.stats.get(kind, []):
+            nodeid = getattr(report, "nodeid", "")
+            if not nodeid:
+                continue
+            text = getattr(report, "longreprtext", "") or ""
+            failures.append((f"{kind.upper()} {nodeid}",
+                             "\n".join(text.splitlines()[-25:])))
+    for line in annotations.error_commands(failures):
+        terminalreporter.write_line(line)
 
 
 def pytest_configure(config):
