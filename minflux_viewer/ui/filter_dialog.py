@@ -61,7 +61,12 @@ from ..core.loader import (
 )
 from ..utils.filters import AGG_MODES, FLOAT_RESULT_MODES, trace_agg_func
 from .attribute_help import apply_attribute_tooltips
-from .dataset_binding import DatasetIndex, event_index, window_dataset_index
+from .dataset_binding import (
+    DatasetIndex,
+    event_index,
+    window_dataset_index,
+    window_draws_dataset,
+)
 
 #: Same set, same order as the histogram's "As" dropdown — a view the user can
 #: author in the histogram must be expressible as a filter.
@@ -353,8 +358,7 @@ class FilterDialog(QDialog):
         mapping = getattr(main, window_attr, {})
         for win in list(mapping.values()):
             try:
-                channels = getattr(win, "_channels", None) or []
-                if any(ch.get("dataset_idx") == target_idx for ch in channels):
+                if window_draws_dataset(win, self._state, target_idx):
                     return win
                 win_idx = window_dataset_index(win)
                 if win_idx is not None and win_idx in group_set:
@@ -369,8 +373,7 @@ class FilterDialog(QDialog):
         if win is None or not (0 <= idx < len(self._state.datasets)):
             return
         try:
-            channels = getattr(win, "_channels", None) or []
-            if any(ch.get("dataset_idx") == idx for ch in channels):
+            if window_draws_dataset(win, self._state, idx):
                 if hasattr(win, "_idx"):
                     win._idx = idx
                 if hasattr(win, "_dataset_idx"):

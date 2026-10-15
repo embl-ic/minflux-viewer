@@ -564,7 +564,9 @@ class PrecisionRenderWindow(RenderWindow):
     def _build_channel_grid(self, ch: dict) -> None:
         super()._build_channel_grid(ch)
         dataset_key = ch["dataset_key"]
-        ds = self._state.datasets[ch["dataset_idx"]]
+        ds = self._channel_dataset(ch)
+        if ds is None:
+            return
         try:
             raw_locs = np.asarray(ds.loc_nm, dtype=np.float64)
         except Exception:
@@ -1124,7 +1126,7 @@ class PrecisionRenderWindow(RenderWindow):
             if ch["kind"] == "image":
                 tile = np.asarray(
                     self._image_tile(
-                        self._state.datasets[ch["dataset_idx"]],
+                        self._channel_dataset(ch),
                         x0, x1, y0, y1, height, width,
                     ),
                     dtype=np.float32,

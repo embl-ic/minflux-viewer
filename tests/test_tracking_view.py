@@ -207,7 +207,7 @@ def test_the_head_is_the_leading_edge_of_the_drawn_tail(_qt_app):
     """A comet head anywhere but the newest point is not a comet."""
     win = _window(_qt_app, _state(_tracking_dataset()))
     try:
-        tracks = win._tracks[0]
+        tracks = win._tracks[win._dataset_key]
         window = win._time_row.range()
         sel = tracks.window(*window)
         assert sel.n_traces > 0
@@ -249,7 +249,7 @@ def test_a_tail_segment_never_joins_two_molecules(_qt_app):
                     if np.asarray(item.getData()[0]).size)
         assert drawn, "nothing was drawn"
 
-        tracks = win._tracks[0]
+        tracks = win._tracks[win._dataset_key]
         lo_t, hi_t = win._time_row.range()
         checked = 0
         for lo, hi, _age in band_edges(hi_t, hi_t - lo_t, 0.0, win._tail_bands):
@@ -310,7 +310,7 @@ def test_a_single_tracking_run_uses_its_own_points_as_the_backdrop(_qt_app):
     win = _window(_qt_app, _state(_tracking_dataset()))
     try:
         assert win._visible_channels("Structure") == []
-        assert win._backdrop_points().shape[0] == win._tracks[0].n_points
+        assert win._backdrop_points().shape[0] == win._tracks[win._dataset_key].n_points
     finally:
         win.close()
         _pump(_qt_app)
@@ -357,14 +357,15 @@ def test_selecting_one_track_isolates_it_and_exposes_hover_statistics(_qt_app):
     try:
         win._draw()
         assert win._candidate_trace_ids.size
-        dataset_idx = int(win._candidate_dataset_indices[0])
+        dataset_key = win._candidate_keys[int(win._candidate_dataset_indices[0])]
         trace_id = win._candidate_trace_ids[0]
-        win._selected_track = (dataset_idx, trace_id)
+        win._selected_track = (dataset_key, trace_id)
         win._draw()
 
-        assert np.all(win._candidate_dataset_indices == dataset_idx)
+        assert {win._candidate_keys[int(slot)]
+                for slot in win._candidate_dataset_indices} == {dataset_key}
         assert np.all(win._candidate_trace_ids == trace_id)
-        summary = win._track_summary(dataset_idx, trace_id)
+        summary = win._track_summary(dataset_key, trace_id)
         assert f"tid {trace_id}" in summary
         assert "median" in summary and "net" in summary
     finally:
@@ -387,7 +388,7 @@ def test_trace_viewer_and_tracking_view_share_selected_trace_and_playhead(_qt_ap
         state.tracking_playhead_changed.emit(
             state.datasets[0], 3, 0.012, object())
         _pump(_qt_app)
-        assert tracking._selected_track == (0, 3)
+        assert tracking._selected_track == (state.key_at(0), 3)
         assert trace._selected_tid == 3
         times = np.asarray(trace._series["t"])
         assert times[trace._time_slider.value()] == pytest.approx(0.012, abs=5e-4)
@@ -562,7 +563,7 @@ def test_new_generation_cancels_and_rejects_an_older_result(_qt_app, monkeypatch
         queued[1].run()
         _pump(_qt_app, 4)
         assert not win._building_tracks
-        current = win._tracks[0]
+        current = win._tracks[win._dataset_key]
         assert current.n_points == 20
 
         # A non-cooperative/native worker can finish after cancellation. The
@@ -574,8 +575,8 @@ def test_new_generation_cancels_and_rejects_an_older_result(_qt_app, monkeypatch
             fit_view=True,
             rebuild_rows=True,
         )
-        assert win._tracks[0] is current
-        assert win._tracks[0].n_points == 20
+        assert win._tracks[win._dataset_key] is current
+        assert win._tracks[win._dataset_key].n_points == 20
     finally:
         win.close()
         _pump(_qt_app)

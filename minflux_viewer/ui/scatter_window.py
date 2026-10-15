@@ -49,6 +49,7 @@ from ..colors import (
 )
 from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
+from ..core.dataset_key import DatasetKey
 from ..core.loader import attr_values_1d
 from ..core.overlay import (
     apply_display_transform_nm,
@@ -62,7 +63,7 @@ from ..core.overlay import (
 )
 from ..core.roi_selection import REGION_ROI_TYPES, roi_region_mask
 from .attribute_help import apply_attribute_menu_tooltips, apply_attribute_tooltips
-from .dataset_binding import DatasetIndex, event_index
+from .dataset_binding import DatasetIndex, event_index, event_key
 from .gl_3d_reference import nice_step, three_plane_grid_positions, tick_values
 from .ortho_view import (
     AXIS_COLUMNS,
@@ -123,6 +124,7 @@ class ScatterWindow(QWidget):
     # The window's dataset key, read and set as a position (None once the
     # dataset has closed). See ui/dataset_binding.py.
     _dataset_idx = DatasetIndex()
+    _dataset_key: DatasetKey | None         # set through the property above
 
     def __init__(self, state: AppState, parent: QWidget | None = None, *, dataset_idx: int | None = None) -> None:
         super().__init__(parent)
@@ -158,7 +160,7 @@ class ScatterWindow(QWidget):
         # The 3-D marker is off until asked for, like the render view's.
         self._show_crosshair = False
         self._ortho_crosshair = None
-        self._cached_dataset_idx: int | None = None
+        self._cached_dataset_key: DatasetKey | None = None   # whose locs are cached
         self._cached_locs_nm: np.ndarray | None = None
         self._color_cache_key: tuple | None = None
         self._color_cache: dict | None = None
@@ -210,6 +212,7 @@ class ScatterWindow(QWidget):
         state.dataset_events.calibration_changed.connect(self._on_calibration_changed)
         state.dataset_events.overlay_transform_changed.connect(self._on_overlay_transform_changed)
         state.dataset_events.roi_selection_changed.connect(self._on_roi_selection_changed)
+        state.dataset_events.removed.connect(self._on_dataset_closed)
         state.rois.selection_changed.connect(self._redraw_roi_highlight)
         # The side panes' outlines follow the store, not the redraw debounce:
         # adding, deleting or re-selecting a ROI must show there immediately,
@@ -233,10 +236,10 @@ class ScatterWindow(QWidget):
             for index, channel in enumerate(self._channels):
                 lut = cycle[index % len(cycle)]
                 channel["lut"] = lut
-                ds_idx = channel.get("dataset_idx")
-                if ds_idx is not None and 0 <= ds_idx < len(self._state.datasets):
-                    self._state.datasets[ds_idx].state["overlay_lut"] = lut
-                    self._state.datasets[ds_idx].state["render_channel_lut"] = lut
+                ds = self._channel_dataset(channel)
+                if ds is not None:
+                    ds.state["overlay_lut"] = lut
+                    ds.state["render_channel_lut"] = lut
         try:
             self._cmap = _load_cmap(self._cmap_combo.currentText())
         except Exception:
@@ -1912,13 +1915,10 @@ class ScatterWindow(QWidget):
                 return
             channel = self._channels[active]
             attribute = str(channel.get("color_by") or "")
-            dataset_idx = channel.get("dataset_idx")
-            if not attribute or dataset_idx is None or not (
-                0 <= dataset_idx < len(self._state.datasets)
-            ):
+            dataset = self._channel_dataset(channel)
+            if not attribute or dataset is None:
                 self._colorbar.set_bar_visible(False)
                 return
-            dataset = self._state.datasets[dataset_idx]
         if dataset is None or not attribute:
             self._colorbar.set_bar_visible(False)
             return
@@ -1948,28 +1948,27 @@ class ScatterWindow(QWidget):
     def _update_color(self) -> None:
         self._redraw_current(save_state=True)
 
-    def _on_filter_changed(self, idx) -> None:
-        idx = event_index(self._state, idx)
-        if idx is None:
-            return
-        if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
+    def _shows(self, event) -> bool:
+        """Whether this view draws the open dataset *event* names."""
+        dataset_key = event_key(self._state, event)
+        if dataset_key is None or self._state.index_of(dataset_key) is None:
+            return False
+        return dataset_key == self._dataset_key or any(
+            ch.get("dataset_key") == dataset_key for ch in self._channels)
+
+    def _on_filter_changed(self, event) -> None:
+        if self._shows(event):
             self._redraw_current(save_state=False)
 
-    def _on_attributes_changed(self, idx) -> None:
-        idx = event_index(self._state, idx)
-        if idx is None:
-            return
-        if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
+    def _on_attributes_changed(self, event) -> None:
+        if self._shows(event):
             self._refresh()
 
-    def _on_calibration_changed(self, idx) -> None:
-        idx = event_index(self._state, idx)
-        if idx is None:
-            return
-        # Z scaling factor changed: the cached loc_nm (keyed only by dataset
-        # index) is now stale on z — invalidate it before redrawing.
-        if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
-            self._cached_dataset_idx = None
+    def _on_calibration_changed(self, event) -> None:
+        # Z scaling factor changed: the cached loc_nm is now stale on z --
+        # invalidate it before redrawing.
+        if self._shows(event):
+            self._cached_dataset_key = None
             self._cached_locs_nm = None
             self._redraw_current(save_state=False)
 
@@ -1985,23 +1984,40 @@ class ScatterWindow(QWidget):
             or self._state.datasets[idx].state.get("render_transform_2d")
         )
         changed = False
+        dataset_key = self._state.key_at(idx)
         for channel in self._channels:
-            if channel.get("dataset_idx") != idx:
+            if channel.get("dataset_key") != dataset_key:
                 continue
             if transform_key(channel.get("loc_transform")) != transform_key(current):
                 channel["loc_transform"] = current
                 changed = True
         if changed:
-            self._cached_dataset_idx = None
+            self._cached_dataset_key = None
             self._cached_locs_nm = None
             self._redraw_current(save_state=False)
 
-    def _on_roi_selection_changed(self, idx) -> None:
-        idx = event_index(self._state, idx)
-        if idx is None:
-            return
-        if idx == self._dataset_idx or any(ch.get("dataset_idx") == idx for ch in self._channels):
+    def _on_roi_selection_changed(self, event) -> None:
+        if self._shows(event):
             self._redraw_roi_highlight()
+
+    def _on_dataset_closed(self, event) -> None:
+        """A closed overlay channel leaves this view; nothing else reloads."""
+        if self._closing or not any(
+                ch.get("dataset_key") == event.key for ch in self._channels):
+            return
+        remaining = [ch for ch in self._channels
+                     if ch.get("dataset_key") != event.key]
+        if not remaining:
+            return              # the view's only dataset: its window closes
+        self._channels = remaining
+        if self._dataset_key == event.key:
+            # The member the view had selected closed; the overlay goes on.
+            self._dataset_key = remaining[0]["dataset_key"]
+        self._cached_dataset_key = None
+        self._cached_locs_nm = None
+        self._rebuild_channel_ui()
+        self._invalidate_color_cache()
+        self._redraw_current(save_state=False)
 
     def _reset_view(self) -> None:
         if self._axis_combo.currentText() == "3D" and self._3d_view is not None:
@@ -2115,10 +2131,9 @@ class ScatterWindow(QWidget):
             for ch in channels:
                 if not ch.get("visible", True):
                     continue
-                ds_idx = ch.get("dataset_idx")
-                if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
+                ds = self._channel_dataset(ch)
+                if ds is None:
                     continue
-                ds = self._state.datasets[ds_idx]
                 locs = self._locs_for_dataset(ds)
                 mask = np.asarray(ds.filter_mask, dtype=bool).ravel()
                 if mask.size != locs.shape[0]:
@@ -2290,7 +2305,7 @@ class ScatterWindow(QWidget):
 
     def _build_channels(self) -> None:
         previous = {
-            ch.get("dataset_idx"): {"visible": ch.get("visible", True),
+            ch.get("dataset_key"): {"visible": ch.get("visible", True),
                                     "lut": ch.get("lut"),
                                     "color_by": ch.get("color_by"),
                                     "transform": ch.get("transform")}
@@ -2301,9 +2316,10 @@ class ScatterWindow(QWidget):
             return
         channel_luts = channel_colormap_names()
         for pos, (idx, ds) in enumerate(overlay_members(self._state, self._dataset_idx)):
-            prev = previous.get(idx, {})
+            dataset_key = self._state.key_at(idx)
+            prev = previous.get(dataset_key, {})
             self._channels.append({
-                "dataset_idx": idx,
+                "dataset_key": dataset_key,
                 "name": ds.name,
                 "visible": bool(prev.get("visible", True)),
                 "lut": prev.get("lut") or ds.state.get("overlay_lut") or ds.state.get("render_channel_lut") or channel_luts[pos % len(channel_luts)],
@@ -2381,8 +2397,9 @@ class ScatterWindow(QWidget):
         """Start the same mode as channel-row right-click → Manual align."""
         if len(self._channels) < 2:
             return False
+        dataset_key = self._state.key_at(dataset_idx)
         for channel_idx, channel in enumerate(self._channels):
-            if channel.get("dataset_idx") == dataset_idx:
+            if dataset_key is not None and channel.get("dataset_key") == dataset_key:
                 self._manual_align_channel(channel_idx)
                 return True
         return False
@@ -2426,8 +2443,7 @@ class ScatterWindow(QWidget):
             axis = self._active_plane()
             axes = (0, 2) if axis == "XZ" else (1, 2) if axis == "YZ" else (0, 1)
             if axis == "3D":
-                ds_idx = ch.get("dataset_idx")
-                locs = self._locs_for_dataset_raw(ds_idx)
+                locs = self._locs_for_dataset_raw(self._channel_index(ch))
                 centre = np.nanmedian(locs[:, :3], axis=0) if locs.size else np.zeros(3)
                 transform["anchor_x_nm"] = float(centre[axes[0]])
                 transform["anchor_y_nm"] = float(centre[axes[1]])
@@ -2464,7 +2480,7 @@ class ScatterWindow(QWidget):
         transform["dx_nm"] = float(transform.get("dx_nm", 0.0)) + dx_nm
         transform["dy_nm"] = float(transform.get("dy_nm", 0.0)) + dy_nm
         transform["angle"] = float(transform.get("angle", 0.0)) + rotation
-        self._cached_dataset_idx = None
+        self._cached_dataset_key = None
         self._cached_locs_nm = None
         self._redraw_current(save_state=False)
 
@@ -2486,7 +2502,7 @@ class ScatterWindow(QWidget):
                 self._overlay_alignment_original[ch_idx]
                 if self._overlay_alignment_original is not None else {}
             )
-        self._cached_dataset_idx = None
+        self._cached_dataset_key = None
         self._cached_locs_nm = None
         self._redraw_current(save_state=False)
         panel.refresh_status()
@@ -2500,8 +2516,8 @@ class ScatterWindow(QWidget):
             transform = ch.get("transform") or {}
             if not any(abs(float(transform.get(key, 0.0))) > 1e-12 for key in ("dx_nm", "dy_nm", "angle")):
                 continue
-            ds_idx = ch.get("dataset_idx")
-            if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
+            ds_idx = self._channel_index(ch)
+            if ds_idx is None:
                 continue
             ds = self._state.datasets[ds_idx]
             base_transform = ch.get("loc_transform") or ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
@@ -2531,7 +2547,7 @@ class ScatterWindow(QWidget):
         if self._overlay_alignment_original_visibility is not None:
             for ch, visible in zip(self._channels, self._overlay_alignment_original_visibility):
                 ch["visible"] = bool(visible)
-        self._cached_dataset_idx = None
+        self._cached_dataset_key = None
         self._cached_locs_nm = None
         self._redraw_current(save_state=False)
         self._end_overlay_alignment()
@@ -2545,7 +2561,7 @@ class ScatterWindow(QWidget):
         if self._overlay_alignment_original_visibility is not None:
             for ch, visible in zip(self._channels, self._overlay_alignment_original_visibility, strict=True):
                 ch["visible"] = visible
-        self._cached_dataset_idx = None
+        self._cached_dataset_key = None
         self._cached_locs_nm = None
         self._redraw_current(save_state=False)
         self._end_overlay_alignment()
@@ -2563,7 +2579,7 @@ class ScatterWindow(QWidget):
 
     def _active_channel_index(self) -> int | None:
         for i, ch in enumerate(self._channels):
-            if ch.get("dataset_idx") == self._dataset_idx:
+            if ch.get("dataset_key") == self._dataset_key:
                 return i
         return 0 if self._channels else None
 
@@ -2584,8 +2600,8 @@ class ScatterWindow(QWidget):
             menu.exec(event.globalPosition().toPoint())
             return
         if event.button() == Qt.MouseButton.LeftButton and 0 <= ch_idx < len(self._channels):
-            ds_idx = self._channels[ch_idx]["dataset_idx"]
-            if 0 <= ds_idx < len(self._state.datasets):
+            ds_idx = self._channel_index(self._channels[ch_idx])
+            if ds_idx is not None:
                 self._dataset_idx = ds_idx
                 self._state.set_active(ds_idx)
                 self._update_overlay_title()
@@ -2602,10 +2618,10 @@ class ScatterWindow(QWidget):
         if 0 <= ch_idx < len(self._channels):
             self._channels[ch_idx]["lut"] = lut
             self._channels[ch_idx]["color_by"] = None    # solid color picked
-            ds_idx = self._channels[ch_idx]["dataset_idx"]
-            if 0 <= ds_idx < len(self._state.datasets):
-                self._state.datasets[ds_idx].state["render_channel_lut"] = lut
-                self._state.datasets[ds_idx].state["overlay_lut"] = lut
+            ds = self._channel_dataset(self._channels[ch_idx])
+            if ds is not None:
+                ds.state["render_channel_lut"] = lut
+                ds.state["overlay_lut"] = lut
             if 0 <= ch_idx < len(self._channel_rows):
                 self._style_channel_swatch(self._channel_rows[ch_idx][1], lut)
             self._redraw_current(save_state=False)
@@ -2753,9 +2769,17 @@ class ScatterWindow(QWidget):
         self._draw(self._current_locs(ds), ds.filter_mask, ds, save_state=save_state)
         self._redraw_roi_highlight()
 
+    def _channel_dataset(self, ch: dict):
+        """The dataset *ch* draws, or None once it has closed."""
+        return self._state.dataset_for(ch["dataset_key"])
+
+    def _channel_index(self, ch: dict) -> int | None:
+        """The current position of *ch*'s dataset, or None once it has closed."""
+        return self._state.index_of(ch["dataset_key"])
+
     def _current_locs(self, ds) -> np.ndarray:
-        idx = self._dataset_idx
-        if self._cached_dataset_idx != idx or self._cached_locs_nm is None:
+        dataset_key = self._dataset_key
+        if self._cached_dataset_key != dataset_key or self._cached_locs_nm is None:
             locs = np.asarray(ds.loc_nm, dtype=float)
             if locs.ndim == 2 and locs.shape[1] == 2:
                 locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
@@ -2763,7 +2787,7 @@ class ScatterWindow(QWidget):
                 locs,
                 ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"),
             )
-            self._cached_dataset_idx = idx
+            self._cached_dataset_key = dataset_key
             self._cached_locs_nm = locs
         return self._cached_locs_nm
 
@@ -2772,9 +2796,9 @@ class ScatterWindow(QWidget):
         if locs.ndim == 2 and locs.shape[1] == 2:
             locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
         transform = ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
-        ds_idx = self._state.index_of_dataset(ds)
+        dataset_key = self._state.key_of(ds)
         channel = next(
-            (ch for ch in self._channels if ch.get("dataset_idx") == ds_idx),
+            (ch for ch in self._channels if ch.get("dataset_key") == dataset_key),
             None,
         )
         if channel is not None:
@@ -2842,15 +2866,14 @@ class ScatterWindow(QWidget):
         # the drawn ROI itself stays on the XY pane.
         picked: list[tuple[np.ndarray, np.ndarray]] = []   # (locs, indices)
         brushes: list = []
-        channels = self._channels or [{"dataset_idx": self._dataset_idx, "visible": True}]
+        channels = self._channels or [{"dataset_key": self._dataset_key, "visible": True}]
         per_channel_max = max(1, _MAX_DISPLAY_POINTS_2D // max(len(channels), 1))
         for ch in channels:
             if not ch.get("visible", True):
                 continue
-            ds_idx = ch.get("dataset_idx")
-            if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
+            ds = self._channel_dataset(ch)
+            if ds is None:
                 continue
-            ds = self._state.datasets[ds_idx]
             locs = self._locs_for_dataset(ds)
             if locs.ndim != 2 or locs.shape[0] == 0:
                 continue
@@ -2881,15 +2904,14 @@ class ScatterWindow(QWidget):
             return
         parts: list[np.ndarray] = []
         colors: list[np.ndarray] = []
-        channels = self._channels or [{"dataset_idx": self._dataset_idx, "visible": True}]
+        channels = self._channels or [{"dataset_key": self._dataset_key, "visible": True}]
         per_channel_max = max(1, _MAX_DISPLAY_POINTS_3D // max(len(channels), 1))
         for ch in channels:
             if not ch.get("visible", True):
                 continue
-            ds_idx = ch.get("dataset_idx")
-            if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
+            ds = self._channel_dataset(ch)
+            if ds is None:
                 continue
-            ds = self._state.datasets[ds_idx]
             locs = self._locs_for_dataset(ds)
             if locs.ndim != 2 or locs.shape[0] == 0:
                 continue
@@ -2943,7 +2965,9 @@ class ScatterWindow(QWidget):
         for ch in self._channels:
             if not ch.get("visible", True):
                 continue
-            ds = self._state.datasets[ch["dataset_idx"]]
+            ds = self._channel_dataset(ch)
+            if ds is None:
+                continue
             locs = self._locs_for_dataset(ds)
             if locs.ndim != 2 or locs.shape[1] < 3:
                 continue
@@ -3003,7 +3027,9 @@ class ScatterWindow(QWidget):
         for ch in self._channels:
             if not ch.get("visible", True):
                 continue
-            ds = self._state.datasets[ch["dataset_idx"]]
+            ds = self._channel_dataset(ch)
+            if ds is None:
+                continue
             locs = self._locs_for_dataset(ds)
             mask = np.array(ds.filter_mask, dtype=bool)  # a copy: narrowed below, never the dataset's own mask
             if mask.shape[0] != locs.shape[0]:
@@ -3420,7 +3446,7 @@ class ScatterWindow(QWidget):
 
     def _profile_channels(self):
         return self._channels or [
-            {"dataset_idx": self._dataset_idx, "visible": True, "kind": "localizations"}]
+            {"dataset_key": self._dataset_key, "visible": True, "kind": "localizations"}]
 
     def profile_localizations(self):
         """``(M, 2)`` filtered, visible localizations projected into the current 2-D
@@ -3508,8 +3534,9 @@ class ScatterWindow(QWidget):
     def roi_dataset_indices(self) -> set[int]:
         """Datasets this scatter displays — every overlay channel, not just the
         anchor it is keyed by."""
-        indices = {ch["dataset_idx"] for ch in getattr(self, "_channels", [])
-                   if isinstance(ch.get("dataset_idx"), int)}
+        indices = {position for ch in getattr(self, "_channels", [])
+                   if ch.get("dataset_key") is not None
+                   and (position := self._channel_index(ch)) is not None}
         if isinstance(getattr(self, "_dataset_idx", None), int):
             indices.add(int(self._dataset_idx))
         return indices
@@ -3554,10 +3581,9 @@ class ScatterWindow(QWidget):
                 return None, ""
             channel = self._channels[active]
             attribute = str(channel.get("color_by") or "")
-            dataset_idx = channel.get("dataset_idx")
-            if dataset_idx is None or not (0 <= dataset_idx < len(self._state.datasets)):
+            ds = self._channel_dataset(channel)
+            if ds is None:
                 return None, ""
-            ds = self._state.datasets[dataset_idx]
         return ds, str(attribute or "")
 
     def _show_wand_highlight(self, ds, result, field: str) -> str:

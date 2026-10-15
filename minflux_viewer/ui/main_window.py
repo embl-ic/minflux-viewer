@@ -72,6 +72,7 @@ from .dataset_binding import (
     event_index,
     window_dataset_index,
     window_dataset_key,
+    window_draws_dataset,
 )
 
 #: Everything the application will attempt to open, from the one format
@@ -2944,10 +2945,7 @@ class MainWindow(QMainWindow):
         self._state.set_active(dataset_idx)
 
         def contains_dataset(window) -> bool:
-            return any(
-                channel.get("dataset_idx") == dataset_idx
-                for channel in getattr(window, "_channels", [])
-            )
+            return window_draws_dataset(window, self._state, dataset_idx)
 
         candidates = []
         focused = getattr(self, "_last_active_plot_window", None)
@@ -4389,13 +4387,9 @@ class MainWindow(QMainWindow):
                 list(self._render_windows.values())
                 + list(self._scatter_windows.values())
             ):
-                try:
-                    channels = getattr(win, "_channels", None)
-                    if channels and any(ch.get("dataset_idx") == idx and ch.get("visible", True) for ch in channels):
-                        visible_overlay = True
-                        break
-                except RuntimeError:
-                    continue
+                if window_draws_dataset(win, self._state, idx, visible_only=True):
+                    visible_overlay = True
+                    break
             if visible_overlay or is_overlay:
                 return f"Overlay {overlay_idx}" if overlay_idx else "Overlay"
         own_maps = tuple(
@@ -4863,11 +4857,8 @@ class MainWindow(QMainWindow):
         if win is not None:
             return win
         for win in self._render_windows.values():
-            try:
-                if any(ch.get("dataset_idx") == idx for ch in getattr(win, "_channels", [])):
-                    return win
-            except Exception:
-                continue
+            if window_draws_dataset(win, self._state, idx):
+                return win
         return None
 
     def _show_brightness_contrast(self) -> None:
@@ -4900,10 +4891,7 @@ class MainWindow(QMainWindow):
         active = QApplication.activeWindow()
         if (
             getattr(active, "TAG", None) == "render_window"
-            and any(
-                ch.get("dataset_idx") == idx
-                for ch in getattr(active, "_channels", [])
-            )
+            and window_draws_dataset(active, self._state, idx)
         ):
             rwin = active
         else:
@@ -5956,7 +5944,8 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 continue
             for ch in channels:
-                idx = ch.get("dataset_idx")
+                key = ch.get("dataset_key") if isinstance(ch, dict) else None
+                idx = None if key is None else self._state.index_of(key)
                 if idx in wanted and idx not in luts:
                     luts[idx] = str(ch.get("lut") or "")
         return {idx: lut for idx, lut in luts.items() if lut}
@@ -6028,8 +6017,8 @@ class MainWindow(QMainWindow):
         if self._state.active_idx is None:
             self.setWindowTitle(self.APP_NAME)
 
-        # Refresh open render/scatter overlay windows so their channel lists
-        # reflect the removal (indices have shifted after remove_dataset).
+        # A view drops a closed member by itself; a member left alone has just
+        # lost its overlay state, so its view has to be rebuilt as standalone.
         if touched_group:
             self._refresh_overlay_windows()
 
@@ -8901,11 +8890,11 @@ class MainWindow(QMainWindow):
         """Retire what belonged to a dataset that has closed (typed removal).
 
         Its background work and its windows are found by key. Every other
-        dataset's windows stay registered under their own key, so nothing is
-        re-keyed, and their ``_idx`` follows their dataset by itself.
+        dataset's windows stay registered under their own key and draw their
+        datasets by key, so nothing is re-keyed and nothing reloads: an overlay
+        view drops a closed member itself (on the same event).
         """
         self._retire_dataset_tasks(event)
-        idx = event.old_index
         for mapping in (
             self._data_windows,
             self._render_windows,
@@ -8927,7 +8916,6 @@ class MainWindow(QMainWindow):
                         win.deleteLater()
                 except Exception:
                     pass
-            self._refresh_shifted_windows(mapping, idx)
         # ROI scopes are held by key, so the other datasets' ROIs need nothing;
         # this dataset's ROIs stay listed, now resolving to "closed dataset".
         from ..core.roi_scope import references_dataset
@@ -8973,28 +8961,6 @@ class MainWindow(QMainWindow):
                     registry.pop(key, None)
 
         window.destroyed.connect(forget)
-
-    def _refresh_shifted_windows(self, mapping, removed_idx: int) -> None:
-        """Reload the windows whose dataset moved down when an earlier one closed.
-
-        They keep their registration and their ``_idx`` (both follow the key),
-        but an overlay window's channel list still records positions, and the
-        scatter loc cache is keyed by position, so each is told to reload.
-        """
-        for idx, win in list(mapping.items()):
-            if idx is None or idx < removed_idx:
-                continue
-            if hasattr(win, "_cached_dataset_idx"):
-                win._cached_dataset_idx = None
-                win._cached_locs_nm = None
-            for refresh in ("_refresh", "_refresh_from_dataset"):
-                fn = getattr(win, refresh, None)
-                if callable(fn):
-                    try:
-                        fn()
-                    except Exception:
-                        pass
-                    break
 
     def _on_active_changed(self, event) -> None:
         idx = event_index(self._state, event)
@@ -9149,10 +9115,7 @@ class MainWindow(QMainWindow):
         try:
             if window_dataset_index(view) == idx:
                 return True
-            return any(
-                ch.get("dataset_idx") == idx
-                for ch in getattr(view, "_channels", [])
-            )
+            return window_draws_dataset(view, view._state, idx)
         except (RuntimeError, TypeError, AttributeError):
             return False
 

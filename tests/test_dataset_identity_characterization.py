@@ -250,11 +250,19 @@ def overlay_session(qapp):
     ds = {"A": _dataset("A", 0.0), "B": _dataset("B", 1000.0),
           "C": _dataset("C", 2000.0, group="grp", order=1),
           "D": _dataset("D", 2000.0, group="grp", order=2)}
-    for name in "ABCD":
+    for name in "AB":
         win._state.add_dataset(ds[name])
+    # An import adds a group's channels with auto-render held back, then opens
+    # one view for the group: one per channel would each see only those added
+    # before it.
+    win._state.suspend_auto_render = True
+    for name in "CD":
+        win._state.add_dataset(ds[name])
+    win._state.suspend_auto_render = False
+    view = win._show_render(_index_of(win, ds["C"]))
     _flush()
-    views = dict(win._render_windows)
-    view = views[_index_of(win, ds["C"])]
+    assert [win._state.dataset_for(c["dataset_key"])
+            for c in view._channels] == [ds["C"], ds["D"]]
     try:
         yield win, ds, view
     finally:
@@ -275,8 +283,8 @@ def test_an_overlay_keeps_its_members_and_its_channels_when_others_close(overlay
     assert is_multichannel_overlay(win._state, anchor)
     assert [d for _, d in overlay_members(win._state, anchor)] == [ds["C"], ds["D"]]
     assert not sip.isdeleted(view)
-    channels = [c.get("dataset_idx") for c in view._channels]
-    assert [win._state.datasets[i] for i in channels] == [ds["C"], ds["D"]]
+    assert [win._state.dataset_for(c["dataset_key"])
+            for c in view._channels] == [ds["C"], ds["D"]]
 
 
 def test_an_overlay_view_stays_registered_when_others_close(overlay_session):

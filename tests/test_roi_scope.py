@@ -391,8 +391,6 @@ def test_closing_a_dataset_drops_only_its_restore_roi_memory(qapp):
                  "_attr_windows", "_filter_dlgs"):
         setattr(window, name, DatasetWindowMap(st))
     window._retire_dataset_tasks = lambda _event: None
-    window._refresh_shifted_windows = (
-        MainWindow._refresh_shifted_windows.__get__(window))
 
     closed = st.datasets[1]
     st.remove_dataset(1)

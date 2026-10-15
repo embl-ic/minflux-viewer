@@ -4,6 +4,8 @@ from types import MethodType, SimpleNamespace
 
 import numpy as np
 
+from minflux_viewer.core.dataset_key import DatasetKey
+
 
 def test_alignment_panel_uses_owner_units_persists_steps_and_drags(qtbot):
     from PyQt6.QtCore import QEvent, QPointF, Qt
@@ -194,8 +196,10 @@ def test_dataset_information_manual_align_routes_to_existing_overlay_view():
 
     started = []
 
+    keys = [DatasetKey(1), DatasetKey(2)]
+
     class View:
-        _channels = [{"dataset_idx": 0}, {"dataset_idx": 1}]
+        _channels = [{"dataset_key": keys[0]}, {"dataset_key": keys[1]}]
 
         @staticmethod
         def start_manual_alignment_for_dataset(dataset_idx):
@@ -227,6 +231,9 @@ def test_dataset_information_manual_align_routes_to_existing_overlay_view():
         def set_active(self, dataset_idx):
             self.active = dataset_idx
 
+        def key_at(self, dataset_idx):
+            return keys[dataset_idx] if 0 <= dataset_idx < len(keys) else None
+
         def log(self, message, level="INFO", **_kwargs):
             self.messages.append((message, level))
 
@@ -250,10 +257,13 @@ def test_render_and_scatter_public_manual_align_entry_uses_channel_handler():
     from minflux_viewer.ui.render_window import RenderWindow
     from minflux_viewer.ui.scatter_window import ScatterWindow
 
+    keys = {3: DatasetKey(4), 8: DatasetKey(9)}
+    state = SimpleNamespace(key_at=keys.get)
     for window_class in (RenderWindow, ScatterWindow):
         calls = []
         owner = SimpleNamespace(
-            _channels=[{"dataset_idx": 3}, {"dataset_idx": 8}],
+            _state=state,
+            _channels=[{"dataset_key": keys[3]}, {"dataset_key": keys[8]}],
             _manual_align_channel=calls.append,
         )
         assert window_class.start_manual_alignment_for_dataset(owner, 8) is True

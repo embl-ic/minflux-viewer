@@ -17,11 +17,13 @@ destroy them on screen. Stabilization Phase 3 binds a window to its dataset's
 * :class:`DatasetWindowMap` is a registry keyed by key that still accepts a
   position wherever a dict of positions was used, so its entries never need
   re-keying when an earlier dataset closes.
-* :func:`event_index` resolves a typed dataset event (or an index an internal
-  caller passes) to the current position.
+* :func:`event_index` / :func:`event_key` resolve a typed dataset event (or an
+  index an internal caller passes) to the current position / to the key.
+* :func:`window_channel_keys` / :func:`window_draws_dataset` say which datasets
+  an overlay view's channels draw; a channel holds its dataset's key.
 
-The position-backed names stay until the render engine stops keying its tiles,
-channel grids and masks by position (stabilization Phase 4).
+The position-backed names stay while code inside the windows still reads a
+position (stabilization Phase 4).
 """
 
 from __future__ import annotations
@@ -47,6 +49,21 @@ def event_index(state: Any, payload: Any) -> int | None:
     return payload
 
 
+def event_key(state: Any, payload: Any) -> DatasetKey | None:
+    """The key of the dataset *payload* names.
+
+    *payload* is a typed dataset event, whose key is returned whether or not
+    the dataset is still open, or a plain index an internal caller passes,
+    resolved to the key at that position.
+    """
+    key = getattr(payload, "key", None)
+    if isinstance(key, DatasetKey):
+        return key
+    if payload is None or hasattr(payload, "key"):
+        return None
+    return state.key_at(payload)
+
+
 def window_dataset_key(window: Any) -> DatasetKey | None:
     """The key of the dataset *window* is bound to, or None.
 
@@ -57,6 +74,31 @@ def window_dataset_key(window: Any) -> DatasetKey | None:
     except RuntimeError:                    # a window whose C++ half is gone
         return None
     return key if isinstance(key, DatasetKey) else None
+
+
+def window_channel_keys(window: Any, *, visible_only: bool = False) -> list[DatasetKey]:
+    """The keys of the datasets *window*'s channel list draws, in channel order.
+
+    An overlay view draws one channel per member. Channels that are not a
+    dataset (an image channel) and windows without a channel list contribute
+    nothing; with *visible_only*, neither does a hidden channel.
+    """
+    try:
+        channels = getattr(window, "_channels", None) or []
+        return [
+            ch["dataset_key"] for ch in channels
+            if isinstance(ch, dict) and isinstance(ch.get("dataset_key"), DatasetKey)
+            and (not visible_only or ch.get("visible", True))
+        ]
+    except RuntimeError:                    # a window whose C++ half is gone
+        return []
+
+
+def window_draws_dataset(window: Any, state: Any, dataset: Any,
+                         *, visible_only: bool = False) -> bool:
+    """Whether a channel of *window* draws *dataset* (a position or a key)."""
+    key = dataset if isinstance(dataset, DatasetKey) or dataset is None else state.key_at(dataset)
+    return key is not None and key in window_channel_keys(window, visible_only=visible_only)
 
 
 def window_dataset_index(window: Any) -> int | None:

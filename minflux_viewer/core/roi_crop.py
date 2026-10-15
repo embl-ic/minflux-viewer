@@ -147,7 +147,8 @@ def plane_localizations(state, channels, plane) -> np.ndarray:
     """``(M, 2)`` filtered **display-nm** localizations of the visible localization
     *channels* projected into *plane* (``XY``/``XZ``/``YZ``) — the same frame ROIs
     live in. Concatenates every visible non-image channel; used by the Plot Profile
-    so the profile is decided by the data (not any render viewport)."""
+    so the profile is decided by the data (not any render viewport). A channel
+    names its dataset by ``dataset_key``; a closed one contributes nothing."""
     axes = _PLANE_AXES.get(plane)
     if axes is None:
         return np.zeros((0, 2))
@@ -156,10 +157,10 @@ def plane_localizations(state, channels, plane) -> np.ndarray:
     for ch in channels or []:
         if not ch.get("visible", True) or ch.get("kind") == "image":
             continue
-        di = ch.get("dataset_idx")
-        if di is None or not (0 <= di < len(state.datasets)):
+        ds = _channel_dataset(state, ch)
+        if ds is None:
             continue
-        xyz = display_xyz_filtered(state.datasets[di])
+        xyz = display_xyz_filtered(ds)
         if xyz.shape[0]:
             parts.append(xyz[:, [i, j]])
     return np.concatenate(parts) if parts else np.zeros((0, 2))
@@ -175,18 +176,24 @@ def plane_localizations_version(state, channels, plane):
     for ch in channels or []:
         if ch.get("kind") == "image":
             continue
-        di = ch.get("dataset_idx")
-        if di is None or not (0 <= di < len(state.datasets)):
+        ds = _channel_dataset(state, ch)
+        if ds is None:
             continue
-        ds = state.datasets[di]
         mask = getattr(ds, "filter_mask", None)
         mtok = None
         if mask is not None:
             mask = np.asarray(mask, dtype=bool)
             mtok = (int(mask.sum()), int(mask.shape[0]))
         z_scaling_factor = round(float(getattr(getattr(ds, "cali", None), "z_scaling_factor", 1.0) or 1.0), 6)
-        toks.append((di, bool(ch.get("visible", True)), mtok, z_scaling_factor))
+        toks.append((ch["dataset_key"], bool(ch.get("visible", True)), mtok,
+                     z_scaling_factor))
     return tuple(toks)
+
+
+def _channel_dataset(state, ch):
+    """The open dataset a view's channel draws (by its ``dataset_key``), or None."""
+    key = ch.get("dataset_key")
+    return None if key is None else state.dataset_for(key)
 
 
 def _trace_ids(ds, n: int) -> np.ndarray:

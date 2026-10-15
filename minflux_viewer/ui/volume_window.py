@@ -39,6 +39,7 @@ from ..analysis.voronoi_density import (
 )
 from ..colormaps import map_to_rgba, named_colormap_names, representative_rgb
 from ..core.app_state import AppState
+from ..core.dataset_key import DatasetKey
 from .dataset_binding import DatasetIndex
 
 _DEFAULT_MAX_VOXELS = 8_000_000
@@ -517,6 +518,7 @@ class VolumeRenderWindow(QWidget):
     # The window's dataset key, read and set as a position (None once the
     # dataset has closed). See ui/dataset_binding.py.
     _idx = DatasetIndex()
+    _dataset_key: DatasetKey | None         # set through the property above
 
     def __init__(
         self,
@@ -544,8 +546,10 @@ class VolumeRenderWindow(QWidget):
         self._render_method = render_method
         self._region_bounds = region_bounds
         self._display_state = display_state
-        self._volume_channel_ids: tuple[int, ...] = ()
-        self._overlay_transforms: dict[int, object] = {}
+        # Per channel, by dataset key: the datasets the built volume holds,
+        # in payload order, and the transforms an explicit refresh captured.
+        self._volume_channel_ids: tuple[DatasetKey, ...] = ()
+        self._overlay_transforms: dict[DatasetKey, object] = {}
         # Cached GPU 3-D texture limit (see _gl_max_3d_texture); the Max dim
         # spinbox is constrained by it on first refresh, then user-adjustable.
         self._max_dim: int | None = None
@@ -692,25 +696,28 @@ class VolumeRenderWindow(QWidget):
             if isinstance(spec, dict)
         ]
 
-    def _display_channel_map(self) -> dict[int, dict]:
+    def _display_channel_map(self) -> dict[DatasetKey, dict]:
         out = {}
         for spec in self._display_channel_specs():
-            try:
-                out[int(spec["dataset_idx"])] = spec
-            except (KeyError, TypeError, ValueError):
-                continue
+            key = spec.get("dataset_key")
+            if isinstance(key, DatasetKey):
+                out[key] = spec
         return out
 
-    def _display_visible_ids(self) -> tuple[int, ...]:
+    def _display_visible_ids(self) -> tuple[DatasetKey, ...]:
         return tuple(
-            dataset_idx
-            for dataset_idx, spec in self._display_channel_map().items()
+            dataset_key
+            for dataset_key, spec in self._display_channel_map().items()
             if spec.get("kind", "localizations") == "localizations"
             and bool(spec.get("visible", True))
         )
 
-    def _display_contrast(self, dataset_idx: int) -> tuple[float, float] | None:
-        spec = self._display_channel_map().get(int(dataset_idx))
+    def _display_spec(self, dataset_key: DatasetKey | None) -> dict | None:
+        """The 2-D view's display spec for one channel, or None."""
+        return None if dataset_key is None else self._display_channel_map().get(dataset_key)
+
+    def _display_contrast(self, dataset_key: DatasetKey | None) -> tuple[float, float] | None:
+        spec = self._display_spec(dataset_key)
         value = spec.get("contrast_pct") if spec else None
         if value is None:
             return None
@@ -724,7 +731,7 @@ class VolumeRenderWindow(QWidget):
         if display_state is None:
             return
         self._lut_invert = bool(display_state.get("invert", False))
-        spec = self._display_channel_map().get(self._idx)
+        spec = self._display_spec(self._dataset_key)
         if spec is None:
             return
         lut = str(spec.get("lut") or self._cmap_combo.currentText())
@@ -733,7 +740,7 @@ class VolumeRenderWindow(QWidget):
         self._cmap_combo.blockSignals(True)
         self._cmap_combo.setCurrentText(lut)
         self._cmap_combo.blockSignals(False)
-        contrast = self._display_contrast(self._idx)
+        contrast = self._display_contrast(self._dataset_key)
         if contrast is not None:
             self._black_pct, self._white_pct = contrast
 
@@ -752,8 +759,9 @@ class VolumeRenderWindow(QWidget):
             transform = ds.state.get("overlay_transform") or ds.state.get(
                 "render_transform_2d"
             )
-            if transform is not None:
-                self._overlay_transforms[int(dataset_idx)] = deepcopy(transform)
+            key = self._state.key_at(dataset_idx)
+            if transform is not None and key is not None:
+                self._overlay_transforms[key] = deepcopy(transform)
 
     def _overlay_channels(self):
         """Visible overlay channels as ``[(locs_nm, rgb01), …]`` (display-space,
@@ -777,7 +785,8 @@ class VolumeRenderWindow(QWidget):
         self._volume_channel_ids = ()
         channel_ids = []
         for dataset_idx, ds in members:
-            spec = display_map.get(int(dataset_idx))
+            key = self._state.key_at(dataset_idx)
+            spec = display_map.get(key)
             if spec is not None:
                 if spec.get("kind", "localizations") != "localizations":
                     continue
@@ -786,7 +795,7 @@ class VolumeRenderWindow(QWidget):
             locs = _finite_filtered_locs(ds)
             if locs.shape[0] == 0:
                 continue
-            transform = self._overlay_transforms.get(int(dataset_idx))
+            transform = self._overlay_transforms.get(key)
             if transform is None:
                 transform = ds.state.get("overlay_transform") or ds.state.get(
                     "render_transform_2d"
@@ -801,7 +810,7 @@ class VolumeRenderWindow(QWidget):
             )
             rgb = lut_rgb(lut)
             out.append((np.ascontiguousarray(locs[:, :3], dtype=np.float64), rgb))
-            channel_ids.append(int(dataset_idx))
+            channel_ids.append(key)
         self._volume_channel_ids = tuple(channel_ids)
         return out or None
 
@@ -836,7 +845,7 @@ class VolumeRenderWindow(QWidget):
     def _single_channel_locs(self, ds):
         """Filtered finite native-XYZ locs, plus aligned per-loc precision sigma
         (N,3 nm) when the reflected method is the precision Gaussian, else None."""
-        spec = self._display_channel_map().get(self._idx)
+        spec = self._display_spec(self._dataset_key)
         if spec is not None and not bool(spec.get("visible", True)):
             return np.empty((0, 3), dtype=np.float64), None
         try:
@@ -863,7 +872,7 @@ class VolumeRenderWindow(QWidget):
             return locs, None
 
     def refresh_from_dataset(self) -> None:
-        if self._idx < 0 or self._idx >= len(self._state.datasets):
+        if self._idx is None or not (0 <= self._idx < len(self._state.datasets)):
             self._info_label.setText("No active dataset.")
             return
         ds = self._state.datasets[self._idx]
@@ -915,9 +924,9 @@ class VolumeRenderWindow(QWidget):
             render_method = (self._render_method or "").lower()
             if channels:
                 channel_contrast_pct = [
-                    self._display_contrast(dataset_idx)
+                    self._display_contrast(dataset_key)
                     or (self._black_pct, self._white_pct)
-                    for dataset_idx in self._volume_channel_ids
+                    for dataset_key in self._volume_channel_ids
                 ]
                 voronoi_fields = None
                 if render_method == "voronoi_density":
@@ -940,7 +949,7 @@ class VolumeRenderWindow(QWidget):
                     voronoi_fields=voronoi_fields,
                 )
             else:
-                contrast = self._display_contrast(self._idx)
+                contrast = self._display_contrast(self._dataset_key)
                 if contrast is not None:
                     self._black_pct, self._white_pct = contrast
                 voronoi_field = None
@@ -994,7 +1003,7 @@ class VolumeRenderWindow(QWidget):
         payload = self._payload
         if payload is None or self._volume_channel_ids:
             return False
-        contrast = self._display_contrast(self._idx)
+        contrast = self._display_contrast(self._dataset_key)
         black, white = contrast or (self._black_pct, self._white_pct)
         norm, vmax = _normalize_volume(payload.scalar, black, white)
         rgba = _colormap_rgba(
@@ -1026,18 +1035,18 @@ class VolumeRenderWindow(QWidget):
         if payload is None or not payload.channel_norms:
             return False
         norm_by_id = {
-            dataset_idx: norm
-            for dataset_idx, norm in zip(
+            dataset_key: norm
+            for dataset_key, norm in zip(
                 self._volume_channel_ids, payload.channel_norms
             )
         }
         visible_ids = self._display_visible_ids()
-        if not visible_ids or any(dataset_idx not in norm_by_id for dataset_idx in visible_ids):
+        if not visible_ids or any(dataset_key not in norm_by_id for dataset_key in visible_ids):
             return False
         specs = self._display_channel_map()
-        norms = [norm_by_id[dataset_idx] for dataset_idx in visible_ids]
-        rgbs = [lut_rgb(str(specs[dataset_idx].get("lut") or "Gray"))
-                for dataset_idx in visible_ids]
+        norms = [norm_by_id[dataset_key] for dataset_key in visible_ids]
+        rgbs = [lut_rgb(str(specs[dataset_key].get("lut") or "Gray"))
+                for dataset_key in visible_ids]
         rgba = _compose_multichannel_rgba(
             norms, rgbs, float(self._opacity_spin.value())
         )
@@ -1089,14 +1098,14 @@ class VolumeRenderWindow(QWidget):
         ids_changed = tuple(old_visible_ids) != tuple(new_visible_ids)
         ids_to_compare = set(old_map) | set(new_map)
         contrast_changed = any(
-            old_map.get(dataset_idx, {}).get("contrast_pct")
-            != new_map.get(dataset_idx, {}).get("contrast_pct")
-            for dataset_idx in ids_to_compare
+            old_map.get(dataset_key, {}).get("contrast_pct")
+            != new_map.get(dataset_key, {}).get("contrast_pct")
+            for dataset_key in ids_to_compare
         )
         lut_changed = any(
-            old_map.get(dataset_idx, {}).get("lut")
-            != new_map.get(dataset_idx, {}).get("lut")
-            for dataset_idx in ids_to_compare
+            old_map.get(dataset_key, {}).get("lut")
+            != new_map.get(dataset_key, {}).get("lut")
+            for dataset_key in ids_to_compare
         )
         if old_state is None:
             ids_changed = True

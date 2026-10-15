@@ -125,7 +125,11 @@ def test_bc_edits_only_active_channel(_qt_app):
 def test_render_overlay_rows_show_swatch_and_bold_active_channel(_qt_app):
     from PyQt6.QtWidgets import QComboBox, QLabel, QScrollArea, QVBoxLayout, QWidget
 
+    from minflux_viewer.core.dataset_key import DatasetKey
     from minflux_viewer.ui.render_window import RenderWindow
+
+    keys = [DatasetKey(1), DatasetKey(2)]
+    datasets = [SimpleNamespace(state={}), SimpleNamespace(state={})]
 
     class ChannelRowHarness(QWidget):
         _active_channel_index = RenderWindow._active_channel_index
@@ -134,17 +138,19 @@ def test_render_overlay_rows_show_swatch_and_bold_active_channel(_qt_app):
         _rebuild_channel_ui = RenderWindow._rebuild_channel_ui
         _refresh_channel_highlight = RenderWindow._refresh_channel_highlight
         _style_channel_swatch = RenderWindow._style_channel_swatch
+        _channel_dataset = RenderWindow._channel_dataset
 
         def __init__(self):
             super().__init__()
-            self._idx = 0
+            self._dataset_key = keys[0]
             self._active_cmap = "hot"
             self._channels = [
-                {"dataset_idx": 0, "name": "chA.mat", "visible": True, "lut": "Red"},
-                {"dataset_idx": 1, "name": "chB.mat", "visible": True, "lut": "Green"},
+                {"dataset_key": keys[0], "name": "chA.mat", "visible": True, "lut": "Red"},
+                {"dataset_key": keys[1], "name": "chB.mat", "visible": True, "lut": "Green"},
             ]
             self._state = SimpleNamespace(
-                datasets=[SimpleNamespace(state={}), SimpleNamespace(state={})]
+                datasets=datasets,
+                dataset_for=lambda key: datasets[keys.index(key)] if key in keys else None,
             )
             self._channel_area = QScrollArea(self)
             channel_widget = QWidget(self._channel_area)
@@ -179,7 +185,7 @@ def test_render_overlay_rows_show_swatch_and_bold_active_channel(_qt_app):
         assert win._channel_rows[0][0].font().bold()
         assert not win._channel_rows[1][0].font().bold()
 
-        win._idx = 1
+        win._dataset_key = keys[1]
         win._refresh_channel_highlight()
         assert not win._channel_rows[0][0].font().bold()
         assert win._channel_rows[1][0].font().bold()

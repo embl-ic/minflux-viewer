@@ -496,7 +496,8 @@ class SpatialLinePatternWindow(QDialog):
         return record, points[:, :2]
 
     def _localization_token(self, idx: int, plane: str):
-        channel = [{"dataset_idx": idx, "visible": True, "kind": "localizations"}]
+        channel = [{"dataset_key": self._state.key_at(idx), "visible": True,
+                    "kind": "localizations"}]
         token = plane_localizations_version(self._state, channel, plane)
         transform = (
             self._dataset.state.get("overlay_transform")
@@ -552,7 +553,8 @@ class SpatialLinePatternWindow(QDialog):
         data_token = self._localization_token(idx, plane)
         if data_token != self._data_token:
             channel = [
-                {"dataset_idx": idx, "visible": True, "kind": "localizations"}
+                {"dataset_key": self._state.key_at(idx), "visible": True,
+                 "kind": "localizations"}
             ]
             self._localizations = plane_localizations(
                 self._state,

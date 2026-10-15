@@ -80,8 +80,8 @@ def test_tiles_survive_an_earlier_dataset_closing(qtbot):
     before = set(win._phys_tile_cache._cache)
     requested = _record_requests(win)
 
-    state.remove_dataset(0)
-    win._refresh_from_dataset()          # what the main window does for it today
+    state.remove_dataset(0)              # nothing reloads the view (slice 4.2)
+    qtbot.wait(50)
     qtbot.waitUntil(lambda: _settled(win), timeout=20_000)
 
     assert requested == [], "an earlier close re-rendered tiles it already had"

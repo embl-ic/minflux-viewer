@@ -90,7 +90,7 @@ from ..core.overlay import (
 )
 from ..core.roi_selection import REGION_ROI_TYPES, roi_region_mask
 from ..core.spatial_grid import SpatialGrid
-from .dataset_binding import DatasetIndex, event_index, window_dataset_index
+from .dataset_binding import DatasetIndex, event_index, event_key, window_dataset_index
 from .ortho_view import (
     ORTHO_AXIS,
     ORTHO_AXIS_COLUMNS,
@@ -823,6 +823,7 @@ class RenderWindow(QWidget):
     # The window's dataset key, read and set as a position (None once the
     # dataset has closed). See ui/dataset_binding.py.
     _idx = DatasetIndex()
+    _dataset_key: DatasetKey | None         # set through the property above
 
     def __init__(
         self,
@@ -931,6 +932,7 @@ class RenderWindow(QWidget):
         self._roi_highlight_item = None
         self._pane_highlights: dict[str, object] = {}
         self._volume_window = None
+        self._closing = False
         self._ortho_redrawing = False
         self._ortho_crosshair = None
         self._show_crosshair = False
@@ -1814,7 +1816,7 @@ class RenderWindow(QWidget):
             primary_index = next(
                 index
                 for index, item in enumerate(self._channels)
-                if item.get("dataset_idx") == channel.get("dataset_idx")
+                if item.get("dataset_key") == channel.get("dataset_key")
             )
         except StopIteration:
             return self._compute_render_auto_levels(side_tile)
@@ -2027,7 +2029,7 @@ class RenderWindow(QWidget):
     def _build_channels(self) -> None:
         """Build lightweight channel descriptors; scalar tiles are computed lazily."""
         previous_transforms = {
-            ch.get("dataset_idx"): dict(ch.get("transform") or {"dx": 0.0, "dy": 0.0, "angle": 0.0})
+            ch.get("dataset_key"): dict(ch.get("transform") or {"dx": 0.0, "dy": 0.0, "angle": 0.0})
             for ch in self._channels
         }
         self._channels = []
@@ -2049,23 +2051,22 @@ class RenderWindow(QWidget):
             # A channel may opt to start hidden (e.g. the DCR "unassigned" channel).
             if visible and ds.state.get("overlay_default_hidden"):
                 visible = False
+            dataset_key = self._state.key_at(idx)
             self._channels.append({
-                "dataset_idx": idx,
-                "dataset_key": self._state.key_at(idx),
+                "dataset_key": dataset_key,
                 "name": ds.name,
                 "kind": "image" if ds.image_data is not None and not ds.has_localizations else "localizations",
                 "visible": visible,
                 "lut": ds.state.get("render_channel_lut") or color_cycle[len(self._channels) % len(color_cycle)],
                 "levels": None,
                 "loc_transform": ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"),
-                "transform": previous_transforms.get(idx, {"dx_nm": 0.0, "dy_nm": 0.0, "angle": 0.0}),
+                "transform": previous_transforms.get(dataset_key, {"dx_nm": 0.0, "dy_nm": 0.0, "angle": 0.0}),
             })
-        if len(self._channels) == 1 and not self._state.datasets[self._channels[0]["dataset_idx"]].state.get("render_channel_lut"):
+        if len(self._channels) == 1 and not self._channel_dataset(self._channels[0]).state.get("render_channel_lut"):
             self._channels[0]["lut"] = self._active_cmap
         if not self._channels and self._idx is not None:
             ds = self._state.datasets[self._idx]
             self._channels.append({
-                "dataset_idx": self._idx,
                 "dataset_key": self._state.key_at(self._idx),
                 "name": ds.name,
                 "kind": "localizations",
@@ -2073,7 +2074,8 @@ class RenderWindow(QWidget):
                 "lut": ds.state.get("render_channel_lut") or "Red",
                 "levels": None,
                 "loc_transform": ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"),
-                "transform": previous_transforms.get(self._idx, {"dx_nm": 0.0, "dy_nm": 0.0, "angle": 0.0}),
+                "transform": previous_transforms.get(
+                    self._state.key_at(self._idx), {"dx_nm": 0.0, "dy_nm": 0.0, "angle": 0.0}),
             })
 
         self._forget_departed_datasets()
@@ -2117,8 +2119,9 @@ class RenderWindow(QWidget):
         """Start the same mode as channel-row right-click → Manual align."""
         if len(self._channels) < 2:
             return False
+        dataset_key = self._state.key_at(dataset_idx)
         for channel_idx, channel in enumerate(self._channels):
-            if channel.get("dataset_idx") == dataset_idx:
+            if dataset_key is not None and channel.get("dataset_key") == dataset_key:
                 self._manual_align_channel(channel_idx)
                 return True
         return False
@@ -2286,8 +2289,8 @@ class RenderWindow(QWidget):
         if not (0 <= ch_idx < len(self._channels)):
             return
         ch = self._channels[ch_idx]
-        ds_idx = ch.get("dataset_idx")
-        if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
+        ds_idx = self._channel_index(ch)
+        if ds_idx is None:
             return
         ds = self._state.datasets[ds_idx]
         manual = self._manual_transform_matrix(ch.get("transform") or {})
@@ -2405,8 +2408,8 @@ class RenderWindow(QWidget):
             menu.exec(event.globalPosition().toPoint())
             return
         if event.button() == Qt.MouseButton.LeftButton and 0 <= ch_idx < len(self._channels):
-            ds_idx = self._channels[ch_idx].get("dataset_idx")
-            if ds_idx is not None and 0 <= ds_idx < len(self._state.datasets):
+            ds_idx = self._channel_index(self._channels[ch_idx])
+            if ds_idx is not None:
                 self._idx = ds_idx
                 self._state.set_active(ds_idx)
                 self._update_overlay_title()
@@ -2433,11 +2436,9 @@ class RenderWindow(QWidget):
     def _on_channel_lut(self, ch_idx: int, lut: str) -> None:
         if 0 <= ch_idx < len(self._channels):
             self._channels[ch_idx]["lut"] = lut
-            try:
-                ds_idx = self._channels[ch_idx]["dataset_idx"]
-                self._state.datasets[ds_idx].state["render_channel_lut"] = lut
-            except Exception:
-                pass
+            ds = self._channel_dataset(self._channels[ch_idx])
+            if ds is not None:
+                ds.state["render_channel_lut"] = lut
             if 0 <= ch_idx < len(self._channel_rows):
                 self._style_channel_swatch(self._channel_rows[ch_idx][1], lut)
             self._compose_from_cache()
@@ -2447,8 +2448,18 @@ class RenderWindow(QWidget):
                 self._sync_bc_dialog()
                 self.sync_lut_dialog()
 
+    def _channel_dataset(self, ch: dict):
+        """The dataset *ch* draws, or None once it has closed."""
+        return self._state.dataset_for(ch["dataset_key"])
+
+    def _channel_index(self, ch: dict) -> int | None:
+        """The current position of *ch*'s dataset, or None once it has closed."""
+        return self._state.index_of(ch["dataset_key"])
+
     def _channel_locs(self, ch: dict) -> np.ndarray:
-        ds = self._state.datasets[ch["dataset_idx"]]
+        ds = self._channel_dataset(ch)
+        if ds is None:
+            return np.empty((0, 3), dtype=np.float64)
         return self._dataset_locs(ds)
 
     def _dataset_locs(self, ds) -> np.ndarray:
@@ -2664,9 +2675,11 @@ class RenderWindow(QWidget):
             y_min, y_max,
         )
         for ch in self._channels:
-            if not ch["visible"] or ch["dataset_idx"] == self._idx:
+            if not ch["visible"] or ch["dataset_key"] == self._dataset_key:
                 continue
-            ds_ch = self._state.datasets[ch["dataset_idx"]]
+            ds_ch = self._channel_dataset(ch)
+            if ds_ch is None:
+                continue
             if ch["kind"] == "image" and ds_ch.image_data is not None:
                 image = self._prepare_image_payload(ds_ch.image_data)
                 bx0, bx1, by0, by1 = self._image_bounds(ds_ch, image)
@@ -2837,7 +2850,7 @@ class RenderWindow(QWidget):
 
         for ch in self._channels:
             if ch["kind"] == "image":
-                ds = self._state.datasets[ch["dataset_idx"]]
+                ds = self._channel_dataset(ch)
                 n_bins_x = max(int(round(view_w / px_nm)), 8)
                 n_bins_y = max(int(round(view_h / px_nm)), 8)
                 canvas = self._image_tile(ds, x0, x1, y0, y1, n_bins_y, n_bins_x)
@@ -2968,7 +2981,7 @@ class RenderWindow(QWidget):
         for ch in self._channels:
             if ch["kind"] == "image":
                 canvas = self._image_tile(
-                    self._state.datasets[ch["dataset_idx"]],
+                    self._channel_dataset(ch),
                     x0, x1, y0, y1, n_bins_y, n_bins_x,
                 )
                 tiles.append(canvas)
@@ -3230,7 +3243,7 @@ class RenderWindow(QWidget):
         tiles: list[np.ndarray] = []
         for ch in self._channels:
             if ch["kind"] == "image":
-                ds = self._state.datasets[ch["dataset_idx"]]
+                ds = self._channel_dataset(ch)
                 n_bins_x = max(int(round((x1 - x0) / px_nm)), 8)
                 n_bins_y = max(int(round((y1 - y0) / px_nm)), 8)
                 canvas = self._image_tile(ds, x0, x1, y0, y1, n_bins_y, n_bins_x)
@@ -3282,8 +3295,8 @@ class RenderWindow(QWidget):
     def _build_channel_grid(self, ch: dict) -> None:
         """Build SpatialGrid for one channel from its oriented filtered locs."""
         dataset_key = ch["dataset_key"]
-        ds = self._state.datasets[ch["dataset_idx"]]
-        oriented = self._oriented_locs(ds)
+        ds = self._channel_dataset(ch)
+        oriented = self._oriented_locs(ds) if ds is not None else np.empty((0, 3))
         if oriented.shape[0] == 0:
             self._channel_grids[dataset_key] = None
             self._channel_locs_xyz[dataset_key] = (
@@ -3346,9 +3359,35 @@ class RenderWindow(QWidget):
     def _increment_mask_version(self, dataset_key: DatasetKey) -> None:
         self._mask_versions[dataset_key] = self._mask_versions.get(dataset_key, 0) + 1
 
+    def _draws(self, dataset_key) -> bool:
+        """Whether one of this view's channels draws *dataset_key*."""
+        return dataset_key is not None and any(
+            ch.get("dataset_key") == dataset_key for ch in self._channels)
+
     def _on_dataset_closed(self, event) -> None:
-        """A closed dataset's tiles, grid and mask version leave with it."""
+        """A closed dataset leaves this view: its channel, tiles, grid and mask
+        version. Every other channel keeps its key, so nothing is reloaded."""
         self._forget_dataset(event.key)
+        if self._closing or not self._draws(event.key):
+            return
+        remaining = [ch for ch in self._channels
+                     if ch.get("dataset_key") != event.key]
+        if not remaining:
+            return              # the view's only dataset: its window closes
+        self._channels = remaining
+        if self._dataset_key == event.key:
+            # The member the view had selected closed; the overlay goes on.
+            self._dataset_key = remaining[0]["dataset_key"]
+            self._update_overlay_title()
+        self._rebuild_channel_ui()
+        self._compute_tile_grid_origin()
+        self._schedule_render()
+        volume = self._volume_window
+        if volume is not None and volume._dataset_key == event.key:
+            volume._dataset_key = self._dataset_key      # it goes with the view
+        self._sync_volume_display_state()
+        if volume is not None and volume.isVisible():
+            volume.refresh_from_dataset()
 
     def _forget_departed_datasets(self) -> None:
         """Forget every dataset this view no longer draws.
@@ -3382,7 +3421,7 @@ class RenderWindow(QWidget):
         first visible channel, then 0, so a single-dataset window still resolves.
         """
         for i, ch in enumerate(self._channels):
-            if ch.get("dataset_idx") == self._idx:
+            if ch.get("dataset_key") == self._dataset_key:
                 return i
         return next((i for i, ch in enumerate(self._channels) if ch.get("visible")), 0)
 
@@ -3469,7 +3508,7 @@ class RenderWindow(QWidget):
         for i, channel in enumerate(self._channels):
             channels.append(
                 {
-                    "dataset_idx": int(channel.get("dataset_idx", -1)),
+                    "dataset_key": channel["dataset_key"],
                     "kind": str(channel.get("kind", "localizations")),
                     "visible": bool(channel.get("visible", True)),
                     "lut": str(channel.get("lut") or self._active_cmap),
@@ -4847,7 +4886,9 @@ class RenderWindow(QWidget):
         for ch in self._channels:
             if not ch.get("visible") or ch.get("kind") != "localizations":
                 continue
-            ds = self._state.datasets[ch["dataset_idx"]]
+            ds = self._channel_dataset(ch)
+            if ds is None:
+                continue
             xyz = self._dataset_locs(ds)
             if xyz.shape[0] > 0:
                 # A solid-colour channel carries its colour into the OME-TIFF;
@@ -4885,9 +4926,10 @@ class RenderWindow(QWidget):
 
         all_xyz = np.vstack([c.xyz for c in channels])
         is_3d = any(
-            int(getattr(self._state.datasets[ch["dataset_idx"]].prop, "num_dim", 2)) >= 3
+            int(getattr(self._channel_dataset(ch).prop, "num_dim", 2)) >= 3
             for ch in self._channels
             if ch.get("visible") and ch.get("kind") == "localizations"
+            and self._channel_dataset(ch) is not None
         )
 
         roi_bounds = self._active_rectangle_xy_bounds()
@@ -5298,7 +5340,7 @@ class RenderWindow(QWidget):
 
         entries: list[tuple[object, np.ndarray, np.ndarray]] = []
         channels = self._channels or [{
-            "dataset_idx": self._idx,
+            "dataset_key": self._dataset_key,
             "visible": True,
             "kind": "localizations",
         }]
@@ -5306,10 +5348,9 @@ class RenderWindow(QWidget):
         for ch in channels:
             if not ch.get("visible", True) or ch.get("kind") == "image":
                 continue
-            ds_idx = ch.get("dataset_idx")
-            if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
+            ds = self._channel_dataset(ch)
+            if ds is None:
                 continue
-            ds = self._state.datasets[ds_idx]
             locs = self._raw_render_locs(ds)
             if locs.shape[0] == 0:
                 continue
@@ -5458,7 +5499,7 @@ class RenderWindow(QWidget):
 
     def _profile_channels(self):
         return self._channels or [
-            {"dataset_idx": self._idx, "visible": True, "kind": "localizations"}]
+            {"dataset_key": self._dataset_key, "visible": True, "kind": "localizations"}]
 
     def profile_localizations(self):
         """``(M, 2)`` filtered, visible localizations projected into the current 2-D
@@ -5513,8 +5554,9 @@ class RenderWindow(QWidget):
         An overlay window is keyed by its anchor but draws several datasets, so
         a ROI belonging to a non-anchor channel must still show here.
         """
-        indices = {ch["dataset_idx"] for ch in getattr(self, "_channels", [])
-                   if isinstance(ch.get("dataset_idx"), int)}
+        indices = {position for ch in getattr(self, "_channels", [])
+                   if ch.get("dataset_key") is not None
+                   and (position := self._channel_index(ch)) is not None}
         if isinstance(self._idx, int):
             indices.add(int(self._idx))
         return indices
@@ -5799,6 +5841,7 @@ class RenderWindow(QWidget):
         from .lut_dialog import release_shared_lut_owner
         from .qt_lifecycle import close_image_views
 
+        self._closing = True
         self._redraw_timer.stop()
         self._ortho_timer.stop()
         if getattr(self, "_ortho_crosshair", None) is not None:
@@ -5900,32 +5943,31 @@ class RenderWindow(QWidget):
     # State signals
     # ------------------------------------------------------------------
 
-    def _on_active_changed(self, idx) -> None:
-        idx = event_index(self._state, idx)
+    def _on_active_changed(self, event) -> None:
+        idx = event_index(self._state, event)
         if idx is None:
             return
         # In an overlay, follow the active channel so Brightness/Contrast reads
         # and edits the dataset the user selected.
-        if any(ch.get("dataset_idx") == idx for ch in self._channels):
+        if self._draws(event_key(self._state, event)):
             self._idx = idx
             self._update_overlay_title()
             self._refresh_channel_highlight()
             self._sync_bc_dialog()
             self.sync_lut_dialog()
 
-    def _on_filter_changed(self, idx) -> None:
-        idx = event_index(self._state, idx)
-        if idx is None:
+    def _on_filter_changed(self, event) -> None:
+        dataset_key = event_key(self._state, event)
+        if dataset_key is None or self._state.index_of(dataset_key) is None:
             return
-        dataset_key = self._state.key_at(idx)
-        if dataset_key is not None and any(ch["dataset_idx"] == idx for ch in self._channels):
+        if self._draws(dataset_key):
             self._increment_mask_version(dataset_key)
             for ch in self._channels:
-                if ch["dataset_idx"] == idx and ch["kind"] == "localizations":
+                if ch["dataset_key"] == dataset_key and ch["kind"] == "localizations":
                     self._build_channel_grid(ch)
             self._compute_tile_grid_origin()
             # Update depth slider range without touching the viewport
-            if self._channels and self._channels[0]["dataset_idx"] == idx:
+            if self._channels and self._channels[0]["dataset_key"] == dataset_key:
                 self._locs_nm = self._channel_locs(self._channels[0])
                 self._refresh_depth_state()
             self._scheduler.cancel()
@@ -5945,8 +5987,9 @@ class RenderWindow(QWidget):
             or self._state.datasets[idx].state.get("render_transform_2d")
         )
         changed = False
+        dataset_key = self._state.key_at(idx)
         for channel in self._channels:
-            if channel.get("dataset_idx") != idx:
+            if channel.get("dataset_key") != dataset_key:
                 continue
             if transform_key(channel.get("loc_transform")) != transform_key(current):
                 channel["loc_transform"] = current
@@ -5954,9 +5997,6 @@ class RenderWindow(QWidget):
         if changed:
             self._on_filter_changed(idx)
 
-    def _on_roi_selection_changed(self, idx) -> None:
-        idx = event_index(self._state, idx)
-        if idx is None:
-            return
-        if any(ch["dataset_idx"] == idx for ch in self._channels):
+    def _on_roi_selection_changed(self, event) -> None:
+        if self._draws(event_key(self._state, event)):
             self._redraw_roi_highlight()

@@ -20,14 +20,16 @@ def _ds(name):
     return build_localization_dataset(name=name, x_nm=p[:, 0], y_nm=p[:, 1], z_nm=p[:, 2])
 
 
-def _stub_render(_qt_app):
-    """Minimal QWidget stand-in for an overlay RenderWindow (channels 0 and 1)."""
+def _stub_render(_qt_app, state):
+    """Minimal QWidget stand-in for an overlay RenderWindow drawing the datasets
+    at positions 0 and 1 of *state*."""
     from PyQt6.QtWidgets import QWidget
 
     class _StubRender(QWidget):
         def __init__(self):
             super().__init__()
-            self._channels = [{"dataset_idx": 0}, {"dataset_idx": 1}]
+            self._channels = [{"dataset_key": state.key_at(0)},
+                              {"dataset_key": state.key_at(1)}]
             self.bc_calls = 0
             self.refresh_calls = 0
 
@@ -51,7 +53,7 @@ def test_shift_c_on_overlay_channel_reuses_window(_qt_app):
         state.add_dataset(_ds("ch0"))                 # idx 0 — overlay anchor
         state.add_dataset(_ds("ch1"))                 # idx 1 — green channel
 
-        stub = _stub_render(_qt_app)
+        stub = _stub_render(_qt_app, state)
         win._render_windows[0] = stub                 # one overlay window, keyed by anchor
 
         # Found for the anchor AND for the non-primary channel (the fix).
@@ -83,7 +85,7 @@ def test_show_render_on_overlay_channel_reuses_window(_qt_app):
         state.add_dataset(_ds("ch0"))                 # idx 0 — overlay anchor
         state.add_dataset(_ds("ch1"))                 # idx 1 — green channel
 
-        stub = _stub_render(_qt_app)
+        stub = _stub_render(_qt_app, state)
         win._render_windows[0] = stub                 # overlay window, keyed by anchor
 
         state.set_active(1)

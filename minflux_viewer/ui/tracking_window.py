@@ -63,6 +63,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.app_state import AppState
+from ..core.dataset_key import DatasetKey
 from ..core.loader import attr_values_1d
 from ..core.overlay import (
     apply_display_transform_nm,
@@ -87,7 +88,7 @@ from ..core.tracks import (
     build_track_set,
     looks_like_tracking,
 )
-from .dataset_binding import DatasetIndex, event_index
+from .dataset_binding import DatasetIndex, event_key
 from .plot_format import apply_spatial_y_direction, plot_widget
 from .time_slider import TimeAxisRow
 
@@ -143,7 +144,7 @@ class _TrackChannelSnapshot:
     """Non-Qt input captured on the GUI thread for one channel build."""
 
     dataset_idx: int
-    dataset_key: object                    # DatasetKey the input was captured from
+    dataset_key: DatasetKey                # the dataset the input was captured from
     x_m: np.ndarray | None
     y_m: np.ndarray | None
     z_m: np.ndarray | None
@@ -157,7 +158,7 @@ class _TrackChannelSnapshot:
 @dataclass(frozen=True)
 class _TrackChannelBuild:
     dataset_idx: int
-    dataset_key: object                    # DatasetKey the input was captured from
+    dataset_key: DatasetKey                # the dataset the input was captured from
     tracks: TrackSet | None
     automatic_role: str
     reason: str
@@ -333,6 +334,7 @@ class TrackingWindow(QWidget):
     # The window's dataset key, read and set as a position (None once the
     # dataset has closed). See ui/dataset_binding.py.
     _idx = DatasetIndex()
+    _dataset_key: DatasetKey | None         # set through the property above
 
     def __init__(self, state: AppState, dataset_idx: int | None = None,
                  parent: QWidget | None = None) -> None:
@@ -340,8 +342,8 @@ class TrackingWindow(QWidget):
         self._state = state
         self._idx = dataset_idx if dataset_idx is not None else state.active_idx
         self._channels: list[dict] = []
-        self._tracks: dict[int, TrackSet] = {}
-        self._track_reasons: dict[int, str] = {}
+        self._tracks: dict[DatasetKey, TrackSet] = {}
+        self._track_reasons: dict[DatasetKey, str] = {}
         tracking_prefs = state.prefs.get("tracking", {}) or {}
         backdrop_mode = str(tracking_prefs.get("backdrop_mode", "Render"))
         self._backdrop_mode = (
@@ -386,13 +388,15 @@ class TrackingWindow(QWidget):
         self._3d_head = None
         self._3d_tail_items: list = []
         self._3d_camera_initialized = False
-        self._selected_track: tuple[int, object] | None = None
+        self._selected_track: tuple[DatasetKey, object] | None = None
         self._candidate_xy = np.empty((0, 2), dtype=float)
+        # Each candidate's slot in _candidate_keys: the dataset it was drawn from.
         self._candidate_dataset_indices = np.empty(0, dtype=np.int64)
+        self._candidate_keys: list[DatasetKey] = []
         self._candidate_trace_ids = np.empty(0, dtype=object)
         self._hover_summary = ""
         self._receiving_playhead = False
-        self._published_playhead: tuple[int, object, float] | None = None
+        self._published_playhead: tuple[DatasetKey, object, float] | None = None
         self._movie_export: dict | None = None
         self._movie_timer = QTimer(self)
         self._movie_timer.setSingleShot(True)
@@ -422,6 +426,7 @@ class TrackingWindow(QWidget):
         state.dataset_events.calibration_changed.connect(self._on_dataset_changed)
         state.dataset_events.overlay_transform_changed.connect(self._on_dataset_changed)
         state.dataset_events.attributes_changed.connect(self._on_dataset_changed)
+        state.dataset_events.removed.connect(self._on_dataset_closed)
         state.tracking_playhead_changed.connect(self._receive_playhead)
 
     # ------------------------------------------------------------------- UI
@@ -549,7 +554,7 @@ class TrackingWindow(QWidget):
         The same membership rule the render view uses, so a two-colour
         experiment opens here showing both channels rather than one.
         """
-        previous = {ch["dataset_idx"]: ch for ch in self._channels}
+        previous = {ch["dataset_key"]: ch for ch in self._channels}
         self._channels = []
         anchor = self._dataset()
         if anchor is None:
@@ -563,9 +568,10 @@ class TrackingWindow(QWidget):
                 continue
             name = str(getattr(ds, "name", f"dataset {idx}"))
             lut = ds.state.get("overlay_lut") or cycle[len(self._channels) % len(cycle)]
-            old = previous.get(idx, {})
+            dataset_key = self._state.key_at(idx)
+            old = previous.get(dataset_key, {})
             self._channels.append({
-                "dataset_idx": idx, "name": name,
+                "dataset_key": dataset_key, "name": name,
                 "visible": bool(old.get("visible", True)),
                 "lut": lut, "color": channel_rgb(lut),
                 "role": "Tracking", "reason": "",
@@ -629,7 +635,9 @@ class TrackingWindow(QWidget):
         """Capture non-Qt inputs; workers never dereference mutable datasets."""
         snapshots = []
         for channel in self._channels:
-            idx = channel["dataset_idx"]
+            idx = self._state.index_of(channel["dataset_key"])
+            if idx is None:
+                continue
             ds = self._state.datasets[idx]
 
             def read(name: str):
@@ -656,7 +664,7 @@ class TrackingWindow(QWidget):
                 tid.flags.writeable = False
             snapshots.append(_TrackChannelSnapshot(
                 dataset_idx=idx,
-                dataset_key=self._state.key_of(ds),
+                dataset_key=channel["dataset_key"],
                 x_m=read("loc_x"),
                 y_m=read("loc_y"),
                 z_m=read("loc_z"),
@@ -769,14 +777,11 @@ class TrackingWindow(QWidget):
     ) -> None:
         if generation != self._track_generation or self._closing:
             return
-        channels = {ch["dataset_idx"]: ch for ch in self._channels}
-        # Each channel must still show the dataset it was built from: the
-        # channel list holds positions, so a close in between can put another
-        # dataset at the same position.
+        channels = {ch["dataset_key"]: ch for ch in self._channels}
+        # Each channel must still be shown and its dataset still open.
         source_is_current = all(
-            built.dataset_idx in channels
-            and built.dataset_key is not None
-            and self._state.key_at(built.dataset_idx) == built.dataset_key
+            built.dataset_key in channels
+            and self._state.index_of(built.dataset_key) is not None
             for built in result.channels
         )
         if not source_is_current:
@@ -787,10 +792,10 @@ class TrackingWindow(QWidget):
         self._tracks = {}
         self._track_reasons = {}
         for built in result.channels:
-            channel = channels.get(built.dataset_idx)
-            if channel is None:  # guarded above; keeps the type narrow below
+            channel = channels.get(built.dataset_key)
+            ds = self._state.dataset_for(built.dataset_key)
+            if channel is None or ds is None:  # guarded above; keeps the type narrow
                 continue
-            ds = self._state.datasets[built.dataset_idx]
             ds.state["tracking_role_auto"] = built.automatic_role
             ds.state["tracking_role_auto_reason"] = built.reason
             manual = ds.state.get("tracking_role")
@@ -803,13 +808,13 @@ class TrackingWindow(QWidget):
             else:
                 channel["role"] = built.automatic_role
                 channel["reason"] = built.reason
-            self._track_reasons[built.dataset_idx] = built.reason
+            self._track_reasons[built.dataset_key] = built.reason
             if built.tracks is not None:
-                self._tracks[built.dataset_idx] = built.tracks
+                self._tracks[built.dataset_key] = built.tracks
 
         if self._selected_track is not None:
-            selected_idx, selected_tid = self._selected_track
-            selected_tracks = self._tracks.get(selected_idx)
+            selected_key, selected_tid = self._selected_track
+            selected_tracks = self._tracks.get(selected_key)
             if (
                 selected_tracks is None
                 or not np.any(selected_tracks.trace_ids == selected_tid)
@@ -920,13 +925,13 @@ class TrackingWindow(QWidget):
         self._request_track_build(
             reset_window=True, fit_view=False, rebuild_rows=True)
 
-    def _on_dataset_changed(self, idx) -> None:
-        idx = event_index(self._state, idx)
-        if idx is None:
+    def _on_dataset_changed(self, event) -> None:
+        dataset_key = event_key(self._state, event)
+        if dataset_key is None or self._state.index_of(dataset_key) is None:
             return
         if self._closing:
             return
-        if any(ch["dataset_idx"] == idx for ch in self._channels):
+        if any(ch["dataset_key"] == dataset_key for ch in self._channels):
             self._request_track_build(
                 reset_window=False, fit_view=False, rebuild_rows=True)
 
@@ -998,11 +1003,11 @@ class TrackingWindow(QWidget):
     def _visible_channels(self, role: str) -> list[dict]:
         return [ch for ch in self._channels
                 if ch["visible"] and ch["role"] == role
-                and ch["dataset_idx"] in self._tracks]
+                and ch["dataset_key"] in self._tracks]
 
     def _all_points(self) -> np.ndarray:
-        parts = [self._tracks[ch["dataset_idx"]].coords
-                 for ch in self._channels if ch["dataset_idx"] in self._tracks]
+        parts = [self._tracks[ch["dataset_key"]].coords
+                 for ch in self._channels if ch["dataset_key"] in self._tracks]
         if not parts:
             return np.empty((0, 3), dtype=float)
         return np.vstack(parts)
@@ -1061,7 +1066,7 @@ class TrackingWindow(QWidget):
         """
         structure = self._visible_channels("Structure")
         source = structure or self._visible_channels("Tracking")
-        parts = [self._tracks[ch["dataset_idx"]].coords for ch in source]
+        parts = [self._tracks[ch["dataset_key"]].coords for ch in source]
         if not parts:
             return np.empty((0, 3), dtype=float)
         return np.vstack(parts)
@@ -1075,9 +1080,9 @@ class TrackingWindow(QWidget):
         return (
             self._backdrop_mode, self._backdrop_level, self._axis, self._black_bg,
             self._bounds,
-            tuple((ch["dataset_idx"], ch["visible"], ch["role"])
+            tuple((ch["dataset_key"], ch["visible"], ch["role"])
                   for ch in self._channels),
-            tuple(id(self._tracks.get(ch["dataset_idx"])) for ch in self._channels),
+            tuple(id(self._tracks.get(ch["dataset_key"])) for ch in self._channels),
         )
 
     def _draw_backdrop(self) -> None:
@@ -1192,20 +1197,21 @@ class TrackingWindow(QWidget):
         drawn = 0
         candidate_xy: list[np.ndarray] = []
         candidate_dataset: list[np.ndarray] = []
+        self._candidate_keys = [ch["dataset_key"] for ch in channels]
         candidate_tid: list[np.ndarray] = []
         for channel_pos, ch in enumerate(channels):
             r, g, b = ch["color"]
             for band_pos, (lo, hi, age) in enumerate(bands):
                 item = self._tail_items[channel_pos * self._tail_bands + band_pos]
-                tracks = self._tracks[ch["dataset_idx"]]
+                tracks = self._tracks[ch["dataset_key"]]
                 sel = tracks.window(lo, hi)
                 if sel.size == 0:
                     continue
                 indices = sel.indices
                 connect = sel.connect
                 if self._selected_track is not None:
-                    selected_idx, selected_tid = self._selected_track
-                    if ch["dataset_idx"] != selected_idx:
+                    selected_key, selected_tid = self._selected_track
+                    if ch["dataset_key"] != selected_key:
                         continue
                     selected = tracks.trace_ids[tracks.trace_codes[indices]] == selected_tid
                     indices = indices[selected]
@@ -1228,22 +1234,22 @@ class TrackingWindow(QWidget):
                 drawn += int(pts.shape[0])
                 candidate_xy.append(pts[:, [ci, cj]])
                 candidate_dataset.append(np.full(
-                    indices.size, ch["dataset_idx"], dtype=np.int64))
+                    indices.size, channel_pos, dtype=np.int64))
                 candidate_tid.append(tracks.trace_ids[tracks.trace_codes[indices]])
 
         heads_x: list[np.ndarray] = []
         heads_y: list[np.ndarray] = []
         head_brushes = []
         for ch in channels:
-            tracks = self._tracks[ch["dataset_idx"]]
+            tracks = self._tracks[ch["dataset_key"]]
             sel = tracks.window(max(t_lo, axis.lo), t_head)
             if sel.n_traces == 0:
                 continue
             head_indices = sel.head_indices
             head_traces = sel.head_traces
             if self._selected_track is not None:
-                selected_idx, selected_tid = self._selected_track
-                if ch["dataset_idx"] != selected_idx:
+                selected_key, selected_tid = self._selected_track
+                if ch["dataset_key"] != selected_key:
                     continue
                 selected = tracks.trace_ids[head_traces] == selected_tid
                 head_indices = head_indices[selected]
@@ -1303,13 +1309,13 @@ class TrackingWindow(QWidget):
         drawn = 0
         for channel_pos, ch in enumerate(channels):
             for band_pos, (lo, hi, age) in enumerate(bands):
-                tracks = self._tracks[ch["dataset_idx"]]
+                tracks = self._tracks[ch["dataset_key"]]
                 selected_window = tracks.window(lo, hi)
                 indices = selected_window.indices
                 connect = selected_window.connect
                 if self._selected_track is not None:
-                    selected_idx, selected_tid = self._selected_track
-                    if ch["dataset_idx"] != selected_idx:
+                    selected_key, selected_tid = self._selected_track
+                    if ch["dataset_key"] != selected_key:
                         continue
                     selected = tracks.trace_ids[tracks.trace_codes[indices]] == selected_tid
                     indices = indices[selected]
@@ -1340,13 +1346,13 @@ class TrackingWindow(QWidget):
         head_points: list[np.ndarray] = []
         head_colors: list[np.ndarray] = []
         for ch in channels:
-            tracks = self._tracks[ch["dataset_idx"]]
+            tracks = self._tracks[ch["dataset_key"]]
             selected_window = tracks.window(max(t_lo, axis.lo), t_head)
             indices = selected_window.head_indices
             trace_codes = selected_window.head_traces
             if self._selected_track is not None:
-                selected_idx, selected_tid = self._selected_track
-                if ch["dataset_idx"] != selected_idx:
+                selected_key, selected_tid = self._selected_track
+                if ch["dataset_key"] != selected_key:
                     continue
                 selected = tracks.trace_ids[trace_codes] == selected_tid
                 indices = indices[selected]
@@ -1371,7 +1377,7 @@ class TrackingWindow(QWidget):
         pieces = []
         tracking = self._visible_channels("Tracking")
         structure = self._visible_channels("Structure")
-        total = sum(self._tracks[ch["dataset_idx"]].n_traces for ch in tracking)
+        total = sum(self._tracks[ch["dataset_key"]].n_traces for ch in tracking)
         pieces.append(f"{heads:,} of {total:,} track(s) live")
         pieces.append(f"{drawn:,} tail points")
         if structure:
@@ -1432,7 +1438,7 @@ class TrackingWindow(QWidget):
             self._selected_track = None
         else:
             self._selected_track = (
-                int(self._candidate_dataset_indices[nearest]),
+                self._candidate_keys[int(self._candidate_dataset_indices[nearest])],
                 self._candidate_trace_ids[nearest].item()
                 if hasattr(self._candidate_trace_ids[nearest], "item")
                 else self._candidate_trace_ids[nearest],
@@ -1447,7 +1453,7 @@ class TrackingWindow(QWidget):
         summary = ""
         if nearest is not None:
             summary = self._track_summary(
-                int(self._candidate_dataset_indices[nearest]),
+                self._candidate_keys[int(self._candidate_dataset_indices[nearest])],
                 self._candidate_trace_ids[nearest],
             )
         if summary != self._hover_summary:
@@ -1462,8 +1468,8 @@ class TrackingWindow(QWidget):
         heads = 1 if self._selected_track is not None and drawn else 0
         self._update_info(drawn, heads)
 
-    def _track_summary(self, dataset_idx: int, trace_id) -> str:
-        tracks = self._tracks.get(dataset_idx)
+    def _track_summary(self, dataset_key: DatasetKey, trace_id) -> str:
+        tracks = self._tracks.get(dataset_key)
         if tracks is None:
             return ""
         match = np.flatnonzero(tracks.trace_ids == trace_id)
@@ -1498,23 +1504,24 @@ class TrackingWindow(QWidget):
     def _publish_playhead(self) -> None:
         if self._selected_track is None or self._receiving_playhead:
             return
-        dataset_idx, trace_id = self._selected_track
-        tracks = self._tracks.get(dataset_idx)
+        dataset_key, trace_id = self._selected_track
+        tracks = self._tracks.get(dataset_key)
+        dataset = self._state.dataset_for(dataset_key)
         window = self._time_row.range()
         if tracks is None or window is None:
             return
         match = np.flatnonzero(tracks.trace_ids == trace_id)
-        if match.size != 1 or not (0 <= dataset_idx < len(self._state.datasets)):
+        if match.size != 1 or dataset is None:
             return
         code = int(match[0])
         head_time = float(window[1])
         relative_time = head_time - float(tracks.t_start[code])
-        key = (dataset_idx, trace_id, round(relative_time, 12))
+        key = (dataset_key, trace_id, round(relative_time, 12))
         if key == self._published_playhead:
             return
         self._published_playhead = key
         self._state.tracking_playhead_changed.emit(
-            self._state.datasets[dataset_idx], trace_id, relative_time, self)
+            dataset, trace_id, relative_time, self)
 
     def _receive_playhead(
         self,
@@ -1525,15 +1532,11 @@ class TrackingWindow(QWidget):
     ) -> None:
         if source is self or self._closing:
             return
-        matches = [
-            ch["dataset_idx"] for ch in self._channels
-            if 0 <= ch["dataset_idx"] < len(self._state.datasets)
-            and self._state.datasets[ch["dataset_idx"]] is dataset
-        ]
-        if not matches:
+        dataset_key = self._state.key_of(dataset)
+        if dataset_key is None or not any(
+                ch["dataset_key"] == dataset_key for ch in self._channels):
             return
-        dataset_idx = int(matches[0])
-        tracks = self._tracks.get(dataset_idx)
+        tracks = self._tracks.get(dataset_key)
         if tracks is None:
             return
         code_match = np.flatnonzero(tracks.trace_ids == trace_id)
@@ -1550,11 +1553,30 @@ class TrackingWindow(QWidget):
         lo = max(axis.lo, head - width)
         self._receiving_playhead = True
         try:
-            self._selected_track = (dataset_idx, tracks.trace_ids[code])
+            self._selected_track = (dataset_key, tracks.trace_ids[code])
             self._time_row.set_window(lo, head)
             self._draw()
         finally:
             self._receiving_playhead = False
+
+    def _on_dataset_closed(self, event) -> None:
+        """A closed overlay channel leaves this view; nothing else reloads."""
+        if self._closing or not any(
+                ch["dataset_key"] == event.key for ch in self._channels):
+            return
+        remaining = [ch for ch in self._channels if ch["dataset_key"] != event.key]
+        if not remaining:
+            return              # the view's only dataset: its window closes
+        self._channels = remaining
+        if self._dataset_key == event.key:
+            # The member the view had selected closed; the overlay goes on.
+            self._dataset_key = remaining[0]["dataset_key"]
+        self._tracks.pop(event.key, None)
+        self._track_reasons.pop(event.key, None)
+        if self._selected_track is not None and self._selected_track[0] == event.key:
+            self._selected_track = None
+        self._request_track_build(
+            reset_window=False, fit_view=False, rebuild_rows=True)
 
     def _set_channel_visible(self, pos: int, on: bool) -> None:
         if 0 <= pos < len(self._channels):
@@ -1565,8 +1587,9 @@ class TrackingWindow(QWidget):
         if 0 <= pos < len(self._channels) and role in {"Tracking", "Structure"}:
             channel = self._channels[pos]
             channel["role"] = role
-            ds = self._state.datasets[channel["dataset_idx"]]
-            ds.state["tracking_role"] = role
+            ds = self._state.dataset_for(channel["dataset_key"])
+            if ds is not None:
+                ds.state["tracking_role"] = role
             channel["reason"] = "User-selected Tracking View role"
             self._schedule_draw()
 
@@ -1869,16 +1892,16 @@ class TrackingWindow(QWidget):
         if self._axis == "3D":
             points = []
             for ch in self._comet_channels():
-                selected = self._tracks[ch["dataset_idx"]].window(*window)
+                selected = self._tracks[ch["dataset_key"]].window(*window)
                 if selected.size:
-                    points.append(self._tracks[ch["dataset_idx"]].coords[selected.indices])
+                    points.append(self._tracks[ch["dataset_key"]].coords[selected.indices])
             self._reset_3d_camera(np.vstack(points) if points else np.empty((0, 3)))
             return
         ci, cj = self._columns()
         xs: list[np.ndarray] = []
         ys: list[np.ndarray] = []
         for ch in self._comet_channels():
-            tracks = self._tracks[ch["dataset_idx"]]
+            tracks = self._tracks[ch["dataset_key"]]
             sel = tracks.window(*window)
             if sel.size == 0:
                 continue

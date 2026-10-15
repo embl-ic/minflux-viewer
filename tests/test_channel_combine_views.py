@@ -156,7 +156,8 @@ def test_combining_in_place_leaves_one_overlay_view_not_several(_app, monkeypatc
         # One overlay view showing every channel — not three, two of which still
         # draw a single dataset as if it were standalone.
         assert sorted(win._render_windows) == [0]
-        assert [c.get("dataset_idx") for c in win._render_windows[0]._channels] == [0, 1, 2]
+        assert [win._state.index_of(c["dataset_key"])
+                for c in win._render_windows[0]._channels] == [0, 1, 2]
         assert "Overlay" in win._render_windows[0].windowTitle()
         assert sorted(win._scatter_windows) == [0]
 
