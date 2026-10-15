@@ -147,6 +147,55 @@ def _only_qt_tests_start_qt(request):
             "test: request the qapp (or qtbot) fixture instead.", pytrace=False)
 
 
+@pytest.fixture
+def qtbot(qtbot):
+    """pytest-qt's ``qtbot``, whose ``addWidget`` holds the widget until
+    teardown and then destroys it.
+
+    pytest-qt holds only a weak reference. A test's window is usually cyclic
+    garbage once the test body returns, and pytest-qt processes events before
+    teardown closes it; if the cyclic collector runs then, it destroys a
+    window that was never closed. Its pyqtgraph views fire
+    ``ViewBox.register``'s ``destroyed`` callback, which walks every
+    registered view in the middle of the collection: a native crash. That is
+    how CI's Python 3.11 jobs aborted in ``test_lut_dialog.py``; collecting
+    right after each test body reproduces it on any version (it crashed four
+    modules that way).
+
+    So the widgets are held here, closed at teardown as pytest-qt would close
+    them, and deleted at once -- a deferred deletion needs a running event
+    loop otherwise -- leaving nothing for the collector to destroy unclosed.
+
+    ⚠ This overrides ``qtbot`` rather than being an autouse fixture on
+    purpose: an autouse fixture runs for every test, and that alone moved
+    ``test_phase2.py`` (which never uses ``qtbot``) from 0 to 5 of 20 runs
+    crashing at interpreter exit. Tests that do not ask for ``qtbot`` must
+    not see this at all.
+    """
+    from PyQt6 import sip
+    from PyQt6.QtCore import QCoreApplication, QEvent
+    from PyQt6.QtWidgets import QWidget
+
+    held: list = []
+
+    def add_widget(widget, *, before_close_func=None):
+        if not isinstance(widget, QWidget):
+            raise TypeError(f"Need to pass a QWidget to addWidget: {widget!r}")
+        held.append((widget, before_close_func))
+
+    qtbot.addWidget = qtbot.add_widget = add_widget
+    yield qtbot
+    for widget, before_close in held:
+        if sip.isdeleted(widget):              # the test destroyed it itself
+            continue
+        if before_close is not None:
+            before_close(widget)
+        widget.close()
+        widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    held.clear()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolate_preferences(tmp_path_factory):
     try:
