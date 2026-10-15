@@ -129,7 +129,7 @@ def test_the_projection_reuses_the_xy_spatial_grid(_qt_app):
     try:
         win._set_orientation(ORTHO_AXIS)
         _settle(_qt_app)
-        xyz, indices = win._ortho_viewport_indices(0)
+        xyz, indices = win._ortho_viewport_indices(win._channels[0]["dataset_key"])
         assert xyz is not None and indices is not None and indices.size > 0
         (x0, x1), (y0, y1) = win._view_box.viewRange()
         xs, ys = xyz[0][indices], xyz[1][indices]
@@ -150,11 +150,11 @@ def test_projecting_only_the_visible_region(_qt_app):
     try:
         win._set_orientation(ORTHO_AXIS)
         _settle(_qt_app)
-        _, before = win._ortho_viewport_indices(0)
+        _, before = win._ortho_viewport_indices(win._channels[0]["dataset_key"])
         win._view_box.setXRange(-300.0, 300.0, padding=0)
         win._view_box.setYRange(-300.0, 300.0, padding=0)
         _settle(_qt_app)
-        _, after = win._ortho_viewport_indices(0)
+        _, after = win._ortho_viewport_indices(win._channels[0]["dataset_key"])
         assert after.size < before.size
     finally:
         win.close()
@@ -671,7 +671,7 @@ def test_the_side_panes_use_the_primary_pane_reconstruction_exactly(_qt_app):
             px_nm = max(x1 - x0, y1 - y0) / float(_RENDER_SIZE)
             n_h = min(max(int(round((x1 - x0) / px_nm)), 1), win._MAX_CANVAS_PX)
             n_v = min(max(int(round((y1 - y0) / px_nm)), 1), win._MAX_CANVAS_PX)
-            xyz, indices = win._ortho_viewport_indices(0)
+            xyz, indices = win._ortho_viewport_indices(win._channels[0]["dataset_key"])
             side_rule = win.render_scalar(
                 xyz[0][indices], xyz[1][indices], (x0, x1), (y0, y1),
                 px_nm, win._sigma_for_plane("XY", px_nm), n_h, n_v,

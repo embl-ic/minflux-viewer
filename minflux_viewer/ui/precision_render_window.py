@@ -12,6 +12,7 @@ from collections import OrderedDict
 import numpy as np
 from PyQt6.QtCore import QTimer
 
+from ..core.dataset_key import DatasetKey
 from .ortho_view import ORTHO_AXIS_COLUMNS, SIDE_PLANES
 from .precision_render import (
     RENDER_METHOD_DEFAULT,
@@ -47,6 +48,13 @@ class _SelectedRowsGrid:
         return self._indices
 
 
+def _drop_dataset_entries(mapping, dataset_key) -> None:
+    """Remove the entries of a mapping keyed by ``(kind, dataset_key, ...)``."""
+    for key in [k for k in mapping
+                if isinstance(k, tuple) and len(k) > 1 and k[1] == dataset_key]:
+        mapping.pop(key, None)
+
+
 class PrecisionRenderWindow(RenderWindow):
     """Unified render window with selectable scientific reconstruction."""
 
@@ -80,8 +88,8 @@ class PrecisionRenderWindow(RenderWindow):
         self._fixed_sigma_z_nm = 5.0
         self._fixed_sigma_nm = 5.0
         self._sigma_nm_xyz = (5.0, 5.0, 5.0)
-        self._precision_channels: dict[int, PrecisionChannelData] = {}
-        self._precision_channel_versions: dict[int, int] = {}
+        self._precision_channels: dict[DatasetKey, PrecisionChannelData] = {}
+        self._precision_channel_versions: dict[DatasetKey, int] = {}
         self._precision_cache = ViewportScalarCache(
             max_bytes=self._CACHE_BYTES, max_items=2048
         )
@@ -105,7 +113,7 @@ class PrecisionRenderWindow(RenderWindow):
         self._active_tile_generation = -1
         self._active_voronoi_generation = -1
         self._pending_voronoi_keys: set[tuple] = set()
-        self._active_tile_keys: dict[int, list[tuple[int, int, tuple]]] = {}
+        self._active_tile_keys: dict[DatasetKey, list[tuple[int, int, tuple]]] = {}
         self._active_tile_geometry: tuple[float, float, float, float] | None = None
         self._active_tile_pixel_nm = 1.0
         self._active_tile_grid: tuple[int, int, int, int] | None = None
@@ -192,7 +200,7 @@ class PrecisionRenderWindow(RenderWindow):
         indices: np.ndarray,
         plane: str,
     ) -> PrecisionChannelData | None:
-        channel = self._precision_channels.get(ch["dataset_idx"])
+        channel = self._precision_channels.get(ch["dataset_key"])
         if channel is None or len(channel.x_nm) != len(xyz[0]):
             return None
         horizontal, vertical = ORTHO_AXIS_COLUMNS[plane]
@@ -202,7 +210,7 @@ class PrecisionRenderWindow(RenderWindow):
             channel.sigma_depth_nm,
         )
         return PrecisionChannelData(
-            dataset_idx=channel.dataset_idx,
+            dataset_key=channel.dataset_key,
             x_nm=xyz[horizontal],
             y_nm=xyz[vertical],
             depth_nm=channel.depth_nm,
@@ -232,9 +240,9 @@ class PrecisionRenderWindow(RenderWindow):
         transform_key = self._channel_loc_transform_key(ch)
         return (
             "ortho-scalar",
-            ch["dataset_idx"],
-            self._precision_channel_versions.get(ch["dataset_idx"], 0),
-            self._mask_versions.get(ch["dataset_idx"], 0),
+            ch["dataset_key"],
+            self._precision_channel_versions.get(ch["dataset_key"], 0),
+            self._mask_versions.get(ch["dataset_key"], 0),
             plane,
             self._advanced_render_method,
             tuple(round(float(v), 6) for v in self._fixed_sigma_for_ortho_plane(plane)),
@@ -555,8 +563,8 @@ class PrecisionRenderWindow(RenderWindow):
 
     def _build_channel_grid(self, ch: dict) -> None:
         super()._build_channel_grid(ch)
-        ds_idx = ch["dataset_idx"]
-        ds = self._state.datasets[ds_idx]
+        dataset_key = ch["dataset_key"]
+        ds = self._state.datasets[ch["dataset_idx"]]
         try:
             raw_locs = np.asarray(ds.loc_nm, dtype=np.float64)
         except Exception:
@@ -589,7 +597,7 @@ class PrecisionRenderWindow(RenderWindow):
             order = (0, 1, 2)
         sigma_oriented = sigma_xyz[:, order] if sigma_xyz.size else np.empty((0, 3))
         x, y, depth = self._channel_locs_xyz.get(
-            ds_idx,
+            dataset_key,
             (
                 np.empty(0, dtype=np.float64),
                 np.empty(0, dtype=np.float64),
@@ -602,28 +610,37 @@ class PrecisionRenderWindow(RenderWindow):
             sigma_oriented = np.full((len(x), 3), 5.0, dtype=np.float64)
             source = "5 nm fallback (precision rows did not align)"
 
-        self._precision_channels[ds_idx] = PrecisionChannelData(
-            dataset_idx=ds_idx,
+        self._precision_channels[dataset_key] = PrecisionChannelData(
+            dataset_key=dataset_key,
             x_nm=x,
             y_nm=y,
             depth_nm=depth,
             sigma_x_nm=np.ascontiguousarray(sigma_oriented[:, 0], dtype=np.float64),
             sigma_y_nm=np.ascontiguousarray(sigma_oriented[:, 1], dtype=np.float64),
             sigma_depth_nm=np.ascontiguousarray(sigma_oriented[:, 2], dtype=np.float64),
-            grid=self._channel_grids.get(ds_idx),
+            grid=self._channel_grids.get(dataset_key),
             source=source,
         )
-        self._precision_channel_versions[ds_idx] = (
-            self._precision_channel_versions.get(ds_idx, 0) + 1
+        self._precision_channel_versions[dataset_key] = (
+            self._precision_channel_versions.get(dataset_key, 0) + 1
         )
-        self._precision_cache.remove_dataset(ds_idx)
-        self._ortho_precision_cache.remove_dataset(ds_idx)
-        self._ortho_voronoi_cache.remove_dataset(ds_idx)
-        for key in list(self._ortho_voronoi_failures):
-            if isinstance(key, tuple) and len(key) > 1 and key[1] == ds_idx:
-                self._ortho_voronoi_failures.pop(key, None)
+        self._precision_cache.remove_dataset(dataset_key)
+        self._ortho_precision_cache.remove_dataset(dataset_key)
+        self._ortho_voronoi_cache.remove_dataset(dataset_key)
+        _drop_dataset_entries(self._ortho_voronoi_failures, dataset_key)
         self._preview_scalar = None
         self._preview_geometry = None
+
+    def _forget_dataset(self, dataset_key: DatasetKey) -> None:
+        super()._forget_dataset(dataset_key)
+        self._precision_channels.pop(dataset_key, None)
+        self._precision_channel_versions.pop(dataset_key, None)
+        self._active_tile_keys.pop(dataset_key, None)
+        for cache in (self._precision_cache, self._ortho_precision_cache,
+                      self._voronoi_cache, self._ortho_voronoi_cache):
+            cache.remove_dataset(dataset_key)
+        _drop_dataset_entries(self._voronoi_failures, dataset_key)
+        _drop_dataset_entries(self._ortho_voronoi_failures, dataset_key)
 
     def _depth_key(self) -> tuple[float, float] | None:
         if not self._has_depth or self._all_depth_check.isChecked():
@@ -632,14 +649,14 @@ class PrecisionRenderWindow(RenderWindow):
 
     def _voronoi_field_key(self, channel: PrecisionChannelData) -> tuple:
         ch = next(
-            (item for item in self._channels if item["dataset_idx"] == channel.dataset_idx),
+            (item for item in self._channels if item.get("dataset_key") == channel.dataset_key),
             {},
         )
         transform_key = self._channel_loc_transform_key(ch) if ch else None
         return (
             "voronoi-field",
-            channel.dataset_idx,
-            self._mask_versions.get(channel.dataset_idx, 0),
+            channel.dataset_key,
+            self._mask_versions.get(channel.dataset_key, 0),
             self._orientation,
             transform_key,
             self._depth_key(),
@@ -686,7 +703,7 @@ class PrecisionRenderWindow(RenderWindow):
         for ch in self._channels:
             if ch["kind"] != "localizations":
                 continue
-            channel = self._precision_channels.get(ch["dataset_idx"])
+            channel = self._precision_channels.get(ch["dataset_key"])
             if channel is None or channel.grid is None or channel.x_nm.size == 0:
                 continue
             key = self._voronoi_field_key(channel)
@@ -777,14 +794,14 @@ class PrecisionRenderWindow(RenderWindow):
         tile_col: int,
     ) -> tuple:
         ch = next(
-            (item for item in self._channels if item["dataset_idx"] == channel.dataset_idx),
+            (item for item in self._channels if item.get("dataset_key") == channel.dataset_key),
             {},
         )
         transform_key = self._channel_loc_transform_key(ch) if ch else None
         return (
             "precision-tile",
-            channel.dataset_idx,
-            self._mask_versions.get(channel.dataset_idx, 0),
+            channel.dataset_key,
+            self._mask_versions.get(channel.dataset_key, 0),
             self._orientation,
             transform_key,
             self._depth_key(),
@@ -863,24 +880,24 @@ class PrecisionRenderWindow(RenderWindow):
         float,
         tuple[float, float, float, float],
         tuple[int, int, int, int],
-        dict[int, list[tuple[int, int, tuple]]],
+        dict[DatasetKey, list[tuple[int, int, tuple]]],
         list[PrecisionTileRequest],
     ]:
         pixel_nm = self._tile_pixel_size_nm(bounds)
         geometry, tile_grid = self._tile_grid(bounds, pixel_nm)
-        keys_by_dataset: dict[int, list[tuple[int, int, tuple]]] = {}
+        keys_by_dataset: dict[DatasetKey, list[tuple[int, int, tuple]]] = {}
         missing: list[PrecisionTileRequest] = []
         for ch in self._channels:
             if ch["kind"] != "localizations":
                 continue
-            channel = self._precision_channels.get(ch["dataset_idx"])
+            channel = self._precision_channels.get(ch["dataset_key"])
             if channel is None or channel.grid is None:
                 continue
             entries, channel_missing = self._channel_tile_entries(
                 channel, pixel_nm, tile_grid
             )
             missing.extend(channel_missing)
-            keys_by_dataset[channel.dataset_idx] = entries
+            keys_by_dataset[channel.dataset_key] = entries
         return (
             pixel_nm,
             geometry,
@@ -932,7 +949,7 @@ class PrecisionRenderWindow(RenderWindow):
         for ch_idx, ch in enumerate(self._channels):
             if ch["kind"] != "localizations":
                 continue
-            channel = self._precision_channels.get(ch["dataset_idx"])
+            channel = self._precision_channels.get(ch["dataset_key"])
             if channel is None or channel.grid is None:
                 continue
             bounds = self._alignment_source_bounds(ch_idx, view)
@@ -1119,7 +1136,7 @@ class PrecisionRenderWindow(RenderWindow):
             else:
                 tile = np.zeros((height, width), dtype=np.float32)
             for tile_row, tile_col, key in self._active_tile_keys.get(
-                ch["dataset_idx"], []
+                ch["dataset_key"], []
             ):
                 total += 1
                 value = self._precision_cache.get(key)
@@ -1215,6 +1232,9 @@ class PrecisionRenderWindow(RenderWindow):
             or result.generation != self._active_tile_generation
         ):
             return
+        owner = result.key[1] if isinstance(result.key, tuple) else None
+        if owner not in self._precision_channels:
+            return              # its dataset closed, or left this view, meanwhile
         self._precision_cache.put(result.key, result.array)
         if self._overlay_alignment_panel is not None:
             self._compose_alignment_sources()

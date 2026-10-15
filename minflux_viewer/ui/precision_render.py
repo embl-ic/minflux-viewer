@@ -21,6 +21,7 @@ from ..analysis.voronoi_density import (
     ProjectedVoronoiField,
     build_projected_voronoi_field,
 )
+from ..core.dataset_key import DatasetKey
 from .background_tasks import clear_pool_nonblocking, shared_thread_pool
 
 _DEFAULT_SIGMA_NM = 5.0
@@ -110,7 +111,8 @@ RENDER_METHOD_TIPS = {
 class PrecisionChannelData:
     """Filtered, transformed data for one localization channel."""
 
-    dataset_idx: int
+    dataset_key: DatasetKey
+    """The dataset's key (never its position), as the window's caches use."""
     x_nm: np.ndarray
     y_nm: np.ndarray
     depth_nm: np.ndarray
@@ -196,9 +198,9 @@ class ViewportScalarCache:
             _, evicted = self._items.popitem(last=False)
             self._bytes -= evicted.nbytes
 
-    def remove_dataset(self, dataset_idx: int) -> None:
+    def remove_dataset(self, dataset_key: Hashable) -> None:
         for key in list(self._items):
-            if isinstance(key, tuple) and len(key) > 1 and key[1] == dataset_idx:
+            if isinstance(key, tuple) and len(key) > 1 and key[1] == dataset_key:
                 arr = self._items.pop(key)
                 self._bytes -= arr.nbytes
 
@@ -235,9 +237,9 @@ class VoronoiFieldCache:
         while len(self._items) > self.max_items:
             self._items.popitem(last=False)
 
-    def remove_dataset(self, dataset_idx: int) -> None:
+    def remove_dataset(self, dataset_key: Hashable) -> None:
         for key in list(self._items):
-            if isinstance(key, tuple) and len(key) > 1 and key[1] == dataset_idx:
+            if isinstance(key, tuple) and len(key) > 1 and key[1] == dataset_key:
                 self._items.pop(key)
 
     def clear(self) -> None:

@@ -531,10 +531,12 @@ def test_advanced_render_routes_composition_and_tile_results_behind_preview():
 
     cached = []
     sources = []
-    result = SimpleNamespace(generation=3, key="tile", array=np.ones((2, 2)))
+    result = SimpleNamespace(generation=3, key=("precision-tile", "ds"),
+                             array=np.ones((2, 2)))
     owner = SimpleNamespace(
         _precision_scheduler=SimpleNamespace(generation=3),
         _active_tile_generation=3,
+        _precision_channels={"ds": object()},
         _precision_cache=SimpleNamespace(put=lambda key, array: cached.append((key, array))),
         _overlay_alignment_panel=object(),
         _all_active_tiles_cached=lambda: (_ for _ in ()).throw(
@@ -543,7 +545,7 @@ def test_advanced_render_routes_composition_and_tile_results_behind_preview():
         _compose_alignment_sources=lambda: sources.append(True),
     )
     PrecisionRenderWindow._on_precision_tile_result(owner, result)
-    assert cached[0][0] == "tile"
+    assert cached[0][0] == ("precision-tile", "ds")
     # ...and a finished tile feeds the alignment preview's re-rendered sources.
     assert sources == [True]
 

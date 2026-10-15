@@ -78,6 +78,7 @@ from ..colors import (
     solid_color_rgba,
 )
 from ..core.app_state import AppState
+from ..core.dataset_key import DatasetKey
 from ..core.overlay import (
     apply_display_transform_nm,
     dataset_group_id,
@@ -904,9 +905,11 @@ class RenderWindow(QWidget):
         # Pyramid render pipeline state
         self._phys_tile_cache: PhysicalTileCache = PhysicalTileCache()
         self._scheduler: RenderScheduler = RenderScheduler(parent=self)
-        self._channel_grids: dict[int, SpatialGrid | None] = {}
-        self._channel_locs_xyz: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
-        self._mask_versions: dict[int, int] = {}
+        # Keyed by dataset key, never position: a position moves when an
+        # earlier dataset closes, and is reused by the next one opened.
+        self._channel_grids: dict[DatasetKey, SpatialGrid | None] = {}
+        self._channel_locs_xyz: dict[DatasetKey, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._mask_versions: dict[DatasetKey, int] = {}
         self._tile_grid_x0: float = 0.0
         self._tile_grid_y0: float = 0.0
         self._pending_tile_keys: set[TileKey] = set()
@@ -970,6 +973,7 @@ class RenderWindow(QWidget):
         state.dataset_events.calibration_changed.connect(self._on_filter_changed)
         state.dataset_events.overlay_transform_changed.connect(self._on_overlay_transform_changed)
         state.dataset_events.roi_selection_changed.connect(self._on_roi_selection_changed)
+        state.dataset_events.removed.connect(self._on_dataset_closed)
         state.rois.selection_changed.connect(self._redraw_roi_highlight)
         # The side panes' outlines follow the store, not the render debounce:
         # adding, deleting or re-selecting a ROI must show there immediately.
@@ -1471,7 +1475,7 @@ class RenderWindow(QWidget):
 
     # -- side-pane projection -------------------------------------------
 
-    def _ortho_viewport_indices(self, ds_idx: int):
+    def _ortho_viewport_indices(self, dataset_key: DatasetKey):
         """Row indices of one channel inside the XY viewport.
 
         The channel grid is built on ``(x, y)`` for the XY orientation, so this
@@ -1479,8 +1483,8 @@ class RenderWindow(QWidget):
         X *and* Y are on screen, which is exactly the XY viewport query. No
         per-orientation grid is needed.
         """
-        xyz = self._channel_locs_xyz.get(ds_idx)
-        grid = self._channel_grids.get(ds_idx)
+        xyz = self._channel_locs_xyz.get(dataset_key)
+        grid = self._channel_grids.get(dataset_key)
         if xyz is None or grid is None or len(xyz[0]) == 0:
             return None, None
         (x0, x1), (y0, y1) = self._view_box.viewRange()
@@ -1608,7 +1612,7 @@ class RenderWindow(QWidget):
         if self._has_depth and not self._all_depth_check.isChecked():
             depth_range = self._depth_range
         for ch in channels:
-            xyz, indices = self._ortho_viewport_indices(ch["dataset_idx"])
+            xyz, indices = self._ortho_viewport_indices(ch["dataset_key"])
             if xyz is None or indices is None or indices.size == 0:
                 continue
             if depth_range is not None:
@@ -2047,6 +2051,7 @@ class RenderWindow(QWidget):
                 visible = False
             self._channels.append({
                 "dataset_idx": idx,
+                "dataset_key": self._state.key_at(idx),
                 "name": ds.name,
                 "kind": "image" if ds.image_data is not None and not ds.has_localizations else "localizations",
                 "visible": visible,
@@ -2061,6 +2066,7 @@ class RenderWindow(QWidget):
             ds = self._state.datasets[self._idx]
             self._channels.append({
                 "dataset_idx": self._idx,
+                "dataset_key": self._state.key_at(self._idx),
                 "name": ds.name,
                 "kind": "localizations",
                 "visible": True,
@@ -2069,6 +2075,8 @@ class RenderWindow(QWidget):
                 "loc_transform": ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"),
                 "transform": previous_transforms.get(self._idx, {"dx_nm": 0.0, "dy_nm": 0.0, "angle": 0.0}),
             })
+
+        self._forget_departed_datasets()
 
     def _manual_align_channel(self, ch_idx: int) -> None:
         if len(self._channels) < 2 or not (0 <= ch_idx < len(self._channels)):
@@ -2835,12 +2843,12 @@ class RenderWindow(QWidget):
                 canvas = self._image_tile(ds, x0, x1, y0, y1, n_bins_y, n_bins_x)
                 tiles.append(canvas)
             else:
-                ds_idx = ch["dataset_idx"]
-                mask_ver = self._mask_versions.get(ds_idx, 0)
+                dataset_key = ch["dataset_key"]
+                mask_ver = self._mask_versions.get(dataset_key, 0)
                 tr_key = self._channel_loc_transform_key(ch)
                 depth_key = (round(depth_range_active[0], 1), round(depth_range_active[1], 1)) if depth_range_active else None
                 canvas, missing = self._composite_loc_channel(
-                    ds_idx, mask_ver, self._active_plane(), tr_key, depth_key,
+                    dataset_key, mask_ver, self._active_plane(), tr_key, depth_key,
                     x0, x1, y0, y1, lod, px_nm,
                 )
                 tiles.append(canvas)
@@ -2879,21 +2887,21 @@ class RenderWindow(QWidget):
             for ch in self._channels:
                 if ch["kind"] != "localizations":
                     continue
-                ds_idx = ch["dataset_idx"]
-                mask_ver = self._mask_versions.get(ds_idx, 0)
+                dataset_key = ch["dataset_key"]
+                mask_ver = self._mask_versions.get(dataset_key, 0)
                 tr_key = self._channel_loc_transform_key(ch)
                 depth_key = (round(depth_range_active[0], 1), round(depth_range_active[1], 1)) if depth_range_active else None
                 ch_missing = [
                     k for k in all_missing
-                    if k.dataset_id == ds_idx
+                    if k.dataset_key == dataset_key
                     and k.mask_version == mask_ver
                     and k.transform_key == tr_key
                     and k.depth_range == depth_key
                 ]
                 if not ch_missing:
                     continue
-                xyz = self._channel_locs_xyz.get(ds_idx)
-                grid = self._channel_grids.get(ds_idx)
+                xyz = self._channel_locs_xyz.get(dataset_key)
+                grid = self._channel_grids.get(dataset_key)
                 if xyz is None or grid is None:
                     continue
                 xnm, ynm, znm = xyz
@@ -2966,9 +2974,9 @@ class RenderWindow(QWidget):
                 tiles.append(canvas)
                 continue
 
-            ds_idx = ch["dataset_idx"]
-            xyz = self._channel_locs_xyz.get(ds_idx)
-            grid = self._channel_grids.get(ds_idx)
+            dataset_key = ch["dataset_key"]
+            xyz = self._channel_locs_xyz.get(dataset_key)
+            grid = self._channel_grids.get(dataset_key)
             if xyz is None or grid is None or len(xyz[0]) == 0:
                 tiles.append(np.zeros((n_bins_y, n_bins_x), dtype=np.float32))
                 continue
@@ -3111,7 +3119,7 @@ class RenderWindow(QWidget):
 
     def _composite_loc_channel(
         self,
-        ds_idx: int,
+        dataset_key: DatasetKey,
         mask_ver: int,
         orientation: str,
         tr_key: tuple,
@@ -3149,7 +3157,7 @@ class RenderWindow(QWidget):
         for tile_row in range(row0, row1 + 1):
             for tile_col in range(col0, col1 + 1):
                 key = TileKey(
-                    dataset_id=ds_idx,
+                    dataset_key=dataset_key,
                     mask_version=mask_ver,
                     orientation=orientation,
                     lod=lod,
@@ -3188,6 +3196,8 @@ class RenderWindow(QWidget):
     @pyqtSlot(object, object)
     def _on_tile_ready(self, key: TileKey, array: np.ndarray) -> None:
         """Called on the main thread when a worker finishes a tile."""
+        if key.dataset_key not in self._channel_grids:
+            return              # its dataset closed, or left this view, meanwhile
         self._phys_tile_cache.put(key, array)
         self._pending_tile_keys.discard(key)
 
@@ -3200,7 +3210,7 @@ class RenderWindow(QWidget):
         # Re-composite only if the tile is still relevant
         if (
             key.orientation == self._active_plane()
-            and key.mask_version == self._mask_versions.get(key.dataset_id, 0)
+            and key.mask_version == self._mask_versions.get(key.dataset_key, 0)
             and self._last_tile_geometry is not None
         ):
             self._recomposite_from_tiles()
@@ -3225,12 +3235,12 @@ class RenderWindow(QWidget):
                 n_bins_y = max(int(round((y1 - y0) / px_nm)), 8)
                 canvas = self._image_tile(ds, x0, x1, y0, y1, n_bins_y, n_bins_x)
             else:
-                ds_idx = ch["dataset_idx"]
-                mask_ver = self._mask_versions.get(ds_idx, 0)
+                dataset_key = ch["dataset_key"]
+                mask_ver = self._mask_versions.get(dataset_key, 0)
                 tr_key = self._channel_loc_transform_key(ch)
                 depth_key = (round(depth_range_active[0], 1), round(depth_range_active[1], 1)) if depth_range_active else None
                 canvas, _ = self._composite_loc_channel(
-                    ds_idx, mask_ver, self._active_plane(), tr_key, depth_key,
+                    dataset_key, mask_ver, self._active_plane(), tr_key, depth_key,
                     x0, x1, y0, y1, lod, px_nm,
                 )
             tiles.append(canvas)
@@ -3271,12 +3281,12 @@ class RenderWindow(QWidget):
 
     def _build_channel_grid(self, ch: dict) -> None:
         """Build SpatialGrid for one channel from its oriented filtered locs."""
-        ds_idx = ch["dataset_idx"]
-        ds = self._state.datasets[ds_idx]
+        dataset_key = ch["dataset_key"]
+        ds = self._state.datasets[ch["dataset_idx"]]
         oriented = self._oriented_locs(ds)
         if oriented.shape[0] == 0:
-            self._channel_grids[ds_idx] = None
-            self._channel_locs_xyz[ds_idx] = (
+            self._channel_grids[dataset_key] = None
+            self._channel_locs_xyz[dataset_key] = (
                 np.empty(0, dtype=np.float64),
                 np.empty(0, dtype=np.float64),
                 np.empty(0, dtype=np.float64),
@@ -3285,8 +3295,8 @@ class RenderWindow(QWidget):
         xnm = np.ascontiguousarray(oriented[:, 0], dtype=np.float64)
         ynm = np.ascontiguousarray(oriented[:, 1], dtype=np.float64)
         znm = np.ascontiguousarray(oriented[:, 2], dtype=np.float64)
-        self._channel_locs_xyz[ds_idx] = (xnm, ynm, znm)
-        self._channel_grids[ds_idx] = SpatialGrid(xnm, ynm)
+        self._channel_locs_xyz[dataset_key] = (xnm, ynm, znm)
+        self._channel_grids[dataset_key] = SpatialGrid(xnm, ynm)
 
     def _compute_tile_grid_origin(self) -> None:
         """Set _tile_grid_x0/_y0 aligned to PHYSICAL_TILE_NM boundaries."""
@@ -3333,8 +3343,32 @@ class RenderWindow(QWidget):
         self._depth_slider.set_limits(*self._bounds_depth, reset_range=False)
         self._update_depth_label()
 
-    def _increment_mask_version(self, dataset_id: int) -> None:
-        self._mask_versions[dataset_id] = self._mask_versions.get(dataset_id, 0) + 1
+    def _increment_mask_version(self, dataset_key: DatasetKey) -> None:
+        self._mask_versions[dataset_key] = self._mask_versions.get(dataset_key, 0) + 1
+
+    def _on_dataset_closed(self, event) -> None:
+        """A closed dataset's tiles, grid and mask version leave with it."""
+        self._forget_dataset(event.key)
+
+    def _forget_departed_datasets(self) -> None:
+        """Forget every dataset this view no longer draws.
+
+        A channel that leaves without its dataset closing (its overlay was
+        split) has to go too: a filter change while it is away bumps nothing
+        here, so its old tiles would be served if it came back.
+        """
+        drawn = {ch.get("dataset_key") for ch in self._channels}
+        held = (set(self._channel_grids) | set(self._channel_locs_xyz)
+                | set(self._mask_versions)
+                | {key.dataset_key for key in self._phys_tile_cache._cache})
+        for dataset_key in held - drawn:
+            self._forget_dataset(dataset_key)
+
+    def _forget_dataset(self, dataset_key: DatasetKey) -> None:
+        self._phys_tile_cache.invalidate_dataset(dataset_key)
+        self._channel_grids.pop(dataset_key, None)
+        self._channel_locs_xyz.pop(dataset_key, None)
+        self._mask_versions.pop(dataset_key, None)
 
     # ------------------------------------------------------------------
     # Brightness & Contrast helpers
@@ -5883,8 +5917,9 @@ class RenderWindow(QWidget):
         idx = event_index(self._state, idx)
         if idx is None:
             return
-        if any(ch["dataset_idx"] == idx for ch in self._channels):
-            self._increment_mask_version(idx)
+        dataset_key = self._state.key_at(idx)
+        if dataset_key is not None and any(ch["dataset_idx"] == idx for ch in self._channels):
+            self._increment_mask_version(dataset_key)
             for ch in self._channels:
                 if ch["dataset_idx"] == idx and ch["kind"] == "localizations":
                     self._build_channel_grid(ch)

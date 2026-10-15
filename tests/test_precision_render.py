@@ -121,7 +121,7 @@ def test_halo_aware_precision_tiles_match_one_continuous_raster():
     sx = np.array([3.0])
     sy = np.array([5.0])
     channel = PrecisionChannelData(
-        dataset_idx=0,
+        dataset_key=0,
         x_nm=x,
         y_nm=y,
         depth_nm=np.zeros(1),
@@ -151,7 +151,7 @@ def test_advanced_tile_supports_each_explicit_method():
     y = np.array([-1.0, 0.0, 1.0])
     sigma = np.array([1.0, 2.0, 3.0])
     channel = PrecisionChannelData(
-        dataset_idx=0,
+        dataset_key=0,
         x_nm=x,
         y_nm=y,
         depth_nm=np.zeros(3),
@@ -190,7 +190,7 @@ def test_advanced_tile_samples_precomputed_voronoi_field():
     x, y = x.ravel(), y.ravel()
     sigma = np.ones_like(x)
     channel = PrecisionChannelData(
-        dataset_idx=0,
+        dataset_key=0,
         x_nm=x,
         y_nm=y,
         depth_nm=np.zeros_like(x),
@@ -449,7 +449,7 @@ def test_precision_render_window_smoke(qtbot):
         ),
         timeout=5000,
     )
-    channel = window._precision_channels[0]
+    channel = window._precision_channels[window._channels[0]["dataset_key"]]
     assert np.allclose(channel.sigma_x_nm, sx)
     assert np.allclose(channel.sigma_y_nm, sz * 0.7)
 

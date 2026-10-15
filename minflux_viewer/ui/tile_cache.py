@@ -3,7 +3,7 @@ minflux_viewer.ui.tile_cache
 ==============================
 Fixed-tile LRU cache for the pyramid render pipeline.
 
-TileKey identifies a rendered tile by dataset, mask version, orientation,
+TileKey identifies a rendered tile by dataset key, mask version, orientation,
 LOD level, and physical grid position.  Because mask_version is part of
 the key, stale tiles are never served — they simply fail the LRU lookup
 and are eventually evicted by capacity pressure.
@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ..core.dataset_key import DatasetKey
 from .render_config import TILE_CACHE_CAPACITY
 
 
@@ -23,8 +24,10 @@ from .render_config import TILE_CACHE_CAPACITY
 class TileKey:
     """Immutable identifier for one rendered physical tile."""
 
-    dataset_id: int
-    """Index of the dataset in AppState.datasets."""
+    dataset_key: DatasetKey
+    """The dataset's key, never its position: a position moves when an earlier
+    dataset closes, and a closed dataset's position is taken by the next one
+    opened, so a position would hand one dataset another's tiles."""
 
     mask_version: int
     """Monotonically increasing counter; incremented whenever filter_mask
@@ -82,9 +85,9 @@ class PhysicalTileCache:
         while len(self._cache) > self._capacity:
             self._cache.popitem(last=False)
 
-    def invalidate_dataset(self, dataset_id: int) -> None:
-        """Remove all tiles for a given dataset (e.g., after dataset reload)."""
-        stale = [k for k in self._cache if k.dataset_id == dataset_id]
+    def invalidate_dataset(self, dataset_key: DatasetKey) -> None:
+        """Remove every tile of one dataset (when it closes)."""
+        stale = [k for k in self._cache if k.dataset_key == dataset_key]
         for k in stale:
             del self._cache[k]
 
@@ -110,7 +113,7 @@ class PhysicalTileCache:
 
         for coarser_lod in range(key.lod - 1, -1, -1):
             coarser_key = TileKey(
-                dataset_id=key.dataset_id,
+                dataset_key=key.dataset_key,
                 mask_version=key.mask_version,
                 orientation=key.orientation,
                 lod=coarser_lod,
