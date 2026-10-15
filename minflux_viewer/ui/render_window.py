@@ -115,6 +115,7 @@ from .render_config import (
     render_tile_px,
 )
 from .render_scheduler import RenderScheduler
+from .status_line import StatusLine
 from .tile_cache import PhysicalTileCache, TileKey
 
 # ---------------------------------------------------------------------------
@@ -1112,7 +1113,8 @@ class RenderWindow(QWidget):
 
         root.addWidget(self._depth_row)
 
-        self._info_label = QLabel("")
+        # A status line never widens the window, however long its text.
+        self._info_label = StatusLine("")
         self._info_label.setStyleSheet("color: gray; font-size: 11px;")
         root.addWidget(self._info_label)
 

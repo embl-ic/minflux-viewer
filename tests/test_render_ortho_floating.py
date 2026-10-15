@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 import numpy as np
 import pytest
 
@@ -582,6 +581,34 @@ def test_the_ortho_coordinate_is_reported_in_the_status_line(_qt_app):
         text = win._info_label.text()
         assert "centre X=" in text
         assert "crosshair X=" not in text
+    finally:
+        win.close()
+
+
+def test_a_long_status_line_does_not_widen_the_window(_qt_app):
+    """The status line demanded its whole text as minimum width. In Ortho-View
+    it carries the 3-D coordinate (about 890 px of text), so once it was
+    written, about half a second after entering, the window grew past the
+    size the floating fit had given it -- here from 483 to 1145 px on an
+    800 px screen -- and every pane's view range moved with it. That made the
+    tests in this module depend on timing: a fast run read the views before
+    the growth, a slow one (CI) after it."""
+    win = _window(_qt_app)
+    try:
+        win._set_orientation(ORTHO_AXIS)
+        _settle(_qt_app, turns=18)
+        width = win.width()
+        before = [v for r in win._view_box.viewRange() for v in r]
+
+        win._ortho_timer.stop()
+        win._render_ortho_sides()
+        _settle(_qt_app)
+
+        text = win._info_label.text()
+        assert "crosshair X=" in text
+        assert win.width() == width
+        assert [v for r in win._view_box.viewRange() for v in r] == pytest.approx(before)
+        assert win._info_label.toolTip() == text        # nothing is lost
     finally:
         win.close()
 
