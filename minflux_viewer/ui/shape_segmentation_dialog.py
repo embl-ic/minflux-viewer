@@ -386,7 +386,11 @@ class ShapeSegmentationWindow(QDialog):
         if not path or not did:
             return None
         try:
-            from ..msr.acquisition_roi import group_by_dataset, read_acquisition_rois, union_bounds
+            from ..core.acquisition_metadata import (
+                group_by_dataset,
+                read_acquisition_rois,
+                union_bounds,
+            )
             groups = group_by_dataset(read_acquisition_rois(str(path))) or {}
             group = groups.get(str(did))
             if not group:

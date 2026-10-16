@@ -1145,7 +1145,7 @@ class TestDuplicate:
     def _qt(self, qapp):
         self._app = qapp
 
-    def test_duplicate_prefixes_name_and_adds_to_state(self):
+    def test_duplicate_prefixes_name_and_adds_to_state(self, qtbot):
         from minflux_viewer.core.app_state import AppState
         from minflux_viewer.core.dataset import AttrStore, DataProp, FileInfo, MinfluxDataset
         from minflux_viewer.ui.main_window import MainWindow
@@ -1172,6 +1172,10 @@ class TestDuplicate:
 
         state = AppState()
         w = MainWindow(state)
+        # Keep the window alive until teardown, then close and destroy it.
+        # Adding datasets opens tool windows; leaving the main window to cyclic
+        # GC can destroy those pyqtgraph views during interpreter shutdown.
+        qtbot.addWidget(w)
         state.add_dataset(ds)
         assert len(state) == 1
 

@@ -138,7 +138,7 @@ def dataset_viewer_state(ds, *, manifest: dict | None = None,
 
 def write_viewer_state(store: dict, payload: dict) -> dict:
     """Add ``viewer/`` carrying *payload* to a channel's zarr store, in place."""
-    from . import zarr2
+    from ..utils import zarr2
 
     root = zarr2.open(store, mode="a")
     group = root.require_group(VIEWER_GROUP)

@@ -22,10 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-# Importing the msr package applies the OBF reader compat monkeypatches
-# (meta_data_position == 0 sentinel), needed for some legacy files to open.
-import minflux_viewer.msr  # noqa: F401
-
+from ..utils.obf_compat import apply_obf_reader_patches
 from .tiff_source import (
     MetadataDocument,
     PhysicalSize,
@@ -33,6 +30,9 @@ from .tiff_source import (
     _parse_ome_metadata,
     extract_ome_image_xml,
 )
+
+# The shared adapter handles legacy OBF headers without initializing a backend.
+apply_obf_reader_patches()
 
 
 def axes_for_sizes(sizes: tuple[int, ...]) -> str:
@@ -345,12 +345,12 @@ class ObfImageSource:
         can cover **several** runs, and merging those would produce one box
         spanning the empty field between them — marking nothing — so an image
         that is not specific to a single run gets no ROI at all."""
-        from ..msr.acquisition_roi import (
+        from .acquisition_metadata import (
+            extract_did_label_map,
             group_by_dataset,
             read_acquisition_rois,
             rois_within,
         )
-        from ..msr.mfxdta import extract_did_label_map
 
         extent = self._stacks[self.series_index].get("extent_m")
         if not extent:
@@ -385,7 +385,7 @@ class ObfImageSource:
         real files matches the run's localization extent to ~50 nm.  The tiles
         themselves are not exported: individually they say only where the beam
         dwelt within an area the single box already delimits."""
-        from ..msr.acquisition_roi import union_bounds
+        from .acquisition_metadata import union_bounds
 
         found = self._single_run_rois()
         if found is None:

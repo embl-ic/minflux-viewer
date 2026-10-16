@@ -46,41 +46,15 @@ layers = _tool()
 
 #: Imports that cross the layers the wrong way, as they stand on 9175afb.
 KNOWN_CROSSINGS = frozenset({
-    'analysis.local_density -> ui.modeless (deferred)',
-    'analysis.local_density -> ui.plot_format (import time)',
-    'analysis.local_density -> ui.qt_lifecycle (deferred)',
-    'analysis.localization_precision -> ui.modeless (deferred)',
-    'analysis.localization_precision -> ui.qt_lifecycle (deferred)',
     'analysis.method_text -> plugins (deferred)',
     'analysis.method_text -> plugins.method (deferred)',
-    'analysis.trace_analysis -> ui.modeless (deferred)',
-    'analysis.trace_analysis -> ui.qt_lifecycle (deferred)',
-    'analysis.trace_analysis -> ui.text_select (deferred)',
-    'analysis.trace_analysis -> ui.z_scaling_widgets (deferred)',
     'core.app_state -> scripting (deferred)',
-    'core.confocal_mapping -> msr.acquisition_roi (import time)',
-    'core.confocal_mapping -> msr.mfxdta (import time)',
-    'core.mbm_file -> msr.legacy_mbm (import time)',
-    'core.minflux_zarr -> msr (deferred)',
-    'core.minflux_zarr -> msr.io (deferred)',
-    'core.minflux_zarr -> msr.zarr2 (deferred)',
-    'core.obf_image_source -> msr (import time)',
-    'core.obf_image_source -> msr.acquisition_roi (deferred)',
-    'core.obf_image_source -> msr.mfxdta (deferred)',
-    'core.overlay -> msr.alignment (deferred)',
-    'core.post_load -> analysis.local_density (deferred)',
-    'core.post_load -> analysis.localization_precision (deferred)',
-    'core.post_load -> analysis.trace_analysis (deferred)',
     'core.recorder -> api (deferred)',
-    'core.save -> msr.writer (deferred)',
-    'core.spatial_grid -> ui.render_config (import time)',
     'utils.paraview_export -> core.dataset (import time)',
 })
 
 #: Import cycles that run at import time.
-KNOWN_IMPORT_TIME_CYCLES = frozenset({
-    ('msr', 'msr.io'),
-})
+KNOWN_IMPORT_TIME_CYCLES = frozenset()
 
 #: Import cycles once deferred imports are counted too.
 KNOWN_CYCLES = frozenset({
@@ -90,10 +64,11 @@ KNOWN_CYCLES = frozenset({
      'plugins.msr_reader', 'plugins.paraview', 'plugins.script_editor',
      'plugins.spatial_line_pattern', 'plugins.trace_viewer',
      'plugins.trace_viewer.trace_viewer_window'),
+    # The former cross-layer component split into smaller within-layer
+    # components when the backend dependency was inverted.
     ('core.acquisition_time', 'core.dataset', 'core.loader',
-     'core.minflux_zarr', 'core.obf_image_source', 'core.overlay_save',
-     'core.save', 'msr', 'msr.export', 'msr.io', 'msr.mfxdta',
-     'msr.msr_parser', 'msr.viewer_state', 'msr.writer'),
+     'core.minflux_zarr', 'core.overlay_save', 'core.save'),
+    ('msr.io', 'msr.msr_parser'),
     ('core.processing_journal', 'core.recorder'),
     ('core.roi', 'core.roi_logic'),
     ('ui.filter_dialog', 'ui.histogram_window'),

@@ -8,6 +8,8 @@ All physical units are nanometres.
 
 from __future__ import annotations
 
+from ..core.spatial_grid import SPATIAL_GRID_CELL_NM as SPATIAL_GRID_CELL_NM
+
 # ---------------------------------------------------------------------------
 # Physical tile grid
 # ---------------------------------------------------------------------------
@@ -15,8 +17,6 @@ from __future__ import annotations
 PHYSICAL_TILE_NM: float = 5_000.0
 """Side length of one physical tile in nm.  Increase for very sparse data."""
 
-SPATIAL_GRID_CELL_NM: float = 2_000.0
-"""Cell size for the SpatialGrid spatial index in nm."""
 
 # ---------------------------------------------------------------------------
 # LOD pyramid

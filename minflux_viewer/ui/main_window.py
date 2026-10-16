@@ -8387,6 +8387,7 @@ class MainWindow(QMainWindow):
 
         import copy
 
+        from ..analysis.post_load import POST_LOAD_ALGORITHMS
         from ..core.post_load import compute_post_load_results
 
         tasks = getattr(self, "_post_load_tasks", None)
@@ -8400,7 +8401,7 @@ class MainWindow(QMainWindow):
         prefs = copy.deepcopy(self._state.prefs)
 
         def work(report):
-            return compute_post_load_results(ds, prefs, report)
+            return compute_post_load_results(ds, prefs, report, algorithms=POST_LOAD_ALGORITHMS)
 
         task = BackgroundTask(
             work,
@@ -9367,26 +9368,26 @@ class MainWindow(QMainWindow):
     def _loc_precision_frc(self) -> None:
         if self._state.active_dataset is None:
             self._no_data_warning(); return
-        from .. import analysis
-        analysis.run_frc(self, self._state)
+        from .precision_analysis import run_frc
+        run_frc(self, self._state)
 
     def _loc_precision_crlb(self) -> None:
         if self._state.active_dataset is None:
             self._no_data_warning(); return
-        from .. import analysis
-        analysis.run_crlb(self, self._state)
+        from .precision_analysis import run_crlb
+        run_crlb(self, self._state)
 
     def _loc_precision_stddev(self) -> None:
         if self._state.active_dataset is None:
             self._no_data_warning(); return
-        from .. import analysis
-        analysis.run_stddev_per_trace(self, self._state)
+        from .precision_analysis import run_stddev_per_trace
+        run_stddev_per_trace(self, self._state)
 
     def _run_local_density(self) -> None:
         if self._state.active_dataset is None:
             self._no_data_warning(); return
-        from .. import analysis
-        analysis.run_local_density(self, self._state)
+        from .density_analysis import run_local_density
+        run_local_density(self, self._state)
 
     # ------------------------------------------------------------------
     # Trace analysis handlers
@@ -9395,13 +9396,13 @@ class MainWindow(QMainWindow):
     def _run_trace_size(self) -> None:
         if self._state.active_dataset is None:
             self._no_data_warning(); return
-        from ..analysis.trace_analysis import show_trace_size_dialog
+        from .trace_analysis_dialogs import show_trace_size_dialog
         show_trace_size_dialog(self, self._state.active_dataset, self._state)
 
     def _run_trace_anisotropy(self) -> None:
         if self._state.active_dataset is None:
             self._no_data_warning(); return
-        from ..analysis.trace_analysis import show_anisotropy_dialog
+        from .trace_analysis_dialogs import show_anisotropy_dialog
         show_anisotropy_dialog(self, self._state.active_dataset, self._state)
 
     def _install_toolbar_icons(self) -> None:

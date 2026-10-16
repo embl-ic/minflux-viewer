@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..msr.legacy_mbm import POINTS_DTYPE
+from .mbm_schema import POINTS_DTYPE
 
 __all__ = [
     "MBM_REQUIRED_FIELDS",

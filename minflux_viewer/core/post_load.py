@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -57,10 +58,19 @@ def _last_valid_points_nm(ds, z_factor: float) -> np.ndarray:
     )
 
 
+@dataclass(frozen=True)
+class PostLoadAlgorithms:
+    estimate_anisotropy: Callable
+    trace_precision: Callable
+    density: Callable
+
+
 def compute_post_load_results(
     ds,
     prefs: dict,
     report: Callable[[str], None],
+    *,
+    algorithms: PostLoadAlgorithms,
 ) -> dict:
     """Compute optional derived arrays for *ds* without touching Qt.
 
@@ -111,9 +121,8 @@ def compute_post_load_results(
             details = None
             try:
                 started = time.perf_counter()
-                from ..analysis.trace_analysis import estimate_anisotropy_for_dataset
 
-                details = estimate_anisotropy_for_dataset(ds)
+                details = algorithms.estimate_anisotropy(ds)
                 elapsed = time.perf_counter() - started
                 if details is not None and np.isfinite(details["z_scaling_factor"]):
                     value = float(details["z_scaling_factor"])
@@ -159,7 +168,6 @@ def compute_post_load_results(
         report(f"Computing localization precision of '{ds.name}'")
         try:
             started = time.perf_counter()
-            from ..analysis.localization_precision import stddev_per_trace
             from .loader import attr_values_1d
 
             loc_x = np.asarray(attr_values_1d(ds, "loc_x"))
@@ -168,7 +176,7 @@ def compute_post_load_results(
             loc_z = np.zeros_like(loc_x) if raw_z is None else np.asarray(raw_z)
             raw_tid = attr_values_1d(ds, "tid")
             tid = np.arange(loc_x.size) if raw_tid is None else np.asarray(raw_tid)
-            precision = stddev_per_trace(
+            precision = algorithms.trace_precision(
                 np.column_stack([loc_x, loc_y, loc_z]), tid
             )
             elapsed = time.perf_counter() - started
@@ -192,10 +200,9 @@ def compute_post_load_results(
         report(f"Computing local density of '{ds.name}'")
         try:
             started = time.perf_counter()
-            from ..analysis.local_density import compute_local_density_for_points
 
             points = _materialized_points_nm(ds, z_factor)
-            density, method, detail = compute_local_density_for_points(
+            density, method, detail = algorithms.density(
                 points, prefs, dimensions=3 if ds.prop.num_dim == 3 else 2
             )
             elapsed = time.perf_counter() - started
@@ -222,10 +229,9 @@ def compute_post_load_results(
     ):
         report(f"Computing last-valid density of '{ds.name}'")
         try:
-            from ..analysis.local_density import compute_local_density_for_points
 
             points = _last_valid_points_nm(ds, z_factor)
-            density, method, detail = compute_local_density_for_points(
+            density, method, detail = algorithms.density(
                 points, prefs, dimensions=3 if ds.prop.num_dim == 3 else 2
             )
             result["last_density"] = density

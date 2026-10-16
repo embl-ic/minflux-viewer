@@ -21,13 +21,13 @@ from pathlib import Path
 
 import numpy as np
 
-from ..msr.acquisition_roi import (
+from .acquisition_metadata import (
     AcquisitionRoi,
+    extract_did_label_map,
     group_by_dataset,
     read_acquisition_rois,
     union_bounds,
 )
-from ..msr.mfxdta import extract_did_label_map
 from .obf_image_source import (
     ObfImageSource,
     axes_for_sizes,

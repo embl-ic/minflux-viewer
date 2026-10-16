@@ -938,7 +938,7 @@ class AlignmentPlotWindow(QDialog):
         self.results = results
         # Requested MBM-handling mode (may be downgraded per bead count when re-fit);
         # falls back to the effective mode already on the results.
-        from ...msr.alignment import TRANSFORM_RIGID_XY_Z
+        from ...core.bead_alignment import TRANSFORM_RIGID_XY_Z
         self._requested_transform_type = (
             requested_transform_type
             or (getattr(results[0], "transform_type", "") if results else "")
@@ -1146,7 +1146,7 @@ class AlignmentPlotWindow(QDialog):
                 "included": inc, "valid": True,
             }]
             return
-        from ...msr.alignment import (
+        from ...core.bead_alignment import (
             MIN_BEADS_FOR_ALIGNMENT,
             align_channels_from_bead_positions,
             apply_homogeneous_transform,
@@ -1225,7 +1225,7 @@ class AlignmentPlotWindow(QDialog):
     # ------------------------------------------------------------------
 
     def _current_reports(self) -> list[dict]:
-        from ...msr.alignment import RMSE_WARN_NM
+        from ...core.bead_alignment import RMSE_WARN_NM
 
         reports = []
         for cur in self._current:
@@ -1243,7 +1243,7 @@ class AlignmentPlotWindow(QDialog):
             self._render_single_channel_banner()
             self._update_single_channel_table_values()
             return
-        from ...msr.alignment import RMSE_WARN_NM
+        from ...core.bead_alignment import RMSE_WARN_NM
 
         reports = self._current_reports()
         self._render_quality_banner(reports, RMSE_WARN_NM)
@@ -1461,7 +1461,7 @@ class AlignmentPlotWindow(QDialog):
     def _update_residual_table_values(self):
         from PyQt6.QtGui import QBrush, QColor
 
-        from ...msr.alignment import RMSE_WARN_NM, bead_residual_comment
+        from ...core.bead_alignment import RMSE_WARN_NM, bead_residual_comment
 
         excluded_bg = QColor("#eeeeee")
         warn_bg = QColor("#fbeaea")
@@ -4880,7 +4880,7 @@ class MsrReaderDialog(QWidget):
 
     def _viewer_mbm_alignment_available(self, selected: list[str]) -> tuple[bool, str]:
         MFSTATE = self._msr_state()
-        from ...msr.alignment import MIN_BEADS_FOR_ALIGNMENT, extract_bead_summaries
+        from ...core.bead_alignment import MIN_BEADS_FOR_ALIGNMENT, extract_bead_summaries
 
         if len(selected) < 2:
             return False, "fewer than two selected datasets"
@@ -5062,7 +5062,7 @@ class MsrReaderDialog(QWidget):
         ref_name: str | None = None,
     ) -> dict[str, dict]:
         MFSTATE = self._msr_state()
-        from ...msr.alignment import align_channels_from_arrays
+        from ...core.bead_alignment import align_channels_from_arrays
 
         selected = self._viewer_selected_dataset_names(import_plan)
         if len(selected) < 2:
@@ -5128,7 +5128,7 @@ class MsrReaderDialog(QWidget):
         applied silently. No-op for the fallback modes (they carry no bead RMSE)."""
         if mode != "mbm info" or not transforms:
             return
-        from ...msr.alignment import RMSE_WARN_NM
+        from ...core.bead_alignment import RMSE_WARN_NM
 
         poor = []
         for name, tf in transforms.items():
@@ -5463,7 +5463,7 @@ class MsrReaderDialog(QWidget):
         """The MBM-handling transform mode from Preferences (Preferences > MBM
         Handling > transform_type); falls back to the rigid-XY + translational-Z
         default when no app state / preference is available."""
-        from ...msr.alignment import TRANSFORM_RIGID_XY_Z
+        from ...core.bead_alignment import TRANSFORM_RIGID_XY_Z
 
         default = TRANSFORM_RIGID_XY_Z
         if self._state is None:
@@ -5531,7 +5531,7 @@ class MsrReaderDialog(QWidget):
 
     def on_align_channel(self):
         MFSTATE = self._msr_state()
-        from ...msr.alignment import MIN_BEADS_FOR_ALIGNMENT, align_channels_from_arrays
+        from ...core.bead_alignment import MIN_BEADS_FOR_ALIGNMENT, align_channels_from_arrays
 
         if not self._ensure_single_file_parsed():
             return
@@ -5632,7 +5632,7 @@ class MsrReaderDialog(QWidget):
                                     requested_transform_type=transform_type,
                                     prefs=getattr(self._state, "prefs", None))
             )
-        from ...msr.alignment import RMSE_WARN_NM, alignment_quality_report
+        from ...core.bead_alignment import RMSE_WARN_NM, alignment_quality_report
 
         reports = [alignment_quality_report(r) for r in results]
         summary = [f"Reference channel: {ref_name}"] + [

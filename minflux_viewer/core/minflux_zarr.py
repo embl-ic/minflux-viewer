@@ -286,8 +286,8 @@ def capture_native_zarr_metadata(ds, store) -> None:
     """
     if store is None:
         return
-    from ..msr import zarr2
-    from ..msr.io import read_zarr_attrs
+    from ..utils import zarr2
+    from ..utils.zarr2 import read_zarr_attrs
 
     archive = zarr2.open(store, mode="r")
     ds.metadata["native_zarr_root_attrs"] = read_zarr_attrs(store, "")

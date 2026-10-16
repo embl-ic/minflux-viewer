@@ -373,11 +373,11 @@ def test_a_closed_dataset_never_receives_its_post_load_result(qapp, qtbot, monke
     real = post_load.compute_post_load_results
     started, release = threading.Event(), threading.Event()
 
-    def held(ds, prefs, report):
+    def held(ds, prefs, report, **kwargs):
         if ds.name == "A":
             started.set()
             release.wait(10)
-        return real(ds, prefs, report)
+        return real(ds, prefs, report, **kwargs)
 
     monkeypatch.setattr(post_load, "compute_post_load_results", held)
     win = _main(_DENSITY_ON)
@@ -402,11 +402,11 @@ def test_closing_one_dataset_leaves_another_datasets_post_load_running(qapp, qtb
     real = post_load.compute_post_load_results
     started, release = threading.Event(), threading.Event()
 
-    def held(ds, prefs, report):
+    def held(ds, prefs, report, **kwargs):
         if ds.name == "B":
             started.set()
             release.wait(10)
-        return real(ds, prefs, report)
+        return real(ds, prefs, report, **kwargs)
 
     monkeypatch.setattr(post_load, "compute_post_load_results", held)
     win = _main(_DENSITY_ON)

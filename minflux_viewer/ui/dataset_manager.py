@@ -644,7 +644,7 @@ class DatasetManager(QDialog):
         # factor dialog, where the user can review, edit, and apply the estimate.
         if index.column() == _COL_DIMS and int(getattr(ds.prop, "num_dim", 2)) >= 3:
             try:
-                from ..analysis.trace_analysis import show_anisotropy_dialog
+                from .trace_analysis_dialogs import show_anisotropy_dialog
                 owner = self._owner if isinstance(self._owner, QWidget) else self
                 show_anisotropy_dialog(owner, ds, self._state)
             except Exception as exc:

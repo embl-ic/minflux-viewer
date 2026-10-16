@@ -25,10 +25,7 @@ import numpy as np
 
 #: Model bead-points dtype (matches the modern ``grd/mbm/points`` fields used by
 #: the drift/alignment code: ``gri`` tag, ``xyz`` in metres, ``tim`` in seconds).
-POINTS_DTYPE = np.dtype([
-    ("gri", np.int64), ("xyz", np.float64, (3,)),
-    ("tim", np.float64), ("str", np.float64),
-])
+from ..core.mbm_schema import POINTS_DTYPE as POINTS_DTYPE
 
 
 def _node_attrs(node) -> dict:

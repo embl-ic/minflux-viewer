@@ -2,7 +2,7 @@ from typing import Any
 
 import numpy as np
 
-from . import zarr2
+from ..utils import zarr2
 from .state import reset as reset_state
 from .state import set_mbm_for, set_mbm_meta_for, set_mfx_for
 

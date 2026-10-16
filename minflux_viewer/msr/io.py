@@ -4,7 +4,8 @@ from typing import Any
 
 import numpy as np
 
-from . import zarr2
+from ..utils import zarr2
+from ..utils.zarr2 import read_zarr_attrs as read_zarr_attrs
 from .descriptions import describe_dtype, describe_path
 
 
@@ -44,20 +45,6 @@ def collect_zarr_fields(store) -> list[dict[str, Any]]:
     out.sort(key=lambda d: d["path"])
     return out
 
-def read_zarr_attrs(store, path: str = "") -> dict:
-    """Read a node's ``.zattrs``. *store* is a path or an in-memory zarr store."""
-    arch = zarr2.open(store, mode="r")
-    node = arch[path] if path else arch
-    attrs = getattr(node, "attrs", None)
-    if attrs is None:
-        return {}
-    try:
-        return attrs.asdict()
-    except Exception:
-        try:
-            return dict(attrs)
-        except Exception:
-            return {}
 
 
 # -------- existing: parse_msr_to_tree (kept if you still use it elsewhere) --------

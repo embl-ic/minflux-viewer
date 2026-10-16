@@ -87,7 +87,7 @@ def build_channel_store(channel: MsrChannel, did: str) -> dict[str, bytes]:
     (+ ``used`` attr) — exactly the three nodes the reader + ``beads_drift``
     consume.
     """
-    from . import zarr2
+    from ..utils import zarr2
 
     mfx = np.asarray(channel.mfx)
     if mfx.dtype.names is None:

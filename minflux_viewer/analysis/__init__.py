@@ -13,7 +13,6 @@ from .local_density import (
     local_density_histogram_2d,
     local_density_kdtree,
     local_density_voxel_radius_count,
-    run_local_density,
 )
 from .localization_precision import (
     crlb_from_inputs,
@@ -21,9 +20,6 @@ from .localization_precision import (
     crlb_inputs_from_arrays,
     crlb_precision,
     frc_resolution,
-    run_crlb,
-    run_frc,
-    run_stddev_per_trace,
     stddev_per_trace,
 )
 from .tracking_adapters import (
@@ -109,3 +105,11 @@ __all__ = [
     "tracking_methods",
     "trajectories_from_dataset",
 ]
+
+
+from ..utils.import_compat import resolve_moved_symbol
+
+_MOVED_SYMBOLS = {'run_crlb': 'minflux_viewer.ui.precision_analysis:run_crlb', 'run_frc': 'minflux_viewer.ui.precision_analysis:run_frc', 'run_stddev_per_trace': 'minflux_viewer.ui.precision_analysis:run_stddev_per_trace', 'run_local_density': 'minflux_viewer.ui.density_analysis:run_local_density'}
+
+def __getattr__(name):
+    return resolve_moved_symbol(__name__, name, _MOVED_SYMBOLS)

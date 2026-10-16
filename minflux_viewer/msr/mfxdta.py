@@ -48,12 +48,12 @@ channel alignment are intentionally **not** handled here.
 from __future__ import annotations
 
 import json
-import mmap
-import re
 import struct
 from pathlib import Path
 
 import numpy as np
+
+from ..core.acquisition_metadata import extract_did_label_map as extract_did_label_map
 
 #: Magic at the start of the OBF stack payload.
 MFXDTA_MAGIC = b"MFXDTA"
@@ -188,42 +188,15 @@ def unpack_zarr_store_to_dir(store, dest_dir) -> Path:
 
 def read_mfxdta_mfx(blob: bytes) -> np.ndarray:
     """Decode an MFXDTA blob straight to the structured ``mfx`` numpy array."""
-    from . import zarr2
+    from ..utils import zarr2
 
     store = extract_zarr_store(blob)
     return np.asarray(zarr2.open(store, mode="r")["mfx"])
 
 
 #: Matches the embedded ``{"did":"<uuid>","label":"<…>"}`` dataset descriptors.
-_DID_LABEL_RE = re.compile(
-    rb'"did"\s*:\s*"([0-9a-fA-F-]{36})"\s*,\s*"label"\s*:\s*"([^"]*)"'
-)
 
 
-def extract_did_label_map(msr_path) -> dict[str, str]:
-    """Map each dataset ``did`` (UUID) → its human label.
-
-    Modern multi-channel ``.msr`` files embed ``{"did":…,"label":…}`` descriptors
-    (e.g. ``1_anti_ELYS_F2_Atto655_100pM``). Newer stores may repeat ``did`` in
-    ``mfx/.zattrs``; m2205 stores often keep it only in the enclosing OBF stack
-    tag (handled by :func:`extract_minflux_stack_tags`). Returns ``{}`` for early
-    single-channel files that carry no labels.
-    """
-    out: dict[str, str] = {}
-    try:
-        with open(msr_path, "rb") as fh:
-            mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
-            try:
-                for m in _DID_LABEL_RE.finditer(mm):
-                    out.setdefault(
-                        m.group(1).decode("ascii"),
-                        m.group(2).decode("utf-8", "replace"),
-                    )
-            finally:
-                mm.close()
-    except Exception:
-        pass
-    return out
 
 
 def extract_minflux_stack_tags(msr_path) -> dict[int, dict]:

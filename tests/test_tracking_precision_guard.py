@@ -8,7 +8,7 @@ import pytest
 @pytest.mark.parametrize("runner_name", ["run_frc", "run_stddev_per_trace"])
 def test_static_precision_methods_refuse_a_tracking_role(monkeypatch, runner_name) -> None:
     pytest.importorskip("PyQt6")
-    from minflux_viewer.analysis import localization_precision as precision
+    from minflux_viewer.ui import precision_analysis as precision
 
     dataset = SimpleNamespace(
         name="cargo",

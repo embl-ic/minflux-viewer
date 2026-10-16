@@ -1020,7 +1020,7 @@ def save_processed(
             # container is reused so Imspector still opens the result; the
             # processing state travels inside each channel's zarr store either
             # way, making the file a complete MINFLUX Viewer document.
-            from ..msr.writer import write_datasets_msr
+            write_datasets_msr = _formats.writer_for("msr")
             members = list(related_datasets or [ds])
             # ``log`` matters here: which container was used decides whether
             # the file opens in Imspector, and a silent fallback would look

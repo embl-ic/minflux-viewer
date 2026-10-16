@@ -329,7 +329,7 @@ def build_overlay_transforms(
             ref_points = mbm_points_array(ref_ds)
             moving_points = mbm_points_array(ds)
             if ref_points is not None and moving_points is not None:
-                from ..msr.alignment import align_channels_from_arrays
+                from .bead_alignment import align_channels_from_arrays
 
                 result = align_channels_from_arrays(ref_ds.name, ref_points, ds.name, moving_points)
                 matrix = np.asarray(result.matrix_4x4, dtype=np.float64)

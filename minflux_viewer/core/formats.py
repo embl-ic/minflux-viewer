@@ -48,6 +48,7 @@ __all__ = [
     "roi_extensions",
     "drop_on_dataset_extensions",
     "resolve_open",
+    "writer_for",
 ]
 
 
@@ -99,6 +100,8 @@ class FormatSpec:
     #: May be dropped **onto a dataset row** to act on that dataset.
     drop_on_dataset: bool = False
     notes: str = ""
+    #: Lazy writer registered by a backend; resolved only when selected.
+    writer: str | None = None
 
 
 FORMATS: tuple[FormatSpec, ...] = (
@@ -172,6 +175,7 @@ FORMATS: tuple[FormatSpec, ...] = (
     FormatSpec(
         "msr", "Imspector file (.msr)", (".msr",), OpenAction.MSR_READER,
         writable=True, raw_only=True, default_offered=False, sniff_key="msr",
+        writer="minflux_viewer.msr.writer:write_datasets_msr",
         notes="Opening goes through the MSR reader, unless the file carries our "
               "own processing state, which opens directly. The writer reuses the "
               "source measurement's container when there is one.",
@@ -372,3 +376,11 @@ def resolve_open(path) -> FormatSpec | None:
         except Exception:
             continue
     return None
+
+
+def writer_for(key: str):
+    """Resolve a format backend through its declared writer capability."""
+    dotted = spec_for(key).writer
+    if dotted is None:
+        raise ValueError(f"Format {key!r} has no registered backend writer")
+    return _load_predicate(dotted)

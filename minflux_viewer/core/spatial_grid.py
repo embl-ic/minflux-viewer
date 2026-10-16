@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..ui.render_config import SPATIAL_GRID_CELL_NM
+SPATIAL_GRID_CELL_NM: float = 2_000.0
 
 
 class SpatialGrid:
