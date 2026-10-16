@@ -39,6 +39,7 @@ from ..analysis.voronoi_density import (
 )
 from ..colormaps import map_to_rgba, named_colormap_names, representative_rgb
 from ..core.app_state import AppState
+from ..core.coordinates import coordinate_view
 from ..core.dataset_key import DatasetKey
 from .dataset_binding import DatasetIndex
 
@@ -62,10 +63,10 @@ class VolumePayload:
     channel_norms: tuple[np.ndarray, ...] | None = None
 
 
-def _finite_filtered_locs(dataset) -> np.ndarray:
+def _finite_filtered_locs(dataset, *, transform=None) -> np.ndarray:
     """Return current filtered finite localisation coordinates in nm."""
     try:
-        locs = np.asarray(dataset.loc_nm, dtype=np.float64)
+        locs = coordinate_view(dataset)
     except Exception:
         return np.empty((0, 3), dtype=np.float64)
     if locs.ndim != 2 or locs.shape[1] < 2:
@@ -73,10 +74,11 @@ def _finite_filtered_locs(dataset) -> np.ndarray:
     if locs.shape[1] == 2:
         locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=np.float64)])
     mask = np.asarray(dataset.filter_mask, dtype=bool)
-    if mask.shape[0] == locs.shape[0]:
-        locs = locs[mask]
     finite = np.all(np.isfinite(locs[:, :3]), axis=1)
-    return np.ascontiguousarray(locs[finite, :3], dtype=np.float64)
+    if mask.shape[0] == locs.shape[0]:
+        finite &= mask
+    displayed = coordinate_view(dataset, transform=transform)
+    return np.ascontiguousarray(displayed[finite, :3], dtype=np.float64)
 
 
 def _clip_region(locs, sigma, region):
@@ -768,7 +770,6 @@ class VolumeRenderWindow(QWidget):
         each channel's transform applied), or ``None`` when the dataset is not a
         multi-channel overlay."""
         from ..core.overlay import (
-            apply_display_transform_nm,
             dataset_group_id,
             overlay_members,
         )
@@ -792,17 +793,14 @@ class VolumeRenderWindow(QWidget):
                     continue
                 if not bool(spec.get("visible", True)):
                     continue
-            locs = _finite_filtered_locs(ds)
-            if locs.shape[0] == 0:
-                continue
             transform = self._overlay_transforms.get(key)
             if transform is None:
                 transform = ds.state.get("overlay_transform") or ds.state.get(
                     "render_transform_2d"
                 )
-            locs = apply_display_transform_nm(
-                locs, transform
-            )
+            locs = _finite_filtered_locs(ds, transform=transform)
+            if locs.shape[0] == 0:
+                continue
             lut = (
                 str(spec.get("lut")) if spec is not None and spec.get("lut")
                 else str(ds.state.get("overlay_lut")
@@ -849,7 +847,7 @@ class VolumeRenderWindow(QWidget):
         if spec is not None and not bool(spec.get("visible", True)):
             return np.empty((0, 3), dtype=np.float64), None
         try:
-            full = np.asarray(ds.loc_nm, dtype=np.float64)
+            full = coordinate_view(ds)
         except Exception:
             return np.empty((0, 3), dtype=np.float64), None
         if full.ndim != 2 or full.shape[1] < 2:

@@ -25,6 +25,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QLabel, QTabWidget, QVBoxLayout, QWidget
 
+from ..core.coordinates import coordinate_view
 from ..plugins.msr_reader.beads_drift import (
     dataset_bead_drift,
     single_channel_bead_summary,
@@ -41,7 +42,7 @@ def dataset_loc_bounds_nm(ds):
     import numpy as np
 
     try:
-        loc = np.asarray(ds.loc_nm, dtype=float)
+        loc = coordinate_view(ds)
     except Exception:
         return None
     if loc.ndim != 2 or loc.shape[0] == 0:

@@ -65,6 +65,7 @@ from .. import resource_path
 # ---------------------------------------------------------------------------
 from ..core import formats as _formats
 from ..core.app_state import AppState
+from ..core.coordinates import coordinate_view
 from ..core.dataset_key import DatasetKey
 from .data_window import DataWindow
 from .dataset_binding import (
@@ -4047,7 +4048,7 @@ class MainWindow(QMainWindow):
             return
         ds = self._state.datasets[idx]
         try:
-            loc = np.asarray(ds.loc_nm, dtype=float)
+            loc = coordinate_view(ds)
         except Exception:
             loc = np.empty((0, 2))
         z = loc[:, 2] if loc.ndim == 2 and loc.shape[1] >= 3 else np.empty(0)

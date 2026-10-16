@@ -12,6 +12,7 @@ from collections import OrderedDict
 import numpy as np
 from PyQt6.QtCore import QTimer
 
+from ..core.coordinates import coordinate_view
 from ..core.dataset_key import DatasetKey
 from .ortho_view import ORTHO_AXIS_COLUMNS, SIDE_PLANES
 from .precision_render import (
@@ -567,7 +568,7 @@ class PrecisionRenderWindow(RenderWindow):
         if ds is None:
             return
         try:
-            raw_locs = np.asarray(ds.loc_nm, dtype=np.float64)
+            raw_locs = coordinate_view(ds)
         except Exception:
             raw_locs = np.empty((0, 3), dtype=np.float64)
         if raw_locs.ndim != 2 or raw_locs.shape[1] < 2:

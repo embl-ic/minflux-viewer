@@ -35,6 +35,7 @@ from ..colors import (
     normalize_rgba,
 )
 from . import formats as _formats
+from .coordinates import DEFAULT_CACHE_PERCENT, CoordinateService, cache_budget_bytes
 from .dataset import MinfluxDataset
 from .dataset_events import (
     ActiveDatasetChanged,
@@ -97,6 +98,7 @@ DEFAULT_PREFS: dict = {
         "temp_folder": "",           # app-wide temp dir; empty = use system temp
     },
     "data": {
+        "coordinate_cache_percent": DEFAULT_CACHE_PERCENT,
         # Optional empirical Z scaling; estimation and a fixed factor are both
         # explicit opt-ins in Preferences.
         "estimate_z_scaling_factor": False,
@@ -804,6 +806,8 @@ class AppState(QObject):
         self._active_key: DatasetKey | None = None
         self._key_counter = itertools.count(1)
         self.prefs: dict = self._load_prefs()
+        self.coordinates = CoordinateService(cache_budget_bytes(
+            self.prefs.get("data", {}).get("coordinate_cache_percent", DEFAULT_CACHE_PERCENT)))
         configure_colors(self.prefs)
         from ..colormaps import configure_colormap_order, configure_custom_colormaps
         configure_custom_colormaps(
@@ -978,6 +982,12 @@ class AppState(QObject):
                 entry = DatasetEntry(self._new_key(), ds)
             rebuilt.append(entry)
         self._entries = rebuilt
+        live_keys = {entry.key for entry in rebuilt}
+        for entry in entries:
+            if entry.key not in live_keys:
+                self.coordinates.detach(entry.key)
+        for entry in rebuilt:
+            self.coordinates.attach(entry.dataset, entry.key)
         if self._active_key is not None and all(
                 entry.key != self._active_key for entry in rebuilt):
             if old_active is not None and rebuilt:
@@ -1009,6 +1019,7 @@ class AppState(QObject):
         key = self._new_key()
         self._datasets.append(dataset)
         self._entries.append(DatasetEntry(key, dataset))
+        self.coordinates.attach(dataset, key)
         idx = len(self._datasets) - 1
         # IMPORTANT: set the active dataset BEFORE announcing the addition, so
         # handlers that query active_dataset (e.g. MainWindow._show_render)
@@ -1086,6 +1097,7 @@ class AppState(QObject):
         previous = self._active_key
         self._datasets.pop(idx)
         entry = self._entries.pop(idx)
+        self.coordinates.detach(entry.key)
 
         if not self._datasets:
             self._active_idx = None
@@ -1305,6 +1317,8 @@ class AppState(QObject):
         return default_prefs()
 
     def save_prefs(self) -> None:
+        self.coordinates.set_budget_bytes(cache_budget_bytes(
+            self.prefs.get("data", {}).get("coordinate_cache_percent", DEFAULT_CACHE_PERCENT)))
         configure_colors(self.prefs)
         from ..colormaps import configure_colormap_order, configure_custom_colormaps
         configure_custom_colormaps(

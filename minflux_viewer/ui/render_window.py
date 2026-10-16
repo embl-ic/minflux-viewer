@@ -78,9 +78,9 @@ from ..colors import (
     solid_color_rgba,
 )
 from ..core.app_state import AppState
+from ..core.coordinates import coordinate_view, display_coordinate_view
 from ..core.dataset_key import DatasetKey
 from ..core.overlay import (
-    apply_display_transform_nm,
     dataset_group_id,
     identity_matrix4,
     manual_alignment_matrix4,
@@ -2473,7 +2473,7 @@ class RenderWindow(QWidget):
 
     def _dataset_locs(self, ds) -> np.ndarray:
         try:
-            locs = np.asarray(ds.loc_nm, dtype=np.float64)
+            locs = coordinate_view(ds)
         except Exception:
             return np.empty((0, 3), dtype=np.float64)
         if locs.ndim != 2 or locs.shape[1] < 2:
@@ -2481,17 +2481,12 @@ class RenderWindow(QWidget):
         if locs.shape[1] == 2:
             locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=np.float64)])
         mask = np.asarray(ds.filter_mask, dtype=bool)
-        if mask.shape[0] == locs.shape[0]:
-            locs = locs[mask]
         finite = np.all(np.isfinite(locs[:, :3]), axis=1)
-        locs = locs[finite, :3]
-        return self._apply_dataset_render_transform(ds, locs)
-
-    def _apply_dataset_render_transform(self, ds, locs: np.ndarray) -> np.ndarray:
-        transform = ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
-        if not transform:
-            return locs
-        return apply_display_transform_nm(locs, transform)
+        if mask.shape[0] == locs.shape[0]:
+            finite &= mask
+        # Select from the shared full display view. Filtering remains view-local.
+        displayed = display_coordinate_view(ds)
+        return displayed[finite, :3]
 
     def _oriented_locs(self, ds) -> np.ndarray:
         locs = self._dataset_locs(ds)
@@ -5825,14 +5820,14 @@ class RenderWindow(QWidget):
 
     def _raw_render_locs(self, ds) -> np.ndarray:
         try:
-            locs = np.asarray(ds.loc_nm, dtype=np.float64)
+            locs = display_coordinate_view(ds)
         except Exception:
             return np.empty((0, 3), dtype=np.float64)
         if locs.ndim != 2 or locs.shape[1] < 2:
             return np.empty((0, 3), dtype=np.float64)
         if locs.shape[1] == 2:
             locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=np.float64)])
-        return self._apply_dataset_render_transform(ds, locs[:, :3])
+        return locs[:, :3]
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -6010,9 +6005,10 @@ class RenderWindow(QWidget):
         for channel in self._channels:
             if channel.get("dataset_key") != dataset_key:
                 continue
-            if transform_key(channel.get("loc_transform")) != transform_key(current):
-                channel["loc_transform"] = current
-                changed = True
+            # The record may have been edited in place, and rounded transform
+            # keys can hide a small change. The typed notification is authoritative.
+            channel["loc_transform"] = current
+            changed = True
         if changed:
             self._on_filter_changed(idx)
 

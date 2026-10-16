@@ -188,7 +188,7 @@ class Data(Namespace):
         elif transformed:
             from ..core.roi_crop import display_coords
 
-            loc = np.asarray(display_coords(ds), dtype=float)
+            loc = np.array(display_coords(ds), dtype=float, copy=True)
         else:
             loc = np.asarray(ds.loc_nm, dtype=float)
         return self._apply_filter(ds, loc) if filtered else loc

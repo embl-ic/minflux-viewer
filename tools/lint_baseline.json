@@ -658,7 +658,6 @@
   "minflux_viewer/analysis/trace_analysis.py": {
    "F401": 3,
    "F821": 1,
-   "I001": 2,
    "UP037": 1
   },
   "minflux_viewer/core/mfx_sequence.py": {

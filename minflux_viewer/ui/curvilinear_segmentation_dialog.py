@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
 
 from ..analysis import curvilinear_segmentation as cv
 from ..colormaps import colormap_lut
+from ..core.coordinates import coordinate_view
 from .dataset_binding import DatasetIndex
 
 _MAX_IMAGE_PX = 40_000_000
@@ -373,7 +374,7 @@ class CurvilinearSegmentationWindow(QDialog):
         if ds is None:
             return np.empty((0, 2))
         try:
-            loc = np.asarray(ds.loc_nm, dtype=float)
+            loc = coordinate_view(ds)
         except Exception:
             return np.empty((0, 2))
         if loc.ndim != 2 or loc.shape[0] == 0 or loc.shape[1] < 2:

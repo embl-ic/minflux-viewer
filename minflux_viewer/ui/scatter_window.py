@@ -49,16 +49,15 @@ from ..colors import (
 )
 from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
+from ..core.coordinates import coordinate_view, display_coordinate_view
 from ..core.dataset_key import DatasetKey
 from ..core.loader import attr_values_1d
 from ..core.overlay import (
-    apply_display_transform_nm,
     identity_matrix4,
     manual_alignment_matrix4,
     matrix4_to_xy3,
     overlay_members,
     sync_transform_decomposition,
-    transform_key,
     transform_to_matrix4,
 )
 from ..core.roi_selection import REGION_ROI_TYPES, roi_region_mask
@@ -160,8 +159,6 @@ class ScatterWindow(QWidget):
         # The 3-D marker is off until asked for, like the render view's.
         self._show_crosshair = False
         self._ortho_crosshair = None
-        self._cached_dataset_key: DatasetKey | None = None   # whose locs are cached
-        self._cached_locs_nm: np.ndarray | None = None
         self._color_cache_key: tuple | None = None
         self._color_cache: dict | None = None
         self._brush_lut_key: tuple | None = None
@@ -1965,11 +1962,8 @@ class ScatterWindow(QWidget):
             self._refresh()
 
     def _on_calibration_changed(self, event) -> None:
-        # Z scaling factor changed: the cached loc_nm is now stale on z --
-        # invalidate it before redrawing.
+        # Shared coordinate views detect the calibration change on access.
         if self._shows(event):
-            self._cached_dataset_key = None
-            self._cached_locs_nm = None
             self._redraw_current(save_state=False)
 
     def _on_overlay_transform_changed(self, idx) -> None:
@@ -1988,12 +1982,11 @@ class ScatterWindow(QWidget):
         for channel in self._channels:
             if channel.get("dataset_key") != dataset_key:
                 continue
-            if transform_key(channel.get("loc_transform")) != transform_key(current):
-                channel["loc_transform"] = current
-                changed = True
+            # The record may have been edited in place, and rounded transform
+            # keys can hide a small change. The typed notification is authoritative.
+            channel["loc_transform"] = current
+            changed = True
         if changed:
-            self._cached_dataset_key = None
-            self._cached_locs_nm = None
             self._redraw_current(save_state=False)
 
     def _on_roi_selection_changed(self, event) -> None:
@@ -2013,8 +2006,6 @@ class ScatterWindow(QWidget):
         if self._dataset_key == event.key:
             # The member the view had selected closed; the overlay goes on.
             self._dataset_key = remaining[0]["dataset_key"]
-        self._cached_dataset_key = None
-        self._cached_locs_nm = None
         self._rebuild_channel_ui()
         self._invalidate_color_cache()
         self._redraw_current(save_state=False)
@@ -2369,7 +2360,7 @@ class ScatterWindow(QWidget):
     def _locs_for_dataset_raw(self, ds_idx: int | None) -> np.ndarray:
         if ds_idx is None or not (0 <= ds_idx < len(self._state.datasets)):
             return np.empty((0, 3), dtype=float)
-        locs = np.asarray(self._state.datasets[ds_idx].loc_nm, dtype=float)
+        locs = coordinate_view(self._state.datasets[ds_idx])
         if locs.ndim == 2 and locs.shape[1] == 2:
             locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
         return locs
@@ -2480,8 +2471,6 @@ class ScatterWindow(QWidget):
         transform["dx_nm"] = float(transform.get("dx_nm", 0.0)) + dx_nm
         transform["dy_nm"] = float(transform.get("dy_nm", 0.0)) + dy_nm
         transform["angle"] = float(transform.get("angle", 0.0)) + rotation
-        self._cached_dataset_key = None
-        self._cached_locs_nm = None
         self._redraw_current(save_state=False)
 
     def _overlay_alignment_status(self, ch_idx: int) -> str:
@@ -2502,8 +2491,6 @@ class ScatterWindow(QWidget):
                 self._overlay_alignment_original[ch_idx]
                 if self._overlay_alignment_original is not None else {}
             )
-        self._cached_dataset_key = None
-        self._cached_locs_nm = None
         self._redraw_current(save_state=False)
         panel.refresh_status()
         panel.setFocus()
@@ -2547,8 +2534,6 @@ class ScatterWindow(QWidget):
         if self._overlay_alignment_original_visibility is not None:
             for ch, visible in zip(self._channels, self._overlay_alignment_original_visibility):
                 ch["visible"] = bool(visible)
-        self._cached_dataset_key = None
-        self._cached_locs_nm = None
         self._redraw_current(save_state=False)
         self._end_overlay_alignment()
         for ds_idx in changed_dataset_indices:
@@ -2561,8 +2546,6 @@ class ScatterWindow(QWidget):
         if self._overlay_alignment_original_visibility is not None:
             for ch, visible in zip(self._channels, self._overlay_alignment_original_visibility, strict=True):
                 ch["visible"] = visible
-        self._cached_dataset_key = None
-        self._cached_locs_nm = None
         self._redraw_current(save_state=False)
         self._end_overlay_alignment()
 
@@ -2778,23 +2761,9 @@ class ScatterWindow(QWidget):
         return self._state.index_of(ch["dataset_key"])
 
     def _current_locs(self, ds) -> np.ndarray:
-        dataset_key = self._dataset_key
-        if self._cached_dataset_key != dataset_key or self._cached_locs_nm is None:
-            locs = np.asarray(ds.loc_nm, dtype=float)
-            if locs.ndim == 2 and locs.shape[1] == 2:
-                locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
-            locs = apply_display_transform_nm(
-                locs,
-                ds.state.get("overlay_transform") or ds.state.get("render_transform_2d"),
-            )
-            self._cached_dataset_key = dataset_key
-            self._cached_locs_nm = locs
-        return self._cached_locs_nm
+        return display_coordinate_view(ds)
 
     def _locs_for_dataset(self, ds) -> np.ndarray:
-        locs = np.asarray(ds.loc_nm, dtype=float)
-        if locs.ndim == 2 and locs.shape[1] == 2:
-            locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=float)])
         transform = ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
         dataset_key = self._state.key_of(ds)
         channel = next(
@@ -2809,7 +2778,7 @@ class ScatterWindow(QWidget):
                     base = identity_matrix4()
                 matrix = manual_alignment_matrix4(preview, self._active_plane()) @ base
                 transform = {"matrix_4x4": matrix.tolist()}
-        return apply_display_transform_nm(locs, transform)
+        return coordinate_view(ds, transform=transform)
 
     def _roi_masks_for_dataset(self, ds) -> list[tuple[object, np.ndarray]]:
         from .roi_highlight import highlight_masks

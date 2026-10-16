@@ -11,6 +11,8 @@ from ..colors import (
     overlay_colors,
     rgba_hex,
 )
+from .coordinates import apply_display_transform_nm as apply_display_transform_nm
+from .coordinates import coordinate_view
 
 PURE_COLOR_NAMES = SOLID_COLOR_NAMES
 
@@ -228,33 +230,6 @@ def display_transform_record(
     }
 
 
-def apply_display_transform_nm(points_nm: np.ndarray, transform: dict | None) -> np.ndarray:
-    pts = np.asarray(points_nm, dtype=np.float64)
-    if pts.ndim != 2 or pts.shape[0] == 0:
-        return pts.copy()
-    if transform is None:
-        return pts.copy()
-    matrix_4 = transform.get("matrix_4x4") if isinstance(transform, dict) else None
-    if matrix_4 is not None:
-        mat = np.asarray(matrix_4, dtype=np.float64)
-        if mat.shape == (4, 4):
-            out = pts.copy()
-            if out.shape[1] < 3:
-                out = np.column_stack([out[:, :2], np.zeros(out.shape[0], dtype=np.float64)])
-            xyz_h = np.column_stack([out[:, :3], np.ones(out.shape[0], dtype=np.float64)])
-            out[:, :3] = (mat @ xyz_h.T).T[:, :3]
-            return out
-    matrix_3 = transform.get("matrix_3x3") if isinstance(transform, dict) else None
-    if matrix_3 is not None:
-        mat = np.asarray(matrix_3, dtype=np.float64)
-        if mat.shape == (3, 3) and pts.shape[1] >= 2:
-            out = pts.copy()
-            xy_h = np.column_stack([out[:, :2], np.ones(out.shape[0], dtype=np.float64)])
-            out[:, :2] = (mat @ xy_h.T).T[:, :2]
-            return out
-    return pts.copy()
-
-
 def transform_to_matrix4(transform) -> np.ndarray | None:
     """The 4×4 display matrix of a *transform*, or ``None`` if not resolvable.
 
@@ -306,7 +281,7 @@ def transform_key(transform: dict | None) -> tuple:
 
 
 def localization_centroid_nm(ds) -> np.ndarray:
-    loc = np.asarray(ds.loc_nm, dtype=np.float64)
+    loc = coordinate_view(ds)
     if loc.size == 0:
         return np.zeros(3, dtype=np.float64)
     if loc.shape[1] < 3:

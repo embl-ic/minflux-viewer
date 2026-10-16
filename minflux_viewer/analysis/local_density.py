@@ -34,6 +34,7 @@ from scipy.signal import fftconvolve
 from scipy.spatial import cKDTree
 
 from ..colormaps import BUILTIN_COLORMAP_NAMES, make_colormap, named_colormap_names
+from ..core.coordinates import coordinate_view
 from ..core.execution import cpu_threads
 from ..ui.plot_format import apply_spatial_y_direction
 
@@ -409,7 +410,7 @@ def compute_local_density(
     Returns ``(density_full, method, detail, image, edges, points_valid, density_valid)``
     where ``points_valid`` (nm, 2-D or 3-D) + ``density_valid`` feed the result
     window's optional 3-D scatter."""
-    points = np.asarray(ds.loc_nm, dtype=float)
+    points = coordinate_view(ds)
     mask = (
         np.asarray(ds.filter_mask, dtype=bool)
         if use_filter

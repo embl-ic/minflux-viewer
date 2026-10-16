@@ -22,9 +22,12 @@ import weakref
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 import numpy as np
+
+from .coordinates import calibrated_coordinates, coordinate_view
 
 # ---------------------------------------------------------------------------
 # AttrStore — dict-backed attribute container
@@ -77,7 +80,9 @@ class AttrStore:
     """
 
     def __init__(self, data: dict[str, np.ndarray] | None = None) -> None:
-        object.__setattr__(self, "_d", data or {})
+        object.__setattr__(self, "_d", dict(data) if data is not None else {})
+        object.__setattr__(self, "_coordinate_lock", RLock())
+        object.__setattr__(self, "_coordinate_token", object())
         object.__setattr__(self, "_owner", None)
         object.__setattr__(self, "_sealed", False)
         object.__setattr__(self, "_coordinate_revision", 0)
@@ -106,18 +111,18 @@ class AttrStore:
     def seal_coordinates(self) -> None:
         """Make the coordinate columns read-only from now on (idempotent).
 
-        Their arrays are flagged non-writeable in place, so a reference taken
-        earlier is guarded too; a column added later must come through
-        :meth:`replace_coordinates`.
+        Own the columns before sealing: a caller's dictionary or a writable
+        base array must not bypass the revisioned replacement path.
         """
         d = object.__getattribute__(self, "_d")
+        if object.__getattribute__(self, "_sealed"):
+            return
         for name in COORDINATE_COLUMNS:
             value = d.get(name)
             if value is None or isinstance(value, _Virtual):
                 continue
-            if not isinstance(value, np.ndarray):
-                value = np.array(value)
-                d[name] = value
+            value = np.array(value, copy=True)
+            d[name] = value
             value.flags.writeable = False
         object.__setattr__(self, "_sealed", True)
 
@@ -143,10 +148,20 @@ class AttrStore:
                                  f"got shape {arr.shape}")
             arr.flags.writeable = False
             prepared[name] = arr
-        d.update(prepared)
-        object.__setattr__(
-            self, "_coordinate_revision",
-            object.__getattribute__(self, "_coordinate_revision") + 1)
+        with object.__getattribute__(self, "_coordinate_lock"):
+            d.update(prepared)
+            object.__setattr__(self, "_coordinate_token", object())
+            object.__setattr__(
+                self, "_coordinate_revision",
+                object.__getattribute__(self, "_coordinate_revision") + 1)
+
+    def coordinate_snapshot(self) -> tuple[object, tuple]:
+        """Atomically read immutable localization columns and their identity."""
+        with object.__getattribute__(self, "_coordinate_lock"):
+            self.seal_coordinates()
+            d = object.__getattribute__(self, "_d")
+            return object.__getattribute__(self, "_coordinate_token"), tuple(
+                d.get(name, np.empty(0)) for name in ("loc_x", "loc_y", "loc_z"))
 
     @property
     def coordinate_revision(self) -> int:
@@ -516,10 +531,13 @@ class MinfluxDataset:
         (for example, trace-anisotropy estimation) must read ``loc_z`` (or
         ``mfx_get(ds, "loc_z", ...)``) and convert it to nanometres directly.
         """
-        x = np.asarray(self.attr.get("loc_x", np.empty(0)), dtype=float) * 1e9
-        y = np.asarray(self.attr.get("loc_y", np.empty(0)), dtype=float) * 1e9
-        z = np.asarray(self.attr.get("loc_z", np.empty(0)), dtype=float) * 1e9 * self.cali.z_scaling_factor
-        return np.column_stack([x, y, z])
+        _, columns = self.attr.coordinate_snapshot()
+        return calibrated_coordinates(columns, self.cali.z_scaling_factor)
+
+    @property
+    def coordinate_view_nm(self) -> np.ndarray:
+        """Internal read-only calibrated view, shared while open and cached."""
+        return coordinate_view(self)
 
     @property
     def xnm(self) -> np.ndarray:

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .overlay import apply_display_transform_nm
+from .coordinates import display_coordinate_view
 from .roi_selection import rectangle_bounds, roi_region_mask
 
 
@@ -98,17 +98,16 @@ def parse_channel_spec(text: str, n_channels: int) -> list[int]:
 
 
 def display_coords(ds) -> np.ndarray:
-    """(N, 3) localization coordinates in **display nm** (loc_nm + overlay transform)."""
+    """Read-only (N, 3) coordinates in **display nm**, shared when cached."""
     try:
-        loc = np.asarray(ds.loc_nm, dtype=float)
+        loc = display_coordinate_view(ds)
     except Exception:
         return np.empty((0, 3), dtype=float)
     if loc.ndim != 2 or loc.shape[1] < 2:
         return np.empty((0, 3), dtype=float)
     if loc.shape[1] == 2:
         loc = np.column_stack([loc, np.zeros(loc.shape[0], dtype=float)])
-    transform = ds.state.get("overlay_transform") or ds.state.get("render_transform_2d")
-    return apply_display_transform_nm(loc[:, :3], transform)
+    return loc[:, :3]
 
 
 def display_xy_filtered(ds) -> np.ndarray:

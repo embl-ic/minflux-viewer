@@ -61,7 +61,7 @@ def export_to_vtp(
     mask = dataset.filter_mask if apply_filter else np.ones(
         dataset.prop.num_loc, dtype=bool
     )
-    loc_nm = dataset.loc_nm[mask]      # (N, 3) nanometres
+    loc_nm = dataset.coordinate_view_nm[mask]      # (N, 3) nanometres
 
     # ParaView expects metres in scientific-data convention; MINFLUX raw
     # units are already metres, but our ``loc_nm`` is in nm.  Convert

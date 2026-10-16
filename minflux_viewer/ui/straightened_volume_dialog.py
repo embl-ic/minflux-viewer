@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 
 from ..analysis.straightened_volume import StraightenedVolumeResult, straightened_count_volume
 from ..colormaps import colormap_lut
+from ..core.coordinates import coordinate_view
 from ..core.roi import OPEN_LINE_TYPES, RoiRecord
 from .dataset_binding import DatasetIndex
 from .plot_format import plot_widget
@@ -237,7 +238,7 @@ class StraightenedVolumeAlongSkeletonWindow(QDialog):
         if ds is None:
             return np.empty((0, 3), dtype=float)
         try:
-            loc = np.asarray(ds.loc_nm, dtype=float)
+            loc = coordinate_view(ds)
         except Exception:
             return np.empty((0, 3), dtype=float)
         if loc.ndim != 2 or loc.shape[1] < 3:

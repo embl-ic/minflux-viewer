@@ -26,7 +26,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.optimize import curve_fit
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog,
@@ -43,7 +42,9 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from scipy.optimize import curve_fit
 
+from ..core.coordinates import coordinate_view
 
 # ---------------------------------------------------------------------------
 # Core computation — estimate_size_nd
@@ -325,7 +326,7 @@ def show_trace_size_dialog(parent: QWidget, ds, state) -> None:
 
     # --- collect data ---
     try:
-        loc = np.asarray(ds.loc_nm, dtype=float)   # (N,3) in nm
+        loc = coordinate_view(ds)   # (N,3) in nm
     except Exception as exc:
         QMessageBox.warning(parent, "Trace size", f"Cannot read localisations:\n{exc}")
         return
@@ -730,7 +731,9 @@ class _AnisotropyDialog(QDialog):
         btn_row.addStretch()
         btn_row.addWidget(QLabel("Z scaling factor:"))
         from ..ui.z_scaling_widgets import (
-            Z_SCALING_ARROW_STEP, Z_SCALING_WHEEL_STEP, ZScalingFactorSpinBox,
+            Z_SCALING_ARROW_STEP,
+            Z_SCALING_WHEEL_STEP,
+            ZScalingFactorSpinBox,
         )
 
         self._z_scaling_factor_spin = ZScalingFactorSpinBox(minimum=0.0, maximum=100.0)

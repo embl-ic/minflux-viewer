@@ -487,6 +487,19 @@ class PreferencesDialog(QDialog):
         root.setContentsMargins(16, 12, 16, 12)
         root.setSpacing(6)
 
+        cache_row = QHBoxLayout()
+        cache_row.addWidget(QLabel("Coordinate cache:"))
+        self._coordinate_cache_percent = QSpinBox()
+        self._coordinate_cache_percent.setRange(0, 100)
+        self._coordinate_cache_percent.setSuffix(" % of physical RAM")
+        self._coordinate_cache_percent.setToolTip(
+            "Maximum memory retained by shared coordinate views. 0 disables caching.\n"
+            "This is not a total application memory limit: open views and in-progress\n"
+            "calculations may retain additional arrays. Changes apply immediately on OK.")
+        cache_row.addWidget(self._coordinate_cache_percent)
+        cache_row.addStretch()
+        root.addLayout(cache_row)
+
         # "When opening data file:" section
         root.addWidget(self._section_label("When opening data file:"))
 
@@ -1446,6 +1459,8 @@ class PreferencesDialog(QDialog):
         self._check_updates.setChecked(bool(f.get("check_updates_on_startup", False)))
 
         # Data
+        self._coordinate_cache_percent.setValue(int(d.get(
+            "coordinate_cache_percent", DEFAULT_PREFS["data"]["coordinate_cache_percent"])))
         self._only_valid.setChecked(bool(d.get("only_valid_locs", True)))
         self._enforce_z.setChecked(bool(d.get("enforce_min_z_range", True)))
         self._min_z_spin.setValue(float(d.get("min_z_range_nm", 5.0)))
@@ -1651,6 +1666,7 @@ class PreferencesDialog(QDialog):
         f["check_updates_on_startup"] = bool(self._check_updates.isChecked())
 
         # Data
+        d["coordinate_cache_percent"] = self._coordinate_cache_percent.value()
         d["only_valid_locs"] = bool(self._only_valid.isChecked())
         d["enforce_min_z_range"] = bool(self._enforce_z.isChecked())
         d["min_z_range_nm"] = float(self._min_z_spin.value())

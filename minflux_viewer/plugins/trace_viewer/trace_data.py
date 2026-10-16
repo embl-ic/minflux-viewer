@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from ...core.coordinates import coordinate_view
 from ...core.loader import attr_values_1d
 
 # Per-trace table columns (always present); ch1/ch2 are inserted after efo when
@@ -26,7 +27,7 @@ def _col(ds, name):
 
 
 def _loc_nm(ds) -> np.ndarray:
-    loc = np.asarray(ds.loc_nm, dtype=float)
+    loc = coordinate_view(ds)
     if loc.ndim != 2:
         return np.empty((0, 3))
     if loc.shape[1] == 2:
