@@ -35,6 +35,7 @@ def _registered(monkeypatch, spec, *, plugin_id="demo.analysis", launch=None):
         plugin_id=plugin_id, discovered=True, method=spec,
     )
     monkeypatch.setattr("minflux_viewer.plugins.available", lambda: [entry])
+    monkeypatch.setattr("minflux_viewer.core.plugin_registry.available", lambda: [entry])
     return entry
 
 

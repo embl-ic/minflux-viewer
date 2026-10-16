@@ -47,8 +47,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from minflux_viewer.core.loader_raw_access import attr_values_1d
+
 from ...colors import component_colors
-from ...core.loader import attr_values_1d
 from ...ui.dataset_binding import DatasetIndex
 from ...ui.plot_format import apply_spatial_y_direction, plot_widget
 from . import trace_data as td

@@ -29,6 +29,16 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from minflux_viewer.core.loader_raw_access import (
+    attr_matches_selection,
+    attr_values_for_selection,
+    effective_iteration_for_attr,
+    effective_iterations_for_attr,
+    is_value_pool_selector,
+    mfx_filter_mask,
+    mfx_get,
+)
+
 from ..colors import component_colors, viewer_color
 from ..core.app_state import AppState
 from ..core.attributes import (
@@ -43,15 +53,6 @@ from ..core.iteration import (
     iteration_selector_label,
     ordinal,
     parse_iteration_label,
-)
-from ..core.loader import (
-    attr_matches_selection,
-    attr_values_for_selection,
-    effective_iteration_for_attr,
-    effective_iterations_for_attr,
-    is_value_pool_selector,
-    mfx_filter_mask,
-    mfx_get,
 )
 from ..core.roi_selection import rectangle_bounds, value_range_mask
 from ..utils.filters import TRACE_AGG_FUNCS, trace_agg_func

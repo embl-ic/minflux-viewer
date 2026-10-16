@@ -467,7 +467,8 @@ def snapshot_dataset_trajectories(
     Coordinate calibration and the large N×3 allocation happen later in
     :func:`prepare_dataset_trajectories`, which a UI can run in a worker.
     """
-    from ..core.loader import attr_values_1d
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
+
     from ..core.tracking_time import dataset_time_inputs
 
     x = attr_values_1d(dataset, "loc_x")

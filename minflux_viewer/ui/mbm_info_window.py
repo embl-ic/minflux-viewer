@@ -122,7 +122,7 @@ class MbmInfoWindow(QWidget):
 
     def _build_region_tab(self, name: str, beads: list[dict],
                           data_bounds_nm) -> QWidget | None:
-        from ..plugins.msr_reader.msr_reader_dialog import AlignmentPlotWindow
+        from ..plugins.msr_reader.alignment_plot_window import AlignmentPlotWindow
 
         payload = single_channel_bead_summary(name, beads)
         if payload is None:

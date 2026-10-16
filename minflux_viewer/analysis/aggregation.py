@@ -249,7 +249,7 @@ def _final_flags_from_raw(raw) -> np.ndarray | None:
             return arr
 
     try:
-        from ..core.loader import _raw_loc_id
+        from minflux_viewer.core.loader_raw_access import _raw_loc_id
 
         loc_id = _raw_loc_id(raw)
     except Exception:

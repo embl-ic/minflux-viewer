@@ -1362,8 +1362,9 @@ def _dataset_from_node(root, source: Path, prefs: dict | None = None):
     ``<pkg>/datasets/d000000`` directory to open, only a group in the archive.
     """
     zarr, _Blosc = _zarr_modules()
+    from minflux_viewer.core.loader_format_readers import load_from_mfx_array
+
     from .dataset import AttributeComponent
-    from .loader import load_from_mfx_array
     from .save import columns_to_mfx_array
 
     schema = _require_schema(root)

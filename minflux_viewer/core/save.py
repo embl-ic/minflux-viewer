@@ -322,8 +322,13 @@ def build_snapshot_table(
 
     Returns ``(columns, rows_dropped)``. Coordinates are in nm.
     """
+    from minflux_viewer.core.loader_raw_access import (
+        last_valid_attr_values,
+        mfx_filter_mask,
+        mfx_get,
+    )
+
     from . import overlay as _ov
-    from .loader import last_valid_attr_values, mfx_filter_mask, mfx_get
 
     xnm = mfx_get(ds, "xnm", itr="last", vld_only=True)
     ynm = mfx_get(ds, "ynm", itr="last", vld_only=True)
@@ -590,7 +595,7 @@ def spreadsheet_export_columns(ds) -> dict[str, np.ndarray]:
     The table uses the current filtered, last-valid view. Coordinates are
     Z scaling factor/overlay-transform aware and expressed in nanometres.
     """
-    from .loader import mfx_filter_mask, mfx_get
+    from minflux_viewer.core.loader_raw_access import mfx_filter_mask, mfx_get
 
     columns, _dropped = build_snapshot_table(
         ds,

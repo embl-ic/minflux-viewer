@@ -604,7 +604,7 @@ def apply_confocal_mapping_options(
     ``confocal_mapping.candidates_from_tiff``. ``load_confocal_candidate_array``
     dispatches on the candidate, so both work here unchanged.
     """
-    from ..core.loader import attr_values_1d
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
 
     applicable = [
         choice

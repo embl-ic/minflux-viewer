@@ -519,7 +519,7 @@ def _read_tiff_array(tiff_path: str | Path, *, series_index: int = 0) -> np.ndar
 
 def _dataset_xy_extent_m(dataset) -> tuple[float, float, float, float] | None:
     """The dataset's raw ``(x0, x1, y0, y1)`` localization extent, in metres."""
-    from .loader import attr_values_1d
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
 
     x = attr_values_1d(dataset, "loc_x")
     y = attr_values_1d(dataset, "loc_y")
@@ -769,7 +769,7 @@ def sample_confocal_signal(
 
 def _dataset_coordinates(dataset, store) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if store is dataset.attr:
-        from .loader import attr_values_1d
+        from minflux_viewer.core.loader_raw_access import attr_values_1d
 
         values = [attr_values_1d(dataset, name) for name in ("loc_x", "loc_y", "loc_z")]
     else:

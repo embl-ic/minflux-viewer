@@ -30,7 +30,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .loader import attr_values_1d
+from minflux_viewer.core.loader_raw_access import attr_values_1d
+
 from .roi_crop import display_coords
 
 #: attributes that conflict or go stale when channels concatenate → dropped

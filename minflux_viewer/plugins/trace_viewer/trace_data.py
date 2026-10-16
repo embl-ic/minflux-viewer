@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from minflux_viewer.core.loader_raw_access import attr_values_1d
+
 from ...core.coordinates import coordinate_view
-from ...core.loader import attr_values_1d
 
 # Per-trace table columns (always present); ch1/ch2 are inserted after efo when
 # the dataset carries conf_ch1 / conf_ch2 (matches the MATLAB conditional table).

@@ -93,7 +93,7 @@ class Plugins(Namespace):
         With no *values*, the most recent recorded run of that plugin is used,
         so this answers "write up what I just did" directly.
         """
-        from ..plugins.method import render_method_text
+        from ..utils.plugin_method import render_method_text
 
         spec = self.method(plugin_id)
         if spec is None:

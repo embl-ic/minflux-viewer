@@ -176,7 +176,7 @@ def _dataset_tim(ds):
         except Exception:
             pass
     try:
-        from .loader import attr_values_1d
+        from minflux_viewer.core.loader_raw_access import attr_values_1d
 
         values = attr_values_1d(ds, "tim")
         if values is not None:

@@ -757,7 +757,7 @@ def _show_channel_separation(self: MainWindow) -> None:
         self._no_data_warning()
         return
     ds = self._state.datasets[idx]
-    from ..core.loader import attr_values_1d
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
     if attr_values_1d(ds, "dcr") is None:
         QMessageBox.information(
             self, "Separate Channel by DCR",
@@ -780,7 +780,7 @@ def _show_attribute_separation(self: MainWindow) -> None:
         self._no_data_warning()
         return
     ds = self._state.datasets[idx]
-    from ..core.loader import attr_values_1d
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
     default = "dcr" if attr_values_1d(ds, "dcr") is not None else "efo"
     from .attribute_separation_dialog import AttributeSeparationDialog
     from .modeless import show_modeless
@@ -795,7 +795,8 @@ def _show_time_channel_separation(self: MainWindow) -> None:
     """Open the time-window editor for the active dataset."""
     import numpy as np
 
-    from ..core.loader import attr_values_1d
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
+
     from ..core.overlay import overlay_color_cycle
     from .time_channel_dialog import TimeChannelDialog
     idx = self._state.active_idx
@@ -850,7 +851,8 @@ def apply_time_channel_separation(self: MainWindow, source_idx: int, windows) ->
 
     import numpy as np
 
-    from ..core.loader import attr_values_1d
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
+
     from ..core.overlay import display_transform_record, identity_matrix4
     from ..core.time_channels import (
         clone_time_channel_dataset,

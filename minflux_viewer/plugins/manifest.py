@@ -30,7 +30,7 @@ try:
 except ModuleNotFoundError:     # Python 3.10: tomllib arrived in 3.11
     import tomli as tomllib  # the same API, declared for python < 3.11
 
-from .method import MethodError, parse_method_spec
+from ..utils.plugin_method import MethodError, parse_method_spec
 
 #: The file that makes a directory a Tier 2 plugin.
 MANIFEST_NAME = "plugin.toml"

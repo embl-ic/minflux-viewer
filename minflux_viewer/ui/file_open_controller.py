@@ -599,21 +599,21 @@ def _on_file_load_failed(self: MainWindow, name: str, message: str) -> None:
 def _load_mat(self: MainWindow, path: str) -> None:
     self._status_label.setText(f"Loading {Path(path).name}…")
     self._state.log(f"Opening .mat: {path}", "INFO")
-    from ..core.loader import load_dataset
+    from minflux_viewer.core.loader_format_readers import load_dataset
     self._start_dataset_load(path, load_dataset, kind="MATLAB data")
 
 
 def _load_npy(self: MainWindow, path: str) -> None:
     self._status_label.setText(f"Loading {Path(path).name}…")
     self._state.log(f"Opening .npy: {path}", "INFO")
-    from ..core.loader import load_npy
+    from minflux_viewer.core.loader_format_readers import load_npy
     self._start_dataset_load(path, load_npy, kind="NumPy data")
 
 
 def _load_npz(self: MainWindow, path: str) -> None:
     self._status_label.setText(f"Loading {Path(path).name}…")
     self._state.log(f"Opening .npz: {path}", "INFO")
-    from ..core.loader import load_npz
+    from minflux_viewer.core.loader_format_readers import load_npz
     self._start_dataset_load(path, load_npz, kind="NumPy archive")
 
 
@@ -818,7 +818,7 @@ def _load_spreadsheet(self: MainWindow, path: str) -> None:
     from .spreadsheet_import_dialog import minflux_direct_load_kind
     kind = minflux_direct_load_kind(path)
     if kind is not None:
-        from ..core.loader import load_csv
+        from minflux_viewer.core.loader_format_readers import load_csv
         self._state.log(
             f"'{Path(path).name}': canonical MINFLUX {kind} table — "
                 "loading directly, no column mapping needed.",
@@ -995,7 +995,7 @@ def _load_json(self: MainWindow, path: str) -> None:
         if choice != QMessageBox.StandardButton.Yes:
             self._status_label.setText("JSON load cancelled.")
             return
-    from ..core.loader import load_json
+    from minflux_viewer.core.loader_format_readers import load_json
     self._start_dataset_load(path, load_json, kind="JSON data")
 
 
@@ -1041,7 +1041,7 @@ def apply_metadata_to_dataset(self: MainWindow, idx: int, meta: dict, source: st
         Manager empty. Every apply path goes through here so the ROIs and the
         filter dialog actually appear.
         """
-    from ..core.loader import apply_metadata_recipe
+    from minflux_viewer.core.loader_metadata_recipe import apply_metadata_recipe
     if not (0 <= idx < len(self._state.datasets)):
         return False
     ds = self._state.datasets[idx]
@@ -1117,7 +1117,7 @@ def _sidecar_for_load(self: MainWindow, path) -> bool:
         loader and nothing has to be undone afterwards. A sidecar named in the
         same drop is not asked about — dropping both files IS the answer.
         """
-    from ..core.loader import read_metadata_sidecar
+    from minflux_viewer.core.loader_metadata_recipe import read_metadata_sidecar
     found = read_metadata_sidecar(path)
     if found is None:
         return False
@@ -1141,7 +1141,8 @@ def _sidecar_for_load(self: MainWindow, path) -> bool:
 
 def _open_metadata_sidecar(self: MainWindow, path: str) -> None:
     """A recipe dropped on the main window: ask which dataset it acts on."""
-    from ..core.loader import read_metadata_file
+    from minflux_viewer.core.loader_metadata_recipe import read_metadata_file
+
     from .metadata_apply_dialog import APPLY, KEEP, ask_apply_metadata
     name = Path(path).name
     meta = read_metadata_file(path)
@@ -1254,7 +1255,8 @@ def _drop_metadata_sidecar(self: MainWindow, idx: int, path: Path) -> bool:
         The row already names the target, so this asks only *whether* to apply
         — never silently, because a recipe changes Z scaling, filters and ROIs.
         """
-    from ..core.loader import read_metadata_file
+    from minflux_viewer.core.loader_metadata_recipe import read_metadata_file
+
     from ..core.metadata_match import (
         is_snapshot_recipe,
         match_kind,

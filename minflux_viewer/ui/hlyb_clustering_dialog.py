@@ -75,13 +75,14 @@ def _raw_color_attributes_for_result(
     if source_dataset is None:
         return attributes
 
-    from ..core.attributes import plot_attribute_names
-    from ..core.loader import (
+    from minflux_viewer.core.loader_raw_access import (
         attr_values_1d,
         effective_iteration_for_attr,
         iteration_attr_values_1d,
         mfx_get,
     )
+
+    from ..core.attributes import plot_attribute_names
 
     source_x = mfx_get(source_dataset, "loc_x", itr="last", vld_only=True)
     source_x = np.empty(0) if source_x is None else np.asarray(source_x).ravel()

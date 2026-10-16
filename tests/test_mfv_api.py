@@ -110,7 +110,7 @@ def test_attr_routes_through_the_iteration_aware_accessor(mfv, monkeypatch):
         seen["itr"] = itr
         return original(ds, attr, itr=itr)
 
-    monkeypatch.setattr(loader, "attr_values_for_selection", spy)
+    monkeypatch.setattr("minflux_viewer.core.loader_raw_access.attr_values_for_selection", spy)
     mfv.data.attr("cfr", itr="last")
     assert seen == {"attr": "cfr", "itr": "last"}
 

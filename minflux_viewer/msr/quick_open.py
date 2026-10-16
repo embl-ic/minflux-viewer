@@ -50,7 +50,8 @@ def load_viewer_msr(path, *, prefs: dict | None = None, log=None) -> list:
     Returns them in file order, which is the order they were saved in, so the
     overlay indices the state carries line up with the list.
     """
-    from ..core.loader import load_from_mfx_array
+    from minflux_viewer.core.loader_format_readers import load_from_mfx_array
+
     from .import_stamp import stamp_msr_dataset
     from .msr_parser import parse_general
     from .viewer_state import apply_viewer_state, read_viewer_state

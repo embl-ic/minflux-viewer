@@ -144,7 +144,7 @@ def _recorded_selection(meta, usable: list[int]) -> tuple[list[int], str]:
 def bead_inputs_for_dataset(ds) -> tuple[BeadInputs | None, str]:
     """``(inputs, "")``, or ``(None, reason)`` when the dataset cannot be
     re-corrected with its beads."""
-    from ..core.loader import mfx_get
+    from minflux_viewer.core.loader_raw_access import mfx_get
 
     points = _points_of(ds)
     if points is None:

@@ -151,6 +151,29 @@ def scan(package_dir: Path, package: str) -> set[Edge]:
     return edges
 
 
+def unresolved_modules(package_dir: Path, package: str) -> set[str]:
+    """Internal import bases that do not name source modules.
+
+    Unlike graph edges, these may not fall back to a known parent: that would
+    hide a misspelled module. Imported symbols need not themselves be modules.
+    Typing-only imports are checked too, without importing the application.
+    """
+    names = module_names(package_dir, package)
+    found = set()
+    for module, path in names.items():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            targets = _imported(node, module, path.name == "__init__.py")
+            if isinstance(node, ast.ImportFrom):
+                targets = targets[:1]
+            for target in targets:
+                if (target == package or target.startswith(package + ".")) and target not in names:
+                    found.add(f"{module}:{node.lineno}: {target}")
+    return found
+
+
 def short(name: str, package: str) -> str:
     """``package.core.loader`` -> ``core.loader``; the package itself stays."""
     return name[len(package) + 1:] if name.startswith(package + ".") else name

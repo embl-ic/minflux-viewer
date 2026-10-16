@@ -219,8 +219,12 @@ def mask_from_filter_specs(ds, specs) -> tuple[np.ndarray, list[str]]:
     Each spec is evaluated at its own iteration, exactly as the Filter dialog
     applies it, so a preset means the same thing here as it does there.
     """
+    from minflux_viewer.core.loader_raw_access import (
+        attr_values_for_selection,
+        resolve_spec_iteration,
+    )
+
     from ..utils.filters import compute_filter_mask
-    from .loader import attr_values_for_selection, resolve_spec_iteration
 
     n = int(getattr(getattr(ds, "prop", None), "num_loc", 0) or 0)
     mask = np.ones(n, dtype=bool)

@@ -51,6 +51,13 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from minflux_viewer.core.loader_raw_access import (
+    attr_values_1d,
+    attr_values_for_selection,
+    is_value_pool_selector,
+    mfx_get,
+)
+
 from ..analysis.attribute_channels import (
     Channel,
     channels_from_boundaries,
@@ -73,12 +80,6 @@ from ..core.iteration import (
     iteration_labels,
     ordinal,
     parse_iteration_label,
-)
-from ..core.loader import (
-    attr_values_1d,
-    attr_values_for_selection,
-    is_value_pool_selector,
-    mfx_get,
 )
 from ..utils.filters import raw_trace_aggregate
 from .attribute_help import apply_attribute_tooltips

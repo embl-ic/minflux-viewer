@@ -62,9 +62,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from minflux_viewer.core.loader_raw_access import attr_values_1d
+
 from ..core.app_state import AppState
 from ..core.dataset_key import DatasetKey
-from ..core.loader import attr_values_1d
 from ..core.overlay import (
     apply_display_transform_nm,
     channel_rgb,

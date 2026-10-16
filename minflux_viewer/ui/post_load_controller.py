@@ -250,7 +250,7 @@ def _start_saved_filter_restore(self: MainWindow, ds) -> None:
     if not ds.state.get("filter_specs"):
         self._post_load_finalize(ds)
         return
-    from ..core.loader import evaluate_saved_filters
+    from minflux_viewer.core.loader_raw_access import evaluate_saved_filters
     def work(report):
         report(f"Restoring saved filters for '{ds.name}'")
         return evaluate_saved_filters(ds)
@@ -433,8 +433,9 @@ def _legacy_post_load_loc_prec(self: MainWindow, ds) -> None:
             self._state.log(f"Computing localization precision of '{ds.name}'…")
             self._state.status_progress(f"Computing localization precision of '{ds.name}'")
             t0 = time.perf_counter()
-            from ..analysis.localization_precision import stddev_per_trace
-            from ..core.loader import attr_values_1d
+            from minflux_viewer.core.loader_raw_access import attr_values_1d
+
+            from ..analysis.precision_calculation import stddev_per_trace
             loc_x = np.asarray(attr_values_1d(ds, "loc_x"))
             loc_y = np.asarray(attr_values_1d(ds, "loc_y"))
             _z = attr_values_1d(ds, "loc_z")
@@ -513,8 +514,9 @@ def _legacy_post_load_density(self: MainWindow, ds) -> None:
         try:
             import numpy as np
 
+            from minflux_viewer.core.loader_raw_access import mfx_get
+
             from ..analysis.local_density import compute_local_density_for_points
-            from ..core.loader import mfx_get
             x = mfx_get(ds, "loc_x", itr="last")
             y = mfx_get(ds, "loc_y", itr="last")
             z = mfx_get(ds, "loc_z", itr="last")

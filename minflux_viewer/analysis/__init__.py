@@ -14,7 +14,7 @@ from .local_density import (
     local_density_kdtree,
     local_density_voxel_radius_count,
 )
-from .localization_precision import (
+from .precision_calculation import (
     crlb_from_inputs,
     crlb_inputs_for_dataset,
     crlb_inputs_from_arrays,

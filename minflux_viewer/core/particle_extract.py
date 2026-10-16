@@ -19,7 +19,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .loader import attr_values_1d
+from minflux_viewer.core.loader_raw_access import attr_values_1d
+
 from .overlay import transform_to_matrix4
 from .particle_set import _RESERVED_COLUMNS, ParticleData
 from .roi_crop import display_coords
@@ -236,7 +237,12 @@ def load_any_dataset(path: str | Path, prefs: dict | None = None):
     the main window's post-load chain are NOT applied here — the dataset's default
     Z scaling factor is recorded in the particle metadata.
     """
-    from .loader import load_csv, load_dataset, load_json, load_npy
+    from minflux_viewer.core.loader_format_readers import (
+        load_csv,
+        load_dataset,
+        load_json,
+        load_npy,
+    )
 
     ext = Path(path).suffix.lower()
     if ext == ".npy":

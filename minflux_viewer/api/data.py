@@ -110,7 +110,7 @@ class Data(Namespace):
         which does **not** align to the materialized rows -- ``filtered`` is
         then ignored, and so is the one-value-per-localization guarantee.
         """
-        from ..core.loader import attr_values_for_selection, mfx_get
+        from minflux_viewer.core.loader_raw_access import attr_values_for_selection, mfx_get
 
         if not name:
             raise ApiError("An attribute name is required.")
@@ -173,7 +173,7 @@ class Data(Namespace):
             )
 
         if unit == "m":
-            from ..core.loader import attr_values_1d
+            from minflux_viewer.core.loader_raw_access import attr_values_1d
 
             columns = []
             for name in ("loc_x", "loc_y", "loc_z"):
@@ -327,7 +327,8 @@ class Data(Namespace):
         and for the same reason: silently discarding the user's filters is the
         worse failure.
         """
-        from ..core.loader import attr_values_for_selection
+        from minflux_viewer.core.loader_raw_access import attr_values_for_selection
+
         from ..utils.filters import AGG_MODES, compute_filter_mask
 
         ds = self._dataset(dataset)

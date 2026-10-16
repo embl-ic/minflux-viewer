@@ -230,7 +230,7 @@ def reconstruct_from_channels(datasets) -> dict:
     members. Derived attributes (``den``, ``siz``, …) are omitted — they are
     recomputed by the dataset builder. Returns ``{}`` when nothing usable.
     """
-    from ..core.loader import attr_values_1d
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
 
     datasets = list(datasets)
     xs, ys, zs, tids = [], [], [], []
@@ -272,7 +272,13 @@ def pooled_dcr_per_loc(ds) -> np.ndarray | None:
     Returns ``None`` when the raw store, ``eco``, or the last-valid alignment is
     unavailable (caller then uses the plain materialized DCR).
     """
-    from ..core.loader import _mfx_raw_len, _raw_loc_id, mfx_get, mfx_row_mask
+    from minflux_viewer.core.loader_raw_access import (
+        _mfx_raw_len,
+        _raw_loc_id,
+        mfx_get,
+        mfx_row_mask,
+    )
+
     from ..core.mfx_sequence import photon_iterations_for_dataset
 
     raw = getattr(ds, "mfx_raw", None)

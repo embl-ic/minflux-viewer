@@ -29,6 +29,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from minflux_viewer.core.loader_raw_access import (
+    attr_matches_selection,
+    attr_values_1d,
+    effective_iterations_for_attr,
+    is_value_pool_selector,
+    mfx_filter_mask,
+    mfx_get,
+)
+
 from ..colormaps import (
     colormap_lut,
     custom_colormap_names,
@@ -44,14 +53,6 @@ from ..core.iteration import (
     iteration_labels,
     ordinal,
     parse_iteration_label,
-)
-from ..core.loader import (
-    attr_matches_selection,
-    attr_values_1d,
-    effective_iterations_for_attr,
-    is_value_pool_selector,
-    mfx_filter_mask,
-    mfx_get,
 )
 from ..core.roi_selection import REGION_ROI_TYPES, roi_region_mask
 from .attribute_cpu import (

@@ -80,7 +80,7 @@ def canonical_dataset(
 ):
     """Normalize source mfx once, then expose it to ``save_processed``."""
     _validate_mfx_source(mfx)
-    from ..core.loader import load_from_mfx_array
+    from minflux_viewer.core.loader_format_readers import load_from_mfx_array
 
     # Export is raw and must not depend on the user's valid-only display
     # preference.  mfx_raw is always built from all source rows, and that is

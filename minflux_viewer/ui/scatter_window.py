@@ -36,6 +36,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from minflux_viewer.core.loader_raw_access import attr_values_1d
+
 from ..colormaps import (
     BUILTIN_COLORMAP_NAMES,
     channel_colormap_names,
@@ -51,7 +53,6 @@ from ..core.app_state import AppState
 from ..core.attributes import plot_attribute_names
 from ..core.coordinates import coordinate_view, display_coordinate_view
 from ..core.dataset_key import DatasetKey
-from ..core.loader import attr_values_1d
 from ..core.overlay import (
     identity_matrix4,
     manual_alignment_matrix4,

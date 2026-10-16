@@ -48,12 +48,6 @@
   "minflux_viewer/analysis/image_assisted_segmentation.py": {
    "return-value": 1
   },
-  "minflux_viewer/analysis/localization_precision.py": {
-   "arg-type": 3,
-   "list-item": 2,
-   "operator": 1,
-   "union-attr": 2
-  },
   "minflux_viewer/analysis/npc_geomfit.py": {
    "arg-type": 1
   },
@@ -64,6 +58,12 @@
    "assignment": 1,
    "attr-defined": 1,
    "index": 1
+  },
+  "minflux_viewer/analysis/precision_calculation.py": {
+   "arg-type": 3,
+   "list-item": 2,
+   "operator": 1,
+   "union-attr": 2
   },
   "minflux_viewer/analysis/shape_segmentation.py": {
    "arg-type": 9,
@@ -153,10 +153,16 @@
   "minflux_viewer/core/iteration.py": {
    "call-overload": 1
   },
-  "minflux_viewer/core/loader.py": {
-   "arg-type": 2,
-   "assignment": 13,
+  "minflux_viewer/core/loader_format_readers.py": {
+   "assignment": 5
+  },
+  "minflux_viewer/core/loader_normalization.py": {
+   "assignment": 7,
    "return-value": 2
+  },
+  "minflux_viewer/core/loader_raw_access.py": {
+   "arg-type": 2,
+   "assignment": 1
   },
   "minflux_viewer/core/mbm_file.py": {
    "assignment": 1
@@ -256,6 +262,13 @@
   "minflux_viewer/msr/io.py": {
    "index": 1
   },
+  "minflux_viewer/msr/session_alignment.py": {
+   "arg-type": 1,
+   "assignment": 1
+  },
+  "minflux_viewer/msr/session_export.py": {
+   "arg-type": 4
+  },
   "minflux_viewer/msr/writer.py": {
    "arg-type": 1
   },
@@ -267,6 +280,14 @@
   "minflux_viewer/plugins/generate_method_text/__init__.py": {
    "union-attr": 4
   },
+  "minflux_viewer/plugins/msr_reader/alignment_plot_window.py": {
+   "union-attr": 10,
+   "var-annotated": 4
+  },
+  "minflux_viewer/plugins/msr_reader/array_preview_dialog.py": {
+   "assignment": 1,
+   "union-attr": 1
+  },
   "minflux_viewer/plugins/msr_reader/beads_drift.py": {
    "assignment": 1
   },
@@ -277,13 +298,25 @@
   "minflux_viewer/plugins/msr_reader/drift_correction_dialog.py": {
    "union-attr": 5
   },
+  "minflux_viewer/plugins/msr_reader/export_estimate_task.py": {
+   "dict-item": 1
+  },
+  "minflux_viewer/plugins/msr_reader/field_dialog.py": {
+   "arg-type": 1,
+   "assignment": 1
+  },
+  "minflux_viewer/plugins/msr_reader/json_view_dialog.py": {
+   "assignment": 1,
+   "union-attr": 9
+  },
   "minflux_viewer/plugins/msr_reader/msr_reader_dialog.py": {
-   "arg-type": 8,
-   "assignment": 5,
-   "dict-item": 1,
-   "index": 2,
-   "union-attr": 26,
-   "var-annotated": 5
+   "arg-type": 2,
+   "assignment": 1,
+   "union-attr": 6,
+   "var-annotated": 1
+  },
+  "minflux_viewer/plugins/msr_reader/plot_window.py": {
+   "index": 2
   },
   "minflux_viewer/plugins/spatial_line_pattern/spatial_line_pattern_window.py": {
    "arg-type": 1,
@@ -674,7 +707,7 @@
   "minflux_viewer/analysis/geometry.py": {
    "E702": 2
   },
-  "minflux_viewer/analysis/method_text.py": {
+  "minflux_viewer/analysis/method_rules.py": {
    "F541": 3,
    "F841": 1
   },
@@ -700,9 +733,11 @@
   "minflux_viewer/msr/mbm_drift.py": {
    "UP031": 3
   },
+  "minflux_viewer/msr/session_alignment.py": {
+   "F841": 2
+  },
   "minflux_viewer/plugins/msr_reader/msr_reader_dialog.py": {
-   "E402": 2,
-   "F841": 7
+   "F841": 3
   },
   "minflux_viewer/ui/curvilinear_segmentation_dialog.py": {
    "E702": 2

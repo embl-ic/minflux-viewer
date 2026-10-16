@@ -470,7 +470,7 @@ def _run_hlyb_pairwise_analysis(self: MainWindow, dimensions: int = 3) -> None:
     dimensions = 2 if int(dimensions) == 2 else 3
     import numpy as np
 
-    from ..core.loader import mfx_get
+    from minflux_viewer.core.loader_raw_access import mfx_get
     idx = self._state.active_idx
     if idx is None or self._state.active_dataset is None:
         self._no_data_warning()
@@ -667,7 +667,7 @@ def _run_hlyb_pair_analysis(self: MainWindow, mode: str = "3D") -> None:
         accepts partial 3-D matches to the six-site HlyB distance model."""
     import numpy as np
 
-    from ..core.loader import mfx_get
+    from minflux_viewer.core.loader_raw_access import mfx_get
     mode_text = str(mode).upper()
     if "TEMPLATE" in mode_text:
         mode = "TEMPLATE2D" if "2D" in mode_text else "TEMPLATE3D"

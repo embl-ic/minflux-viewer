@@ -25,7 +25,7 @@ import numpy as np
 
 
 def _materialized_points_nm(ds, z_factor: float) -> np.ndarray:
-    from .loader import attr_values_1d
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
 
     x = attr_values_1d(ds, "loc_x")
     y = attr_values_1d(ds, "loc_y")
@@ -42,7 +42,7 @@ def _materialized_points_nm(ds, z_factor: float) -> np.ndarray:
 
 
 def _last_valid_points_nm(ds, z_factor: float) -> np.ndarray:
-    from .loader import mfx_get
+    from minflux_viewer.core.loader_raw_access import mfx_get
 
     x = mfx_get(ds, "loc_x", itr="last")
     y = mfx_get(ds, "loc_y", itr="last")
@@ -168,7 +168,7 @@ def compute_post_load_results(
         report(f"Computing localization precision of '{ds.name}'")
         try:
             started = time.perf_counter()
-            from .loader import attr_values_1d
+            from minflux_viewer.core.loader_raw_access import attr_values_1d
 
             loc_x = np.asarray(attr_values_1d(ds, "loc_x"))
             loc_y = np.asarray(attr_values_1d(ds, "loc_y"))

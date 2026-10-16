@@ -509,7 +509,7 @@ def dataset_time_inputs(ds) -> tuple:
     because it is the one that resolves a non-last-valid materialization; a
     direct ``ds.attr[...]`` read can be 2-D and would not align.
     """
-    from .loader import attr_values_1d
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
 
     def read(name):
         try:

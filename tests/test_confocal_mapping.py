@@ -431,7 +431,7 @@ def test_manual_mapping_groups_same_geometry_channels_into_one_dialog(monkeypatc
         lambda _path, candidate: np.full(candidate.shape, candidate.raw_index, dtype=float),
     )
     monkeypatch.setattr(
-        "minflux_viewer.core.loader.attr_values_1d",
+        "minflux_viewer.core.loader_raw_access.attr_values_1d",
         lambda _dataset, _name: np.array([0.5, 1.5]),
     )
 

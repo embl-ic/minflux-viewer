@@ -38,6 +38,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from minflux_viewer.core.loader_raw_access import (
+    attr_values_for_selection,
+    effective_iteration_for_attr,
+)
+
 from ..core.app_state import AppState
 from ..core.attributes import is_trace_wise_attribute, plot_attribute_names
 from ..core.filter_io import (
@@ -54,10 +59,6 @@ from ..core.iteration import (
     iteration_selector_label,
     last_label,
     parse_iteration_label,
-)
-from ..core.loader import (
-    attr_values_for_selection,
-    effective_iteration_for_attr,
 )
 from ..utils.filters import AGG_MODES, FLOAT_RESULT_MODES, trace_agg_func
 from .attribute_help import apply_attribute_tooltips

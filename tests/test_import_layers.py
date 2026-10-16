@@ -46,8 +46,6 @@ layers = _tool()
 
 #: Imports that cross the layers the wrong way, as they stand on 9175afb.
 KNOWN_CROSSINGS = frozenset({
-    'analysis.method_text -> plugins (deferred)',
-    'analysis.method_text -> plugins.method (deferred)',
     'core.app_state -> scripting (deferred)',
     'core.recorder -> api (deferred)',
     'utils.paraview_export -> core.dataset (import time)',
@@ -58,7 +56,7 @@ KNOWN_IMPORT_TIME_CYCLES = frozenset()
 
 #: Import cycles once deferred imports are counted too.
 KNOWN_CYCLES = frozenset({
-    ('analysis.method_text', 'plugins', 'plugins.data_simulator',
+    ('plugins', 'plugins.data_simulator',
      'plugins.drift_correction', 'plugins.generate_method_text',
      'plugins.hlyb_pair_analysis', 'plugins.macro_recorder',
      'plugins.msr_reader', 'plugins.paraview', 'plugins.script_editor',
@@ -66,7 +64,11 @@ KNOWN_CYCLES = frozenset({
      'plugins.trace_viewer.trace_viewer_window'),
     # The former cross-layer component split into smaller within-layer
     # components when the backend dependency was inverted.
-    ('core.acquisition_time', 'core.dataset', 'core.loader',
+    # Splitting the old loader component by capability separates the original
+    # dataset/derived-attribute edge from the original reader/save/recipe loop.
+    # No new dependency edge is introduced by these implementation moves.
+    ('core.dataset', 'core.loader_normalization'),
+    ('core.loader_format_readers', 'core.loader_metadata_recipe',
      'core.minflux_zarr', 'core.overlay_save', 'core.save'),
     ('msr.io', 'msr.msr_parser'),
     ('core.processing_journal', 'core.recorder'),
@@ -98,6 +100,20 @@ def _package(tmp_path: Path, files: dict[str, str]) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(textwrap.dedent(text), encoding="utf-8")
     return root
+
+
+def test_internal_import_bases_name_existing_modules():
+    assert not layers.unresolved_modules(layers.PACKAGE_DIR, layers.PACKAGE)
+
+
+def test_missing_module_cannot_hide_behind_a_known_parent(tmp_path):
+    package = _package(tmp_path, {
+        "__init__.py": "",
+        "core/__init__.py": "",
+        "ui/__init__.py": "",
+        "ui/view.py": "from ..core.missing import Result\n",
+    })
+    assert layers.unresolved_modules(package, "pkg") == {"pkg.ui.view:1: pkg.core.missing"}
 
 
 def _edges(root: Path) -> set[tuple[str, str, str]]:

@@ -177,7 +177,8 @@ def extract_cells(ds, records, *, dataset_idx: int = 0,
     Returns ``(cells, skipped)`` where *skipped* explains every ROI that yielded
     no usable cell, so the caller can report it rather than silently dropping it.
     """
-    from .loader import mfx_get
+    from minflux_viewer.core.loader_raw_access import mfx_get
+
     from .roi_crop import compute_crop_mask
 
     def column(attr):

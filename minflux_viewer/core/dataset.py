@@ -705,7 +705,10 @@ def build_localization_dataset(
     ``None`` to synthesise a 1..N index (→ non-MINFLUX). ``is_minflux`` defaults
     to "a real tid was supplied". Sets ``metadata`` flags accordingly.
     """
-    from .loader import _add_derived_attributes, _compute_properties
+    from minflux_viewer.core.loader_normalization import (
+        _add_derived_attributes,
+        _compute_properties,
+    )
 
     x_nm = np.asarray(x_nm, dtype=float).ravel()
     y_nm = np.asarray(y_nm, dtype=float).ravel()

@@ -316,7 +316,7 @@ def raw_last_valid_loc_nm(ds) -> tuple[np.ndarray, np.ndarray] | None:
     the estimate circular and dependent on the current calibration).
     Returns ``None`` if coordinates are unavailable.
     """
-    from ..core.loader import mfx_get
+    from minflux_viewer.core.loader_raw_access import mfx_get
 
     def _col(name: str) -> np.ndarray | None:
         v = mfx_get(ds, name, itr="last", vld_only=True)

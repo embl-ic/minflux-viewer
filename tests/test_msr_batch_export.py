@@ -816,9 +816,9 @@ def test_export_reports_one_progress_unit_per_dataset_and_image(tmp_path,
             {"display_name": "b", "_mfx": arr, "_mbm": None},
         ],
     }
-    monkeypatch.setattr(mod, "image_series_of", lambda *a, **k: [
+    monkeypatch.setattr("minflux_viewer.msr.session_export.image_series_of", lambda *a, **k: [
         {"raw_index": 0, "name": "img"}])
-    monkeypatch.setattr(mod, "export_image_series", lambda *a, **k: None)
+    monkeypatch.setattr("minflux_viewer.msr.session_export.export_image_series", lambda *a, **k: None)
     import minflux_viewer.msr.export as export_mod
     def _fake_export(*_a, on_prepared=None, on_format=None, **_k):
         if on_prepared is not None:
@@ -897,7 +897,8 @@ def test_batch_task_runs_files_and_reports_progress(tmp_path, monkeypatch):
 
     monkeypatch.setattr(msr_mod, "parse_msr_general",
                         lambda *a, **k: {"mode": "modern", "datasets": []})
-    monkeypatch.setattr(mod, "export_parsed_result", lambda *a, **k: None)
+    monkeypatch.setattr("minflux_viewer.plugins.msr_reader.batch_export_task.export_parsed_result",
+                        lambda *a, **k: None)
 
     task = mod._BatchExportTask(files, targets, ["mat"], str(tmp_path),
                                 mfx_sel=None, mbm_sel=None, image_names=None,
@@ -930,7 +931,7 @@ def test_batch_task_cancel_stops_at_the_next_file(tmp_path, monkeypatch):
                                 mfx_sel=None, mbm_sel=None, image_names=None,
                                 field_selection={})
     # Cancel while the first file is "exporting".
-    monkeypatch.setattr(mod, "export_parsed_result",
+    monkeypatch.setattr("minflux_viewer.plugins.msr_reader.batch_export_task.export_parsed_result",
                         lambda *a, **k: task.cancel())
     results = []
     task.signals.finished.connect(
@@ -961,7 +962,7 @@ def test_batch_task_records_a_failure_without_stopping(tmp_path, monkeypatch):
         if calls["n"] == 2:
             raise RuntimeError("bad file")
 
-    monkeypatch.setattr(mod, "export_parsed_result", _boom)
+    monkeypatch.setattr("minflux_viewer.plugins.msr_reader.batch_export_task.export_parsed_result", _boom)
     results = []
     task = mod._BatchExportTask(files, targets, ["mat"], str(tmp_path),
                                 mfx_sel=None, mbm_sel=None, image_names=None,

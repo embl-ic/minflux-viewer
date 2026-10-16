@@ -21,8 +21,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..analysis import localization_precision as _calculation
-from ..analysis.localization_precision import (
+from ..analysis import precision_calculation as _calculation
+from ..analysis.precision_calculation import (
     _SQRT2,
     CRLB_DEFAULT_L_NM,
     CRLB_DEFAULT_SIGMA_Q_NM,
@@ -85,7 +85,7 @@ def run_frc(parent, state) -> None:
                           f"This analysis requires {missing_reason(miss)}.")
         return
 
-    from ..core.loader import attr_values_1d
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
     loc_x = attr_values_1d(ds, "loc_x")
     loc_y = attr_values_1d(ds, "loc_y")
 
@@ -141,7 +141,7 @@ def run_stddev_per_trace(parent, state) -> None:
             f"This analysis requires {missing_reason(miss)}.")
         return
 
-    from ..core.loader import attr_values_1d
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
     loc_x = np.asarray(attr_values_1d(ds, "loc_x"))
     loc_y = np.asarray(attr_values_1d(ds, "loc_y"))
     # Raw z — no Z scaling factor applied. The precision is a property of the measurement,

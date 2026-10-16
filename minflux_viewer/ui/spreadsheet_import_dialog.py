@@ -580,7 +580,7 @@ def build_spreadsheet_dataset(
 ):
     """Build from a dialog snapshot without reading any Qt widget state."""
     if spec.get("canonical"):
-        from ..core.loader import load_csv
+        from minflux_viewer.core.loader_format_readers import load_csv
 
         return load_csv(
             table.path, prefs=prefs, apply_sidecar=apply_sidecar
@@ -629,7 +629,7 @@ def import_spreadsheet(path, *, prefs: dict | None = None, parent=None, log=None
     """
     kind = minflux_direct_load_kind(path)
     if kind is not None:
-        from ..core.loader import load_csv
+        from minflux_viewer.core.loader_format_readers import load_csv
 
         if log is not None:
             log(f"'{Path(path).name}': canonical MINFLUX {kind} table — "

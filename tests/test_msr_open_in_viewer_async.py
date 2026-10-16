@@ -42,7 +42,7 @@ def _flat_mfx(n: int = 1000, n_itr: int = 4, seed: int = 0) -> np.ndarray:
 
 def test_block_copy_matches_the_field_by_field_copy(monkeypatch):
     mfx = _flat_mfx(1003)                           # not a multiple of the block
-    monkeypatch.setattr(loader, "_FIELD_COPY_BLOCK_ROWS", 64)
+    monkeypatch.setattr("minflux_viewer.core.loader_normalization._FIELD_COPY_BLOCK_ROWS", 64)
     seen: list[float] = []
     cols = loader._mfx_columns(mfx, seen.append)
     for name in mfx.dtype.names:

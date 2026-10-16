@@ -310,7 +310,7 @@ class DriftCorrectionWindow(QDialog):
         if not is_minflux(ds):
             return ("The active dataset is not a MINFLUX dataset (no trace ids), "
                     "so drift correction cannot use the time information.")
-        from ...core.loader import mfx_get
+        from minflux_viewer.core.loader_raw_access import mfx_get
         try:
             t = mfx_get(ds, "tim", itr="last", vld_only=True)
         except Exception:
@@ -342,7 +342,7 @@ class DriftCorrectionWindow(QDialog):
 
     def _gather(self, ds, dims):
         """Last-valid display coordinates (nm) and times (s)."""
-        from ...core.loader import mfx_get
+        from minflux_viewer.core.loader_raw_access import mfx_get
         cols = [mfx_get(ds, k, itr="last", vld_only=True) for k in ("xnm", "ynm", "znm")[:dims]]
         t = mfx_get(ds, "tim", itr="last", vld_only=True)
         return [np.asarray(c, dtype=float) for c in cols], np.asarray(t, dtype=float)
@@ -361,7 +361,7 @@ class DriftCorrectionWindow(QDialog):
         specs are re-evaluated exactly as the snapshot export does, each at its
         own iteration (cfr/efc at the one they are measured at).
         """
-        from ...core.loader import mfx_filter_mask
+        from minflux_viewer.core.loader_raw_access import mfx_filter_mask
         specs = ds.state.get("filter_specs") or []
         if not specs:
             return np.ones(n, dtype=bool), [], []
@@ -802,8 +802,9 @@ class DriftCorrectionWindow(QDialog):
                                 f"Could not create corrected dataset:\n{exc}")
 
     def _build_corrected_dataset(self, ds, est: DriftEstimate):
+        from minflux_viewer.core.loader_raw_access import last_valid_attr_values, mfx_get
+
         from ...core.dataset import build_localization_dataset
-        from ...core.loader import last_valid_attr_values, mfx_get
 
         coords = np.asarray(est.coords_nm, dtype=float)
         n = coords.shape[0]

@@ -9,6 +9,8 @@ from math import isfinite
 
 import numpy as np
 
+from minflux_viewer.core.loader_normalization import _build_channel, _compute_properties
+
 from .dataset import (
     AttributeComponent,
     AttrStore,
@@ -16,7 +18,6 @@ from .dataset import (
     FileInfo,
     MinfluxDataset,
 )
-from .loader import _build_channel, _compute_properties
 
 _OVERLAY_KEYS = (
     "overlay_id",

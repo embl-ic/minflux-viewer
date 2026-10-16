@@ -196,7 +196,7 @@ def _channel_dataset(state, ch):
 
 
 def _trace_ids(ds, n: int) -> np.ndarray:
-    from .loader import attr_values_1d
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
     tid = attr_values_1d(ds, "tid")
     if tid is None:
         return np.arange(n)
@@ -345,8 +345,9 @@ def subset_dataset(src, keep_mask, *, name: str, prefs: dict | None = None):
     the subset is a clean standalone dataset whose Z scaling factor/dimensionality are
     re-derived like any fresh load.
     """
+    from minflux_viewer.core.loader_raw_access import attr_values_1d
+
     from .dataset import build_localization_dataset
-    from .loader import attr_values_1d
 
     keep = np.asarray(keep_mask, dtype=bool).ravel()
     n = int(getattr(src.prop, "num_loc", keep.size))
