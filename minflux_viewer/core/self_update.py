@@ -107,7 +107,7 @@ def is_writable(path) -> bool:
         probe.write_bytes(b"")
         probe.unlink()
         return True
-    except Exception:
+    except OSError:
         return False
 
 

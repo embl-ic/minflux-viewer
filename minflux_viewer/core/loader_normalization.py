@@ -143,7 +143,7 @@ def _raw_localization_count(raw: dict) -> int:
                 return int(arr.shape[1])
             return int(arr.shape[0])
         return int(arr.shape[0])
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         return 0
 
 
@@ -175,7 +175,7 @@ def _raw_iteration_count(raw: dict) -> int:
             return int(arr.shape[1])
         if arr.ndim == 3:
             return int(arr.shape[1])
-    except Exception:
+    except (AttributeError, TypeError, ValueError, OverflowError):
         pass
     return 1
 
@@ -226,7 +226,7 @@ def _effective_iteration_column(raw: dict, field: str) -> int | None:
         vld = np.asarray(merged.get("vld", np.ones(num_loc, bool)), dtype=bool).ravel()
         col = int(np.argmax(np.nansum(np.abs(arr[vld, :]), axis=0)))
         return col + 1
-    except Exception:
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         return None
 
 
@@ -747,7 +747,7 @@ def _build_mfx_raw_from_json_records(records: list) -> AttrStore:
 
     try:
         loc_m = _json_coordinate_array_m(records)
-    except Exception:
+    except (IndexError, KeyError, TypeError, ValueError):
         return AttrStore()
     mfx["loc_x"] = loc_m[:, 0]
     mfx["loc_y"] = loc_m[:, 1]
@@ -1050,7 +1050,7 @@ def _iteration_count(values: np.ndarray, fallback: int) -> int:
         finite = finite[np.isfinite(finite)]
         if finite.size:
             return max(int(np.unique(finite).size), 1)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         pass
     return max(int(fallback), 1)
 
@@ -1078,7 +1078,7 @@ def _normalize_mfx_attrs(
         nested_names = list(getattr(itr_base, "names", []) or [])
         try:
             itr_values = np.asarray(nested["itr"])
-        except Exception:
+        except (KeyError, TypeError, ValueError):
             itr_values = np.tile(np.arange(num_itr_slots), (num_measurements, 1))
         num_itr = _iteration_count(itr_values, num_itr_slots)
 
@@ -1092,7 +1092,7 @@ def _normalize_mfx_attrs(
                 if not np.any(select_mask):
                     select_mask = np.zeros((num_measurements, num_itr_slots), dtype=bool)
                     select_mask[:, -1] = True
-            except Exception:
+            except (TypeError, ValueError):
                 select_mask = np.zeros((num_measurements, num_itr_slots), dtype=bool)
                 select_mask[:, -1] = True
         flat_select = select_mask.ravel()

@@ -14,9 +14,11 @@ def to_numpy(arr_like):
     if isinstance(arr_like, np.ndarray):
         return arr_like
     try:
-        return np.asarray(arr_like[:])  # zarr arrays
-    except Exception:
+        values = arr_like[:]  # zarr arrays
+    except TypeError:  # an array protocol without slice support
         return np.array(arr_like)
+    # I/O, allocation and conversion failures are not missing slice support.
+    return np.asarray(values)
 
 def to_2d(a: np.ndarray) -> np.ndarray:
     if a.ndim <= 2:

@@ -98,7 +98,7 @@ def _points_of(ds):
         mbm = getattr(ds, "mbm", None)
         try:
             points = mbm.get("points") if mbm is not None else None
-        except Exception:
+        except (AttributeError, TypeError):
             points = None
     if points is None or getattr(points, "dtype", None) is None:
         return None

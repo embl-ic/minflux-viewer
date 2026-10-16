@@ -206,11 +206,9 @@ def apply_viewer_state(ds, payload: dict | None) -> list[str]:
     calibration = ((payload.get("dataset") or {}).get("calibration") or {})
     z = calibration.get("z_scaling_factor")
     if z is not None:
-        try:
-            ds.set_z_scaling_factor(float(z), source="restored (.msr viewer state)")
-            applied.append(f"Z scaling factor {float(z):g}")
-        except Exception:                               # noqa: BLE001 - defensive
-            ds.cali.z_scaling_factor = float(z)
+        # Restoration follows the same provenance/write path as every other edit.
+        ds.set_z_scaling_factor(float(z), source="restored (.msr viewer state)")
+        applied.append(f"Z scaling factor {float(z):g}")
 
     rois = payload.get("rois")
     if isinstance(rois, list) and rois:

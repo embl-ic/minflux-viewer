@@ -770,7 +770,7 @@ def _attrs_include_invalid(attrs: AttrStore) -> bool:
         return False
     try:
         return bool(np.any(~np.asarray(vld).astype(bool).ravel()))
-    except Exception:
+    except (TypeError, ValueError):
         return False
 
 
@@ -782,7 +782,7 @@ def _attrs_valid_count(attrs: AttrStore, fallback: int) -> int:
         return int(fallback)
     try:
         return int(np.asarray(vld).astype(bool).ravel().sum())
-    except Exception:
+    except (TypeError, ValueError):
         return int(fallback)
 
 

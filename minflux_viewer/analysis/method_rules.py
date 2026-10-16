@@ -76,7 +76,7 @@ def _render_load(m, ev, state):
     validity = "all (valid and invalid)" if summary["includes_invalid"] else "only valid"
     try:
         valid_str = f"{int(valid):,}"
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         valid_str = str(valid)
     return (
         f"A MINFLUX dataset '{name}' was loaded into the MINFLUX Data Viewer. The data was "
@@ -103,7 +103,7 @@ def _overlay_members(state, ev):
     try:
         from minflux_viewer.core.overlay import overlay_members
         members = overlay_members(state, idx) if idx is not None else []
-    except Exception:
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         members = []
     return [dataset_summary(m) for _i, m in members] or [dataset_summary(ds)]
 
@@ -113,7 +113,7 @@ def _channel_desc(summary):
     valid = summary.get("valid_num_loc", summary.get("num_loc", 0))
     try:
         valid_s = f"{int(valid):,}"
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         valid_s = str(valid)
     ndim = int(summary.get("num_dim", 2) or 2)
     ntr = int(summary.get("num_traces", 0) or 0)
@@ -126,7 +126,7 @@ def _fmt_matrix(mat):
     try:
         rows = ["[" + ", ".join(f"{float(v):.4g}" for v in r) + "]" for r in mat]
         return "[" + ", ".join(rows) + "]"
-    except Exception:
+    except (TypeError, ValueError):
         return str(mat)
 
 
@@ -142,7 +142,7 @@ def _describe_alignment(mover, ref, t):
     if rot:
         try:
             angle = math.degrees(math.atan2(float(rot[1][0]), float(rot[0][0])))
-        except Exception:
+        except (IndexError, KeyError, TypeError, ValueError, OverflowError):
             angle = 0.0
     nbeads = int(t.get("matched_bead_count", 0) or 0)
     rmse = float(t.get("rmse_xy_nm", 0.0) or 0.0)

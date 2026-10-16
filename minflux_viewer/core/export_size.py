@@ -178,7 +178,7 @@ def _estimate_zarr_data(array: np.ndarray) -> int:
     """Estimate compressed array bytes, excluding images and viewer metadata."""
     try:
         from numcodecs import Blosc
-    except Exception:
+    except ImportError:
         # Conservative fallback when the optional runtime is not importable.
         return int(round(array.nbytes * 0.25))
 

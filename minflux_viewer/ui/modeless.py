@@ -421,7 +421,7 @@ def close_modeless(owner: QWidget | None) -> None:
     for window in list(getattr(owner, "_modeless_windows", []) or []):
         try:
             window.close()
-        except Exception:
+        except RuntimeError:  # C++ peer already deleted
             pass
     if owner is not None and hasattr(owner, "_modeless_windows"):
         owner._modeless_windows = []

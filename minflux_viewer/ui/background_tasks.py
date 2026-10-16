@@ -10,6 +10,7 @@ in ``core/execution.py``.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable
 from threading import Event
 from typing import Any
@@ -20,6 +21,7 @@ from ..core.execution import pool_size
 from .qt_lifecycle import disconnect_signal, qobject_alive
 
 _SHARED_POOLS: dict[str, QThreadPool] = {}
+_LOG = logging.getLogger(__name__)
 _LIVE_QTHREADS: set[Any] = set()
 _COMMON_SIGNAL_NAMES = (
     "stage",
@@ -139,16 +141,16 @@ class BackgroundTask(QRunnable):
             return
         try:
             self._discard_result(result)
-        except Exception:
-            pass
+        except Exception:  # caller-supplied cleanup must not suppress terminal signals
+            _LOG.exception("Could not discard result for %s", self.description)
 
     def _run_finally(self) -> None:
         if self._finally_callback is None:
             return
         try:
             self._finally_callback()
-        except Exception:
-            pass
+        except Exception:  # caller-supplied cleanup must not suppress terminal signals
+            _LOG.exception("Final cleanup failed for %s", self.description)
 
 
 def shared_thread_pool(name: str, *, max_threads: int | None = None) -> QThreadPool:

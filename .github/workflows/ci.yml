@@ -55,6 +55,8 @@ jobs:
           poetry sync
       - name: Ruff and mypy may not gain findings
         run: poetry run python tools/lint_ratchet.py
+      - name: Broad and silently ignored exception counts may not grow
+        run: poetry run python tools/exception_ratchet.py
       - name: No whitespace errors anywhere in the tree
         shell: bash
         # Against the empty tree, so every committed file is checked, not only

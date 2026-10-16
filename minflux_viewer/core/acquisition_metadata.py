@@ -86,7 +86,7 @@ def _json_object_at(data, start: int) -> dict | None:
             if depth == 0:
                 try:
                     return json.loads(data[begin:pos + 1].decode("utf-8"))
-                except Exception:
+                except (UnicodeDecodeError, json.JSONDecodeError):
                     return None
     return None
 
@@ -104,7 +104,7 @@ def _rois_from_block(block: dict) -> list[AcquisitionRoi]:
             out.append(AcquisitionRoi(
                 did=str(entry.get("linked_dta") or ""),
                 x0=float(x0), y0=float(y0), x1=float(x1), y1=float(y1)))
-        except Exception:
+        except (TypeError, ValueError, IndexError):
             continue
     return out
 
@@ -133,7 +133,7 @@ def read_acquisition_rois(msr_path) -> list[AcquisitionRoi]:
                     pos = data.find(_ROIS_KEY, pos + len(_ROIS_KEY))
             finally:
                 data.close()
-    except Exception:
+    except (OSError, ValueError):  # unavailable or empty file
         return []
     return found
 
@@ -209,6 +209,6 @@ def extract_did_label_map(msr_path) -> dict[str, str]:
                     )
             finally:
                 mm.close()
-    except Exception:
+    except (OSError, ValueError):  # unavailable or empty file
         pass
     return out

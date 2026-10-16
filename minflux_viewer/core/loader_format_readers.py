@@ -361,7 +361,7 @@ def load_from_mfx_array(
     if only_valid and "vld" in attrs:
         try:
             valid_mask &= np.asarray(attrs["vld"], dtype=bool).ravel()
-        except Exception:
+        except (TypeError, ValueError):
             pass
 
     loc_x = np.asarray(attrs.get("loc_x", np.full(num_raw, np.nan)), dtype=float).ravel()
@@ -384,7 +384,7 @@ def load_from_mfx_array(
                     num_itr = last_itr + 1
                 if not load_all_itr:
                     valid_mask &= itr_raw == last_itr
-        except Exception:
+        except (IndexError, TypeError, ValueError, OverflowError):
             pass
 
     for key, val in list(attrs.items()):

@@ -1,0 +1,610 @@
+{
+  "minflux_viewer/__main__.py": {
+    "broad": 1,
+    "silent": 1
+  },
+  "minflux_viewer/analysis/aggregation.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/analysis/curvilinear_segmentation.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/analysis/drift_estimators.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/analysis/hlyb_clustering.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/analysis/hlyb_pairwise.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/analysis/hlyb_staged.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/analysis/image_assisted_segmentation.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/analysis/method_text.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/analysis/npc_geomfit.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/analysis/trace_analysis.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/api/plot.py": {
+    "broad": 5,
+    "silent": 0
+  },
+  "minflux_viewer/api/roi.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/api/ui.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/acquisition_time.py": {
+    "broad": 3,
+    "silent": 2
+  },
+  "minflux_viewer/core/app_state.py": {
+    "broad": 6,
+    "silent": 4
+  },
+  "minflux_viewer/core/cell_collection.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/channel_flatten.py": {
+    "broad": 3,
+    "silent": 2
+  },
+  "minflux_viewer/core/channel_labels.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/confocal_mapping.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/coordinates.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/dataset_reset.py": {
+    "broad": 2,
+    "silent": 1
+  },
+  "minflux_viewer/core/filter_io.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/format_sniff.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/formats.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/mbm_file.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/min_enclosing.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/minflux_zarr.py": {
+    "broad": 5,
+    "silent": 0
+  },
+  "minflux_viewer/core/obf_image_source.py": {
+    "broad": 9,
+    "silent": 1
+  },
+  "minflux_viewer/core/overlay.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/particle_extract.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/core/particle_set.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/post_load.py": {
+    "broad": 4,
+    "silent": 0
+  },
+  "minflux_viewer/core/roi.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/roi_convert.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/core/roi_crop.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/roi_depth.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/roi_fit.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/roi_volume.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/core/save.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/task_registry.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/tiff_roi.py": {
+    "broad": 3,
+    "silent": 0
+  },
+  "minflux_viewer/core/tiff_source.py": {
+    "broad": 14,
+    "silent": 5
+  },
+  "minflux_viewer/core/tracking_time.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/core/updater.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/core/user_libs.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/msr/import_stamp.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/msr/io.py": {
+    "broad": 2,
+    "silent": 1
+  },
+  "minflux_viewer/msr/legacy_mbm.py": {
+    "broad": 7,
+    "silent": 1
+  },
+  "minflux_viewer/msr/mbm_drift.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/msr/mfxdta.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/msr/msr_parser.py": {
+    "broad": 6,
+    "silent": 1
+  },
+  "minflux_viewer/msr/session_alignment.py": {
+    "broad": 9,
+    "silent": 4
+  },
+  "minflux_viewer/msr/session_export.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/msr/transplant.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/msr/viewer_import.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/msr/viewer_state.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/plugins/__init__.py": {
+    "broad": 5,
+    "silent": 1
+  },
+  "minflux_viewer/plugins/drift_correction/drift_correction_window.py": {
+    "broad": 10,
+    "silent": 4
+  },
+  "minflux_viewer/plugins/generate_method_text/__init__.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/plugins/hlyb_pair_analysis/main.py": {
+    "broad": 3,
+    "silent": 0
+  },
+  "minflux_viewer/plugins/loader.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/plugins/msr_reader/alignment_plot_window.py": {
+    "broad": 12,
+    "silent": 11
+  },
+  "minflux_viewer/plugins/msr_reader/batch_export_task.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/plugins/msr_reader/beads_drift.py": {
+    "broad": 1,
+    "silent": 1
+  },
+  "minflux_viewer/plugins/msr_reader/beads_drift_dialog.py": {
+    "broad": 2,
+    "silent": 2
+  },
+  "minflux_viewer/plugins/msr_reader/drift_correction_dialog.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/plugins/msr_reader/export_estimate_task.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/plugins/msr_reader/metadata_helpers.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/plugins/msr_reader/msr_reader_dialog.py": {
+    "broad": 25,
+    "silent": 3
+  },
+  "minflux_viewer/plugins/msr_reader/parse_worker.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/plugins/msr_reader/parsed_export_task.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/plugins/msr_reader/viewer_alignment_dialog.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/plugins/paraview/__init__.py": {
+    "broad": 4,
+    "silent": 1
+  },
+  "minflux_viewer/plugins/spatial_line_pattern/__init__.py": {
+    "broad": 4,
+    "silent": 3
+  },
+  "minflux_viewer/plugins/spatial_line_pattern/spatial_line_pattern_window.py": {
+    "broad": 7,
+    "silent": 2
+  },
+  "minflux_viewer/plugins/trace_viewer/trace_data.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/plugins/trace_viewer/trace_viewer_window.py": {
+    "broad": 3,
+    "silent": 0
+  },
+  "minflux_viewer/scripting.py": {
+    "broad": 4,
+    "silent": 4
+  },
+  "minflux_viewer/ui/attribute_separation_dialog.py": {
+    "broad": 11,
+    "silent": 8
+  },
+  "minflux_viewer/ui/attribute_window.py": {
+    "broad": 23,
+    "silent": 11
+  },
+  "minflux_viewer/ui/background_tasks.py": {
+    "broad": 3,
+    "silent": 0
+  },
+  "minflux_viewer/ui/colormap_order_dialog.py": {
+    "broad": 2,
+    "silent": 1
+  },
+  "minflux_viewer/ui/command_finder.py": {
+    "broad": 4,
+    "silent": 1
+  },
+  "minflux_viewer/ui/console_window.py": {
+    "broad": 3,
+    "silent": 2
+  },
+  "minflux_viewer/ui/conv_segmentation_dialog.py": {
+    "broad": 5,
+    "silent": 4
+  },
+  "minflux_viewer/ui/crop_dialog.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/ui/curvilinear_segmentation_dialog.py": {
+    "broad": 4,
+    "silent": 2
+  },
+  "minflux_viewer/ui/data_simulator_window.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/ui/data_window.py": {
+    "broad": 3,
+    "silent": 2
+  },
+  "minflux_viewer/ui/dataset_manager.py": {
+    "broad": 5,
+    "silent": 0
+  },
+  "minflux_viewer/ui/density_analysis.py": {
+    "broad": 7,
+    "silent": 5
+  },
+  "minflux_viewer/ui/figure_export.py": {
+    "broad": 6,
+    "silent": 4
+  },
+  "minflux_viewer/ui/file_manager.py": {
+    "broad": 1,
+    "silent": 1
+  },
+  "minflux_viewer/ui/file_open_controller.py": {
+    "broad": 18,
+    "silent": 3
+  },
+  "minflux_viewer/ui/filter_dialog.py": {
+    "broad": 8,
+    "silent": 2
+  },
+  "minflux_viewer/ui/floating_colorbar.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/ui/floating_legend.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/ui/gpu_capabilities.py": {
+    "broad": 5,
+    "silent": 1
+  },
+  "minflux_viewer/ui/histogram_window.py": {
+    "broad": 15,
+    "silent": 8
+  },
+  "minflux_viewer/ui/hlyb_clustering_dialog.py": {
+    "broad": 11,
+    "silent": 7
+  },
+  "minflux_viewer/ui/hlyb_collection_dialog.py": {
+    "broad": 4,
+    "silent": 0
+  },
+  "minflux_viewer/ui/hlyb_pairwise_dialog.py": {
+    "broad": 2,
+    "silent": 1
+  },
+  "minflux_viewer/ui/image_roi_overlay.py": {
+    "broad": 4,
+    "silent": 3
+  },
+  "minflux_viewer/ui/layer_brightness.py": {
+    "broad": 1,
+    "silent": 1
+  },
+  "minflux_viewer/ui/log_window.py": {
+    "broad": 1,
+    "silent": 1
+  },
+  "minflux_viewer/ui/lut_dialog.py": {
+    "broad": 1,
+    "silent": 1
+  },
+  "minflux_viewer/ui/macro_recorder_window.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/ui/main_window.py": {
+    "broad": 3,
+    "silent": 3
+  },
+  "minflux_viewer/ui/mbm_info_window.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/ui/memory_monitor.py": {
+    "broad": 1,
+    "silent": 1
+  },
+  "minflux_viewer/ui/menu_controller.py": {
+    "broad": 10,
+    "silent": 4
+  },
+  "minflux_viewer/ui/metadata_viewer.py": {
+    "broad": 4,
+    "silent": 0
+  },
+  "minflux_viewer/ui/modeless.py": {
+    "broad": 7,
+    "silent": 3
+  },
+  "minflux_viewer/ui/ortho_roi.py": {
+    "broad": 3,
+    "silent": 2
+  },
+  "minflux_viewer/ui/ortho_view.py": {
+    "broad": 20,
+    "silent": 11
+  },
+  "minflux_viewer/ui/overlay_controller.py": {
+    "broad": 9,
+    "silent": 7
+  },
+  "minflux_viewer/ui/particle_average_dialog.py": {
+    "broad": 12,
+    "silent": 0
+  },
+  "minflux_viewer/ui/particle_inspector.py": {
+    "broad": 4,
+    "silent": 3
+  },
+  "minflux_viewer/ui/plot_format.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/ui/plot_profile_dialog.py": {
+    "broad": 4,
+    "silent": 1
+  },
+  "minflux_viewer/ui/post_load_controller.py": {
+    "broad": 5,
+    "silent": 0
+  },
+  "minflux_viewer/ui/precision_analysis.py": {
+    "broad": 8,
+    "silent": 3
+  },
+  "minflux_viewer/ui/precision_render.py": {
+    "broad": 2,
+    "silent": 1
+  },
+  "minflux_viewer/ui/precision_render_window.py": {
+    "broad": 5,
+    "silent": 0
+  },
+  "minflux_viewer/ui/qt_lifecycle.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/ui/render_window.py": {
+    "broad": 35,
+    "silent": 17
+  },
+  "minflux_viewer/ui/results_table.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/ui/roi_command_controller.py": {
+    "broad": 33,
+    "silent": 12
+  },
+  "minflux_viewer/ui/roi_highlight.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/ui/roi_manager.py": {
+    "broad": 3,
+    "silent": 0
+  },
+  "minflux_viewer/ui/roi_overlay.py": {
+    "broad": 59,
+    "silent": 27
+  },
+  "minflux_viewer/ui/save_export_controller.py": {
+    "broad": 4,
+    "silent": 0
+  },
+  "minflux_viewer/ui/scale_bar.py": {
+    "broad": 10,
+    "silent": 6
+  },
+  "minflux_viewer/ui/scatter_window.py": {
+    "broad": 29,
+    "silent": 19
+  },
+  "minflux_viewer/ui/script_editor_window.py": {
+    "broad": 3,
+    "silent": 0
+  },
+  "minflux_viewer/ui/shape_segmentation_dialog.py": {
+    "broad": 4,
+    "silent": 1
+  },
+  "minflux_viewer/ui/spreadsheet_import_dialog.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/ui/straightened_volume_dialog.py": {
+    "broad": 8,
+    "silent": 3
+  },
+  "minflux_viewer/ui/task_monitor.py": {
+    "broad": 4,
+    "silent": 1
+  },
+  "minflux_viewer/ui/tiff_export_dialog.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/ui/tiff_viewer_window.py": {
+    "broad": 11,
+    "silent": 8
+  },
+  "minflux_viewer/ui/tile_cache.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/ui/trace_analysis_dialogs.py": {
+    "broad": 6,
+    "silent": 1
+  },
+  "minflux_viewer/ui/tracking_analysis_window.py": {
+    "broad": 4,
+    "silent": 0
+  },
+  "minflux_viewer/ui/tracking_window.py": {
+    "broad": 4,
+    "silent": 0
+  },
+  "minflux_viewer/ui/update_dialog.py": {
+    "broad": 4,
+    "silent": 1
+  },
+  "minflux_viewer/ui/volume_window.py": {
+    "broad": 8,
+    "silent": 1
+  },
+  "minflux_viewer/ui/window_controller.py": {
+    "broad": 22,
+    "silent": 10
+  },
+  "minflux_viewer/ui/window_support.py": {
+    "broad": 1,
+    "silent": 0
+  },
+  "minflux_viewer/utils/obf_compat.py": {
+    "broad": 2,
+    "silent": 0
+  },
+  "minflux_viewer/utils/zarr2.py": {
+    "broad": 2,
+    "silent": 0
+  }
+}

@@ -27,7 +27,7 @@ def rectangle_bounds(record: RoiRecord) -> tuple[float, float, float, float] | N
         return None
     try:
         x, y, w, h = record.geometry["bounds"]
-    except Exception:
+    except (AttributeError, KeyError, TypeError, ValueError):
         return None
     x0, x1 = sorted((float(x), float(x) + float(w)))
     y0, y1 = sorted((float(y), float(y) + float(h)))
@@ -104,7 +104,7 @@ def oval_mask(x, y, record, *, base_mask=None) -> np.ndarray:
     out = np.zeros(n, dtype=bool)
     try:
         bx, by, bw, bh = (float(v) for v in record.geometry["bounds"])
-    except Exception:
+    except (AttributeError, KeyError, TypeError, ValueError):
         return out
     if n == 0:
         return out

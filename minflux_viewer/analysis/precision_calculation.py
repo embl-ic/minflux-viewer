@@ -208,10 +208,11 @@ def _rfft2(img: np.ndarray) -> np.ndarray:
     """
     try:
         from scipy.fft import rfft2
-        with cpu_threads() as workers:
-            return rfft2(img, workers=workers)
-    except Exception:                       # pragma: no cover - scipy present
+    except ImportError:
         return np.fft.rfft2(img)
+    # Once selected, a backend failure must not silently select another FFT.
+    with cpu_threads() as workers:
+        return rfft2(img, workers=workers)
 
 
 @lru_cache(maxsize=4)
@@ -274,9 +275,9 @@ def _smooth_frc(y: np.ndarray) -> np.ndarray:
         return y
     try:
         from scipy.signal import savgol_filter
-        return savgol_filter(y, 7, 1)
-    except Exception:                       # pragma: no cover - scipy always present
+    except ImportError:
         return np.convolve(y, np.ones(3) / 3, mode="same")
+    return savgol_filter(y, 7, 1)
 
 
 def _frc_crossing(freq: np.ndarray, frc: np.ndarray, threshold: float) -> float:
@@ -1085,7 +1086,7 @@ def _measured_trace_precision(ds) -> dict | None:
         _z = attr_values_1d(ds, "loc_z")
         lz = np.zeros_like(lx) if _z is None else np.asarray(_z, dtype=float)
         _tid = attr_values_1d(ds, "tid")
-    except Exception:
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         return None
     if _tid is None or lx.size == 0:
         return None
@@ -1161,7 +1162,7 @@ def crlb_inputs_for_dataset(ds, *, prefs=None) -> dict | None:
         # This iteration's values only — no fallback to the materialized view.
         try:
             v = iteration_attr_values_1d(ds, name, iteration, itr="last", vld_only=True)
-        except Exception:
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
             return None
         if v is None:
             return None

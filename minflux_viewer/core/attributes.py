@@ -218,7 +218,7 @@ def _dataset_attribute_keys(dataset) -> list[str]:
     if attr is not None:
         try:
             attr_keys = attr.keys()
-        except Exception:
+        except (AttributeError, TypeError):
             attr_keys = []
         for name in attr_keys:
             if name not in seen:

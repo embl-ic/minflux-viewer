@@ -24,6 +24,38 @@ def _dataset(name: str, prefs: dict):
     )
 
 
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_background_cleanup_failures_are_logged_without_losing_terminal_signals(qapp, caplog, cancelled):
+    from minflux_viewer.ui.background_tasks import BackgroundTask
+
+    seen = []
+
+    def work(report):
+        if cancelled:
+            task.cancel()
+        return object()
+
+    def discard(result):
+        raise RuntimeError("discard broke")
+
+    def finish():
+        raise RuntimeError("final cleanup broke")
+
+    task = BackgroundTask(work, description="boundary test", discard_result=discard,
+                          finally_callback=finish)
+    task.signals.done.connect(lambda result: seen.append("done"))
+    task.signals.cancelled.connect(lambda: seen.append("cancelled"))
+    task.signals.finished.connect(lambda: seen.append("finished"))
+    task.run()
+    assert seen == ["cancelled" if cancelled else "done", "finished"]
+    failures = [record for record in caplog.records if record.name.endswith("background_tasks")]
+    assert len(failures) == (2 if cancelled else 1)
+    assert all(record.exc_info for record in failures)
+    assert "final cleanup broke" in caplog.text
+    if cancelled:
+        assert "discard broke" in caplog.text
+
+
 def _pump_until(app, predicate, timeout_s: float = 5.0) -> bool:
     deadline = time.time() + timeout_s
     while time.time() < deadline:

@@ -2058,13 +2058,13 @@ def _close_all_child_windows(self: MainWindow, *, keep_log_console: bool = False
     # Per-dataset windows
     for win in list(self._data_windows.values()):
         try: win.close()
-        except Exception: pass
+        except RuntimeError: pass
     for win in list(self._render_windows.values()):
         try: win.close()
-        except Exception: pass
+        except RuntimeError: pass
     for win in list(self._tiff_windows.values()):
         try: win.close()
-        except Exception: pass
+        except RuntimeError: pass
     for mapping in (
         self._scatter_windows,
         self._tracking_windows,
@@ -2074,10 +2074,10 @@ def _close_all_child_windows(self: MainWindow, *, keep_log_console: bool = False
     ):
         for win in list(mapping.values()):
             try: win.close()
-            except Exception: pass
+            except RuntimeError: pass
     for win in list(self._filter_dlgs.values()):
         try: win.close()
-        except Exception: pass
+        except RuntimeError: pass
     try:
         self._state.mfv.close_windows()
     except Exception:
@@ -2099,7 +2099,7 @@ def _close_all_child_windows(self: MainWindow, *, keep_log_console: bool = False
                     w.force_close()
                 else:
                     w.close()
-            except Exception: pass
+            except RuntimeError: pass
     # Plugin dialogs that stashed themselves on the main window. Several MSR
     # reader dialogs can be open at once — close every one in the registry
     # (plus the legacy single-attr alias, for safety).
@@ -2109,12 +2109,12 @@ def _close_all_child_windows(self: MainWindow, *, keep_log_console: bool = False
         msr_dialogs.append(legacy)
     for w in msr_dialogs:
         try: w.close()
-        except Exception: pass
+        except RuntimeError: pass
     # Modeless analysis/plugin windows retained via ui/modeless.py
     try:
         from .modeless import close_modeless
         close_modeless(self)
-    except Exception:
+    except RuntimeError:  # deleted C++ peers during shutdown
         pass
 
 

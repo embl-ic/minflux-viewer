@@ -110,7 +110,7 @@ def apply_metadata_recipe(ds: MinfluxDataset, meta: dict) -> list[str]:
             ds.set_z_scaling_factor(float(z_scaling_factor), source="processed (metadata sidecar)")
             ds.derived["z_scaling_factor"] = np.asarray([float(z_scaling_factor)], dtype=float)
             applied.append(f"Z scaling factor {float(z_scaling_factor):.4g}")
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             pass
     elif calibration.get("rimf") is not None:
         # A sidecar written before the factor was renamed. The old key is NOT
@@ -199,7 +199,7 @@ def read_metadata_file(path: str | Path) -> dict | None:
 
     try:
         meta = json.loads(Path(path).read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         return None
     return meta if is_metadata_json_payload(meta) else None
 

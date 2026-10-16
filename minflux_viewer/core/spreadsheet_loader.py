@@ -462,7 +462,7 @@ def _read_delimited_preview(
 def _read_excel(path: Path) -> tuple[list[str], list[list[str]]]:
     try:
         from openpyxl import load_workbook
-    except Exception as exc:  # pragma: no cover - dependency present in env
+    except ImportError as exc:  # pragma: no cover - dependency present in env
         raise ImportError("openpyxl is required to open Excel spreadsheets.") from exc
     wb = load_workbook(path, read_only=True, data_only=True)
     ws = wb[wb.sheetnames[0]]

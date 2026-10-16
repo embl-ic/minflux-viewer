@@ -1,3 +1,4 @@
+import xml.etree.ElementTree as ET
 from typing import Any
 
 import numpy as np
@@ -15,7 +16,10 @@ def _ome_xml_metadata(msr_file: str) -> str | None:
         with OBFFile(msr_file) as obf:
             xml = obf.get_ome_xml_metadata()
         return str(xml) if xml else None
+    except MemoryError:
+        raise
     except Exception:
+        # Optional metadata crosses an opaque third-party decoder boundary.
         return None
 
 
@@ -26,13 +30,11 @@ def _ome_metadata(msr_file: str, xml: str | None = None) -> dict | None:
     without MINFLUX data).
     """
     try:
-        import xml.etree.ElementTree as ET
-
         xml = xml if xml is not None else _ome_xml_metadata(msr_file)
         if not xml:
             return None
         return {"OME": _xml_to_dict(ET.fromstring(xml))}
-    except Exception:
+    except (ET.ParseError, TypeError, ValueError, RecursionError):
         return None
 
 
@@ -70,14 +72,14 @@ class LegacyMSRParser:
             from msr_reader.obffile import _parse_dtype
 
             return np.dtype(_parse_dtype(int(dtype_flags))[0]).name
-        except Exception:
+        except (ImportError, KeyError, TypeError, ValueError, OverflowError):
             return ""
 
     def build_series_tree_entries(self, msr_file: str, meta=None, log=print) -> list[dict]:
         entries: list[dict] = []
         try:
             from msr_reader import OBFFile
-        except Exception:
+        except ImportError:
             return entries
 
         # Defense-in-depth: a malformed/variant OBF header must not crash the open
@@ -105,10 +107,12 @@ class LegacyMSRParser:
                             "dtype": self._dtype_name(getattr(header, "dtype", 0)),
                         }
                     )
-        except Exception as exc:
+        except MemoryError:
+            raise
+        except Exception as exc:  # third-party OBF decoding; report, do not crash a batch
             try:
                 log(f"[warn] could not read OBF image-series tree: {exc}")
-            except Exception:
+            except Exception:  # caller-supplied logging must not mask the decoder error
                 pass
         return entries
 
@@ -141,7 +145,9 @@ class GeneralMSRParser:
 
         try:
             stacks = read_obf_mfxdta_stacks(msr_file)
-        except Exception as e:
+        except MemoryError:
+            raise
+        except Exception as e:  # report third-party decoding failures
             log(f"[warn] msr-reader could not read stacks: {e}")
             stacks = []
 
@@ -199,7 +205,9 @@ class GeneralMSRParser:
         try:
             store = extract_zarr_store(blob)            # {key: bytes} — no disk
             arch = zarr2.open(store, mode="r")
-        except Exception as e:
+        except MemoryError:
+            raise
+        except Exception as e:  # malformed per-stack containers are reported and skipped
             log(f"  [warn] stack {stack_idx}: failed to decode MFXDTA store: {e}")
             return None
         if "mfx" not in arch:
@@ -235,7 +243,9 @@ class GeneralMSRParser:
                         set_mbm_for(name, pts)
                     mbm_meta = {"points_by_gri": pbg, "used": used}
                     set_mbm_meta_for(name, mbm_meta)
-        except Exception as e:
+        except MemoryError:
+            raise
+        except Exception as e:  # report a failed stack without discarding other stacks
             log(f"    [warn] stack {stack_idx}: mfx load failed: {e}")
             return None
         return {

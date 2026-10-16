@@ -118,10 +118,8 @@ def subset_struct_fields(arr, names_sel):
         keep = [n for n in names if n in names_sel]
         if not keep:
             return None
-        try:
-            return arr[keep]
-        except Exception:
-            pass
+        # A failed restriction must never become an unrestricted export.
+        return arr[keep]
     return arr
 
 
@@ -230,7 +228,7 @@ def _entry_row_count(entry, msr_state, key: str) -> int:
         array = getattr(msr_state, "mfx_map", {}).get(key)
     try:
         return int(np.asarray(array).size) if array is not None else 0
-    except Exception:                                       # noqa: BLE001
+    except (TypeError, ValueError):                                       # noqa: BLE001
         return 0
 
 

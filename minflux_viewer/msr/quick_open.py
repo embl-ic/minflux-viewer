@@ -40,7 +40,7 @@ def is_viewer_msr(path) -> bool:
         with open(source, "rb") as handle:
             with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
                 return data.find(_MARKER) != -1
-    except Exception:                                       # noqa: BLE001
+    except (OSError, ValueError):                                       # noqa: BLE001
         return False                                        # unreadable: not ours
 
 

@@ -417,7 +417,7 @@ def auto_fit(
                 break
             try:
                 res = _dispatch_on_fitbasis(xf, dist, k, seed=seed)
-            except Exception:
+            except (ValueError, np.linalg.LinAlgError, FloatingPointError, OverflowError):
                 continue
             if best is None or res.bic < best.bic:
                 best = res
@@ -433,7 +433,7 @@ def auto_fit(
             k += 1
             try:
                 cand = _dispatch_on_fitbasis(xf, best.distribution, k, seed=seed)
-            except Exception:
+            except (ValueError, np.linalg.LinAlgError, FloatingPointError, OverflowError):
                 break
             if cand.bic < best.bic - improvement * abs(best.bic):
                 best = cand
