@@ -323,8 +323,9 @@ def test_file_menu_zarr_action_uses_new_save_backend():
     not something a user has to care about, and Preferences is the one place
     that spells out Zarr v2."""
     from minflux_viewer.core import formats as F
+    from minflux_viewer.ui import menu_controller
 
-    source = Path("minflux_viewer/ui/main_window.py").read_text(encoding="utf-8")
+    source = Path(menu_controller.__file__).read_text(encoding="utf-8")
     assert 'QAction("Viewer format (.zarr)"' in source
     assert 'self._save_as_format("zarr", "Zarr v2")' in source
     assert F.spec_for("zarr").label == "Viewer format (.zarr)"
@@ -383,7 +384,9 @@ def test_existing_zarr_prompt_offers_processing_replace_and_cancel(tmp_path, mon
         def clickedButton(self):
             return self.clicked
 
-    monkeypatch.setattr(main_module, "QMessageBox", _FakeMessageBox)
+    from minflux_viewer.ui import save_export_controller
+
+    monkeypatch.setattr(save_export_controller, "QMessageBox", _FakeMessageBox)
     target = tmp_path / "existing.zarr"
     target.mkdir()
     for choice, expected in (("update", "viewer"), ("replace", "replace"),
@@ -878,7 +881,7 @@ def test_zarr_dataset_never_borrows_images_from_the_source_msr(tmp_path, monkeyp
                         lambda path: consulted.append(path) or [])
     shown: list = []
     monkeypatch.setattr(
-        "minflux_viewer.ui.main_window.QMessageBox.information",
+        "PyQt6.QtWidgets.QMessageBox.information",
         staticmethod(lambda *a, **k: shown.append(a[2] if len(a) > 2 else "")))
 
     # Drive the method directly: constructing a MainWindow is unnecessary for
@@ -947,7 +950,7 @@ def test_a_failed_background_load_reports_instead_of_vanishing(qapp, tmp_path, m
     window = MainWindow(AppState())
     shown: list = []
     monkeypatch.setattr(
-        "minflux_viewer.ui.main_window.QMessageBox.critical",
+        "PyQt6.QtWidgets.QMessageBox.critical",
         staticmethod(lambda *a, **k: shown.append(a[2] if len(a) > 2 else "")))
     try:
         window._load_zarr(str(tmp_path / "does-not-exist.zarr"))

@@ -380,9 +380,9 @@ def test_main_window_broadcasts_preferences_to_histogram_windows():
     import inspect
 
     from minflux_viewer.ui.histogram_window import HistogramWindow
-    from minflux_viewer.ui.main_window import MainWindow
+    from minflux_viewer.ui.menu_controller import _refresh_plot_preferences
 
-    src = inspect.getsource(MainWindow._refresh_plot_preferences)
+    src = inspect.getsource(_refresh_plot_preferences)
     assert "_histogram_windows" in src
     assert callable(getattr(HistogramWindow, "refresh_preferences", None))
 

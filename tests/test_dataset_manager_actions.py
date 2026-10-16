@@ -235,7 +235,7 @@ def test_close_and_duplicate_from_the_single_row_menu(manager):
 def test_view_mbm_reports_instead_of_opening_an_empty_plot(manager, monkeypatch):
     shown: list[str] = []
     monkeypatch.setattr(
-        "minflux_viewer.ui.main_window.QMessageBox.information",
+        "PyQt6.QtWidgets.QMessageBox.information",
         staticmethod(lambda *a, **k: shown.append(a[2])))
 
     mgr, win = manager
@@ -266,7 +266,7 @@ def test_view_mbm_opens_a_drift_window_for_a_dataset_with_beads(manager):
 def test_view_image_series_reports_when_there_is_no_source_msr(manager, monkeypatch):
     shown: list[str] = []
     monkeypatch.setattr(
-        "minflux_viewer.ui.main_window.QMessageBox.information",
+        "PyQt6.QtWidgets.QMessageBox.information",
         staticmethod(lambda *a, **k: shown.append(a[2])))
 
     mgr, win = manager

@@ -380,6 +380,9 @@
    "attr-defined": 1,
    "call-overload": 1
   },
+  "minflux_viewer/ui/file_open_controller.py": {
+   "attr-defined": 1
+  },
   "minflux_viewer/ui/filter_dialog.py": {
    "override": 3,
    "union-attr": 66
@@ -449,17 +452,9 @@
    "union-attr": 4
   },
   "minflux_viewer/ui/main_window.py": {
-   "arg-type": 11,
-   "assignment": 18,
-   "attr-defined": 29,
-   "index": 1,
-   "list-item": 2,
-   "operator": 2,
    "override": 2,
-   "return-value": 1,
-   "union-attr": 28,
-   "unused-ignore": 1,
-   "var-annotated": 3
+   "union-attr": 11,
+   "unused-ignore": 1
   },
   "minflux_viewer/ui/mbm_info_window.py": {
    "arg-type": 1,
@@ -468,6 +463,12 @@
   "minflux_viewer/ui/memory_monitor.py": {
    "override": 1,
    "var-annotated": 3
+  },
+  "minflux_viewer/ui/menu_controller.py": {
+   "arg-type": 1,
+   "assignment": 2,
+   "attr-defined": 6,
+   "union-attr": 8
   },
   "minflux_viewer/ui/metadata_save_dialog.py": {
    "union-attr": 1
@@ -490,6 +491,12 @@
    "call-overload": 1,
    "union-attr": 3
   },
+  "minflux_viewer/ui/overlay_controller.py": {
+   "arg-type": 2,
+   "assignment": 2,
+   "attr-defined": 5,
+   "union-attr": 1
+  },
   "minflux_viewer/ui/particle_average_dialog.py": {
    "assignment": 2,
    "attr-defined": 3,
@@ -498,6 +505,9 @@
   "minflux_viewer/ui/plot_profile_dialog.py": {
    "assignment": 1,
    "union-attr": 1
+  },
+  "minflux_viewer/ui/post_load_controller.py": {
+   "operator": 2
   },
   "minflux_viewer/ui/precision_analysis.py": {
    "arg-type": 6,
@@ -543,6 +553,13 @@
   "minflux_viewer/ui/results_table.py": {
    "union-attr": 4
   },
+  "minflux_viewer/ui/roi_command_controller.py": {
+   "arg-type": 1,
+   "assignment": 5,
+   "attr-defined": 2,
+   "list-item": 2,
+   "union-attr": 7
+  },
   "minflux_viewer/ui/roi_convert_dialog.py": {
    "assignment": 1
   },
@@ -559,6 +576,10 @@
   },
   "minflux_viewer/ui/save_dialog.py": {
    "union-attr": 2
+  },
+  "minflux_viewer/ui/save_export_controller.py": {
+   "arg-type": 1,
+   "attr-defined": 2
   },
   "minflux_viewer/ui/scatter_window.py": {
    "arg-type": 6,
@@ -629,6 +650,13 @@
    "attr-defined": 10,
    "union-attr": 6
   },
+  "minflux_viewer/ui/window_controller.py": {
+   "arg-type": 6,
+   "assignment": 8,
+   "attr-defined": 13,
+   "return-value": 1,
+   "union-attr": 1
+  },
   "minflux_viewer/ui/zarr_save_dialog.py": {
    "union-attr": 1
   },
@@ -688,10 +716,8 @@
   "minflux_viewer/ui/lut_dialog.py": {
    "E702": 8
   },
-  "minflux_viewer/ui/main_window.py": {
-   "E402": 1,
-   "E701": 15,
-   "E702": 16,
+  "minflux_viewer/ui/menu_controller.py": {
+   "E702": 1,
    "E731": 1
   },
   "minflux_viewer/ui/particle_average_dialog.py": {
@@ -710,6 +736,10 @@
   },
   "minflux_viewer/ui/scatter_window.py": {
    "E731": 1
+  },
+  "minflux_viewer/ui/window_controller.py": {
+   "E701": 15,
+   "E702": 15
   },
   "minflux_viewer/utils/paraview_export.py": {
    "F841": 1
@@ -760,9 +790,6 @@
    "F841": 1
   },
   "tests/test_log_window.py": {
-   "I001": 1
-  },
-  "tests/test_magic_wand.py": {
    "I001": 1
   },
   "tests/test_min_enclosing.py": {

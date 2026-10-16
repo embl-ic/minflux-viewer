@@ -199,7 +199,10 @@ def test_post_load_chain_and_abort(_qt_app):
     from minflux_viewer.ui.main_window import MainWindow
 
     state = AppState()
-    state.prefs.setdefault("data", {}).update({"show_data_info": False, "show_render": False})
+    state.prefs.setdefault("data", {}).update({
+        "show_data_info": False, "show_render": False,
+        "compute_loc_prec": True, "compute_local_density": True,
+    })
     state.prefs["data"]["estimate_z_scaling_factor"] = False
     state.prefs.setdefault("plot", {}).update({"use_fixed_z_scaling_factor": True, "z_scaling_factor": 0.67})
     win = MainWindow(state)

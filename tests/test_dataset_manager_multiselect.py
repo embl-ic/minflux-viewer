@@ -249,7 +249,7 @@ def test_combine_needs_at_least_two_selected(manager, monkeypatch):
         "minflux_viewer.ui.channel_combine_dialog.ChannelCombineDialog",
         lambda *a, **k: opened.append(True))
     monkeypatch.setattr(
-        "minflux_viewer.ui.main_window.QMessageBox.information",
+        "PyQt6.QtWidgets.QMessageBox.information",
         staticmethod(lambda *a, **k: None))
 
     mgr, win = manager

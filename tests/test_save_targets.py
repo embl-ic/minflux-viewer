@@ -9,6 +9,7 @@ apart, and a writer can be kept while its menu entry is withdrawn.
 
 from __future__ import annotations
 
+import ast
 import pathlib
 import types
 from pathlib import Path
@@ -277,9 +278,26 @@ def test_the_dataset_manager_is_the_only_way_to_the_save_export_dialog():
     root = pathlib.Path(minflux_viewer.__file__).parent   # not the CWD
     callers = set()
     for path in root.rglob("*.py"):
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if "save_dataset" in line and "def save_dataset" not in line:
-                callers.add(path.relative_to(root).as_posix())
+        class Consumers(ast.NodeVisitor):
+            def visit_FunctionDef(self, node):
+                # Implementation and compatibility forwarding are one route;
+                # count its consumers, not its own internal delegation.
+                if node.name != "save_dataset":
+                    self.generic_visit(node)
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Call(self, node):
+                name = (node.func.attr if isinstance(node.func, ast.Attribute)
+                        else node.func.id if isinstance(node.func, ast.Name) else None)
+                lookup = (name in {"getattr", "hasattr"} and len(node.args) > 1
+                          and isinstance(node.args[1], ast.Constant)
+                          and node.args[1].value == "save_dataset")
+                if name == "save_dataset" or lookup:
+                    callers.add(path.relative_to(root).as_posix())
+                self.generic_visit(node)
+
+        Consumers().visit(ast.parse(path.read_text(encoding="utf-8")))
     assert callers == {"ui/dataset_manager.py"}, callers
 
 

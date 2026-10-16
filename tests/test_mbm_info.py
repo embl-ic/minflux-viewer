@@ -177,7 +177,7 @@ def test_the_region_view_gets_the_datasets_own_data_bounds(window):
 def test_a_dataset_without_beads_reports_the_reason(window, monkeypatch):
     shown: list[str] = []
     monkeypatch.setattr(
-        "minflux_viewer.ui.main_window.QMessageBox.information",
+        "PyQt6.QtWidgets.QMessageBox.information",
         staticmethod(lambda *a, **k: shown.append(a[2])))
     window._state.add_dataset(_dataset_with_beads(None))
 
@@ -194,7 +194,7 @@ def test_a_malformed_points_array_is_reported_distinctly(window, monkeypatch):
     for an array that is present but unusable."""
     shown: list[str] = []
     monkeypatch.setattr(
-        "minflux_viewer.ui.main_window.QMessageBox.information",
+        "PyQt6.QtWidgets.QMessageBox.information",
         staticmethod(lambda *a, **k: shown.append(a[2])))
     bad = np.zeros(3, dtype=[("gri", "u4"), ("tim", "f8")])
     window._state.add_dataset(_dataset_with_beads(bad))

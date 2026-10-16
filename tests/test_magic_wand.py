@@ -8,7 +8,6 @@ existing ROI consumer can read.
 
 from __future__ import annotations
 
-
 import numpy as np
 import pytest
 
@@ -687,10 +686,10 @@ def test_arming_the_magic_wand_does_not_open_the_orthogonal_view():
     import inspect
 
     from minflux_viewer.core.roi_selection import VOLUME_ROI_TYPES
-    from minflux_viewer.ui.main_window import MainWindow
+    from minflux_viewer.ui.roi_command_controller import _enter_ortho_for_volume_tool
 
     assert "magic_wand" not in VOLUME_ROI_TYPES
-    source = inspect.getsource(MainWindow._enter_ortho_for_volume_tool)
+    source = inspect.getsource(_enter_ortho_for_volume_tool)
     assert "if tool not in VOLUME_ROI_TYPES:" in source
 
 
@@ -703,8 +702,9 @@ def test_the_lasso_button_activates_its_current_variant(_qt_app):
 
     from minflux_viewer.core.roi import RoiStore
     from minflux_viewer.ui.main_window import MainWindow
+    from minflux_viewer.ui.menu_controller import _connect_actions
 
-    source = inspect.getsource(MainWindow._connect_actions)
+    source = inspect.getsource(_connect_actions)
     assert "self._on_roi_tool(self._lasso_variant, checked)" in source
     assert 'self._on_roi_tool("magnetic_lasso", checked)' not in source
 
