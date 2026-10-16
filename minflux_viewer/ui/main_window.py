@@ -2156,7 +2156,7 @@ class MainWindow(QMainWindow):
             tasks = self._file_io_tasks = []
         tasks.append(task)
         task.signals.finished.connect(lambda _t=task: self._finish_file_io(_t))
-        shared_thread_pool(pool_name, max_threads=2).start(task)
+        shared_thread_pool(pool_name).start(task)
 
     def _begin_zarr_io(self, task) -> None:
         """Compatibility wrapper for the former Zarr-only task runner."""
@@ -8421,7 +8421,7 @@ class MainWindow(QMainWindow):
         )
         from .background_tasks import shared_thread_pool
 
-        shared_thread_pool("post-load", max_threads=2).start(task)
+        shared_thread_pool("post-load").start(task)
 
     def _finish_post_load_task(self, key, task) -> None:
         tasks = getattr(self, "_post_load_tasks", {})
@@ -8551,7 +8551,7 @@ class MainWindow(QMainWindow):
         tasks[key] = task
         from .background_tasks import shared_thread_pool
 
-        shared_thread_pool("post-load", max_threads=2).start(task)
+        shared_thread_pool("post-load").start(task)
 
     def _on_saved_filters_done(self, key, ds, mask) -> None:
         if self._state.index_of(key) is not None:
@@ -9461,7 +9461,9 @@ class MainWindow(QMainWindow):
         task.signals.done.connect(
             lambda result, t=task: self._on_update_check_done(result, silent, t)
         )
-        QThreadPool.globalInstance().start(task)
+        from .background_tasks import shared_thread_pool
+
+        shared_thread_pool("update-check").start(task)
 
     def _maybe_startup_update_check(self) -> None:
         if getattr(self, "_is_shutting_down", False):

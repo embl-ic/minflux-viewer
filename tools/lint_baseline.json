@@ -465,7 +465,7 @@
    "operator": 2,
    "override": 2,
    "return-value": 1,
-   "union-attr": 29,
+   "union-attr": 28,
    "unused-ignore": 1,
    "var-annotated": 3
   },

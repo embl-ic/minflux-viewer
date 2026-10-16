@@ -22,15 +22,12 @@ after cancel() are silently dropped.
 
 from __future__ import annotations
 
-import os
-
 import numpy as np
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal, pyqtSlot
 
 from .render_config import (
     PER_LOC_SWITCH_COUNT,
     PHYSICAL_TILE_NM,
-    WORKER_THREAD_COUNT,
     actual_pixel_size_nm,
     render_tile_px,
 )
@@ -239,9 +236,7 @@ class RenderScheduler(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._generation: int = 0
-        self._pool = shared_thread_pool(
-            self.POOL,
-            max_threads=max(1, min(WORKER_THREAD_COUNT, os.cpu_count() or 4)))
+        self._pool = shared_thread_pool(self.POOL)
         self._in_flight: set[TileKey] = set()
 
     # ------------------------------------------------------------------

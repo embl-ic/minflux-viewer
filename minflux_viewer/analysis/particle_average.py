@@ -29,11 +29,11 @@ Pure NumPy/SciPy — Qt-free and unit-testable. Distances are in nm.
 
 from __future__ import annotations
 
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 
+from ..core.execution import acquire_cpu_threads
 from .geometry import rotation_a_to_b
 
 DEFAULT_BOX_NM = 150.0
@@ -46,14 +46,14 @@ DEFAULT_N_ITERS = 30
 DEFAULT_CONV_TOL = 1e-4
 
 
-def _resolve_workers(n_workers, n_tasks: int) -> int:
-    """Number of parallel alignment workers: ``None`` → all logical CPUs, capped to
-    the task count (no point spawning more threads than particles). The per-particle
+def _wanted_workers(n_workers, n_tasks: int) -> int:
+    """How many alignment workers to lease from the analysis budget
+    (``core/execution.py``): ``None`` → as many as are free, never more than the
+    task count (no point in more threads than particles). The per-particle
     alignment is FFT/histogram-bound and numpy/scipy release the GIL, so threads
     parallelise well without pickling the (potentially large) particle clouds."""
-    if n_workers is None:
-        n_workers = os.cpu_count() or 1
-    return max(1, min(int(n_workers), max(1, int(n_tasks))))
+    cap = max(1, int(n_tasks))
+    return cap if n_workers is None else max(1, min(int(n_workers), cap))
 
 
 # --------------------------------------------------------------------------- #
@@ -489,8 +489,8 @@ def average_template_provided(particles, template_img, *, box_nm=DEFAULT_BOX_NM,
         if progress is not None:
             progress(done[0], total)
 
-    workers = _resolve_workers(n_workers, total)
-    executor = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
+    lease = acquire_cpu_threads(_wanted_workers(n_workers, total))
+    executor = ThreadPoolExecutor(max_workers=lease.threads) if lease.threads > 1 else None
     try:
         transforms = _align_all(particles_c, template_img, box_nm=box_nm,
                                 pixel_nm=pixel_nm, angles=angles, sigma_nm=sigma_nm,
@@ -498,6 +498,7 @@ def average_template_provided(particles, template_img, *, box_nm=DEFAULT_BOX_NM,
     finally:
         if executor is not None:
             executor.shutdown(wait=True)
+        lease.release()
     pooled = _pool(particles_c, transforms)
     avg_img = render_points(pooled[:, :2], box_nm, pixel_nm, sigma_nm) if pooled.size else \
         np.zeros_like(template_img)
@@ -553,8 +554,8 @@ def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_
         if progress is not None:
             progress(done[0], total)
 
-    workers = _resolve_workers(n_workers, len(particles_c))
-    executor = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
+    lease = acquire_cpu_threads(_wanted_workers(n_workers, len(particles_c)))
+    executor = ThreadPoolExecutor(max_workers=lease.threads) if lease.threads > 1 else None
     converged = False
     try:
         prev = None
@@ -576,6 +577,7 @@ def average_template_free(particles, *, box_nm=DEFAULT_BOX_NM, pixel_nm=DEFAULT_
     finally:
         if executor is not None:
             executor.shutdown(wait=True)
+        lease.release()
     pooled = _pool(particles_c, transforms)
     avg_img = render_points(pooled[:, :2], box_nm, pixel_nm, sigma_nm)
     mats4 = [_matrix_2d(t[0], t[1], t[2]) @ M for t, M in zip(transforms, prep_mats)]

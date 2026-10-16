@@ -444,7 +444,7 @@ class MsdAnalysisWindow(QWidget):
     def _start_task(self, task) -> None:
         from .background_tasks import shared_thread_pool
 
-        shared_thread_pool("tracking-analysis", max_threads=1).start(task)
+        shared_thread_pool("tracking-analysis").start(task)
 
     def _on_stage(self, generation: int, text: str) -> None:
         if generation == self._generation and not self._closing:

@@ -797,7 +797,7 @@ class ParticleAverageWindow(QDialog):
         self._task = task                                    # keep a ref (QRunnable auto-deletes)
         from .background_tasks import shared_thread_pool
 
-        shared_thread_pool("particle-average", max_threads=1).start(task)
+        shared_thread_pool("particle-average").start(task)
 
     def _on_progress(self, done: int, total: int) -> None:
         if total <= 0:

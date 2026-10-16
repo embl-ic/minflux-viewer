@@ -40,7 +40,7 @@ class PythonPackagesGroup(QGroupBox):
         super().__init__("Python packages", parent)
         self._prefs: dict | None = None
         self._tasks: set[BackgroundTask] = set()
-        self._pool = shared_thread_pool("python-packages", max_threads=1)
+        self._pool = shared_thread_pool("python-packages")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 10)

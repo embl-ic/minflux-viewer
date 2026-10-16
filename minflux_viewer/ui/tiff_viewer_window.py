@@ -564,7 +564,7 @@ class TiffViewerWindow(QWidget):
         task.signals.finished.connect(
             lambda _task=task: self._finish_plane_load(_task)
         )
-        shared_thread_pool("tiff-plane", max_threads=1).start(task)
+        shared_thread_pool("tiff-plane").start(task)
 
     def _on_plane_loaded(self, generation: int, plane, fit_view: bool) -> None:
         if generation != self._plane_generation:
@@ -1057,7 +1057,7 @@ class TiffViewerWindow(QWidget):
         )
         self._save_tasks.append(task)
         self._control_row.setEnabled(False)
-        shared_thread_pool("tiff-io", max_threads=2).start(task)
+        shared_thread_pool("tiff-io").start(task)
 
     def _finish_save_task(self, task) -> None:
         try:

@@ -37,12 +37,13 @@ Pure NumPy/SciPy — Qt-free and unit-testable. Distances in nm.
 
 from __future__ import annotations
 
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 from scipy.optimize import minimize
 from scipy.spatial.transform import Rotation
+
+from ..core.execution import acquire_cpu_threads
 
 DEFAULT_SIGMA_NM = 5.0          # GMM kernel width (localization blur)
 DEFAULT_N_ITER = 3              # data-driven template refinement rounds
@@ -456,8 +457,10 @@ def fuse_particles(particles, *, sigma_nm=DEFAULT_SIGMA_NM, n_iter=DEFAULT_N_ITE
         if progress is not None:
             progress(done[0], total)
 
-    workers = max(1, min(int(os.cpu_count() or 1) if n_workers is None else int(n_workers), n * n))
-    executor = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
+    # Workers are leased from the analysis budget (core/execution.py): None asks
+    # for as many as are free, never more than there are particle pairs.
+    lease = acquire_cpu_threads(max(1, n * n if n_workers is None else min(int(n_workers), n * n)))
+    executor = ThreadPoolExecutor(max_workers=lease.threads) if lease.threads > 1 else None
     n_it = max(int(n_iter), 1)
     try:
         # 1) all-to-all pairwise registration, coarse→fine GMM width per pair (wide =
@@ -476,6 +479,7 @@ def fuse_particles(particles, *, sigma_nm=DEFAULT_SIGMA_NM, n_iter=DEFAULT_N_ITE
     finally:
         if executor is not None:
             executor.shutdown(wait=True)
+        lease.release()
 
     # fuse the FULL (non-downsampled) clouds with the found transforms
     pooled = np.vstack([_apply(full[i], G[i], T[i]) for i in range(n)]) if n else np.empty((0, 3))

@@ -34,6 +34,7 @@ from scipy.signal import fftconvolve
 from scipy.spatial import cKDTree
 
 from ..colormaps import BUILTIN_COLORMAP_NAMES, make_colormap, named_colormap_names
+from ..core.execution import cpu_threads
 from ..ui.plot_format import apply_spatial_y_direction
 
 #: Leaf size for the KD-tree. Larger than scipy's default (16): for radius
@@ -69,10 +70,10 @@ def local_density_kdtree(points_nm: np.ndarray, radius_nm: float) -> np.ndarray:
     (This differs from MATLAB ``length(...)-1`` after ``rangesearch``, which
     excludes the centre point.)
 
-    The range count runs in parallel across all CPU cores (``workers=-1``) and
-    only returns neighbour *counts* (``return_length=True``), never the lists —
-    together ≈8× faster than the serial version while giving the identical
-    result.
+    The range count runs in parallel on the cores the analysis budget has free
+    (``core/execution.py``) and only returns neighbour *counts*
+    (``return_length=True``), never the lists — together ≈8× faster than the
+    serial version on all cores, with the identical result.
     """
     pts = _finite_points(points_nm, force_3d=False)
     if pts.size == 0:
@@ -81,9 +82,10 @@ def local_density_kdtree(points_nm: np.ndarray, radius_nm: float) -> np.ndarray:
     if radius_nm <= 0:
         raise ValueError("radius_nm must be positive")
     tree = cKDTree(pts, leafsize=_KDTREE_LEAFSIZE)
-    counts = tree.query_ball_point(
-        pts, r=radius_nm, return_length=True, workers=-1,
-    )
+    with cpu_threads() as workers:
+        counts = tree.query_ball_point(
+            pts, r=radius_nm, return_length=True, workers=workers,
+        )
     return np.asarray(counts, dtype=float)
 
 

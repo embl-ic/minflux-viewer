@@ -69,6 +69,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ..core.execution import cpu_threads
+
 _FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
 
 #: Render cell budget (pixels or voxels) — a guard against an accidental fine
@@ -393,13 +395,15 @@ def estimate_drift(
         counts[j] = int(sel.sum())
         ti[j] = float(tt[sel].mean()) if counts[j] else t0 + (j + 0.5) * T
         img = _render(pts[sel], s, lows, shape, sigma_px)
-        spectra.append(sfft.rfftn(img, workers=-1).astype(np.complex64))
+        with cpu_threads() as workers:
+            spectra.append(sfft.rfftn(img, workers=workers).astype(np.complex64))
         _tick(0.25 * (j + 1) / n_win)
 
     pairs = [(i, j) for i in range(n_win - 1) for j in range(i + 1, n_win)]
     shifts = np.zeros((len(pairs), dims))
     for p, (i, j) in enumerate(pairs):
-        corr = sfft.irfftn(np.conj(spectra[i]) * spectra[j], s=shape, workers=-1)
+        with cpu_threads() as workers:
+            corr = sfft.irfftn(np.conj(spectra[i]) * spectra[j], s=shape, workers=workers)
         shifts[p] = _centroid_shift(np.fft.fftshift(corr), params)
         _tick(0.25 + 0.7 * (p + 1) / len(pairs))
     del spectra

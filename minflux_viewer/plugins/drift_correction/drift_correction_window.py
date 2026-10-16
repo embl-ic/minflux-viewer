@@ -647,7 +647,7 @@ class DriftCorrectionWindow(QDialog):
         self._stop_btn.setEnabled(True)
         self._apply_btn.setEnabled(False)
         self._stats.setText("Estimating …")
-        shared_thread_pool(_POOL_NAME, max_threads=1).start(task)
+        shared_thread_pool(_POOL_NAME).start(task)
 
     def _on_stop(self) -> None:
         if self._task is not None:

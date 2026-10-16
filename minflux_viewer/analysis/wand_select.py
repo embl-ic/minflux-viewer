@@ -23,6 +23,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ..core.execution import cpu_threads
+
 __all__ = [
     "WandResult",
     "DEFAULT_DISTANCE_NM",
@@ -298,7 +300,8 @@ def grow_selection(
     if cKDTree is not None:
         tree = cKDTree(sub)
         while frontier.size:
-            neighbours = tree.query_ball_point(sub[frontier], radius, workers=-1)
+            with cpu_threads() as workers:
+                neighbours = tree.query_ball_point(sub[frontier], radius, workers=workers)
             nxt: list[int] = []
             for group in neighbours:
                 for j in group:
@@ -469,7 +472,8 @@ def _splice_rings(rings: list[list[list[float]]]) -> list[list[float]]:
         hole = [list(map(float, pt)) for pt in ring]
         hole_xy = np.asarray(hole, dtype=float)[:, :2]
         if tree is not None:
-            dist, idx = tree.query(hole_xy, k=1, workers=-1)
+            with cpu_threads() as workers:
+                dist, idx = tree.query(hole_xy, k=1, workers=workers)
             h = int(np.argmin(dist))
             i = int(idx[h])
         else:                                 # pragma: no cover

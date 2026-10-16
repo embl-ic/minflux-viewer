@@ -6210,7 +6210,7 @@ class MsrReaderDialog(QWidget):
         self._set_viewer_open_running(True)
         self.log(f"[viewer] opening {n_jobs} dataset(s) from '{source_name}' "
                  "in the background…")
-        shared_thread_pool("msr-open", max_threads=1).start(task)
+        shared_thread_pool("msr-open").start(task)
 
     # -- the per-dataset build (worker thread; Qt-free) --------------------
 

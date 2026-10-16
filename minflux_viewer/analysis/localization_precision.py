@@ -57,6 +57,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..core.execution import cpu_threads
 from ..core.mfx_sequence import DEFAULT_FINAL_GEO_FACTOR, PATTERN_SCALE_NM
 
 # ---------------------------------------------------------------------------
@@ -217,11 +218,13 @@ FRC_MAX_IMAGE_PX: int = 4096         # hard cap on grid size (FFT cost)
 def _rfft2(img: np.ndarray) -> np.ndarray:
     """Real 2-D FFT — half the spectrum, ~2× faster than a full complex FFT.
 
-    Uses multithreaded ``scipy.fft`` when available, else NumPy.
+    Uses multithreaded ``scipy.fft`` (on the threads the analysis budget has
+    free) when available, else NumPy.
     """
     try:
         from scipy.fft import rfft2
-        return rfft2(img, workers=-1)
+        with cpu_threads() as workers:
+            return rfft2(img, workers=workers)
     except Exception:                       # pragma: no cover - scipy present
         return np.fft.rfft2(img)
 

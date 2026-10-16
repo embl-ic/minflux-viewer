@@ -52,9 +52,6 @@ TILE_CACHE_CAPACITY: int = 512
 # Async scheduler
 # ---------------------------------------------------------------------------
 
-WORKER_THREAD_COUNT: int = 4
-"""Maximum render worker threads.  Leave headroom for the UI thread."""
-
 PREFETCH_RING_SIZE: int = 1
 """Number of tile rings outside the viewport to prefetch when idle."""
 

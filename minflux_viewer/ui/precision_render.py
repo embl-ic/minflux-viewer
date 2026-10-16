@@ -907,7 +907,6 @@ class PrecisionRenderScheduler(QObject):
     def __init__(
         self,
         parent: QObject | None = None,
-        max_threads: int = 4,
         *,
         pool_name: str = "precision-render",
         clear_pool_on_cancel: bool = True,
@@ -915,9 +914,7 @@ class PrecisionRenderScheduler(QObject):
         super().__init__(parent)
         self._generation = 0
         self._clear_pool_on_cancel = bool(clear_pool_on_cancel)
-        self._pool = shared_thread_pool(
-            str(pool_name), max_threads=max(int(max_threads), 1)
-        )
+        self._pool = shared_thread_pool(str(pool_name))
 
     @property
     def generation(self) -> int:
@@ -1004,8 +1001,9 @@ class VoronoiFieldScheduler(QObject):
         super().__init__(parent)
         self._generation = 0
         self._clear_pool_on_cancel = bool(clear_pool_on_cancel)
-        # Overlay channels run serially to avoid simultaneous Qhull memory peaks.
-        self._pool = shared_thread_pool(str(pool_name), max_threads=1)
+        # One thread (core/execution.py): overlay channels run serially to
+        # avoid simultaneous Qhull memory peaks.
+        self._pool = shared_thread_pool(str(pool_name))
 
     @property
     def generation(self) -> int:

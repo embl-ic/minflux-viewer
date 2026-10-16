@@ -756,7 +756,7 @@ class TrackingWindow(QWidget):
         """Start on the process-owned serial pool (a seam for deterministic tests)."""
         from .background_tasks import shared_thread_pool
 
-        shared_thread_pool("tracking-index", max_threads=1).start(task)
+        shared_thread_pool("tracking-index").start(task)
 
     def _on_track_build_stage(self, generation: int, text: str) -> None:
         if generation == self._track_generation and not self._closing:

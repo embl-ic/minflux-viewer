@@ -3,7 +3,9 @@
 Qt destroys a child ``QThreadPool`` synchronously and waits for its active
 runnables.  A scheduler owned by a closing widget must therefore not own the
 pool that executes its work.  Named pools in this module live for the process,
-while widgets only cancel generations and detach result callbacks.
+while widgets only cancel generations and detach result callbacks.  Which
+queue a named pool belongs to and how many threads it has is declared once,
+in ``core/execution.py``.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from typing import Any
 
 from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal
 
+from ..core.execution import pool_size
 from .qt_lifecycle import disconnect_signal, qobject_alive
 
 _SHARED_POOLS: dict[str, QThreadPool] = {}
@@ -149,10 +152,27 @@ class BackgroundTask(QRunnable):
 
 
 def shared_thread_pool(name: str, *, max_threads: int | None = None) -> QThreadPool:
-    """Return a process-owned pool whose destructor cannot block a window close."""
+    """Return a process-owned pool whose destructor cannot block a window close.
+
+    A pool the application uses is declared in ``core/execution.py``, which
+    sizes it (never above the core count); *max_threads* may only repeat that
+    size. A name declared nowhere needs *max_threads* (tests, ad hoc work).
+    """
     key = str(name).strip()
     if not key:
         raise ValueError("A shared thread-pool name is required")
+    try:
+        size: int | None = pool_size(key)
+    except KeyError:
+        if max_threads is None:
+            raise
+        size = None
+    if size is not None:
+        if max_threads is not None and int(max_threads) != size:
+            raise ValueError(
+                f"thread pool {key!r} has {size} thread(s), as declared in "
+                f"core/execution.py; it was asked for {max_threads}")
+        max_threads = size
     pool = _SHARED_POOLS.get(key)
     # Test suites and embedders may destroy one QApplication and create the
     # next without unloading this module. Qt then deletes the C++ pool while

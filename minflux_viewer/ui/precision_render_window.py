@@ -282,7 +282,6 @@ class PrecisionRenderWindow(RenderWindow):
             # would make cancelling a side pan clear queued XY tiles as well.
             self._ortho_precision_scheduler = PrecisionRenderScheduler(
                 parent=self,
-                max_threads=2,
                 pool_name="precision-render-ortho",
                 clear_pool_on_cancel=False,
             )
