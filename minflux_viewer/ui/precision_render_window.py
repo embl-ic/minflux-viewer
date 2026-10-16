@@ -1001,6 +1001,7 @@ class PrecisionRenderWindow(RenderWindow):
             self._request_overlay_alignment_preview(invalidate=False)
 
     def _render(self) -> None:
+        self._tile_compose_timer.stop()     # see RenderWindow._render
         self._apply_y_axis_direction()
         if self._render_alignment_view_change():
             return

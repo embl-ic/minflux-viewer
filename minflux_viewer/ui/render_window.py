@@ -125,6 +125,7 @@ from .tile_cache import PhysicalTileCache, TileKey
 
 _RENDER_SIZE   = 800     # fallback target image dimension for image-mode render
 _DEBOUNCE_MS   = 25      # delay between view change and re-render
+_TILE_COALESCE_MS = 20   # tiles arriving within this are composed once
 _COLORMAPS     = list(BUILTIN_COLORMAP_NAMES)
 _ORIENTATIONS  = ["XY", "XZ", "YZ", "3D", ORTHO_AXIS]
 _RENDER_ORIENTATIONS = {"XY", "XZ", "YZ"}
@@ -956,6 +957,13 @@ class RenderWindow(QWidget):
         self._redraw_timer.setSingleShot(True)
         self._redraw_timer.setInterval(_DEBOUNCE_MS)
         self._redraw_timer.timeout.connect(self._render)
+
+        # A burst of finished tiles is composed once, not once per tile: each
+        # composite redraws every channel (~140 ms for two in a 900 px view).
+        self._tile_compose_timer = QTimer(self)
+        self._tile_compose_timer.setSingleShot(True)
+        self._tile_compose_timer.setInterval(_TILE_COALESCE_MS)
+        self._tile_compose_timer.timeout.connect(self._recomposite_from_tiles)
 
         self._ortho_timer = QTimer(self)
         self._ortho_timer.setSingleShot(True)
@@ -2108,6 +2116,7 @@ class RenderWindow(QWidget):
         self._overlay_alignment_panel = OverlayAlignmentPanel(self, self._channels, ch_idx)
         self._root_layout.insertWidget(self._channel_area_layout_index, self._overlay_alignment_panel)
         self._redraw_timer.stop()
+        self._tile_compose_timer.stop()
         self._prepare_overlay_alignment_preview()
         if self._overlay_alignment_preview_scalar is None:
             # No frame yet to snapshot: have the sources rendered directly.
@@ -2812,6 +2821,9 @@ class RenderWindow(QWidget):
 
     def _render(self) -> None:
         """Timer callback: dispatch to tiled or direct render based on zoom."""
+        # A composite queued for the previous view's tiles must not land over
+        # what this render draws (a direct render, an image, a new tile plan).
+        self._tile_compose_timer.stop()
         self._apply_y_axis_direction()
         if self._render_alignment_view_change():
             return
@@ -3220,13 +3232,19 @@ class RenderWindow(QWidget):
         if self._overlay_alignment_panel is not None:
             return
 
-        # Re-composite only if the tile is still relevant
+        # Re-composite only if the tile is still relevant: at once for the
+        # last tile of the view, so a settled view is a composed one, and
+        # once per burst before that.
         if (
             key.orientation == self._active_plane()
             and key.mask_version == self._mask_versions.get(key.dataset_key, 0)
             and self._last_tile_geometry is not None
         ):
-            self._recomposite_from_tiles()
+            if not self._pending_tile_keys:
+                self._tile_compose_timer.stop()
+                self._recomposite_from_tiles()
+            elif not self._tile_compose_timer.isActive():
+                self._tile_compose_timer.start()
 
     def _recomposite_from_tiles(self) -> None:
         """Re-assemble the display image from whatever is in the tile cache."""
@@ -5843,6 +5861,7 @@ class RenderWindow(QWidget):
 
         self._closing = True
         self._redraw_timer.stop()
+        self._tile_compose_timer.stop()
         self._ortho_timer.stop()
         if getattr(self, "_ortho_crosshair", None) is not None:
             self._ortho_crosshair.dispose()

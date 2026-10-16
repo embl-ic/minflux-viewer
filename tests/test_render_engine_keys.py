@@ -186,3 +186,42 @@ def test_a_tile_key_names_its_dataset_by_key(field):
 
     assert field in {f.name for f in fields(TileKey)}
     assert "dataset_id" not in {f.name for f in fields(TileKey)}
+
+
+def test_a_burst_of_tiles_is_composed_once_not_once_per_tile(qtbot):
+    """The view used to recomposite every channel once per arriving tile
+    (slice 4.3): ~140 ms each for two channels in a 900 px window."""
+    state = _state(_dataset("A", 1, overlay="g"), _dataset("B", 2, overlay="g"))
+    win = _window(qtbot, state, 0)
+    composites = []
+    original = win._recomposite_from_tiles
+
+    def counting():
+        composites.append(len(win._pending_tile_keys))
+        return original()
+
+    win._recomposite_from_tiles = counting
+    tiles_before = len(win._phys_tile_cache)
+    win._phys_tile_cache.clear()
+    win._render()
+    qtbot.waitUntil(lambda: _settled(win), timeout=20_000)
+    arrived = len(win._phys_tile_cache)
+
+    assert arrived >= 8, f"too few tiles ({arrived}) to show coalescing"
+    assert len(composites) < arrived / 2, (len(composites), arrived)
+    # Settled means composed: the last composite saw no tile still pending.
+    assert composites and composites[-1] == 0
+    assert not win._tile_compose_timer.isActive()
+    assert tiles_before > 0
+
+
+def test_a_new_render_drops_a_composite_queued_for_the_old_view(qtbot):
+    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+
+    for cls in (None, PrecisionRenderWindow):
+        state = _state(_dataset("A", 1))
+        win = _window(qtbot, state, 0, cls) if cls is None else cls(state, dataset_idx=0)
+        qtbot.addWidget(win)
+        win._tile_compose_timer.start()          # tiles of the old view arrived
+        win._render()                            # e.g. zoomed into a direct render
+        assert not win._tile_compose_timer.isActive(), cls
