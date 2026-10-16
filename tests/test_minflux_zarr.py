@@ -1220,7 +1220,7 @@ def test_nan_coordinates_survive_the_write():
     raw = dataset.mfx_raw
     coords = np.asarray(raw["loc_x"], dtype=float).copy()
     coords[::3] = np.nan                                # scatter NaN through it
-    raw["loc_x"] = coords
+    raw.replace_coordinates(loc_x=coords)
     target = Path(tempfile.mkdtemp()) / "nan.zarr"
     write_minflux_zarr(dataset, target)
 

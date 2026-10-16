@@ -81,7 +81,7 @@ class TestMinfluxDataset:
     def test_loc_nm_units(self):
         """loc values are in metres; loc_nm should convert to nanometres."""
         ds = _make_dataset(n=4)
-        ds.attr.loc_x = np.array([1e-9, 2e-9, 3e-9, 4e-9])   # 1–4 nm in metres
+        ds.attr.replace_coordinates(loc_x=np.array([1e-9, 2e-9, 3e-9, 4e-9]))  # 1–4 nm in m
         nm = ds.loc_nm[:, 0]
         np.testing.assert_allclose(nm, [1.0, 2.0, 3.0, 4.0], rtol=1e-10)
 

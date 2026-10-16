@@ -50,6 +50,13 @@ class _Virtual:
         return f"<virtual: dataset.{self.prop}>"
 
 
+#: The localization coordinate columns, in metres: the corrected ``loc`` and the
+#: uncorrected ``lnc``. Once their dataset is built they are read-only and
+#: change only through :meth:`AttrStore.replace_coordinates`.
+COORDINATE_COLUMNS: tuple[str, ...] = (
+    "loc_x", "loc_y", "loc_z", "lnc_x", "lnc_y", "lnc_z")
+
+
 class AttrStore:
     """
     Thin wrapper around a plain dict of numpy arrays.
@@ -62,11 +69,18 @@ class AttrStore:
     An entry may be **virtual** (:meth:`bind_virtual`): read from the owning
     dataset on every access, listed where it always was, and read-only -- the
     filter mask's ``ftr`` is one, so the mask has a single owner.
+
+    Once the store belongs to a dataset its :data:`COORDINATE_COLUMNS` are
+    **sealed** (:meth:`seal_coordinates`): their arrays are read-only and
+    assigning or deleting one raises. :meth:`replace_coordinates` is the one
+    way to change them, and :attr:`coordinate_revision` counts its calls.
     """
 
     def __init__(self, data: dict[str, np.ndarray] | None = None) -> None:
         object.__setattr__(self, "_d", data or {})
         object.__setattr__(self, "_owner", None)
+        object.__setattr__(self, "_sealed", False)
+        object.__setattr__(self, "_coordinate_revision", 0)
 
     def _resolve(self, name: str, value: Any) -> Any:
         if not isinstance(value, _Virtual):
@@ -83,6 +97,61 @@ class AttrStore:
             raise TypeError(
                 f"Attribute {name!r} is read-only: it is the dataset's "
                 f"{object.__getattribute__(self, '_d')[name].prop}; set that instead.")
+        if name in COORDINATE_COLUMNS and object.__getattribute__(self, "_sealed"):
+            raise TypeError(
+                f"Coordinate column {name!r} is read-only once its dataset is built; "
+                f"change it with replace_coordinates({name}=...).")
+
+    # -- coordinates -------------------------------------------------------
+    def seal_coordinates(self) -> None:
+        """Make the coordinate columns read-only from now on (idempotent).
+
+        Their arrays are flagged non-writeable in place, so a reference taken
+        earlier is guarded too; a column added later must come through
+        :meth:`replace_coordinates`.
+        """
+        d = object.__getattribute__(self, "_d")
+        for name in COORDINATE_COLUMNS:
+            value = d.get(name)
+            if value is None or isinstance(value, _Virtual):
+                continue
+            if not isinstance(value, np.ndarray):
+                value = np.array(value)
+                d[name] = value
+            value.flags.writeable = False
+        object.__setattr__(self, "_sealed", True)
+
+    def replace_coordinates(self, **columns: Any) -> None:
+        """The one way to change coordinate columns once they are sealed.
+
+        Each value becomes a read-only float copy (the caller's array is not
+        kept) with as many rows as the store already has; a refused call
+        changes nothing. :attr:`coordinate_revision` goes up by one per call.
+        """
+        unknown = sorted(set(columns) - set(COORDINATE_COLUMNS))
+        if unknown:
+            raise ValueError(f"{unknown} is not a coordinate column; "
+                             f"those are {COORDINATE_COLUMNS}")
+        d = object.__getattribute__(self, "_d")
+        rows = next((len(v) for v in d.values()
+                     if isinstance(v, np.ndarray) and v.ndim >= 1), None)
+        prepared: dict[str, np.ndarray] = {}
+        for name, value in columns.items():
+            arr = np.array(value, dtype=float, copy=True)
+            if arr.ndim != 1 or (rows is not None and arr.shape[0] != rows):
+                raise ValueError(f"{name} needs {rows} rows in one column, "
+                                 f"got shape {arr.shape}")
+            arr.flags.writeable = False
+            prepared[name] = arr
+        d.update(prepared)
+        object.__setattr__(
+            self, "_coordinate_revision",
+            object.__getattribute__(self, "_coordinate_revision") + 1)
+
+    @property
+    def coordinate_revision(self) -> int:
+        """How many times :meth:`replace_coordinates` has changed this store."""
+        return object.__getattribute__(self, "_coordinate_revision")
 
     def bind_virtual(self, name: str, owner: Any, prop: str) -> None:
         """Make *name* read ``owner.<prop>`` (keeping its place in the order)."""
@@ -99,6 +168,11 @@ class AttrStore:
         owner = owner_ref() if owner_ref is not None else None
         if owner is not None and id(owner) in memo:
             object.__setattr__(new, "_owner", weakref.ref(memo[id(owner)]))
+        # The copy's own coordinate arrays are as guarded as these.
+        object.__setattr__(new, "_coordinate_revision",
+                           object.__getattribute__(self, "_coordinate_revision"))
+        if object.__getattribute__(self, "_sealed"):
+            new.seal_coordinates()
         return new
 
     # -- attribute access --------------------------------------------------
@@ -224,6 +298,13 @@ class DatasetComponents:
     # NOT the last-valid materialization (an all-iteration store), so mfx_get can
     # broadcast them onto any iteration selection.
     derived_last: AttrStore = field(default_factory=AttrStore)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # Loaders attach the all-iteration store after the dataset is built;
+        # its coordinates are sealed the moment it is attached.
+        if name == "mfx_raw" and isinstance(value, AttrStore):
+            value.seal_coordinates()
+        object.__setattr__(self, name, value)
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +445,7 @@ class MinfluxDataset:
 
     def __post_init__(self) -> None:
         self._adopt_filter_attr()
+        self.attr.seal_coordinates()
         if self.components.mfx is None:
             self.components.mfx = AttributeComponent(
                 self.attr,
