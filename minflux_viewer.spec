@@ -26,7 +26,9 @@
 # Output:  dist/minflux_viewer/  (dist/MINFLUX Viewer.app on macOS)
 
 from pathlib import Path
+from contextlib import contextmanager
 import importlib.util
+import os
 import re
 import sys
 
@@ -269,19 +271,49 @@ excludes = [
 # ---------------------------------------------------------------------------
 # Analysis
 # ---------------------------------------------------------------------------
-a = Analysis(
-    [str(ROOT / "run_app.py")],
-    pathex=[str(ROOT)],
-    binaries=[],
-    datas=datas,
-    hiddenimports=hidden_imports,
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=excludes,
-    noarchive=False,
-    optimize=1,
-)
+@contextmanager
+def build_binary_search_path():
+    """Prevent unrelated tools on PATH from supplying incompatible native DLLs.
+
+    Windows Qt uses the operating system's ICU. A different ICU on PATH can
+    resolve during freezing even though the Windows loader would select the
+    system copy in a source run. Scope lookup to this Python, its Qt wheel and
+    Windows; restore the caller's environment even if Analysis fails.
+    """
+    if sys.platform != "win32":
+        yield
+        return
+    previous = os.environ.get("PATH")
+    qt_package = importlib.util.find_spec("PyQt6")
+    qt_bin = Path(qt_package.origin).parent / "Qt6" / "bin"
+    windows = Path(os.environ["SystemRoot"])
+    paths = [qt_bin, Path(sys.executable).parent, Path(sys.prefix),
+             Path(sys.base_prefix), Path(sys.base_prefix) / "DLLs",
+             windows / "System32", windows]
+    os.environ["PATH"] = os.pathsep.join(dict.fromkeys(str(path) for path in paths))
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = previous
+
+
+with build_binary_search_path():
+    a = Analysis(
+        [str(ROOT / "run_app.py")],
+        pathex=[str(ROOT)],
+        binaries=[],
+        datas=datas,
+        hiddenimports=hidden_imports,
+        hookspath=[],
+        hooksconfig={},
+        runtime_hooks=[],
+        excludes=excludes,
+        noarchive=False,
+        optimize=1,
+    )
 
 # ---------------------------------------------------------------------------
 # PYZ archive

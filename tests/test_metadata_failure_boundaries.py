@@ -285,3 +285,29 @@ def test_preference_failure_does_not_replace_saved_settings(error, monkeypatch):
     exec(compile(ast.Module(body=[method], type_ignores=[]), app_state.__file__, "exec"), namespace)
     with pytest.raises(error, match="injected"):
         namespace["_load_prefs"](object())
+
+
+@pytest.mark.parametrize("error", [MemoryError, RuntimeError])
+@pytest.mark.parametrize("command", ["file", "roi_channel"])
+def test_gui_command_reports_backend_failure_without_continuing(error, command, monkeypatch, tmp_path):
+    from PyQt6.QtWidgets import QMessageBox
+    from minflux_viewer.core import channel_labels, formats
+    from minflux_viewer.ui.analysis.attribute_separation_dialog import AttributeSeparationDialog
+    from minflux_viewer.ui.controllers.file_open_controller import _route_file
+
+    messages, dialogs, added = [], [], []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *args: dialogs.append(args))
+    owner = SimpleNamespace(_state=SimpleNamespace(log=lambda text, *args: messages.append(text)))
+    if command == "file":
+        monkeypatch.setattr(formats, "resolve_open", fail(error))
+        _route_file(owner, str(tmp_path / "test.json"))
+    else:
+        monkeypatch.setattr(channel_labels, "roi_mask_for_record", fail(error))
+        owner._roi_candidates = lambda: [SimpleNamespace(name="test")]
+        owner._roi_combo = SimpleNamespace(setCurrentIndex=lambda index: None)
+        owner._dataset = lambda: object()
+        owner._add_mask_channel = lambda *args, **kwargs: added.append(True)
+        AttributeSeparationDialog._on_roi_source_picked(owner, 1)
+    assert dialogs and "injected backend failure" in dialogs[0][-1]
+    assert messages and "injected backend failure" in messages[-1]
+    assert not added

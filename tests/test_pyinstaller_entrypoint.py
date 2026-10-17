@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import sys
 from pathlib import Path
 
@@ -33,6 +34,8 @@ def _evaluate_spec():
         class Stub:
             def __init__(self, *args, **kwargs):
                 calls.setdefault(name, []).append((args, kwargs))
+                if name == "Analysis":
+                    calls["AnalysisPATH"] = [os.environ.get("PATH")]
                 self.binaries = []
                 self.datas = []
                 self.pure = []
@@ -62,6 +65,23 @@ def _evaluate_spec():
         patch.setattr(Path, "is_dir", is_dir)
         exec(code, namespace)  # noqa: S102 - the spec is first-party build config
     return namespace, calls
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows DLL resolution")
+def test_spec_ignores_foreign_dll_paths_and_restores_the_callers_environment(monkeypatch, tmp_path):
+    foreign = str(tmp_path / "unrelated-native-tools")
+    monkeypatch.setenv("PATH", foreign)
+    namespace, calls = _evaluate_spec()
+    analyzed_path = calls["AnalysisPATH"][0].split(os.pathsep)
+    assert foreign not in analyzed_path
+    assert str(Path(os.environ["SystemRoot"]) / "System32") in analyzed_path
+    assert str(namespace["ROOT"]) not in analyzed_path
+    assert os.environ["PATH"] == foreign
+    with pytest.raises(RuntimeError, match="analysis failed"):
+        with namespace["build_binary_search_path"]():
+            assert foreign not in os.environ["PATH"].split(os.pathsep)
+            raise RuntimeError("analysis failed")
+    assert os.environ["PATH"] == foreign
 
 
 def test_freeze_support_precedes_application_import() -> None:
