@@ -118,6 +118,13 @@ def test_freeze_support_precedes_application_import() -> None:
     )
 
 
+def test_external_cuda_worker_is_bundled_as_source_not_a_gpu_dependency():
+    namespace, _calls = _evaluate_spec()
+    assert (str(ROOT / "minflux_viewer/core/cuda_fft_worker.py"), "minflux_viewer/core") in namespace["datas"]
+    assert not any(name.startswith("cupy") for name in namespace["hidden_imports"])
+    assert {"cupy", "cupyx"}.issubset(namespace["excludes"])
+
+
 def test_spec_guards_against_incomplete_build_environment() -> None:
     """A global PyInstaller must not silently omit required app packages."""
     source = SPEC.read_text(encoding="utf-8")

@@ -109,6 +109,37 @@ minflux-viewer /path/to/data.msr  # open a file on launch
 
 On Linux, the Qt/OpenGL system libraries listed above may also be required.
 
+### Optional CUDA FFT convolution
+
+**Analyze › Segmentation › Convolution…** defaults to CPU (SciPy). The **CUDA FFT
+(CuPy)** selection accelerates only the 2D FFT, with float64 precision, zero
+padding and the same output alignment. Histogram/kernel preparation, DoG and
+detection remain on CPU. A fresh isolated worker is started for each new map;
+small maps can be slower because startup and transfers are included. Threshold
+edits reuse the map. There is no automatic CPU fallback on CUDA failure.
+
+Use a **separate trusted Python environment**, not the viewer's managed package
+panel or its own environment. For NVIDIA hardware with an installed CUDA 13.x
+toolkit and compatible driver, create an external Python 3.12 environment and
+install the pinned worker requirements:
+
+```powershell
+py -3.12 -m venv C:\path\to\cuda-worker
+C:\path\to\cuda-worker\Scripts\python.exe -m pip install --only-binary=:all: -r tools/gpu/requirements-cuda13.txt
+```
+
+On Linux use `python3.12 -m venv /path/to/cuda-worker` and its `bin/python`.
+In the convolution dialog select that environment's **Python executable**, the
+CUDA device index (default 0), and a GPU memory estimate budget (default 512 MiB).
+The worker checks available VRAM, reports failures and records device/runtime/
+precision information in the preview tooltip and ROI log. Memory estimates are
+not hard total-RSS/VRAM limits. Request stop/closing retires work without blocking
+Qt; cancellation or a 120-second timeout stops only the owned child process.
+Only one CUDA convolution runs at a time per viewer process; other processes
+and applications are not coordinated. OpenGL rendering does not establish CUDA
+availability. AMD/Intel, macOS GPU computing, 3D convolution and deconvolution
+are not implemented by this option.
+
 ---
 
 ## For developers

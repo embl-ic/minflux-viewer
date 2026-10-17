@@ -156,6 +156,8 @@ datas = [
     (str(ROOT / "resources"), "resources"),
     # pip must remain an ordinary on-disk package, never a frozen hidden import.
     (str(ROOT / "resources" / "pip"), "resources/pip"),
+    # Executed by the user's external CUDA Python, not the frozen interpreter.
+    (str(ROOT / "minflux_viewer/core/cuda_fft_worker.py"), "minflux_viewer/core"),
 ] + collect_data_files("minflux_viewer.plugins.hlyb_pair_analysis")
 
 # ---------------------------------------------------------------------------
@@ -246,6 +248,9 @@ excludes = [
     "notebook",
     "jupyter",
     "cv2",
+    # CUDA dependencies belong only to the explicitly selected external worker.
+    "cupy",
+    "cupyx",
     # Matplotlib is deliberately not part of the application.  PyQtGraph has
     # optional discovery/import paths for it, so exclude it and its otherwise
     # unused dependency chain to keep stale build environments from bundling it.

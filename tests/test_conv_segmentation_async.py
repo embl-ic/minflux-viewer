@@ -163,3 +163,76 @@ def test_completed_jobs_release_captured_maps_and_callbacks(state, qtbot, monkey
     gc.collect()
     assert len(references) == 2
     assert all(reference() is None for reference in references)
+
+
+def test_cuda_requires_explicit_environment_and_cpu_recovery(state, qtbot):
+    win = _window(state, qtbot)
+    _ready(qtbot, win)
+    win._backend_combo.setCurrentIndex(1)
+    qtbot.waitUntil(lambda: "absolute path" in win._info_label.text())
+    assert win._map_key is None and not win._add_btn.isEnabled()
+    assert win._response.size == 0 and win._fft_provenance == {}
+    win._backend_combo.setCurrentIndex(0)
+    _ready(qtbot, win)
+    assert win._fft_provenance["backend"] == "cpu-scipy"
+
+
+def test_cuda_selection_cache_provenance_and_persistence(state, qtbot, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from scipy.signal import fftconvolve
+
+    calls = []
+    def accelerated(image, kernel, settings, **kwargs):
+        calls.append((settings, threading.get_ident()))
+        return fftconvolve(image, kernel, mode="same"), {"backend": "cuda-cupy", "dtype": "float64", "device_name": "test GPU"}
+    monkeypatch.setattr(cs, "cuda_fftconvolve", accelerated)
+    win = _window(state, qtbot)
+    _ready(qtbot, win)
+    win._cuda_python.setText(sys.executable)
+    win._backend_combo.setCurrentIndex(1)
+    _ready(qtbot, win)
+    assert len(calls) == 1 and calls[0][1] != threading.get_ident()
+    assert "cuda-cupy" in win._info_label.text()
+    assert "test GPU" in win._info_label.toolTip()
+    win._response_spin.setValue(.4)
+    _ready(qtbot, win)
+    assert len(calls) == 1 and win._fft_provenance["device_name"] == "test GPU"
+    captured = []
+    win._owner = SimpleNamespace(add_segmentation_rois=lambda *a, **kw: captured.append(kw) or 1)
+    win._add_to_manager()
+    assert captured and "test GPU" in captured[0]["log_message"]
+    win._cuda_device.setValue(1)
+    _ready(qtbot, win)
+    assert len(calls) == 2 and calls[-1][0].device == 1
+    win.close()
+    assert state.prefs["conv_segmentation"]["fft_backend"] == "cuda"
+    again = _window(state, qtbot)
+    _ready(qtbot, again)
+    assert again._backend_combo.currentData() == "cuda" and again._cuda_device.value() == 1
+
+
+def test_switch_backend_discards_late_cuda_result(state, qtbot, monkeypatch):
+    import sys
+
+    from scipy.signal import fftconvolve
+
+    started, release = threading.Event(), threading.Event()
+    def accelerated(image, kernel, settings, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return fftconvolve(image, kernel, mode="same"), {"backend": "cuda-cupy"}
+    monkeypatch.setattr(cs, "cuda_fftconvolve", accelerated)
+    win = _window(state, qtbot)
+    _ready(qtbot, win)
+    win._cuda_python.setText(sys.executable)
+    win._backend_combo.setCurrentIndex(1)
+    try:
+        qtbot.waitUntil(started.is_set)
+        win._backend_combo.setCurrentIndex(0)
+        assert not win._add_btn.isEnabled()
+    finally:
+        release.set()
+    _ready(qtbot, win)
+    assert win._fft_provenance["backend"] == "cpu-scipy"

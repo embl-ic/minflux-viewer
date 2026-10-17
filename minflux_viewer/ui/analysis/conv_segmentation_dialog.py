@@ -33,13 +33,16 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -48,6 +51,7 @@ from PyQt6.QtWidgets import (
 from minflux_viewer.analysis import conv_segmentation as cs
 from minflux_viewer.colormaps import colormap_lut
 from minflux_viewer.core.computation_snapshot import input_signature
+from minflux_viewer.core.cuda_fft import CudaFftSettings
 from minflux_viewer.ui.common.background_tasks import (
     BackgroundTask,
     detach_task_signals,
@@ -88,6 +92,7 @@ class ConvSegmentationWindow(QDialog):
         self._task: BackgroundTask | None = None
         self._pending = False
         self._map_key = None
+        self._fft_provenance: dict = {}
         self._kernel = np.empty((0, 0))
         self._param_spins: dict[str, QDoubleSpinBox] = {}
         self._H = np.zeros((0, 0))
@@ -167,6 +172,41 @@ class ConvSegmentationWindow(QDialog):
         left.addLayout(self._param_form)
 
         common = QFormLayout()
+        self._backend_combo = QComboBox()
+        self._backend_combo.addItem("CPU (SciPy)", "cpu")
+        self._backend_combo.addItem("CUDA FFT (CuPy)", "cuda")
+        self._backend_combo.setToolTip(
+            "Accelerates the FFT only, using float64. No automatic CPU fallback. "
+            "Requires a separate trusted Python environment with CuPy and CUDA.")
+        self._backend_combo.currentIndexChanged.connect(self._backend_changed)
+        common.addRow("FFT backend:", self._backend_combo)
+        self._cuda_controls = QWidget()
+        cuda_form = QFormLayout(self._cuda_controls)
+        cuda_form.setContentsMargins(0, 0, 0, 0)
+        self._cuda_python = QLineEdit()
+        self._cuda_python.setPlaceholderText("External Python executable")
+        self._cuda_python.setToolTip("Absolute path to a trusted external Python; not site-packages or the viewer executable.")
+        self._cuda_python.textChanged.connect(self._schedule_recompute)
+        browse = QPushButton("…")
+        browse.setFixedWidth(28)
+        browse.clicked.connect(self._choose_cuda_python)
+        python_row = QHBoxLayout()
+        python_row.addWidget(self._cuda_python)
+        python_row.addWidget(browse)
+        cuda_form.addRow("Python:", python_row)
+        self._cuda_device = QSpinBox()
+        self._cuda_device.setRange(0, 63)
+        self._cuda_device.valueChanged.connect(self._schedule_recompute)
+        cuda_form.addRow("Device index:", self._cuda_device)
+        self._cuda_memory = QSpinBox()
+        self._cuda_memory.setRange(64, 65536)
+        self._cuda_memory.setValue(512)
+        self._cuda_memory.setSuffix(" MiB")
+        self._cuda_memory.setToolTip("Conservative device estimate cap; also refuses estimates over 80% of free VRAM. Not total VRAM usage.")
+        self._cuda_memory.valueChanged.connect(self._schedule_recompute)
+        cuda_form.addRow("GPU budget:", self._cuda_memory)
+        self._cuda_controls.hide()
+        common.addRow(self._cuda_controls)
         self._pixel_spin = self._spin(0.5, 200.0, 4.0, 1, 0.5, " nm")
         self._pixel_spin.valueChanged.connect(self._schedule_recompute)
         common.addRow("Pixel size:", self._pixel_spin)
@@ -259,8 +299,11 @@ class ConvSegmentationWindow(QDialog):
 
         panel = QWidget()
         panel.setLayout(left)
-        panel.setFixedWidth(300)
-        return panel
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFixedWidth(320)
+        scroll.setWidget(panel)
+        return scroll
 
     def _build_center(self) -> QWidget:
         center = QVBoxLayout()
@@ -484,6 +527,21 @@ class ConvSegmentationWindow(QDialog):
             self._schedule_recompute()
 
     # ----------------------------------------------------- persistence
+    def _backend_changed(self, *_args) -> None:
+        self._cuda_controls.setVisible(self._backend_combo.currentData() == "cuda")
+        self._schedule_recompute()
+
+    def _choose_cuda_python(self) -> None:
+        path, _filter = QFileDialog.getOpenFileName(self, "Select trusted CUDA Python executable")
+        if path:
+            self._cuda_python.setText(path)
+
+    def _cuda_settings(self) -> CudaFftSettings | None:
+        if self._backend_combo.currentData() == "cpu":
+            return None
+        return CudaFftSettings(self._cuda_python.text().strip(), self._cuda_device.value(),
+                               self._cuda_memory.value() * 1024**2)
+
     def _restore_prefs(self) -> None:
         """Restore the last-session parameters from ``state.prefs`` (or fall back
         to the built-in defaults), then build the param spins for the model."""
@@ -501,6 +559,10 @@ class ConvSegmentationWindow(QDialog):
             return
         self._suspend = True
         try:
+            self._cuda_python.setText(str(cfg.get("cuda_python", "")))
+            self._cuda_device.setValue(int(cfg.get("cuda_device", 0)))
+            self._cuda_memory.setValue(int(cfg.get("cuda_memory_mib", 512)))
+            self._backend_combo.setCurrentIndex(max(0, self._backend_combo.findData(cfg.get("fft_backend", "cpu"))))
             for spin, key in ((self._pixel_spin, "pixel_size"),
                               (self._response_spin, "min_response"),
                               (self._sep_spin, "min_separation"),
@@ -530,6 +592,10 @@ class ConvSegmentationWindow(QDialog):
             self._model_params[self._active_model_key] = self._params()
         self._state.prefs["conv_segmentation"] = {
             "model": self._model_key(),
+            "fft_backend": self._backend_combo.currentData(),
+            "cuda_python": self._cuda_python.text().strip(),
+            "cuda_device": self._cuda_device.value(),
+            "cuda_memory_mib": self._cuda_memory.value(),
             "pixel_size": self._pixel_spin.value(),
             "memory_budget_mib": self._memory_spin.value(),
             "zero_mean": self._zero_mean.isChecked(),
@@ -621,9 +687,11 @@ class ConvSegmentationWindow(QDialog):
         generation, stamp, xy = self._generation, self._source_stamp(), self._xy
         zero, sqrt, dog = self._zero_mean.isChecked(), self._sqrt.isChecked(), self._dog.isChecked()
         budget = int(self._memory_spin.value()) * 1024**2
-        map_key = (stamp, key, tuple(params.items()), px, zero, sqrt, dog, budget)
+        cuda_settings = self._cuda_settings()
+        map_key = (stamp, key, tuple(params.items()), px, zero, sqrt, dog, budget, cuda_settings)
         cached = (dict(kernel=self._kernel, histogram=self._H, response_map=self._response,
-                       xedge=self._xedge, yedge=self._yedge) if self._map_key == map_key else None)
+                       xedge=self._xedge, yedge=self._yedge, fft_provenance=self._fft_provenance)
+                  if self._map_key == map_key else None)
         threshold = dict(model_key=key, params=params, pixel_size_nm=px,
                          min_response=float(self._response_spin.value()),
                          min_distance_nm=float(self._sep_spin.value()),
@@ -636,13 +704,16 @@ class ConvSegmentationWindow(QDialog):
         def work(report):
             maps = cached if cached is not None else cs.convolution_maps(
                 xy, model_key=key, params=params, pixel_size_nm=px, zero_mean=zero,
-                sqrt_stabilize=sqrt, dog=dog, budget_bytes=budget, report=report)
+                sqrt_stabilize=sqrt, dog=dog, budget_bytes=budget, report=report,
+                cuda_settings=cuda_settings)
             detections = cs.threshold_response_maps(xy, maps, **threshold, report=report)
             report("Convolution preview ready")
             return maps, detections
 
         try:
             estimate = cs.preflight_convolution(xy, key, params, px, budget_bytes=budget)
+            if cuda_settings is not None:
+                cuda_settings.preflight(estimate.image_shape, estimate.kernel_shape)
         except (ValueError, MemoryError) as exc:
             self._reset_maps(str(exc))
             self._info_label.setText(str(exc))
@@ -668,9 +739,13 @@ class ConvSegmentationWindow(QDialog):
         self._kernel = maps["kernel"]
         self._H, self._response = maps["histogram"], maps["response_map"]
         self._xedge, self._yedge = maps["xedge"], maps["yedge"]
+        self._fft_provenance = maps["fft_provenance"]
         self._draw_kernel(self._kernel)
         self._info_label.setText(
-            f"{self._xy.shape[0]:,} localizations · {self._H.shape[0]}×{self._H.shape[1]} px")
+            f"{self._xy.shape[0]:,} localizations · {self._H.shape[0]}×{self._H.shape[1]} px"
+            f" · {self._fft_provenance['backend']}")
+        import json
+        self._info_label.setToolTip(json.dumps(self._fft_provenance, indent=2))
         self._centers, self._values = detections["centers"], detections["peak_values"]
         self._inside, self._support = detections["inside_ratio"], detections["support"]
         self._labels = [f"{self._name_prefix()} {i}" for i in range(1, len(self._centers) + 1)]
@@ -697,6 +772,8 @@ class ConvSegmentationWindow(QDialog):
             self._recompute()
 
     def _reset_maps(self, status: str) -> None:
+        self._fft_provenance = {}
+        self._info_label.setToolTip("")
         self._H = np.zeros((0, 0))
         self._response = np.zeros((0, 0))
         self._resp_img.clear()
@@ -858,6 +935,8 @@ class ConvSegmentationWindow(QDialog):
         centers = self._centers[sel]
         names = [self._labels[i] for i in sel]
         opts = []
+        import json
+        opts.append("FFT " + json.dumps(self._fft_provenance, sort_keys=True))
         if self._zero_mean.isChecked():
             opts.append("zero-mean kernel")
         if self._sqrt.isChecked():
