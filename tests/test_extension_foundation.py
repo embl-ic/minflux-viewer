@@ -51,10 +51,11 @@ def test_a_deferred_member_explains_itself_rather_than_vanishing():
     from minflux_viewer.api.view import View
 
     view = View(facade=None)
-    for call in (view.volume, view.lut):
+    for call, alternative in ((view.volume, "View menu"), (view.lut, "LUT dialog")):
         with pytest.raises(NotImplementedError) as excinfo:
             call()
-        assert "1.0" in str(excinfo.value)
+        assert "not available" in str(excinfo.value)
+        assert alternative in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

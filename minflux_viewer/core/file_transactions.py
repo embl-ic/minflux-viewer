@@ -23,33 +23,48 @@ _LOCKS: weakref.WeakValueDictionary[str, Any] = weakref.WeakValueDictionary()
 
 
 @contextmanager
-def file_transaction(paths: Iterable[Path], *, protected: Iterable[Path] = ()) -> Iterator[dict[Path, Path]]:
-    """Yield original → staged paths (same basename), then publish the set.
-
-    Locks cover preparation through cleanup, including resolved-path aliases.
-    They serialize this process's writers, not arbitrary external applications.
-    """
-    originals = list(paths)
-    resolved = {path: path.resolve() for path in originals}
-    if len(set(resolved.values())) != len(originals):
-        raise ValueError("Transaction destinations must be distinct.")
+def destination_locks(paths: Iterable[Path]) -> Iterator[None]:
+    """Serialize resolved file/directory destinations in this process only."""
     with _LOCK_GUARD:
         locks = []
-        destinations = {*resolved.values(), *(path.resolve() for path in protected)}
-        for key in sorted({os.path.normcase(str(p)) for p in destinations}):
+        for key in sorted({os.path.normcase(str(Path(p).resolve())) for p in paths}):
             lock = _LOCKS.get(key)
             if lock is None:
                 lock = threading.RLock()
                 _LOCKS[key] = lock
             locks.append(lock)
+    with ExitStack() as stack:
+        for lock in locks:
+            stack.enter_context(lock)
+        yield
+
+
+@contextmanager
+def file_transaction(paths: Iterable[Path], *, protected: Iterable[Path] = (),
+                     overwrite: bool = True) -> Iterator[dict[Path, Path]]:
+    """Yield same-basename staged paths, then publish with recoverable rollback.
+
+    Locks cover preparation through cleanup; external writers are not excluded.
+    ``overwrite=False`` refuses existing destinations before preparation and
+    rechecks before publication. It does not reserve paths against other processes.
+    """
+    originals = list(paths)
+    resolved = {path: path.resolve() for path in originals}
+    if len(set(resolved.values())) != len(originals):
+        raise ValueError("Transaction destinations must be distinct.")
     stages: dict[Path, Path] = {}
     directories: dict[Path, Path] = {}
     backups: dict[Path, Path] = {}
     published: list[Path] = []
     committed = False
-    with ExitStack() as stack:
-        for lock in locks:
-            stack.enter_context(lock)
+    with destination_locks([*resolved.values(), *protected]):
+        if not overwrite:
+            for original in originals:
+                if original.is_symlink():
+                    raise FileExistsError(original)
+            for target in resolved.values():
+                if target.exists():
+                    raise FileExistsError(target)
         try:
             for original, target in resolved.items():
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -66,6 +81,10 @@ def file_transaction(paths: Iterable[Path], *, protected: Iterable[Path] = ()) -
             yield stages
             if any(not stage.is_file() for stage in stages.values()):
                 raise FileNotFoundError("A transaction member was not prepared.")
+            if not overwrite:
+                for target in resolved.values():
+                    if target.exists():
+                        raise FileExistsError(target)
             for original, target in resolved.items():
                 if target.exists():
                     backup = stages[original].parent / (uuid.uuid4().hex + ".backup")

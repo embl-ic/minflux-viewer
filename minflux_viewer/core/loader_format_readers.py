@@ -163,6 +163,8 @@ def load_dataset(path: str | Path, prefs: dict | None = None, *,
     # parser (which would lose the coordinates).
     flat = _flat_table_from_dict(raw, path.name, str(path.parent), prefs)
     if flat is not None:
+        if apply_sidecar:
+            apply_metadata_sidecar(flat, path)
         return flat
 
     # 2. Build mfx_raw — all iterations, all measurements, no filtering
@@ -473,6 +475,8 @@ def load_npy(path: str | Path, prefs: dict | None = None, *,
             path.name, str(path.parent), prefs,
         )
         if flat is not None:
+            if apply_sidecar:
+                apply_metadata_sidecar(flat, path)
             return flat
         ds = load_from_mfx_array(
             mfx=arr,
@@ -542,10 +546,8 @@ def load_npz(path: str | Path, prefs: dict | None = None, *,
              apply_sidecar: bool = True) -> MinfluxDataset:
     """Load a ``.npz`` flat-column export.
 
-    ``.npz`` is offered by the save dialog and enabled by default in
-    Preferences, but had no reader at all - every ``.npz`` save was a file the
-    application could never reopen. It carries the same flat columns as the
-    ``.zarr`` export, so it follows the same two shapes: canonical raw
+    The retired writer is not offered by the save dialog; this reader preserves
+    existing files. It accepts flat columns in two shapes: canonical raw
     (``loc_x``/``loc_y``/``itr``/``vld``) or a processed table (``xnm``/``ynm``).
     """
     path = Path(path).resolve()

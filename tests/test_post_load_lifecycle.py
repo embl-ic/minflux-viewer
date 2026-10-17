@@ -12,9 +12,11 @@ window's methods on a light stand-in.
 
 from __future__ import annotations
 
+import itertools
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
@@ -157,3 +159,37 @@ def test_current_guarded_delivery_still_applies():
     MainWindow._on_post_load_done(stub, key, ds, {"run": 1}, task,
                                   input_signature(ds), st.data_revision(key))
     assert applied == [(ds, {"run": 1})]
+
+
+@pytest.mark.parametrize("actions", list(itertools.permutations(("edit", "close-reopen", "cancel", "deliver"))))
+def test_adversarial_edit_close_cancel_delivery_orders(actions):
+    from minflux_viewer.core.computation_snapshot import input_signature
+
+    state = _state("A")
+    dataset, key, task = state.datasets[0], state.key_at(0), _task()
+    signature, revision = input_signature(dataset), state.data_revision(key)
+    applied = []
+    owner = SimpleNamespace(_state=state, _is_shutting_down=False,
+                            _post_load_tasks={key: task},
+                            _apply_post_load_results=lambda *args: applied.append(args))
+    invalidated = False
+    delivered_before_change = False
+    for action in actions:
+        if action == "edit":
+            dataset.filter_mask = np.arange(dataset.prop.num_loc) % 2 == 0
+            state.notify_filter_changed(state.index_of_dataset(dataset))
+            invalidated = True
+        elif action == "close-reopen":
+            state.remove_dataset(state.index_of_dataset(dataset))
+            state.add_dataset(dataset)
+            invalidated = True
+        elif action == "cancel":
+            task.cancel()
+            invalidated = True
+        else:
+            delivered_before_change = not invalidated
+            MainWindow._on_post_load_done(owner, key, dataset, {}, task, signature, revision)
+    assert len(applied) == int(delivered_before_change)
+    # Repeated queued results never revive a cancelled/retired registration.
+    MainWindow._on_post_load_done(owner, key, dataset, {}, task, signature, revision)
+    assert len(applied) == int(delivered_before_change)

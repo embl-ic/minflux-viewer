@@ -4,7 +4,7 @@
 script in the Script Editor and a plugin from your own folder use the same
 object: the script imports it as `mfv`, the plugin receives it as `ctx`.
 
-**API version 1.3.** Adding a namespace, a function or a defaulted keyword is a
+**API version 1.4.** Adding a namespace, a function or a defaulted keyword is a
 minor bump; removing or renaming anything is a major one. A plugin declares
 what it was written against and the loader refuses to run it against an API
 that has moved.
@@ -24,7 +24,7 @@ mfv.ui.log(f"{ds.name}: {len(loc)} localizations")
 - [Namespaces](#namespaces) · [`data`](#mfvdata) · [`roi`](#mfvroi) ·
   [`results`](#mfvresults) · [`plot`](#mfvplot) · [`view`](#mfvview) ·
   [`ui`](#mfvui) · [`run`](#mfvrun) · [`journal`](#mfvjournal) ·
-  [`record`](#mfvrecord) · [`plugins`](#mfvplugins)
+  [`record`](#mfvrecord) · [`plugins`](#mfvplugins) · [`io`](#mfvio)
 - [Writing a plugin](#writing-a-plugin)
 - [Using libraries the viewer does not ship](#using-libraries-the-viewer-does-not-ship)
 - [Compatibility and limits](#compatibility-and-limits)
@@ -45,6 +45,7 @@ mfv.ui.log(f"{ds.name}: {len(loc)} localizations")
 | `mfv.journal` | record a step so it reaches *Generate Method Text* |
 | `mfv.record` | record viewer work as a reusable Python script |
 | `mfv.plugins` | list plugins, write up or re-run their last run (since 1.3) |
+| `mfv.io` | detached single-dataset file I/O and sequential CPU batches (since 1.4) |
 
 Statistics are deliberately **not** wrapped. SciPy is bundled; use
 `scipy.stats` directly.
@@ -266,7 +267,7 @@ twice raises the existing window rather than opening a second.
 `snapshot()` captures what is on screen — the exact zoom, filters and channels
 the user is looking at — not a re-render.
 
-`mfv.view.volume()` and `mfv.view.lut()` are published but **deferred in 1.0**;
+`mfv.view.volume()` and `mfv.view.lut()` are published but **unavailable**;
 they raise with the reason. Use the render window's own View menu and the LUT
 dialog.
 
@@ -577,6 +578,91 @@ ship their own OpenMP runtime, which collides at the DLL level. Run those in a
 separate environment.
 
 ---
+
+## `mfv.io`
+
+Synchronous CPU operations, with no window creation, viewer registration or
+automatic density, precision or anisotropy computation. In standalone Python
+use `from minflux_viewer.api.io import load, save, batch`; no running viewer or
+Qt application is needed. In the viewer, use `mfv.run.background` around these
+operations, never hand a worker a live viewer dataset.
+
+```python
+ds = mfv.io.load(path, apply_sidecar=False)
+paths = mfv.io.save(ds, output, fmt="npy", content="raw", filter_mode="flag")
+```
+
+Inputs: one dataset in NPY, NPZ, MAT, JSON, delimited tables or marked application
+dataset Zarr (directory/package). Generic tables must already be interpretable
+without a mapping dialog. MSR and multi-member Zarr projects are refused; use
+explicit acquisition/channel selection through the existing viewer workflow.
+Optional sibling processing recipes are opt-in; embedded Zarr state is intrinsic.
+An explicitly requested unreadable/invalid recipe, calibration or unrestored
+transform is an error. Enabled filters whose attributes are not materialized
+are refused: this CPU path cannot silently defer them to a GUI post-load chain.
+Load without the sidecar and explicitly prepare/apply processing when needed.
+Disabled filter specifications remain inactive. I/O reports invalid requests
+with `ValueError`/`TypeError` and filesystem failures with their native exceptions
+(including `FileExistsError`); batch callback exceptions propagate unchanged.
+Outputs: NPY, MAT, JSON, CSV, Zarr or Zarr package. Ordinary outputs include a
+processing recipe; Zarr embeds processing. No overlay siblings or external images
+are implicitly gathered. Zarr requires `content="raw"`. Snapshot `filter_mode`
+is `"flag"` (keep rows) or `"apply"` (drop filtered rows). Saving never overwrites
+an existing data file, directory or sibling recipe. Caller owns detached data
+during the call; synchronous I/O is not an automatic snapshot of live GUI state.
+
+```python
+def process(ds, parameters, check_cancelled):
+    check_cancelled()
+    # CPU-only processing of this private dataset. Modify it in place or
+    # return a replacement dataset. No Qt widgets or viewer-state calls.
+
+def work(task):
+    return mfv.io.batch(
+        input_paths, output_directory, process,
+        operation="my-processing@1", parameters={"radius_nm": 25.0},
+        fmt="npy", content="raw", filter_mode="flag",
+        apply_sidecar=False, resume=True,
+        check_cancelled=task.check_cancelled, progress=task.progress,
+    )
+
+mfv.run.background(work, on_done=lambda rows: mfv.ui.log(f"{len(rows)} outputs verified"))
+```
+
+Batch is sequential and **fail-fast**. An exception propagates; previously
+committed items remain intact. Each input gets a stable `item-<path hash>` owned
+directory with data, recipe where applicable and `receipt.json`. Publication is
+a same-filesystem staged-directory rename. Stages are cleaned on handled failure
+or cancellation; a process crash may leave an uncommitted hidden stage, which
+is never treated as completed work. No data is added to the viewer.
+
+Resume verifies the operation ID, parameters, application version, options,
+source/optional-recipe SHA-256 and every output file SHA-256. A mismatch refuses
+the item without overwriting it. **Change the operation ID/version when callback
+code changes**; code identity is not inferred. Parameters must be finite JSON
+values with string dictionary keys; captured values are copied independently
+per callback. Receipts contain absolute source paths and processing parameters;
+consider that before sharing outputs. They detect accidental changes, not an
+attacker able to rewrite both files and receipts. Hashing costs I/O: sources
+are checked before and after processing, and resume re-reads output files.
+
+`check_cancelled()` runs between phases and during hash chunks. Supply the same
+checkpoint to your algorithm. Native reads/writes finish before their next
+checkpoint. The final checkpoint is before publication, not after a commit.
+`progress(done, total, label)` reports the item about to be processed; it is
+not called after the final commit. Returned rows contain `source`, `output_dir`
+and `status` (`"written"` or `"resumed"`). GUI delivery cancellation cannot undo
+already committed files. Batch does not retain loaded datasets between items;
+callbacks must not retain them either if bounded memory is needed. There is no
+quota for arbitrary callback/native allocations or GPU execution.
+
+Inputs and output trees must not overlap; duplicate inputs, links/junctions
+inside inventories and unsupported file types are refused. File inventories
+are limited to 100,000 files and receipts to 16 MiB; empty directories are not
+fingerprinted. In-process destination locks serialize writers; other processes
+must not modify the same inputs/outputs concurrently. Publication is not a
+power-loss durability or cross-process transaction guarantee. The Process Folder
+script demonstrates background discovery, CPU processing and GUI-only reporting.
 
 ## Compatibility and limits
 

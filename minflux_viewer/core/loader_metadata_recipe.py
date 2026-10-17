@@ -24,10 +24,9 @@ def _restore_filter_mask(ds: MinfluxDataset, saved_ftr) -> bool:
     """
     if saved_ftr is None:
         return False
-    mask = np.asarray(saved_ftr).ravel()
-    n = len(np.asarray(ds.attr.get("loc_x", np.empty(0))).ravel())
-    if mask.size != n or n == 0:
-        return False
+    mask = np.asarray(saved_ftr)
+    if mask.shape != (ds.prop.num_loc,):
+        raise ValueError("Saved filter mask must align with materialized localizations")
     ds.filter_mask = mask.astype(bool, copy=False)
     return True
 

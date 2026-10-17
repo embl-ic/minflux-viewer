@@ -505,10 +505,11 @@ def test_deferred_members_explain_themselves(mfv):
     ``volume`` and ``lut`` are published names deliberately not implemented in
     API 1.0. A caller must get the reason, not an AttributeError.
     """
-    for call in (mfv.view.volume, mfv.view.lut):
+    for call, alternative in ((mfv.view.volume, "View menu"), (mfv.view.lut, "LUT dialog")):
         with pytest.raises(NotImplementedError) as excinfo:
             call()
-        assert "1.0" in str(excinfo.value)
+        assert "not available" in str(excinfo.value)
+        assert alternative in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

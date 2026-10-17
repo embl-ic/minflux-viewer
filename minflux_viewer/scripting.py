@@ -176,7 +176,7 @@ class MinfluxViewerFacade:
         """
         Refused. ``AppState`` is not part of the published API.
 
-        The nine namespaces are the contract. Reaching past them into
+        The published namespaces are the contract. Reaching past them into
         application state would couple external code to internals this project
         refactors freely -- exactly what the extension layer exists to prevent.
         If something you need is genuinely missing from the namespaces, that is

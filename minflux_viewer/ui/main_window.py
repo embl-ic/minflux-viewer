@@ -1783,11 +1783,6 @@ class MainWindow(QMainWindow):
         from minflux_viewer.ui.controllers import post_load_controller as controller
         return controller._post_load_index(self, ds)
 
-    def _post_load_next(self, ds, step) -> None:
-        'Run the next post-load step from the event loop (keeps the UI live).'
-        from minflux_viewer.ui.controllers import post_load_controller as controller
-        return controller._post_load_next(self, ds, step)
-
     def _restart_post_load_in_background(self, ds) -> None:
         'Compatibility entry point for extensions calling the former steps.'
         from minflux_viewer.ui.controllers import post_load_controller as controller
@@ -1797,33 +1792,17 @@ class MainWindow(QMainWindow):
         from minflux_viewer.ui.controllers import post_load_controller as controller
         return controller._post_load_z_scaling_factor(self, ds)
 
-    def _legacy_post_load_z_scaling_factor(self, ds) -> None:
-        from minflux_viewer.ui.controllers import post_load_controller as controller
-        return controller._legacy_post_load_z_scaling_factor(self, ds)
-
     def _post_load_z_scaling_factor_estimate(self, ds) -> None:
         from minflux_viewer.ui.controllers import post_load_controller as controller
         return controller._post_load_z_scaling_factor_estimate(self, ds)
-
-    def _legacy_post_load_z_scaling_factor_estimate(self, ds) -> None:
-        from minflux_viewer.ui.controllers import post_load_controller as controller
-        return controller._legacy_post_load_z_scaling_factor_estimate(self, ds)
 
     def _post_load_loc_prec(self, ds) -> None:
         from minflux_viewer.ui.controllers import post_load_controller as controller
         return controller._post_load_loc_prec(self, ds)
 
-    def _legacy_post_load_loc_prec(self, ds) -> None:
-        from minflux_viewer.ui.controllers import post_load_controller as controller
-        return controller._legacy_post_load_loc_prec(self, ds)
-
     def _post_load_density(self, ds) -> None:
         from minflux_viewer.ui.controllers import post_load_controller as controller
         return controller._post_load_density(self, ds)
-
-    def _legacy_post_load_density(self, ds) -> None:
-        from minflux_viewer.ui.controllers import post_load_controller as controller
-        return controller._legacy_post_load_density(self, ds)
 
     def _post_load_finalize(self, ds) -> None:
         from minflux_viewer.ui.controllers import post_load_controller as controller

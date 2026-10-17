@@ -40,6 +40,27 @@ def test_collect_paths_shortcuts_and_cleaning(_app):
     assert "Segmentation" not in by_text and "NPC" not in by_text
 
 
+def test_unavailable_builtins_remain_disabled_and_explain_why(_app):
+    from types import SimpleNamespace
+
+    from PyQt6.QtGui import QAction
+    from PyQt6.QtWidgets import QMenu
+
+    from minflux_viewer.ui.controllers.menu_controller import _mark_ai_unapproved_actions
+
+    names = ("actionBatchRender", "actionBatchExport", "actionBatchFilter")
+    ui = SimpleNamespace(**{name: QAction(name) for name in names}, menuBatchProcessing=QMenu("Batch"))
+    owner = SimpleNamespace(_ui=ui, actionChannelTool=QAction("Channel Tool"),
+                            actionDbscan=QAction("DBSCAN"), actionKNearestNeighbour=QAction("KNN"))
+    for _ in range(3):
+        _mark_ai_unapproved_actions(owner)
+        for action in [*(getattr(ui, name) for name in names), owner.actionChannelTool,
+                       owner.actionDbscan, owner.actionKNearestNeighbour]:
+            assert not action.isEnabled()
+            assert "Not implemented" in action.toolTip()
+            assert "Phase" not in action.statusTip()
+
+
 def test_filter_ranks_name_above_path(_app):
     from minflux_viewer.ui.tools.command_finder import collect_commands, filter_commands
     entries = collect_commands(_menubar(_app)[0])

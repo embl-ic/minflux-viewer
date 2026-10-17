@@ -224,16 +224,7 @@ def _connect_actions(self: MainWindow) -> None:
     # actionTraceViewer (legacy View/Tracking entry) retired. The retained
     # trace inspection workflow lives in Plugins > Trace Viewer.
     u.actionMsdAnalysis.triggered.connect(self._show_msd_analysis)
-    # Process menu — Batch Processing submenu (Phase 5 placeholders)
-    u.actionBatchRender.triggered.connect(
-        lambda: self._placeholder("Batch render", "Phase 5")
-    )
-    u.actionBatchExport.triggered.connect(
-        lambda: self._placeholder("Batch export", "Phase 5")
-    )
-    u.actionBatchFilter.triggered.connect(
-        lambda: self._placeholder("Batch filter", "Phase 5")
-    )
+    # Batch GUI commands remain unavailable; CPU batch I/O is a separate API.
     self.menuProcessChannel = QMenu("Channel...", self)
     self.actionChannelTool = QAction("Channel Tool", self)
     self.actionChannelTool.triggered.connect(
@@ -625,7 +616,7 @@ def _keep_standard_actions_in_declared_menus(self: MainWindow) -> None:
 
 
 def _mark_ai_unapproved_actions(self: MainWindow) -> None:
-    """Visually separate AI-generated/unapproved actions from approved UI."""
+    """Disable unfinished built-in commands, independently of dataset selection."""
     u = self._ui
     actions = [
         #u.actionSave,
@@ -659,7 +650,13 @@ def _mark_ai_unapproved_actions(self: MainWindow) -> None:
         #u.actionMsdAnalysis,
     ]
     for action in actions:
-        self._mark_action_ai_unapproved(action)
+        action.setEnabled(False)
+        reason = "Not implemented in this version."
+        if action in (u.actionBatchRender, u.actionBatchExport, u.actionBatchFilter,
+                      u.menuBatchProcessing.menuAction()):
+            reason += " For CPU file workflows use mfv.io.batch or the Process Folder script."
+        action.setToolTip(reason)
+        action.setStatusTip(reason)
 
 
 def _mark_action_ai_unapproved(self: MainWindow, action: QAction) -> None:

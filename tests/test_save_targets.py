@@ -278,6 +278,15 @@ def test_the_dataset_manager_is_the_only_way_to_the_save_export_dialog():
     root = pathlib.Path(minflux_viewer.__file__).parent   # not the CWD
     callers = set()
     for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        # Detached file I/O is not the window method that opens this dialog.
+        # Resolve its import binding instead of counting an unrelated spelling.
+        detached_saves = {
+            alias.asname or alias.name
+            for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+            and node.module in {"minflux_viewer.core.dataset_io", "dataset_io"}
+            for alias in node.names if alias.name == "save_dataset"
+        }
         class Consumers(ast.NodeVisitor):
             def visit_FunctionDef(self, node):
                 # Implementation and compatibility forwarding are one route;
@@ -288,6 +297,9 @@ def test_the_dataset_manager_is_the_only_way_to_the_save_export_dialog():
             visit_AsyncFunctionDef = visit_FunctionDef
 
             def visit_Call(self, node):
+                if isinstance(node.func, ast.Name) and node.func.id in detached_saves:
+                    self.generic_visit(node)
+                    return
                 name = (node.func.attr if isinstance(node.func, ast.Attribute)
                         else node.func.id if isinstance(node.func, ast.Name) else None)
                 lookup = (name in {"getattr", "hasattr"} and len(node.args) > 1
@@ -297,7 +309,7 @@ def test_the_dataset_manager_is_the_only_way_to_the_save_export_dialog():
                     callers.add(path.relative_to(root).as_posix())
                 self.generic_visit(node)
 
-        Consumers().visit(ast.parse(path.read_text(encoding="utf-8")))
+        Consumers().visit(tree)
     assert callers == {"ui/tools/dataset_manager.py"}, callers
 
 

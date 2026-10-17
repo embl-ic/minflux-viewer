@@ -244,3 +244,16 @@ def test_hlyb_builtin_plugin_metadata_is_bundled() -> None:
     old_location = ROOT / "plugins" / "hlyb_pair_analysis"
     assert not (old_location / "main.py").exists()
     assert not (old_location / "plugin.toml").exists()
+
+
+def test_every_public_namespace_is_frozen_and_level_one_keeps_docstrings() -> None:
+    from minflux_viewer.api import NAMESPACES
+
+    namespace, calls = _evaluate_spec()
+    for name in NAMESPACES:
+        assert f"minflux_viewer.api.{name}" in namespace["hidden_imports"]
+    level = calls["Analysis"][0][1]["optimize"]
+    assert level == 1
+    sample = {}
+    exec(compile('"module documentation"\nassert False\n', "synthetic.py", "exec", optimize=level), sample)
+    assert sample["__doc__"] == "module documentation"

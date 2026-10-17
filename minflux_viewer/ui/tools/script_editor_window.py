@@ -42,7 +42,7 @@ if ds is not None:
 """
 
 
-_API_HELP = """MINFLUX Viewer scripting API 1.3
+_API_HELP = """MINFLUX Viewer scripting API 1.4
 
 Scripts run inside the current viewer session. The runtime module `mfv` is
 bound to the live application state, and is the same object a plugin receives
@@ -69,6 +69,7 @@ mfv.run       background execution, progress, cancellation
 mfv.journal   record a step so it reaches Generate Method Text
 mfv.record    record viewer work as a reusable Python script
 mfv.plugins   list plugins, write up or re-run their last run
+mfv.io        detached single-dataset load/save and CPU batches
 
 mfv.data
 
@@ -140,6 +141,15 @@ mfv.plugins
 
 Compatibility
 
+  mfv.io.load(path, apply_sidecar=False)
+  mfv.io.save(ds, path, fmt="npy", content="raw", filter_mode="flag")
+  mfv.io.batch(paths, output_dir, process, operation="my-tool@1", parameters={})
+  I/O is synchronous and detached: use run.background for GUI responsiveness.
+  Batch is sequential, fail-fast, never overwrites, and supports hash-verified
+  resume=True. Supply check_cancelled=task.check_cancelled, progress=task.progress.
+  process(ds, parameters, check_cancelled) must touch no Qt/viewer state.
+  view.volume() and view.lut() remain unavailable; use the render View menu/LUT dialog.
+
   mfv.get_active_dataset(), get_datasets(), get_dataset(), get_attr(),
   get_loc(), log(), show_console() and mfv.viewer.* all still work.
 
@@ -164,6 +174,7 @@ _COMPLETION_MAP = {
         "journal",
         "record",
         "plugins",
+        "io",
         "viewer",
         "ScriptError",
         "get_active_dataset()",
@@ -264,6 +275,7 @@ _COMPLETION_MAP = {
         "method_text()",
         "last_run()",
     ],
+    "mfv.io": ["load()", "save()", "batch()"],
     "mfv.viewer": [
         "render()",
         "scatter()",

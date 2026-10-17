@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+Scripting API 1.4 adds detached CPU load/save and sequential batch processing,
+with no-overwrite outputs, cooperative cancellation and hash-verified resume.
+The folder template runs CPU work in the background. Unimplemented built-in
+commands are disabled with explanations instead of promising an old milestone.
+Flat NPY/MAT snapshots now restore opted-in processing recipes consistently;
+malformed imported filter masks are rejected. Post-load publication has a typed,
+Qt-free boundary, and unused synchronous implementations were removed.
+Disabled saved filters stay inactive; detached CPU loading refuses recipes that
+cannot be restored completely instead of silently exporting a partial selection.
+
 Filter masks reject malformed row alignment instead of silently dropping a
 selection. Queued dataset exports capture submission-time data and processing
 state. Background task handles now terminate correctly, queued work is visible,
@@ -29,7 +39,7 @@ memory budget is adjustable; it is not a total application memory limit.
 
 UI internals are grouped into capability packages. Plugins that import private
 `minflux_viewer.ui` modules must use their new paths; old UI module paths are
-not retained. The public `mfv` scripting API is unchanged.
+not retained. Existing public `mfv` scripting calls remain compatible.
 
 Retired HlyB workflows and unreachable tiled-render levels were removed while
 preserving the live staged workflow and its shared numerical helpers. Late tile

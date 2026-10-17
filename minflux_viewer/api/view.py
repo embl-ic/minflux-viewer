@@ -115,12 +115,12 @@ class View(Namespace):
         """
         Open the 3-D volume preview.
 
-        Deferred in API 1.0: the volume window is owned by its render window
+        Unavailable: the volume window is owned by its render window
         and is reached through that window's own View menu, so publishing it
         here would mean publishing a second ownership path.
         """
         raise NotImplementedError(
-            "mfv.view.volume() is deferred in API 1.0 — open the 3-D preview "
+            "mfv.view.volume() is not available — open the 3-D preview "
             "from the render window's View menu."
         )
 
@@ -128,12 +128,12 @@ class View(Namespace):
         """
         Set the colour mapping of a dataset render channel.
 
-        Deferred in API 1.0: colour state is split across per-dataset overlay
+        Unavailable: colour state is split across per-dataset overlay
         LUTs, per-window levels and the shared LUT dialog, and publishing a
         single setter before that is unified would freeze the wrong shape.
         """
         raise NotImplementedError(
-            "mfv.view.lut() is deferred in API 1.0 — use the LUT dialog."
+            "mfv.view.lut() is not available — use the LUT dialog."
         )
 
     def refresh(self, dataset: Any = None) -> None:

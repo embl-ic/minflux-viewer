@@ -32,6 +32,7 @@ Namespaces
 ``journal``  record a step so it reaches *Generate Method Text*
 ``record``   record viewer work as a reusable Python script
 ``plugins``  list plugins, write up or re-run their last run (since 1.3)
+``io``       detached single-dataset I/O and sequential CPU batches (since 1.4)
 
 Scripts do not import this package directly. ``minflux_viewer.scripting``
 binds these namespaces to the live :class:`AppState` and installs the result as
@@ -45,8 +46,8 @@ from __future__ import annotations
 #:   major — a signature was removed or changed incompatibly
 #:   minor — a namespace, function or defaulted keyword was added
 #: Declared by plugins as ``requires.mfv_api = ">=1.0,<2.0"``.
-# 1.3 adds the ``plugins`` namespace -- an addition, so a minor bump.
-__api_version__ = "1.3"
+# 1.4 adds detached file I/O and CPU batch execution.
+__api_version__ = "1.4"
 
 #: Namespace module names, in documentation order. The facade builds one bound
 #: instance of each; the plugin loader and the API reference both read this.
@@ -61,6 +62,7 @@ NAMESPACES: tuple[str, ...] = (
     "journal",
     "record",
     "plugins",
+    "io",
 )
 
 __all__ = ["__api_version__", "NAMESPACES"]

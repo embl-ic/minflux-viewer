@@ -676,6 +676,8 @@ def mfx_filter_mask(
     mask = np.ones(n, dtype=bool)
     unevaluable: list[str] = []
     for spec in specs:
+        if not spec.get("enabled", True):
+            continue
         attr = spec.get("attribute", "")
         vals = _spec_filter_values(
             ds, spec, itr=itr, vld_only=vld_only, raw=raw, browse_mask=browse_mask,
@@ -735,6 +737,8 @@ def evaluate_saved_filters(ds: MinfluxDataset) -> np.ndarray | None:
     mask = np.ones(n, dtype=bool)
     applied = False
     for spec in specs:
+        if not spec.get("enabled", True):
+            continue
         vals = attr_values_for_selection(
             ds,
             str(spec.get("attribute", "")),
