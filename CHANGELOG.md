@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+Filter masks reject malformed row alignment instead of silently dropping a
+selection. Queued dataset exports capture submission-time data and processing
+state. Background task handles now terminate correctly, queued work is visible,
+and script error callbacks retain structured diagnostics without worker frames.
+Managed package installation also protects alternative Qt runtimes and the
+bundled fitting stack; conflicting external Qt paths are refused.
+
 NPC model averages now require converged, finite fits and report optimizer
 diagnostics. CSV exports preserve large integer identifiers. Ordinary dataset
 exports stage data and recipes before replacement, with rollback on handled

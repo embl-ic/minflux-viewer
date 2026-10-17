@@ -94,7 +94,7 @@ class TaskHandle:
 
     def is_running(self) -> bool:
         """Whether the task is still active."""
-        return not bool(getattr(self._task, "is_cancelled", True))
+        return getattr(self._task, "status", None) in {"queued", "running", "cancelling"}
 
 
 class Run(Namespace):
@@ -124,7 +124,12 @@ class Run(Namespace):
         passed to *on_done*. A failure is passed to *on_error*, or reported to
         the Log if none is given -- it is never swallowed silently.
         """
-        from minflux_viewer.ui.common.background_tasks import BackgroundTask, shared_thread_pool
+        from minflux_viewer.core.task_failure import TaskExecutionError
+        from minflux_viewer.ui.common.background_tasks import (
+            BackgroundTask,
+            detach_task_signals,
+            shared_thread_pool,
+        )
 
         if not callable(fn):
             raise ApiError("run.background() needs a callable.")
@@ -164,11 +169,11 @@ class Run(Namespace):
                 except ValueError:
                     pass
 
-        def _on_failed(message: str) -> None:
+        def _on_failed(failure) -> None:
             if on_error is not None:
-                on_error(RuntimeError(message))
+                on_error(TaskExecutionError(failure))
             else:
-                state.log(f"{label} failed: {message}", "ERROR")
+                state.log(f"{label} failed: {failure.traceback}", "ERROR")
 
         def _on_cancelled() -> None:
             state.log(f"{label}: stopped at the caller's request.", "INFO")
@@ -176,7 +181,7 @@ class Run(Namespace):
                 on_cancel()
 
         task.signals.stage.connect(_on_stage)
-        task.signals.failed.connect(_on_failed)
+        task.signals.failure.connect(_on_failed)
         task.signals.cancelled.connect(_on_cancelled)
         if on_done is not None:
             task.signals.done.connect(on_done)
@@ -184,7 +189,10 @@ class Run(Namespace):
         # Retain until Qt reports the runnable finished; a QRunnable handed to
         # a pool is otherwise collected mid-flight.
         self._facade.retain_task(task)
-        task.signals.finished.connect(lambda: self._facade.release_task(task))
+        def _finished() -> None:
+            self._facade.release_task(task)
+            detach_task_signals(task)
+        task.signals.finished.connect(_finished)
 
         shared_thread_pool(self.POOL).start(task)
         return TaskHandle(task)

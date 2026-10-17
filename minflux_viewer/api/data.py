@@ -394,7 +394,10 @@ class Data(Namespace):
         """Apply the filter mask when *arr* is one-row-per-localization."""
         if arr.ndim == 0 or arr.shape[0] != int(ds.prop.num_loc):
             return arr
-        mask = np.asarray(ds.filter_mask, dtype=bool)
-        if mask.shape[0] != arr.shape[0]:
-            return arr
+        try:
+            mask = np.asarray(ds.filter_mask, dtype=bool)
+        except (TypeError, ValueError) as exc:
+            raise ApiError(f"Invalid filter mask for {ds.name!r}: {exc}") from exc
+        if mask.shape != (arr.shape[0],):
+            raise ApiError(f"Invalid filter mask for {ds.name!r}: row alignment mismatch")
         return arr[mask]

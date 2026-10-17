@@ -12,13 +12,17 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
-from threading import Event
-from typing import Any
+from threading import Event, Lock
+from typing import TYPE_CHECKING, Any
 
 from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal
 
 from minflux_viewer.core.execution import pool_size
+from minflux_viewer.core.task_failure import TaskFailure
 from minflux_viewer.ui.common.qt_lifecycle import disconnect_signal, qobject_alive
+
+if TYPE_CHECKING:
+    from minflux_viewer.core.task_registry import TaskHandle as RegistryTaskHandle
 
 _SHARED_POOLS: dict[str, QThreadPool] = {}
 _LOG = logging.getLogger(__name__)
@@ -31,6 +35,8 @@ _COMMON_SIGNAL_NAMES = (
     "result_ready",
     "done",
     "failed",
+    "failure",
+    "delivery_discarded",
     "cancelled",
     "finished",
 )
@@ -42,7 +48,9 @@ class BackgroundTaskSignals(QObject):
     stage = pyqtSignal(str)
     done = pyqtSignal(object)
     failed = pyqtSignal(str)
+    failure = pyqtSignal(object)
     cancelled = pyqtSignal()
+    delivery_discarded = pyqtSignal()
     finished = pyqtSignal()
 
 
@@ -67,33 +75,66 @@ class BackgroundTask(QRunnable):
         category: str = "I/O",
         discard_result: Callable[[Any], None] | None = None,
         finally_callback: Callable[[], None] | None = None,
+        commits_output: bool = False,
     ) -> None:
         super().__init__()
-        self._work = work
+        self._work: Callable[[Callable[[str], None]], Any] | None = work
         self.description = str(description)
         self.category = str(category)
         self.signals = BackgroundTaskSignals()
         self._cancelled = Event()
         self._discard_result = discard_result
         self._finally_callback = finally_callback
+        self._commits_output = bool(commits_output)
+        self._status = "queued"
+        self._state_lock = Lock()
+        self._handle: RegistryTaskHandle | None = None
+        self._on_start: Callable[[BackgroundTask], None] | None = None
+
+    @property
+    def status(self) -> str:
+        with self._state_lock:
+            return self._status
+
+    def prepare(self) -> RegistryTaskHandle:
+        """Register before enqueueing, or on entry for a direct run()."""
+        from minflux_viewer.core.task_registry import registry
+
+        with self._state_lock:
+            if self._handle is None:
+                self._handle = registry.register(self.description, self.category, cancel=self.cancel)
+                if self._cancelled.is_set():
+                    self._handle.update(detail="Stop requested before execution")
+            return self._handle
+
+    def _finish(self, status: str, detail: str | None = None) -> None:
+        with self._state_lock:
+            self._status = status
+        assert self._handle is not None
+        self._handle.finish(status, detail=detail)
 
     @property
     def is_cancelled(self) -> bool:
         return self._cancelled.is_set()
 
     def cancel(self) -> None:
-        self._cancelled.set()
+        with self._state_lock:
+            if self._status in {"done", "failed", "cancelled"}:
+                return
+            self._cancelled.set()
+            self._status = "cancelling"
 
     def run(self) -> None:  # noqa: N802 - Qt API
-        from minflux_viewer.core.task_registry import registry as task_registry
-
+        if self._on_start is not None:
+            self._on_start(self)
+            self._on_start = None
+        handle = self.prepare()
         if self.is_cancelled:
             self._finish_cancelled(None)
             return
-        handle = task_registry.register(
-            self.description, self.category, cancel=self.cancel
-        )
         handle.start()
+        with self._state_lock:
+            self._status = "cancelling" if self.is_cancelled else "running"
         result = None
 
         def report(stage: str) -> None:
@@ -104,37 +145,48 @@ class BackgroundTask(QRunnable):
             self.signals.stage.emit(text)
 
         try:
+            assert self._work is not None
             result = self._work(report)
             if self.is_cancelled:
-                handle.finish("cancelled")
+                committed = self._commits_output
+                self._finish("done" if committed else "cancelled",
+                             "Output committed; UI delivery cancelled" if committed else None)
                 self._discard(result)
-                self.signals.cancelled.emit()
+                if committed:
+                    self.signals.delivery_discarded.emit()
+                else:
+                    self.signals.cancelled.emit()
             else:
-                handle.finish("done")
+                self._finish("done")
                 self.signals.done.emit(result)
         except BackgroundTaskCancelled:
-            handle.finish("cancelled")
+            self._finish("cancelled")
             self._discard(result)
             self.signals.cancelled.emit()
         except Exception as exc:  # noqa: BLE001 - exceptions cross the Qt boundary
-            if self.is_cancelled:
-                handle.finish("cancelled")
-                self._discard(result)
-                self.signals.cancelled.emit()
-            else:
-                handle.finish("failed", detail=str(exc))
-                self.signals.failed.emit(str(exc))
+            failure = TaskFailure.capture(exc)
+            self._finish("failed", detail=f"{failure.exception_type}: {failure.message}")
+            self.signals.failure.emit(failure)
+            self.signals.failed.emit(str(exc))
         finally:
             self._run_finally()
+            self._work = None
+            self._discard_result = None
+            self._finally_callback = None
             self.signals.finished.emit()
 
     def _finish_cancelled(self, result: Any) -> None:
         try:
+            self._finish("cancelled")
             self._discard(result)
             self.signals.cancelled.emit()
         finally:
             self._run_finally()
+            self._work = None
+            self._discard_result = None
+            self._finally_callback = None
             self.signals.finished.emit()
+
 
     def _discard(self, result: Any) -> None:
         if result is None or self._discard_result is None:
@@ -151,6 +203,39 @@ class BackgroundTask(QRunnable):
             self._finally_callback()
         except Exception:  # caller-supplied cleanup must not suppress terminal signals
             _LOG.exception("Final cleanup failed for %s", self.description)
+
+
+class _TrackedThreadPool(QThreadPool):
+    def __init__(self) -> None:
+        super().__init__()
+        self._pending: set[BackgroundTask] = set()
+        self._pending_lock = Lock()
+
+    def _started(self, task: BackgroundTask) -> None:
+        with self._pending_lock:
+            self._pending.discard(task)
+
+    def start(self, runnable, priority: int = 0) -> None:
+        if isinstance(runnable, BackgroundTask):
+            # tryTake is unsafe for auto-deleted runnables (Qt's ABA hazard).
+            # Python owners and run() retain these until actual completion.
+            runnable.setAutoDelete(False)
+            runnable.prepare()
+            runnable._on_start = self._started
+            with self._pending_lock:
+                self._pending.add(runnable)
+        super().start(runnable, priority)
+
+    def clear(self) -> None:
+        with self._pending_lock:
+            pending = list(self._pending)
+        for task in pending:
+            if self.tryTake(task):
+                self._started(task)
+                task._on_start = None
+                task.cancel()
+                task._finish_cancelled(None)
+        super().clear()
 
 
 def shared_thread_pool(name: str, *, max_threads: int | None = None) -> QThreadPool:
@@ -180,7 +265,7 @@ def shared_thread_pool(name: str, *, max_threads: int | None = None) -> QThreadP
     # next without unloading this module. Qt then deletes the C++ pool while
     # the Python registry still contains its wrapper.
     if pool is None or not qobject_alive(pool):
-        pool = QThreadPool()
+        pool = _TrackedThreadPool()
         _SHARED_POOLS[key] = pool
     if max_threads is not None:
         pool.setMaxThreadCount(max(int(max_threads), 1))

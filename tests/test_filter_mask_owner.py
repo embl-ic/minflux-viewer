@@ -97,6 +97,35 @@ def test_a_loaded_filter_is_adopted_and_an_all_pass_one_is_not():
     assert "filter_mask" not in _dataset().state
 
 
+@pytest.mark.parametrize("mask", [True, [], [True] * 5, [True] * 7,
+                                  np.ones((6, 1)), np.ones((1, 6))])
+def test_invalid_mask_assignment_does_not_replace_the_previous_selection(mask):
+    ds = _dataset()
+    ds.filter_mask = [True, False] * 3
+    before = ds.filter_mask.copy()
+    with pytest.raises(ValueError, match="filter_mask must have shape"):
+        ds.filter_mask = mask
+    np.testing.assert_array_equal(ds.filter_mask, before)
+
+
+def test_malformed_all_pass_import_is_not_silently_ignored():
+    with pytest.raises(ValueError, match="filter_mask must have shape"):
+        _dataset(ftr=[True] * 5)
+
+
+@pytest.mark.parametrize("mask", [[True, False], True, np.ones((6, 1))])
+def test_api_refuses_a_corrupted_state_mask(mask):
+    from minflux_viewer.api._base import ApiError
+    from minflux_viewer.api.data import Data
+
+    ds = _dataset()
+    ds.state["filter_mask"] = mask
+    with pytest.raises(ApiError, match="Invalid filter mask"):
+        Data._apply_filter(ds, np.arange(6))
+    # Non-materialized values are intentionally not filtered.
+    np.testing.assert_array_equal(Data._apply_filter(ds, np.arange(12)), np.arange(12))
+
+
 def test_a_copied_dataset_has_its_own_mask():
     ds = _dataset()
     ds.filter_mask = np.array([True, False] * 3)

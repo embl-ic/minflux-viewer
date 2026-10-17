@@ -29,9 +29,19 @@ BLOCKED_PACKAGES = frozenset(
     {
         "numpy",
         "scipy",
+        "scikit-learn",
+        "pyqt5",
+        "pyqt5-qt5",
+        "pyqt5-sip",
         "pyqt6",
+        "pyqt6-qt6",
+        "pyqt6-sip",
         "pyside2",
         "pyside6",
+        "pyside6-addons",
+        "pyside6-essentials",
+        "shiboken2",
+        "shiboken6",
         "pyqtgraph",
         "h5py",
         "zarr",
@@ -39,7 +49,11 @@ BLOCKED_PACKAGES = frozenset(
     }
 )
 
-_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+_PACKAGE_ALIASES = {"sklearn": "scikit-learn"}
+_CONFLICTING_QT = frozenset({
+    "pyqt5", "pyqt5-qt5", "pyqt5-sip", "pyside2", "pyside6",
+    "pyside6-addons", "pyside6-essentials", "shiboken2", "shiboken6",
+})
 _PIP_MODULE_LOCK = threading.RLock()
 
 
@@ -125,6 +139,7 @@ def blocked_packages_in(path: str | Path) -> tuple[str, ...]:
             canonical = _canonical_name(_metadata_name(entry))
         else:
             canonical = _canonical_name(name.split(".", 1)[0])
+        canonical = _PACKAGE_ALIASES.get(canonical, canonical)
         if canonical in BLOCKED_PACKAGES:
             found.add(canonical)
     return tuple(sorted(found))
@@ -202,6 +217,11 @@ def inspect_path(path: str | Path) -> PathInspection:
             incompatible.append(f"{distribution} ({', '.join(tags)})")
 
     blocked = blocked_packages_in(root)
+    conflicting = sorted(set(blocked) & _CONFLICTING_QT)
+    if conflicting:
+        return PathInspection(root, False,
+                              "Conflicting Qt runtime: " + ", ".join(conflicting),
+                              (), blocked)
     if incompatible:
         running = (
             f"CPython {sys.version_info.major}.{sys.version_info.minor} "
@@ -274,12 +294,18 @@ def install_paths(prefs: dict) -> list[str]:
 
 
 def _requested_name(spec: str) -> str:
-    match = _NAME_RE.match(str(spec))
-    if match is None:
+    from packaging.requirements import InvalidRequirement, Requirement
+
+    try:
+        requirement = Requirement(str(spec))
+    except InvalidRequirement as exc:
         raise UserLibraryError(
             "Enter a package name, optionally followed by a version constraint"
-        )
-    return _canonical_name(match.group(1))
+        ) from exc
+    if requirement.url:
+        raise UserLibraryError("Direct URLs and local wheels are not supported by the managed installer")
+    name = _canonical_name(requirement.name)
+    return _PACKAGE_ALIASES.get(name, name)
 
 
 def _ensure_allowed_spec(spec: str) -> str:

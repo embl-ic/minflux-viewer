@@ -320,6 +320,12 @@ first, and apply the result in `on_done`, which runs on the GUI thread. A
 failure goes to `on_error` if you give one, and to the Log otherwise — never
 silently.
 
+The returned handle's `is_running()` is true only while queued, running or
+stopping, and false after success, failure or cancellation. Tasks are visible in
+the monitor while queued. Error callbacks receive a `RuntimeError` subclass with
+`exception_type`, `worker_traceback` and `code` diagnostics; these are plain values,
+not retained worker frames. A stop request does not undo an already committed file.
+
 The task appears in **Help ▸ Task Monitor** with a working *Request stop*
 button. Cancellation is cooperative: a thread cannot be killed, so the work
 stops when it next calls `task.check_cancelled()` (or `task.progress()`, which
@@ -550,9 +556,13 @@ Nothing is downloaded. The folder must be built for the same Python
 `pandas==2.2.0`) and it is fetched into a managed per-user folder.
 
 Both are **appended** to the import path, so the application's own NumPy,
-SciPy, Qt and HDF5 always win. `numpy`, `scipy`, `PyQt6`, `PySide2/6`,
-`pyqtgraph`, `h5py`, `zarr` and `tifffile` cannot be installed — a second copy
-of any of those is a crash, not a version conflict.
+SciPy, Qt and HDF5 keep import priority. Managed installation protects `numpy`,
+`scipy`, `scikit-learn` (including `sklearn`), `PyQt5/6`, `PySide2/6`, their Qt/SIP/
+Shiboken runtime distributions, `pyqtgraph`, `h5py`, `zarr` and `tifffile`.
+External roots containing a conflicting Qt binding are refused; other protected
+packages produce a warning. Appending paths is not a native-library sandbox or
+a guarantee that arbitrary packages are ABI-compatible. Named index requirements
+are supported; direct URLs/local wheels are not accepted by the managed installer.
 
 Only pre-built wheels are installed, and dependencies are not pulled in
 automatically; add any you need explicitly. Deep-learning stacks (PyTorch,

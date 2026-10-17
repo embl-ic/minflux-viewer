@@ -409,6 +409,9 @@ def test_background_failure_is_reported_not_swallowed(mfv, qapp):
         if errors:
             break
     assert errors and "deliberate" in str(errors[0])
+    assert errors[0].exception_type == "builtins.ValueError"
+    assert "raise ValueError" in errors[0].worker_traceback
+    assert errors[0].code == "worker_error"
 
 
 def test_background_rejects_a_non_callable(mfv):

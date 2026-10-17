@@ -130,10 +130,32 @@ def test_blocklisted_install_is_rejected_before_pip(
         return 0
 
     monkeypatch.setattr(user_libs, "_run_pip", fail_if_called)
-    for spec in ("numpy", "SciPy>=1.11", "PyQt6[extras]", "tifffile==2026.1"):
+    for spec in ("numpy", "SciPy>=1.11", "PyQt6[extras]", "tifffile==2026.1",
+                 "PyQt5", "PyQt5.Qt5", "PyQt6_sip", "scikit_learn>=1.3", "sklearn",
+                 "PySide6-Essentials", "shiboken6"):
         with pytest.raises(user_libs.UserLibraryError, match="bundled runtime"):
             user_libs.install_package(spec)
     assert not called
+
+
+@pytest.mark.parametrize("spec", ["https://example.org/demo.whl", "./demo.whl",
+                                  "alias @ https://example.org/PyQt5.whl", "--upgrade numpy"])
+def test_managed_policy_refuses_ambiguous_sources(spec):
+    with pytest.raises(user_libs.UserLibraryError):
+        user_libs._ensure_allowed_spec(spec)
+
+
+@pytest.mark.parametrize("name", ["PyQt5", "PySide2", "PySide6", "shiboken6"])
+def test_external_conflicting_qt_root_is_refused_without_importing(name, tmp_path):
+    (tmp_path / name).mkdir()
+    inspection = user_libs.inspect_path(tmp_path)
+    assert not inspection.ok
+    assert "Conflicting Qt runtime" in inspection.message
+
+
+def test_import_alias_is_in_the_same_protected_inventory(tmp_path):
+    (tmp_path / "sklearn").mkdir()
+    assert user_libs.blocked_packages_in(tmp_path) == ("scikit-learn",)
 
 
 def test_external_blocklisted_package_warns_but_path_is_appended(

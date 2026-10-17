@@ -633,10 +633,20 @@ class MinfluxDataset:
         raw = object.__getattribute__(self.attr, "_d")
         value = raw.get("ftr")
         if value is not None and not isinstance(value, _Virtual):
-            arr = np.asarray(value, dtype=bool)
+            arr = self._validated_filter_mask(value)
             if "filter_mask" not in self.state and arr.size and not arr.all():
-                self.state["filter_mask"] = np.array(arr, dtype=bool)
+                self.filter_mask = arr
         self.attr.bind_virtual("ftr", self, "filter_mask")
+
+    def _validated_filter_mask(self, mask) -> np.ndarray:
+        """Validate materialized-row alignment, including direct state writes."""
+        arr = np.asarray(mask, dtype=bool)
+        expected = (int(self.prop.num_loc),)
+        if arr.shape != expected:
+            raise ValueError(
+                f"filter_mask must have shape {expected}, got {arr.shape}"
+            )
+        return arr
 
     @property
     def filter_mask(self) -> np.ndarray:
@@ -656,14 +666,14 @@ class MinfluxDataset:
                 default.flags.writeable = False
                 object.__setattr__(self, "_all_pass", default)
             return default
-        view = np.asarray(stored, dtype=bool).view()
+        view = self._validated_filter_mask(stored).view()
         view.flags.writeable = False
         return view
 
     @filter_mask.setter
     def filter_mask(self, mask: np.ndarray) -> None:
         # A copy: the caller's array must not be able to change the mask later.
-        self.state["filter_mask"] = np.array(mask, dtype=bool)
+        self.state["filter_mask"] = self._validated_filter_mask(mask).copy()
 
     def summary(self) -> str:
         """One-line string suitable for a status bar."""
