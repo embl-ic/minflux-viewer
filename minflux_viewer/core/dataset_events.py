@@ -8,9 +8,9 @@ listeners run the dataset has left the registry, so :class:`DatasetRemoved`
 carries everything a listener needs: the key, the dataset, where it was and
 which dataset is active now.
 
-They are emitted by ``AppState.dataset_events`` beside the index signals, which
-keep firing unchanged until every listener has moved to these. Like the keys,
-they are internal: nothing here is published to scripts.
+They are the sole dataset notifications emitted by ``AppState.dataset_events``;
+the positional dataset signals have been retired. Like the keys, these events
+are internal: nothing here is published to scripts.
 
 Qt-free on purpose, so the events can be built and compared in plain tests.
 """

@@ -343,8 +343,8 @@ def resolve_open(path) -> FormatSpec | None:
 
     Candidates sharing the extension are probed in ``detect_order``; a spec with
     no ``detect`` matches unconditionally, which is why plain data sits last.
-    A predicate that raises is treated as "not this kind" -- an unreadable file
-    should fall through to the next candidate, not abort the routing.
+    Expected I/O, type, value or EOF detection errors mean "not this kind".
+    Unexpected failures propagate rather than silently select another reader.
     """
     p = Path(path)
     # Compound suffixes matter: ".zarr.zip" is a sealed store, NOT the ".zip"

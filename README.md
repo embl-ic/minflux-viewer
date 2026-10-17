@@ -1,8 +1,12 @@
 # MINFLUX Viewer
 
 MINFLUX Viewer is a desktop application for viewing, filtering, processing, and
-analysing MINFLUX microscopy data. It reads most if not all MINFLUX data
-formats (e.g.: .mat, .npy, .json etc), including Abberior Imspector `.msr`, and operate on Windows, macOS, and Linux. It use Qt backend GUI to support regular data exploration, processing especially filter on data attributes. It also capable of export processed data to 3rd party application, including directly in-app call to ParaView if it already installed and accessible. It is intended for users who is familar with using ImageJ/Fiji, and need to inspect and process MINFLUX data.
+analysing MINFLUX microscopy data. It reads common MINFLUX data
+formats (for example `.mat`, `.npy` and `.json`), including Abberior Imspector
+`.msr`, on Windows, macOS and Linux. Its Qt interface supports data exploration,
+attribute-based filtering and processing. Processed data can be exported to
+other applications, including an installed ParaView. The interaction model is
+intended to feel familiar to ImageJ/Fiji users.
 
 Developed at the [EMBL Imaging Centre](https://www.embl.org/about/info/imaging-centre/)
 as a Python/Qt reimplementation of a previous in-house built MATLAB toolset.
@@ -76,9 +80,10 @@ Prebuilt applications for each operating system are provided on the
 
 The on-startup update check is disabled by default. It can be enabled in the
 update dialog or in Preferences → File. `Help → Check for Updates` reports whether
-a newer release exists; on Windows and Linux it can download and install the new
-version in place and restart after confirmation. On macOS the dialog provides a
-download link (in-place update requires code-signing).
+a newer release exists. Frozen Windows/Linux builds can install a signed update
+only when a trusted publisher key is configured; current unconfigured builds
+offer manual release links. macOS uses manual downloads. See
+[Release authentication](#release-authentication) for the trust requirements.
 
 ## Running from source
 
@@ -113,7 +118,8 @@ A short technical overview, sufficient to clone or fork the project.
 Stack: Python 3.10–3.12, PyQt6 (GUI), pyqtgraph with PyOpenGL (2-D/3-D plotting),
 NumPy/SciPy (computation), zarr, h5py, and tifffile (I/O), and msr-reader
 (pure-Python OBF/`.msr` reading). The project is managed with Poetry
-(`poetry install`) and tested with `pytest`. Releases are built with `pyinstaller`.
+(`poetry sync`) and tested with `pytest`. Releases use the locked PyInstaller
+build dependency group.
 
 Build the Windows one-folder executable from the Poetry environment—not from a
 global Python installation. PyInstaller is pinned in the optional `build`
@@ -132,7 +138,7 @@ Layout:
 ```
 minflux_viewer/
   core/       data model, format loaders, AppState (Qt signal bus), save/export
-  ui/         windows and dialogs (render, scatter, histogram, ROI, preferences, ...)
+  ui/         capability packages: controllers, rendering, plots, roi, dialogs, ...
   analysis/   algorithms (density, precision, anisotropy, segmentation, particle averaging, ...)
   msr/        the .msr parser (OBF -> MFXDTA -> zarr -> mfx) and .msr writer
   plugins/    MSR reader, Data Simulator, Script Editor, Trace Viewer, ParaView, method-text
@@ -144,8 +150,9 @@ Design principles:
 
 - Canonical import. Every source format is normalized to one internal
   representation, so the UI and analyses do not branch on file type.
-- One fact, one storage location. Coordinates are stored once (canonical `loc`
-  in metres); other quantities are views or derived values, not duplicate fields.
+- One fact, one storage location. Normalized coordinates are metre-valued
+  `loc_x/y/z` columns; calibrated/transformed arrays are views or explicit copies,
+  not additional persistent coordinate fields.
 - Dataset and viewer are separate. Datasets hold data; viewer windows reference
   them as layers. Multi-colour channels are separate datasets, combined only at
   the viewer as an overlay.
@@ -155,11 +162,16 @@ Design principles:
 Data model. A dataset carries `attr`/`mfx` (the materialized localizations used
 for plotting), `mfx_raw` (the all-iteration, all-validity flat store), an optional
 `mbm` (bead/fiducial reference), `derived` (computed attributes), `state`
-(persistent view/filter preferences), and `metadata`. Canonical `mfx` keys are
+(persistent view/filter preferences), and `metadata`. Common source `mfx` fields are
 `loc`, `itr`, `tid`, `tim`, `vld`, `efo`, `cfr`, `dcr`, plus optional `eco`,
 `ecc`, `fbg`, and others. The MINFLUX iteration formats (`m2410` flat, `m2205`
 nested, legacy) are collapsed to this flat model, with selectors for `last`,
 `all`, and per-iteration views.
+
+Runtime registrations use stable internal dataset keys, not list positions.
+Shared read-only coordinate views have an adjustable cache-owned-array budget
+(25% of physical RAM by default), not a total application memory cap. Public
+coordinate access returns independent arrays; filters have one canonical mask.
 
 Filtering. A filter is a specification rather than a baked mask: each row is
 `{attribute, mode, lo, hi, lo_inc, hi_inc}`, stored in
@@ -182,9 +194,19 @@ Instruments.
 Tests:
 
 ```bash
-pip install pytest pytest-qt   # or: poetry install  (installs the dev group)
-pytest -q
+poetry sync --with build
+poetry run python -m pytest -m "not qt" -q
+poetry run python tools/run_qt_tests.py -j 4 --strict
+poetry run python tools/run_qt_tests.py -j 4 --strict
+poetry run python tools/lint_ratchet.py
+poetry run python tools/exception_ratchet.py
 ```
+
+Pure tests run in one process; Qt modules run in separate processes. A native
+crash fails the strict gate even if a diagnostic retry passes. CI-style pure
+checks use `PYTHONUTF8=1` and `TZ=UTC0`; also test a source-only copy in local time.
+The suite redirects preferences and plugin folders away from real user settings.
+Lint/type/exception baselines measure existing debt, not permission to add more.
 
 The entry points are `run_app.py` and `minflux_viewer/__main__.py`.
 

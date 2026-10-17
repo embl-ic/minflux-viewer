@@ -106,10 +106,14 @@ would give calibrated metres, off by the Z factor from what you asked for.
 `transformed=True` is refused with `unit="m"`: an overlay transform is defined
 in display space, so there is no raw-metre answer.
 
+Returned coordinate arrays are independent writable copies. Internal views can
+share read-only cached arrays, but editing a `loc()` result does not edit the
+dataset. Runtime dataset keys and cache objects are not part of the public API.
+
 ### Adding an attribute
 
 ```python
-loc = mfv.data.loc()
+loc = mfv.data.loc(filtered=False)  # add_attr needs every materialized row
 mfv.data.add_attr("radius_nm", (loc[:, 0] ** 2 + loc[:, 1] ** 2) ** 0.5)
 ```
 
