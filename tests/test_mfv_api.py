@@ -421,6 +421,20 @@ def test_background_rejects_a_non_callable(mfv):
         mfv.run.background(object())
 
 
+def test_cancel_after_worker_completion_retires_pending_callback(mfv, qapp):
+    from minflux_viewer.ui.common.background_tasks import shared_thread_pool
+
+    results, cancelled = [], []
+    handle = mfv.run.background(lambda ctx: 42, on_done=results.append,
+                                on_cancel=lambda: cancelled.append(True))
+    shared_thread_pool("mfv-script").waitForDone(5000)
+    handle.cancel()
+    for _ in range(5):
+        qapp.processEvents()
+    assert results == [] and cancelled == [True]
+    assert not handle.is_running()
+
+
 # ---------------------------------------------------------------------------
 # compatibility -- every previously published name still works
 # ---------------------------------------------------------------------------

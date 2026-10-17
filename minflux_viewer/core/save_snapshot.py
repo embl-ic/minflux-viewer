@@ -9,7 +9,9 @@ from typing import Any
 
 import numpy as np
 
+from .computation_snapshot import readonly_array
 from .dataset import AttrStore, MinfluxDataset
+from .job_resources import JOB_RESOURCES
 
 
 class _Capture:
@@ -23,14 +25,7 @@ class _Capture:
             # A materialized Path can carry the lease keeping its file alive.
             return value
         if isinstance(value, np.ndarray):
-            base = value
-            immutable = not value.dtype.hasobject
-            while isinstance(base, np.ndarray):
-                immutable = immutable and not base.flags.writeable
-                base = base.base
-            immutable = immutable and (base is None or isinstance(base, bytes))
-            result = value.view() if immutable else copy.deepcopy(value, self.memo)
-            result.flags.writeable = False
+            result = readonly_array(value)
         elif isinstance(value, AttrStore):
             result = AttrStore()
             self.memo[id(value)] = result
@@ -71,3 +66,43 @@ def save_snapshot(ds: MinfluxDataset, context: dict | None = None) -> tuple[Minf
     """
     capture = _Capture()
     return capture.capture(ds), capture.capture(context or {})
+
+
+def estimate_save_bytes(ds: MinfluxDataset, context: dict | None = None) -> int:
+    """Conservative array payload allowance for capture and writer temporaries.
+
+    Shared arrays are counted once. Compression/library overhead is estimated,
+    not an allocator guarantee; external source-image payloads are excluded.
+    """
+    seen: set[int] = set()
+
+    def size(value) -> int:
+        if id(value) in seen:
+            return 0
+        seen.add(id(value))
+        if isinstance(value, np.ndarray):
+            return int(value.nbytes)
+        if isinstance(value, AttrStore):
+            return sum(size(item) for key, item in value.items() if key != "ftr")
+        if is_dataclass(value) and not isinstance(value, type):
+            return sum(size(getattr(value, item.name)) for item in fields(value))
+        if isinstance(value, dict):
+            return sum(size(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return sum(size(item) for item in value)
+        return 0
+
+    return 1024**2 + 3 * (size(ds) + size(context or {}))
+
+
+def admitted_save_snapshot(ds: MinfluxDataset, context: dict | None = None):
+    """Reserve before copying any mutable acquisition buffers."""
+    lease = JOB_RESOURCES.acquire(estimate_save_bytes(ds, context))
+    prepared = False
+    try:
+        snapshot, options = save_snapshot(ds, context)
+        prepared = True
+        return snapshot, options, lease
+    finally:
+        if not prepared:
+            lease.release()

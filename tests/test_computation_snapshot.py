@@ -31,3 +31,35 @@ def test_lazy_raw_cache_does_not_invalidate_signature():
     signature = input_signature(ds)
     ds.mfx_raw["loc_id"] = np.arange(4)
     assert input_signature(ds) == signature
+
+
+def test_version_checks_identity_revisions_and_unannounced_replacements():
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.core.computation_snapshot import DatasetInputVersion
+
+    ds = build_localization_dataset(name="version", x_nm=np.arange(4.), y_nm=np.arange(4.))
+    state = AppState()
+    state.add_dataset(ds)
+    version = DatasetInputVersion.capture(state, ds)
+    assert version.is_current(state)
+    ds.attr.replace_coordinates(loc_x=np.ones(4))
+    assert not version.is_current(state)
+    version = DatasetInputVersion.capture(state, ds)
+    state.notify_attributes_changed(0)
+    assert not version.is_current(state)
+    version = DatasetInputVersion.capture(state, ds)
+    state.remove_dataset(0)
+    state.add_dataset(ds)
+    assert not version.is_current(state)
+
+
+def test_trajectory_snapshot_isolates_writable_times_and_trace_ids():
+    from minflux_viewer.analysis.tracking_stats import snapshot_dataset_trajectories
+
+    ds = build_localization_dataset(name="tracking", x_nm=np.arange(4.), y_nm=np.arange(4.),
+                                     tid=np.arange(4), tim=np.arange(4.))
+    snapshot = snapshot_dataset_trajectories(ds)
+    ds.attr["tid"][:] = 99
+    ds.attr["tim"][:] = 55
+    np.testing.assert_array_equal(snapshot.trace_ids, np.arange(4))
+    np.testing.assert_array_equal(snapshot.timestamps_s, np.arange(4.))

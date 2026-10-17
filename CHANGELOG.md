@@ -9,6 +9,14 @@ and script error callbacks retain structured diagnostics without worker frames.
 Managed package installation also protects alternative Qt runtimes and the
 bundled fitting stack; conflicting external Qt paths are refused.
 
+Generic spreadsheet imports preserve full-width integer identifiers and report
+precision-risk inputs, including large numeric Excel IDs. Tracking, drift and
+particle workers use captured inputs and reject stale dataset/settings results.
+Shared background admission bounds ordinary jobs and estimated large-operation
+memory; both are adjustable in Preferences > Data. Image-cache retention now
+also bounds unleased file count/age and safely reclaims identified dead-owner
+temporary caches, without deleting files still leased by open consumers.
+
 NPC model averages now require converged, finite fits and report optimizer
 diagnostics. CSV exports preserve large integer identifiers. Ordinary dataset
 exports stage data and recipes before replacement, with rollback on handled

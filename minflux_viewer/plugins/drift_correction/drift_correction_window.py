@@ -24,7 +24,8 @@ original for comparison.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import copy
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pyqtgraph as pg
@@ -47,6 +48,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from minflux_viewer.core.computation_snapshot import DatasetInputVersion, readonly_array
 from minflux_viewer.ui.common.dataset_binding import event_index
 
 from ...analysis import bead_drift as bd
@@ -98,6 +100,8 @@ class DriftEstimate:
     filter_attrs: list = field(default_factory=list)
     filter_skipped: list = field(default_factory=list)   # specs that could not be evaluated
     filter_signature: str = ""
+    input_version: DatasetInputVersion | None = None
+    settings_signature: tuple | None = None
 
     @property
     def n_kept(self) -> int:
@@ -119,6 +123,8 @@ class DriftCorrectionWindow(QDialog):
         self._task = None
         self._bead_inputs = None               # (dataset key, BeadInputs | None, reason)
         self._suspend = False
+        self._generation = 0
+        self._closing = False
 
         self.setWindowTitle("Drift Correction")
         self.resize(720, 820)
@@ -127,6 +133,8 @@ class DriftCorrectionWindow(QDialog):
         try:
             state.dataset_events.active_changed.connect(self._on_active_changed)
             state.dataset_events.filter_changed.connect(self._on_filter_changed)
+            state.dataset_events.calibration_changed.connect(self._on_data_changed)
+            state.dataset_events.attributes_changed.connect(self._on_data_changed)
         except Exception:
             pass
         self._refresh_dataset_info()
@@ -332,7 +340,10 @@ class DriftCorrectionWindow(QDialog):
         """Cached :func:`bead_drift.bead_inputs_for_dataset` of the active dataset."""
         if ds is None:
             return None, "no dataset"
-        key = self._state.key_of(ds)
+        key = (self._state.key_of(ds), ds.attr.coordinate_snapshot()[0],
+               ds.mfx_raw.coordinate_snapshot()[0], id(ds.attr.get("tim")),
+               id(ds.mfx_raw.get("tim")), id(ds.metadata.get("mbm_points")),
+               float(ds.cali.z_scaling_factor))
         if self._bead_inputs is None or self._bead_inputs[0] != key:
             try:
                 inputs, reason = bd.bead_inputs_for_dataset(ds)
@@ -415,10 +426,15 @@ class DriftCorrectionWindow(QDialog):
         # The estimate used the filtered rows, so another filter needs another estimate.
         if idx != self._state.active_idx:
             return
-        if self._estimate is not None:
-            self._invalidate()
-            self._stats.setText("The filter changed: estimate the drift again.")
+        self._invalidate()
+        self._stats.setText("The filter changed: estimate the drift again.")
         self._refresh_dataset_info()
+
+    def _on_data_changed(self, event) -> None:
+        if event_index(self._state, event) == self._state.active_idx:
+            self._bead_inputs = None
+            self._invalidate()
+            self._refresh_dataset_info()
 
     def _on_method_changed(self, *_a) -> None:
         m = self._method()
@@ -429,6 +445,7 @@ class DriftCorrectionWindow(QDialog):
 
     def _on_auto_T_toggled(self, checked: bool) -> None:
         self._T_spin.setEnabled(not checked)
+        self._invalidate()
         self._refresh_dataset_info()
 
     def _on_bead_toggled(self, *_a) -> None:
@@ -452,6 +469,9 @@ class DriftCorrectionWindow(QDialog):
 
     def _invalidate(self) -> None:
         """A parameter changed: the last estimate no longer describes it."""
+        self._generation += 1
+        if self._task is not None:
+            self._task.cancel()
         if self._estimate is not None:
             self._estimate = None
             self._apply_btn.setEnabled(False)
@@ -556,6 +576,8 @@ class DriftCorrectionWindow(QDialog):
 
     # --------------------------------------------------------------- estimate
     def _on_estimate(self) -> None:
+        if self._task is not None or self._closing:
+            return
         ds = self._active()
         err = self._validate(ds)
         if err:
@@ -601,6 +623,17 @@ class DriftCorrectionWindow(QDialog):
         res_nm = float(self._res_spin.value())
         T = None if self._auto_T.isChecked() else float(self._T_spin.value())
         ds_key = self._state.key_of(ds)
+        version = DatasetInputVersion.capture(self._state, ds)
+        generation = self._generation
+        settings = self._estimate_settings()
+        cols, t = [readonly_array(column) for column in cols], readonly_array(t)
+        keep = readonly_array(keep)
+        if bead_inputs is not None:
+            bead_inputs = replace(
+                bead_inputs, points=readonly_array(bead_inputs.points),
+                lnc_m=readonly_array(bead_inputs.lnc_m), loc_m=readonly_array(bead_inputs.loc_m),
+                t=readonly_array(bead_inputs.t), beads=copy.deepcopy(bead_inputs.beads),
+                names=dict(bead_inputs.names), recorded_gris=list(bead_inputs.recorded_gris))
 
         def work(report):
             coords = np.column_stack(cols)
@@ -632,14 +665,16 @@ class DriftCorrectionWindow(QDialog):
 
         from minflux_viewer.ui.common.background_tasks import BackgroundTask, shared_thread_pool
 
-        task = BackgroundTask(work, description="Drift correction", category="analysis")
+        task = BackgroundTask(work, description="Drift correction", category="analysis",
+                              estimated_bytes=256 * n_source)
         task.signals.stage.connect(lambda text: self._state.status_progress(text))
         filter_info = {"row_mask": keep if filtered else None, "n_source": n_source,
                        "filter_attrs": f_attrs, "filter_skipped": f_skipped,
-                       "filter_signature": f_signature}
+                       "filter_signature": f_signature,
+                       "input_version": version, "settings_signature": settings}
         task.signals.done.connect(
-            lambda result: self._on_estimated(result, method, ds_key, dims, gris, bead_inputs,
-                                              filter_info))
+            lambda result: self._deliver_estimate(generation, result, method, ds_key, dims,
+                                                 gris, bead_inputs, filter_info))
         task.signals.failed.connect(self._on_estimate_failed)
         task.signals.cancelled.connect(self._on_estimate_cancelled)
         task.signals.finished.connect(self._on_task_finished)
@@ -656,6 +691,10 @@ class DriftCorrectionWindow(QDialog):
             self._stats.setText("Stopping …")
 
     def _on_task_finished(self) -> None:
+        from minflux_viewer.ui.common.background_tasks import detach_task_signals
+
+        if self._task is not None:
+            detach_task_signals(self._task)
         self._task = None
         self._stop_btn.setEnabled(False)
         self._estimate_btn.setEnabled(self._active() is not None)
@@ -668,6 +707,23 @@ class DriftCorrectionWindow(QDialog):
     def _on_estimate_cancelled(self) -> None:
         self._state.status_progress("Drift estimation stopped")
         self._stats.setText("Stopped.")
+
+    def _estimate_settings(self) -> tuple:
+        ds = self._active()
+        return (self._method(), self._chosen_dims(ds) if ds is not None else None,
+                tuple(self._selected_gris()), self._consensus_combo.currentData(),
+                self._smooth_spin.value(), self._res_spin.value(),
+                self._auto_T.isChecked(), self._T_spin.value())
+
+    def _deliver_estimate(self, generation, result, method, ds_key, dims, gris,
+                          bead_inputs, filter_info) -> None:
+        if self._closing or generation != self._generation:
+            return
+        if (not filter_info["input_version"].is_current(self._state)
+                or filter_info["settings_signature"] != self._estimate_settings()):
+            self._stats.setText("The inputs or settings changed; estimate again.")
+            return
+        self._on_estimated(result, method, ds_key, dims, gris, bead_inputs, filter_info)
 
     def _on_estimated(self, result, method, ds_key, dims, gris, bead_inputs,
                       filter_info) -> None:
@@ -795,6 +851,11 @@ class DriftCorrectionWindow(QDialog):
                                     "The filter changed since the estimate; estimate the "
                                     "drift again.")
             return
+        if (est.input_version is not None and not est.input_version.is_current(self._state)
+                or est.settings_signature is not None and est.settings_signature != self._estimate_settings()):
+            self._invalidate()
+            self._stats.setText("The inputs or settings changed; estimate again.")
+            return
         try:
             self._build_corrected_dataset(ds, est)
         except Exception as exc:
@@ -883,9 +944,13 @@ class DriftCorrectionWindow(QDialog):
 
     # --------------------------------------------------------------- close
     def closeEvent(self, event) -> None:
+        self._closing = True
+        self._generation += 1
         events = self._state.dataset_events
         for signal, slot in ((events.active_changed, self._on_active_changed),
-                             (events.filter_changed, self._on_filter_changed)):
+                             (events.filter_changed, self._on_filter_changed),
+                             (events.calibration_changed, self._on_data_changed),
+                             (events.attributes_changed, self._on_data_changed)):
             try:
                 signal.disconnect(slot)
             except Exception:

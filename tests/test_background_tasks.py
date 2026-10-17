@@ -180,6 +180,16 @@ def test_a_real_failure_does_not_become_cancellation_when_stop_was_requested():
     assert failures[0].exception_type == "builtins.OSError"
 
 
+@pytest.mark.parametrize("error", [SystemExit, KeyboardInterrupt])
+def test_script_requested_stop_cannot_escape_the_qt_worker_boundary(error):
+    def work(report):
+        raise error("requested stop")
+
+    task = BackgroundTask(work, description="script stop")
+    task.run()
+    assert task.status == "cancelled" and task._work is None
+
+
 def test_committed_output_and_cancelled_delivery_are_distinct():
     from minflux_viewer.core.task_registry import registry
 
@@ -195,6 +205,16 @@ def test_committed_output_and_cancelled_delivery_are_distinct():
     assert task.status == "done"
     assert cancelled == [] and discarded == [True]
     assert registry.get(task._handle.id).detail == "Output committed; UI delivery cancelled"
+
+
+def test_late_cancel_records_retired_delivery_without_changing_completed_status():
+    from minflux_viewer.api.run import TaskHandle
+
+    task = BackgroundTask(lambda report: 42, description="complete then retire")
+    task.run()
+    task.cancel()
+    assert task.is_cancelled and task.status == "done"
+    assert not TaskHandle(task).is_running()
 
 
 def test_pending_work_is_visible_and_pool_clear_finishes_it(qtbot):

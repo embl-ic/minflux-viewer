@@ -203,6 +203,13 @@ class TaskMonitor(QWidget):
         threads = list(threading.enumerate())
         self._summary.setText(
             summary_text(tasks, pool_active, pool_max, len(threads)))
+        from minflux_viewer.core.job_resources import JOB_RESOURCES
+
+        self._summary.setToolTip(
+            f"Estimated transient reservations: {JOB_RESOURCES.reserved_bytes / 1024**2:.1f} / "
+            f"{JOB_RESOURCES.budget_bytes / 1024**2:.1f} MiB; "
+            f"{JOB_RESOURCES.admitted_jobs}/{JOB_RESOURCES.job_limit} admitted ordinary jobs. "
+            "Not total process memory.")
         self._fill_tasks(tasks)
         self._fill_threads(threads)
         self._sync_buttons()

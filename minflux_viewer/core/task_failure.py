@@ -14,10 +14,10 @@ class TaskFailure:
     code: str = "worker_error"
 
     @classmethod
-    def capture(cls, error: BaseException) -> TaskFailure:
+    def capture(cls, error: BaseException, *, code: str = "worker_error") -> TaskFailure:
         kind = type(error)
         return cls(f"{kind.__module__}.{kind.__qualname__}", str(error),
-                   "".join(traceback.format_exception(kind, error, error.__traceback__))[-65536:])
+                   "".join(traceback.format_exception(kind, error, error.__traceback__))[-65536:], code)
 
 
 class TaskExecutionError(RuntimeError):

@@ -117,3 +117,25 @@ def test_boxes_from_a_processed_copy_are_offered_and_extracted(qtbot):
     dlg._collect()
     assert len(dlg._particles) == 1
     assert dlg._particles[0].n_locs == 40                 # the 40 in-box localizations
+
+
+def test_admission_refusal_precedes_particle_copying_or_grouping(qtbot, monkeypatch):
+    from types import SimpleNamespace
+
+    from minflux_viewer.core import job_resources
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.ui.analysis.particle_average_dialog import ParticleAverageWindow
+
+    state = AppState()
+    state.add_dataset(_dataset_with_cluster())
+    state.rois.add(_detection_box())
+    owner = SimpleNamespace(add_particle_average_dataset=lambda *args, **kwargs: None)
+    dlg = ParticleAverageWindow(state, owner=owner)
+    qtbot.addWidget(dlg)
+    dlg._collect()
+    assert dlg._particles
+    monkeypatch.setattr(job_resources, "JOB_RESOURCES", job_resources.JobResources(1, 1))
+    monkeypatch.setattr(dlg, "_grouped_points", lambda *args: pytest.fail("allocated before admission"))
+    dlg._run()
+    assert dlg._task is None
+    assert "admission refused" in dlg._status.text()

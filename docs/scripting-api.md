@@ -325,6 +325,12 @@ stopping, and false after success, failure or cancellation. Tasks are visible in
 the monitor while queued. Error callbacks receive a `RuntimeError` subclass with
 `exception_type`, `worker_traceback` and `code` diagnostics; these are plain values,
 not retained worker frames. A stop request does not undo an already committed file.
+Shared admission bounds ordinary queued/running jobs (default 32). Supported
+large operations share an adjustable estimated-memory budget (default 25% of
+physical RAM, separate from coordinate-cache retention). Exceeding admission
+reports an error, with code `resource_admission` for submission refusals, without
+waiting on the GUI thread. These estimates do not cap process RSS or arbitrary
+user-script/native allocations. Configure them in Preferences > Data.
 
 The task appears in **Help ▸ Task Monitor** with a working *Request stop*
 button. Cancellation is cooperative: a thread cannot be killed, so the work

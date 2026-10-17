@@ -68,6 +68,20 @@ def test_ok_still_applies_what_the_user_actually_edited(_app, _state):
         dialog.deleteLater()
 
 
+def test_data_operation_limits_are_editable_without_reverting_other_preferences(_app, _state):
+    dialog = _dialog(_state)
+    try:
+        dialog._operation_memory_percent.setValue(18)
+        dialog._background_job_limit.setValue(7)
+        _state.prefs["file"]["recent_files"] = ["new.npy"]
+        dialog._accept()
+        assert _state.prefs["data"]["operation_memory_percent"] == 18
+        assert _state.prefs["data"]["background_job_limit"] == 7
+        assert _state.prefs["file"]["recent_files"] == ["new.npy"]
+    finally:
+        dialog.deleteLater()
+
+
 def test_ok_does_not_replace_the_prefs_object(_app, _state):
     """Other components hold sub-dict references; rebinding prefs orphans them."""
     dialog = _dialog(_state)

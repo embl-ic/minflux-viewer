@@ -47,6 +47,7 @@ from .dataset_events import (
     ManualAlignmentRequested,
 )
 from .dataset_key import DatasetEntry, DatasetKey
+from .job_resources import DEFAULT_JOB_LIMIT, DEFAULT_MEMORY_PERCENT, configure_job_resources
 
 if TYPE_CHECKING:
     pass
@@ -100,6 +101,8 @@ DEFAULT_PREFS: dict = {
     },
     "data": {
         "coordinate_cache_percent": DEFAULT_CACHE_PERCENT,
+        "operation_memory_percent": DEFAULT_MEMORY_PERCENT,
+        "background_job_limit": DEFAULT_JOB_LIMIT,
         # Optional empirical Z scaling; estimation and a fixed factor are both
         # explicit opt-ins in Preferences.
         "estimate_z_scaling_factor": False,
@@ -808,6 +811,7 @@ class AppState(QObject):
         self._key_counter = itertools.count(1)
         self._data_revisions: dict[DatasetKey, int] = {}
         self.prefs: dict = self._load_prefs()
+        configure_job_resources(self.prefs)
         self.coordinates = CoordinateService(cache_budget_bytes(
             self.prefs.get("data", {}).get("coordinate_cache_percent", DEFAULT_CACHE_PERCENT)))
         configure_colors(self.prefs)
@@ -1327,6 +1331,7 @@ class AppState(QObject):
         return default_prefs()
 
     def save_prefs(self) -> None:
+        configure_job_resources(self.prefs)
         self.coordinates.set_budget_bytes(cache_budget_bytes(
             self.prefs.get("data", {}).get("coordinate_cache_percent", DEFAULT_CACHE_PERCENT)))
         configure_colors(self.prefs)

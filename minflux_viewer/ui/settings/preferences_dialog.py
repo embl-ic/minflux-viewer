@@ -500,6 +500,23 @@ class PreferencesDialog(QDialog):
         cache_row.addStretch()
         root.addLayout(cache_row)
 
+        operation_row = QHBoxLayout()
+        operation_row.addWidget(QLabel("Background operation estimates:"))
+        self._operation_memory_percent = QSpinBox()
+        self._operation_memory_percent.setRange(1, 100)
+        self._operation_memory_percent.setSuffix(" % of physical RAM")
+        self._operation_memory_percent.setToolTip(
+            "Shared admission budget for estimated transient memory of supported jobs.\n"
+            "Separate from coordinate-cache retention, imported data and open views.\n"
+            "Not a total RSS limit. Work exceeding admission is refused without waiting.")
+        operation_row.addWidget(self._operation_memory_percent)
+        operation_row.addWidget(QLabel("Queued/running job limit:"))
+        self._background_job_limit = QSpinBox()
+        self._background_job_limit.setRange(1, 256)
+        operation_row.addWidget(self._background_job_limit)
+        operation_row.addStretch()
+        root.addLayout(operation_row)
+
         # "When opening data file:" section
         root.addWidget(self._section_label("When opening data file:"))
 
@@ -1461,6 +1478,10 @@ class PreferencesDialog(QDialog):
         # Data
         self._coordinate_cache_percent.setValue(int(d.get(
             "coordinate_cache_percent", DEFAULT_PREFS["data"]["coordinate_cache_percent"])))
+        self._operation_memory_percent.setValue(int(d.get(
+            "operation_memory_percent", DEFAULT_PREFS["data"]["operation_memory_percent"])))
+        self._background_job_limit.setValue(int(d.get(
+            "background_job_limit", DEFAULT_PREFS["data"]["background_job_limit"])))
         self._only_valid.setChecked(bool(d.get("only_valid_locs", True)))
         self._enforce_z.setChecked(bool(d.get("enforce_min_z_range", True)))
         self._min_z_spin.setValue(float(d.get("min_z_range_nm", 5.0)))
@@ -1667,6 +1688,8 @@ class PreferencesDialog(QDialog):
 
         # Data
         d["coordinate_cache_percent"] = self._coordinate_cache_percent.value()
+        d["operation_memory_percent"] = self._operation_memory_percent.value()
+        d["background_job_limit"] = self._background_job_limit.value()
         d["only_valid_locs"] = bool(self._only_valid.isChecked())
         d["enforce_min_z_range"] = bool(self._enforce_z.isChecked())
         d["min_z_range_nm"] = float(self._min_z_spin.value())

@@ -63,6 +63,7 @@ from PyQt6.QtWidgets import (
 )
 
 from minflux_viewer.core.app_state import AppState
+from minflux_viewer.core.computation_snapshot import DatasetInputVersion, readonly_array
 from minflux_viewer.core.dataset_key import DatasetKey
 from minflux_viewer.core.loader_raw_access import attr_values_1d
 from minflux_viewer.core.overlay import (
@@ -153,6 +154,7 @@ class _TrackChannelSnapshot:
     timestamps_s: np.ndarray | None
     trace_ids: np.ndarray | None
     keep: np.ndarray | None
+    input_version: DatasetInputVersion | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +164,7 @@ class _TrackChannelBuild:
     tracks: TrackSet | None
     automatic_role: str
     reason: str
+    input_version: DatasetInputVersion | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +172,7 @@ class _TrackBuildResult:
     channels: tuple[_TrackChannelBuild, ...]
     anchor_axis: TimeAxis | None
     axis_error: str
+    settings: tuple | None = None
 
 
 def _snapshot_coordinates(snapshot: _TrackChannelSnapshot) -> np.ndarray:
@@ -221,6 +225,7 @@ def _build_track_payload(
                 None,
                 "Structure",
                 reason,
+                input_version=snapshot.input_version,
             ))
             if snapshot.dataset_idx == anchor_idx:
                 axis_error = reason
@@ -256,6 +261,7 @@ def _build_track_payload(
                 tracks,
                 automatic,
                 reason,
+                input_version=snapshot.input_version,
             ))
             if snapshot.dataset_idx == anchor_idx:
                 anchor_axis = build_time_axis(
@@ -277,11 +283,13 @@ def _build_track_payload(
                 None,
                 "Structure",
                 reason,
+                input_version=snapshot.input_version,
             ))
             if snapshot.dataset_idx == anchor_idx:
                 axis_error = reason
         report(f"Finished channel {snapshot.dataset_idx + 1}")
-    return _TrackBuildResult(tuple(results), anchor_axis, axis_error)
+    return _TrackBuildResult(tuple(results), anchor_axis, axis_error,
+                             (mode, precision_s, role_displacement_nm, role_min_median_locs))
 
 
 def _thin(n: int, limit: int) -> np.ndarray | slice:
@@ -641,14 +649,10 @@ class TrackingWindow(QWidget):
             ds = self._state.datasets[idx]
 
             def read(name: str):
-                try:
-                    value = attr_values_1d(ds, name)
-                except Exception:
-                    return None
+                value = attr_values_1d(ds, name)
                 if value is None:
                     return None
-                array = np.asarray(value).reshape(-1).view()
-                array.flags.writeable = False
+                array = readonly_array(value).reshape(-1)
                 return array if array.size else None
 
             tim, tid = dataset_time_inputs(ds)
@@ -656,8 +660,8 @@ class TrackingWindow(QWidget):
             keep.flags.writeable = False
             transform = ds.state.get("overlay_transform") or ds.state.get(
                 "render_transform_2d")
-            tim = None if tim is None else np.asarray(tim).reshape(-1).view()
-            tid = None if tid is None else np.asarray(tid).reshape(-1).view()
+            tim = None if tim is None else readonly_array(tim).reshape(-1)
+            tid = None if tid is None else readonly_array(tid).reshape(-1)
             if tim is not None:
                 tim.flags.writeable = False
             if tid is not None:
@@ -673,6 +677,7 @@ class TrackingWindow(QWidget):
                 timestamps_s=tim,
                 trace_ids=tid,
                 keep=keep,
+                input_version=DatasetInputVersion.capture(self._state, ds),
             ))
         return tuple(snapshots)
 
@@ -710,6 +715,8 @@ class TrackingWindow(QWidget):
         anchor_idx = int(self._idx) if self._idx is not None else -1
         mode = self._time_row.mode()
         precision = self._time_precision_s()
+        role_displacement = self._role_displacement_nm
+        role_min_locs = self._role_min_median_locs
 
         def work(report):
             return _build_track_payload(
@@ -718,8 +725,8 @@ class TrackingWindow(QWidget):
                 mode=mode,
                 precision_s=precision,
                 with_diagnostics=diagnostics,
-                role_displacement_nm=self._role_displacement_nm,
-                role_min_median_locs=self._role_min_median_locs,
+                role_displacement_nm=role_displacement,
+                role_min_median_locs=role_min_locs,
                 report=report,
             )
 
@@ -729,6 +736,7 @@ class TrackingWindow(QWidget):
             work,
             description=f"Index Tracking View trajectories: {name}",
             category="analysis",
+            estimated_bytes=256 * sum(item.x_m.size for item in snapshots if item.x_m is not None),
         )
         task.signals.stage.connect(
             lambda text, g=generation: self._on_track_build_stage(g, text))
@@ -763,6 +771,9 @@ class TrackingWindow(QWidget):
             self._info_label.setText(f"Indexing trajectories… {text}")
 
     def _forget_track_task(self, generation: int, task) -> None:
+        from minflux_viewer.ui.common.background_tasks import detach_task_signals
+
+        detach_task_signals(task)
         if self._track_tasks.get(generation) is task:
             self._track_tasks.pop(generation, None)
 
@@ -777,11 +788,17 @@ class TrackingWindow(QWidget):
     ) -> None:
         if generation != self._track_generation or self._closing:
             return
+        if result.settings is not None and result.settings != (
+                self._time_row.mode(), self._time_precision_s(),
+                self._role_displacement_nm, self._role_min_median_locs):
+            self._on_track_build_failed(generation, "tracking settings changed; rebuild trajectories")
+            return
         channels = {ch["dataset_key"]: ch for ch in self._channels}
         # Each channel must still be shown and its dataset still open.
         source_is_current = all(
             built.dataset_key in channels
             and self._state.index_of(built.dataset_key) is not None
+            and (built.input_version is None or built.input_version.is_current(self._state))
             for built in result.channels
         )
         if not source_is_current:

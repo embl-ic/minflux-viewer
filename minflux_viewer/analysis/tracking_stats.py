@@ -449,7 +449,9 @@ def trajectories_from_dataset(
 
 
 def _readonly_vector(values, *, name: str) -> np.ndarray:
-    array = np.asarray(values).reshape(-1).view()
+    from minflux_viewer.core.computation_snapshot import readonly_array
+
+    array = readonly_array(values).reshape(-1)
     if not array.size:
         raise ValueError(f"Tracking analysis requires a non-empty {name!r} attribute.")
     array.flags.writeable = False

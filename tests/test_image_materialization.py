@@ -100,3 +100,49 @@ def test_tiff_consumer_holds_and_releases_extraction_lease(tmp_path):
     gc.collect()
     from pathlib import Path
     assert not Path(path).exists()
+
+
+def test_count_age_and_close_never_evict_a_live_lease(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from minflux_viewer.core import image_materialization
+
+    cache = image_materialization.ImageMaterializationCache(
+        tmp_path / "cache", budget_bytes=100, max_unleased_files=1, max_idle_seconds=10)
+    first = cache.materialize(_package(tmp_path / "first.zip", b""))
+    second = cache.materialize(_package(tmp_path / "second.zip", b""))
+    old, recent = str(first), str(second)
+    del first, second
+    gc.collect()
+    assert cache.retained_files == 1 and not Path(old).exists()
+    entry = next(iter(cache._entries.values()))
+    entry.last_used -= 20
+    live = cache.materialize(_package(tmp_path / "live.zip", b"live"))
+    assert not Path(recent).exists()
+    cache.close()
+    assert live.read_bytes() == b"live"
+    live_path = str(live)
+    del live
+    gc.collect()
+    assert not Path(live_path).exists()
+
+
+def test_failed_eviction_retains_accounting_for_retry(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from minflux_viewer.core.image_materialization import ImageMaterializationCache
+
+    cache = ImageMaterializationCache(tmp_path / "cache", budget_bytes=0)
+    live = cache.materialize(_package(tmp_path / "locked.zip", b"locked"))
+    original = Path.unlink
+
+    def refuse(path, **kwargs):
+        raise PermissionError("locked by an external reader")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    del live
+    gc.collect()
+    assert cache.retained_files == 1 and cache.retained_bytes == 6
+    monkeypatch.setattr(Path, "unlink", original)
+    cache.close()
+    assert cache.retained_files == cache.retained_bytes == 0

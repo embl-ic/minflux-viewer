@@ -73,7 +73,7 @@ def test_save_submission_captures_primary_related_data_and_roi_options(fmt, tmp_
     ds, other = _dataset(), _dataset()
     members = [ds, other]
     rois = [{"geometry": {"bounds": [1, 2, 3, 4]}}]
-    submitted, written = [], []
+    submitted, written, leases = [], [], []
     stub = SimpleNamespace(
         _active_dataset_for_save=lambda: ds,
         save_roi_records=lambda dataset: rois,
@@ -81,7 +81,7 @@ def test_save_submission_captures_primary_related_data_and_roi_options(fmt, tmp_
         _zarr_save_context=lambda dataset: {"related_datasets": members, "roi_records": rois},
         _zarr_overwrite_mode=lambda path: "replace",
         _state=SimpleNamespace(log=lambda *args: None),
-        _start_file_save=lambda work, **kwargs: submitted.append(work),
+        _start_file_save=lambda work, **kwargs: (submitted.append(work), leases.append(kwargs["resource_lease"])),
     )
     monkeypatch.setattr(save, "save_processed", lambda dataset, **kwargs: written.append((dataset, kwargs)))
     save_export_controller._save_as_format(stub, fmt, "data", path=str(tmp_path / f"out.{fmt}"))
@@ -90,6 +90,7 @@ def test_save_submission_captures_primary_related_data_and_roi_options(fmt, tmp_
     rois[0]["geometry"]["bounds"][0] = 99
     members.clear()  # removal/reopen cannot retarget or change captured group
     submitted[0](lambda text: None)
+    leases[0].release()
     captured, options = written[0]
     np.testing.assert_array_equal(captured.attr["efo"], np.arange(4.))
     assert options["roi_records"][0]["geometry"]["bounds"][0] == 1

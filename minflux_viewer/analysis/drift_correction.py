@@ -389,24 +389,30 @@ def estimate_drift(
     win = np.floor((tt - t0) / T).astype(np.int64)
     ti = np.zeros(n_win)
     counts = np.zeros(n_win, dtype=np.int64)
-    spectra = []
-    for j in range(n_win):
-        sel = win == j
-        counts[j] = int(sel.sum())
-        ti[j] = float(tt[sel].mean()) if counts[j] else t0 + (j + 0.5) * T
-        img = _render(pts[sel], s, lows, shape, sigma_px)
-        with cpu_threads() as workers:
-            spectra.append(sfft.rfftn(img, workers=workers).astype(np.complex64))
-        _tick(0.25 * (j + 1) / n_win)
+    from minflux_viewer.core.job_resources import JOB_RESOURCES
 
-    pairs = [(i, j) for i in range(n_win - 1) for j in range(i + 1, n_win)]
-    shifts = np.zeros((len(pairs), dims))
-    for p, (i, j) in enumerate(pairs):
-        with cpu_threads() as workers:
-            corr = sfft.irfftn(np.conj(spectra[i]) * spectra[j], s=shape, workers=workers)
-        shifts[p] = _centroid_shift(np.fft.fftshift(corr), params)
-        _tick(0.25 + 0.7 * (p + 1) / len(pairs))
-    del spectra
+    # Nested byte-only reservation: the caller's ordinary job already owns its
+    # queue slot. Include padded spectra, correlation/render work and pair data.
+    pair_bytes = n_win * (n_win - 1) // 2 * (64 + 8 * dims)
+    with JOB_RESOURCES.acquire(2 * spectra_bytes + 64 * cells + pair_bytes, job=False):
+        spectra = []
+        for j in range(n_win):
+            sel = win == j
+            counts[j] = int(sel.sum())
+            ti[j] = float(tt[sel].mean()) if counts[j] else t0 + (j + 0.5) * T
+            img = _render(pts[sel], s, lows, shape, sigma_px)
+            with cpu_threads() as workers:
+                spectra.append(sfft.rfftn(img, workers=workers).astype(np.complex64))
+            _tick(0.25 * (j + 1) / n_win)
+
+        pairs = [(i, j) for i in range(n_win - 1) for j in range(i + 1, n_win)]
+        shifts = np.zeros((len(pairs), dims))
+        for p, (i, j) in enumerate(pairs):
+            with cpu_threads() as workers:
+                corr = sfft.irfftn(np.conj(spectra[i]) * spectra[j], s=shape, workers=workers)
+            shifts[p] = _centroid_shift(np.fft.fftshift(corr), params)
+            _tick(0.25 + 0.7 * (p + 1) / len(pairs))
+        del spectra, img, corr
     a = np.array([p[0] for p in pairs])
     b = np.array([p[1] for p in pairs])
 

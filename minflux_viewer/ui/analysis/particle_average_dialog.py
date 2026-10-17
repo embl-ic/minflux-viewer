@@ -33,7 +33,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import QObject, QRunnable, Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -61,6 +61,7 @@ from PyQt6.QtWidgets import (
 from minflux_viewer.analysis import conv_segmentation as cs
 from minflux_viewer.analysis import particle_average as pa
 from minflux_viewer.core.app_state import format_progress_bar
+from minflux_viewer.core.computation_snapshot import readonly_array
 from minflux_viewer.core.particle_extract import (
     extract_particles,
     load_any_dataset,
@@ -68,6 +69,11 @@ from minflux_viewer.core.particle_extract import (
 )
 from minflux_viewer.core.particle_set import ParticleData, load_particle_set, save_particle_set
 from minflux_viewer.core.roi_selection import rectangle_bounds
+from minflux_viewer.ui.common.background_tasks import (
+    BackgroundTask,
+    BackgroundTaskSignals,
+    detach_task_signals,
+)
 
 _TEMPLATE_MODELS = ("ring", "disk", "gaussian", "npc")
 
@@ -92,66 +98,27 @@ def _template_model_spec(key: str):
     return m.label, m.params
 
 
-class _AverageSignals(QObject):
+class _AverageSignals(BackgroundTaskSignals):
     progress = pyqtSignal(int, int)        # done, total
-    done = pyqtSignal(object, str, object)  # pooled points, description, extra(dict|None)
-    failed = pyqtSignal(str)
-    cancelled = pyqtSignal()
 
 
-class _AverageTask(QRunnable):
+class _AverageTask(BackgroundTask):
     """Run an averaging closure off the UI thread, reporting progress + result."""
 
-    def __init__(self, fn, *, description: str = "Particle average") -> None:
-        super().__init__()
-        self._fn = fn
-        self.description = str(description)
+    signals: _AverageSignals
+
+    def __init__(self, fn, *, description: str = "Particle average", resource_lease=None) -> None:
+        def work(report):
+            def progress(done, total):
+                report(f"{int(done)}/{int(total)}")
+                assert self._handle is not None
+                self._handle.update(progress=int(done) / max(int(total), 1))
+                self.signals.progress.emit(int(done), int(total))
+            result = fn(progress)
+            return np.asarray(result[0]), result[1], result[2] if len(result) > 2 else None
+
+        super().__init__(work, description=description, category="analysis", resource_lease=resource_lease)
         self.signals = _AverageSignals()
-        self._cancelled = False
-
-    def cancel(self) -> None:
-        self._cancelled = True
-
-    def run(self) -> None:  # noqa: N802 - Qt API
-        from minflux_viewer.core.task_registry import registry as task_registry
-
-        if self._cancelled:
-            self.signals.cancelled.emit()
-            return
-        handle = task_registry.register(
-            self.description, "analysis", cancel=self.cancel
-        )
-        handle.start()
-
-        def report(done, total) -> None:
-            if self._cancelled:
-                raise _AverageCancelled
-            handle.update(progress=int(done) / max(int(total), 1),
-                          detail=f"{int(done)}/{int(total)}")
-            self.signals.progress.emit(int(done), int(total))
-
-        try:
-            result = self._fn(report)
-        except Exception as exc:               # never let a worker exception escape
-            if self._cancelled or isinstance(exc, _AverageCancelled):
-                handle.finish("cancelled")
-                self.signals.cancelled.emit()
-                return
-            handle.finish("failed", detail=str(exc))
-            self.signals.failed.emit(str(exc))
-            return
-        if self._cancelled:
-            handle.finish("cancelled")
-            self.signals.cancelled.emit()
-            return
-        handle.finish("done")
-        pts, desc = result[0], result[1]
-        extra = result[2] if len(result) > 2 else None
-        self.signals.done.emit(np.asarray(pts), desc, extra)
-
-
-class _AverageCancelled(Exception):
-    """Internal cooperative-cancellation checkpoint from progress callbacks."""
 
 
 class ParticleAverageWindow(QDialog):
@@ -458,7 +425,8 @@ class ParticleAverageWindow(QDialog):
         n = len(self._particles)
         others = [name for name in self._channel_luts if name != self._ref_channel_name]
         channels = {
-            name: [(self._channels_by_particle[i].get(name) if i < len(self._channels_by_particle) else None)
+            name: [(readonly_array(self._channels_by_particle[i][name])
+                    if i < len(self._channels_by_particle) and name in self._channels_by_particle[i] else None)
                    for i in range(n)]
             for name in others}
         return {"channels": channels, "ref_name": self._ref_channel_name,
@@ -670,7 +638,7 @@ class ParticleAverageWindow(QDialog):
         """Per-particle point arrays for a fit, optionally collapsed to trace
         (tid) centroids — one point per molecule-blink (de-biasing over-counting)."""
         if not use_grouping:
-            return [np.asarray(p.points, float) for p in self._particles]
+            return [readonly_array(np.asarray(p.points, float)) for p in self._particles]
         return [pa.collapse_traces(p.points, p.tid) for p in self._particles]
 
     def _use_grouping_for(self, method: str) -> bool:
@@ -691,6 +659,32 @@ class ParticleAverageWindow(QDialog):
         method = self._method.currentData()
         n_in = len(self._particles)
         use_grouping = self._use_grouping_for(method)
+        from minflux_viewer.core.execution import CPU_THREADS
+        from minflux_viewer.core.job_resources import JOB_RESOURCES, ResourceAdmissionError
+
+        # Include concurrent angle-stack histograms/FFTs and rotated points.
+        payload_bytes = sum(np.asarray(p.points).nbytes + (
+            0 if p.tid is None else np.asarray(p.tid).nbytes) for p in self._particles)
+        if self._multichannel_active():
+            payload_bytes += sum(np.asarray(points).nbytes
+                                 for channels in self._channels_by_particle
+                                 for points in channels.values() if points is not None)
+        if method == "geomfit":
+            estimate = 8 * payload_bytes + 8 * 1024**2
+        else:
+            grid = max(8, int(round(self._box_size.value() / max(self._pixel.value(), 1e-6))))
+            angles = int(self._angles.value())
+            workers = min(max(1, n_in), CPU_THREADS.per_lease)
+            peak_points = max((len(p.points) for p in self._particles), default=0)
+            estimate = (8 * payload_bytes + workers * angles * (64 * grid**2 + 64 * peak_points)
+                        + 64 * grid**2)
+        try:
+            lease = JOB_RESOURCES.acquire(estimate)
+        except ResourceAdmissionError as exc:
+            self._status.setText(str(exc))
+            return
+        # Admission precedes grouping/copying, and includes raw fit-init and
+        # secondary-channel inputs even when grouping collapses the reference.
         grouped = self._grouped_points(use_grouping)
 
         # Read every widget value on the UI thread, then build a closure that does
@@ -707,8 +701,8 @@ class ParticleAverageWindow(QDialog):
             # Raw localizations + trace ids for the LoG sub-unit fit-init (the fit
             # itself uses g_particles, which may be trace-collapsed).
             g_subinit = bool(self._geom_subunit_init.isChecked())
-            g_init_pts = [np.asarray(p.points, float) for p in self._particles]
-            g_init_tids = [(None if p.tid is None else np.asarray(p.tid)) for p in self._particles]
+            g_init_pts = [readonly_array(np.asarray(p.points, float)) for p in self._particles]
+            g_init_tids = [(None if p.tid is None else readonly_array(p.tid)) for p in self._particles]
             # Multi-channel: capture the other channels' per-particle points (UI
             # thread) so the worker can replay the reference particle's fitted
             # transform onto them (same as template-free / template-provided).
@@ -766,7 +760,12 @@ class ParticleAverageWindow(QDialog):
                 key = self._geom_combo.currentData()
                 key_label = _template_model_spec(key)[0]
                 params = {k: s.value() for k, s in self._template_spins.items()}
-                tmpl = pa.geometry_template_image(key, params, box, px, sigma_nm=px)
+                try:
+                    tmpl = pa.geometry_template_image(key, params, box, px, sigma_nm=px)
+                except (ValueError, MemoryError, OverflowError) as exc:
+                    lease.release()
+                    self._status.setText(f"Could not prepare template: {exc}")
+                    return
 
                 def compute(progress):
                     res = pa.average_particles(particles, mode="template", template_img=tmpl,
@@ -796,12 +795,13 @@ class ParticleAverageWindow(QDialog):
                              "the app stays responsive)")
         self._run_btn.setEnabled(False)
 
-        task = _AverageTask(compute)
+        task = _AverageTask(compute, resource_lease=lease)
         task.signals.progress.connect(self._on_progress)
-        task.signals.done.connect(self._on_done)
+        task.signals.done.connect(lambda result: self._on_done(*result))
         task.signals.failed.connect(self._on_failed)
         task.signals.cancelled.connect(self._on_cancelled)
-        self._task = task                                    # keep a ref (QRunnable auto-deletes)
+        task.signals.finished.connect(lambda _task=task: detach_task_signals(_task))
+        self._task = task
         from minflux_viewer.ui.common.background_tasks import shared_thread_pool
 
         shared_thread_pool("particle-average").start(task)

@@ -180,11 +180,18 @@ class Run(Namespace):
             if on_cancel is not None:
                 on_cancel()
 
+        def _on_done(result) -> None:
+            if task.is_cancelled:
+                state.log(f"{label}: work completed; result delivery cancelled.", "INFO")
+                if on_cancel is not None:
+                    on_cancel()
+            elif on_done is not None:
+                on_done(result)
+
         task.signals.stage.connect(_on_stage)
         task.signals.failure.connect(_on_failed)
         task.signals.cancelled.connect(_on_cancelled)
-        if on_done is not None:
-            task.signals.done.connect(on_done)
+        task.signals.done.connect(_on_done)
 
         # Retain until Qt reports the runnable finished; a QRunnable handed to
         # a pool is otherwise collected mid-flight.

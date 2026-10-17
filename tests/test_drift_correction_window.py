@@ -152,6 +152,30 @@ def test_plugin_registered():
     assert "Drift Correction" in [e.name for e in plugins.available()]
 
 
+def test_queued_drift_rejects_unannounced_coordinate_replacement(qtbot, monkeypatch):
+    from types import SimpleNamespace
+
+    from minflux_viewer.plugins.drift_correction import drift_correction_window as module
+    from minflux_viewer.ui.common import background_tasks
+
+    queued = []
+    monkeypatch.setattr(background_tasks, "shared_thread_pool", lambda name: SimpleNamespace(start=queued.append))
+    monkeypatch.setattr(module.dc, "estimate_drift", lambda x, y, z, t, **kwargs:
+                        SimpleNamespace(dx=np.zeros(len(t)), dy=np.zeros(len(t)), dz=None))
+    win, state = _window(qtbot, _make_drifting_dataset())
+    try:
+        win._on_estimate()
+        assert len(queued) == 1
+        dataset = state.datasets[0]
+        dataset.attr.replace_coordinates(loc_x=np.zeros(dataset.prop.num_loc))
+        queued[0].run()
+        qtbot.waitUntil(lambda: win._task is None)
+        assert win._estimate is None and not win._apply_btn.isEnabled()
+        assert "inputs or settings changed" in win._stats.text()
+    finally:
+        win.close()
+
+
 def test_time_windows_estimate_and_apply(qtbot):
     from minflux_viewer.plugins.drift_correction.drift_correction_window import METHOD_WINDOWS
 

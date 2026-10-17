@@ -43,6 +43,7 @@ from minflux_viewer.analysis.tracking_stats import (
     run_tracking_method,
     snapshot_dataset_trajectories,
 )
+from minflux_viewer.core.computation_snapshot import DatasetInputVersion
 from minflux_viewer.core.tracking_time import tracking_precision_from_prefs
 from minflux_viewer.ui.common.dataset_binding import DatasetIndex, event_index
 from minflux_viewer.ui.plots.plot_format import plot_widget
@@ -396,6 +397,8 @@ class MsdAnalysisWindow(QWidget):
                 ("msd_d", "msd_alpha", "msd_sigma_apparent"),
             ))
             attach_attributes = bool(self._attach_attributes.isChecked())
+            version = DatasetInputVersion.capture(self._state, dataset)
+            settings = self._input_settings()
         except Exception as exc:  # noqa: BLE001 - present input failure in the window
             self._on_failed(generation, str(exc))
             return
@@ -425,11 +428,12 @@ class MsdAnalysisWindow(QWidget):
             work,
             description=f"MSD analysis: {snapshot.dataset_name}",
             category="analysis",
+            estimated_bytes=256 * int(snapshot.x_m.size),
         )
         task.signals.stage.connect(
             lambda text, g=generation: self._on_stage(g, text))
         task.signals.done.connect(
-            lambda payload, g=generation: self._on_done(g, payload))
+            lambda payload, g=generation: self._deliver_result(g, payload, version, settings))
         task.signals.failed.connect(
             lambda message, g=generation: self._on_failed(g, message))
         task.signals.cancelled.connect(
@@ -451,8 +455,26 @@ class MsdAnalysisWindow(QWidget):
             self._status.setText(f"Running MSD analysis… {text}")
 
     def _forget_task(self, generation: int, task) -> None:
+        from minflux_viewer.ui.common.background_tasks import detach_task_signals
+
+        detach_task_signals(task)
         if self._tasks.get(generation) is task:
             self._tasks.pop(generation, None)
+
+    def _input_settings(self) -> tuple:
+        prefs = self._state.prefs.get("tracking", {}) or {}
+        return (self._parameters(), self._scope.currentData(), self._time_mode.currentData(),
+                tracking_precision_from_prefs(self._state.prefs),
+                self._attach_attributes.isChecked(), tuple(prefs.get(
+                    "analysis_attributes", ("msd_d", "msd_alpha", "msd_sigma_apparent"))))
+
+    def _deliver_result(self, generation, payload, version, settings) -> None:
+        if generation != self._generation or self._closing:
+            return
+        if not version.is_current(self._state) or settings != self._input_settings():
+            self._invalidate("The inputs or settings changed. Run again to refresh the analysis.")
+            return
+        self._on_done(generation, payload)
 
     def _on_done(self, generation: int, payload: _AnalysisPayload) -> None:
         if generation != self._generation or self._closing:

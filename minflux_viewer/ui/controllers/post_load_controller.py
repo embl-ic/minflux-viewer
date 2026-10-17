@@ -133,6 +133,7 @@ def _run_post_load_computations(self: MainWindow, idx: int) -> None:
         work,
         description=f"Post-load processing of {ds.name}",
         category="analysis",
+        estimated_bytes=512 * int(ds.prop.num_loc) + 8 * 1024**2,
     )
     tasks[key] = task
     task.signals.stage.connect(

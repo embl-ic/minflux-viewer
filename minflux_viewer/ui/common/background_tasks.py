@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal
 
 from minflux_viewer.core.execution import pool_size
+from minflux_viewer.core.job_resources import JOB_RESOURCES, ResourceAdmissionError, ResourceLease
 from minflux_viewer.core.task_failure import TaskFailure
 from minflux_viewer.ui.common.qt_lifecycle import disconnect_signal, qobject_alive
 
@@ -76,6 +77,8 @@ class BackgroundTask(QRunnable):
         discard_result: Callable[[Any], None] | None = None,
         finally_callback: Callable[[], None] | None = None,
         commits_output: bool = False,
+        estimated_bytes: int = 0,
+        resource_lease: ResourceLease | None = None,
     ) -> None:
         super().__init__()
         self._work: Callable[[Callable[[str], None]], Any] | None = work
@@ -90,6 +93,8 @@ class BackgroundTask(QRunnable):
         self._state_lock = Lock()
         self._handle: RegistryTaskHandle | None = None
         self._on_start: Callable[[BackgroundTask], None] | None = None
+        self._estimated_bytes = int(estimated_bytes)
+        self._resource_lease = resource_lease
 
     @property
     def status(self) -> str:
@@ -113,15 +118,42 @@ class BackgroundTask(QRunnable):
         assert self._handle is not None
         self._handle.finish(status, detail=detail)
 
+    def admit(self) -> bool:
+        self.prepare()
+        if self._resource_lease is not None:
+            return True
+        try:
+            self._resource_lease = JOB_RESOURCES.acquire(self._estimated_bytes)
+        except ResourceAdmissionError as exc:
+            failure = TaskFailure.capture(exc, code="resource_admission")
+            self._finish("failed", detail=failure.message)
+            self.signals.failure.emit(failure)
+            self.signals.failed.emit(failure.message)
+            self._cleanup()
+            self.signals.finished.emit()
+            return False
+        return True
+
+    def _cleanup(self) -> None:
+        self._run_finally()
+        self._work = None
+        self._discard_result = None
+        self._finally_callback = None
+        if self._resource_lease is not None:
+            self._resource_lease.release()
+            self._resource_lease = None
+
     @property
     def is_cancelled(self) -> bool:
         return self._cancelled.is_set()
 
     def cancel(self) -> None:
         with self._state_lock:
+            # Closing can retire a queued delivery after native work finished.
+            # Record the request without relabelling an already terminal job.
+            self._cancelled.set()
             if self._status in {"done", "failed", "cancelled"}:
                 return
-            self._cancelled.set()
             self._status = "cancelling"
 
     def run(self) -> None:  # noqa: N802 - Qt API
@@ -131,6 +163,8 @@ class BackgroundTask(QRunnable):
         handle = self.prepare()
         if self.is_cancelled:
             self._finish_cancelled(None)
+            return
+        if not self.admit():
             return
         handle.start()
         with self._state_lock:
@@ -163,16 +197,17 @@ class BackgroundTask(QRunnable):
             self._finish("cancelled")
             self._discard(result)
             self.signals.cancelled.emit()
-        except Exception as exc:  # noqa: BLE001 - exceptions cross the Qt boundary
+        except (SystemExit, KeyboardInterrupt):
+            self._finish("cancelled", detail="Worker requested to stop")
+            self._discard(result)
+            self.signals.cancelled.emit()
+        except BaseException as exc:  # noqa: BLE001 - nothing escapes the Qt run boundary
             failure = TaskFailure.capture(exc)
             self._finish("failed", detail=f"{failure.exception_type}: {failure.message}")
             self.signals.failure.emit(failure)
             self.signals.failed.emit(str(exc))
         finally:
-            self._run_finally()
-            self._work = None
-            self._discard_result = None
-            self._finally_callback = None
+            self._cleanup()
             self.signals.finished.emit()
 
     def _finish_cancelled(self, result: Any) -> None:
@@ -181,10 +216,7 @@ class BackgroundTask(QRunnable):
             self._discard(result)
             self.signals.cancelled.emit()
         finally:
-            self._run_finally()
-            self._work = None
-            self._discard_result = None
-            self._finally_callback = None
+            self._cleanup()
             self.signals.finished.emit()
 
 
@@ -221,6 +253,11 @@ class _TrackedThreadPool(QThreadPool):
             # Python owners and run() retain these until actual completion.
             runnable.setAutoDelete(False)
             runnable.prepare()
+            if runnable.is_cancelled:
+                runnable._finish_cancelled(None)
+                return
+            if not runnable.admit():
+                return
             runnable._on_start = self._started
             with self._pending_lock:
                 self._pending.add(runnable)

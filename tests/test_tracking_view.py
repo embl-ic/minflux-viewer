@@ -609,6 +609,25 @@ def test_result_from_a_replaced_dataset_object_is_rejected(_qt_app, monkeypatch)
         _pump(_qt_app)
 
 
+def test_unannounced_coordinate_replacement_rejects_indexed_tracks(_qt_app, monkeypatch):
+    from minflux_viewer.ui.plots.tracking_window import TrackingWindow
+
+    queued = []
+    monkeypatch.setattr(TrackingWindow, "_start_track_task", lambda self, task: queued.append(task))
+    state = _state(_tracking_dataset(n_tracks=2, per=10))
+    win = TrackingWindow(state, dataset_idx=0)
+    try:
+        dataset = state.datasets[0]
+        dataset.attr.replace_coordinates(loc_x=np.zeros(dataset.prop.num_loc))
+        queued[-1].run()
+        _pump(_qt_app, 4)
+        assert not win._tracks
+        assert "source dataset changed" in win._info_label.text()
+    finally:
+        win.close()
+        _pump(_qt_app)
+
+
 def test_closing_cancels_and_detaches_a_pending_track_build(_qt_app, monkeypatch):
     from minflux_viewer.ui.plots.tracking_window import TrackingWindow
 

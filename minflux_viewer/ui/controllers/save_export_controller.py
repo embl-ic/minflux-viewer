@@ -18,7 +18,8 @@ from PyQt6.QtWidgets import (
 )
 
 from minflux_viewer.core import formats as _formats
-from minflux_viewer.core.save_snapshot import save_snapshot
+from minflux_viewer.core.job_resources import ResourceAdmissionError
+from minflux_viewer.core.save_snapshot import admitted_save_snapshot
 from minflux_viewer.ui.common.background_tasks import BackgroundTask
 
 if TYPE_CHECKING:
@@ -70,10 +71,21 @@ def _active_dataset_for_save(self):
     return ds
 
 
-def _start_file_save(self: MainWindow, work, *, name: str, on_done) -> None:
+class _SaveInputs:
+    @staticmethod
+    def capture(owner, ds, options, name):
+        try:
+            return admitted_save_snapshot(ds, options)
+        except (ResourceAdmissionError, MemoryError, TypeError, ValueError) as exc:
+            owner._on_file_save_failed(name, str(exc))
+            return None
+
+
+def _start_file_save(self: MainWindow, work, *, name: str, on_done, resource_lease=None) -> None:
     """Run a prepared writer without blocking Qt's event loop."""
     task = BackgroundTask(
-        work, description=f"Saving {name}", category="save", commits_output=True
+        work, description=f"Saving {name}", category="save", commits_output=True,
+        resource_lease=resource_lease,
     )
     task.signals.stage.connect(
         lambda text: self._state.status_progress(text)
@@ -217,7 +229,10 @@ def _save_as_format(self: MainWindow, fmt: str, title: str, *, path: str | None 
     )
     action = "Updated processing in " if zarr_overwrite == "viewer" else "Saved "
     name = Path(path).name
-    captured_ds, captured_kwargs = save_snapshot(ds, kwargs)
+    captured = _SaveInputs.capture(self, ds, kwargs, name)
+    if captured is None:
+        return
+    captured_ds, captured_kwargs, lease = captured
     def work(report, _ds=captured_ds, _kwargs=captured_kwargs, _name=name):
         report(f"Writing {_name}")
         written = save_processed(_ds, **_kwargs)
@@ -225,6 +240,7 @@ def _save_as_format(self: MainWindow, fmt: str, title: str, *, path: str | None 
     self._start_file_save(
         work,
         name=name,
+        resource_lease=lease,
         on_done=lambda written, _a=action, _n=name, _ds=ds: self._on_files_saved(
             written, _a, _n, _ds
         ),
@@ -397,7 +413,10 @@ def export_custom_csv(self: MainWindow, ds, suggested: str | Path | None = None)
     selected_columns = dialog.selected_columns()
     separator = dialog.separator_edit.text()
     name = Path(output_path).name or "spreadsheet"
-    captured_ds, _ = save_snapshot(ds)
+    captured = _SaveInputs.capture(self, ds, None, name)
+    if captured is None:
+        return
+    captured_ds, _, lease = captured
     def work(report):
         report(f"Writing {name}")
         path = write_spreadsheet_csv(
@@ -410,6 +429,7 @@ def export_custom_csv(self: MainWindow, ds, suggested: str | Path | None = None)
     self._start_file_save(
         work,
         name=name,
+        resource_lease=lease,
         on_done=lambda written, _n=name, _ds=ds: self._on_files_saved(
             written, "Saved spreadsheet: ", _n, _ds
         ),
@@ -508,7 +528,10 @@ def _save_as_picasso_hdf5(self: MainWindow) -> None:
     from minflux_viewer.core.save import write_picasso_hdf5
     pixel_size_nm = pixel_spin.value()
     name = Path(path).name
-    captured_ds, _ = save_snapshot(ds)
+    captured = _SaveInputs.capture(self, ds, None, name)
+    if captured is None:
+        return
+    captured_ds, _, lease = captured
     def work(report):
         report(f"Writing {name}")
         written = write_picasso_hdf5(
@@ -518,6 +541,7 @@ def _save_as_picasso_hdf5(self: MainWindow) -> None:
     self._start_file_save(
         work,
         name=name,
+        resource_lease=lease,
         on_done=lambda written, _n=name, _ds=ds: self._on_files_saved(
             written, "Saved Picasso HDF5: ", _n, _ds
         ),
@@ -607,7 +631,10 @@ def save_dataset(self: MainWindow, ds) -> None:
         else "Saved processed data"
     )
     name = Path(opts["data_path"] or src.name or ds.name).name
-    captured_ds, captured_options = save_snapshot(ds, {"options": opts, "context": zarr_context})
+    captured = _SaveInputs.capture(self, ds, {"options": opts, "context": zarr_context}, name)
+    if captured is None:
+        return
+    captured_ds, captured_options, lease = captured
     opts, zarr_context = captured_options["options"], captured_options["context"]
     def work(report):
         report(f"Writing {name}")
@@ -627,6 +654,7 @@ def save_dataset(self: MainWindow, ds) -> None:
     self._start_file_save(
         work,
         name=name,
+        resource_lease=lease,
         on_done=lambda written, _a=action, _n=name, _ds=ds: self._on_processed_saved(
             written, _a, _n, _ds
         ),
@@ -745,8 +773,11 @@ def _save_overlay_group(self: MainWindow, members, opts) -> None:
     rois = {index: self.save_roi_records(member)
             for index, member in enumerate(members)}
     names, content = list(opts["group_names"]), opts.get("content", "raw")
-    _, captured = save_snapshot(members[0], {"members": members, "include": opts.get("include")})
-    members, include = captured["members"], captured["include"]
+    captured = _SaveInputs.capture(self, members[0], {"members": members, "include": opts.get("include")}, folder.name)
+    if captured is None:
+        return
+    _, options, lease = captured
+    members, include = options["members"], options["include"]
     filter_mode = opts.get("filter_mode", "flag")
     def work(report):
         report(f"Writing {len(members)} channel(s) to {folder.name}")
@@ -756,7 +787,7 @@ def _save_overlay_group(self: MainWindow, members, opts) -> None:
             roi_records_for=rois.get)
         return written
     self._start_file_save(
-        work, name=folder.name,
+        work, name=folder.name, resource_lease=lease,
         on_done=lambda written, _f=folder, _n=len(members): self._on_group_saved(
             written, _f, _n))
 

@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import csv
 import re
-from array import array
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+from .numeric_columns import NumericColumnBuffer
 
 # ---------------------------------------------------------------------------
 # Roles & units
@@ -114,8 +115,9 @@ class SpreadsheetColumn:
     name: str                # original header text
     key: str                 # normalised key (lower-case, units/brackets removed)
     unit: str | None         # "nm" | "um" | "m" | "px" | None (detected)
-    values: np.ndarray       # float array (NaN for blank / non-numeric cells)
+    values: np.ndarray       # int64/uint64 when exact; float with NaN otherwise
     numeric: bool            # whether the column parsed as numeric
+    precision_loss: bool = False
 
 
 @dataclass
@@ -217,24 +219,16 @@ def _detect_tool(keys: set[str], headers: list[str]) -> str:
     return "generic"
 
 
-def _column_from_cells(name: str, cells: list[str]) -> SpreadsheetColumn:
+def _column_from_cells(name: str, cells: list, *, excel_numeric: bool = False) -> SpreadsheetColumn:
     """Parse a column of raw string cells into a numeric (or non-numeric) column."""
-    values = np.full(len(cells), np.nan, dtype=float)
-    n_total = 0
-    n_ok = 0
-    for i, cell in enumerate(cells):
-        if cell is None or cell == "":
-            continue
-        n_total += 1
-        try:
-            values[i] = float(cell)
-            n_ok += 1
-        except (TypeError, ValueError):
-            pass
-    numeric = n_total > 0 and n_ok >= 0.5 * n_total
+    buffer = NumericColumnBuffer()
+    for cell in cells:
+        buffer.append(cell, excel_numeric=excel_numeric)
+    numeric = buffer.nonempty > 0 and buffer.numeric >= 0.5 * buffer.nonempty
     return SpreadsheetColumn(
         name=name, key=_normalise_key(name),
-        unit=parse_unit(name), values=values, numeric=numeric,
+        unit=parse_unit(name), values=buffer.values(), numeric=numeric,
+        precision_loss=buffer.precision_loss,
     )
 
 
@@ -293,9 +287,7 @@ def _columns_from_rows(
 ) -> tuple[list[SpreadsheetColumn], int]:
     """Parse rows directly into compact numeric column buffers."""
     n_cols = len(headers)
-    buffers = [array("d") for _ in range(n_cols)]
-    nonempty = [0] * n_cols
-    numeric = [0] * n_cols
+    buffers = [NumericColumnBuffer() for _ in range(n_cols)]
     n_rows = 0
     for row in rows:
         if not any(str(cell).strip() for cell in row):
@@ -303,25 +295,17 @@ def _columns_from_rows(
         n_rows += 1
         for col in range(n_cols):
             cell = row[col] if col < len(row) else ""
-            text = str(cell).strip()
-            if not text:
-                buffers[col].append(np.nan)
-                continue
-            nonempty[col] += 1
-            try:
-                buffers[col].append(float(text))
-                numeric[col] += 1
-            except (TypeError, ValueError):
-                buffers[col].append(np.nan)
+            buffers[col].append(cell)
     columns = []
     for index, name in enumerate(headers):
-        values = np.frombuffer(buffers[index], dtype=np.float64)
+        buffer = buffers[index]
         columns.append(SpreadsheetColumn(
             name=name,
             key=_normalise_key(name),
             unit=parse_unit(name),
-            values=values,
-            numeric=nonempty[index] > 0 and numeric[index] >= 0.5 * nonempty[index],
+            values=buffer.values(),
+            numeric=buffer.nonempty > 0 and buffer.numeric >= 0.5 * buffer.nonempty,
+            precision_loss=buffer.precision_loss,
         ))
     return columns, n_rows
 
@@ -418,6 +402,10 @@ def _read_delimited_preview(
         if file_size > tail_bytes:
             handle.readline()
         raw_lines = handle.readlines()
+    if file_size <= tail_bytes and header_bytes:
+        # A small file forced through preview sampling can include its header
+        # in the tail; never treat it as a missing/non-numeric data row.
+        raw_lines = raw_lines[1:]
     for raw in raw_lines[-tail_count:]:
         row = _parse_sample_line(raw, delimiter)
         if row is not None:
@@ -459,7 +447,7 @@ def _read_delimited_preview(
     return headers, columns, delimiter, n_rows, indices
 
 
-def _read_excel(path: Path) -> tuple[list[str], list[list[str]]]:
+def _read_excel(path: Path) -> tuple[list[str], list[list]]:
     try:
         from openpyxl import load_workbook
     except ImportError as exc:  # pragma: no cover - dependency present in env
@@ -474,11 +462,11 @@ def _read_excel(path: Path) -> tuple[list[str], list[list[str]]]:
         values, lambda v: str(v).strip() if v is not None else "")
     headers = [h or f"{_ordinal(i + 1)} column" for i, h in enumerate(headers)]
     n_cols = len(headers)
-    cols: list[list[str]] = [[] for _ in range(n_cols)]
+    cols: list[list] = [[] for _ in range(n_cols)]
     for row in data:
         for c in range(n_cols):
             v = row[c] if c < len(row) else None
-            cols[c].append("" if v is None else str(v))
+            cols[c].append(v)
     return headers, cols
 
 
@@ -497,7 +485,7 @@ def read_table(path: str | Path) -> SpreadsheetTable:
     elif ext in {".xlsx", ".xlsm"}:
         headers, cells = _read_excel(path)
         delimiter, fmt = None, ext.lstrip(".")
-        columns = [_column_from_cells(h, cells[i]) for i, h in enumerate(headers)]
+        columns = [_column_from_cells(h, cells[i], excel_numeric=True) for i, h in enumerate(headers)]
         n_rows = max((c.values.size for c in columns), default=0)
     else:
         raise ValueError(
@@ -664,9 +652,9 @@ def column_stats(col: SpreadsheetColumn) -> ColumnStats:
     vmin, vmax = float(v.min()), float(v.max())
     is_int = bool(np.all(v == np.rint(v)))
     if v.size >= 2:
-        d = np.diff(v)
+        d = np.diff(v.astype(float))
         med = float(np.median(np.abs(d)))
-        frac_inc = float(np.mean(d >= 0.0))
+        frac_inc = float(np.mean(v[1:] >= v[:-1]))
     else:
         med, frac_inc = float("nan"), 0.0
     n_unique = int(np.unique(v).size)
@@ -1103,6 +1091,17 @@ def build_dataset_from_mapping(
     # tid from the id column (real → MINFLUX-eligible) and time from frame.
     cid = col("id")
     tid = take(cid.values) if cid is not None else None
+    if cid is not None:
+        assert tid is not None
+        if cid.precision_loss or (tid.dtype.kind == "f" and np.any(np.abs(tid) >= 2**53)):
+            raise ValueError(f"Trace IDs in {cid.name!r} may have lost integer precision; use exact integer text without missing/mixed cells")
+        if tid.dtype.kind in "iu":
+            valid_ids = not tid.size or (int(tid.min()) >= -(2**63) and int(tid.max()) < 2**63)
+        else:
+            valid_ids = bool(np.all(np.isfinite(tid)) and np.all(tid == np.floor(tid)))
+        if not valid_ids:
+            raise ValueError(f"Trace IDs in {cid.name!r} must be finite signed 64-bit integers")
+        tid = tid.astype(np.int64)
     cframe = col("frame")
     tim = None
     if cframe is not None:
@@ -1129,7 +1128,9 @@ def build_dataset_from_mapping(
         # ``eco`` is the MINFLUX name for this; keep the canonical spelling so
         # the CRLB / photon-weighted paths find it.
         key = "eco" if cphot.key == "eco" else "photons"
-        extra[key] = np.asarray(take(cphot.values), dtype=float)
+        if cphot.precision_loss:
+            raise ValueError(f"Column {cphot.name!r} may have lost integer precision")
+        extra[key] = take(cphot.values)
 
     # Raw MINFLUX attribute roles: the column is imported verbatim under the
     # canonical attribute name, so a "CFR" or "EFO" column drives the quality
@@ -1137,7 +1138,9 @@ def build_dataset_from_mapping(
     for role in EXTRA_ATTR_ROLES:
         attr_col = col(role)
         if attr_col is not None:
-            extra[role] = np.asarray(take(attr_col.values), dtype=float)
+            if attr_col.precision_loss:
+                raise ValueError(f"Column {attr_col.name!r} may have lost integer precision")
+            extra[role] = take(attr_col.values)
 
     # Carry through any remaining numeric columns under sanitised keys.
     mapped_names = {name for name in mapping.values() if name}
@@ -1150,7 +1153,9 @@ def build_dataset_from_mapping(
             continue
         key = _safe_attr_key(c.name, taken)
         taken.add(key)
-        extra[key] = np.asarray(take(c.values), dtype=float)
+        if c.precision_loss:
+            raise ValueError(f"Column {c.name!r} may have lost integer precision")
+        extra[key] = take(c.values)
 
     ds = build_localization_dataset(
         name=name, folder=folder,

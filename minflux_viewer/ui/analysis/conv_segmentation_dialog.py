@@ -641,7 +641,14 @@ class ConvSegmentationWindow(QDialog):
             report("Convolution preview ready")
             return maps, detections
 
-        task = BackgroundTask(work, description="Convolution segmentation preview", category="analysis")
+        try:
+            estimate = cs.preflight_convolution(xy, key, params, px, budget_bytes=budget)
+        except (ValueError, MemoryError) as exc:
+            self._reset_maps(str(exc))
+            self._info_label.setText(str(exc))
+            return
+        task = BackgroundTask(work, description="Convolution segmentation preview", category="analysis",
+                              estimated_bytes=estimate.bytes_required)
         self._task = task
         task.signals.done.connect(lambda result: self._computed(task, generation, stamp, map_key, result))
         task.signals.failed.connect(lambda message: self._compute_failed(task, generation, stamp, message))

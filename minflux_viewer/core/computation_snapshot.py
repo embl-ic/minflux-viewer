@@ -3,11 +3,57 @@
 from __future__ import annotations
 
 import copy
+import weakref
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from .dataset import AttrStore, MinfluxDataset
+
+
+def readonly_array(values) -> np.ndarray:
+    """Share immutable storage; isolate writable arrays and writable bases."""
+    array = np.asarray(values)
+    base: Any = array
+    immutable = not array.dtype.hasobject
+    while isinstance(base, np.ndarray):
+        immutable = immutable and not base.flags.writeable
+        base = base.base
+    immutable = immutable and (base is None or isinstance(base, bytes))
+    result = array.view() if immutable else copy.deepcopy(array)
+    result.flags.writeable = False
+    return result
+
+
+@dataclass(frozen=True)
+class DatasetInputVersion:
+    """Runtime-only delivery guard, without retaining the source dataset."""
+
+    key: Any
+    dataset: weakref.ReferenceType
+    revision: int
+    signature: tuple
+
+    @classmethod
+    def capture(cls, state, ds: MinfluxDataset) -> DatasetInputVersion:
+        key = state.key_of(ds)
+        if key is None:
+            raise ValueError("Cannot submit work for an unregistered dataset")
+        return cls(key, weakref.ref(ds), state.data_revision(key), input_signature(ds))
+
+    def is_current(self, state) -> bool:
+        ds = self.dataset()
+        return (ds is not None and state.dataset_for(self.key) is ds
+                and state.data_revision(self.key) == self.revision
+                and input_signature(ds) == self.signature)
+
+
+def _transform_signature(value) -> tuple | str:
+    if isinstance(value, dict):
+        return tuple((key, np.asarray(value[key], dtype=float).tobytes())
+                     for key in ("matrix_4x4", "matrix_3x3") if value.get(key) is not None)
+    return repr(value)
 
 
 def input_signature(ds: MinfluxDataset) -> tuple:
@@ -23,7 +69,9 @@ def input_signature(ds: MinfluxDataset) -> tuple:
     return (identities, ds.attr.coordinate_snapshot()[0],
             float(ds.cali.z_scaling_factor), repr(ds.metadata.get("z_scaling_factor_provenance")),
             ds.prop.num_loc, ds.prop.num_dim, bool(ds.metadata.get("particle_average")),
-            repr(ds.state.get("filter_specs")), id(ds.state.get("filter_mask")))
+            repr(ds.state.get("filter_specs")), id(ds.state.get("filter_mask")),
+            _transform_signature(ds.state.get("overlay_transform")),
+            _transform_signature(ds.state.get("render_transform_2d")))
 
 
 def computation_snapshot(ds: MinfluxDataset) -> MinfluxDataset:

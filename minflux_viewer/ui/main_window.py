@@ -1598,10 +1598,10 @@ class MainWindow(QMainWindow):
         from minflux_viewer.ui.controllers import save_export_controller as controller
         return controller._active_dataset_for_save(self)
 
-    def _start_file_save(self, work, *, name: str, on_done) -> None:
+    def _start_file_save(self, work, *, name: str, on_done, resource_lease=None) -> None:
         "Run a prepared writer without blocking Qt's event loop."
         from minflux_viewer.ui.controllers import save_export_controller as controller
-        return controller._start_file_save(self, work, name=name, on_done=on_done)
+        return controller._start_file_save(self, work, name=name, on_done=on_done, resource_lease=resource_lease)
 
     def _on_file_save_failed(self, name: str, message: str) -> None:
         from minflux_viewer.ui.controllers import save_export_controller as controller

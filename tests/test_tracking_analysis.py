@@ -138,6 +138,28 @@ def test_new_msd_run_cancels_and_rejects_the_old_generation(_qt_app, monkeypatch
         _qt_app.processEvents()
 
 
+def test_unannounced_coordinate_replacement_rejects_a_queued_analysis(_qt_app, monkeypatch):
+    from minflux_viewer.ui.plots.tracking_analysis_window import MsdAnalysisWindow
+
+    queued = []
+    monkeypatch.setattr(MsdAnalysisWindow, "_start_task", lambda self, task: queued.append(task))
+    state = _state()
+    win = MsdAnalysisWindow(state, 0)
+    try:
+        _qt_app.processEvents()
+        assert queued
+        dataset = state.datasets[0]
+        dataset.attr.replace_coordinates(loc_x=np.zeros(dataset.prop.num_loc))
+        queued[-1].run()
+        _qt_app.processEvents()
+        assert win._payload is None
+        assert "inputs or settings changed" in win._status.text()
+        assert not win._export_button.isEnabled()
+    finally:
+        win.close()
+        _qt_app.processEvents()
+
+
 def test_tracking_result_zip_contains_tables_units_and_provenance(tmp_path):
     from minflux_viewer.analysis.tracking_export import export_tracking_result_zip
     from minflux_viewer.analysis.tracking_stats import (
