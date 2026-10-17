@@ -33,7 +33,8 @@ def test_corner_centers_geometry():
 
 
 def test_fit_recovers_diameter_inter_rim():
-    fit = gf.fit_npc_model(_make_npc(diameter=100, inter=40, rim=6, seed=1))
+    fit = gf.fit_npc_model(_make_npc(diameter=100, inter=40, rim=6, seed=1),
+                           max_iter=6000, max_fev=12000)
     assert fit["ok"]
     assert abs(fit["diameter"] - 100) < 10
     assert abs(fit["inter"] - 40) < 10
@@ -139,9 +140,59 @@ def test_subunit_init_detects_corners_and_recovers():
     assert fit["ok"] and abs(fit["diameter"] - 105) < 10 and abs(fit["inter"] - 45) < 12
     # fallback: no tid → no sub-units, moment init still fits
     assert gf._subunit_centers(P, None) is None
-    assert gf.fit_npc_model(P, subunit_init=True, init_tid=None)["ok"]
+    assert gf.fit_npc_model(P, subunit_init=True, init_tid=None,
+                            max_iter=6000, max_fev=12000)["ok"]
 
 
 def test_too_few_points_safe():
     assert gf.fit_npc_model(np.zeros((5, 3)))["ok"] is False
     assert gf.average_npc_geomfit([])["n_accepted"] == 0
+
+
+def test_budget_exhaustion_is_not_a_successful_fit():
+    points = _make_npc(per=4, rim=1, seed=17)
+    fit = gf.fit_npc_model(points, subunit_init=False, max_iter=1, max_fev=1)
+    assert fit["candidate_valid"]
+    assert not fit["converged"]
+    assert not fit["ok"]
+    assert fit["optimizer_status"] == 1
+    assert fit["nfev"] == 1
+    assert "evaluations" in fit["optimizer_message"]
+    result = gf.average_npc_geomfit([points], subunit_init=False,
+                                   max_iter=1, max_fev=1, min_gof=-100)
+    assert result["n_accepted"] == 0
+    assert result["aligned"] == [None]
+    assert result["particle_transforms"] == [None]
+    row = result["table"][0]
+    assert np.isfinite(row["diameter"])  # keep the rejected candidate inspectable
+    assert not row["converged"] and not row["accepted"]
+    assert row["optimizer_message"] == fit["optimizer_message"]
+
+
+def test_nonfinite_optimizer_output_is_invalid(monkeypatch):
+    from scipy.optimize import OptimizeResult
+
+    monkeypatch.setattr("scipy.optimize.minimize", lambda *a, **kw: OptimizeResult(
+        x=np.full(9, np.nan), fun=np.nan, success=True, status=0,
+        message="reported success", nit=1, nfev=1))
+    fit = gf.fit_npc_model(_make_npc(per=4), subunit_init=False)
+    assert fit["converged"]
+    assert not fit["candidate_valid"] and not fit["ok"]
+
+
+def test_degenerate_candidate_is_not_scientifically_valid():
+    fit = gf.fit_npc_model(np.zeros((20, 3)), subunit_init=False, max_iter=10)
+    assert not fit["ok"] and not fit["candidate_valid"]
+
+
+def test_mixed_average_pools_only_converged_valid_fits(monkeypatch):
+    points = _make_npc(per=4, rim=2, tilt_deg=15, seed=5)
+    fit = gf.fit_npc_model(points, subunit_init=False, max_iter=6000, max_fev=12000)
+    assert fit["ok"]
+    fits = iter([fit, {**fit, "ok": False, "converged": False,
+                       "optimizer_message": "evaluation limit"}])
+    monkeypatch.setattr(gf, "fit_npc_model", lambda *a, **kw: next(fits))
+    result = gf.average_npc_geomfit([points, points], min_gof=-100)
+    assert result["n_accepted"] == 1
+    assert result["particle_transforms"][1] is None
+    np.testing.assert_array_equal(result["points"], gf.align_to_canonical(points, fit))

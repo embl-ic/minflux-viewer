@@ -23,6 +23,21 @@ def _image_rows():
     ]
 
 
+def test_unconverged_or_invalid_candidate_cannot_be_manually_accepted(qtbot):
+    from minflux_viewer.ui.analysis.particle_average_dialog import GEOM_COLS, ParticleFitTableWindow
+
+    rows = [dict(particle=1, n_locs=64, diameter=100., gof=.99, accepted=False,
+                 converged=False, candidate_valid=True, optimizer_message="evaluation limit"),
+            dict(particle=2, n_locs=64, diameter=100., gof=.99, accepted=False,
+                 converged=True, candidate_valid=False, optimizer_message="invalid candidate")]
+    win = ParticleFitTableWindow(rows, columns=GEOM_COLS)
+    qtbot.addWidget(win)
+    assert "optimizer_message" not in [key for _label, key in win._filter_cols]
+    win._toggle_accepted(0)
+    win._toggle_accepted(1)
+    assert win.accepted_flags() == [False, False]
+
+
 def test_fit_table_sorts_numerically_and_maps_original_index(_qt_app):
     from PyQt6.QtCore import Qt
 

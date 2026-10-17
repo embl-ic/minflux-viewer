@@ -35,6 +35,48 @@ def test_a_task_moves_through_its_lifecycle():
     assert info.status == "done" and info.finished > 0.0 and info.active is False
 
 
+@pytest.mark.parametrize("status", ["done", "failed", "cancelled"])
+def test_finished_history_releases_worker_cancel_callback(status):
+    import gc
+    import weakref
+
+    class Worker:
+        def cancel(self):
+            pass
+    registry = TaskRegistry()
+    worker = Worker()
+    reference = weakref.ref(worker)
+    handle = registry.register("worker", "analysis", cancel=worker.cancel)
+    del worker
+    assert reference() is not None
+    handle.finish(status)
+    gc.collect()
+    assert reference() is None
+    assert registry.get(handle.id).status == status
+    assert not registry.get(handle.id).cancellable
+
+
+def test_post_load_terminal_callback_releases_its_task(qtbot):
+    import gc
+    import weakref
+    from types import SimpleNamespace
+
+    from minflux_viewer.ui.common.background_tasks import BackgroundTask, shared_thread_pool
+    from minflux_viewer.ui.controllers import post_load_controller
+
+    task = BackgroundTask(lambda report: None, description="post-load release regression")
+    stub = SimpleNamespace(_post_load_tasks={"key": task})
+    task.signals.finished.connect(
+        lambda _task=task: post_load_controller._finish_post_load_task(stub, "key", _task))
+    reference = weakref.ref(task)
+    shared_thread_pool("post-load").start(task)
+    del task
+    qtbot.waitUntil(lambda: not stub._post_load_tasks)
+    qtbot.wait(10)
+    gc.collect()
+    assert reference() is None
+
+
 def test_stopping_is_a_request_the_task_honours_itself():
     registry = TaskRegistry()
     asked = []

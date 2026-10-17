@@ -165,6 +165,11 @@ class TaskRegistry:
                     changes["started"] = time.monotonic()
                 if status in {"done", "failed", "cancelled"} and not info.finished:
                     changes["finished"] = time.monotonic()
+                if status in {"done", "failed", "cancelled"}:
+                    # History retains plain facts, not a bound callback keeping
+                    # the completed worker, captured datasets and maps alive.
+                    entry.cancel = None
+                    changes["cancellable"] = False
             if detail is not None:
                 changes["detail"] = str(detail)
             if progress is not None:

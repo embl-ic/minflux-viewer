@@ -47,12 +47,19 @@ from PyQt6.QtWidgets import (
 
 from minflux_viewer.analysis import conv_segmentation as cs
 from minflux_viewer.colormaps import colormap_lut
-from minflux_viewer.ui.common.dataset_binding import DatasetIndex
+from minflux_viewer.core.computation_snapshot import input_signature
+from minflux_viewer.ui.common.background_tasks import (
+    BackgroundTask,
+    detach_task_signals,
+    retire_background_tasks,
+    shared_thread_pool,
+)
+from minflux_viewer.ui.common.dataset_binding import DatasetIndex, window_dataset_key
+from minflux_viewer.ui.common.qt_lifecycle import qobject_alive
 from minflux_viewer.ui.plots.plot_format import apply_spatial_y_direction
 from minflux_viewer.ui.roi.roi_overlay import PointMarkerItem
 from minflux_viewer.ui.widgets.layer_brightness import LayerBrightness, percentile_levels
 
-_MAX_IMAGE_PX = 40_000_000      # guard: skip convolution above this histogram size
 _RESPONSE_CMAP = "inferno"
 _SEL_COLOR = (255, 235, 0)      # yellow ring on the selected detections
 _ROI_STROKE = "#00e5ff"
@@ -75,6 +82,13 @@ class ConvSegmentationWindow(QDialog):
         self.resize(1180, 700)
 
         self._xy = self._load_xy()
+        self._xy.flags.writeable = False
+        self._closed = False
+        self._generation = 0
+        self._task: BackgroundTask | None = None
+        self._pending = False
+        self._map_key = None
+        self._kernel = np.empty((0, 0))
         self._param_spins: dict[str, QDoubleSpinBox] = {}
         self._H = np.zeros((0, 0))
         self._response = np.zeros((0, 0))
@@ -101,7 +115,11 @@ class ConvSegmentationWindow(QDialog):
         self._build_ui()
         self._register_bc_layers()
         self._restore_prefs()      # restore last-session model + params (builds param spins)
-        self._recompute()
+        for signal in (state.dataset_events.filter_changed, state.dataset_events.attributes_changed,
+                       state.dataset_events.calibration_changed, state.dataset_events.overlay_transform_changed,
+                       state.dataset_events.removed):
+            signal.connect(self._source_changed)
+        self._schedule_recompute()
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
@@ -152,6 +170,13 @@ class ConvSegmentationWindow(QDialog):
         self._pixel_spin = self._spin(0.5, 200.0, 4.0, 1, 0.5, " nm")
         self._pixel_spin.valueChanged.connect(self._schedule_recompute)
         common.addRow("Pixel size:", self._pixel_spin)
+        self._memory_spin = QSpinBox()
+        self._memory_spin.setRange(32, 16384)
+        self._memory_spin.setValue(cs.DEFAULT_MEMORY_BUDGET // 1024**2)
+        self._memory_spin.setSuffix(" MiB")
+        self._memory_spin.setToolTip("Conservative per-operation allocation estimate, not a total application memory limit.")
+        self._memory_spin.valueChanged.connect(self._schedule_recompute)
+        common.addRow("Memory budget:", self._memory_spin)
         self._zero_mean = QCheckBox("Zero-mean kernel")
         self._zero_mean.setChecked(cs.DEFAULT_ZERO_MEAN)
         self._zero_mean.setToolTip(
@@ -456,7 +481,7 @@ class ConvSegmentationWindow(QDialog):
         self._suspend = False
         self._ring_group.setVisible(model.ringlike)   # ring validation: ring-like only
         if not initial:
-            self._recompute()
+            self._schedule_recompute()
 
     # ----------------------------------------------------- persistence
     def _restore_prefs(self) -> None:
@@ -487,6 +512,8 @@ class ConvSegmentationWindow(QDialog):
                     spin.setValue(float(cfg[key]))
             if "max_detections" in cfg:
                 self._max_spin.setValue(int(cfg["max_detections"]))
+            if "memory_budget_mib" in cfg:
+                self._memory_spin.setValue(int(cfg["memory_budget_mib"]))
             for chk, key in ((self._zero_mean, "zero_mean"), (self._sqrt, "sqrt"),
                              (self._dog, "dog"), (self._ring_validate, "ring_validate"),
                              (self._show_detection, "show_detection"),
@@ -504,6 +531,7 @@ class ConvSegmentationWindow(QDialog):
         self._state.prefs["conv_segmentation"] = {
             "model": self._model_key(),
             "pixel_size": self._pixel_spin.value(),
+            "memory_budget_mib": self._memory_spin.value(),
             "zero_mean": self._zero_mean.isChecked(),
             "sqrt": self._sqrt.isChecked(),
             "dog": self._dog.isChecked(),
@@ -529,6 +557,13 @@ class ConvSegmentationWindow(QDialog):
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
         from minflux_viewer.ui.common.qt_lifecycle import cleanup_callback, dispose_plot_widgets
 
+        self._closed = True
+        self._generation += 1
+        self._pending = False
+        self._recompute_timer.stop()
+        if self._task is not None:
+            retire_background_tasks([self._task])
+            self._task = None
         cleanup_callback(self._save_prefs, context="save segmentation preferences on exit")
         cleanup_callback(self._bc.close, context="close segmentation brightness dialog")
 
@@ -539,39 +574,120 @@ class ConvSegmentationWindow(QDialog):
 
     # ----------------------------------------------------------- compute
     def _schedule_recompute(self) -> None:
-        if not self._suspend:
+        if not self._suspend and not self._closed:
+            self._map_key = None
+            self._generation += 1
+            self._pending = True
+            if self._task is not None:
+                self._task.cancel()
+            self._reset_maps("Updating convolution preview…")
+            self._kernel_img.clear()
             self._recompute_timer.start()
 
+    def _source_stamp(self):
+        ds = self._dataset()
+        key = window_dataset_key(self)
+        if ds is None or key is None:
+            return None
+        return (self._state.data_revision(key), input_signature(ds),
+                repr(ds.state.get("overlay_transform")), repr(ds.state.get("render_transform_2d")))
+
+    def _source_changed(self, event) -> None:
+        if self._closed or event.key != window_dataset_key(self):
+            return
+        if self._dataset() is None:
+            self._generation += 1
+            self._pending = False
+            self._recompute_timer.stop()
+            if self._task is not None:
+                self._task.cancel()
+            self._reset_maps("Dataset is closed.")
+            return
+        self._xy = self._load_xy()
+        self._xy.flags.writeable = False
+        self._fitted = False
+        self._schedule_recompute()
+
     def _recompute(self) -> None:
-        """Full update: build kernel, render histogram, FFT-convolve."""
+        """Dispatch the latest captured request; one active job per window."""
+        if self._closed or self._dataset() is None:
+            return
+        if self._task is not None:
+            self._pending = True
+            return
+        self._pending = False
         px = float(self._pixel_spin.value())
-        kernel = cs.build_kernel(self._model_key(), self._params(), px,
-                                 zero_mean=self._zero_mean.isChecked())
-        self._draw_kernel(kernel)
+        key, params = self._model_key(), self._params()
+        generation, stamp, xy = self._generation, self._source_stamp(), self._xy
+        zero, sqrt, dog = self._zero_mean.isChecked(), self._sqrt.isChecked(), self._dog.isChecked()
+        budget = int(self._memory_spin.value()) * 1024**2
+        map_key = (stamp, key, tuple(params.items()), px, zero, sqrt, dog, budget)
+        cached = (dict(kernel=self._kernel, histogram=self._H, response_map=self._response,
+                       xedge=self._xedge, yedge=self._yedge) if self._map_key == map_key else None)
+        threshold = dict(model_key=key, params=params, pixel_size_nm=px,
+                         min_response=float(self._response_spin.value()),
+                         min_distance_nm=float(self._sep_spin.value()),
+                         max_detections=self._max_spin.value() or None,
+                         ring_validation=(dict(max_inside=float(self._max_inside.value()),
+                                               max_outside=float(self._max_outside.value()),
+                                               min_support=float(self._min_support.value()))
+                                          if self._ring_validate.isChecked() else None))
 
-        xy = self._xy
-        if xy.shape[0] < 3:
-            self._reset_maps("Need at least 3 localizations.")
-            return
-        nx = int((xy[:, 0].max() - xy[:, 0].min()) / px) + 2
-        ny = int((xy[:, 1].max() - xy[:, 1].min()) / px) + 2
-        if nx * ny > _MAX_IMAGE_PX:
-            self._reset_maps("")
-            self._info_label.setText(
-                f"Image {nx}×{ny} too large at {px:g} nm/px — increase the pixel size.")
-            return
+        def work(report):
+            maps = cached if cached is not None else cs.convolution_maps(
+                xy, model_key=key, params=params, pixel_size_nm=px, zero_mean=zero,
+                sqrt_stabilize=sqrt, dog=dog, budget_bytes=budget, report=report)
+            detections = cs.threshold_response_maps(xy, maps, **threshold, report=report)
+            report("Convolution preview ready")
+            return maps, detections
 
-        # self._H stays the raw counts (for the rendered-image layer); the
-        # convolution uses an optionally √-stabilized copy.
-        self._H, self._xedge, self._yedge = cs.render_histogram_2d(xy[:, 0], xy[:, 1], px)
-        H_conv = cs.stabilize_histogram(self._H, self._sqrt.isChecked())
-        size_nm = cs.get_model(self._model_key()).size(self._params())
-        dog_radius_px = (0.5 * size_nm / px) if self._dog.isChecked() else None
-        self._response = cs.convolve_response(H_conv, kernel, dog_radius_px=dog_radius_px)
+        task = BackgroundTask(work, description="Convolution segmentation preview", category="analysis")
+        self._task = task
+        task.signals.done.connect(lambda result: self._computed(task, generation, stamp, map_key, result))
+        task.signals.failed.connect(lambda message: self._compute_failed(task, generation, stamp, message))
+        task.signals.finished.connect(lambda: self._compute_finished(task))
+        shared_thread_pool("convolution-segmentation").start(task)
+
+    def _delivery_current(self, task: BackgroundTask, generation, stamp) -> bool:
+        return (not self._closed and qobject_alive(self) and not task.is_cancelled
+                and generation == self._generation and stamp == self._source_stamp()
+                and self._task is task)
+
+    def _computed(self, task, generation, stamp, map_key, result) -> None:
+        if not self._delivery_current(task, generation, stamp):
+            return
+        maps, detections = result
+        self._map_key = map_key
+        self._kernel = maps["kernel"]
+        self._H, self._response = maps["histogram"], maps["response_map"]
+        self._xedge, self._yedge = maps["xedge"], maps["yedge"]
+        self._draw_kernel(self._kernel)
         self._info_label.setText(
-            f"{xy.shape[0]:,} localizations · {self._H.shape[0]}×{self._H.shape[1]} px")
+            f"{self._xy.shape[0]:,} localizations · {self._H.shape[0]}×{self._H.shape[1]} px")
+        self._centers, self._values = detections["centers"], detections["peak_values"]
+        self._inside, self._support = detections["inside_ratio"], detections["support"]
+        self._labels = [f"{self._name_prefix()} {i}" for i in range(1, len(self._centers) + 1)]
         self._draw_layers()
-        self._rethreshold()
+        self._set_rings(self._centers)
+        self._populate_list()
+        self._status_label.setText("" if len(self._xy) >= 3 else "Need at least 3 localizations.")
+        self._add_btn.setEnabled(len(self._centers) > 0)
+
+    def _compute_failed(self, task, generation, stamp, message) -> None:
+        if self._delivery_current(task, generation, stamp):
+            self._map_key = None
+            self._reset_maps(message)
+            self._info_label.setText(message)
+
+    def _compute_finished(self, task) -> None:
+        # Signals own callbacks capturing the task/window/maps. Break that
+        # Qt/Python cycle on the GUI thread after terminal delivery.
+        detach_task_signals(task)
+        if self._closed or not qobject_alive(self) or self._task is not task:
+            return
+        self._task = None
+        if self._pending and not self._recompute_timer.isActive():
+            self._recompute()
 
     def _reset_maps(self, status: str) -> None:
         self._H = np.zeros((0, 0))
@@ -590,39 +706,15 @@ class ConvSegmentationWindow(QDialog):
         self._add_btn.setEnabled(False)
 
     def _rethreshold(self) -> None:
-        """Cheap update: re-run NMS on the cached response map, then optional
-        ring validation (reject solid blobs)."""
-        if self._suspend or self._response.size == 0:
+        """Coalesce detection-only changes; reuse the captured response map."""
+        if self._suspend or self._closed:
             return
-        px = float(self._pixel_spin.value())
-        centers, vals = cs.detections_from_response(
-            self._response, self._xedge, self._yedge,
-            min_response=float(self._response_spin.value()),
-            min_distance_px=float(self._sep_spin.value()) / px,
-            max_detections=(self._max_spin.value() or None))
-        inside = np.full(centers.shape[0], np.nan)
-        support = np.full(centers.shape[0], np.nan)
-        model = cs.get_model(self._model_key())
-        if (model.ringlike and model.ring_geom is not None
-                and self._ring_validate.isChecked() and centers.shape[0]):
-            radius_nm, rim_nm = model.ring_geom(self._params())
-            keep, ins, _outs, sup = cs.ring_validation_mask(
-                self._xy, centers, radius_nm, rim_nm,
-                max_inside=float(self._max_inside.value()),
-                max_outside=float(self._max_outside.value()),
-                min_support=float(self._min_support.value()))
-            centers, vals = centers[keep], vals[keep]
-            inside, support = ins[keep], sup[keep]
-        self._centers = centers
-        self._values = vals
-        self._inside = inside
-        self._support = support
-        prefix = self._name_prefix()
-        self._labels = [f"{prefix} {i}" for i in range(1, centers.shape[0] + 1)]
-        self._set_rings(centers)
-        self._populate_list()
-        self._status_label.setText("")
-        self._add_btn.setEnabled(centers.shape[0] > 0)
+        self._generation += 1
+        self._pending = True
+        if self._task is not None:
+            self._task.cancel()
+        self._add_btn.setEnabled(False)
+        self._recompute_timer.start()
 
     def _name_prefix(self) -> str:
         return cs.get_model(self._model_key()).label.split(" ")[0]
@@ -745,6 +837,8 @@ class ConvSegmentationWindow(QDialog):
 
     # ----------------------------------------------------------- commit
     def _add_to_manager(self) -> None:
+        if self._closed or self._pending or self._task is not None:
+            return
         sel = self._selected_indices()
         if sel.size == 0 or self._owner is None:
             return

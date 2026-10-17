@@ -59,6 +59,7 @@ POOLS: dict[str, PoolPolicy] = {
     "post-load": PoolPolicy(
         "analysis", 2, "density, precision and Z scaling after a dataset opens"),
     "particle-average": PoolPolicy("analysis", 1, "particle averaging"),
+    "convolution-segmentation": PoolPolicy("analysis", 1, "bounded convolution previews and detection"),
     "drift-correction": PoolPolicy("analysis", 1, "drift correction"),
     "tracking-analysis": PoolPolicy("analysis", 1, "tracking analysis"),
     "mfv-script": PoolPolicy("analysis", 2, "mfv.run.background from scripts and plugins"),
@@ -73,7 +74,7 @@ POOLS: dict[str, PoolPolicy] = {
 }
 
 #: The most threads each queue may run at once.
-QUEUE_LIMITS: dict[str, int] = {"interactive": 14, "analysis": 7, "io": 11}
+QUEUE_LIMITS: dict[str, int] = {"interactive": 14, "analysis": 8, "io": 11}
 
 
 def _check_policy() -> None:

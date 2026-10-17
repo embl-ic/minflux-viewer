@@ -806,6 +806,7 @@ class AppState(QObject):
         self._entries: list[DatasetEntry] = []
         self._active_key: DatasetKey | None = None
         self._key_counter = itertools.count(1)
+        self._data_revisions: dict[DatasetKey, int] = {}
         self.prefs: dict = self._load_prefs()
         self.coordinates = CoordinateService(cache_budget_bytes(
             self.prefs.get("data", {}).get("coordinate_cache_percent", DEFAULT_CACHE_PERCENT)))
@@ -945,6 +946,7 @@ class AppState(QObject):
 
     def _announce_removal(self, entry: DatasetEntry, old_index: int) -> None:
         """Emit ``dataset_events.removed``; the registry is settled by then."""
+        self._data_revisions.pop(entry.key, None)
         self.dataset_events.removed.emit(DatasetRemoved(
             key=entry.key, dataset=entry.dataset, old_index=old_index,
             new_active_key=self._active_key))
@@ -954,7 +956,13 @@ class AppState(QObject):
         """Emit a typed change for the dataset at *idx*, if there is one there."""
         key = self.key_at(idx)
         if key is not None:
+            if aspect in (ChangeAspect.FILTER, ChangeAspect.ATTRIBUTES, ChangeAspect.CALIBRATION):
+                self._data_revisions[key] = self.data_revision(key) + 1
             signal.emit(DatasetChanged(key=key, dataset=self._datasets[idx], aspect=aspect))
+
+    def data_revision(self, key: DatasetKey) -> int:
+        """Runtime revision for worker inputs; never persisted or public API."""
+        return self._data_revisions.get(key, 0)
 
     def _new_key(self) -> DatasetKey:
         return DatasetKey(next(self._key_counter))
@@ -986,6 +994,7 @@ class AppState(QObject):
         live_keys = {entry.key for entry in rebuilt}
         for entry in entries:
             if entry.key not in live_keys:
+                self._data_revisions.pop(entry.key, None)
                 self.coordinates.detach(entry.key)
         for entry in rebuilt:
             self.coordinates.attach(entry.dataset, entry.key)

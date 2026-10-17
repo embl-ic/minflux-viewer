@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+NPC model averages now require converged, finite fits and report optimizer
+diagnostics. CSV exports preserve large integer identifiers. Ordinary dataset
+exports stage data and recipes before replacement, with rollback on handled
+publication failures. Outdated post-load/filter results cannot overwrite newer
+choices, and embedded image extraction follows package versions.
+
+Convolution segmentation previews run in the background, coalesce edits, and
+check kernel/histogram/FFT memory estimates before allocation. The preview's
+memory budget is adjustable; it is not a total application memory limit.
+
 UI internals are grouped into capability packages. Plugins that import private
 `minflux_viewer.ui` modules must use their new paths; old UI module paths are
 not retained. The public `mfv` scripting API is unchanged.

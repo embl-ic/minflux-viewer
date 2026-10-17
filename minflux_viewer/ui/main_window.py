@@ -1741,14 +1741,14 @@ class MainWindow(QMainWindow):
         from minflux_viewer.ui.controllers import post_load_controller as controller
         return controller._retire_dataset_tasks(self, event)
 
-    def _on_post_load_done(self, key, ds, result: dict) -> None:
+    def _on_post_load_done(self, key, ds, result: dict, task=None, signature=None, revision=None) -> None:
         'Deliver a post-load result only while the dataset it started for is open.'
         from minflux_viewer.ui.controllers import post_load_controller as controller
-        return controller._on_post_load_done(self, key, ds, result)
+        return controller._on_post_load_done(self, key, ds, result, task, signature, revision)
 
-    def _on_post_load_error(self, key, ds, message: str) -> None:
+    def _on_post_load_error(self, key, ds, message: str, task=None, signature=None, revision=None) -> None:
         from minflux_viewer.ui.controllers import post_load_controller as controller
-        return controller._on_post_load_error(self, key, ds, message)
+        return controller._on_post_load_error(self, key, ds, message, task, signature, revision)
 
     def _on_post_load_failed(self, ds, message: str) -> None:
         from minflux_viewer.ui.controllers import post_load_controller as controller
@@ -1762,13 +1762,13 @@ class MainWindow(QMainWindow):
         from minflux_viewer.ui.controllers import post_load_controller as controller
         return controller._start_saved_filter_restore(self, ds)
 
-    def _on_saved_filters_done(self, key, ds, mask) -> None:
+    def _on_saved_filters_done(self, key, ds, mask, task=None, signature=None, revision=None) -> None:
         from minflux_viewer.ui.controllers import post_load_controller as controller
-        return controller._on_saved_filters_done(self, key, ds, mask)
+        return controller._on_saved_filters_done(self, key, ds, mask, task, signature, revision)
 
-    def _on_saved_filters_error(self, key, ds, message: str) -> None:
+    def _on_saved_filters_error(self, key, ds, message: str, task=None, signature=None, revision=None) -> None:
         from minflux_viewer.ui.controllers import post_load_controller as controller
-        return controller._on_saved_filters_error(self, key, ds, message)
+        return controller._on_saved_filters_error(self, key, ds, message, task, signature, revision)
 
     def _on_saved_filters_evaluated(self, ds, mask) -> None:
         from minflux_viewer.ui.controllers import post_load_controller as controller

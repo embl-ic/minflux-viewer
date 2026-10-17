@@ -1495,25 +1495,11 @@ def materialize_image(record: dict) -> Path | None:
     if not package or not member or not Path(package).is_file():
         return None
 
-    cache = Path(tempfile.gettempdir()) / "minflux-viewer-images"
-    stamp = hashlib.sha256(f"{package}\x00{member}".encode()).hexdigest()[:16]
-    target = cache / f"{stamp}-{Path(member).name}"
-    if target.is_file():
-        return target
-    cache.mkdir(parents=True, exist_ok=True)
+    from .image_materialization import IMAGE_CACHE
     try:
-        with zipfile.ZipFile(package) as archive:
-            data = archive.read(member)
-    except (KeyError, OSError, zipfile.BadZipFile):
+        return IMAGE_CACHE.materialize(record)
+    except (KeyError, ValueError, OSError, zipfile.BadZipFile):
         return None
-    partial = target.with_name(f".{target.name}.tmp-{uuid.uuid4().hex}")
-    try:
-        partial.write_bytes(data)
-        os.replace(partial, target)
-    finally:
-        if partial.exists():
-            partial.unlink()
-    return target
 
 
 def _open_root(source: Path):

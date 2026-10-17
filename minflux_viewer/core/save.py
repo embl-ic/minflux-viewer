@@ -34,6 +34,7 @@ import numpy as np
 from . import formats as _formats
 from . import overlay_save as _ov_save
 from .acquisition_time import acquisition_metadata
+from .file_transactions import atomic_file_writer, file_transaction
 
 #: Tag identifying the metadata sidecar JSON (a dict; filter/data JSON are lists).
 METADATA_JSON_MARKER = "minflux_viewer_metadata"
@@ -133,8 +134,9 @@ def write_metadata_sidecar(ds, path, *, data_filename: str | None = None,
     output.parent.mkdir(parents=True, exist_ok=True)
     payload = build_metadata(ds, data_filename=data_filename, content="raw",
                              roi_records=roi_records)
-    output.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
-                      encoding="utf-8")
+    with file_transaction([output]) as staged:
+        staged[output].write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                                 encoding="utf-8")
     return output
 
 
@@ -498,6 +500,7 @@ def build_metadata(ds, *, data_filename: str | None = None,
 # ---------------------------------------------------------------------------
 # Data writers (Abberior-style structured mfx)
 # ---------------------------------------------------------------------------
+@atomic_file_writer
 def _write_mat(path: Path, mfx: np.ndarray, *, root: str = "mfx") -> None:
     from scipy.io import savemat
 
@@ -507,10 +510,12 @@ def _write_mat(path: Path, mfx: np.ndarray, *, root: str = "mfx") -> None:
     savemat(str(path), {str(root): fields}, do_compression=True, long_field_names=True)
 
 
+@atomic_file_writer
 def _write_npy(path: Path, mfx: np.ndarray) -> None:
     np.save(str(path), mfx, allow_pickle=False)
 
 
+@atomic_file_writer
 def _write_json(path: Path, mfx: np.ndarray) -> None:
     names = mfx.dtype.names
     # Keep the File > Save JSON shape (a JSON array of records), but stream one
@@ -547,16 +552,19 @@ _WRITERS = {"mat": _write_mat, "npy": _write_npy, "json": _write_json}
 
 
 # --- flat-columns writers (CSV) --------------------------------------------
+@atomic_file_writer
 def _write_csv(path: Path, columns: dict[str, np.ndarray]) -> None:
     names = list(columns)
     if not names:
         path.write_text("", encoding="utf-8")
         return
-    arrays = {name: np.asarray(columns[name]).ravel() for name in names}
-    if all(
-        np.issubdtype(values.dtype, np.number) or np.issubdtype(values.dtype, np.bool_)
-        for values in arrays.values()
-    ):
+    arrays = {name: np.asarray(columns[name]) for name in names}
+    if any(values.ndim != 1 for values in arrays.values()):
+        raise ValueError("CSV columns must be one-dimensional.")
+    n = len(arrays[names[0]])
+    if any(len(values) != n for values in arrays.values()):
+        raise ValueError("CSV columns must align with the export rows.")
+    if all(values.dtype.kind in "biuf" for values in arrays.values()):
         # Numeric canonical exports are common and can be written much faster
         # in bounded chunks than one csv.writer call per row.  Per-column
         # formats keep integer/bool fields textual-exact while floats retain
@@ -567,11 +575,16 @@ def _write_csv(path: Path, columns: dict[str, np.ndarray]) -> None:
             for name in names
         ]
         with path.open("w", encoding="utf-8", newline="") as handle:
-            handle.write(",".join(names) + "\n")
-            n = len(arrays[names[0]])
+            csv.writer(handle, lineterminator="\n").writerow(names)
             for start in range(0, n, 100_000):
                 stop = min(start + 100_000, n)
-                matrix = np.column_stack([arrays[name][start:stop] for name in names])
+                # A homogeneous matrix promotes mixed int/float to float64 and
+                # rounds IDs above 2**53 before formatting. Structured records
+                # preserve every column's dtype with the same bounded payload.
+                matrix = np.empty(stop - start, dtype=[
+                    (name, arrays[name].dtype) for name in names])
+                for name in names:
+                    matrix[name] = arrays[name][start:stop]
                 np.savetxt(handle, matrix, delimiter=",", fmt=formats)
         return
     # Keep integer/bool columns textual-exact.  The previous float conversion
@@ -665,7 +678,10 @@ def write_spreadsheet_csv(
     if output.suffix.lower() != ".csv":
         output = output.with_suffix(".csv")
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8", newline="") as handle:
+    sidecar = metadata_sidecar_path(output)
+    with file_transaction([output], protected=[sidecar]) as staged, staged[output].open("w", encoding="utf-8", newline="") as handle:
+        if sidecar.exists():
+            raise ValueError(f"An existing processing recipe would become stale: {sidecar}. Choose another CSV filename.")
         writer = csv.writer(handle, delimiter=delimiter, lineterminator="\n")
         writer.writerow([header for _name, header, _values in selected])
         for row_idx in range(n_rows or 0):
@@ -803,7 +819,7 @@ def _write_simple_yaml_documents(path: Path, docs: list[dict[str, Any]]) -> None
     path.write_text("\n".join(chunks) + "\n", encoding="utf-8")
 
 
-def write_picasso_hdf5(
+def _write_picasso_hdf5(
     ds,
     path: str | Path,
     *,
@@ -913,7 +929,7 @@ def write_picasso_hdf5(
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
-def save_processed(
+def _save_processed(
     ds,
     *,
     data_path: str | Path | None = None,
@@ -1065,3 +1081,58 @@ def save_processed(
         )
         written.append(sidecar)
     return written
+
+
+def write_picasso_hdf5(ds, path: str | Path, *, pixel_size_nm: float = 1.0) -> list[Path]:
+    """Publish the Picasso table and its calibration YAML as one recoverable set."""
+    output = Path(path).with_suffix(".hdf5")
+    targets = [output, output.with_suffix(".yaml")]
+    with file_transaction(targets) as staged:
+        _write_picasso_hdf5(ds, staged[output], pixel_size_nm=pixel_size_nm)
+    return targets
+
+
+def save_processed(
+    ds, *, data_path: str | Path | None = None, fmt: str | None = None,
+    metadata_dir: str | Path | None = None, content: str = "raw",
+    include: dict | None = None, filter_mode: str = "flag", related_datasets=None,
+    roi_records=None, image_specs=None, project_name: str | None = None,
+    zarr_overwrite: str = "replace", overlay: dict | None = None, log=None,
+) -> list[Path]:
+    """Save canonical raw or a processed snapshot and optional processing recipe.
+
+    Ordinary files and their requested recipe are fully prepared before replacing
+    old outputs, with rollback on handled publication failure. Zarr retains its
+    own validated store transaction. See ``_save_processed`` for format options.
+    """
+    options = dict(fmt=fmt, content=content, include=include, filter_mode=filter_mode,
+                   related_datasets=related_datasets, roi_records=roi_records,
+                   image_specs=image_specs, project_name=project_name,
+                   zarr_overwrite=zarr_overwrite, overlay=overlay, log=log)
+    if fmt in {"zarr", "zarr_zip"} and data_path is not None:
+        return _save_processed(ds, data_path=data_path, metadata_dir=metadata_dir, **options)
+    targets = []
+    output = None
+    if data_path is not None:
+        if fmt not in _EXT:
+            raise ValueError(f"Unsupported data format: {fmt!r}")
+        output = _formats.normalize_path(fmt, data_path)
+        targets.append(output)
+        sidecar = metadata_sidecar_path(output)
+    else:
+        stem = Path(getattr(ds.file, "name", "dataset") or "dataset").stem or "dataset"
+        folder = Path(metadata_dir or getattr(ds.file, "folder", "") or ".")
+        sidecar = metadata_sidecar_path(folder / stem)
+    if (include or {}).get("recipe", True):
+        targets.append(sidecar)
+    if not targets:
+        return []
+    with file_transaction(targets, protected=[sidecar]) as staged:
+        if output is not None and sidecar not in targets and sidecar.exists():
+            raise ValueError(
+                f"An existing processing recipe would become stale: {sidecar}. "
+                "Include a new recipe or choose a different output filename.")
+        _save_processed(ds, data_path=staged[output] if output is not None else None,
+                        metadata_dir=staged[sidecar].parent if output is None else metadata_dir,
+                        **options)
+    return targets

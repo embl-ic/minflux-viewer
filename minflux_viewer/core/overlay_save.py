@@ -151,6 +151,7 @@ def save_overlay_group(datasets, folder, fmt: str, *, names=None,
     """
     from .save import save_processed
 
+    builtin_writer = save is None
     save = save or save_processed
     datasets = list(datasets)
     if not datasets:
@@ -164,6 +165,25 @@ def save_overlay_group(datasets, folder, fmt: str, *, names=None,
 
     target = Path(folder)
     target.mkdir(parents=True, exist_ok=True)
+    if builtin_writer and fmt in {"mat", "npy", "json", "csv"}:
+        from .file_transactions import file_transaction
+        from .save import metadata_sidecar_path
+        targets = []
+        sidecars = []
+        for filename in data_files:
+            data_path = target / filename
+            targets.append(data_path)
+            sidecars.append(metadata_sidecar_path(data_path))
+            if (include or {}).get("recipe", True):
+                targets.append(metadata_sidecar_path(data_path))
+        with file_transaction(targets, protected=sidecars) as staged:
+            if not (include or {}).get("recipe", True) and any(path.exists() for path in sidecars):
+                raise ValueError("An existing overlay recipe would become stale; include recipes or choose new output names.")
+            save_overlay_group(datasets, staged[targets[0]].parent, fmt=fmt,
+                               names=stems, content=content, include=include,
+                               filter_mode=filter_mode, roi_records_for=roi_records_for,
+                               save=save)
+        return targets
     written: list[Path] = []
     for index, ds in enumerate(datasets):
         rois = roi_records_for(index) if roi_records_for else None

@@ -109,3 +109,51 @@ def test_the_post_load_index_follows_the_dataset():
     assert MainWindow._post_load_index(stub, b) == 0
     st.remove_dataset(0)
     assert MainWindow._post_load_index(stub, b) is None
+
+
+def test_late_delivery_cannot_replace_newer_state_or_task():
+    from minflux_viewer.core.computation_snapshot import input_signature
+
+    for change in ("filter", "calibration", "coordinates", "attributes", "task", "shutdown"):
+        st = _state("A")
+        ds, key = st.datasets[0], st.key_at(0)
+        task = _task()
+        applied = []
+        stub = SimpleNamespace(_state=st, _is_shutting_down=False,
+                               _post_load_tasks={key: task},
+                               _apply_post_load_results=lambda *a: applied.append(a),
+                               _on_saved_filters_evaluated=lambda *a: applied.append(a),
+                               _on_post_load_failed=lambda *a: applied.append(a),
+                               _on_saved_filter_failed=lambda *a: applied.append(a))
+        signature, revision = input_signature(ds), st.data_revision(key)
+        if change == "filter":
+            ds.state["filter_specs"] = [dict(attribute="tid", lo=1, hi=2)]
+        elif change == "calibration":
+            ds.set_z_scaling_factor(.7)
+        elif change == "coordinates":
+            ds.attr.replace_coordinates(loc_x=np.ones(ds.prop.num_loc))
+        elif change == "attributes":
+            st.notify_attributes_changed(0)  # also covers notified in-place edits
+        elif change == "task":
+            stub._post_load_tasks[key] = _task()
+        else:
+            stub._is_shutting_down = True
+        MainWindow._on_post_load_done(stub, key, ds, {}, task, signature, revision)
+        MainWindow._on_post_load_error(stub, key, ds, "late", task, signature, revision)
+        MainWindow._on_saved_filters_done(stub, key, ds, np.ones(12), task, signature, revision)
+        MainWindow._on_saved_filters_error(stub, key, ds, "late", task, signature, revision)
+        assert applied == [], change
+
+
+def test_current_guarded_delivery_still_applies():
+    from minflux_viewer.core.computation_snapshot import input_signature
+
+    st = _state("A")
+    ds, key = st.datasets[0], st.key_at(0)
+    task, applied = _task(), []
+    stub = SimpleNamespace(_state=st, _is_shutting_down=False,
+                           _post_load_tasks={key: task},
+                           _apply_post_load_results=lambda *a: applied.append(a))
+    MainWindow._on_post_load_done(stub, key, ds, {"run": 1}, task,
+                                  input_signature(ds), st.data_revision(key))
+    assert applied == [(ds, {"run": 1})]

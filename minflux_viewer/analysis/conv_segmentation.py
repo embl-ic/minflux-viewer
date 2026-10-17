@@ -45,6 +45,7 @@ Pure NumPy/SciPy — Qt-free and unit-testable. Distances are in nm.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -58,6 +59,7 @@ DEFAULT_SQRT = False
 DEFAULT_MAX_INSIDE = 0.5           # ring validation: max inside/ring loc-count ratio
 DEFAULT_MAX_OUTSIDE = 2.0          # ring validation: max outside/ring loc-count ratio
 DEFAULT_MIN_SUPPORT = 0.0          # ring validation: min ring support score (0 = off)
+DEFAULT_MEMORY_BUDGET = 512 * 1024**2  # conservative per-operation estimate, not an RSS quota
 _MIN_RING_LOCS = 6                 # ring band must hold at least this many locs
 _ANGULAR_BINS = 36                 # ring support: azimuthal bins of the annulus
 
@@ -95,6 +97,8 @@ class GeometryModel:
     ringlike: bool = False
     #: ``params -> (radius_nm, rim_nm)`` for ring validation (ring-like models only)
     ring_geom: Callable[[dict], tuple] | None = None
+    #: Half-width of the generated grid, required for allocation preflight.
+    extent_nm: Callable[[dict, float], float] | None = None
 
     def defaults(self) -> dict:
         return {ps.name: ps.default for ps in self.params}
@@ -103,6 +107,7 @@ class GeometryModel:
 def _coord_grid(extent_nm: float, pixel_size_nm: float):
     """Square (x, y) mesh in nm spanning ``[-extent, +extent]`` at the pixel size."""
     extent_nm = max(float(extent_nm), pixel_size_nm)
+    _grid_side(extent_nm, pixel_size_nm)  # validate before arange
     n = np.arange(-extent_nm, extent_nm + pixel_size_nm / 2.0, pixel_size_nm)
     if n.size == 0:
         n = np.array([0.0])
@@ -165,6 +170,7 @@ GEOMETRY_MODELS: dict[str, GeometryModel] = {
         size=lambda p: float(p["diameter_nm"]),
         ringlike=True,
         ring_geom=lambda p: (float(p["diameter_nm"]) / 2.0, float(p["rim_nm"])),
+        extent_nm=lambda p, px: float(p["diameter_nm"]),
     ),
     "disk": GeometryModel(
         key="disk",
@@ -178,6 +184,7 @@ GEOMETRY_MODELS: dict[str, GeometryModel] = {
         ),
         make_kernel=_disk_kernel,
         size=lambda p: float(p["diameter_nm"]),
+        extent_nm=lambda p, px: float(p["diameter_nm"]) / 2 + 3 * max(float(p["edge_nm"]), px * 1e-3),
     ),
     "gaussian": GeometryModel(
         key="gaussian",
@@ -188,6 +195,7 @@ GEOMETRY_MODELS: dict[str, GeometryModel] = {
         ),
         make_kernel=_gaussian_kernel,
         size=lambda p: float(p["fwhm_nm"]),
+        extent_nm=lambda p, px: 3 * max(float(p["fwhm_nm"]), px * 1e-3) / 2.3548200450309493,
     ),
     "log": GeometryModel(
         key="log",
@@ -200,6 +208,7 @@ GEOMETRY_MODELS: dict[str, GeometryModel] = {
         ),
         make_kernel=_log_kernel,
         size=lambda p: float(p["diameter_nm"]),
+        extent_nm=lambda p, px: 3.5 * max(float(p["diameter_nm"]) / (2 * np.sqrt(2)), px * 1e-3),
     ),
 }
 
@@ -211,14 +220,83 @@ def get_model(model_key: str) -> GeometryModel:
         raise ValueError(f"Unknown geometry model: {model_key!r}") from exc
 
 
+@dataclass(frozen=True)
+class ConvolutionEstimate:
+    kernel_shape: tuple[int, int]
+    image_shape: tuple[int, int]
+    fft_shape: tuple[int, int]
+    bytes_required: int
+
+
+def _check_budget(required: int, budget: int) -> None:
+    if budget <= 0 or required > budget:
+        raise ValueError(f"Convolution memory estimate {required / 1024**2:,.1f} MiB exceeds "
+                         f"the {budget / 1024**2:,.1f} MiB budget; increase pixel size or reduce the region/model.")
+
+
+def _pixel_size(pixel: float) -> float:
+    pixel = float(pixel)
+    if not np.isfinite(pixel) or pixel <= 0:
+        raise ValueError("Pixel size must be finite and positive.")
+    return pixel
+
+
+def _grid_side(extent: float, pixel: float) -> int:
+    pixel = _pixel_size(pixel)
+    if not np.isfinite(extent) or extent <= 0:
+        raise ValueError("Kernel extent must be finite and positive.")
+    return math.ceil(2 * max(extent, pixel) / pixel + .5) + 1  # conservative arange upper bound
+
+
+def _kernel_shape(key: str, params: dict, pixel: float) -> tuple[int, int]:
+    model = get_model(key)
+    p = {**model.defaults(), **params}
+    if any(not np.isfinite(float(value)) or float(value) <= 0 for value in p.values()):
+        raise ValueError("Kernel parameters must be finite and positive.")
+    if model.extent_nm is None:
+        raise ValueError("A geometry model must declare a resource preflight before allocation.")
+    extent = model.extent_nm(p, pixel)
+    side = _grid_side(extent, pixel)
+    return side, side
+
+
+def _fft_estimate(image: tuple[int, int], kernel: tuple[int, int], extra: int = 0) -> ConvolutionEstimate:
+    from scipy.fft import next_fast_len
+    shape = tuple(next_fast_len(a + b - 1, real=True) for a, b in zip(image, kernel))
+    # Includes grids/model temporaries, cached/raw/stabilized maps, NMS arrays,
+    # padded real/complex FFT workspaces and inverse/normalization/DoG buffers.
+    required = extra + 64 * math.prod(kernel) + 96 * math.prod(image) + 96 * math.prod(shape)
+    return ConvolutionEstimate(kernel, image, (shape[0], shape[1]), required)
+
+
+def _histogram_shape(x: np.ndarray, y: np.ndarray, pixel: float) -> tuple[int, int]:
+    pixel = _pixel_size(pixel)
+    spans = (float(np.max(x)) - float(np.min(x)), float(np.max(y)) - float(np.min(y)))
+    if not all(np.isfinite(span) and span >= 0 for span in spans):
+        raise ValueError("Histogram bounds must be finite.")
+    return max(1, math.ceil(spans[0] / pixel) + 1), max(1, math.ceil(spans[1] / pixel) + 1)
+
+
+def preflight_convolution(xy: np.ndarray, model_key: str, params: dict, pixel_size_nm: float,
+                          *, budget_bytes: int = DEFAULT_MEMORY_BUDGET) -> ConvolutionEstimate:
+    pixel = _pixel_size(pixel_size_nm)
+    kernel = _kernel_shape(model_key, params, pixel)
+    image = _histogram_shape(xy[:, 0], xy[:, 1], pixel) if len(xy) else (1, 1)
+    estimate = _fft_estimate(image, kernel, 8 * xy.nbytes)
+    _check_budget(estimate.bytes_required, budget_bytes)
+    return estimate
+
+
 def build_kernel(model_key: str, params: dict, pixel_size_nm: float, *,
-                 zero_mean: bool = DEFAULT_ZERO_MEAN) -> np.ndarray:
+                 zero_mean: bool = DEFAULT_ZERO_MEAN,
+                 budget_bytes: int = DEFAULT_MEMORY_BUDGET) -> np.ndarray:
     """Geometry model + params → finite, L2-normalised convolution kernel.
 
     With ``zero_mean`` the kernel DC component is removed first so the convolution
     measures local *contrast/shape* (template matching) rather than raw density.
     """
     model = get_model(model_key)
+    _check_budget(64 * math.prod(_kernel_shape(model_key, params, _pixel_size(pixel_size_nm))), budget_bytes)
     h = np.asarray(model.make_kernel({**model.defaults(), **params},
                                      float(pixel_size_nm)), dtype=float)
     h = np.nan_to_num(h, nan=0.0, posinf=0.0, neginf=0.0)
@@ -231,9 +309,12 @@ def build_kernel(model_key: str, params: dict, pixel_size_nm: float, *,
 # --------------------------------------------------------------------------- #
 # Histogram + convolution + NMS
 # --------------------------------------------------------------------------- #
-def render_histogram_2d(x: np.ndarray, y: np.ndarray, pixel_size_nm: float):
+def render_histogram_2d(x: np.ndarray, y: np.ndarray, pixel_size_nm: float, *,
+                        budget_bytes: int = DEFAULT_MEMORY_BUDGET):
     """XY localizations → counts image ``H`` (nx, ny) + bin edges (nm)."""
-    px = float(pixel_size_nm)
+    px = _pixel_size(pixel_size_nm)
+    shape = _histogram_shape(x, y, px)
+    _check_budget(96 * math.prod(shape) + 32 * len(x), budget_bytes)
     xedge = np.arange(x.min(), x.max() + px, px)
     yedge = np.arange(y.min(), y.max() + px, px)
     if xedge.size < 2:
@@ -268,7 +349,8 @@ def dog_bandpass(response, radius_px: float) -> np.ndarray:
 
 
 def non_max_suppression(response: np.ndarray, min_height: float,
-                        min_distance_px: float) -> tuple[np.ndarray, np.ndarray]:
+                        min_distance_px: float, *, max_peaks: int | None = None,
+                        checkpoint: Callable[[], None] | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Local maxima ``>= min_height`` thinned so none are closer than
     ``min_distance_px`` (strongest kept first).
 
@@ -278,6 +360,10 @@ def non_max_suppression(response: np.ndarray, min_height: float,
     from scipy.ndimage import maximum_filter
 
     response = np.asarray(response, dtype=float)
+    if max_peaks is not None and max_peaks < 0:
+        raise ValueError("Maximum detections must be nonnegative.")
+    if max_peaks == 0:
+        return np.empty((0, 2), dtype=int), np.empty(0)
     if response.size == 0:
         return np.empty((0, 2), dtype=int), np.empty(0)
     local_max = maximum_filter(response, size=3, mode="constant", cval=-np.inf)
@@ -292,9 +378,13 @@ def non_max_suppression(response: np.ndarray, min_height: float,
     taken = np.zeros(rows.size, dtype=bool)
     keep: list[int] = []
     for i in range(rows.size):
+        if checkpoint is not None and i % 256 == 0:
+            checkpoint()
         if taken[i]:
             continue
         keep.append(i)
+        if max_peaks is not None and len(keep) >= max_peaks:
+            break  # exactly the same prefix as full NMS followed by slicing
         if min_d > 0:
             d = np.hypot(coords[:, 0] - coords[i, 0], coords[:, 1] - coords[i, 1])
             taken |= (d <= min_d) & (d > 0)
@@ -302,7 +392,8 @@ def non_max_suppression(response: np.ndarray, min_height: float,
     return np.column_stack([rows[keep_arr], cols[keep_arr]]), vals[keep_arr]
 
 
-def convolve_response(H, kernel, *, dog_radius_px: float | None = None) -> np.ndarray:
+def convolve_response(H, kernel, *, dog_radius_px: float | None = None,
+                       budget_bytes: int = DEFAULT_MEMORY_BUDGET) -> np.ndarray:
     """FFT-convolve a histogram with a kernel; rescale the result to its own max.
 
     With ``dog_radius_px`` a difference-of-Gaussians band-pass is applied to the
@@ -312,9 +403,13 @@ def convolve_response(H, kernel, *, dog_radius_px: float | None = None) -> np.nd
     """
     from scipy.signal import fftconvolve
 
-    H = np.asarray(H, dtype=float)
+    H, kernel = np.asarray(H), np.asarray(kernel)
+    if H.ndim != 2 or kernel.ndim != 2:
+        raise ValueError("Convolution requires two-dimensional inputs.")
     if H.size == 0 or np.asarray(kernel).size == 0:
         return np.zeros_like(H)
+    _check_budget(_fft_estimate(H.shape, kernel.shape).bytes_required, budget_bytes)
+    H = np.asarray(H, dtype=float)
     response = fftconvolve(H, np.asarray(kernel, dtype=float), mode="same")
     if dog_radius_px:
         response = dog_bandpass(response, dog_radius_px)
@@ -324,7 +419,8 @@ def convolve_response(H, kernel, *, dog_radius_px: float | None = None) -> np.nd
 
 def detections_from_response(response, xedge, yedge, *, min_response: float,
                              min_distance_px: float,
-                             max_detections: int | None = None):
+                             max_detections: int | None = None,
+                             checkpoint: Callable[[], None] | None = None):
     """NMS on a response map → ``(centers_nm (K, 2), peak_values)`` (descending).
 
     Cheap relative to the convolution, so the UI can re-run just this when the
@@ -334,7 +430,8 @@ def detections_from_response(response, xedge, yedge, *, min_response: float,
     xedge = np.asarray(xedge, dtype=float)
     yedge = np.asarray(yedge, dtype=float)
     peaks_rc, vals = non_max_suppression(response, float(min_response),
-                                         max(float(min_distance_px), 1.0))
+                                         max(float(min_distance_px), 1.0),
+                                         max_peaks=max_detections, checkpoint=checkpoint)
     if peaks_rc.shape[0] == 0 or xedge.size < 2 or yedge.size < 2:
         return np.empty((0, 2)), np.empty(0)
     if max_detections is not None and peaks_rc.shape[0] > max_detections:
@@ -348,7 +445,8 @@ def detections_from_response(response, xedge, yedge, *, min_response: float,
 # --------------------------------------------------------------------------- #
 # Ring validation (reject solid blobs) — inside/outside-ring count ratios
 # --------------------------------------------------------------------------- #
-def ring_inside_outside_ratios(xy, centers, radius_nm: float, rim_nm: float):
+def ring_inside_outside_ratios(xy, centers, radius_nm: float, rim_nm: float, *,
+                               checkpoint: Callable[[], None] | None = None):
     """Per-detection localization-count ratios about a ring of radius ``R``.
 
     With ``half = rim/2``: the **ring** band is ``[R-half, R+half]``, the
@@ -374,6 +472,8 @@ def ring_inside_outside_ratios(xy, centers, radius_nm: float, rim_nm: float):
     inner2, outer2, out2_2 = inner ** 2, outer ** 2, out2 ** 2
     x, y = xy[:, 0], xy[:, 1]
     for k, (cx, cy) in enumerate(centers):
+        if checkpoint is not None and k % 16 == 0:
+            checkpoint()
         dx, dy = x - cx, y - cy
         box = (np.abs(dx) <= out2) & (np.abs(dy) <= out2)
         if not box.any():
@@ -392,7 +492,8 @@ def ring_inside_outside_ratios(xy, centers, radius_nm: float, rim_nm: float):
 
 def ring_support_scores(xy, centers, radius_nm: float, rim_nm: float, *,
                         angular_bins: int = _ANGULAR_BINS,
-                        min_ring_locs: int = _MIN_RING_LOCS) -> np.ndarray:
+                        min_ring_locs: int = _MIN_RING_LOCS,
+                        checkpoint: Callable[[], None] | None = None) -> np.ndarray:
     """Per-detection ring **support**: ``coverage · exp(-(spread/half)²) · exp(-(|bias|/half)²)``
     over the localizations in the annulus ``[R - rim/2, R + rim/2]``.
 
@@ -417,6 +518,8 @@ def ring_support_scores(xy, centers, radius_nm: float, rim_nm: float, *,
     ang_edges = np.linspace(-np.pi, np.pi, int(angular_bins) + 1)
     x, y = xy[:, 0], xy[:, 1]
     for k, (cx, cy) in enumerate(centers):
+        if checkpoint is not None and k % 16 == 0:
+            checkpoint()
         dx, dy = x - cx, y - cy
         box = (np.abs(dx) <= outer_r) & (np.abs(dy) <= outer_r)
         if not box.any():
@@ -441,23 +544,78 @@ def ring_validation_mask(xy, centers, radius_nm: float, rim_nm: float, *,
                          max_inside: float = DEFAULT_MAX_INSIDE,
                          max_outside: float | None = DEFAULT_MAX_OUTSIDE,
                          min_support: float = DEFAULT_MIN_SUPPORT,
-                         min_ring_locs: int = _MIN_RING_LOCS):
+                         min_ring_locs: int = _MIN_RING_LOCS,
+                         checkpoint: Callable[[], None] | None = None):
     """Keep-mask for ring-like detections: enough ring locs, inside/outside ratios
     within bounds and — when ``min_support > 0`` — a ring support score above it.
 
     Returns ``(keep, inside_ratio, outside_ratio, support)``; ``support`` is all-NaN
     when the criterion is off, so it is only computed when asked for.
     """
-    inside, outside, n_ring = ring_inside_outside_ratios(xy, centers, radius_nm, rim_nm)
+    inside, outside, n_ring = ring_inside_outside_ratios(xy, centers, radius_nm, rim_nm,
+                                                       checkpoint=checkpoint)
     keep = np.isfinite(inside) & (n_ring >= int(min_ring_locs)) & (inside <= float(max_inside))
     if max_outside is not None:
         keep &= np.isfinite(outside) & (outside <= float(max_outside))
     support = np.full(np.asarray(centers, dtype=float).reshape(-1, 2).shape[0], np.nan)
     if float(min_support) > 0.0:
         support = ring_support_scores(xy, centers, radius_nm, rim_nm,
-                                      min_ring_locs=min_ring_locs)
+                                      min_ring_locs=min_ring_locs, checkpoint=checkpoint)
         keep &= np.isfinite(support) & (support >= float(min_support))
     return keep, inside, outside, support
+
+
+def convolution_maps(xy: np.ndarray, *, model_key: str, params: dict, pixel_size_nm: float,
+                     zero_mean: bool = DEFAULT_ZERO_MEAN, sqrt_stabilize: bool = DEFAULT_SQRT,
+                     dog: bool = DEFAULT_DOG, budget_bytes: int = DEFAULT_MEMORY_BUDGET,
+                     report: Callable[[str], None] = lambda text: None) -> dict:
+    """Captured-input numerical preview, reusable independently of thresholding."""
+    preflight_convolution(xy, model_key, params, pixel_size_nm, budget_bytes=budget_bytes)
+    report("Building convolution kernel")
+    kernel = build_kernel(model_key, params, pixel_size_nm, zero_mean=zero_mean,
+                          budget_bytes=budget_bytes)
+    out = dict(kernel=kernel, histogram=np.zeros((0, 0)), response_map=np.zeros((0, 0)),
+               xedge=np.zeros(0), yedge=np.zeros(0))
+    if len(xy) < 3:
+        return out
+    report("Rendering localization histogram")
+    H, xedge, yedge = render_histogram_2d(xy[:, 0], xy[:, 1], pixel_size_nm,
+                                        budget_bytes=budget_bytes)
+    H_conv = stabilize_histogram(H, sqrt_stabilize)
+    model = get_model(model_key)
+    radius = .5 * model.size({**model.defaults(), **params}) / pixel_size_nm if dog else None
+    report("FFT convolution")
+    response = convolve_response(H_conv, kernel, dog_radius_px=radius, budget_bytes=budget_bytes)
+    out.update(histogram=H, response_map=response, xedge=xedge, yedge=yedge)
+    return out
+
+
+def threshold_response_maps(xy: np.ndarray, maps: dict, *, model_key: str, params: dict,
+                            pixel_size_nm: float, min_response: float, min_distance_nm: float,
+                            max_detections: int | None = None, ring_validation: dict | None = None,
+                            report: Callable[[str], None] = lambda text: None) -> dict:
+    """Detection/validation on a captured map; no widgets or mutable live state."""
+    report("Detecting convolution peaks")
+    centers, vals = detections_from_response(
+        maps["response_map"], maps["xedge"], maps["yedge"], min_response=min_response,
+        min_distance_px=min_distance_nm / pixel_size_nm, max_detections=max_detections,
+        checkpoint=lambda: report("Detecting convolution peaks"))
+    inside = outside = support = np.empty(0)
+    model = get_model(model_key)
+    if ring_validation is not None and model.ringlike and model.ring_geom and len(centers):
+        report("Validating ring support")
+        radius, rim = model.ring_geom({**model.defaults(), **params})
+        keep, inside, outside, support = ring_validation_mask(
+            xy, centers, radius, rim,
+            max_inside=ring_validation.get("max_inside", DEFAULT_MAX_INSIDE),
+            max_outside=ring_validation.get("max_outside", DEFAULT_MAX_OUTSIDE),
+            min_support=ring_validation.get("min_support", DEFAULT_MIN_SUPPORT),
+            min_ring_locs=ring_validation.get("min_ring_locs", _MIN_RING_LOCS),
+            checkpoint=lambda: report("Validating ring support"))
+        centers, vals = centers[keep], vals[keep]
+        inside, outside, support = inside[keep], outside[keep], support[keep]
+    return dict(centers=centers, peak_values=vals, inside_ratio=inside,
+                outside_ratio=outside, support=support)
 
 
 def segment_by_convolution(xy_nm, *, model_key: str, params: dict | None = None,
@@ -468,7 +626,8 @@ def segment_by_convolution(xy_nm, *, model_key: str, params: dict | None = None,
                            sqrt_stabilize: bool = DEFAULT_SQRT,
                            dog: bool = DEFAULT_DOG,
                            ring_validation: dict | None = None,
-                           max_detections: int | None = None) -> dict:
+                           max_detections: int | None = None,
+                           budget_bytes: int = DEFAULT_MEMORY_BUDGET) -> dict:
     """Detect structures of a given geometry by template-matched convolution.
 
     Parameters
@@ -505,37 +664,13 @@ def segment_by_convolution(xy_nm, *, model_key: str, params: dict | None = None,
         xy = xy.reshape(-1, 2) if xy.size else np.empty((0, 2))
     xy = xy[np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])]
 
-    kernel = build_kernel(model_key, params, px, zero_mean=zero_mean)
-    out = {"response_map": np.zeros((0, 0)), "xedge": np.zeros(0), "yedge": np.zeros(0),
-           "kernel": kernel, "centers": np.empty((0, 2)), "peak_values": np.empty(0),
-           "inside_ratio": np.empty(0), "outside_ratio": np.empty(0),
-           "support": np.empty(0),
-           "model_key": model_key, "params": params, "pixel_size_nm": px}
-    if xy.shape[0] < 3:
-        return out
-
-    H, xedge, yedge = render_histogram_2d(xy[:, 0], xy[:, 1], px)
-    H = stabilize_histogram(H, sqrt_stabilize)
-    dog_radius_px = (0.5 * model.size(params) / px) if dog else None
-    response = convolve_response(H, kernel, dog_radius_px=dog_radius_px)
-    out.update(response_map=response, xedge=xedge, yedge=yedge)
-
+    out = convolution_maps(xy, model_key=model_key, params=params, pixel_size_nm=px,
+                           zero_mean=zero_mean, sqrt_stabilize=sqrt_stabilize, dog=dog,
+                           budget_bytes=budget_bytes)
     size_nm = min_distance_nm if min_distance_nm is not None else model.size(params)
-    centers, vals = detections_from_response(
-        response, xedge, yedge, min_response=float(min_response),
-        min_distance_px=float(size_nm) / px, max_detections=max_detections)
-
-    if ring_validation is not None and model.ringlike and model.ring_geom and centers.shape[0]:
-        radius_nm, rim_nm = model.ring_geom(params)
-        keep, inside, outside, support = ring_validation_mask(
-            xy, centers, radius_nm, rim_nm,
-            max_inside=ring_validation.get("max_inside", DEFAULT_MAX_INSIDE),
-            max_outside=ring_validation.get("max_outside", DEFAULT_MAX_OUTSIDE),
-            min_support=ring_validation.get("min_support", DEFAULT_MIN_SUPPORT),
-            min_ring_locs=ring_validation.get("min_ring_locs", _MIN_RING_LOCS))
-        centers, vals = centers[keep], vals[keep]
-        out.update(inside_ratio=inside[keep], outside_ratio=outside[keep],
-                   support=support[keep])
-
-    out.update(centers=centers, peak_values=vals)
+    out.update(threshold_response_maps(xy, out, model_key=model_key, params=params,
+                                      pixel_size_nm=px, min_response=float(min_response),
+                                      min_distance_nm=float(size_nm), max_detections=max_detections,
+                                      ring_validation=ring_validation))
+    out.update(model_key=model_key, params=params, pixel_size_nm=px)
     return out

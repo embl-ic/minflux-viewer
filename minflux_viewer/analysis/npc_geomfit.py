@@ -183,6 +183,10 @@ def fit_npc_model(points, *, init_points=None, init_tid=None, subunit_init=True,
     moment init). Init only — the fit still refines on *points*, so this never
     biases the estimate, only makes the optimizer start near the corners.
 
+    ``ok`` requires a finite, nondegenerate candidate AND optimizer convergence.
+    Rejected candidates retain parameters and optimizer diagnostics for inspection;
+    exhausting the iteration/evaluation budget is not scientific success.
+
     Returns a dict with ``ok``, ``diameter``, ``inter``, ``rim``, ``tilt_deg``,
     ``azimuth``, ``phase``, ``normal``, ``center`` and quality metrics ``gof``
     (R² of point-to-nearest-corner residuals), ``rmse``, ``nrmse``, ``nll``.
@@ -193,7 +197,9 @@ def fit_npc_model(points, *, init_points=None, init_tid=None, subunit_init=True,
     P = P[np.all(np.isfinite(P[:, :3]), axis=1), :3] if P.ndim == 2 and P.shape[1] >= 3 else \
         np.empty((0, 3))
     if P.shape[0] < max(2 * int(symmetry), 12):
-        return {"ok": False}
+        return dict(ok=False, candidate_valid=False, converged=False,
+                    optimizer_status=None, optimizer_message="Too few finite points",
+                    nit=0, nfev=0, n=int(P.shape[0]))
 
     centroid = P.mean(axis=0)
     pc = P - centroid
@@ -239,6 +245,11 @@ def fit_npc_model(points, *, init_points=None, init_tid=None, subunit_init=True,
     res = minimize(_neg_log_likelihood, q0, args=(pc, np.zeros(3), opt),
                    method="Nelder-Mead",
                    options=dict(maxiter=max_iter, maxfev=max_fev, xatol=1e-4, fatol=1e-6))
+    diagnostics = dict(converged=bool(res.success), optimizer_status=int(res.status),
+                       optimizer_message=str(res.message), nit=int(res.nit),
+                       nfev=int(res.nfev))
+    if not np.all(np.isfinite(res.x)) or not np.isfinite(res.fun):
+        return dict(ok=False, candidate_valid=False, n=int(P.shape[0]), **diagnostics)
     m = _decode(res.x, np.zeros(3), opt)
     m["center"] = m["center"] + centroid                     # back to world frame
 
@@ -248,10 +259,12 @@ def fit_npc_model(points, *, init_points=None, init_tid=None, subunit_init=True,
     ss_res = float(np.sum(mind2))
     ss_tot = float(np.sum((P - P.mean(axis=0)) ** 2))
     gof = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
-    m.update(ok=bool(np.all(np.isfinite(m["center"])) and np.isfinite(m["radius"])),
+    valid = bool(np.all(np.isfinite(corners)) and np.isfinite(gof) and
+                 np.isfinite(rmse) and ss_tot > 0 and m["radius"] > 0)
+    m.update(ok=valid and diagnostics["converged"], candidate_valid=valid, **diagnostics,
              diameter=2.0 * m["radius"], nll=float(res.fun), rmse=rmse,
              nrmse=float(rmse / m["radius"]) if m["radius"] > 0 else float("nan"),
-             gof=gof, n=int(P.shape[0]))
+             gof=gof, n=int(P.shape[0]), symmetry=int(symmetry))
     return m
 
 
@@ -289,15 +302,18 @@ def canonical_transform_matrix(fit: dict) -> np.ndarray:
 
 
 def _row(i, n, fit) -> dict:
-    if not fit.get("ok"):
+    diagnostics = {key: fit[key] for key in (
+        "candidate_valid", "converged", "optimizer_status", "optimizer_message", "nit", "nfev")}
+    if not fit.get("candidate_valid"):
         nan = float("nan")
         return dict(particle=i, n_locs=n, diameter=nan, inter=nan, rim=nan, tilt=nan,
-                    phase=nan, gof=nan, rmse=nan, nrmse=nan, accepted=False)
-    sym = DEFAULT_SYMMETRY
+                    phase=nan, gof=nan, rmse=nan, nrmse=nan, accepted=False, **diagnostics)
+    sym = int(fit.get("symmetry", DEFAULT_SYMMETRY))
     return dict(particle=i, n_locs=n, diameter=fit["diameter"], inter=fit["inter"],
                 rim=fit["rim"], tilt=fit["tilt_deg"],
                 phase=float(np.rad2deg(fit["phase"]) % (360.0 / sym)),
-                gof=fit["gof"], rmse=fit["rmse"], nrmse=fit["nrmse"], accepted=False)
+                gof=fit["gof"], rmse=fit["rmse"], nrmse=fit["nrmse"], accepted=False,
+                **diagnostics)
 
 
 def average_npc_geomfit(particles, *, init_particles=None, init_tids=None,

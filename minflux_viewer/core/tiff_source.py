@@ -117,7 +117,7 @@ class TiffImageSource:
         except ImportError as exc:  # pragma: no cover - dependency declared in pyproject
             raise ImportError("tifffile is required to open TIFF images") from exc
 
-        self.path = Path(path)
+        self.path = path if isinstance(path, Path) else Path(path)
         self._tifffile = tifffile
         self._tf = tifffile.TiffFile(str(self.path))
         if not self._tf.series:
@@ -135,6 +135,12 @@ class TiffImageSource:
             self._tf.close()
         except OSError:
             logging.getLogger(__name__).exception("Could not close TIFF source")
+        finally:
+            # Close releases our extraction lease, while a caller retaining the
+            # original path or metadata can still keep that version alive.
+            self.path = Path(str(self.path))
+            if hasattr(self, "metadata"):
+                self.metadata = dataclasses.replace(self.metadata, path=self.path)
 
     # -- series ---------------------------------------------------------------
     @property
@@ -638,7 +644,8 @@ class EmbeddedImageSource:
     def __init__(self, paths, names=None, *, series_index: int = 0) -> None:
         import tifffile
 
-        files = [Path(p) for p in paths]
+        # Keep extraction-path leases, including inactive series we may reopen.
+        files = [p if isinstance(p, Path) else Path(p) for p in paths]
         if not files:
             raise ValueError("No embedded images to open")
         labels = list(names or [])
@@ -740,3 +747,6 @@ class EmbeddedImageSource:
         if self._active is not None:
             self._active.close()
             self._active = None
+        self._entries = [(Path(str(path)), inner, name) for path, inner, name in self._entries]
+        if hasattr(self, "metadata"):
+            self.metadata = dataclasses.replace(self.metadata, path=Path(str(self.metadata.path)))

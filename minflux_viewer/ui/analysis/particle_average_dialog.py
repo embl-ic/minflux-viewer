@@ -309,6 +309,11 @@ class ParticleAverageWindow(QDialog):
         self._g_rim_max = self._dspin(0.5, 80.0, 30.0, 1, 0.5, " nm")
         self._g_tilt_max = self._dspin(0.0, 90.0, 45.0, 0, 1.0, "°")
         self._g_sym = QSpinBox(); self._g_sym.setRange(2, 16); self._g_sym.setValue(8)
+        self._g_max_iter = QSpinBox()
+        self._g_max_iter.setRange(1, 100000)
+        self._g_max_iter.setValue(1500)
+        self._g_max_iter.setToolTip("Optimizer iteration limit (at most twice as many objective evaluations). "
+                                   "Only converged, finite fits enter an average. Increase this limit to retry exhausted fits.")
         self._g_min_gof = self._dspin(-1.0, 1.0, 0.3, 2, 0.05, "")
         self._g_min_gof.setToolTip(
             "Goodness-of-fit gate (R² of point-to-nearest-corner residuals): only "
@@ -326,6 +331,7 @@ class ParticleAverageWindow(QDialog):
                        ("Inter-ring min:", self._g_inter_min), ("Inter-ring max:", self._g_inter_max),
                        ("Rim min:", self._g_rim_min), ("Rim max:", self._g_rim_max),
                        ("Tilt max:", self._g_tilt_max), ("Symmetry:", self._g_sym),
+                       ("Optimizer iterations:", self._g_max_iter),
                        ("Min goodness of fit:", self._g_min_gof)):
             gb.addRow(lbl, w)
         gb.addRow("", self._geom_group)
@@ -697,6 +703,7 @@ class ParticleAverageWindow(QDialog):
             tmax = float(self._g_tilt_max.value())
             gsym = int(self._g_sym.value())
             gmingof = float(self._g_min_gof.value())
+            gmaxiter = int(self._g_max_iter.value())
             # Raw localizations + trace ids for the LoG sub-unit fit-init (the fit
             # itself uses g_particles, which may be trace-collapsed).
             g_subinit = bool(self._geom_subunit_init.isChecked())
@@ -713,11 +720,11 @@ class ParticleAverageWindow(QDialog):
                     g_particles, init_particles=g_init_pts, init_tids=g_init_tids,
                     subunit_init=g_subinit, diameter_bounds=dbounds, inter_bounds=ibounds,
                     rim_bounds=rbounds, tilt_max_deg=tmax, symmetry=gsym,
-                    min_gof=gmingof, progress=progress)
+                    min_gof=gmingof, max_iter=gmaxiter, max_fev=2 * gmaxiter, progress=progress)
                 diams = [r["diameter"] for r in res["table"] if np.isfinite(r.get("diameter", np.nan))]
                 med = float(np.median(diams)) if diams else float("nan")
                 desc = (f"NPC model fit: {res['n_accepted']}/{res['n_particles']} accepted "
-                        f"(GoF≥{gmingof:g}), median diameter {med:.1f} nm")
+                        f"(converged, GoF≥{gmingof:g}, maxiter={gmaxiter}), median diameter {med:.1f} nm")
                 mats = res.get("particle_transforms", [])
                 extra = {
                     "table": res.get("table", []), "min_gof": gmingof, "mode": "geomfit",
@@ -878,7 +885,7 @@ class ParticleAverageWindow(QDialog):
             if min_gof is not None:
                 header += f"   (min GoF = {min_gof:g})"
             log = (f"Particle fit table: {n_acc}/{len(table)} particle(s) passed the "
-                   f"GoF gate (min GoF {min_gof:g}).")
+                   f"convergence and GoF gates (min GoF {min_gof:g}).")
         else:
             columns = IMAGE_COLS
             header = f"{len(table)} particle(s) aligned — {method}"
@@ -930,13 +937,16 @@ class ParticleAverageWindow(QDialog):
                     return
                 fit = fits[idx] if idx < len(fits) else None
                 A = aligned[idx] if idx < len(aligned) else None
+                if A is None and fit and fit.get("candidate_valid"):
+                    A = gfit.align_to_canonical(ctx["particles"][idx], fit, sym)
                 cloud = np.asarray(A, float)[:, :3] if A is not None else np.empty((0, 3))
                 model_pts = model_curves = None
-                if fit and fit.get("ok"):
+                if fit and fit.get("candidate_valid"):
                     # aligned points are canonical → overlay the canonical model (phase 0)
                     model_pts, model_curves = gfit.canonical_overlay(fit["radius"], fit["inter"], sym)
                 win = ParticleInspectorWindow(
-                    title=f"Particle {idx + 1} — NPC model fit", cloud=cloud,
+                    title=(f"Particle {idx + 1} — NPC model fit"
+                           + (" (not converged)" if fit and not fit.get("converged") else "")), cloud=cloud,
                     model_points=model_pts, model_curves=model_curves, is_3d=True,
                     owner=self._owner, prefs=self._state.prefs)
             else:
@@ -1183,6 +1193,9 @@ GEOM_COLS = [
     ("Phase (°)", "phase", "{:.1f}"),
     ("GoF (R²)", "gof", "{:.3f}"),
     ("RMSE (nm)", "rmse", "{:.2f}"),
+    ("Converged", "converged", "{}"),
+    ("Optimizer status", "optimizer_message", "{}"),
+    ("Evaluations", "nfev", "{:d}"),
     ("Accepted", "accepted", None),
 ]
 
@@ -1264,7 +1277,7 @@ class ParticleFitTableWindow(QWidget):
 
         # histogram + interactive range filter over the numeric fit columns
         self._filter_cols = [(label, key) for (label, key, _f) in self._columns
-                             if key not in ("accepted", self._columns[0][1])]
+                             if key not in ("accepted", "optimizer_message", self._columns[0][1])]
         if self._filter_cols:
             root.addWidget(self._build_filter_panel())
 
@@ -1332,10 +1345,15 @@ class ParticleFitTableWindow(QWidget):
         A hand-set verdict wins; otherwise the fit's own outcome, minus anything
         the range filter excludes."""
         keep = self._passing_mask()
-        return [bool(self._manual[i]) if i in self._manual else self._auto_accepted(i, keep)
+        return [bool(self._rows[i].get("converged", True)) and bool(self._rows[i].get("candidate_valid", True)) and
+                (bool(self._manual[i]) if i in self._manual else self._auto_accepted(i, keep))
                 for i in range(len(self._rows))]
 
     def _accepted_tip(self, orig: int, keep) -> str:
+        if not self._rows[orig].get("candidate_valid", True):
+            return "Invalid fit candidate; this particle cannot enter the average."
+        if not self._rows[orig].get("converged", True):
+            return "Optimizer did not converge; this candidate cannot enter the average."
         if orig in self._manual:
             why = "set by hand"
         elif not self._base_accepted.get(orig, True):
@@ -1408,6 +1426,8 @@ class ParticleFitTableWindow(QWidget):
         if it0 is None:
             return
         orig = int(it0.data(Qt.ItemDataRole.UserRole))
+        if not self._rows[orig].get("converged", True) or not self._rows[orig].get("candidate_valid", True):
+            return
         new = not self._accepted_by_index.get(orig, True)
         if new == self._auto_accepted(orig, self._passing_mask()):
             self._manual.pop(orig, None)           # back in step with the filter

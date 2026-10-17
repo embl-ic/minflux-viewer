@@ -114,6 +114,7 @@ def _run_post_load_computations(self: MainWindow, idx: int) -> None:
     import copy
 
     from minflux_viewer.analysis.post_load import POST_LOAD_ALGORITHMS
+    from minflux_viewer.core.computation_snapshot import computation_snapshot, input_signature
     from minflux_viewer.core.post_load import compute_post_load_results
     tasks = getattr(self, "_post_load_tasks", None)
     if tasks is None:
@@ -124,8 +125,10 @@ def _run_post_load_computations(self: MainWindow, idx: int) -> None:
     if key is None or key in tasks:
         return
     prefs = copy.deepcopy(self._state.prefs)
+    signature, revision = input_signature(ds), self._state.data_revision(key)
+    snapshot = computation_snapshot(ds)
     def work(report):
-        return compute_post_load_results(ds, prefs, report, algorithms=POST_LOAD_ALGORITHMS)
+        return compute_post_load_results(snapshot, prefs, report, algorithms=POST_LOAD_ALGORITHMS)
     task = BackgroundTask(
         work,
         description=f"Post-load processing of {ds.name}",
@@ -136,10 +139,10 @@ def _run_post_load_computations(self: MainWindow, idx: int) -> None:
         lambda text: self._state.status_progress(text)
     )
     task.signals.done.connect(
-        lambda result, _key=key, _ds=ds: self._on_post_load_done(_key, _ds, result)
+        lambda result: self._on_post_load_done(key, ds, result, task, signature, revision)
     )
     task.signals.failed.connect(
-        lambda message, _key=key, _ds=ds: self._on_post_load_error(_key, _ds, message)
+        lambda message: self._on_post_load_error(key, ds, message, task, signature, revision)
     )
     task.signals.finished.connect(
         lambda _key=key, _task=task: self._finish_post_load_task(_key, _task)
@@ -149,6 +152,8 @@ def _run_post_load_computations(self: MainWindow, idx: int) -> None:
 
 
 def _finish_post_load_task(self: MainWindow, key, task) -> None:
+    from minflux_viewer.ui.common.background_tasks import detach_task_signals
+    detach_task_signals(task)
     tasks = getattr(self, "_post_load_tasks", {})
     if tasks.get(key) is task:
         tasks.pop(key, None)
@@ -168,19 +173,47 @@ def _retire_dataset_tasks(self: MainWindow, event) -> None:
         retire_background_tasks([task])
 
 
-def _on_post_load_done(self: MainWindow, key, ds, result: dict) -> None:
+class _Delivery:
+    """Controller-private validation, not another MainWindow capability."""
+
+    @staticmethod
+    def current(self, key, ds, task: BackgroundTask | None, signature, revision) -> bool:
+        from minflux_viewer.core.computation_snapshot import input_signature
+        if getattr(self, "_is_shutting_down", False) or self._state.dataset_for(key) is not ds:
+            return False
+        if task is None:
+            return True  # synchronous/internal caller, not a queued task delivery
+        return (not task.is_cancelled and self._state.data_revision(key) == revision
+                and input_signature(ds) == signature
+                and getattr(self, "_post_load_tasks", {}).get(key) is task)
+
+    @staticmethod
+    def report_outdated(self, key, ds, task) -> None:
+        if (task is not None and not getattr(self, "_is_shutting_down", False)
+                and self._state.dataset_for(key) is ds
+                and getattr(self, "_post_load_tasks", {}).get(key) is task):
+            message = f"Discarded outdated processing result for '{ds.name}'; newer dataset state was kept."
+            self._state.log(message, "INFO")
+            self._state.status_message.emit(message)
+
+
+def _on_post_load_done(self: MainWindow, key, ds, result: dict,
+                       task=None, signature=None, revision=None) -> None:
     """Deliver a post-load result only while the dataset it started for is open.
 
         Checked by the key the task started under: a dataset closed and opened
         again is a new registration, and a result for the old one is not its.
         """
-    if self._state.index_of(key) is None:
+    if not _Delivery.current(self, key, ds, task, signature, revision):
+        _Delivery.report_outdated(self, key, ds, task)
         return
     self._apply_post_load_results(ds, result)
 
 
-def _on_post_load_error(self: MainWindow, key, ds, message: str) -> None:
-    if self._state.index_of(key) is None:
+def _on_post_load_error(self: MainWindow, key, ds, message: str,
+                        task=None, signature=None, revision=None) -> None:
+    if not _Delivery.current(self, key, ds, task, signature, revision):
+        _Delivery.report_outdated(self, key, ds, task)
         return
     self._on_post_load_failed(ds, message)
 
@@ -243,25 +276,28 @@ def _apply_post_load_results(self: MainWindow, ds, result: dict) -> None:
 
 def _start_saved_filter_restore(self: MainWindow, ds) -> None:
     key = self._state.key_of(ds)
-    if key is None:
+    if key is None or self._is_shutting_down:
         return
     if not ds.state.get("filter_specs"):
         self._post_load_finalize(ds)
         return
+    from minflux_viewer.core.computation_snapshot import computation_snapshot, input_signature
     from minflux_viewer.core.loader_raw_access import evaluate_saved_filters
+    signature, revision = input_signature(ds), self._state.data_revision(key)
+    snapshot = computation_snapshot(ds)
     def work(report):
-        report(f"Restoring saved filters for '{ds.name}'")
-        return evaluate_saved_filters(ds)
+        report(f"Restoring saved filters for '{snapshot.name}'")
+        return evaluate_saved_filters(snapshot)
     task = BackgroundTask(
         work,
         description=f"Restoring filters for {ds.name}",
         category="analysis",
     )
     task.signals.done.connect(
-        lambda mask, _key=key, _ds=ds: self._on_saved_filters_done(_key, _ds, mask)
+        lambda mask: self._on_saved_filters_done(key, ds, mask, task, signature, revision)
     )
     task.signals.failed.connect(
-        lambda message, _key=key, _ds=ds: self._on_saved_filters_error(_key, _ds, message)
+        lambda message: self._on_saved_filters_error(key, ds, message, task, signature, revision)
     )
     task.signals.finished.connect(
         lambda _key=key, _t=task: self._finish_post_load_task(_key, _t)
@@ -271,19 +307,29 @@ def _start_saved_filter_restore(self: MainWindow, ds) -> None:
     tasks = getattr(self, "_post_load_tasks", None)
     if tasks is None:
         tasks = self._post_load_tasks = {}
+    previous = tasks.get(key)
+    if previous is not None:
+        from minflux_viewer.ui.common.background_tasks import retire_background_tasks
+        retire_background_tasks([previous])
     tasks[key] = task
     from minflux_viewer.ui.common.background_tasks import shared_thread_pool
     shared_thread_pool("post-load").start(task)
 
 
-def _on_saved_filters_done(self: MainWindow, key, ds, mask) -> None:
-    if self._state.index_of(key) is not None:
+def _on_saved_filters_done(self: MainWindow, key, ds, mask,
+                           task=None, signature=None, revision=None) -> None:
+    if _Delivery.current(self, key, ds, task, signature, revision):
         self._on_saved_filters_evaluated(ds, mask)
+    else:
+        _Delivery.report_outdated(self, key, ds, task)
 
 
-def _on_saved_filters_error(self: MainWindow, key, ds, message: str) -> None:
-    if self._state.index_of(key) is not None:
+def _on_saved_filters_error(self: MainWindow, key, ds, message: str,
+                            task=None, signature=None, revision=None) -> None:
+    if _Delivery.current(self, key, ds, task, signature, revision):
         self._on_saved_filter_failed(ds, message)
+    else:
+        _Delivery.report_outdated(self, key, ds, task)
 
 
 def _on_saved_filters_evaluated(self: MainWindow, ds, mask) -> None:
