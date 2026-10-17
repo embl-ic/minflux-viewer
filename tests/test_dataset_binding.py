@@ -1,4 +1,4 @@
-"""Windows and registries bound to a dataset by key (ui/dataset_binding.py).
+"""Windows and registries bound to a dataset by key (ui/common/dataset_binding.py).
 
 Stabilization Phase 3, slice 3.5. A window's ``_idx`` and the main window's
 registries used to hold positions, re-keyed by hand on every close. They now
@@ -14,7 +14,7 @@ import pytest
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
 from minflux_viewer.core.dataset_events import ActiveDatasetChanged, ChangeAspect, DatasetChanged
-from minflux_viewer.ui.dataset_binding import (
+from minflux_viewer.ui.common.dataset_binding import (
     DatasetIndex,
     DatasetWindowMap,
     event_index,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 import numpy as np
 import pytest
 
@@ -27,7 +26,7 @@ def _image_rows():
 def test_fit_table_sorts_numerically_and_maps_original_index(_qt_app):
     from PyQt6.QtCore import Qt
 
-    from minflux_viewer.ui.particle_average_dialog import (
+    from minflux_viewer.ui.analysis.particle_average_dialog import (
         IMAGE_COLS,
         ParticleFitTableWindow,
     )
@@ -55,7 +54,7 @@ def test_fit_table_sorts_numerically_and_maps_original_index(_qt_app):
 
 
 def test_fit_table_filter_and_rebuild(_qt_app):
-    from minflux_viewer.ui.particle_average_dialog import (
+    from minflux_viewer.ui.analysis.particle_average_dialog import (
         IMAGE_COLS,
         ParticleFitTableWindow,
     )
@@ -110,7 +109,7 @@ def _dclick(win, item):
 
 
 def test_fit_table_accepted_follows_the_filter_and_a_double_click(_qt_app):
-    from minflux_viewer.ui.particle_average_dialog import (
+    from minflux_viewer.ui.analysis.particle_average_dialog import (
         IMAGE_COLS,
         ParticleFitTableWindow,
     )
@@ -149,7 +148,7 @@ def test_fit_table_accepted_follows_the_filter_and_a_double_click(_qt_app):
 
 def test_fit_table_accepts_a_particle_the_fit_rejected(_qt_app):
     """A hand-set verdict also overrides the fit's own gate, in both directions."""
-    from minflux_viewer.ui.particle_average_dialog import (
+    from minflux_viewer.ui.analysis.particle_average_dialog import (
         IMAGE_COLS,
         ParticleFitTableWindow,
     )
@@ -173,7 +172,7 @@ def test_fit_table_accepts_a_particle_the_fit_rejected(_qt_app):
 def test_fit_table_csv_and_rebuild_use_the_shown_accepted(_qt_app, tmp_path, monkeypatch):
     import csv
 
-    from minflux_viewer.ui import particle_average_dialog as pad
+    from minflux_viewer.ui.analysis import particle_average_dialog as pad
 
     got = []
     win = pad.ParticleFitTableWindow(_image_rows(), columns=pad.IMAGE_COLS,
@@ -205,7 +204,7 @@ def test_fit_table_csv_and_rebuild_use_the_shown_accepted(_qt_app, tmp_path, mon
 
 
 def test_inspector_window_builds_and_toggles(_qt_app):
-    from minflux_viewer.ui.particle_inspector import ParticleInspectorWindow
+    from minflux_viewer.ui.analysis.particle_inspector import ParticleInspectorWindow
 
     rng = np.random.default_rng(0)
     cloud = np.column_stack([rng.normal(0, 40, 200), rng.normal(0, 40, 200),
@@ -234,7 +233,7 @@ def test_inspector_window_builds_and_toggles(_qt_app):
 
 
 def test_inspector_disables_model_toggle_when_no_model(_qt_app):
-    from minflux_viewer.ui.particle_inspector import ParticleInspectorWindow
+    from minflux_viewer.ui.analysis.particle_inspector import ParticleInspectorWindow
 
     win = ParticleInspectorWindow(title="p", cloud=np.zeros((10, 2)), is_3d=False)
     assert not win._model_chk.isEnabled()
@@ -242,7 +241,7 @@ def test_inspector_disables_model_toggle_when_no_model(_qt_app):
 
 
 def test_inspector_axis_and_box_toggles_2d(_qt_app):
-    from minflux_viewer.ui.particle_inspector import ParticleInspectorWindow
+    from minflux_viewer.ui.analysis.particle_inspector import ParticleInspectorWindow
 
     cloud = np.column_stack([np.linspace(-50, 50, 80), np.linspace(-30, 30, 80)])
     win = ParticleInspectorWindow(title="p", cloud=cloud, is_3d=False)
@@ -260,7 +259,7 @@ def test_inspector_axis_and_box_toggles_2d(_qt_app):
 
 
 def test_inspector_reference_helpers():
-    from minflux_viewer.ui import particle_inspector as pi
+    from minflux_viewer.ui.analysis import particle_inspector as pi
 
     assert pi._fmt_tick(1000) == "1000"
     ticks = pi._tick_values(0.0, 100.0)

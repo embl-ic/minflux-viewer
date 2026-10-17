@@ -145,7 +145,7 @@ def test_crop_options_defaults_for_roi_duplicate():
 
 
 def test_auto_z_bounds_trims_sparse_tails():
-    from minflux_viewer.ui.crop_dialog import auto_z_bounds
+    from minflux_viewer.ui.roi.crop_dialog import auto_z_bounds
 
     rng = np.random.default_rng(0)
     z = np.concatenate([rng.normal(50.0, 12.0, 5000), [-300.0, 300.0, 305.0]])

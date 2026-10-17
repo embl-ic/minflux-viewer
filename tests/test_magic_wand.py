@@ -215,7 +215,7 @@ def test_wand_from_rows_reads_the_columns_the_view_plots():
 # ------------------------------------------------------- the scatter plot hook
 def test_scatter_wand_grows_on_the_color_by_attribute(_qt_app):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = AppState()
     state.add_dataset(_make_ds())
@@ -239,7 +239,7 @@ def test_scatter_wand_refuses_in_3d_with_the_reason(_qt_app):
     """A click in the OpenGL view carries no data coordinate, so there is nothing
     to seed from -- said out loud rather than silently doing nothing."""
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = AppState()
     state.add_dataset(_make_ds())
@@ -259,7 +259,7 @@ def test_scatter_wand_refuses_a_solid_colour_with_the_reason(_qt_app):
     wand refuses and names the fix rather than quietly substituting a field the
     user never chose (``den``, say)."""
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = AppState()
     state.add_dataset(_make_ds())
@@ -277,7 +277,7 @@ def test_scatter_wand_refuses_a_solid_colour_with_the_reason(_qt_app):
 
 def test_scatter_wand_refuses_an_attribute_with_no_per_loc_values(_qt_app):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = AppState()
     state.add_dataset(_make_ds())
@@ -302,7 +302,7 @@ def test_render_wand_grows_on_local_density(_qt_app):
     from types import SimpleNamespace
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     state = AppState()
     state.add_dataset(_make_ds())
@@ -332,7 +332,7 @@ def test_render_wand_grows_on_local_density(_qt_app):
 
 def test_render_wand_refuses_when_the_view_shows_an_image(_qt_app):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     state = AppState()
     state.add_dataset(_make_ds())
@@ -393,7 +393,7 @@ def _controller(owner):
     import pyqtgraph as pg
 
     from minflux_viewer.core.roi import RoiStore
-    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+    from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
     plot = pg.PlotWidget()
     store = RoiStore()
@@ -439,7 +439,7 @@ def test_redo_wand_reuses_the_last_seed(_qt_app):
 
 # -------------------------------------------------------------- the dialog
 def test_the_dialog_writes_the_tolerances_and_announces_them(_qt_app):
-    from minflux_viewer.ui.wand_dialog import MagicWandDialog
+    from minflux_viewer.ui.roi.wand_dialog import MagicWandDialog
 
     prefs = {"wand": {"distance_nm": 20.0, "value_percent": 10.0}}
     dialog = MagicWandDialog(prefs)
@@ -477,7 +477,7 @@ def test_a_click_in_a_real_scatter_window_files_a_usable_roi(_qt_app):
     can be picked in a row.
     """
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = AppState()
     state.add_dataset(_make_ds())
@@ -537,7 +537,7 @@ def test_nearest_index_honours_its_bound():
 
 def test_scatter_reports_an_empty_click_rather_than_selecting(_qt_app):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = AppState()
     state.add_dataset(_make_ds())
@@ -556,7 +556,7 @@ def test_scatter_reports_an_empty_click_rather_than_selecting(_qt_app):
 def _render_stub(locs, den, num_dim, *, all_z=True, depth=(-40.0, 40.0)):
     from types import SimpleNamespace
 
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     ds = SimpleNamespace(attr={"den": den},
                          filter_mask=np.ones(locs.shape[0], dtype=bool),
@@ -661,8 +661,8 @@ def test_an_ortho_side_pane_serves_the_click_on_its_own_axes():
     would be read as an XY click."""
     from PyQt6.QtCore import QObject
 
-    from minflux_viewer.ui.ortho_roi import OrthoPaneOwner
-    from minflux_viewer.ui.ortho_view import ORTHO_AXIS_COLUMNS
+    from minflux_viewer.ui.rendering.ortho_roi import OrthoPaneOwner
+    from minflux_viewer.ui.rendering.ortho_view import ORTHO_AXIS_COLUMNS
 
     class _Window(QObject):
         def __init__(self):
@@ -686,7 +686,7 @@ def test_arming_the_magic_wand_does_not_open_the_orthogonal_view():
     import inspect
 
     from minflux_viewer.core.roi_selection import VOLUME_ROI_TYPES
-    from minflux_viewer.ui.roi_command_controller import _enter_ortho_for_volume_tool
+    from minflux_viewer.ui.controllers.roi_command_controller import _enter_ortho_for_volume_tool
 
     assert "magic_wand" not in VOLUME_ROI_TYPES
     source = inspect.getsource(_enter_ortho_for_volume_tool)
@@ -701,8 +701,8 @@ def test_the_lasso_button_activates_its_current_variant(_qt_app):
     from types import SimpleNamespace
 
     from minflux_viewer.core.roi import RoiStore
+    from minflux_viewer.ui.controllers.menu_controller import _connect_actions
     from minflux_viewer.ui.main_window import MainWindow
-    from minflux_viewer.ui.menu_controller import _connect_actions
 
     source = inspect.getsource(_connect_actions)
     assert "self._on_roi_tool(self._lasso_variant, checked)" in source
@@ -764,8 +764,8 @@ def test_scatter_in_ortho_highlights_the_3d_selection_and_files_no_shape(_qt_app
     in every pane and in the 3-D view."""
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.core.roi_selection import active_roi_mask
-    from minflux_viewer.ui.ortho_view import ORTHO_AXIS
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
+    from minflux_viewer.ui.rendering.ortho_view import ORTHO_AXIS
 
     ds, locs = _make_3d_ds()
     state = AppState()

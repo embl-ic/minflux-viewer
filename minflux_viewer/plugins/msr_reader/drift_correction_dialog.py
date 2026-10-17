@@ -220,7 +220,7 @@ class DriftCorrectionDialog(QDialog):
         :attr:`applied` after ``exec()`` returns, so the plots must stay valid.
         Idempotent, so being reached twice is fine.
         """
-        from ...ui.qt_lifecycle import dispose_plot_widgets
+        from minflux_viewer.ui.common.qt_lifecycle import dispose_plot_widgets
 
         dispose_plot_widgets(self)
 

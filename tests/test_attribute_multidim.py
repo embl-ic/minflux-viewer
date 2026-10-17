@@ -70,7 +70,7 @@ def test_adding_z_offers_the_attribute_list_and_shows_the_top_row_control(
     monkeypatch, _qt_app,
 ):
     """Z and C are added from the menu, each choosing its attribute there."""
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(), dataset_idx=0)
     try:
@@ -120,7 +120,7 @@ def test_adding_z_offers_the_attribute_list_and_shows_the_top_row_control(
 
 
 def test_default_context_menu_has_view_controls_and_reset(monkeypatch, _qt_app):
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(), dataset_idx=0)
     try:
@@ -165,7 +165,7 @@ def test_c_can_exist_without_z_and_each_is_removed_on_its_own(
     monkeypatch, _qt_app,
 ):
     """C is independent of Z: XY, XYZ, XYC and XYZC are all reachable."""
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(), dataset_idx=0)
     try:
@@ -226,7 +226,7 @@ def test_c_can_exist_without_z_and_each_is_removed_on_its_own(
 
 def test_swap_moves_the_attribute_between_z_and_c(_qt_app):
     """With both present the two exchange; with one, the dimension moves."""
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(), dataset_idx=0)
     try:
@@ -256,7 +256,7 @@ def test_swap_moves_the_attribute_between_z_and_c(_qt_app):
 
 def test_c_dimension_disables_stacked_iterations(monkeypatch, _qt_app):
     """C owns the colour, so the per-iteration colour series cannot coexist."""
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(), dataset_idx=0)
     try:
@@ -300,8 +300,8 @@ def test_marker_symbol_decides_the_renderer_and_is_actually_drawn(_qt_app):
     nothing at all. The CPU renderer's ``BulkScatterItem`` draws the real
     symbol, so the symbol now selects the renderer.
     """
-    from minflux_viewer.ui.attribute_cpu import BulkScatterItem
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_cpu import BulkScatterItem
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(), dataset_idx=0)
     try:
@@ -344,7 +344,7 @@ def test_custom_c_mapping_is_offered_and_drives_shared_lut(_qt_app):
         delete_custom_colormap,
         store_custom_colormap,
     )
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     state = _state()
     custom_name = "Attribute test linear"
@@ -378,7 +378,7 @@ def test_custom_c_mapping_is_offered_and_drives_shared_lut(_qt_app):
 def test_floating_colorbar_is_linked_editable_and_persistent(
     monkeypatch, _qt_app,
 ):
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     state = _state()
     window = AttributeWindow(state, dataset_idx=0)
@@ -498,7 +498,7 @@ def test_docked_colorbar_paints_flush_and_undocked_paints_a_panel(_qt_app):
     from PyQt6.QtCore import QRect
     from PyQt6.QtGui import QColor
 
-    from minflux_viewer.ui.floating_colorbar import FloatingColorBar
+    from minflux_viewer.ui.widgets.floating_colorbar import FloatingColorBar
 
     parent = QWidget()
     parent.resize(400, 300)
@@ -570,7 +570,7 @@ def test_docked_colorbar_paints_flush_and_undocked_paints_a_panel(_qt_app):
 
 
 def test_floating_colorbar_uses_regular_compact_ruler_values():
-    from minflux_viewer.ui.floating_colorbar import FloatingColorBar
+    from minflux_viewer.ui.widgets.floating_colorbar import FloatingColorBar
 
     small = FloatingColorBar._regular_tick_values(0.01, 0.10)
     np.testing.assert_allclose(small, np.arange(1, 11, dtype=float) / 100.0)
@@ -607,7 +607,7 @@ def test_floating_colorbar_uses_regular_compact_ruler_values():
 
 def _thinning_window(_qt_app, n_points: int = 400):
     """An Attribute Plot over a plain idx/efo dataset, with a settled view."""
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     state = AppState()
     state.add_dataset(
@@ -837,7 +837,7 @@ def test_gpu_2d_is_the_default_and_draws_behind_the_plot(monkeypatch, _qt_app):
     colour budget exists only because of pyqtgraph's per-point Python cost, so
     it does not apply here.
     """
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     state = _state()
     window = AttributeWindow(state, dataset_idx=0)
@@ -1021,7 +1021,7 @@ def test_gpu_mode_falls_back_to_the_cpu_without_opengl(monkeypatch, _qt_app):
         )
 
         # ...and every point is on screen, bulk-painted by the CPU renderer.
-        from minflux_viewer.ui.attribute_cpu import BulkScatterItem
+        from minflux_viewer.ui.plots.attribute_cpu import BulkScatterItem
 
         markers = [item[1] for item in window._series_items]
         assert markers and all(isinstance(m, BulkScatterItem) for m in markers)
@@ -1042,7 +1042,7 @@ def test_gpu_mode_falls_back_when_the_canvas_draws_nothing(monkeypatch, _qt_app)
     colour while pyqtgraph swallows the GL errors. The pixels are the only
     evidence, so they are checked once per canvas.
     """
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     _state_obj, window = _thinning_window(_qt_app, n_points=200)
     try:
@@ -1065,7 +1065,7 @@ def test_gpu_mode_falls_back_when_the_canvas_draws_nothing(monkeypatch, _qt_app)
         assert window._use_gl_2d is False
         assert "rendered nothing" in window._info.text()
         assert not window._gl2d_view.isVisible()
-        from minflux_viewer.ui.attribute_cpu import BulkScatterItem
+        from minflux_viewer.ui.plots.attribute_cpu import BulkScatterItem
 
         markers = [item[1] for item in window._series_items]
         assert markers and all(isinstance(m, BulkScatterItem) for m in markers)
@@ -1084,8 +1084,8 @@ def test_stacked_iterations_use_a_ramp_spread_over_the_series(_qt_app):
     — and that the two plots colour the same series identically.
     """
     from minflux_viewer.core.app_state import default_prefs
-    from minflux_viewer.ui.attribute_window import _iter_color
-    from minflux_viewer.ui.histogram_window import _iter_color as _hist_iter_color
+    from minflux_viewer.ui.plots.attribute_window import _iter_color
+    from minflux_viewer.ui.plots.histogram_window import _iter_color as _hist_iter_color
 
     prefs = default_prefs()
     ten = [_iter_color(prefs, k, 10)[:3] for k in range(10)]
@@ -1111,7 +1111,7 @@ def test_stacked_legend_is_drawn_by_us_on_every_renderer(_qt_app):
     dot when clicked; and its legend cannot appear over the 3-D view at all.
     """
     from minflux_viewer.core.iteration import STACKED_LABEL
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     state = _state()
     window = AttributeWindow(state, dataset_idx=0)
@@ -1164,7 +1164,7 @@ def test_line_style_follows_the_matlab_specifiers(_qt_app):
     """Plot style carries a MATLAB line spec, honoured by both renderers."""
     from PyQt6.QtCore import Qt as _Qt
 
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     state = _state()
     window = AttributeWindow(state, dataset_idx=0)
@@ -1192,7 +1192,7 @@ def test_line_style_follows_the_matlab_specifiers(_qt_app):
 
 
 def test_three_plane_grid_geometry_contains_xy_xz_and_yz_faces():
-    from minflux_viewer.ui.gl_3d_reference import three_plane_grid_positions
+    from minflux_viewer.ui.rendering.gl_3d_reference import three_plane_grid_positions
 
     positions = three_plane_grid_positions(
         np.array([-0.5, -0.5, -0.5]),
@@ -1207,7 +1207,7 @@ def test_three_plane_grid_geometry_contains_xy_xz_and_yz_faces():
 
 def test_attribute_3d_axis_has_attribute_labels_and_numeric_ticks(_qt_app):
     pytest.importorskip("pyqtgraph.opengl")
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(), dataset_idx=0)
     try:
@@ -1237,7 +1237,7 @@ def test_attribute_3d_bounding_box_menu_is_linked_and_persistent(
     monkeypatch, _qt_app,
 ):
     pytest.importorskip("pyqtgraph.opengl")
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     state = _state()
     window = AttributeWindow(state, dataset_idx=0)
@@ -1273,7 +1273,7 @@ def test_attribute_3d_bounding_box_menu_is_linked_and_persistent(
 
 
 def test_linear_mapping_uses_even_full_range_steps(_qt_app):
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     bins, lo, hi = AttributeWindow._linear_color_bins(
         np.array([0.0, 1.0, 2.0, 3.0, 4.0])
@@ -1294,7 +1294,7 @@ def test_linear_mapping_uses_even_full_range_steps(_qt_app):
 
 
 def test_c_mapping_hides_missing_values_and_expands_constant_ranges(_qt_app):
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     # Constant C data always occupies a real, documented range rather than
     # being silently sent to the LUT midpoint.  A bool keeps its full domain
@@ -1348,7 +1348,7 @@ def test_c_mapping_hides_missing_values_and_expands_constant_ranges(_qt_app):
 
 
 def test_3d_view_keeps_top_controls_and_uses_unit_cube(monkeypatch, _qt_app):
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(), dataset_idx=0)
     fake_view = QWidget()
@@ -1396,7 +1396,7 @@ def test_changing_an_axis_attribute_refits_only_that_axis(_qt_app):
     shows nothing — but the *other* axis is still the window the user chose,
     and C only recolours the same points, so neither of those moves.
     """
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(), dataset_idx=0)
     try:
@@ -1443,7 +1443,7 @@ def test_3d_toggles_keep_the_cube_so_points_stay_put(_qt_app):
     jumping. The extent is pinned across Valid only / Lines / Filtered only,
     so points appear and disappear where they are.
     """
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(), dataset_idx=0)
     try:
@@ -1470,7 +1470,7 @@ def test_3d_toggles_keep_the_cube_so_points_stay_put(_qt_app):
 
 
 def test_3d_blending_stays_visible_on_light_and_dark_backgrounds():
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     # Additive OpenGL blending washes every point out against white.  Light
     # backgrounds need alpha-over, while dark backgrounds retain the brighter
@@ -1484,7 +1484,7 @@ def test_3d_blending_stays_visible_on_light_and_dark_backgrounds():
 
 
 def test_multidimensional_attribute_state_restores(_qt_app):
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     state = _state()
     window = AttributeWindow(state, dataset_idx=0)
@@ -1538,7 +1538,7 @@ def test_gpu_transparency_does_not_cascade_onto_the_roi_context_menu(_qt_app):
     """
     from PyQt6.QtWidgets import QMenu
 
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(), dataset_idx=0)
     try:

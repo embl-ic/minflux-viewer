@@ -6,8 +6,8 @@ from .. import PluginEntry, register
 
 
 def _launch(state, parent=None) -> None:
-    from ...ui import modeless
-    from ...ui.data_simulator_window import DataSimulatorWindow
+    from minflux_viewer.ui.common import modeless
+    from minflux_viewer.ui.tools.data_simulator_window import DataSimulatorWindow
 
     win = DataSimulatorWindow(state, owner=parent)
     modeless.show_modeless(win, parent)

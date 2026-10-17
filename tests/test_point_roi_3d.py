@@ -5,11 +5,7 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
-from minflux_viewer.ui.roi_overlay import (
-    point_to_3d,
-    project_point,
-    update_point_in_plane,
-)
+from minflux_viewer.ui.roi.roi_overlay import point_to_3d, project_point, update_point_in_plane
 
 
 def test_point_to_3d_per_plane():

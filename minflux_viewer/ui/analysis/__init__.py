@@ -1,0 +1,1 @@
+"""Analysis UI capabilities."""

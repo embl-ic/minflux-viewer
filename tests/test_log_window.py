@@ -13,7 +13,7 @@ def _app(qapp):
 
 def test_log_window_replays_history_and_updates_live(_app):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.log_window import LogWindow
+    from minflux_viewer.ui.tools.log_window import LogWindow
 
     state = AppState()
     state.log("loading dataset one")

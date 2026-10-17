@@ -13,12 +13,8 @@ from minflux_viewer.core.roi import (
     record_to_points,
 )
 from minflux_viewer.core.roi import _bounds as _core_bounds
-from minflux_viewer.ui.roi_overlay import _bounds as _ov_bounds
-from minflux_viewer.ui.roi_overlay import (
-    points_to_3d,
-    project_points,
-    update_points_in_plane,
-)
+from minflux_viewer.ui.roi.roi_overlay import _bounds as _ov_bounds
+from minflux_viewer.ui.roi.roi_overlay import points_to_3d, project_points, update_points_in_plane
 
 
 def test_new_types_registered():

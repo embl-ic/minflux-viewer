@@ -24,7 +24,7 @@ def _dialog_with_two_rows():
     """A dialog over a small dataset with two enabled, genuinely gating rows."""
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.core.dataset import build_localization_dataset
-    from minflux_viewer.ui.filter_dialog import FilterDialog
+    from minflux_viewer.ui.dialogs.filter_dialog import FilterDialog
 
     rng = np.random.default_rng(0)
     ds = build_localization_dataset(
@@ -44,7 +44,7 @@ def _dialog_with_two_rows():
 def _ticks(dialog):
     from PyQt6.QtWidgets import QCheckBox
 
-    from minflux_viewer.ui.filter_dialog import _COL_ENABLED
+    from minflux_viewer.ui.dialogs.filter_dialog import _COL_ENABLED
 
     out = []
     for row in range(dialog._table.rowCount()):

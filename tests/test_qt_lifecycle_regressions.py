@@ -119,7 +119,7 @@ def test_repeated_lut_plot_teardown_survives_deferred_layout_events() -> None:
         import numpy as np
         from PyQt6.QtCore import QCoreApplication, QEvent
         from PyQt6.QtWidgets import QApplication
-        from minflux_viewer.ui.lut_dialog import LutDialog
+        from minflux_viewer.ui.dialogs.lut_dialog import LutDialog
 
         app = QApplication([])
         pixels = np.linspace(0.0, 100.0, 1000)
@@ -166,8 +166,8 @@ def test_scatter_ortho_close_does_not_redraw_into_disposed_plots() -> None:
         from PyQt6.QtWidgets import QApplication
         from minflux_viewer.core.app_state import AppState
         from minflux_viewer.core.loader import build_localization_dataset
-        from minflux_viewer.ui.ortho_view import ORTHO_AXIS
-        from minflux_viewer.ui.scatter_window import ScatterWindow
+        from minflux_viewer.ui.rendering.ortho_view import ORTHO_AXIS
+        from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
         app = QApplication([])
         rng = np.random.default_rng(7)
@@ -212,7 +212,7 @@ def test_render_close_never_waits_for_a_tiff_export() -> None:
         import time
         from PyQt6.QtWidgets import QApplication
         from minflux_viewer.core.app_state import AppState
-        from minflux_viewer.ui.render_window import RenderWindow
+        from minflux_viewer.ui.rendering.render_window import RenderWindow
 
         class SlowWorker:
             def __init__(self):
@@ -276,7 +276,7 @@ def test_precision_scheduler_deletion_does_not_wait_for_running_work() -> None:
         import time
         from PyQt6.QtCore import QCoreApplication, QEvent, QRunnable
         from PyQt6.QtWidgets import QApplication
-        from minflux_viewer.ui.precision_render import PrecisionRenderScheduler
+        from minflux_viewer.ui.rendering.precision_render import PrecisionRenderScheduler
 
         app = QApplication([])
         scheduler = PrecisionRenderScheduler()
@@ -336,8 +336,8 @@ def test_particle_average_close_detaches_running_task() -> None:
         from PyQt6.QtCore import QCoreApplication, QEvent
         from PyQt6.QtWidgets import QApplication
         from minflux_viewer.core.app_state import AppState
-        from minflux_viewer.ui.background_tasks import shared_thread_pool
-        from minflux_viewer.ui.particle_average_dialog import (
+        from minflux_viewer.ui.common.background_tasks import shared_thread_pool
+        from minflux_viewer.ui.analysis.particle_average_dialog import (
             ParticleAverageWindow, _AverageTask,
         )
 
@@ -372,8 +372,8 @@ def test_tracking_window_close_detaches_running_index_task() -> None:
         from PyQt6.QtWidgets import QApplication
         from minflux_viewer.core.app_state import AppState
         from minflux_viewer.core.dataset import build_localization_dataset
-        from minflux_viewer.ui.background_tasks import shared_thread_pool
-        import minflux_viewer.ui.tracking_window as tracking_window
+        from minflux_viewer.ui.common.background_tasks import shared_thread_pool
+        import minflux_viewer.ui.plots.tracking_window as tracking_window
 
         app = QApplication([])
         state = AppState()
@@ -423,8 +423,8 @@ def test_msd_window_close_detaches_running_analysis_task() -> None:
         from PyQt6.QtWidgets import QApplication
         from minflux_viewer.core.app_state import AppState
         from minflux_viewer.core.dataset import build_localization_dataset
-        from minflux_viewer.ui.background_tasks import shared_thread_pool
-        import minflux_viewer.ui.tracking_analysis_window as analysis_window
+        from minflux_viewer.ui.common.background_tasks import shared_thread_pool
+        import minflux_viewer.ui.plots.tracking_analysis_window as analysis_window
 
         app = QApplication([])
         state = AppState()
@@ -475,7 +475,7 @@ def test_main_window_close_detaches_running_zarr_io() -> None:
         from PyQt6.QtCore import QCoreApplication, QEvent
         from PyQt6.QtWidgets import QApplication
         from minflux_viewer.core.app_state import AppState
-        from minflux_viewer.ui.background_tasks import shared_thread_pool
+        from minflux_viewer.ui.common.background_tasks import shared_thread_pool
         from minflux_viewer.ui.main_window import MainWindow, _ZarrIoTask
 
         app = QApplication([])
@@ -507,7 +507,7 @@ def test_main_window_close_detaches_running_generic_file_io() -> None:
         from PyQt6.QtCore import QCoreApplication, QEvent
         from PyQt6.QtWidgets import QApplication
         from minflux_viewer.core.app_state import AppState
-        from minflux_viewer.ui.background_tasks import BackgroundTask, shared_thread_pool
+        from minflux_viewer.ui.common.background_tasks import BackgroundTask, shared_thread_pool
         from minflux_viewer.ui.main_window import MainWindow
 
         app = QApplication([])
@@ -544,8 +544,8 @@ def test_tiff_window_close_defers_source_close_until_export_finishes() -> None:
         from PyQt6.QtCore import QCoreApplication, QEvent
         from PyQt6.QtWidgets import QApplication
         from minflux_viewer.core.tiff_source import TiffImageSource
-        from minflux_viewer.ui.background_tasks import BackgroundTask, shared_thread_pool
-        from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+        from minflux_viewer.ui.common.background_tasks import BackgroundTask, shared_thread_pool
+        from minflux_viewer.ui.tools.tiff_viewer_window import TiffViewerWindow
 
         class SourceProxy:
             def __init__(self, source):
@@ -604,7 +604,7 @@ def test_update_dialog_close_does_not_destroy_a_running_download_thread() -> Non
         from minflux_viewer.core.updater import (
             ReleaseAsset, ReleaseInfo, UpdateCheckResult,
         )
-        from minflux_viewer.ui.update_dialog import (
+        from minflux_viewer.ui.dialogs.update_dialog import (
             _DownloadCancelled, _DownloadWorker, _UpdateAvailableDialog,
         )
 
@@ -674,7 +674,7 @@ def test_results_table_window_teardown_is_clean():
         from types import SimpleNamespace
         from PyQt6.QtWidgets import QApplication, QWidget
         from minflux_viewer.scripting import create_facade
-        from minflux_viewer.ui.modeless import close_modeless
+        from minflux_viewer.ui.common.modeless import close_modeless
 
         app = QApplication([])
         owner = QWidget()
@@ -705,7 +705,7 @@ def test_script_plot_window_teardown_is_clean():
         import numpy as np
         from PyQt6.QtWidgets import QApplication, QWidget
         from minflux_viewer.scripting import create_facade
-        from minflux_viewer.ui.modeless import close_modeless
+        from minflux_viewer.ui.common.modeless import close_modeless
 
         app = QApplication([])
         owner = QWidget()

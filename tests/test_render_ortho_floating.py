@@ -11,7 +11,7 @@ pytest.importorskip("pyqtgraph")
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
-from minflux_viewer.ui.ortho_view import ORTHO_AXIS, fit_ortho_plot_rects
+from minflux_viewer.ui.rendering.ortho_view import ORTHO_AXIS, fit_ortho_plot_rects
 
 
 @pytest.fixture
@@ -40,7 +40,7 @@ def _settle(app, turns: int = 10) -> None:
 
 
 def _window(app, *, size=(900, 880)):
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     win = RenderWindow(_state(), dataset_idx=0)
     win.resize(*size)
@@ -622,7 +622,7 @@ def test_a_tiled_render_keeps_the_ortho_coordinate_in_the_status_line(_qt_app, q
     qtbot.addWidget(win)
     try:
         win._set_orientation(ORTHO_AXIS)
-        from minflux_viewer.ui.render_window import _RENDER_SIZE
+        from minflux_viewer.ui.rendering.render_window import _RENDER_SIZE
 
         half_span = 25.0 * _RENDER_SIZE
         win._view_box.setRange(xRange=(-half_span, half_span),
@@ -664,7 +664,7 @@ def test_ortho_works_with_a_multi_channel_overlay(_qt_app):
     draws all of its channels there too; the channel list stays in the primary
     window, where it belongs."""
     from minflux_viewer.core.app_state import default_prefs
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     rng = np.random.default_rng(5)
     state = AppState()

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+UI internals are grouped into capability packages. Plugins that import private
+`minflux_viewer.ui` modules must use their new paths; old UI module paths are
+not retained. The public `mfv` scripting API is unchanged.
+
+Retired HlyB workflows and unreachable tiled-render levels were removed while
+preserving the live staged workflow and its shared numerical helpers. Late tile
+results no longer replace direct, precision or image-mode renders.
+
 ## v0.4.4
 
 Adds trajectory playback and quantitative analysis, richer 3-D ROI and magic-wand workflows, reproducible plugin methods, and an improved HlyB/D pair-distance workflow.

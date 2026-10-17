@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 import numpy as np
 import pytest
 
@@ -16,7 +15,7 @@ from PyQt6.QtWidgets import QComboBox, QMenu
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.attributes import attribute_description
 from minflux_viewer.core.dataset import build_localization_dataset
-from minflux_viewer.ui.attribute_help import (
+from minflux_viewer.ui.widgets.attribute_help import (
     apply_attribute_menu_tooltips,
     apply_attribute_tooltips,
 )
@@ -88,10 +87,10 @@ def test_menu_helper_leaves_non_attribute_entries_alone(_qt_app):
 
 def test_every_attribute_picker_carries_the_help(_qt_app):
     """Attribute Plot, Histogram, Scatter, Filter and the menus that list names."""
-    from minflux_viewer.ui.attribute_window import AttributeWindow
-    from minflux_viewer.ui.filter_dialog import FilterDialog
-    from minflux_viewer.ui.histogram_window import HistogramWindow
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.dialogs.filter_dialog import FilterDialog
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = _state()
     windows = []

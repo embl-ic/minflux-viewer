@@ -67,7 +67,7 @@ def _make_dataset(n_loc=N_LOC, n_itr=N_ITR):
 
 def _histogram(prefs_patch=None):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     ds = _make_dataset()
     state = AppState()
@@ -268,7 +268,7 @@ def test_every_histogram_trace_mode_is_supported_on_both_paths(qapp):
     cover the same set of read-outs, or the plot changes meaning with the
     iteration selection."""
     _qapp()
-    from minflux_viewer.ui.histogram_window import _TRACE_AGG_MODES
+    from minflux_viewer.ui.plots.histogram_window import _TRACE_AGG_MODES
     from minflux_viewer.utils.filters import raw_trace_aggregate
 
     win, ds, _state = _histogram({"histogram_values": list(_TRACE_AGG_MODES)})
@@ -379,8 +379,8 @@ def test_main_window_broadcasts_preferences_to_histogram_windows():
     so the Histogram Plot options needed a window reopen to take effect."""
     import inspect
 
-    from minflux_viewer.ui.histogram_window import HistogramWindow
-    from minflux_viewer.ui.menu_controller import _refresh_plot_preferences
+    from minflux_viewer.ui.controllers.menu_controller import _refresh_plot_preferences
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     src = inspect.getsource(_refresh_plot_preferences)
     assert "_histogram_windows" in src
@@ -392,7 +392,7 @@ def test_main_window_broadcasts_preferences_to_histogram_windows():
 # ---------------------------------------------------------------------------
 
 def _prefs_dialog(state):
-    from minflux_viewer.ui.preferences_dialog import PreferencesDialog
+    from minflux_viewer.ui.settings.preferences_dialog import PreferencesDialog
 
     return PreferencesDialog(state)
 
@@ -432,7 +432,7 @@ def test_preferences_dialog_round_trips_both_rows(qapp):
 def test_preferences_dialog_offers_every_documented_option(qapp):
     _qapp()
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.histogram_window import _TRACE_AGG_MODES
+    from minflux_viewer.ui.plots.histogram_window import _TRACE_AGG_MODES
 
     dlg = _prefs_dialog(AppState())
     try:

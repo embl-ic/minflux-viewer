@@ -229,7 +229,7 @@ def test_dialog_prefills_roles_units_and_builds(qapp, tmp_path):
     pytest.importorskip("PyQt6")
     from PyQt6.QtWidgets import QApplication
 
-    from minflux_viewer.ui.spreadsheet_import_dialog import SpreadsheetMappingDialog
+    from minflux_viewer.ui.dialogs.spreadsheet_import_dialog import SpreadsheetMappingDialog
 
     app = QApplication.instance() or QApplication([])
     rng = np.random.default_rng(0)
@@ -258,7 +258,7 @@ def _open_dialog(path):
     asserted with ``isHidden()`` (explicit hide) rather than ``isVisible()``."""
     from PyQt6.QtWidgets import QApplication
 
-    from minflux_viewer.ui.spreadsheet_import_dialog import SpreadsheetMappingDialog
+    from minflux_viewer.ui.dialogs.spreadsheet_import_dialog import SpreadsheetMappingDialog
 
     app = QApplication.instance() or QApplication([])
     return app, SpreadsheetMappingDialog(read_table(path))
@@ -320,7 +320,7 @@ def test_the_folded_view_owns_up_to_the_parameters_it_hides(qapp, tmp_path):
 
 def test_the_dialog_opens_on_the_folded_mapping_and_ten_preview_rows(qapp, tmp_path):
     pytest.importorskip("PyQt6")
-    from minflux_viewer.ui.spreadsheet_import_dialog import PREVIEW_ROWS
+    from minflux_viewer.ui.dialogs.spreadsheet_import_dialog import PREVIEW_ROWS
 
     app, dlg = _open_dialog(_plain_xy(tmp_path))
     preview = dlg._preview

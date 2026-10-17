@@ -278,7 +278,7 @@ def _qapp():
 
 def _dialog(ds=None):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.filter_dialog import FilterDialog
+    from minflux_viewer.ui.dialogs.filter_dialog import FilterDialog
 
     ds = ds if ds is not None else _make_dataset()
     state = AppState()
@@ -288,7 +288,7 @@ def _dialog(ds=None):
 
 def test_dialog_has_an_iter_column_and_no_weighted_column(qapp):
     _qapp()
-    from minflux_viewer.ui import filter_dialog as fd
+    from minflux_viewer.ui.dialogs import filter_dialog as fd
 
     dlg, _ds, _state = _dialog()
     try:
@@ -304,7 +304,7 @@ def test_dialog_has_an_iter_column_and_no_weighted_column(qapp):
 
 def test_dialog_row_defaults_last_and_effective_for_cfr(qapp):
     _qapp()
-    from minflux_viewer.ui import filter_dialog as fd
+    from minflux_viewer.ui.dialogs import filter_dialog as fd
 
     dlg, _ds, _state = _dialog()
     try:
@@ -320,7 +320,7 @@ def test_dialog_row_defaults_last_and_effective_for_cfr(qapp):
 
 def test_dialog_persists_the_iteration_into_specs(qapp):
     _qapp()
-    from minflux_viewer.ui import filter_dialog as fd
+    from minflux_viewer.ui.dialogs import filter_dialog as fd
 
     dlg, ds, _state = _dialog()
     try:
@@ -339,7 +339,7 @@ def test_dialog_changing_iter_reranges_the_bounds(qapp):
     """Iter changes the value space, so the Min/Max auto-range must follow —
     keeping the old numbers would silently mis-filter."""
     _qapp()
-    from minflux_viewer.ui import filter_dialog as fd
+    from minflux_viewer.ui.dialogs import filter_dialog as fd
 
     dlg, _ds, _state = _dialog()
     try:
@@ -356,7 +356,7 @@ def test_dialog_changing_iter_reranges_the_bounds(qapp):
 def test_dialog_json_round_trips_the_iteration(qapp, tmp_path):
     _qapp()
     from minflux_viewer.core import filter_io
-    from minflux_viewer.ui import filter_dialog as fd
+    from minflux_viewer.ui.dialogs import filter_dialog as fd
 
     dlg, _ds, _state = _dialog()
     try:
@@ -378,7 +378,7 @@ def test_dialog_loads_a_json_carrying_the_obsolete_weighted_key(qapp, tmp_path):
     """Presets written while the option existed still load; the key is ignored."""
     _qapp()
     from minflux_viewer.core import filter_io
-    from minflux_viewer.ui import filter_dialog as fd
+    from minflux_viewer.ui.dialogs import filter_dialog as fd
 
     dlg, _ds, _state = _dialog()
     try:
@@ -398,7 +398,7 @@ def test_dialog_loads_a_legacy_json_without_the_iteration_key(qapp, tmp_path):
     """Backward compatibility: no 'iteration' -> last (effective for cfr/efc)."""
     _qapp()
     from minflux_viewer.core import filter_io
-    from minflux_viewer.ui import filter_dialog as fd
+    from minflux_viewer.ui.dialogs import filter_dialog as fd
 
     dlg, ds, _state = _dialog()
     try:
@@ -431,7 +431,7 @@ def test_dialog_loads_a_legacy_json_without_the_iteration_key(qapp, tmp_path):
 
 def _histogram(ds=None):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     ds = ds if ds is not None else _make_dataset()
     state = AppState()

@@ -11,7 +11,7 @@ import pyqtgraph as pg
 from PyQt6.QtWidgets import QWidget
 
 from minflux_viewer.core.roi import RoiStore
-from minflux_viewer.ui.roi_overlay import RoiOverlayController, _bounds
+from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController, _bounds
 
 
 @pytest.fixture(scope="module")

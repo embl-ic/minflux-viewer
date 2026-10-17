@@ -112,7 +112,7 @@ def _controller(source_view, dataset_indices, store, qtbot=None):
     import pyqtgraph as pg
     from PyQt6.QtWidgets import QWidget
 
-    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+    from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
     class _Owner(QWidget):
         def __init__(self):
@@ -374,7 +374,7 @@ def test_closing_a_dataset_drops_only_its_restore_roi_memory(qapp):
     the other datasets' entries need no re-keying. (A stand-in, not a real
     MainWindow: constructing one per test drags in every child window.)"""
     from minflux_viewer.core.dataset_events import DatasetRemoved
-    from minflux_viewer.ui.dataset_binding import DatasetWindowMap
+    from minflux_viewer.ui.common.dataset_binding import DatasetWindowMap
     from minflux_viewer.ui.main_window import MainWindow
 
     st = _registry("A", "B", "C")

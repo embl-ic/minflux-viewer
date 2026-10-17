@@ -25,7 +25,7 @@ class PluginEntry:
     # Extra search tags for the Command Finder — synonyms and domain terms that
     # are NOT already in ``name``. Optional; the plugin is findable by its name
     # either way. Built-in menu commands get the equivalent from
-    # ``ui/command_meta.py``, which is keyed by QAction attribute name and so
+    # ``ui/common/command_meta.py``, which is keyed by QAction attribute name and so
     # cannot describe a plugin action (it has none).
     keywords: tuple[str, ...] = ()
     # Implementing file shown by the Command Finder. Discovered plugins set

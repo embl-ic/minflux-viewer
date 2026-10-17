@@ -66,8 +66,8 @@ def main(qapp):
     try:
         yield win
     finally:
-        from minflux_viewer.ui.render_window import RenderWindow
-        from minflux_viewer.ui.scatter_window import ScatterWindow
+        from minflux_viewer.ui.plots.scatter_window import ScatterWindow
+        from minflux_viewer.ui.rendering.render_window import RenderWindow
         for widget in QApplication.topLevelWidgets():
             try:
                 if (isinstance(widget, (RenderWindow, ScatterWindow))

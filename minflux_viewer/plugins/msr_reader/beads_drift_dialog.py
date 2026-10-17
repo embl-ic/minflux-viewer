@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ...ui.plot_format import apply_spatial_y_direction
+from minflux_viewer.ui.plots.plot_format import apply_spatial_y_direction
 
 # rainbow time colormap: blue → cyan → green → yellow → orange → red
 _CMAP_POS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
@@ -321,7 +321,7 @@ class BeadsDriftDialog(QDialog):
         if not getattr(self, "_positioned", False):
             self._positioned = True
             try:
-                from ...ui.modeless import ensure_on_screen
+                from minflux_viewer.ui.common.modeless import ensure_on_screen
                 ensure_on_screen(self, self.parent())
             except Exception:
                 pass
@@ -556,7 +556,7 @@ class BeadsDriftDialog(QDialog):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
         """Retire this window's pyqtgraph plots before Qt deletes them."""
-        from ...ui.qt_lifecycle import dispose_plot_widgets
+        from minflux_viewer.ui.common.qt_lifecycle import dispose_plot_widgets
 
         dispose_plot_widgets(self)
         super().closeEvent(event)

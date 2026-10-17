@@ -21,9 +21,9 @@ from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
 from minflux_viewer.core.roi import RoiRecord
 from minflux_viewer.core.roi_selection import store_roi_mask
-from minflux_viewer.ui.attribute_window import AttributeWindow
-from minflux_viewer.ui.histogram_window import HistogramWindow
-from minflux_viewer.ui.roi_highlight import decimate, highlight_masks, union_mask
+from minflux_viewer.ui.plots.attribute_window import AttributeWindow
+from minflux_viewer.ui.plots.histogram_window import HistogramWindow
+from minflux_viewer.ui.roi.roi_highlight import decimate, highlight_masks, union_mask
 
 
 @pytest.fixture(scope="module")
@@ -313,7 +313,7 @@ def test_histogram_clears_the_highlight_where_a_mask_cannot_be_mapped(_app, monk
 # Render: the depth slider is a view setting, not part of the mask
 # ---------------------------------------------------------------------------
 def test_render_roi_mask_spans_the_whole_depth_axis(_app):
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     state = _state()
     ds = state.datasets[0]
@@ -345,7 +345,7 @@ def test_render_roi_mask_spans_the_whole_depth_axis(_app):
 @pytest.mark.parametrize("plane,axes", [("XZ", (0, 2)), ("YZ", (2, 1))])
 def test_render_ortho_side_panes_highlight_the_selected_rows(_app, plane, axes):
     """Render's side rasters need the same row highlight as the primary pane."""
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     state = _state()
     ds = state.datasets[0]
@@ -374,7 +374,7 @@ def test_render_ortho_side_panes_highlight_the_selected_rows(_app, plane, axes):
 
 def test_render_side_pane_draft_uses_the_drawing_view_highlight_preference(_app):
     """A draft owned by XZ is still sourced by this Render view, not a peer view."""
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     state = _state()
     state.prefs.setdefault("plot", {})["roi_highlight_in_roi"] = True

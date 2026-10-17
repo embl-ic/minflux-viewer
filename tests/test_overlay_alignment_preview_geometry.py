@@ -51,7 +51,7 @@ def _blob_dataset(name: str, offset: tuple[float, float], seed: int):
 
 def _overlay_window(qtbot):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+    from minflux_viewer.ui.rendering.precision_render_window import PrecisionRenderWindow
 
     state = AppState()
     state.save_prefs = lambda: None
@@ -252,7 +252,7 @@ def test_alignment_started_before_the_first_frame_still_previews(_qt_app, qtbot)
     once. No exact render runs while aligning, so with no first frame to
     snapshot the preview must render its sources itself, not stay blank."""
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+    from minflux_viewer.ui.rendering.precision_render_window import PrecisionRenderWindow
 
     state = AppState()
     state.save_prefs = lambda: None
@@ -295,7 +295,7 @@ def test_apply_with_source_tiles_in_flight_never_shows_a_blank_frame(_qt_app, qt
 
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.core.dataset import build_localization_dataset
-    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+    from minflux_viewer.ui.rendering.precision_render_window import PrecisionRenderWindow
 
     def busy(name, offset, seed):
         rng = np.random.default_rng(seed)
@@ -414,7 +414,7 @@ def test_the_projection_cannot_change_under_a_pending_move(_qt_app, qtbot):
 def test_side_panes_never_apply_the_primary_panes_warp():
     """A side projection composed with a pending move must equal one without:
     the move is a warp in the PRIMARY pane's rectangle, meaningless in XZ/YZ."""
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     tile = np.zeros((40, 60), dtype=np.float32)
     tile[10:14, 20:24] = 5.0
@@ -435,7 +435,7 @@ def test_side_panes_never_apply_the_primary_panes_warp():
 
 
 def test_alignment_warp_maps_between_grids_of_different_extent():
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     # One bright pixel centred at world (25, 35) in a 0..100 x 0..100 grid.
     source = np.zeros((10, 10), dtype=np.float32)
@@ -494,7 +494,7 @@ def test_a_lost_mouse_release_does_not_keep_dragging_the_channel(_qt_app, qtbot)
     from PyQt6.QtGui import QMouseEvent
     from PyQt6.QtWidgets import QWidget
 
-    from minflux_viewer.ui.overlay_alignment import OverlayAlignmentPanel
+    from minflux_viewer.ui.rendering.overlay_alignment import OverlayAlignmentPanel
 
     view = QWidget()
     qtbot.addWidget(view)

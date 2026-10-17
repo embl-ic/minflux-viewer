@@ -40,7 +40,9 @@ class ViewerAlignmentDialog(QDialog):
 
         layout = QVBoxLayout(self)
         if confocal_candidates:
-            from minflux_viewer.ui.confocal_mapping_dialog import ConfocalMappingOptionsWidget
+            from minflux_viewer.ui.analysis.confocal_mapping_dialog import (
+                ConfocalMappingOptionsWidget,
+            )
 
             self.confocal_widget = ConfocalMappingOptionsWidget(
                 list(confocal_candidates),

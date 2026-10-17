@@ -68,7 +68,7 @@ class ResultsTable:
 
     def _notify_changed(self) -> None:
         if self._window is not None:
-            from ..ui.qt_lifecycle import qobject_alive
+            from minflux_viewer.ui.common.qt_lifecycle import qobject_alive
 
             if qobject_alive(self._window):
                 self._window.refresh()
@@ -184,9 +184,9 @@ class ResultsTable:
     def show(self) -> ResultsTable:
         """Show and raise the table window."""
         self._require_open()
-        from ..ui.modeless import show_modeless
-        from ..ui.qt_lifecycle import qobject_alive
-        from ..ui.results_table import ResultsTableWindow
+        from minflux_viewer.ui.common.modeless import show_modeless
+        from minflux_viewer.ui.common.qt_lifecycle import qobject_alive
+        from minflux_viewer.ui.tools.results_table import ResultsTableWindow
 
         owner = self._namespace._main_window()
         if self._window is None or not qobject_alive(self._window):

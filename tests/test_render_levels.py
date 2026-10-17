@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 
 from minflux_viewer.core.dataset_key import DatasetKey
-from minflux_viewer.ui import render_config as config
-from minflux_viewer.ui.tile_cache import PhysicalTileCache, TileKey
+from minflux_viewer.ui.rendering import render_config as config
+from minflux_viewer.ui.rendering.tile_cache import PhysicalTileCache, TileKey
 
 
 def key(lod):
@@ -45,7 +45,7 @@ def test_two_level_progressive_placeholder_preserves_pixels_and_identity():
 
 @pytest.mark.parametrize("pixel_nm", [.05, 1., 5., 19.99, 20., 100.])
 def test_zoom_below_threshold_uses_direct_path_not_removed_tile_levels(monkeypatch, pixel_nm):
-    from minflux_viewer.ui import render_window
+    from minflux_viewer.ui.rendering import render_window
 
     class TiledPathReached(Exception):
         pass
@@ -77,7 +77,7 @@ def test_zoom_below_threshold_uses_direct_path_not_removed_tile_levels(monkeypat
 
 @pytest.mark.parametrize("mode,lod", [("loc", -1), ("loc", -3), ("image", 0)])
 def test_queued_tile_composite_cannot_take_over_a_non_tiled_view(mode, lod):
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     class NonTiled(SimpleNamespace):
         @property
@@ -91,7 +91,7 @@ def test_queued_tile_composite_cannot_take_over_a_non_tiled_view(mode, lod):
 
 @pytest.mark.parametrize("mode,lod", [("loc", -1), ("loc", -3), ("image", 0)])
 def test_late_tile_result_may_be_cached_but_cannot_repaint_a_non_tiled_view(mode, lod):
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     tile_key = key(1)
     tile = np.ones((100, 100), np.float32)

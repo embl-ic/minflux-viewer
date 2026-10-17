@@ -4,10 +4,7 @@ from types import MethodType, SimpleNamespace
 
 import numpy as np
 
-from minflux_viewer.ui.render_window import (
-    RenderWindow,
-    localization_render_auto_levels,
-)
+from minflux_viewer.ui.rendering.render_window import RenderWindow, localization_render_auto_levels
 
 
 def _sparse_smoothed_histogram() -> np.ndarray:

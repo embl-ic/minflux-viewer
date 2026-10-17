@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from minflux_viewer.ui.plot_style_dialog import PlotStyleDialog
+from minflux_viewer.ui.dialogs.plot_style_dialog import PlotStyleDialog
 
 
 class PlotWindow(QDialog):
@@ -170,7 +170,7 @@ class PlotWindow(QDialog):
             self._owner._on_plot_window_focused(self)
 
     def closeEvent(self, event):
-        from minflux_viewer.ui.qt_lifecycle import close_plot_widgets
+        from minflux_viewer.ui.common.qt_lifecycle import close_plot_widgets
 
         close_plot_widgets(self.plot)
         if hasattr(self._owner, "_on_plot_window_closed"):

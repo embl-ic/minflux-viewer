@@ -96,14 +96,14 @@ def test_imagej_export_keeps_every_marker():
 
 # ------------------------------------------------------------------- geometry
 def test_bounds_cover_every_marker():
-    from minflux_viewer.ui.roi_overlay import _bounds
+    from minflux_viewer.ui.roi.roi_overlay import _bounds
 
     x, y, w, h = _bounds({"points": [[0.0, 0.0, 5.0], [300.0, 120.0, 9.0]]})
     assert (x, y, w, h) == (0.0, 0.0, 300.0, 120.0)
 
 
 def test_status_read_out_leads_with_the_count():
-    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+    from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
     text = RoiOverlayController._roi_status_text("points", {"points": _marks(3)})
     assert text.startswith("Points  3 points")
@@ -111,7 +111,7 @@ def test_status_read_out_leads_with_the_count():
 
 
 def test_an_empty_multi_point_says_so_rather_than_reporting_a_box():
-    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+    from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
     assert "empty" in RoiOverlayController._roi_status_text("points", {"points": []})
 
@@ -120,7 +120,7 @@ def test_an_empty_multi_point_says_so_rather_than_reporting_a_box():
 def test_the_item_is_one_plot_item_carrying_every_marker(_qt_app):
     """The controller keys exactly one item per record id, so a multi-point
     cannot be N marker items."""
-    from minflux_viewer.ui.roi_overlay import MultiPointItem
+    from minflux_viewer.ui.roi.roi_overlay import MultiPointItem
 
     item = MultiPointItem([[0.0, 0.0], [10.0, 20.0], [30.0, 5.0]])
     xs, ys = item.getData()
@@ -134,7 +134,7 @@ def test_the_item_is_one_plot_item_carrying_every_marker(_qt_app):
 
 def test_markers_stay_the_same_size_on_screen(_qt_app):
     """pxMode -- a marker is a marker at any zoom, not a shape that grows."""
-    from minflux_viewer.ui.roi_overlay import MultiPointItem
+    from minflux_viewer.ui.roi.roi_overlay import MultiPointItem
 
     assert MultiPointItem([[0.0, 0.0]]).opts["pxMode"] is True
 
@@ -143,7 +143,7 @@ def test_markers_stay_the_same_size_on_screen(_qt_app):
 def test_markers_project_per_view_plane():
     """A set drawn in XY must show its true Z when the view flips, exactly as a
     single point does."""
-    from minflux_viewer.ui.roi_overlay import project_points
+    from minflux_viewer.ui.roi.roi_overlay import project_points
 
     marks = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
     assert project_points(marks, "XY") == [[10.0, 20.0], [40.0, 50.0]]
@@ -156,7 +156,7 @@ def test_grouping_files_one_record_and_ungrouped_files_many(_qt_app):
     """The two menu routes are kept apart deliberately: one files N independent
     markers, the other one multi-point. Silently changing what the existing
     entry produces would be worse than offering both."""
-    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+    from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
     ctrl = RoiOverlayController.__new__(RoiOverlayController)
     ctrl.store = RoiStore()
@@ -182,7 +182,7 @@ def test_grouping_files_one_record_and_ungrouped_files_many(_qt_app):
 
 
 def test_grouping_nothing_is_a_no_op(_qt_app):
-    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+    from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
     ctrl = RoiOverlayController.__new__(RoiOverlayController)
     ctrl.store = RoiStore()

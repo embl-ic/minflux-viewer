@@ -11,7 +11,7 @@ def _app(qapp):
 
 
 def test_dialog_defaults_to_two_even_minute_windows(_app):
-    from minflux_viewer.ui.time_channel_dialog import TimeChannelDialog
+    from minflux_viewer.ui.analysis.time_channel_dialog import TimeChannelDialog
 
     dialog = TimeChannelDialog(
         np.linspace(0.0, 600.0, 601),
@@ -34,7 +34,7 @@ def test_dialog_defaults_to_two_even_minute_windows(_app):
 
 
 def test_drag_region_and_add_window_update_table(_app):
-    from minflux_viewer.ui.time_channel_dialog import TimeChannelDialog
+    from minflux_viewer.ui.analysis.time_channel_dialog import TimeChannelDialog
 
     dialog = TimeChannelDialog(
         np.arange(0.0, 601.0),

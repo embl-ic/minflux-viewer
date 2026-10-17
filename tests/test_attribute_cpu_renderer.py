@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 import numpy as np
 import pytest
 
@@ -12,16 +11,16 @@ pytest.importorskip("pyqtgraph")
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
-from minflux_viewer.ui.attribute_cpu import (
-    BulkScatterItem,
-    aggregate_screen_points,
-    spatial_representative_indices,
-)
-from minflux_viewer.ui.gpu_capabilities import (
+from minflux_viewer.ui.common.gpu_capabilities import (
     CPU_WORK_BYTES_PER_POINT,
     GPU_BYTES_PER_POINT,
     GpuCapabilities,
     point_limit_from_memory,
+)
+from minflux_viewer.ui.plots.attribute_cpu import (
+    BulkScatterItem,
+    aggregate_screen_points,
+    spatial_representative_indices,
 )
 
 
@@ -124,7 +123,7 @@ def test_cpu_renderer_is_the_automatic_non_gpu_path(_qt_app):
     Attribute Plot uses whenever it is not on the GPU, so nothing was lost with
     the extra menu entry.
     """
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(5_000), dataset_idx=0)
     try:
@@ -148,7 +147,7 @@ def test_cpu_renderer_switches_to_screen_aggregation_when_overplotted(
 ):
     from pyqtgraph import ImageItem
 
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(50_000), dataset_idx=0)
     try:
@@ -175,7 +174,7 @@ def test_cpu_renderer_switches_to_screen_aggregation_when_overplotted(
 
 
 def test_cpu_curve_lod_connects_skipped_vertices_but_preserves_nan_gaps(_qt_app):
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state(100), dataset_idx=0)
     try:

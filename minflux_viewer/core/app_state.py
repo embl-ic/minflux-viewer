@@ -171,7 +171,7 @@ DEFAULT_PREFS: dict = {
         "scatter_cmap": "jet",
         "scatter_xy_origin": "top_left",    # "top_left" | "bottom_left"
         # Attribute Plot: draw a uniform subsample when the view holds more
-        # points than the display budget (ui/attribute_window.py). Off draws
+        # points than the display budget (ui/plots/attribute_window.py). Off draws
         # every point, which costs ~19 s per redraw at 20 M raw rows.
         # Application-owned named gradients created from the LUT dialog.
         # Values are JSON-compatible ``{"stops": [[position, RGBA], ...]}``.

@@ -234,7 +234,7 @@ def test_attached_signal_is_user_visible_and_available_in_raw_store():
 
 
 def test_mapping_options_switch_to_dimension_appropriate_methods(qtbot):
-    from minflux_viewer.ui.confocal_mapping_dialog import ConfocalMappingOptionsWidget
+    from minflux_viewer.ui.analysis.confocal_mapping_dialog import ConfocalMappingOptionsWidget
 
     widget = ConfocalMappingOptionsWidget([_candidate(z=True)])
     qtbot.addWidget(widget)
@@ -265,7 +265,7 @@ def test_single_dataset_reader_dialog_shows_confocal_section_not_overlay_control
 
 
 def test_manual_alignment_dialog_uses_editable_steps_and_shortcuts(qtbot):
-    from minflux_viewer.ui.confocal_mapping_dialog import ConfocalManualAlignmentDialog
+    from minflux_viewer.ui.analysis.confocal_mapping_dialog import ConfocalManualAlignmentDialog
 
     dialog = ConfocalManualAlignmentDialog(
         _candidate(),
@@ -304,7 +304,7 @@ def test_manual_alignment_dialog_uses_editable_steps_and_shortcuts(qtbot):
 
 
 def test_manual_alignment_dialog_toggles_shared_channel_preview(qtbot):
-    from minflux_viewer.ui.confocal_mapping_dialog import ConfocalManualAlignmentDialog
+    from minflux_viewer.ui.analysis.confocal_mapping_dialog import ConfocalManualAlignmentDialog
 
     ch1 = _candidate(name="Ch1 {12}", raw_index=3)
     ch2 = _candidate(name="Ch2 {12}", raw_index=4)
@@ -363,7 +363,7 @@ def test_manual_alignment_dialog_toggles_shared_channel_preview(qtbot):
 def test_manual_alignment_steps_persist_via_owner_state(qtbot):
     from PyQt6.QtWidgets import QWidget
 
-    from minflux_viewer.ui.confocal_mapping_dialog import ConfocalManualAlignmentDialog
+    from minflux_viewer.ui.analysis.confocal_mapping_dialog import ConfocalManualAlignmentDialog
 
     class State:
         def __init__(self):
@@ -398,7 +398,7 @@ def test_manual_mapping_groups_same_geometry_channels_into_one_dialog(monkeypatc
 
     from PyQt6.QtWidgets import QDialog
 
-    from minflux_viewer.ui import confocal_mapping_dialog as module
+    from minflux_viewer.ui.analysis import confocal_mapping_dialog as module
 
     ch1 = _candidate(name="Ch1 {12}", raw_index=3)
     ch2 = _candidate(name="Ch2 {12}", raw_index=4)

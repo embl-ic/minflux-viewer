@@ -47,10 +47,11 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from minflux_viewer.ui.common.dataset_binding import event_index
+
 from ...analysis import bead_drift as bd
 from ...analysis import drift_correction as dc
 from ...colors import component_colors
-from ...ui.dataset_binding import event_index
 
 METHOD_BEADS = "beads"
 METHOD_WINDOWS = "windows"
@@ -629,7 +630,7 @@ class DriftCorrectionWindow(QDialog):
                 coords = coords - shift
             return bead_corr, windows, coords
 
-        from ...ui.background_tasks import BackgroundTask, shared_thread_pool
+        from minflux_viewer.ui.common.background_tasks import BackgroundTask, shared_thread_pool
 
         task = BackgroundTask(work, description="Drift correction", category="analysis")
         task.signals.stage.connect(lambda text: self._state.status_progress(text))
@@ -890,10 +891,10 @@ class DriftCorrectionWindow(QDialog):
             except Exception:
                 pass
         if self._task is not None:
-            from ...ui.background_tasks import retire_background_tasks
+            from minflux_viewer.ui.common.background_tasks import retire_background_tasks
             retire_background_tasks([self._task])
             self._task = None
-        from ...ui.qt_lifecycle import dispose_plot_widgets
+        from minflux_viewer.ui.common.qt_lifecycle import dispose_plot_widgets
 
         # Retire the pyqtgraph plots last, after this window's own teardown.
         dispose_plot_widgets(self)

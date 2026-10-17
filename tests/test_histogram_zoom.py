@@ -57,7 +57,7 @@ def _make_dataset(n_loc=N_LOC, n_itr=N_ITR):
 
 def _histogram(ds=None):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     ds = ds if ds is not None else _make_dataset()
     state = AppState()
@@ -85,7 +85,7 @@ class _Pt:
 # ---------------------------------------------------------------------------
 
 def test_zoom_modes_are_the_three_documented_ones_in_order():
-    from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     assert HistogramWindow.ZOOM_MODES == ("horizontal", "vertical", "unconstrained")
 
@@ -474,7 +474,7 @@ def test_zoom_actually_puts_more_bars_in_the_zoomed_window(qapp):
     did before. Re-running Freedman-Diaconis on the subset does not achieve this
     (it trades span for sample size), so this guards the bin-count targeting."""
     _qapp()
-    from minflux_viewer.ui.histogram_window import _ZOOM_MIN_BINS
+    from minflux_viewer.ui.plots.histogram_window import _ZOOM_MIN_BINS
 
     win, _ds, _state = _histogram()
     try:
@@ -498,7 +498,7 @@ def test_zoom_actually_puts_more_bars_in_the_zoomed_window(qapp):
 def _spiky_histogram():
     """A sharp spike on a broad tail — the shape that broke the bin choice."""
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     rng = np.random.default_rng(0)
     vals = np.concatenate([rng.normal(1000.0, 1.5, 8000),
@@ -538,7 +538,7 @@ def test_zoom_over_a_sharp_peak_does_not_flood_the_window_with_bars(qapp):
     ~2000 sub-pixel bars that were 91% count<=1 — a solid block of equal-height
     bars once the height auto-fitted to them."""
     _qapp()
-    from minflux_viewer.ui.histogram_window import _ZOOM_MAX_BINS
+    from minflux_viewer.ui.plots.histogram_window import _ZOOM_MAX_BINS
 
     win, _ds, _state = _spiky_histogram()
     try:
@@ -561,7 +561,7 @@ def test_zoom_bin_width_ignores_freedman_diaconis(qapp):
     """The window bin count is set by the target rule alone, so it is
     predictable regardless of the shape inside the window."""
     _qapp()
-    from minflux_viewer.ui.histogram_window import _ZOOM_MAX_BINS
+    from minflux_viewer.ui.plots.histogram_window import _ZOOM_MAX_BINS
 
     win, _ds, _state = _spiky_histogram()
     try:
@@ -589,7 +589,7 @@ def test_zoom_bin_width_scales_with_the_zoom_and_respects_the_bin_cap(qapp):
         # Even an absurdly tiny span cannot ask for more than the 4096-bin cap
         # over the full range, or the spin box would advertise a width the
         # renderer silently clamps away.
-        from minflux_viewer.ui.histogram_window import _MAX_HISTOGRAM_BINS
+        from minflux_viewer.ui.plots.histogram_window import _MAX_HISTOGRAM_BINS
 
         tiny = win._zoom_bin_width(1499.999, 1500.001)
         full_span = 2000.0 - 1000.0

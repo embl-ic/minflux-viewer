@@ -80,7 +80,7 @@ def _state(*datasets, overlay=False):
 
 
 def _window(app, state, idx=0):
-    from minflux_viewer.ui.tracking_window import TrackingWindow
+    from minflux_viewer.ui.plots.tracking_window import TrackingWindow
 
     win = TrackingWindow(state, dataset_idx=idx)
     win.resize(760, 680)
@@ -96,10 +96,7 @@ def _window(app, state, idx=0):
 def test_worker_snapshot_coordinates_match_the_existing_display_path() -> None:
     from minflux_viewer.core.loader import attr_values_1d
     from minflux_viewer.core.roi_crop import display_coords
-    from minflux_viewer.ui.tracking_window import (
-        _snapshot_coordinates,
-        _TrackChannelSnapshot,
-    )
+    from minflux_viewer.ui.plots.tracking_window import _snapshot_coordinates, _TrackChannelSnapshot
 
     ds = _tracking_dataset(n_tracks=2, per=5)
     ds.set_z_scaling_factor(0.73, source="test")
@@ -515,7 +512,7 @@ def test_a_playback_step_stays_in_frame_budget(_qt_app):
 def test_track_indexing_runs_off_the_gui_thread(_qt_app, monkeypatch):
     import threading
 
-    from minflux_viewer.ui import tracking_window as module
+    from minflux_viewer.ui.plots import tracking_window as module
 
     gui_thread = threading.get_ident()
     worker_threads = []
@@ -536,7 +533,7 @@ def test_track_indexing_runs_off_the_gui_thread(_qt_app, monkeypatch):
 
 
 def test_new_generation_cancels_and_rejects_an_older_result(_qt_app, monkeypatch):
-    from minflux_viewer.ui.tracking_window import TrackingWindow
+    from minflux_viewer.ui.plots.tracking_window import TrackingWindow
 
     queued = []
     monkeypatch.setattr(
@@ -583,7 +580,7 @@ def test_new_generation_cancels_and_rejects_an_older_result(_qt_app, monkeypatch
 
 
 def test_result_from_a_replaced_dataset_object_is_rejected(_qt_app, monkeypatch):
-    from minflux_viewer.ui.tracking_window import TrackingWindow
+    from minflux_viewer.ui.plots.tracking_window import TrackingWindow
 
     queued = []
     monkeypatch.setattr(
@@ -613,7 +610,7 @@ def test_result_from_a_replaced_dataset_object_is_rejected(_qt_app, monkeypatch)
 
 
 def test_closing_cancels_and_detaches_a_pending_track_build(_qt_app, monkeypatch):
-    from minflux_viewer.ui.tracking_window import TrackingWindow
+    from minflux_viewer.ui.plots.tracking_window import TrackingWindow
 
     queued = []
     monkeypatch.setattr(

@@ -1,7 +1,7 @@
 """
 ``mfv.run`` -- running work off the GUI thread.
 
-Wraps ``ui/background_tasks.py`` and ``core/task_registry.py``, so a plugin's
+Wraps ``ui/common/background_tasks.py`` and ``core/task_registry.py``, so a plugin's
 computation appears in *Help > Monitor Tasks* with a working *Request stop*
 button without the plugin author doing anything.
 
@@ -88,7 +88,7 @@ class TaskHandle:
 
     def cancel(self) -> None:
         """Request a stop. Cooperative -- see the module docstring."""
-        from ..ui.background_tasks import request_task_cancel
+        from minflux_viewer.ui.common.background_tasks import request_task_cancel
 
         request_task_cancel(self._task)
 
@@ -124,7 +124,7 @@ class Run(Namespace):
         passed to *on_done*. A failure is passed to *on_error*, or reported to
         the Log if none is given -- it is never swallowed silently.
         """
-        from ..ui.background_tasks import BackgroundTask, shared_thread_pool
+        from minflux_viewer.ui.common.background_tasks import BackgroundTask, shared_thread_pool
 
         if not callable(fn):
             raise ApiError("run.background() needs a callable.")

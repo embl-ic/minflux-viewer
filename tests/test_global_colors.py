@@ -27,9 +27,9 @@ from minflux_viewer.colors import (
     solid_color_names,
 )
 from minflux_viewer.core.app_state import AppState, _merge, default_prefs
-from minflux_viewer.ui.global_color_dialog import GlobalColorDialog
+from minflux_viewer.ui.dialogs.global_color_dialog import GlobalColorDialog
 from minflux_viewer.ui.main_window import MainWindow
-from minflux_viewer.ui.preferences_dialog import PreferencesDialog
+from minflux_viewer.ui.settings.preferences_dialog import PreferencesDialog
 
 
 def test_every_configurable_color_is_rgba():
@@ -405,7 +405,7 @@ def test_update_button_matches_the_add_to_custom_colors_button(qtbot):
 
 def test_wrap_columns_closes_gaps_before_it_wraps():
     """Pure rule behind every wrapping grid: spacing gives way before a row does."""
-    from minflux_viewer.ui.global_color_dialog import wrap_columns
+    from minflux_viewer.ui.dialogs.global_color_dialog import wrap_columns
 
     kwargs = dict(preferred=5, max_spacing=32, min_spacing=8)
     wide = wrap_columns(600, 55, **kwargs)
@@ -586,7 +586,7 @@ def test_roi_palette_follows_state_and_keeps_custom_stroke():
     """Draft / entry / selected each take their own colors."""
     from minflux_viewer.colors import pg_safe_hex, viewer_color
     from minflux_viewer.core.roi import RoiRecord
-    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+    from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
     state = AppState()
     state.prefs = default_prefs()
@@ -894,7 +894,7 @@ def test_typing_a_hex_code_recolours_the_preview_at_once(qtbot):
     from PyQt6.QtGui import QColor
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.global_color_dialog import GlobalColorDialog
+    from minflux_viewer.ui.dialogs.global_color_dialog import GlobalColorDialog
 
     dialog = GlobalColorDialog(AppState())
     qtbot.addWidget(dialog)

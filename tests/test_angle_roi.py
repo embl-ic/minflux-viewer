@@ -6,7 +6,7 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
-from minflux_viewer.ui.roi_overlay import _angle_abc
+from minflux_viewer.ui.roi.roi_overlay import _angle_abc
 
 
 @pytest.mark.parametrize("a,b,c,expected", [

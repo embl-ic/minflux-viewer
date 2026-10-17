@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from minflux_viewer.ui.z_scaling_widgets import (
+from minflux_viewer.ui.widgets.z_scaling_widgets import (
     Z_SCALING_ARROW_STEP,
     Z_SCALING_DECIMALS,
     Z_SCALING_WHEEL_STEP,
@@ -32,7 +32,7 @@ def test_display_keeps_four_decimals_but_never_shows_fewer_than_two():
 def test_dataset_information_dims_row_shows_the_value_that_was_set():
     np = pytest.importorskip("numpy")
     from minflux_viewer.core.dataset import build_localization_dataset
-    from minflux_viewer.ui.data_window import _dims_text
+    from minflux_viewer.ui.tools.data_window import _dims_text
 
     rng = np.random.default_rng(0)
     n = 200

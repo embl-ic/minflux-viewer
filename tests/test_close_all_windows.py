@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import QWidget
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
-from minflux_viewer.ui import modeless
+from minflux_viewer.ui.common import modeless
 from minflux_viewer.ui.main_window import MainWindow
 
 

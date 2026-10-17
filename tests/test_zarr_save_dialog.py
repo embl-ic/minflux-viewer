@@ -8,7 +8,7 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtWidgets import QDialog
 
-from minflux_viewer.ui.zarr_save_dialog import ZarrSaveFileDialog
+from minflux_viewer.ui.dialogs.zarr_save_dialog import ZarrSaveFileDialog
 
 
 @pytest.fixture(scope="module")

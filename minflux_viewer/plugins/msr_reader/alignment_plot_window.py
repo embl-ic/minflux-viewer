@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from minflux_viewer.ui.plot_format import apply_spatial_y_direction
+from minflux_viewer.ui.plots.plot_format import apply_spatial_y_direction
 
 
 class AlignmentPlotWindow(QDialog):
@@ -634,7 +634,7 @@ class AlignmentPlotWindow(QDialog):
             self.resid_table.itemChanged.disconnect(self._on_bead_item_changed)
         except (TypeError, RuntimeError):
             pass
-        from minflux_viewer.ui.qt_lifecycle import close_plot_widgets
+        from minflux_viewer.ui.common.qt_lifecycle import close_plot_widgets
 
         close_plot_widgets(self.plot)
         super().closeEvent(event)

@@ -389,8 +389,8 @@ def _open_result_window(ctx, result, label):
     That window already exists in the application, so it is reused rather than
     reimplemented here.
     """
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
-    from minflux_viewer.ui.modeless import show_modeless
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.common.modeless import show_modeless
 
     owner = ctx.require_main_window()
     window = HlyBStagedWindow(result, title=label, owner=owner)

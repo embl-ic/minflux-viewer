@@ -118,6 +118,6 @@ def test_the_kind_is_the_point_of_the_return_value():
 def test_plane_columns_match_the_drawing_convention():
     """These are the columns a drawn record's geometry is stored in
     (roi_overlay._PLANE_PLOT_AXES); they must not drift apart."""
-    from minflux_viewer.ui.roi_overlay import _PLANE_PLOT_AXES
+    from minflux_viewer.ui.roi.roi_overlay import _PLANE_PLOT_AXES
 
     assert PLANE_COLUMNS == _PLANE_PLOT_AXES

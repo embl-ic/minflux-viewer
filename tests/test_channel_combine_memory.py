@@ -20,7 +20,7 @@ def _dataset(name):
 
 
 def test_remembered_choices_stay_with_their_datasets(qapp):
-    from minflux_viewer.ui.channel_combine_dialog import ChannelCombineDialog
+    from minflux_viewer.ui.analysis.channel_combine_dialog import ChannelCombineDialog
 
     state = AppState()
     for name in ("A", "B", "C"):

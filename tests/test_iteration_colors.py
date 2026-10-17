@@ -43,8 +43,8 @@ def test_palette_is_ten_stops_of_jet_running_blue_to_red():
 
 def test_ten_stops_map_one_to_one_onto_a_ten_iteration_sequence():
     """The bug: eleven stops skipped one and mis-coloured the last iterations."""
-    from minflux_viewer.ui.attribute_window import _iter_color as attribute_color
-    from minflux_viewer.ui.histogram_window import _iter_color as histogram_color
+    from minflux_viewer.ui.plots.attribute_window import _iter_color as attribute_color
+    from minflux_viewer.ui.plots.histogram_window import _iter_color as histogram_color
 
     prefs = default_prefs()
     palette = _colors(prefs)
@@ -59,7 +59,7 @@ def test_ten_stops_map_one_to_one_onto_a_ten_iteration_sequence():
 
 def test_the_legend_swatch_is_the_colour_the_series_is_drawn_in():
     """Legend and plot read the same table, so they cannot disagree."""
-    from minflux_viewer.ui.attribute_window import _iter_color as attribute_color
+    from minflux_viewer.ui.plots.attribute_window import _iter_color as attribute_color
 
     prefs = default_prefs()
     drawn = [attribute_color(prefs, k, 10) for k in range(10)]
@@ -69,7 +69,7 @@ def test_the_legend_swatch_is_the_colour_the_series_is_drawn_in():
 
 def test_a_short_sequence_still_spans_the_whole_ramp():
     """Three iterations must not sit in one corner of the ramp."""
-    from minflux_viewer.ui.attribute_window import _iter_color as attribute_color
+    from minflux_viewer.ui.plots.attribute_window import _iter_color as attribute_color
 
     prefs = default_prefs()
     assert attribute_color(prefs, 0, 4) == BLUE
@@ -187,7 +187,7 @@ def test_normalisation_alone_also_refuses_to_carry_a_retired_stop():
 def test_the_colour_dialog_lists_exactly_the_stops_that_exist(qtbot):
     pytest.importorskip("PyQt6")
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.global_color_dialog import GlobalColorDialog
+    from minflux_viewer.ui.dialogs.global_color_dialog import GlobalColorDialog
 
     dialog = GlobalColorDialog(AppState())
     qtbot.addWidget(dialog)

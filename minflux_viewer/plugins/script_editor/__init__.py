@@ -9,7 +9,7 @@ def _launch(state, parent=None) -> None:
     if parent is not None and hasattr(parent, "show_script_editor"):
         parent.show_script_editor()
         return
-    from ...ui.script_editor_window import ScriptEditorWindow
+    from minflux_viewer.ui.tools.script_editor_window import ScriptEditorWindow
 
     win = ScriptEditorWindow(state, parent=parent)
     win.show()

@@ -18,7 +18,8 @@ from .. import PluginEntry, register
 
 
 def _launch(state, parent=None) -> None:
-    from ...ui.modeless import show_modeless
+    from minflux_viewer.ui.common.modeless import show_modeless
+
     from .drift_correction_window import DriftCorrectionWindow
 
     win = DriftCorrectionWindow(state, owner=parent)

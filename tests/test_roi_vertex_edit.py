@@ -84,7 +84,7 @@ def test_add_vertex_on_3d_polyline_via_projection_interpolates_depth():
     """The controller projects stored (3-D) vertices to the view plane, finds the
     nearest edge there, then interpolates the STORED points at the same t — so the
     new vertex lands on the projected edge and its depth is interpolated."""
-    from minflux_viewer.ui.roi_overlay import project_points
+    from minflux_viewer.ui.roi.roi_overlay import project_points
 
     stored = [[0, 0, 10], [100, 0, 20]]          # z 10 -> 20
     projected = project_points(stored, "XY")     # drops z -> [[0,0],[100,0]]
@@ -95,7 +95,7 @@ def test_add_vertex_on_3d_polyline_via_projection_interpolates_depth():
 
 
 def test_delete_vertex_via_projection_targets_nearest_projected_vertex():
-    from minflux_viewer.ui.roi_overlay import project_points
+    from minflux_viewer.ui.roi.roi_overlay import project_points
 
     stored = [[0, 0, 10], [50, 0, 12], [100, 0, 20]]
     projected = project_points(stored, "XY")

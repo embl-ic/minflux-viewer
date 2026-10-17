@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from minflux_viewer.ui.modeless import open_position
+from minflux_viewer.ui.common.modeless import open_position
 
 SCREEN = (0, 0, 1920, 1040)
 
@@ -104,7 +104,7 @@ def test_the_cascade_only_runs_when_no_side_is_free():
 
 def test_two_render_sized_windows_tile_across_a_1920_screen():
     """They fit -- 880 + 12 + 880 = 1772 -- but only if neither is centred."""
-    from minflux_viewer.ui.modeless import tile_pair
+    from minflux_viewer.ui.common.modeless import tile_pair
 
     pair = tile_pair(SCREEN, (880, 920), (880, 920), anchor=(0, 60))
     assert pair is not None
@@ -119,7 +119,7 @@ def test_a_portrait_monitor_tiles_the_pair_top_and_bottom():
     """⚠ This machine has one: 1440x2560. Two 880-wide windows do not fit
     across it and two 920-tall ones do fit down it, so a horizontal-only rule
     left the second window half over the first with room going unused."""
-    from minflux_viewer.ui.modeless import tile_pair
+    from minflux_viewer.ui.common.modeless import tile_pair
 
     portrait = (-1440, -572, 0, 1940)                 # a real second monitor
     pair = tile_pair(portrait, (880, 951), (880, 951), anchor=(-1159, 193))
@@ -133,13 +133,13 @@ def test_a_portrait_monitor_tiles_the_pair_top_and_bottom():
 
 def test_a_pair_that_fits_neither_way_is_not_tiled():
     """Shuffling two windows for no gain is worse than leaving one placed."""
-    from minflux_viewer.ui.modeless import tile_pair
+    from minflux_viewer.ui.common.modeless import tile_pair
 
     assert tile_pair(SCREEN, (1200, 800), (1200, 800)) is None
 
 
 def test_tiling_clamps_a_window_taller_than_the_screen():
-    from minflux_viewer.ui.modeless import tile_pair
+    from minflux_viewer.ui.common.modeless import tile_pair
 
     (_ax, ay), (_bx, by) = tile_pair(SCREEN, (400, 1400), (400, 300),
                                      anchor=(0, 900))
@@ -166,7 +166,7 @@ def _window(app, x, y, w=300, h=200, title=""):
 
 
 def test_place_clear_of_moves_the_window_off_its_neighbour(_app):
-    from minflux_viewer.ui.modeless import place_clear_of
+    from minflux_viewer.ui.common.modeless import place_clear_of
 
     first = _window(_app, 200, 200)
     second = _window(_app, 200, 200)
@@ -244,7 +244,7 @@ def test_the_neighbour_moves_too_when_that_is_what_makes_both_visible(_app):
     placing only the newcomer leaves it half over the one already there with
     nowhere better to go: 880 + 12 + 880 fits across 1920, but not starting from
     the middle. With exactly one window in the way, both are tiled."""
-    from minflux_viewer.ui.modeless import place_clear_of
+    from minflux_viewer.ui.common.modeless import place_clear_of
 
     first, second = _stub_pair(_app)
     before = first.rect()
@@ -259,7 +259,7 @@ def test_a_crowded_desktop_is_not_rearranged(_app):
     """Tiling is for one window in the way, not for reflowing a session."""
     from PyQt6.QtCore import QRect
 
-    from minflux_viewer.ui.modeless import place_clear_of
+    from minflux_viewer.ui.common.modeless import place_clear_of
 
     screen = _StubScreen(QRect(0, 0, 1920, 1040))
     a = _StubWindow(520, 60, 880, 920, screen)
@@ -277,7 +277,7 @@ def test_a_neighbour_the_user_has_placed_is_never_moved(_app):
     worse bug than the overlap this is fixing."""
     from PyQt6.QtCore import QRect
 
-    from minflux_viewer.ui.modeless import place_clear_of
+    from minflux_viewer.ui.common.modeless import place_clear_of
 
     screen = _StubScreen(QRect(0, 0, 1920, 1040))
     parked = _StubWindow(30, 40, 880, 920, screen)      # nowhere near centred
@@ -289,7 +289,7 @@ def test_a_neighbour_the_user_has_placed_is_never_moved(_app):
 
 
 def test_looks_unplaced_knows_the_default_spot():
-    from minflux_viewer.ui.modeless import looks_unplaced
+    from minflux_viewer.ui.common.modeless import looks_unplaced
 
     avail = (0, 0, 1920, 1040)
     centred = (520, 60, 520 + 880, 60 + 920)
@@ -303,7 +303,7 @@ def test_a_pair_too_wide_to_tile_leaves_the_neighbour_alone(_app):
     """Nothing is gained by moving both, so nothing is moved but the newcomer."""
     from PyQt6.QtCore import QRect
 
-    from minflux_viewer.ui.modeless import place_clear_of
+    from minflux_viewer.ui.common.modeless import place_clear_of
 
     screen = _StubScreen(QRect(0, 0, 1200, 1040))
     first = _StubWindow(150, 60, 900, 920, screen)
@@ -318,7 +318,7 @@ def test_place_clear_of_survives_a_dead_or_hidden_neighbour(_app):
     """Registries are handed over whole, so they carry closed windows."""
     from PyQt6.QtWidgets import QWidget
 
-    from minflux_viewer.ui.modeless import place_clear_of
+    from minflux_viewer.ui.common.modeless import place_clear_of
 
     hidden = QWidget()
     hidden.resize(300, 200)                      # never shown

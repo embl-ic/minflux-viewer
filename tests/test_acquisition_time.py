@@ -272,7 +272,7 @@ def test_msr_writer_omits_the_attr_when_there_is_no_date(tmp_path):
 # Dataset Information rows
 # ---------------------------------------------------------------------------
 def test_data_window_row_order_and_labels():
-    from minflux_viewer.ui.data_window import _info_rows
+    from minflux_viewer.ui.tools.data_window import _info_rows
 
     rows = _info_rows(_make_ds())
     labels = [label for label, _ in rows]
@@ -290,8 +290,8 @@ def test_dims_row_double_click_sets_z_scaling_factor(qtbot, monkeypatch):
     from PyQt6.QtTest import QTest
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui import data_window as data_window_module
-    from minflux_viewer.ui.data_window import DataWindow
+    from minflux_viewer.ui.tools import data_window as data_window_module
+    from minflux_viewer.ui.tools.data_window import DataWindow
 
     ds = _make_ds()
     state = AppState()
@@ -327,8 +327,8 @@ def test_transformed_row_double_click_edits_canonical_overlay_matrix(qtbot, monk
 
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.core.overlay import matrix4_to_xy3
-    from minflux_viewer.ui import transform_dialog as transform_module
-    from minflux_viewer.ui.data_window import DataWindow
+    from minflux_viewer.ui.roi import transform_dialog as transform_module
+    from minflux_viewer.ui.tools.data_window import DataWindow
 
     ds = _make_ds()
     original_matrix = np.eye(4)
@@ -392,8 +392,8 @@ def test_transform_dialog_manual_align_button_uses_state_request(qtbot, monkeypa
     from PyQt6.QtWidgets import QDialog
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui import transform_dialog as transform_module
-    from minflux_viewer.ui.data_window import DataWindow
+    from minflux_viewer.ui.roi import transform_dialog as transform_module
+    from minflux_viewer.ui.tools.data_window import DataWindow
 
     ds = _make_ds()
     matrix = np.eye(4)
@@ -437,7 +437,7 @@ def test_transform_dialog_manual_align_button_uses_state_request(qtbot, monkeypa
 
 
 def test_transform_description_reports_xyz_direction_and_screen_rotation():
-    from minflux_viewer.ui.transform_dialog import transform_description
+    from minflux_viewer.ui.roi.transform_dialog import transform_description
 
     matrix = np.eye(4)
     matrix[:2, :2] = ((0.0, -1.0), (1.0, 0.0))
@@ -453,7 +453,7 @@ def test_transform_description_reports_xyz_direction_and_screen_rotation():
 
 
 def test_transform_dialog_edits_full_xyz_matrix_and_preserves_record(qtbot):
-    from minflux_viewer.ui.transform_dialog import TransformDialog
+    from minflux_viewer.ui.roi.transform_dialog import TransformDialog
 
     matrix = np.eye(4)
     matrix[0, 3] = 5.0

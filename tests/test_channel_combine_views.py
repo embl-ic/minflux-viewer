@@ -119,7 +119,7 @@ def _dataset(name: str, offset: float):
 def test_combining_in_place_leaves_one_overlay_view_not_several(_app, monkeypatch):
     """The reported bug: after combining, one dataset was still shown in its
     original standalone render view."""
-    import minflux_viewer.ui.channel_combine_dialog as mod
+    import minflux_viewer.ui.analysis.channel_combine_dialog as mod
 
     class _Dialog:
         def __init__(self, *a, **k):

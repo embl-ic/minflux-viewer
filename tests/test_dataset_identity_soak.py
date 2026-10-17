@@ -61,12 +61,12 @@ def _index_of(win, ds) -> int:
 
 
 def _dataset_windows():
-    from minflux_viewer.ui.attribute_window import AttributeWindow
-    from minflux_viewer.ui.data_window import DataWindow
-    from minflux_viewer.ui.filter_dialog import FilterDialog
-    from minflux_viewer.ui.histogram_window import HistogramWindow
-    from minflux_viewer.ui.render_window import RenderWindow
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.dialogs.filter_dialog import FilterDialog
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
+    from minflux_viewer.ui.tools.data_window import DataWindow
 
     kinds = (AttributeWindow, DataWindow, FilterDialog, HistogramWindow,
              RenderWindow, ScatterWindow)

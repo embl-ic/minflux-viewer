@@ -6,7 +6,7 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from minflux_viewer.ui.background_tasks import (
+from minflux_viewer.ui.common.background_tasks import (
     BackgroundTask,
     retire_background_tasks,
     shared_thread_pool,
@@ -55,7 +55,7 @@ def test_named_thread_pools_are_process_owned_and_reused() -> None:
 
 
 def test_cancelled_particle_task_emits_terminal_signal_without_work() -> None:
-    from minflux_viewer.ui.particle_average_dialog import _AverageTask
+    from minflux_viewer.ui.analysis.particle_average_dialog import _AverageTask
 
     called = []
     cancelled = []

@@ -12,7 +12,7 @@ def test_alignment_panel_uses_owner_units_persists_steps_and_drags(qtbot):
     from PyQt6.QtGui import QKeyEvent, QMouseEvent
     from PyQt6.QtWidgets import QLabel, QWidget
 
-    from minflux_viewer.ui.overlay_alignment import OverlayAlignmentPanel
+    from minflux_viewer.ui.rendering.overlay_alignment import OverlayAlignmentPanel
 
     class Owner(QWidget):
         def __init__(self):
@@ -164,9 +164,9 @@ def test_alignment_panel_uses_owner_units_persists_steps_and_drags(qtbot):
 
 
 def test_overlay_rotation_sign_tracks_displayed_y_direction():
-    from minflux_viewer.ui.ortho_view import ORTHO_AXIS
-    from minflux_viewer.ui.render_window import RenderWindow
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
+    from minflux_viewer.ui.rendering.ortho_view import ORTHO_AXIS
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     render = SimpleNamespace(_should_invert_y_axis=lambda: True)
     assert RenderWindow._overlay_alignment_rotation_sign(render) == -1.0
@@ -254,8 +254,8 @@ def test_dataset_information_manual_align_routes_to_existing_overlay_view():
 
 
 def test_render_and_scatter_public_manual_align_entry_uses_channel_handler():
-    from minflux_viewer.ui.render_window import RenderWindow
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     keys = {3: DatasetKey(4), 8: DatasetKey(9)}
     state = SimpleNamespace(key_at=keys.get)
@@ -272,7 +272,7 @@ def test_render_and_scatter_public_manual_align_entry_uses_channel_handler():
 
 
 def test_scatter_alignment_nudge_is_physical_nm_and_steps_persist():
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     class State:
         def __init__(self):
@@ -329,7 +329,7 @@ def test_scatter_alignment_nudge_is_physical_nm_and_steps_persist():
 
 
 def test_render_alignment_nudge_is_physical_nm_and_steps_persist():
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     class State:
         def __init__(self):
@@ -386,7 +386,7 @@ def test_overlay_alignment_preferences_migrate_from_pixel_defaults():
 
 
 def test_render_alignment_preview_uses_bilinear_warp_and_frozen_levels(monkeypatch):
-    from minflux_viewer.ui import render_window as module
+    from minflux_viewer.ui.rendering import render_window as module
 
     captured = {}
 
@@ -424,7 +424,7 @@ def test_render_alignment_preview_uses_bilinear_warp_and_frozen_levels(monkeypat
 
 
 def test_render_alignment_preview_caps_resolution_and_uses_uint8_composite():
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     scalar = np.zeros((3, 1200, 800), dtype=np.float32)
     preview = RenderWindow._alignment_preview_scalar(scalar)
@@ -449,7 +449,7 @@ def test_render_alignment_preview_caps_resolution_and_uses_uint8_composite():
 
 
 def test_render_alignment_preview_rebuilds_only_dirty_channel():
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     class ImageView:
         def __init__(self):
@@ -497,7 +497,7 @@ def test_render_alignment_preview_rebuilds_only_dirty_channel():
 
 
 def test_render_alignment_preview_coalesces_requests_and_marks_changed_channel():
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     class Timer:
         def __init__(self):
@@ -528,7 +528,7 @@ def test_render_alignment_preview_coalesces_requests_and_marks_changed_channel()
 
 
 def test_advanced_render_routes_composition_and_tile_results_behind_preview():
-    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+    from minflux_viewer.ui.rendering.precision_render_window import PrecisionRenderWindow
 
     requests = []
     owner = SimpleNamespace(
@@ -561,7 +561,7 @@ def test_advanced_render_routes_composition_and_tile_results_behind_preview():
 
 
 def test_render_alignment_cancel_dispatches_to_viewer_exact_compositor():
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     calls = []
     owner = SimpleNamespace(

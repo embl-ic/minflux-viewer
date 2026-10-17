@@ -5,11 +5,8 @@ from PyQt6.QtCore import QPoint, QPointF, Qt
 from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtWidgets import QApplication, QDialogButtonBox
 
-from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
-from minflux_viewer.ui.render_window import (
-    SigmaDialog,
-    fixed_gaussian_sigma_limits_nm,
-)
+from minflux_viewer.ui.rendering.precision_render_window import PrecisionRenderWindow
+from minflux_viewer.ui.rendering.render_window import SigmaDialog, fixed_gaussian_sigma_limits_nm
 
 
 def _app() -> QApplication:

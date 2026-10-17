@@ -226,7 +226,7 @@ def test_filter_preset_json_rejects_itr_data_key():
 
 def _make_dialog_with_dataset():
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.filter_dialog import FilterDialog
+    from minflux_viewer.ui.dialogs.filter_dialog import FilterDialog
 
     mfx, _ = _make_m2410_per_iter_efo()
     ds = loader.load_from_mfx_array(mfx, "iter")
@@ -270,7 +270,7 @@ def test_dialog_restores_persisted_filter_rows(qapp):
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.filter_dialog import (
+    from minflux_viewer.ui.dialogs.filter_dialog import (
         _COL_ATTR,
         _COL_ENABLED,
         _COL_MAX,

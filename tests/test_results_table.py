@@ -20,7 +20,7 @@ def facade(qt_app):
     owner = QWidget()
     api.bind_main_window(owner)
     yield api, owner
-    from minflux_viewer.ui.modeless import close_modeless
+    from minflux_viewer.ui.common.modeless import close_modeless
 
     close_modeless(owner)
     api.close_windows()

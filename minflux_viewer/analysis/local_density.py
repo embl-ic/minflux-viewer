@@ -521,7 +521,7 @@ def _convolve_radius_counts(counts: np.ndarray, kernel: np.ndarray) -> np.ndarra
 
 
 
-_MOVED_SYMBOLS = {'run_local_density': 'minflux_viewer.ui.density_analysis:run_local_density', 'LocalDensityOptionsDialog': 'minflux_viewer.ui.density_analysis:LocalDensityOptionsDialog', 'LocalDensityImageWindow': 'minflux_viewer.ui.density_analysis:LocalDensityImageWindow'}
+_MOVED_SYMBOLS = {'run_local_density': 'minflux_viewer.ui.analysis.density_analysis:run_local_density', 'LocalDensityOptionsDialog': 'minflux_viewer.ui.analysis.density_analysis:LocalDensityOptionsDialog', 'LocalDensityImageWindow': 'minflux_viewer.ui.analysis.density_analysis:LocalDensityImageWindow'}
 
 def __getattr__(name):
     return resolve_moved_symbol(__name__, name, _MOVED_SYMBOLS)

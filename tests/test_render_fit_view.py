@@ -38,7 +38,7 @@ def _pump(app, n=5):
 
 def test_wide_dataset_shows_full_x_on_open(_qt_app):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     ds = _wide_dataset()
     x0d, x1d = float(ds.loc_nm[:, 0].min()), float(ds.loc_nm[:, 0].max())
@@ -67,7 +67,7 @@ def test_reshow_does_not_reset_user_zoom(_qt_app):
     """The one-shot fit must not fire again when an existing window is re-raised, or
     it would throw away the user's zoom/pan."""
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     ds = _wide_dataset()
     state = AppState()

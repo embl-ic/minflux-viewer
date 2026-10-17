@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 import pytest
 
 
@@ -30,7 +29,7 @@ def _menubar(_app):
 
 
 def test_collect_paths_shortcuts_and_cleaning(_app):
-    from minflux_viewer.ui.command_finder import collect_commands
+    from minflux_viewer.ui.tools.command_finder import collect_commands
     mb, _ = _menubar(_app)
     by_text = {e.text: e for e in collect_commands(mb)}
     assert by_text["Open"].path == "File"                  # '&' + '…' stripped
@@ -42,7 +41,7 @@ def test_collect_paths_shortcuts_and_cleaning(_app):
 
 
 def test_filter_ranks_name_above_path(_app):
-    from minflux_viewer.ui.command_finder import collect_commands, filter_commands
+    from minflux_viewer.ui.tools.command_finder import collect_commands, filter_commands
     entries = collect_commands(_menubar(_app)[0])
     res = filter_commands(entries, "npc")                  # 'NPC' only in the path
     assert res and res[0].text == "2D"
@@ -52,7 +51,7 @@ def test_filter_ranks_name_above_path(_app):
 
 
 def test_dialog_filters_lists_and_runs(_app):
-    from minflux_viewer.ui.command_finder import CommandFinderDialog, collect_commands
+    from minflux_viewer.ui.tools.command_finder import CommandFinderDialog, collect_commands
     mb, acts = _menubar(_app)
     fired = {"n": 0}
     acts["npc2d"].triggered.connect(lambda *_: fired.__setitem__("n", fired["n"] + 1))
@@ -69,7 +68,7 @@ def test_dialog_filters_lists_and_runs(_app):
 
 
 def test_excluded_menu_and_action_are_skipped(_app):
-    from minflux_viewer.ui.command_finder import collect_commands
+    from minflux_viewer.ui.tools.command_finder import collect_commands
     mb, _ = _menubar(_app)
     file_menu = mb.actions()[0].menu()                     # "File"
     # An "Open Recent" submenu of file paths, flagged for exclusion.
@@ -89,14 +88,14 @@ def test_excluded_menu_and_action_are_skipped(_app):
 
 
 def test_source_of_callable(_app):
-    from minflux_viewer.ui.command_finder import source_of
+    from minflux_viewer.ui.tools.command_finder import source_of
     src = source_of(source_of)                             # a function in this module
-    assert src.endswith("command_finder.py")
-    assert src in ("minflux_viewer/ui/command_finder.py", "command_finder.py")
+    assert src.endswith("tools/command_finder.py")
+    assert src in ("minflux_viewer/ui/tools/command_finder.py", "tools/command_finder.py")
 
 
 def test_collect_reads_command_source_property(_app):
-    from minflux_viewer.ui.command_finder import collect_commands
+    from minflux_viewer.ui.tools.command_finder import collect_commands
     mb, acts = _menubar(_app)
     acts["npc2d"].setProperty("command_source", "minflux_viewer/plugins/npc.py")
     by_text = {e.text: e for e in collect_commands(mb)}
@@ -105,7 +104,7 @@ def test_collect_reads_command_source_property(_app):
 
 
 def test_dialog_four_columns_source_and_shortcut(_app):
-    from minflux_viewer.ui.command_finder import CommandFinderDialog, collect_commands
+    from minflux_viewer.ui.tools.command_finder import CommandFinderDialog, collect_commands
     mb, acts = _menubar(_app)
     acts["npc2d"].setProperty("command_source", "plugins/npc.py")
     dlg = CommandFinderDialog(lambda: collect_commands(mb))
@@ -126,15 +125,15 @@ def test_reopen_after_close_and_builtin_source(_app):
     deleted C++ object; built-in commands show their tagged source; opening clears
     the toolbar field."""
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.command_finder import collect_commands
     from minflux_viewer.ui.main_window import MainWindow
+    from minflux_viewer.ui.tools.command_finder import collect_commands
 
     state = AppState()
     state.prefs.setdefault("data", {}).update({"show_data_info": False, "show_render": False})
     win = MainWindow(state)
     try:
         by_text = {e.text: e for e in collect_commands(win.menuBar())}
-        assert by_text["Convolution"].source.endswith("conv_segmentation_dialog.py")
+        assert by_text["Convolution"].source.endswith("analysis/conv_segmentation_dialog.py")
 
         win._toolbar_search.setText("convolution")
         win._open_command_finder("convolution")
@@ -165,7 +164,7 @@ def _real_window(_app):
 def test_keyword_search_finds_nested_commands(_app):
     """Operational leaves are findable by tag/synonym words that are in neither the
     command name nor its menu path (the whole point of command_meta keywords)."""
-    from minflux_viewer.ui.command_finder import collect_commands, filter_commands
+    from minflux_viewer.ui.tools.command_finder import collect_commands, filter_commands
     win = _real_window(_app)
     try:
         entries = collect_commands(win.menuBar())
@@ -222,7 +221,7 @@ def test_view_menu_offers_one_attribute_plot_and_no_renderer_switches(_app):
 def test_every_menu_command_is_traceable_to_a_source(_app):
     """Every indexed menu command (recent-files etc. are excluded from the index)
     resolves to an implementing module — the user's 'no untraceable command' rule."""
-    from minflux_viewer.ui.command_finder import collect_commands
+    from minflux_viewer.ui.tools.command_finder import collect_commands
     win = _real_window(_app)
     try:
         blank = [
@@ -262,7 +261,7 @@ def test_no_command_sits_in_two_menus(_app):
 
 
 def test_dialog_does_not_run_disabled(_app):
-    from minflux_viewer.ui.command_finder import CommandFinderDialog, collect_commands
+    from minflux_viewer.ui.tools.command_finder import CommandFinderDialog, collect_commands
     mb, acts = _menubar(_app)
     fired = {"n": 0}
     acts["off"].triggered.connect(lambda *_: fired.__setitem__("n", fired["n"] + 1))

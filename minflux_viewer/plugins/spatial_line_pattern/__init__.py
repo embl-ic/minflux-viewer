@@ -66,7 +66,8 @@ def _launch(state, parent=None) -> None:
         )
         return
 
-    from ...ui.modeless import show_modeless
+    from minflux_viewer.ui.common.modeless import show_modeless
+
     from .spatial_line_pattern_window import SpatialLinePatternWindow
 
     win = SpatialLinePatternWindow(state, idx, view, owner=parent)

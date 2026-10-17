@@ -24,7 +24,7 @@ def _ds(name):
 
 def test_overlay_compose_is_per_channel(_qt_app):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     state = AppState()
     state.prefs.setdefault("data", {}).update({"show_data_info": False, "show_render": False})

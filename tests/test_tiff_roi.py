@@ -276,7 +276,7 @@ def test_overlay_converts_between_pixels_and_display_nm(_app):
     conversion, so a ROI must survive set → read unchanged."""
     import pyqtgraph as pg
 
-    from minflux_viewer.ui.image_roi_overlay import ImageRoiOverlay
+    from minflux_viewer.ui.rendering.image_roi_overlay import ImageRoiOverlay
 
     view = pg.PlotWidget()
     overlay = ImageRoiOverlay(view.getPlotItem().vb, pixel_size=(20.0, 50.0))
@@ -301,7 +301,7 @@ def test_overlay_holds_only_one_roi(_app):
     """The image format stores one active ROI, so drawing replaces."""
     import pyqtgraph as pg
 
-    from minflux_viewer.ui.image_roi_overlay import ImageRoiOverlay
+    from minflux_viewer.ui.rendering.image_roi_overlay import ImageRoiOverlay
 
     view = pg.PlotWidget()
     vb = view.getPlotItem().vb
@@ -324,7 +324,7 @@ def test_live_msr_acquisition_roi_is_toggleable_and_read_only(tmp_path, _app):
     """
     from PyQt6.QtCore import Qt
 
-    from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+    from minflux_viewer.ui.tools.tiff_viewer_window import TiffViewerWindow
 
     source = TiffImageSource(_write(tmp_path, "live_source.tif"))
     source_roi = rectangle_roi(3, 4, 12, 9, name="MINFLUX acquisition ROI")
@@ -365,7 +365,7 @@ def test_live_msr_acquisition_roi_is_toggleable_and_read_only(tmp_path, _app):
 
 
 def test_roi_reopened_from_tiff_remains_an_ordinary_editable_roi(tmp_path, _app):
-    from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+    from minflux_viewer.ui.tools.tiff_viewer_window import TiffViewerWindow
 
     source = TiffImageSource(
         _write(tmp_path, "exported.tif", rectangle_roi(3, 4, 12, 9, name="acq"))
@@ -409,7 +409,7 @@ def test_dragging_with_a_tool_armed_draws_and_replaces_the_roi(_app):
     image format holding one ROI — replace whatever was there."""
     import pyqtgraph as pg
 
-    from minflux_viewer.ui.image_roi_overlay import ImageRoiOverlay
+    from minflux_viewer.ui.rendering.image_roi_overlay import ImageRoiOverlay
 
     view = pg.PlotWidget()
     view.resize(400, 400)
@@ -457,7 +457,7 @@ def test_overlay_restores_the_viewbox_drag_on_detach(_app):
     after the window closes would keep a dead window's handler alive."""
     import pyqtgraph as pg
 
-    from minflux_viewer.ui.image_roi_overlay import ImageRoiOverlay
+    from minflux_viewer.ui.rendering.image_roi_overlay import ImageRoiOverlay
 
     view = pg.PlotWidget()
     vb = view.getPlotItem().vb

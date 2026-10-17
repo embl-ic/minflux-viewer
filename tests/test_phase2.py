@@ -1057,7 +1057,7 @@ class TestPreferencesDialog:
 
     def test_roundtrip_preserves_values(self):
         from minflux_viewer.core.app_state import AppState
-        from minflux_viewer.ui.preferences_dialog import PreferencesDialog
+        from minflux_viewer.ui.settings.preferences_dialog import PreferencesDialog
 
         state = AppState()
         # Modify a couple of values
@@ -1095,7 +1095,7 @@ class TestPreferencesDialog:
 
     def test_reset_current_tab_only_resets_visible(self):
         from minflux_viewer.core.app_state import DEFAULT_PREFS, AppState
-        from minflux_viewer.ui.preferences_dialog import PreferencesDialog
+        from minflux_viewer.ui.settings.preferences_dialog import PreferencesDialog
 
         state = AppState()
         # Change values in TWO tabs
@@ -1111,7 +1111,7 @@ class TestPreferencesDialog:
 
     def test_attribute_checkboxes_show_descriptions_on_hover(self):
         from minflux_viewer.core.app_state import AppState
-        from minflux_viewer.ui.preferences_dialog import PreferencesDialog
+        from minflux_viewer.ui.settings.preferences_dialog import PreferencesDialog
 
         dlg = PreferencesDialog(AppState())
 
@@ -1120,7 +1120,7 @@ class TestPreferencesDialog:
         assert "local density" in dlg._computed_attribute_checks["den"].toolTip()
 
     def test_recent_files_dialog_remove_and_clear(self):
-        from minflux_viewer.ui.preferences_dialog import RecentFilesDialog
+        from minflux_viewer.ui.settings.preferences_dialog import RecentFilesDialog
 
         paths = [f"/data/f{i}.mat" for i in range(6)]
         dlg = RecentFilesDialog(paths)
@@ -1308,7 +1308,7 @@ class TestLutColormaps:
             pytest.skip("No display available for Qt tests")
         from PyQt6.QtWidgets import QApplication
         _app = QApplication.instance() or QApplication(sys.argv)
-        from minflux_viewer.ui.lut_dialog import make_colormap
+        from minflux_viewer.ui.dialogs.lut_dialog import make_colormap
         cmap = make_colormap("Red")
         lut = cmap.getLookupTable(0.0, 1.0, 256)
         # Bottom is black, top is pure red
@@ -1324,7 +1324,7 @@ class TestLutColormaps:
             pytest.skip("No display available for Qt tests")
         from PyQt6.QtWidgets import QApplication
         _app = QApplication.instance() or QApplication(sys.argv)
-        from minflux_viewer.ui.lut_dialog import make_colormap
+        from minflux_viewer.ui.dialogs.lut_dialog import make_colormap
         normal   = make_colormap("Red", invert=False).getLookupTable(0., 1., 256)
         inverted = make_colormap("Red", invert=True ).getLookupTable(0., 1., 256)
         # Inverted should be the reverse

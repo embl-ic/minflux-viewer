@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
-from minflux_viewer.ui.render_window import pure_color_ramp
+from minflux_viewer.ui.rendering.render_window import pure_color_ramp
 
 _LUM = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 

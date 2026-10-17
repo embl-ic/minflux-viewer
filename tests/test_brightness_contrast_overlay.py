@@ -86,7 +86,7 @@ def _overlay_state():
 
 
 def test_bc_edits_only_active_channel(_qt_app):
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     state = _overlay_state()
     win = RenderWindow(state, dataset_idx=0)
@@ -126,7 +126,7 @@ def test_render_overlay_rows_show_swatch_and_bold_active_channel(_qt_app):
     from PyQt6.QtWidgets import QComboBox, QLabel, QScrollArea, QVBoxLayout, QWidget
 
     from minflux_viewer.core.dataset_key import DatasetKey
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     keys = [DatasetKey(1), DatasetKey(2)]
     datasets = [SimpleNamespace(state={}), SimpleNamespace(state={})]
@@ -206,7 +206,7 @@ def _lum(rgb) -> float:
 
 def test_luminance_clamp_keeps_dark_darkens_bright():
     """Pure logic (no Qt): readable colors pass through, near-white ones darken."""
-    from minflux_viewer.ui.render_window import _luminance_clamped
+    from minflux_viewer.ui.rendering.render_window import _luminance_clamped
 
     assert _luminance_clamped((1.0, 0.0, 0.0)) == (1.0, 0.0, 0.0)   # red unchanged
     assert _luminance_clamped((0.0, 0.0, 1.0)) == (0.0, 0.0, 1.0)   # blue unchanged
@@ -220,7 +220,7 @@ def test_luminance_clamp_keeps_dark_darkens_bright():
 
 def test_bc_single_dataset_resolves_channel_zero(_qt_app):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     state = AppState()
     state.add_dataset(_make_ds("solo.mat", 3))

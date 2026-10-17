@@ -6,7 +6,7 @@ from minflux_viewer.analysis.voronoi_density import build_projected_voronoi_fiel
 from minflux_viewer.core.dataset import build_localization_dataset
 from minflux_viewer.core.simulate import simulate_localizations
 from minflux_viewer.core.spatial_grid import SpatialGrid
-from minflux_viewer.ui.precision_render import (
+from minflux_viewer.ui.rendering.precision_render import (
     RENDER_METHOD_BASIC,
     RENDER_METHOD_BICUBIC,
     RENDER_METHOD_BILINEAR,
@@ -369,7 +369,7 @@ def test_requested_anisotropic_npc_stress_dataset_renders():
 
 def test_precision_render_window_smoke(qtbot):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+    from minflux_viewer.ui.rendering.precision_render_window import PrecisionRenderWindow
 
     rng = np.random.default_rng(7)
     state = AppState()
@@ -462,8 +462,8 @@ def test_precision_render_ortho_side_panes_follow_selected_method(qtbot, monkeyp
     methods and allowed both side panes to remain smoothed Gaussians.
     """
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.ortho_view import ORTHO_AXIS
-    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+    from minflux_viewer.ui.rendering.ortho_view import ORTHO_AXIS
+    from minflux_viewer.ui.rendering.precision_render_window import PrecisionRenderWindow
 
     rng = np.random.default_rng(73)
     n = 80
@@ -569,8 +569,8 @@ def test_precision_render_ortho_side_panes_follow_selected_method(qtbot, monkeyp
 def test_ortho_render_jobs_have_isolated_cancellable_generations(qtbot):
     """Cancelling side work must suppress stale results without clearing XY."""
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.ortho_view import ORTHO_AXIS
-    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+    from minflux_viewer.ui.rendering.ortho_view import ORTHO_AXIS
+    from minflux_viewer.ui.rendering.precision_render_window import PrecisionRenderWindow
 
     rng = np.random.default_rng(97)
     n = 180
@@ -624,7 +624,7 @@ def test_ortho_render_jobs_have_isolated_cancellable_generations(qtbot):
 
 def test_precision_render_window_voronoi_supports_xy_xz_yz(qtbot):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+    from minflux_viewer.ui.rendering.precision_render_window import PrecisionRenderWindow
 
     rng = np.random.default_rng(18)
     n = 300
@@ -674,8 +674,8 @@ def test_voronoi_3d_action_opens_volume_with_true_3d_method(qtbot, monkeypatch):
     from PyQt6.QtWidgets import QWidget
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui import volume_window as volume_module
-    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+    from minflux_viewer.ui.rendering import volume_window as volume_module
+    from minflux_viewer.ui.rendering.precision_render_window import PrecisionRenderWindow
 
     rng = np.random.default_rng(19)
     state = AppState()

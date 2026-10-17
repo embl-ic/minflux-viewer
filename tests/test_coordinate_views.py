@@ -61,7 +61,7 @@ def test_script_coordinates_remain_independent_writable_copies(state, transforme
 
 def test_preferences_apply_live_budget_and_cancel_preserves_it(state, monkeypatch):
     from minflux_viewer.core import app_state
-    from minflux_viewer.ui.preferences_dialog import PreferencesDialog
+    from minflux_viewer.ui.settings.preferences_dialog import PreferencesDialog
 
     class Settings:
         def __init__(self, *args):
@@ -98,8 +98,8 @@ def test_render_scatter_roi_share_display_views_through_pan_zoom_and_edits(state
     from PyQt6.QtCore import QCoreApplication, QEvent
 
     from minflux_viewer.core.roi_crop import display_coords
-    from minflux_viewer.ui.render_window import RenderWindow
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     ds = dataset()
     ds.state["overlay_transform"] = {"matrix_3x3": [[1, 0, 20], [0, 1, 0], [0, 0, 1]]}

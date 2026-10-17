@@ -14,9 +14,7 @@ from minflux_viewer.analysis.shape_segmentation import (  # noqa: E402
     ShapeInstance,
     instance_mask,
 )
-from minflux_viewer.ui.shape_segmentation_dialog import (  # noqa: E402
-    ShapeSegmentationWindow,
-)
+from minflux_viewer.ui.analysis.shape_segmentation_dialog import ShapeSegmentationWindow
 
 PIXEL = 20.0
 _KEEP_ALIVE: list = []
@@ -187,7 +185,7 @@ def test_the_filed_polygons_are_regions_and_vertex_editable(app, monkeypatch):
     """The two properties that make manual correction work at all."""
     from minflux_viewer.core.roi import record_to_points
     from minflux_viewer.core.roi_selection import roi_region_mask
-    from minflux_viewer.ui.roi_overlay import _VERTEX_EDIT_TYPES
+    from minflux_viewer.ui.roi.roi_overlay import _VERTEX_EDIT_TYPES
 
     win, state, _owner = _window(app, monkeypatch, _two_touching_cells())
     try:
@@ -292,7 +290,7 @@ def test_a_failing_fit_is_reported_in_the_status_not_raised(app, monkeypatch):
         def _boom(*args, **kwargs):
             raise RuntimeError("synthetic failure")
         monkeypatch.setattr(
-            "minflux_viewer.ui.shape_segmentation_dialog.ss.segment_shapes_in_points",
+            "minflux_viewer.ui.analysis.shape_segmentation_dialog.ss.segment_shapes_in_points",
             _boom)
         win._detect()                      # must not propagate
         assert "synthetic failure" in win._status_label.text()
@@ -302,9 +300,9 @@ def test_a_failing_fit_is_reported_in_the_status_not_raised(app, monkeypatch):
 
 
 def test_command_metadata_points_at_the_dialog():
-    from minflux_viewer.ui.command_meta import COMMAND_META
+    from minflux_viewer.ui.common.command_meta import COMMAND_META
     meta = COMMAND_META["actionSegShapeModel"]
-    assert meta.source.endswith("shape_segmentation_dialog.py")
+    assert meta.source.endswith("analysis/shape_segmentation_dialog.py")
     assert "capsule" in meta.keywords
     assert "ecoli" in meta.keywords
 
@@ -336,7 +334,7 @@ def test_menu_entry_and_roi_handoff_through_the_real_main_window(app, monkeypatc
             "minflux_viewer.core.roi_crop.display_xy_filtered", lambda ds: xy)
 
         win.actionSegShapeModel.trigger()
-        from minflux_viewer.ui.shape_segmentation_dialog import ShapeSegmentationWindow
+        from minflux_viewer.ui.analysis.shape_segmentation_dialog import ShapeSegmentationWindow
         dialogs = [w for w in win._modeless_windows
                    if isinstance(w, ShapeSegmentationWindow)]
         assert len(dialogs) == 1
@@ -372,7 +370,7 @@ def test_a_filed_contour_can_be_corrected_by_hand_and_committed(app, monkeypatch
     import pyqtgraph as pg
 
     from minflux_viewer.core.roi import RoiStore
-    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+    from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
     win, state, _owner = _window(app, monkeypatch, _two_touching_cells())
     try:
@@ -541,7 +539,7 @@ def test_localizations_are_shown_before_any_fit(app, monkeypatch):
 
 
 def test_the_point_cloud_is_thinned_for_display_only(app, monkeypatch):
-    from minflux_viewer.ui import shape_segmentation_dialog as mod
+    from minflux_viewer.ui.analysis import shape_segmentation_dialog as mod
 
     xy = _one_offset_cell()
     monkeypatch.setattr(mod, "_MAX_SCATTER_POINTS", 500)

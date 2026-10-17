@@ -241,7 +241,7 @@ def test_only_the_directory_store_takes_a_processing_only_update():
     This is the one behavioural difference between the two Zarr formats, and it
     is why both exist.
     """
-    from minflux_viewer.ui.save_export_controller import _save_as_format
+    from minflux_viewer.ui.controllers.save_export_controller import _save_as_format
 
     source = inspect.getsource(_save_as_format)
     assert 'self._zarr_overwrite_mode(path) if fmt == "zarr" else "replace"' in source

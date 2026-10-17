@@ -21,8 +21,8 @@ from PyQt6.QtWidgets import QAbstractItemView, QDialog
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
-from minflux_viewer.ui.dataset_manager import DatasetManager
 from minflux_viewer.ui.main_window import MainWindow
+from minflux_viewer.ui.tools.dataset_manager import DatasetManager
 
 
 @pytest.fixture(scope="module")
@@ -219,7 +219,7 @@ def test_duplicate_all_makes_one_copy_per_selected_dataset(manager):
 def test_combine_puts_only_the_selected_datasets_in_the_dialog(manager, monkeypatch):
     """The Combine dialog opened from a multi-selection lists exactly those
     datasets, pre-checked — not the whole loaded list."""
-    from minflux_viewer.ui.channel_combine_dialog import ChannelCombineDialog
+    from minflux_viewer.ui.analysis.channel_combine_dialog import ChannelCombineDialog
 
     seen: dict = {}
 
@@ -231,7 +231,7 @@ def test_combine_puts_only_the_selected_datasets_in_the_dialog(manager, monkeypa
             return QDialog.DialogCode.Rejected
 
     monkeypatch.setattr(
-        "minflux_viewer.ui.channel_combine_dialog.ChannelCombineDialog", _Dialog)
+        "minflux_viewer.ui.analysis.channel_combine_dialog.ChannelCombineDialog", _Dialog)
 
     mgr, win = manager
     _select(mgr, [1, 3])
@@ -246,7 +246,7 @@ def test_combine_puts_only_the_selected_datasets_in_the_dialog(manager, monkeypa
 def test_combine_needs_at_least_two_selected(manager, monkeypatch):
     opened = []
     monkeypatch.setattr(
-        "minflux_viewer.ui.channel_combine_dialog.ChannelCombineDialog",
+        "minflux_viewer.ui.analysis.channel_combine_dialog.ChannelCombineDialog",
         lambda *a, **k: opened.append(True))
     monkeypatch.setattr(
         "PyQt6.QtWidgets.QMessageBox.information",
@@ -263,7 +263,7 @@ def test_combine_needs_at_least_two_selected(manager, monkeypatch):
 def test_full_combine_dialog_is_unchanged(_app):
     """``dataset_indices=None`` keeps the old behaviour: every dataset listed,
     the first two pre-checked."""
-    from minflux_viewer.ui.channel_combine_dialog import ChannelCombineDialog
+    from minflux_viewer.ui.analysis.channel_combine_dialog import ChannelCombineDialog
 
     state = AppState()
     for i in range(3):

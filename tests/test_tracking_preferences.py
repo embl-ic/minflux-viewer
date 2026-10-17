@@ -8,7 +8,7 @@ pytest.importorskip("PyQt6")
 
 
 from minflux_viewer.core.app_state import DEFAULT_PREFS, AppState
-from minflux_viewer.ui.preferences_dialog import PreferencesDialog
+from minflux_viewer.ui.settings.preferences_dialog import PreferencesDialog
 
 
 @pytest.fixture(scope="module")

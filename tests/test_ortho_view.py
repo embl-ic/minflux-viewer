@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 import numpy as np
 import pytest
 
@@ -14,7 +13,7 @@ from PyQt6.QtWidgets import QMenu
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
-from minflux_viewer.ui.ortho_view import (
+from minflux_viewer.ui.rendering.ortho_view import (
     AXIS_COLUMNS,
     ORTHO_AXIS,
     ORTHO_AXIS_COLUMNS,
@@ -51,7 +50,7 @@ def _state(**kwargs) -> AppState:
 
 
 def _window(app, state, *, size=(900, 900)):
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     win = ScatterWindow(state, dataset_idx=0)
     win.resize(*size)
@@ -800,7 +799,7 @@ def test_the_crop_lifts_while_showing_everything(_qt_app):
 def test_the_display_budget_is_spent_on_rows_in_view(_qt_app):
     """The crop is applied before decimation, not after: otherwise zooming
     into a sparse region would thin away the few points it contains."""
-    from minflux_viewer.ui import scatter_window as sw
+    from minflux_viewer.ui.plots import scatter_window as sw
 
     state = _slab_state()
     win = _window(_qt_app, state)
@@ -1453,7 +1452,7 @@ def test_no_rotation_mode_is_a_handedness_flipped_twin(_qt_app, letter, held):
     """Each mode must look at the data from the same side as one of the fixed
     panes -- otherwise a point's position reads mirrored between the fourth pane
     and its neighbours, which is the hard-to-spot failure."""
-    from minflux_viewer.ui.ortho_rotation import ROTATION_AXES
+    from minflux_viewer.ui.rendering.ortho_rotation import ROTATION_AXES
 
     win = _window(_qt_app, _state())
     try:
@@ -1573,7 +1572,7 @@ def test_the_play_button_swaps_a_triangle_for_a_solid_square(_qt_app):
     font on every state change would compound, so the glyph would shrink away
     over a few play/pause cycles.
     """
-    from minflux_viewer.ui.scatter_window import (
+    from minflux_viewer.ui.plots.scatter_window import (
         _ROTATION_GLYPH_SCALE,
         _ROTATION_PAUSE_GLYPH,
         _ROTATION_PLAY_GLYPH,

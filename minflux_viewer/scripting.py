@@ -51,7 +51,7 @@ class _AdHocPlotWindow:
         from PyQt6.QtCore import Qt
         from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
-        from .ui.plot_format import plot_widget
+        from minflux_viewer.ui.plots.plot_format import plot_widget
 
         self.widget = QWidget()
         self.widget.setWindowTitle(title)
@@ -313,7 +313,7 @@ class MinfluxViewerFacade:
         self._windows.clear()
         for task in list(self._tasks):
             try:
-                from .ui.background_tasks import request_task_cancel
+                from minflux_viewer.ui.common.background_tasks import request_task_cancel
 
                 request_task_cancel(task)
             except Exception:

@@ -252,7 +252,7 @@ def test_pool_multiple_particle_set_files(tmp_path):
 
 def test_load_dialog_spec_carries_multiple_paths(tmp_path, qapp):
     pytest.importorskip("PyQt6")
-    from minflux_viewer.ui.particle_average_dialog import ParticleLoadDialog
+    from minflux_viewer.ui.analysis.particle_average_dialog import ParticleLoadDialog
 
     dlg = ParticleLoadDialog()
     try:

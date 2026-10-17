@@ -11,8 +11,8 @@ def _launch(state, parent=None) -> None:
         show_recorder()
         return
 
-    from ...ui.macro_recorder_window import MacroRecorderWindow
-    from ...ui.modeless import show_modeless
+    from minflux_viewer.ui.common.modeless import show_modeless
+    from minflux_viewer.ui.tools.macro_recorder_window import MacroRecorderWindow
 
     show_modeless(MacroRecorderWindow(state, owner=parent), parent)
 

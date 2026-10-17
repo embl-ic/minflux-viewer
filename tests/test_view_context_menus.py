@@ -72,7 +72,7 @@ def _submenu(menu: QMenu, title: str) -> QMenu:
 
 
 def test_scatter_view_menu_order(monkeypatch, _qt_app):
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     win = ScatterWindow(_state(), dataset_idx=0)
     try:
@@ -103,7 +103,7 @@ def test_scatter_view_menu_order(monkeypatch, _qt_app):
 
 
 def test_scatter_color_by_starts_with_idx(monkeypatch, _qt_app):
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = _state()
     win = ScatterWindow(state, dataset_idx=0)
@@ -128,7 +128,7 @@ def test_scatter_color_by_starts_with_idx(monkeypatch, _qt_app):
 def test_scatter_colorbar_is_linked_floating_and_persistent(
     monkeypatch, _qt_app,
 ):
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = _state()
     win = ScatterWindow(state, dataset_idx=0)
@@ -239,7 +239,7 @@ def test_scatter_colorbar_is_linked_floating_and_persistent(
 
 
 def test_render_view_menu_contains_axis_and_grid_in_order(monkeypatch, _qt_app):
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     win = RenderWindow(_state(), dataset_idx=0)
     try:
@@ -259,8 +259,8 @@ def test_render_view_menu_contains_axis_and_grid_in_order(monkeypatch, _qt_app):
 
 
 def test_render_colormap_menu_matches_scatter(monkeypatch, _qt_app):
-    from minflux_viewer.ui.render_window import RenderWindow
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     render = RenderWindow(_state(), dataset_idx=0)
     scatter = ScatterWindow(_state(), dataset_idx=0)
@@ -286,7 +286,7 @@ def test_render_colormap_menu_matches_scatter(monkeypatch, _qt_app):
 
 def test_saved_custom_solid_lut_still_renders(_qt_app):
     """Removing the menu entry must not break views already saved with one."""
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     render = RenderWindow(_state(), dataset_idx=0)
     try:
@@ -305,8 +305,8 @@ def test_saved_custom_solid_lut_still_renders(_qt_app):
 
 
 def test_custom_solid_registry_reaches_render_and_scatter_menus(monkeypatch, _qt_app):
-    from minflux_viewer.ui.render_window import RenderWindow
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     state = _state()
     colors = copy.deepcopy(state.prefs["colors"])
@@ -329,7 +329,7 @@ def test_custom_solid_registry_reaches_render_and_scatter_menus(monkeypatch, _qt
 
 
 def test_scatter_plot_style_applies_and_persists(_qt_app):
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = _state()
     win = ScatterWindow(state, dataset_idx=0)

@@ -262,7 +262,7 @@ def test_particle_averaging_runs_serially_when_the_budget_is_spent(
 def test_a_declared_pool_takes_its_size_from_the_policy(qapp):
     import os
 
-    from minflux_viewer.ui.background_tasks import shared_thread_pool
+    from minflux_viewer.ui.common.background_tasks import shared_thread_pool
 
     pool = shared_thread_pool("render-tiles")
     assert pool.maxThreadCount() == execution.pool_size("render-tiles") \

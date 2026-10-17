@@ -19,7 +19,7 @@ def qt_app(qapp):
 def editor_window(qt_app):
     from minflux_viewer import scripting
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.script_editor_window import ScriptEditorWindow
+    from minflux_viewer.ui.tools.script_editor_window import ScriptEditorWindow
 
     state = AppState()
     state.save_prefs = lambda: None

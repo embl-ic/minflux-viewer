@@ -8,7 +8,7 @@ pytest.importorskip("pyqtgraph")
 
 
 from minflux_viewer.core.roi import RoiRecord, record_from_imagej, record_to_imagej
-from minflux_viewer.ui.roi_overlay import PointMarkerItem, item_to_geometry
+from minflux_viewer.ui.roi.roi_overlay import PointMarkerItem, item_to_geometry
 
 
 @pytest.fixture(scope="module")

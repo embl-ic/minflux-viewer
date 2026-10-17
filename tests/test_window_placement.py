@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from minflux_viewer.ui.modeless import beside_position, corner_position
+from minflux_viewer.ui.common.modeless import beside_position, corner_position
 
 # 1920×1080 available screen (exclusive right/bottom).
 AVAIL = (0, 0, 1920, 1080)

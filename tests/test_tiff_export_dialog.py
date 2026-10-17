@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
-from minflux_viewer.ui.tiff_export_dialog import TiffExportDialog
+from minflux_viewer.ui.dialogs.tiff_export_dialog import TiffExportDialog
 
 
 def _dialog(qtbot, default_path):

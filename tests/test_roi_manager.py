@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import QWidget
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.roi import RoiRecord, RoiStore
-from minflux_viewer.ui.roi_overlay import RoiOverlayController
+from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
 
 @pytest.fixture(scope="module")
@@ -36,7 +36,7 @@ def _rect(name, x=0.0, stroke="#ffff00"):
 # ------------------------------------------------------------- arrow navigation
 
 def test_selecting_does_not_rebuild_manager_list(_app):
-    from minflux_viewer.ui.roi_manager import RoiManagerWindow
+    from minflux_viewer.ui.roi.roi_manager import RoiManagerWindow
 
     st = AppState()
     for i in range(3):
@@ -56,7 +56,7 @@ def test_selecting_does_not_rebuild_manager_list(_app):
 def test_arrow_keys_navigate_and_switch_active_roi(_app):
     from PyQt6.QtTest import QTest
 
-    from minflux_viewer.ui.roi_manager import RoiManagerWindow
+    from minflux_viewer.ui.roi.roi_manager import RoiManagerWindow
 
     st = AppState()
     for i in range(3):
@@ -199,7 +199,7 @@ def test_reclicking_the_selected_entry_restores_it(_app):
     selection signal for that click, so the Manager catches it on the viewport."""
     from PyQt6.QtTest import QTest
 
-    from minflux_viewer.ui.roi_manager import RoiManagerWindow
+    from minflux_viewer.ui.roi.roi_manager import RoiManagerWindow
 
     st = AppState()
     ctrl = _ctrl(_app, store=st.rois)
@@ -229,7 +229,7 @@ def test_reclicking_the_selected_entry_restores_it(_app):
 def test_update_commits_the_edit_and_it_then_survives_selection(_app):
     """Update writes the edited copy into the record; after that the geometry is
     the stored one, so a later selection no longer moves it back."""
-    from minflux_viewer.ui.roi_manager import RoiManagerWindow
+    from minflux_viewer.ui.roi.roi_manager import RoiManagerWindow
 
     st = AppState()
     ctrl = _ctrl(_app, store=st.rois)

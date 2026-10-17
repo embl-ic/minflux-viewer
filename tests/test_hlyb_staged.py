@@ -384,7 +384,7 @@ def test_sensitivity_spread_is_reported_as_the_preferred_uncertainty():
 
 
 def test_staged_dialog_round_trips_scientific_defaults(qtbot):
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedDialog
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedDialog
 
     dialog = HlyBStagedDialog(defaults=Staged3DConfig())
     qtbot.addWidget(dialog)
@@ -398,7 +398,7 @@ def test_staged_dialog_round_trips_scientific_defaults(qtbot):
 
 
 def test_staged_result_window_is_modeless_and_states_non_distance_claim(qtbot):
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
 
     result = _synthetic_result(with_dimers=True)
     window = HlyBStagedWindow(result, title="synthetic")
@@ -438,8 +438,8 @@ def test_analysis_is_one_direct_plugins_menu_item(qtbot):
     """
     from minflux_viewer import plugins
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.command_finder import collect_commands, filter_commands
     from minflux_viewer.ui.main_window import MainWindow
+    from minflux_viewer.ui.tools.command_finder import collect_commands, filter_commands
 
     plugins.ensure_loaded()
     entries = [entry for entry in plugins.available()
@@ -905,7 +905,7 @@ def test_pair_enumeration_never_crosses_a_component_or_the_radius():
 
 def test_band_selector_highlights_exactly_the_pairs_its_bins_count(qtbot):
     """Dragging the band is the indicator: links, rings and count must agree."""
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
 
     result = _synthetic_result(with_dimers=True)
     window = HlyBStagedWindow(result, title="synthetic")
@@ -955,7 +955,7 @@ def test_band_selector_highlights_exactly_the_pairs_its_bins_count(qtbot):
 
 
 def test_band_handles_settle_on_bin_edges_so_the_range_matches_the_pairs(qtbot):
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
 
     result = _synthetic_result(with_dimers=True)
     window = HlyBStagedWindow(result, title="synthetic")
@@ -973,7 +973,7 @@ def test_band_handles_settle_on_bin_edges_so_the_range_matches_the_pairs(qtbot):
 
 def test_toggling_a_layer_keeps_the_pan_and_zoom(qtbot):
     """The project rule for filter toggles applies to this view too."""
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
 
     result = _synthetic_result(with_dimers=True)
     window = HlyBStagedWindow(result, title="synthetic")
@@ -994,7 +994,7 @@ def test_toggling_a_layer_keeps_the_pan_and_zoom(qtbot):
 
 
 def test_site_and_trace_hover_report_the_consolidation(qtbot):
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
 
     result = _synthetic_result(with_dimers=True)
     window = HlyBStagedWindow(result, title="synthetic")
@@ -1014,7 +1014,7 @@ def test_site_and_trace_hover_report_the_consolidation(qtbot):
 
 
 def test_consolidation_links_join_each_trace_to_its_site(qtbot):
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
 
     result = _synthetic_result(with_dimers=True)
     window = HlyBStagedWindow(result, title="synthetic")
@@ -1068,7 +1068,7 @@ def test_pooled_trace_to_site_map_is_offset_per_cell_and_never_spans_two():
 
 def test_roi_2d_result_opens_the_window_with_working_pair_links(qtbot):
     """The interactive view has to work in the 2-D ROI mode too."""
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
 
     rng = np.random.default_rng(31)
     centres = np.column_stack([
@@ -1110,7 +1110,7 @@ def test_roi_2d_result_opens_the_window_with_working_pair_links(qtbot):
 
 def test_window_survives_a_result_with_nothing_to_pair(qtbot):
     """One site, or none, must open the window rather than raise."""
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
 
     result = _synthetic_result(with_dimers=True)
     for n in (0, 1):
@@ -1173,7 +1173,7 @@ def test_plugin_opens_the_window_non_owned_and_retained(qtbot):
 
 def test_two_bands_highlight_two_populations_independently(qtbot):
     """One selection near 14 nm and one near 25 nm, each in its own colour."""
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
 
     result = _synthetic_result(with_dimers=True)
     window = HlyBStagedWindow(result, title="synthetic")
@@ -1224,7 +1224,7 @@ def test_two_bands_highlight_two_populations_independently(qtbot):
 
 
 def test_second_band_opens_clear_of_the_first_and_mirrors_onto_the_excess(qtbot):
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
 
     result = _synthetic_result(with_dimers=True)
     cfg = result["config"]
@@ -1247,7 +1247,7 @@ def test_second_band_opens_clear_of_the_first_and_mirrors_onto_the_excess(qtbot)
 
 
 def test_each_band_rings_its_own_sites_and_labels_carry_its_colour(qtbot):
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
 
     result = _synthetic_result(with_dimers=True)
     window = HlyBStagedWindow(result, title="synthetic")

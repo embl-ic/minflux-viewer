@@ -88,7 +88,7 @@ def test_extract_ome_xml_is_scoped_to_one_image():
 
 
 def test_z_range_sum_uses_a_wide_integer_accumulator():
-    from minflux_viewer.ui.tiff_viewer_window import _sum_z_planes
+    from minflux_viewer.ui.tools.tiff_viewer_window import _sum_z_planes
 
     class Source:
         def __init__(self, stack):
@@ -134,7 +134,7 @@ def test_imagej_tiff_resolution_and_spacing_are_calibration(tmp_path):
 
 def test_metadata_viewer_formats_xml_as_table_and_pretty_raw(_app):
     from minflux_viewer.core.tiff_source import MetadataDocument
-    from minflux_viewer.ui.metadata_viewer import MetadataDocumentView
+    from minflux_viewer.ui.tools.metadata_viewer import MetadataDocumentView
 
     view = MetadataDocumentView([
         MetadataDocument(
@@ -209,7 +209,7 @@ def test_tiff_series_count_and_switch(tmp_path, _app):
 def test_tiff_viewer_z_range_controls_sum_selected_planes(tmp_path, _app):
     tifffile = pytest.importorskip("tifffile")
     from minflux_viewer.core.tiff_source import TiffImageSource
-    from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+    from minflux_viewer.ui.tools.tiff_viewer_window import TiffViewerWindow
 
     stack = np.full((5, 4, 6), 30_000, dtype=np.int16)
     path = tmp_path / "z_stack.tif"
@@ -241,7 +241,7 @@ def test_large_tiff_z_projection_runs_on_background_pool(tmp_path, _app):
 
     tifffile = pytest.importorskip("tifffile")
     from minflux_viewer.core.tiff_source import TiffImageSource
-    from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+    from minflux_viewer.ui.tools.tiff_viewer_window import TiffViewerWindow
 
     stack = np.stack(
         [
@@ -273,7 +273,7 @@ def test_large_tiff_z_projection_runs_on_background_pool(tmp_path, _app):
 def test_tiff_viewer_keeps_series_selector_left_of_xyz_controls(tmp_path, _app):
     tifffile = pytest.importorskip("tifffile")
     from minflux_viewer.core.tiff_source import TiffImageSource
-    from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+    from minflux_viewer.ui.tools.tiff_viewer_window import TiffViewerWindow
 
     path = tmp_path / "single_series_xyz.tif"
     tifffile.imwrite(path, np.zeros((3, 4, 5), dtype=np.uint16),
@@ -298,7 +298,7 @@ def test_tiff_viewer_keeps_series_selector_left_of_xyz_controls(tmp_path, _app):
 def test_tiff_viewer_series_selector_stays_left_for_2d_series(tmp_path, _app):
     tifffile = pytest.importorskip("tifffile")
     from minflux_viewer.core.tiff_source import TiffImageSource
-    from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+    from minflux_viewer.ui.tools.tiff_viewer_window import TiffViewerWindow
 
     path = tmp_path / "xyz_and_2d.ome.tif"
     _write_two_series(path)
@@ -335,7 +335,7 @@ def test_obf_source_and_viewer_from_sample(_app):
         list_obf_image_series,
         msr_is_image_only,
     )
-    from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+    from minflux_viewer.ui.tools.tiff_viewer_window import TiffViewerWindow
 
     assert msr_is_image_only(_SAMPLE) is True
     series = list_obf_image_series(_SAMPLE)

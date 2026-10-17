@@ -8,8 +8,8 @@ from PyQt6.QtCore import QEvent
 from PyQt6.QtWidgets import QWidget
 
 from minflux_viewer.core.roi import RoiStore
-from minflux_viewer.ui.qt_lifecycle import close_view_boxes, image_view_boxes
-from minflux_viewer.ui.roi_overlay import RoiOverlayController
+from minflux_viewer.ui.common.qt_lifecycle import close_view_boxes, image_view_boxes
+from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
 
 @pytest.fixture(scope="module")
@@ -35,7 +35,7 @@ def test_image_view_boxes_are_closed_and_unregistered_idempotently(_app):
 def test_plot_widget_is_retired_after_viewbox_unregistration(_app):
     import pyqtgraph as pg
 
-    from minflux_viewer.ui.qt_lifecycle import close_plot_widgets
+    from minflux_viewer.ui.common.qt_lifecycle import close_plot_widgets
 
     plot = pg.PlotWidget()
     box = plot.getViewBox()
@@ -82,7 +82,7 @@ def test_roi_controller_dispose_detaches_store_and_queued_callbacks(_app):
     store.changed.emit()
     store.selection_changed.emit()
     store.restore_requested.emit()
-    from minflux_viewer.ui.qt_lifecycle import close_plot_widgets
+    from minflux_viewer.ui.common.qt_lifecycle import close_plot_widgets
 
     close_plot_widgets(plot)
     owner.close()
@@ -90,7 +90,7 @@ def test_roi_controller_dispose_detaches_store_and_queued_callbacks(_app):
 
 def test_pyqtgraph_version_gate_matches_the_lines_the_helpers_target():
     """The helpers reach into pyqtgraph internals, so the version is checked."""
-    from minflux_viewer.ui.qt_lifecycle import (
+    from minflux_viewer.ui.common.qt_lifecycle import (
         TESTED_PYQTGRAPH_VERSIONS,
         _pyqtgraph_version_is_tested,
     )
@@ -107,7 +107,7 @@ def test_pyqtgraph_version_gate_matches_the_lines_the_helpers_target():
 
     assert _pyqtgraph_version_is_tested(pyqtgraph.__version__), (
         f"installed pyqtgraph {pyqtgraph.__version__} is outside "
-        f"{TESTED_PYQTGRAPH_VERSIONS}; review ui/qt_lifecycle.py"
+        f"{TESTED_PYQTGRAPH_VERSIONS}; review ui/common/qt_lifecycle.py"
     )
 
 
@@ -120,7 +120,7 @@ def test_label_guard_fails_open_when_pyqtgraph_renames_its_text_child(_app):
     import pyqtgraph as pg
     from pyqtgraph.graphicsItems.LabelItem import LabelItem
 
-    from minflux_viewer.ui.qt_lifecycle import install_pyqtgraph_lifecycle_guards
+    from minflux_viewer.ui.common.qt_lifecycle import install_pyqtgraph_lifecycle_guards
 
     install_pyqtgraph_lifecycle_guards()
     assert getattr(LabelItem, "_mfv_deleted_object_guard", False)
@@ -151,7 +151,7 @@ def test_label_guard_skips_a_deleted_text_child(_app):
     import pyqtgraph as pg
     from PyQt6 import sip
 
-    from minflux_viewer.ui.qt_lifecycle import install_pyqtgraph_lifecycle_guards
+    from minflux_viewer.ui.common.qt_lifecycle import install_pyqtgraph_lifecycle_guards
 
     install_pyqtgraph_lifecycle_guards()
     label = pg.LabelItem("hello")
@@ -170,7 +170,7 @@ def test_dispose_plot_widgets_unregisters_without_detaching(_app):
     from PyQt6.QtWidgets import QVBoxLayout, QWidget
     from pyqtgraph.graphicsItems.ViewBox.ViewBox import ViewBox
 
-    from minflux_viewer.ui.qt_lifecycle import dispose_plot_widgets
+    from minflux_viewer.ui.common.qt_lifecycle import dispose_plot_widgets
 
     window = QWidget()
     layout = QVBoxLayout(window)
@@ -198,7 +198,7 @@ def test_dispose_plot_widgets_leaves_an_image_views_own_plot_alone(_app):
     from PyQt6.QtWidgets import QVBoxLayout, QWidget
     from pyqtgraph.graphicsItems.ViewBox.ViewBox import ViewBox
 
-    from minflux_viewer.ui.qt_lifecycle import dispose_plot_widgets
+    from minflux_viewer.ui.common.qt_lifecycle import dispose_plot_widgets
 
     window = QWidget()
     layout = QVBoxLayout(window)
@@ -257,7 +257,7 @@ def test_the_infinite_line_guard_is_installed_once_and_defers_when_unsure():
 
     from pyqtgraph.graphicsItems.InfiniteLine import InfiniteLine
 
-    from minflux_viewer.ui.qt_lifecycle import _install_infinite_line_guard
+    from minflux_viewer.ui.common.qt_lifecycle import _install_infinite_line_guard
 
     installed = InfiniteLine._computeBoundingRect
     _install_infinite_line_guard(__import__("PyQt6.sip", fromlist=["sip"]),

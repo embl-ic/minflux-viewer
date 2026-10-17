@@ -2,7 +2,7 @@
 
 import pytest
 
-from minflux_viewer.ui.scale_bar import format_nm, scale_bar_anchor
+from minflux_viewer.ui.widgets.scale_bar import format_nm, scale_bar_anchor
 
 
 def test_format_nm_units():
@@ -63,7 +63,7 @@ def _viewbox():
 def test_scale_bar_item_builds_and_is_draggable(_app):
     from PyQt6.QtGui import QColor
 
-    from minflux_viewer.ui.scale_bar import ScaleBarItem
+    from minflux_viewer.ui.widgets.scale_bar import ScaleBarItem
     _plot, vb = _viewbox()
     sb = ScaleBarItem(vb, width_nm=100, height_nm=10, font_size=12,
                       color=QColor(255, 255, 255), bg_color=QColor(0, 0, 0),
@@ -83,7 +83,7 @@ def test_scale_bar_item_builds_and_is_draggable(_app):
 def test_scale_bar_item_set_params(_app):
     from PyQt6.QtGui import QColor
 
-    from minflux_viewer.ui.scale_bar import ScaleBarItem
+    from minflux_viewer.ui.widgets.scale_bar import ScaleBarItem
     _plot, vb = _viewbox()
     sb = ScaleBarItem(vb, width_nm=100, height_nm=10, font_size=12,
                       color=QColor(255, 255, 255), bg_color=None,
@@ -100,7 +100,7 @@ def test_scale_bar_item_set_params(_app):
 def test_scale_bar_label_stays_above_bar_when_y_inverted(_app):
     from PyQt6.QtGui import QColor
 
-    from minflux_viewer.ui.scale_bar import ScaleBarItem
+    from minflux_viewer.ui.widgets.scale_bar import ScaleBarItem
     _plot, vb = _viewbox()
     sb = ScaleBarItem(vb, width_nm=1.0, height_nm=1.0, font_size=10,
                       color=QColor(255, 255, 255), bg_color=None,
@@ -116,7 +116,7 @@ def test_scale_bar_label_stays_above_bar_when_y_inverted(_app):
 
 
 def test_scale_bar_dialog_values(_app):
-    from minflux_viewer.ui.scale_bar_dialog import ScaleBarDialog
+    from minflux_viewer.ui.dialogs.scale_bar_dialog import ScaleBarDialog
     dlg = ScaleBarDialog(default_width_nm=200.0, default_height_nm=8.0)
     v = dlg.values()
     assert v["width_nm"] == 200.0 and v["height_nm"] == 8.0
@@ -128,7 +128,7 @@ def test_scale_bar_dialog_values(_app):
 def test_scale_bar_dialog_edit_prefill(_app):
     from PyQt6.QtGui import QColor
 
-    from minflux_viewer.ui.scale_bar_dialog import ScaleBarDialog
+    from minflux_viewer.ui.dialogs.scale_bar_dialog import ScaleBarDialog
     initial = {"width_nm": 333.0, "height_nm": 12.0, "font_size": 18,
                "color": QColor(255, 0, 0), "bg_color": None, "horizontal": False}
     dlg = ScaleBarDialog(initial=initial, edit_mode=True)

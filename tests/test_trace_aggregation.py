@@ -85,7 +85,7 @@ def test_the_fixture_separates_every_read_out():
 
 def _histogram(ds=None):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     ds = ds if ds is not None else _make_dataset()
     state = AppState()
@@ -288,8 +288,8 @@ def test_flatten_pools_every_raw_row_with_equal_weight(qapp):
 
 def test_filter_dialog_offers_the_same_trace_read_outs_as_the_histogram(qapp):
     _qapp()
-    from minflux_viewer.ui import filter_dialog as fd
-    from minflux_viewer.ui.histogram_window import _TRACE_AGG_MODES
+    from minflux_viewer.ui.dialogs import filter_dialog as fd
+    from minflux_viewer.ui.plots.histogram_window import _TRACE_AGG_MODES
 
     assert fd._AGG_MODES == ["per loc"] + _TRACE_AGG_MODES
     for mode in ("trace median", "trace 1st", "trace last"):
@@ -318,7 +318,7 @@ def test_filter_can_bound_every_trace_read_out_end_to_end(qapp):
 
 def test_filter_spinner_values_cover_every_trace_read_out(qapp):
     _qapp()
-    from minflux_viewer.ui.filter_dialog import _filter_spinner_values
+    from minflux_viewer.ui.dialogs.filter_dialog import _filter_spinner_values
 
     _win, ds, _state = _histogram()
     try:

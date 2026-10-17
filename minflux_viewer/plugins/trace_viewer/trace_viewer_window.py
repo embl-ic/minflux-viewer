@@ -48,10 +48,10 @@ from PyQt6.QtWidgets import (
 )
 
 from minflux_viewer.core.loader_raw_access import attr_values_1d
+from minflux_viewer.ui.common.dataset_binding import DatasetIndex
+from minflux_viewer.ui.plots.plot_format import apply_spatial_y_direction, plot_widget
 
 from ...colors import component_colors
-from ...ui.dataset_binding import DatasetIndex
-from ...ui.plot_format import apply_spatial_y_direction, plot_widget
 from . import trace_data as td
 
 _PLANE = {"XY": (0, 1), "XZ": (0, 2), "YZ": (1, 2)}
@@ -74,7 +74,7 @@ class TraceViewerWindow(QDialog):
     """Per-trace inspection window (Plugins › Trace Viewer)."""
 
     # The window's dataset key, read and set as a position (None once the
-    # dataset has closed). See ui/dataset_binding.py.
+    # dataset has closed). See ui/common/dataset_binding.py.
     _idx = DatasetIndex()
 
     def __init__(self, state, dataset_idx: int, owner=None) -> None:

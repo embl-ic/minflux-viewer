@@ -6,7 +6,8 @@ from .. import PluginEntry, register
 
 
 def _launch(state, parent=None) -> None:
-    from ...ui import modeless
+    from minflux_viewer.ui.common import modeless
+
     from .trace_viewer_window import TraceViewerWindow
 
     active = state.active_dataset

@@ -118,7 +118,7 @@ def test_gui_class_rejects_unknown_values() -> None:
 def test_command_hook_is_disabled_by_default_and_idempotent(qapp) -> None:
     from PyQt6.QtGui import QAction
 
-    from minflux_viewer.ui.command_meta import CommandMeta
+    from minflux_viewer.ui.common.command_meta import CommandMeta
     from minflux_viewer.ui.main_window import MainWindow
 
     journal = ProcessingJournal()
@@ -208,7 +208,7 @@ def test_the_command_hook_does_not_keep_its_window_alive(qapp) -> None:
 
     from PyQt6.QtGui import QAction
 
-    from minflux_viewer.ui.command_meta import CommandMeta
+    from minflux_viewer.ui.common.command_meta import CommandMeta
     from minflux_viewer.ui.main_window import MainWindow
 
     recorder = Recorder(ProcessingJournal())
@@ -252,7 +252,7 @@ def test_every_command_declares_a_gui_class() -> None:
     silent script, which is safe but useless -- so adding a command means
     adding its class.
     """
-    from minflux_viewer.ui.command_meta import COMMAND_META
+    from minflux_viewer.ui.common.command_meta import COMMAND_META
 
     missing = sorted(k for k, m in COMMAND_META.items() if m.gui_class is None)
     assert missing == [], (
@@ -265,7 +265,7 @@ def test_the_classification_is_not_trivially_one_bucket() -> None:
     """A guard against 'classified' meaning 'everything marked the same'."""
     from collections import Counter
 
-    from minflux_viewer.ui.command_meta import COMMAND_META
+    from minflux_viewer.ui.common.command_meta import COMMAND_META
 
     spread = Counter(m.gui_class for m in COMMAND_META.values())
     assert len(spread) == 3, spread
@@ -278,7 +278,7 @@ def test_a_declared_record_call_is_a_published_namespace_call() -> None:
     the API actually has.
     """
     from minflux_viewer.api import NAMESPACES
-    from minflux_viewer.ui.command_meta import COMMAND_META
+    from minflux_viewer.ui.common.command_meta import COMMAND_META
 
     for key, meta in COMMAND_META.items():
         if not meta.record:
@@ -290,7 +290,7 @@ def test_a_declared_record_call_is_a_published_namespace_call() -> None:
 
 def test_silent_mode_drops_presentation_commands_and_keeps_the_rest(qapp) -> None:
     """End to end over the real registry rather than hand-built steps."""
-    from minflux_viewer.ui.command_meta import COMMAND_META
+    from minflux_viewer.ui.common.command_meta import COMMAND_META
 
     recorder = Recorder(ProcessingJournal())
     recorder.start()

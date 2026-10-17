@@ -47,7 +47,7 @@ def _qt_app(qapp):
 
 def test_brightness_contrast_closes_with_render_window(_qt_app):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     state = AppState()
     state.add_dataset(_make_ds())

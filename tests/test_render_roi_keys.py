@@ -21,8 +21,8 @@ from PyQt6.QtWidgets import QApplication
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
 from minflux_viewer.core.roi import RoiRecord
-from minflux_viewer.ui.render_window import RenderWindow
-from minflux_viewer.ui.roi_overlay import item_to_geometry
+from minflux_viewer.ui.rendering.render_window import RenderWindow
+from minflux_viewer.ui.roi.roi_overlay import item_to_geometry
 
 
 @pytest.fixture(scope="module")

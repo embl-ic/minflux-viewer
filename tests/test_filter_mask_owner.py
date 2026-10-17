@@ -137,7 +137,7 @@ def test_a_roi_selection_leaves_the_dataset_mask_alone(qapp):
     """Selection narrowed the dataset's own mask in place (rows with NaN coordinates)."""
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.core.roi import RoiRecord
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = AppState()
     x = np.array([0.0, 10.0, np.nan, 30.0, 40.0, 50.0])

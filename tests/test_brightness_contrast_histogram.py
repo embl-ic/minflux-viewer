@@ -4,7 +4,7 @@ import numpy as np
 from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import QApplication
 
-from minflux_viewer.ui.brightness_contrast_dialog import HistogramPreview
+from minflux_viewer.ui.dialogs.brightness_contrast_dialog import HistogramPreview
 
 
 def _app() -> QApplication:

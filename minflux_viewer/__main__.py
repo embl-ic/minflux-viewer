@@ -15,7 +15,7 @@ import sys
 
 def main() -> int:
     # Install stdout/stderr redirection ASAP so even early prints get captured
-    from .ui.console_window import install_redirection
+    from minflux_viewer.ui.tools.console_window import install_redirection
 
     install_redirection()
 
@@ -42,8 +42,9 @@ def main() -> int:
     app.setOrganizationName("EMBL-IC")
     app.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))
 
+    from minflux_viewer.ui.common.gpu_capabilities import probe_gpu_capabilities
+
     from .core.app_state import AppState
-    from .ui.gpu_capabilities import probe_gpu_capabilities
     from .ui.main_window import MainWindow, startup_paths_from_argv
 
     state = AppState()
@@ -72,7 +73,7 @@ def main() -> int:
     except RuntimeError:
         pass
     try:
-        from .ui.console_window import restore_redirection
+        from minflux_viewer.ui.tools.console_window import restore_redirection
         restore_redirection()
     except Exception:
         pass

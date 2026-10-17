@@ -159,7 +159,7 @@ def test_the_embedded_drift_view_is_read_only(window):
 
 
 def test_the_region_view_gets_the_datasets_own_data_bounds(window):
-    from minflux_viewer.ui.mbm_info_window import dataset_loc_bounds_nm
+    from minflux_viewer.ui.tools.mbm_info_window import dataset_loc_bounds_nm
 
     ds = _dataset_with_beads(_points(n_beads=2))
     window._state.add_dataset(ds)

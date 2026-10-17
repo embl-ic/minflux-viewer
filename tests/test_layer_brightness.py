@@ -1,4 +1,4 @@
-"""Per-layer brightness/contrast controller (ui/layer_brightness.py).
+"""Per-layer brightness/contrast controller (ui/widgets/layer_brightness.py).
 
 Exercises the level/auto/reset/target logic without opening the Qt dialog (the
 BrightnessContrastDialog is imported lazily only in ``open()``).
@@ -6,7 +6,7 @@ BrightnessContrastDialog is imported lazily only in ``open()``).
 
 import numpy as np
 
-from minflux_viewer.ui.layer_brightness import LayerBrightness, percentile_levels
+from minflux_viewer.ui.widgets.layer_brightness import LayerBrightness, percentile_levels
 
 
 def _make_controller():

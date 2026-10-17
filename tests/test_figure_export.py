@@ -30,7 +30,7 @@ class _Lazy:
         return getattr(importlib.import_module(self._name), attr)
 
 
-fe = _Lazy("minflux_viewer.ui.figure_export")
+fe = _Lazy("minflux_viewer.ui.common.figure_export")
 _qtw = _Lazy("PyQt6.QtWidgets")
 
 
@@ -214,10 +214,10 @@ def _state():
 
 
 def test_each_view_names_its_plot_type_and_view_mode(_qt_app):
-    from minflux_viewer.ui.attribute_window import AttributeWindow
-    from minflux_viewer.ui.histogram_window import HistogramWindow
-    from minflux_viewer.ui.render_window import RenderWindow
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     state = _state()
     windows = [RenderWindow(state, dataset_idx=0), ScatterWindow(state, dataset_idx=0),

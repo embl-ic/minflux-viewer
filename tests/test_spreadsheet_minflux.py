@@ -76,7 +76,7 @@ def test_headers_identify_a_raw_or_snapshot_minflux_table(canonical_csv):
 def test_canonical_csv_bypasses_the_mapping_dialog(canonical_csv, monkeypatch):
     """The dialog must not even be constructed for a table we wrote."""
     pytest.importorskip("PyQt6")
-    from minflux_viewer.ui import spreadsheet_import_dialog as mod
+    from minflux_viewer.ui.dialogs import spreadsheet_import_dialog as mod
 
     path, expected = canonical_csv
 
@@ -133,7 +133,7 @@ def test_a_raw_csv_does_not_pin_the_z_factor(tmp_path, canonical_csv):
 def test_an_excel_workbook_never_takes_the_direct_route(tmp_path):
     """``load_csv`` cannot read a workbook however its columns are named."""
     pytest.importorskip("PyQt6")
-    from minflux_viewer.ui.spreadsheet_import_dialog import minflux_direct_load_kind
+    from minflux_viewer.ui.dialogs.spreadsheet_import_dialog import minflux_direct_load_kind
 
     workbook = tmp_path / "run.xlsx"
     workbook.write_bytes(b"PK\x03\x04not-really")
@@ -240,7 +240,7 @@ def test_the_bypass_check_reads_only_the_header(canonical_csv, monkeypatch):
     """A table that is NOT ours must not be previewed twice."""
     pytest.importorskip("PyQt6")
     from minflux_viewer.core import spreadsheet_loader as core_mod
-    from minflux_viewer.ui.spreadsheet_import_dialog import minflux_direct_load_kind
+    from minflux_viewer.ui.dialogs.spreadsheet_import_dialog import minflux_direct_load_kind
 
     path, _expected = canonical_csv
 

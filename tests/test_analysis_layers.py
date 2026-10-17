@@ -25,10 +25,10 @@ assert not any(n.startswith(('PyQt6', 'pyqtgraph', 'minflux_viewer.ui')) for n i
 
 
 @pytest.mark.parametrize("old,new,symbol", [
-    ("analysis.localization_precision", "ui.precision_analysis", "CRLBResultDialog"),
-    ("analysis.local_density", "ui.density_analysis", "LocalDensityImageWindow"),
-    ("analysis.trace_analysis", "ui.trace_analysis_dialogs", "_AnisotropyDialog"),
-    ("analysis", "ui.precision_analysis", "run_frc"),
+    ("analysis.localization_precision", "ui.analysis.precision_analysis", "CRLBResultDialog"),
+    ("analysis.local_density", "ui.analysis.density_analysis", "LocalDensityImageWindow"),
+    ("analysis.trace_analysis", "ui.analysis.trace_analysis_dialogs", "_AnisotropyDialog"),
+    ("analysis", "ui.analysis.precision_analysis", "run_frc"),
 ])
 def test_old_symbols_resolve_to_the_canonical_ui_implementation(old, new, symbol):
     legacy = importlib.import_module("minflux_viewer." + old)

@@ -3,7 +3,7 @@
 Background work runs in three queues: **interactive** (what a view needs to
 draw now), **analysis** (computations the user started) and **io** (reading
 and writing files). Every named thread pool
-(``ui/background_tasks.py::shared_thread_pool``) belongs to one queue and is
+(``ui/common/background_tasks.py::shared_thread_pool``) belongs to one queue and is
 sized here, once; a queue's limit bounds the sum of its pools' sizes, which is
 checked when this module is imported.
 

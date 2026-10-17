@@ -150,7 +150,7 @@ def test_new_preference_keys_need_no_migration():
 
 def test_preferences_seam_modules_expose_the_agreed_interface():
     """Three calls, and preferences_dialog.py never needs changing again."""
-    from minflux_viewer.ui import prefs_plugin_paths, prefs_python_packages
+    from minflux_viewer.ui.settings import prefs_plugin_paths, prefs_python_packages
 
     for module, build, group in (
         (prefs_plugin_paths, "build_plugin_paths_group", "PluginPathsGroup"),

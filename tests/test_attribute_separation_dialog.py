@@ -93,7 +93,7 @@ class _FakeOwner:
 
 def _dialog(qtbot, mfx=None, **kwargs):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.attribute_separation_dialog import AttributeSeparationDialog
+    from minflux_viewer.ui.analysis.attribute_separation_dialog import AttributeSeparationDialog
 
     ds = loader.load_from_mfx_array(_make_bimodal_dcr() if mfx is None else mfx, "dcr_test")
     state = AppState()
@@ -130,7 +130,7 @@ def test_apply_hands_over_one_mask_per_channel(qtbot):
 
 
 def test_unassigned_policy_reaches_the_owner(qtbot):
-    from minflux_viewer.ui.attribute_separation_dialog import UNASSIGNED_DISCARD
+    from minflux_viewer.ui.analysis.attribute_separation_dialog import UNASSIGNED_DISCARD
 
     dlg, _ds, owner = _dialog(qtbot)
     dlg._unassigned_combo.setCurrentText(UNASSIGNED_DISCARD)
@@ -185,7 +185,7 @@ def _overlap_two_channels(dlg):
 
 
 def test_overlap_keep_in_both_channels(qtbot):
-    from minflux_viewer.ui.attribute_separation_dialog import OVERLAP_KEEP_BOTH
+    from minflux_viewer.ui.analysis.attribute_separation_dialog import OVERLAP_KEEP_BOTH
 
     dlg, _ds, _owner = _dialog(qtbot)
     _overlap_two_channels(dlg)
@@ -197,7 +197,7 @@ def test_overlap_keep_in_both_channels(qtbot):
 
 
 def test_overlap_discard_leaves_contested_rows_unassigned(qtbot):
-    from minflux_viewer.ui.attribute_separation_dialog import OVERLAP_DISCARD
+    from minflux_viewer.ui.analysis.attribute_separation_dialog import OVERLAP_DISCARD
 
     dlg, _ds, _owner = _dialog(qtbot)
     _overlap_two_channels(dlg)
@@ -209,7 +209,7 @@ def test_overlap_discard_leaves_contested_rows_unassigned(qtbot):
 
 
 def test_overlap_by_weight_assigns_each_contested_row_once(qtbot):
-    from minflux_viewer.ui.attribute_separation_dialog import OVERLAP_BY_WEIGHT
+    from minflux_viewer.ui.analysis.attribute_separation_dialog import OVERLAP_BY_WEIGHT
 
     dlg, _ds, _owner = _dialog(qtbot)
     _overlap_two_channels(dlg)
@@ -294,7 +294,10 @@ def test_bin_step_adapts_to_the_attribute_being_plotted(qtbot):
 
 
 def test_channel_colours_are_transparent_solids_in_rgbmcy_order(qtbot):
-    from minflux_viewer.ui.attribute_separation_dialog import CHANNEL_ALPHA, encoded_channel_lut
+    from minflux_viewer.ui.analysis.attribute_separation_dialog import (
+        CHANNEL_ALPHA,
+        encoded_channel_lut,
+    )
 
     dlg, _ds, _owner = _dialog(qtbot)
     assert dlg._lut_cycle()[:6] == ["Red", "Green", "Blue", "Magenta", "Cyan", "Yellow"]
@@ -413,7 +416,7 @@ def _make_two_photon_iters(n_loc=400, seed=0):
 
 
 def test_photon_weighted_entry_is_offered_for_dcr_only(qtbot):
-    from minflux_viewer.ui.attribute_separation_dialog import PHOTON_WEIGHTED_LABEL
+    from minflux_viewer.ui.analysis.attribute_separation_dialog import PHOTON_WEIGHTED_LABEL
 
     dlg, _ds, _owner = _dialog(qtbot, mfx=_make_two_photon_iters(), pick_attribute=True)
     i = dlg._iter_combo.findText(PHOTON_WEIGHTED_LABEL)
@@ -425,7 +428,7 @@ def test_photon_weighted_entry_is_offered_for_dcr_only(qtbot):
 
 
 def test_photon_weighted_entry_is_disabled_with_one_photon_iteration(qtbot):
-    from minflux_viewer.ui.attribute_separation_dialog import PHOTON_WEIGHTED_LABEL
+    from minflux_viewer.ui.analysis.attribute_separation_dialog import PHOTON_WEIGHTED_LABEL
 
     dlg, _ds, _owner = _dialog(qtbot, mfx=_make_multi_iter_dcr())   # 2-D: one such iteration
     i = dlg._iter_combo.findText(PHOTON_WEIGHTED_LABEL)
@@ -435,7 +438,7 @@ def test_photon_weighted_entry_is_disabled_with_one_photon_iteration(qtbot):
 
 
 def test_photon_weighted_values_are_the_summed_photon_fraction(qtbot):
-    from minflux_viewer.ui.attribute_separation_dialog import PHOTON_WEIGHTED_LABEL
+    from minflux_viewer.ui.analysis.attribute_separation_dialog import PHOTON_WEIGHTED_LABEL
 
     mfx = _make_two_photon_iters()
     dlg, ds, owner = _dialog(qtbot, mfx=mfx)

@@ -13,7 +13,7 @@ the pixel/voxel size.
 
 Pure NumPy + tifffile, no Qt — unit-tested in ``tests/test_tiff_export.py`` and
 driven from the render window's "Export to TIFF…" action via a background
-worker (`ui/tiff_export_dialog.py`).
+worker (`ui/dialogs/tiff_export_dialog.py`).
 """
 
 from __future__ import annotations

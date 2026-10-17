@@ -83,7 +83,7 @@ def test_withdrawn_entries_keep_their_actions_but_leave_every_menu(_app):
 
 # --------------------------------------------------------------- File > Save
 def test_file_save_is_always_zarr_v2(_app, tmp_path, monkeypatch):
-    from minflux_viewer.ui import zarr_save_dialog
+    from minflux_viewer.ui.dialogs import zarr_save_dialog
 
     win = _real_window(_app)
     try:
@@ -128,7 +128,7 @@ def test_file_save_proposes_the_store_the_dataset_came_from(_app, tmp_path):
 
 
 def test_cancelling_the_save_dialog_writes_nothing(_app, tmp_path, monkeypatch):
-    from minflux_viewer.ui import zarr_save_dialog
+    from minflux_viewer.ui.dialogs import zarr_save_dialog
 
     win = _real_window(_app)
     try:
@@ -147,7 +147,7 @@ def test_cancelling_the_save_dialog_writes_nothing(_app, tmp_path, monkeypatch):
 
 
 def test_quick_save_dialog_normalizes_and_refuses_a_bad_path(_app, tmp_path):
-    from minflux_viewer.ui.zarr_save_dialog import ZarrQuickSaveDialog
+    from minflux_viewer.ui.dialogs.zarr_save_dialog import ZarrQuickSaveDialog
 
     dlg = ZarrQuickSaveDialog(tmp_path / "run1.zarr", dataset_name="run1")
     assert dlg.path() == tmp_path / "run1.zarr"
@@ -162,7 +162,7 @@ def test_quick_save_dialog_normalizes_and_refuses_a_bad_path(_app, tmp_path):
 
 # ------------------------------------------------------- Save / export dialog
 def test_export_dropdown_is_the_registry_order_and_csv_is_the_custom_table(_app):
-    from minflux_viewer.ui.save_dialog import SaveProcessedDataDialog
+    from minflux_viewer.ui.dialogs.save_dialog import SaveProcessedDataDialog
 
     dlg = SaveProcessedDataDialog("ds1", prefs={"data": {}, "file": {}})
     # the separator and the metadata-only entry sit after the data formats
@@ -189,7 +189,7 @@ def test_csv_means_the_custom_picker_and_canonical_is_under_more_options(_app):
     and is the only CSV that reloads without the column-mapping dialog, so it
     stays reachable rather than being dropped.
     """
-    from minflux_viewer.ui.save_dialog import SaveProcessedDataDialog
+    from minflux_viewer.ui.dialogs.save_dialog import SaveProcessedDataDialog
 
     dlg = SaveProcessedDataDialog("ds1", prefs={"data": {}, "file": {}})
     dlg._format.setCurrentIndex(dlg._format.findData("csv"))
@@ -213,7 +213,7 @@ def test_csv_means_the_custom_picker_and_canonical_is_under_more_options(_app):
 
 def test_zarr_still_owns_the_options_it_stores_internally(_app):
     """The csv sync must not undo the Zarr overrides it runs after."""
-    from minflux_viewer.ui.save_dialog import SaveProcessedDataDialog
+    from minflux_viewer.ui.dialogs.save_dialog import SaveProcessedDataDialog
 
     dlg = SaveProcessedDataDialog("ds1", prefs={"data": {}, "file": {}})
     dlg._format.setCurrentIndex(dlg._format.findData("zarr"))
@@ -226,7 +226,7 @@ def test_leaving_zarr_restores_the_options_it_forced(_app):
     """Zarr stores derived arrays and processing metadata internally, so it
     forces both on. Switching to another format must give the user's own values
     back -- the forced ticks used to stay, quietly overriding the preference."""
-    from minflux_viewer.ui.save_dialog import SaveProcessedDataDialog
+    from minflux_viewer.ui.dialogs.save_dialog import SaveProcessedDataDialog
 
     prefs = {"data": {"export_include_derived": False,
                       "export_include_recipe": True}, "file": {}}
@@ -249,8 +249,8 @@ def test_leaving_zarr_restores_the_options_it_forced(_app):
 def test_the_dialog_and_preferences_say_the_same_words(_app):
     """Both show these three options; they must not read differently."""
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui import preferences_dialog as P
-    from minflux_viewer.ui import save_dialog as S
+    from minflux_viewer.ui.dialogs import save_dialog as S
+    from minflux_viewer.ui.settings import preferences_dialog as P
 
     dlg = P.PreferencesDialog(AppState())
     try:
@@ -298,12 +298,12 @@ def test_the_dataset_manager_is_the_only_way_to_the_save_export_dialog():
                 self.generic_visit(node)
 
         Consumers().visit(ast.parse(path.read_text(encoding="utf-8")))
-    assert callers == {"ui/dataset_manager.py"}, callers
+    assert callers == {"ui/tools/dataset_manager.py"}, callers
 
 
 def test_preferences_offers_only_formats_that_have_a_menu_entry(_app):
     """Ticking a withdrawn format could not put it back anywhere."""
-    from minflux_viewer.ui.preferences_dialog import _EXPORT_FORMATS
+    from minflux_viewer.ui.settings.preferences_dialog import _EXPORT_FORMATS
 
     keys = [key for _label, key in _EXPORT_FORMATS]
     assert keys == ["zarr", "npy", "mat", "json", "csv"]     # .msr has its own row
@@ -316,7 +316,7 @@ def test_preferences_explains_each_format_from_the_registry(_app):
     page cannot drift from the menus."""
     from minflux_viewer.core import formats as F
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui import preferences_dialog as P
+    from minflux_viewer.ui.settings import preferences_dialog as P
 
     dlg = P.PreferencesDialog(AppState())
     try:
@@ -412,7 +412,7 @@ def test_metadata_only_writes_a_matchable_sidecar(tmp_path):
 def test_metadata_only_is_offered_and_writes_no_data_file(_app):
     """It is not a data format, so the content/attribute/filter choices are all
     inapplicable and options() names no data path -- the caller asks where."""
-    from minflux_viewer.ui.save_dialog import METADATA_ONLY, SaveProcessedDataDialog
+    from minflux_viewer.ui.dialogs.save_dialog import METADATA_ONLY, SaveProcessedDataDialog
 
     dlg = SaveProcessedDataDialog("ds1", prefs={"data": {}, "file": {}})
     index = dlg._format.findData(METADATA_ONLY)

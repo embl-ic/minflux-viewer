@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import QApplication, QDialog, QLabel
 
 
 def _dialog(qtbot):
-    from minflux_viewer.ui.custom_colormap_dialog import CustomColormapDialog
+    from minflux_viewer.ui.dialogs.custom_colormap_dialog import CustomColormapDialog
 
     dialog = CustomColormapDialog()
     qtbot.addWidget(dialog)

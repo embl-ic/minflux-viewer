@@ -51,7 +51,7 @@ def _qt_app(qapp):
 @pytest.mark.parametrize("coord", ["xnm", "ynm", "znm"])
 def test_scatter_color_by_coordinate_varies(_qt_app, coord):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = AppState()
     state.add_dataset(_make_ds())
@@ -80,7 +80,7 @@ def test_opening_lut_dialog_preserves_color_mapping(_qt_app):
     outside the new range and emitted a stale level callback, which the scatter
     recorded as manual levels and recolored with (the plot 'turned one color')."""
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = AppState()
     state.add_dataset(_make_ds())
@@ -110,7 +110,7 @@ def test_color_by_change_drops_manual_levels_and_autoscales(_qt_app):
     """Changing the color-by attribute must auto-scale to the NEW attribute's
     range — a manual level range set for the old attribute must not linger."""
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = AppState()
     state.add_dataset(_make_ds())
@@ -137,7 +137,7 @@ def test_lut_dialog_follows_color_by_range(_qt_app):
     """With the LUT dialog open, switching color-by refreshes the dialog's data
     range (and UI) to the new attribute."""
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     state = AppState()
     state.add_dataset(_make_ds())

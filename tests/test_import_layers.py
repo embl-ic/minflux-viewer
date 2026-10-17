@@ -73,7 +73,7 @@ KNOWN_CYCLES = frozenset({
     ('msr.io', 'msr.msr_parser'),
     ('core.processing_journal', 'core.recorder'),
     ('core.roi', 'core.roi_logic'),
-    ('ui.filter_dialog', 'ui.histogram_window'),
+    ('ui.dialogs.filter_dialog', 'ui.plots.histogram_window'),
 })
 
 

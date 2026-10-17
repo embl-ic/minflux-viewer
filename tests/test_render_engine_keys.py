@@ -49,7 +49,7 @@ def _settled(win) -> bool:
 
 
 def _window(qtbot, state, idx, cls=None):
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     win = (cls or RenderWindow)(state, dataset_idx=idx)
     qtbot.addWidget(win)
@@ -120,7 +120,7 @@ def test_a_dataset_taking_a_closed_ones_place_gets_none_of_its_tiles(qtbot):
 
 
 def test_a_closing_dataset_leaves_the_advanced_view_too(qtbot):
-    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+    from minflux_viewer.ui.rendering.precision_render_window import PrecisionRenderWindow
 
     state = _state(_dataset("A", 1, overlay="g"), _dataset("B", 2, overlay="g"))
     win = PrecisionRenderWindow(state, dataset_idx=0)
@@ -141,7 +141,7 @@ def test_a_closing_dataset_leaves_the_advanced_view_too(qtbot):
 
 
 def test_a_tile_finishing_after_its_dataset_closed_is_not_kept(qtbot):
-    from minflux_viewer.ui.tile_cache import TileKey
+    from minflux_viewer.ui.rendering.tile_cache import TileKey
 
     state = _state(_dataset("A", 1, overlay="g"), _dataset("B", 2, overlay="g"))
     win = _window(qtbot, state, 0)
@@ -156,8 +156,8 @@ def test_a_tile_finishing_after_its_dataset_closed_is_not_kept(qtbot):
 
 
 def test_an_advanced_tile_finishing_after_its_dataset_closed_is_not_kept(qtbot):
-    from minflux_viewer.ui.precision_render import PrecisionTileResult
-    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+    from minflux_viewer.ui.rendering.precision_render import PrecisionTileResult
+    from minflux_viewer.ui.rendering.precision_render_window import PrecisionRenderWindow
 
     state = _state(_dataset("A", 1, overlay="g"), _dataset("B", 2, overlay="g"))
     win = PrecisionRenderWindow(state, dataset_idx=0)
@@ -182,7 +182,7 @@ def test_an_advanced_tile_finishing_after_its_dataset_closed_is_not_kept(qtbot):
 def test_a_tile_key_names_its_dataset_by_key(field):
     from dataclasses import fields
 
-    from minflux_viewer.ui.tile_cache import TileKey
+    from minflux_viewer.ui.rendering.tile_cache import TileKey
 
     assert field in {f.name for f in fields(TileKey)}
     assert "dataset_id" not in {f.name for f in fields(TileKey)}
@@ -216,7 +216,7 @@ def test_a_burst_of_tiles_is_composed_once_not_once_per_tile(qtbot):
 
 
 def test_a_new_render_drops_a_composite_queued_for_the_old_view(qtbot):
-    from minflux_viewer.ui.precision_render_window import PrecisionRenderWindow
+    from minflux_viewer.ui.rendering.precision_render_window import PrecisionRenderWindow
 
     for cls in (None, PrecisionRenderWindow):
         state = _state(_dataset("A", 1))

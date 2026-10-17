@@ -67,7 +67,7 @@ def test_geomfit_multichannel_option_available_for_overlay(qtbot):
     """The 'Combine overlay channels' option now also applies to the NPC two-ring
     (geomfit) method: it collects the other channel and is active for geomfit."""
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.particle_average_dialog import ParticleAverageWindow
+    from minflux_viewer.ui.analysis.particle_average_dialog import ParticleAverageWindow
 
     d0, d1 = _overlay_two_channels()
     state = AppState()
@@ -97,7 +97,7 @@ def test_geomfit_multichannel_option_available_for_overlay(qtbot):
 
 def test_boxes_from_a_processed_copy_are_offered_and_extracted(qtbot):
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.particle_average_dialog import ParticleAverageWindow
+    from minflux_viewer.ui.analysis.particle_average_dialog import ParticleAverageWindow
 
     state = AppState()
     state.add_dataset(_dataset_with_cluster())

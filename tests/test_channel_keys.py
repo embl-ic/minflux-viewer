@@ -161,7 +161,7 @@ def test_a_closed_member_leaves_every_overlay_view_by_itself(views, qtbot):
 
 
 def test_the_volume_view_finds_its_channels_by_key(views):
-    from minflux_viewer.ui.volume_window import VolumeRenderWindow
+    from minflux_viewer.ui.rendering.volume_window import VolumeRenderWindow
 
     render = views.render
     render._channels[1]["lut"] = "Magenta"
@@ -191,7 +191,7 @@ def _state_with(*names):
 
 
 def test_a_window_is_asked_which_datasets_its_channels_draw():
-    from minflux_viewer.ui.dataset_binding import window_channel_keys, window_draws_dataset
+    from minflux_viewer.ui.common.dataset_binding import window_channel_keys, window_draws_dataset
 
     state = _state_with("a", "b", "c")
     key_a, key_b, key_c = (state.key_at(i) for i in range(3))

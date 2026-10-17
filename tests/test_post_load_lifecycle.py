@@ -19,7 +19,7 @@ import numpy as np
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
 from minflux_viewer.core.dataset_events import DatasetRemoved
-from minflux_viewer.ui.background_tasks import BackgroundTask
+from minflux_viewer.ui.common.background_tasks import BackgroundTask
 from minflux_viewer.ui.main_window import MainWindow
 
 

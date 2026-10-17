@@ -23,7 +23,7 @@ def _shell():
 @pytest.mark.parametrize("controller", CONTROLLERS)
 def test_delegators_preserve_signatures_and_forward_every_argument(controller):
     methods = {n.name: n for n in _shell().body if isinstance(n, ast.FunctionDef)}
-    tree = ast.parse((UI / (controller + ".py")).read_text(encoding="utf-8"))
+    tree = ast.parse((UI / "controllers" / (controller + ".py")).read_text(encoding="utf-8"))
     implementations = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
     assert implementations
     for implementation in implementations:
@@ -42,7 +42,7 @@ def test_delegators_preserve_signatures_and_forward_every_argument(controller):
         assert len(statements) == 2, implementation.name
         imported, returned = statements
         assert isinstance(imported, ast.ImportFrom)
-        assert imported.level == 1 and imported.module is None
+        assert imported.level == 0 and imported.module == "minflux_viewer.ui.controllers"
         assert [(n.name, n.asname) for n in imported.names] == [(controller, "controller")]
         assert isinstance(returned, ast.Return) and isinstance(returned.value, ast.Call)
         call = returned.value

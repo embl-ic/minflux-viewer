@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from minflux_viewer.ui.ortho_rotation import (
+from minflux_viewer.ui.rendering.ortho_rotation import (
     ROTATION_AXES,
     rotated_projection,
     rotation_axis_labels,

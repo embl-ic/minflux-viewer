@@ -323,7 +323,7 @@ def test_file_menu_zarr_action_uses_new_save_backend():
     not something a user has to care about, and Preferences is the one place
     that spells out Zarr v2."""
     from minflux_viewer.core import formats as F
-    from minflux_viewer.ui import menu_controller
+    from minflux_viewer.ui.controllers import menu_controller
 
     source = Path(menu_controller.__file__).read_text(encoding="utf-8")
     assert 'QAction("Viewer format (.zarr)"' in source
@@ -384,7 +384,7 @@ def test_existing_zarr_prompt_offers_processing_replace_and_cancel(tmp_path, mon
         def clickedButton(self):
             return self.clicked
 
-    from minflux_viewer.ui import save_export_controller
+    from minflux_viewer.ui.controllers import save_export_controller
 
     monkeypatch.setattr(save_export_controller, "QMessageBox", _FakeMessageBox)
     target = tmp_path / "existing.zarr"

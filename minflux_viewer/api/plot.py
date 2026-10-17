@@ -3,7 +3,7 @@
 
 Implemented by extension-layer **track C**.
 
-Built on pyqtgraph through ``ui/plot_format.py``, so plots match the rest of
+Built on pyqtgraph through ``ui/plots/plot_format.py``, so plots match the rest of
 the application rather than looking like a debug window. Every constructor
 returns a :class:`PlotHandle` whose methods are chainable::
 
@@ -22,7 +22,7 @@ import pyqtgraph as pg
 from ..colormaps import canonical_colormap_name, map_to_rgba
 from ._base import ApiError, Namespace
 
-#: Line styles, MATLAB-style, matching ``ui/plot_style_dialog.py``.
+#: Line styles, MATLAB-style, matching ``ui/dialogs/plot_style_dialog.py``.
 LINE_STYLES = ("-", "--", ":", "-.")
 
 #: Marker symbols pyqtgraph accepts.
@@ -33,7 +33,7 @@ class PlotHandle:
     """One plot window. Every method returns self except :meth:`save_png`."""
 
     def __init__(self, namespace: Plot, *, title: str | None, image: bool = False) -> None:
-        from ..ui.script_plot import ScriptPlotWindow
+        from minflux_viewer.ui.plots.script_plot import ScriptPlotWindow
 
         self._namespace = namespace
         self._closed = False
@@ -184,7 +184,7 @@ class PlotHandle:
     def show(self) -> PlotHandle:
         """Show and raise the plot window."""
         self._require_open()
-        from ..ui.modeless import show_modeless
+        from minflux_viewer.ui.common.modeless import show_modeless
 
         owner = self._namespace._main_window()
         self._window.set_owner(owner)

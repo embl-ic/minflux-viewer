@@ -384,7 +384,7 @@ def test_background_work_runs_off_thread_and_delivers_on_the_gui_thread(mfv, qap
     mfv.run.background(work, on_done=lambda v: out.setdefault("value", v),
                        name="unit test task")
 
-    from minflux_viewer.ui.background_tasks import shared_thread_pool
+    from minflux_viewer.ui.common.background_tasks import shared_thread_pool
 
     shared_thread_pool("mfv-script").waitForDone(5000)
     for _ in range(50):
@@ -395,7 +395,7 @@ def test_background_work_runs_off_thread_and_delivers_on_the_gui_thread(mfv, qap
 
 
 def test_background_failure_is_reported_not_swallowed(mfv, qapp):
-    from minflux_viewer.ui.background_tasks import shared_thread_pool
+    from minflux_viewer.ui.common.background_tasks import shared_thread_pool
 
     errors = []
 

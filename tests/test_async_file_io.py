@@ -26,7 +26,7 @@ def _dataset(name: str, prefs: dict):
 
 @pytest.mark.parametrize("cancelled", [False, True])
 def test_background_cleanup_failures_are_logged_without_losing_terminal_signals(qapp, caplog, cancelled):
-    from minflux_viewer.ui.background_tasks import BackgroundTask
+    from minflux_viewer.ui.common.background_tasks import BackgroundTask
 
     seen = []
 

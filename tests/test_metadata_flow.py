@@ -90,7 +90,7 @@ def test_a_sidecar_beside_the_data_is_never_applied_without_asking(
                                                 encoding="utf-8")
     window = _window()
 
-    import minflux_viewer.ui.metadata_apply_dialog as dialogs
+    import minflux_viewer.ui.dialogs.metadata_apply_dialog as dialogs
 
     monkeypatch.setattr(dialogs, "ask_load_sidecar",
                         lambda *a, **k: dialogs.SKIP)
@@ -117,7 +117,7 @@ def test_dropping_the_data_with_its_recipe_asks_nothing(
     side = tmp_path / "run_viewer_metadata.json"
     side.write_text(json.dumps(_recipe()), encoding="utf-8")
 
-    import minflux_viewer.ui.metadata_apply_dialog as dialogs
+    import minflux_viewer.ui.dialogs.metadata_apply_dialog as dialogs
 
     def _refuse(*a, **k):
         raise AssertionError("the user must not be asked for a paired drop")
@@ -243,7 +243,7 @@ def test_applying_to_a_row_that_no_longer_exists_is_refused(_app):
 # ------------------------------------------------------- the dialog itself
 
 def _apply_dialog(meta, datasets):
-    from minflux_viewer.ui.metadata_apply_dialog import MetadataApplyDialog
+    from minflux_viewer.ui.dialogs.metadata_apply_dialog import MetadataApplyDialog
 
     return MetadataApplyDialog("run_viewer_metadata.json", meta, datasets)
 
@@ -291,7 +291,7 @@ def test_with_no_dataset_loaded_the_apply_row_is_disabled(_app):
 def test_a_snapshot_recipe_is_warned_about_before_it_flattens_z(_app):
     from PyQt6.QtWidgets import QLabel
 
-    from minflux_viewer.ui.metadata_apply_dialog import SNAPSHOT_WARNING
+    from minflux_viewer.ui.dialogs.metadata_apply_dialog import SNAPSHOT_WARNING
 
     dialog = _apply_dialog(_recipe(content="snapshot"), [_dataset("a")])
     try:
@@ -308,7 +308,7 @@ def test_a_snapshot_recipe_is_warned_about_before_it_flattens_z(_app):
 
 
 def test_cancel_is_distinct_from_keep(_app):
-    from minflux_viewer.ui.metadata_apply_dialog import CANCEL
+    from minflux_viewer.ui.dialogs.metadata_apply_dialog import CANCEL
 
     dialog = _apply_dialog(_recipe(), [])
     try:

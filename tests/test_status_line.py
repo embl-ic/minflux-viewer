@@ -1,10 +1,10 @@
-"""ui/status_line.py: a status read-out that never widens its window."""
+"""ui/widgets/status_line.py: a status read-out that never widens its window."""
 
 from __future__ import annotations
 
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from minflux_viewer.ui.status_line import StatusLine
+from minflux_viewer.ui.widgets.status_line import StatusLine
 
 _LONG = ("3D  |  1 ch  |  LOD 1  |  px=50.0 nm  |  projected over the visible "
          "region  |  crosshair X=-136.3  Y=-202.0  Z=133.4 nm")

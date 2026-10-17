@@ -362,7 +362,7 @@ def install_package(
     """Install one wheel-only distribution into the managed library root.
 
     ``report`` is the cooperative cancellation checkpoint supplied by
-    :class:`~minflux_viewer.ui.background_tasks.BackgroundTask`. pip itself is
+    :class:`~minflux_viewer.ui.common.background_tasks.BackgroundTask`. pip itself is
     synchronous; cancellation takes effect after pip returns, before its result
     reaches the UI.
     """

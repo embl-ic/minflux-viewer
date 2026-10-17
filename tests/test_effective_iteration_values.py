@@ -118,7 +118,7 @@ def test_histogram_auto_switches_to_effective_iteration(qapp):
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     mfx, eff = _make_m2410_with_effective_cfr()
     ds = loader.load_from_mfx_array(mfx, "eff")
@@ -145,7 +145,7 @@ def test_filter_edit_on_cfr_displays_effective_iteration(qapp):
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     mfx, eff = _make_m2410_with_effective_cfr()
     ds = loader.load_from_mfx_array(mfx, "eff")
@@ -175,7 +175,7 @@ def test_filter_edit_survives_manual_iteration_browse_and_reports_state(qapp):
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     mfx, _eff = _make_m2410_with_effective_cfr()
     ds = loader.load_from_mfx_array(mfx, "eff")
@@ -223,8 +223,13 @@ def test_filter_dialog_update_and_finish_copy_histogram_controls(qapp):
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.filter_dialog import _COL_ATTR, _COL_ITER, _COL_MODE, FilterDialog
-    from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.dialogs.filter_dialog import (
+        _COL_ATTR,
+        _COL_ITER,
+        _COL_MODE,
+        FilterDialog,
+    )
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     mfx, _eff = _make_m2410_with_effective_cfr()
     ds = loader.load_from_mfx_array(mfx, "eff")

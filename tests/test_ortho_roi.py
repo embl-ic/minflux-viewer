@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 import pytest
 
 pytest.importorskip("PyQt6")
@@ -12,8 +11,8 @@ import numpy as np
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
-from minflux_viewer.ui.ortho_roi import pane_outline
-from minflux_viewer.ui.ortho_view import ORTHO_AXIS, ORTHO_AXIS_COLUMNS
+from minflux_viewer.ui.rendering.ortho_roi import pane_outline
+from minflux_viewer.ui.rendering.ortho_view import ORTHO_AXIS, ORTHO_AXIS_COLUMNS
 
 
 @pytest.fixture
@@ -108,7 +107,7 @@ def _state(three_d: bool = True):
 
 
 def _scatter(app, state):
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
 
     win = ScatterWindow(state, dataset_idx=0)
     win.resize(900, 900)
@@ -435,7 +434,7 @@ def test_a_cuboid_is_a_RECTANGLE_item_in_every_plane(_qt_app):
     vertices -- so a corner drag produced a shape the record could no longer
     represent. An axis-aligned box is a rectangle in every plane.
     """
-    from minflux_viewer.ui.roi_overlay import FilledEllipseROI, FilledRectROI
+    from minflux_viewer.ui.roi.roi_overlay import FilledEllipseROI, FilledRectROI
 
     state = _state()
     win = _scatter(_qt_app, state)
@@ -644,7 +643,7 @@ def test_the_pane_controllers_share_the_store(_qt_app):
 def test_a_point_drawn_in_an_ortho_yz_pane_lands_where_it_was_clicked():
     """The transposition, end to end: in an ortho YZ pane the horizontal
     coordinate is Z and the vertical is Y."""
-    from minflux_viewer.ui.roi_overlay import point_to_3d, project_point
+    from minflux_viewer.ui.roi.roi_overlay import point_to_3d, project_point
 
     xyz = point_to_3d((300.0, 20.0), (2, 1), depth=7.0)    # h=Z, v=Y, depth=X
     assert xyz == [7.0, 20.0, 300.0]
@@ -662,7 +661,7 @@ def test_a_point_drawn_in_an_ortho_yz_pane_lands_where_it_was_clicked():
 
 def test_the_selecting_type_gates_include_the_volume_shapes():
     from minflux_viewer.core.roi_selection import VOLUME_ROI_TYPES
-    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+    from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
     selecting = RoiOverlayController._SELECTING_TYPES
     assert VOLUME_ROI_TYPES <= selecting
@@ -686,7 +685,7 @@ def test_a_volume_edit_queues_a_fresh_localization_selection(_qt_app):
 
 def test_the_properties_read_out_describes_a_volume_roi_in_three_dimensions():
     from minflux_viewer.core.roi import RoiRecord
-    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+    from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
     class _Formatter:                    # _geometry_text reads only self._fmt
         # staticmethod(): a plain function assigned in a class body would bind,
@@ -707,7 +706,7 @@ def test_the_properties_read_out_describes_a_volume_roi_in_three_dimensions():
 # the mouse. Drive the viewport, the way a user does.
 
 def _render(app, state):
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     win = RenderWindow(state, 0)
     win.resize(900, 900)
@@ -893,7 +892,7 @@ def test_pointing_into_a_side_pane_makes_a_pending_volume_editable_there(
     shared store.  A real edit-mode hover now hands that one draft to the pane's
     controller, where its normal edit signal updates the correct two axes.
     """
-    from minflux_viewer.ui.roi_overlay import FilledRectROI
+    from minflux_viewer.ui.roi.roi_overlay import FilledRectROI
 
     state = _state()
     win = _scatter(_qt_app, state) if view == "scatter" else _render(_qt_app, state)
@@ -1027,7 +1026,7 @@ def test_the_cylinder_item_is_an_oval_in_its_own_plane_and_a_box_from_the_side(_
     from PyQt6.QtWidgets import QWidget
 
     from minflux_viewer.core.roi import RoiRecord, RoiStore
-    from minflux_viewer.ui.roi_overlay import (
+    from minflux_viewer.ui.roi.roi_overlay import (
         FilledEllipseROI,
         FilledRectROI,
         RoiOverlayController,
@@ -1073,7 +1072,7 @@ def test_the_cylinder_item_is_an_oval_in_its_own_plane_and_a_box_from_the_side(_
 def test_the_cylinder_tool_draws_an_oval_and_lifts_it_on_release():
     """It reuses the existing oval gesture, so the rubber band, handles and
     status read-out are the ones already in use; only the lift is new."""
-    from minflux_viewer.ui.roi_overlay import _FLAT_TOOL_FOR_VOLUME
+    from minflux_viewer.ui.roi.roi_overlay import _FLAT_TOOL_FOR_VOLUME
 
     assert _FLAT_TOOL_FOR_VOLUME["cylinder"] == "oval"
     assert _FLAT_TOOL_FOR_VOLUME["sphere"] == "oval"     # same gesture, different lift

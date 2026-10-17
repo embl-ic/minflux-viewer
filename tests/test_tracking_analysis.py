@@ -55,7 +55,7 @@ def _wait(app, window, timeout=5.0):
 def test_msd_workbench_runs_and_presents_all_result_levels(_qt_app):
     from PyQt6.QtCore import Qt
 
-    from minflux_viewer.ui.tracking_analysis_window import MsdAnalysisWindow
+    from minflux_viewer.ui.plots.tracking_analysis_window import MsdAnalysisWindow
 
     win = MsdAnalysisWindow(_state(), 0)
     win.show()
@@ -86,7 +86,7 @@ def test_msd_workbench_runs_and_presents_all_result_levels(_qt_app):
 def test_msd_workbench_compute_runs_off_the_gui_thread(_qt_app, monkeypatch):
     import threading
 
-    from minflux_viewer.ui import tracking_analysis_window as module
+    from minflux_viewer.ui.plots import tracking_analysis_window as module
 
     gui_thread = threading.get_ident()
     worker_threads = []
@@ -109,7 +109,7 @@ def test_msd_workbench_compute_runs_off_the_gui_thread(_qt_app, monkeypatch):
 
 
 def test_new_msd_run_cancels_and_rejects_the_old_generation(_qt_app, monkeypatch):
-    from minflux_viewer.ui.tracking_analysis_window import MsdAnalysisWindow
+    from minflux_viewer.ui.plots.tracking_analysis_window import MsdAnalysisWindow
 
     queued = []
     monkeypatch.setattr(
@@ -165,7 +165,7 @@ def test_tracking_result_zip_contains_tables_units_and_provenance(tmp_path):
 
 
 def test_dataset_change_invalidates_a_visible_result(_qt_app):
-    from minflux_viewer.ui.tracking_analysis_window import MsdAnalysisWindow
+    from minflux_viewer.ui.plots.tracking_analysis_window import MsdAnalysisWindow
 
     state = _state()
     win = MsdAnalysisWindow(state, 0)
@@ -184,7 +184,7 @@ def test_dataset_change_invalidates_a_visible_result(_qt_app):
 
 
 def test_msd_workbench_can_materialize_selected_attributes(_qt_app):
-    from minflux_viewer.ui.tracking_analysis_window import MsdAnalysisWindow
+    from minflux_viewer.ui.plots.tracking_analysis_window import MsdAnalysisWindow
 
     state = _state()
     state.prefs["tracking"].update({

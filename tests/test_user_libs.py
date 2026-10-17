@@ -207,7 +207,7 @@ def test_remove_package_uses_record_and_updates_manifest(tmp_path: Path) -> None
 
 
 def test_python_packages_group_shows_abi_status_and_saves(qtbot, tmp_path: Path) -> None:
-    from minflux_viewer.ui.prefs_python_packages import PythonPackagesGroup
+    from minflux_viewer.ui.settings.prefs_python_packages import PythonPackagesGroup
 
     prefs = {
         "plugin": {
@@ -237,7 +237,7 @@ def test_python_packages_group_installs_off_gui_thread_and_records_result(
 ) -> None:
     from PyQt6.QtCore import Qt
 
-    from minflux_viewer.ui.prefs_python_packages import PythonPackagesGroup
+    from minflux_viewer.ui.settings.prefs_python_packages import PythonPackagesGroup
 
     worker_threads: list[int] = []
 

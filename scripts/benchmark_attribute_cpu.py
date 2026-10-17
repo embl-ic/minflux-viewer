@@ -35,10 +35,7 @@ from minflux_viewer.core.loader import (  # noqa: E402
     load_npy,
     mfx_get,
 )
-from minflux_viewer.ui.attribute_cpu import (  # noqa: E402
-    aggregate_screen_points,
-    joint_extent,
-)
+from minflux_viewer.ui.plots.attribute_cpu import aggregate_screen_points, joint_extent
 
 LOAD_PREFS = default_prefs()
 LOAD_PREFS["data"].update({
@@ -196,7 +193,7 @@ def benchmark_file(path: Path, width: int, height: int) -> list[dict]:
 
 
 def benchmark_synthetic(fraction: float, width: int, height: int) -> dict:
-    from minflux_viewer.ui.gpu_capabilities import point_limit_from_memory
+    from minflux_viewer.ui.common.gpu_capabilities import point_limit_from_memory
 
     # This is intentionally a CPU-only benchmark. Starting and destroying a
     # throw-away Qt/OpenGL context in the same process as a ~1 GiB allocation

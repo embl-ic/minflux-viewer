@@ -46,7 +46,7 @@ def test_task_failure_reports_status(_app):
 
 def test_roi_status_readout_text(_app):
     pytest.importorskip("pyqtgraph")
-    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+    from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
     f = RoiOverlayController._roi_status_text
 
     assert f("rectangle", {"bounds": [49, 183, 37, 33]}) == "Rectangle X=49, Y=183, W=37, H=33"
@@ -74,7 +74,7 @@ def test_emit_status_pushes_to_owner_status_bar(_app):
     from types import SimpleNamespace
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.roi_overlay import RoiOverlayController
+    from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
     st = AppState()
     msgs: list[str] = []

@@ -449,7 +449,7 @@ def test_no_accepted_cell_reports_why():
 
 def test_dialog_round_trips_rod_settings_and_greys_out_the_unused_knob(qtbot):
     from minflux_viewer.analysis.hlyb_staged import Staged3DConfig
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedDialog
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedDialog
 
     dialog = HlyBStagedDialog(defaults=Staged3DConfig())
     qtbot.addWidget(dialog)
@@ -476,7 +476,7 @@ def test_dialog_round_trips_rod_settings_and_greys_out_the_unused_knob(qtbot):
 
 def test_dialog_clamps_a_pixel_too_coarse_to_resolve_the_width(qtbot):
     from minflux_viewer.analysis.hlyb_staged import Staged3DConfig
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedDialog
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedDialog
 
     dialog = HlyBStagedDialog(defaults=Staged3DConfig(component_mode="rod"))
     qtbot.addWidget(dialog)
@@ -489,7 +489,7 @@ def test_dialog_clamps_a_pixel_too_coarse_to_resolve_the_width(qtbot):
 
 def test_result_window_reports_the_detection_including_rejections(qtbot):
     from minflux_viewer.analysis.hlyb_staged import analyze_hlyb_staged_3d
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
 
     rng = np.random.default_rng(21)
     loc, tid, tim = _rod_dataset(rng, centers=[(0.0, 0.0), (0.0, 4000.0)])
@@ -508,7 +508,7 @@ def test_result_window_reports_the_detection_including_rejections(qtbot):
 
 def test_result_window_hides_the_outline_toggle_without_a_detection(qtbot):
     from minflux_viewer.analysis.hlyb_staged import analyze_hlyb_staged_3d
-    from minflux_viewer.ui.hlyb_staged_dialog import HlyBStagedWindow
+    from minflux_viewer.ui.analysis.hlyb_staged_dialog import HlyBStagedWindow
 
     rng = np.random.default_rng(22)
     loc, tid, tim = _rod_dataset(rng, centers=[(0.0, 0.0)])

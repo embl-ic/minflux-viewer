@@ -24,7 +24,7 @@ def qt_app(qapp):
 def editor(qt_app):
     from minflux_viewer import scripting
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.script_editor_window import ScriptEditorWindow
+    from minflux_viewer.ui.tools.script_editor_window import ScriptEditorWindow
 
     state = AppState()
     state.save_prefs = lambda: None
@@ -80,10 +80,7 @@ def test_a_normal_script_still_reports_done(editor):
 
 def test_only_a_non_zero_int_code_counts_as_failure():
     """Python's own rule: a string code is a message, not a status."""
-    from minflux_viewer.ui.script_editor_window import (
-        _is_failure_exit,
-        _stopped_message,
-    )
+    from minflux_viewer.ui.tools.script_editor_window import _is_failure_exit, _stopped_message
 
     assert not _is_failure_exit(SystemExit())
     assert not _is_failure_exit(SystemExit(0))

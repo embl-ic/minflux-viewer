@@ -134,7 +134,7 @@ def _app(qapp):
 
 
 def test_window_lists_tasks_and_arms_stop_only_where_it_can_work(_app, qtbot):
-    from minflux_viewer.ui.task_monitor import TaskMonitor
+    from minflux_viewer.ui.tools.task_monitor import TaskMonitor
 
     registry = TaskRegistry()
     asked = []
@@ -169,7 +169,7 @@ def test_window_lists_tasks_and_arms_stop_only_where_it_can_work(_app, qtbot):
 
 
 def test_window_reports_the_raw_thread_picture_too(_app, qtbot):
-    from minflux_viewer.ui.task_monitor import TaskMonitor, summary_text
+    from minflux_viewer.ui.tools.task_monitor import TaskMonitor, summary_text
 
     window = TaskMonitor(None, registry=TaskRegistry())
     qtbot.addWidget(window)
@@ -181,7 +181,7 @@ def test_window_reports_the_raw_thread_picture_too(_app, qtbot):
 
 
 def test_elapsed_and_progress_are_formatted_readably():
-    from minflux_viewer.ui.task_monitor import format_elapsed, format_progress
+    from minflux_viewer.ui.tools.task_monitor import format_elapsed, format_progress
 
     assert format_elapsed(0.0) == "0.0 s"
     assert format_elapsed(3.25) == "3.2 s"
@@ -199,8 +199,8 @@ def test_memory_monitor_is_a_tab_not_a_separate_window(qtbot):
     ``Qt.Window`` is what makes the embedded monitor an ordinary child widget;
     without it the tab would be empty and the monitor would still float.
     """
-    from minflux_viewer.ui.memory_monitor import MemoryMonitor
-    from minflux_viewer.ui.task_monitor import TaskMonitor
+    from minflux_viewer.ui.tools.memory_monitor import MemoryMonitor
+    from minflux_viewer.ui.tools.task_monitor import TaskMonitor
 
     window = TaskMonitor(None, registry=TaskRegistry())
     qtbot.addWidget(window)
@@ -223,7 +223,7 @@ def test_embedded_memory_polling_follows_the_window(qtbot):
     The embedded widget is a child, so its own ``closeEvent`` never runs when
     the Task Monitor is closed — the parent has to stop its timer.
     """
-    from minflux_viewer.ui.task_monitor import TaskMonitor
+    from minflux_viewer.ui.tools.task_monitor import TaskMonitor
 
     window = TaskMonitor(None, registry=TaskRegistry())
     qtbot.addWidget(window)
@@ -270,8 +270,8 @@ def test_the_thread_count_covers_every_pool_the_application_owns(_app):
     Qt's global one; a count of the global pool alone would read them as idle."""
     from PyQt6.QtCore import QThreadPool
 
-    from minflux_viewer.ui.background_tasks import shared_thread_pool, shared_thread_pools
-    from minflux_viewer.ui.task_monitor import TaskMonitor, summary_text
+    from minflux_viewer.ui.common.background_tasks import shared_thread_pool, shared_thread_pools
+    from minflux_viewer.ui.tools.task_monitor import TaskMonitor, summary_text
 
     shared_thread_pool("test-monitor-pool", max_threads=3)
     pools = [QThreadPool.globalInstance(), *shared_thread_pools()]

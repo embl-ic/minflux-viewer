@@ -11,8 +11,8 @@ from __future__ import annotations
 def test_a_render_scheduler_leaves_the_global_pool_alone(qapp):
     from PyQt6.QtCore import QThreadPool
 
-    from minflux_viewer.ui.background_tasks import shared_thread_pool
-    from minflux_viewer.ui.render_scheduler import RenderScheduler
+    from minflux_viewer.ui.common.background_tasks import shared_thread_pool
+    from minflux_viewer.ui.rendering.render_scheduler import RenderScheduler
 
     global_pool = QThreadPool.globalInstance()
     before = global_pool.maxThreadCount()

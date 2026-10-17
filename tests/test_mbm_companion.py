@@ -142,7 +142,7 @@ def _app(qapp):
 
 def _window(qtbot, *, data_bounds_nm=None):
     from minflux_viewer.plugins.msr_reader.beads_drift import extract_bead_drift
-    from minflux_viewer.ui.mbm_info_window import MbmInfoWindow
+    from minflux_viewer.ui.tools.mbm_info_window import MbmInfoWindow
 
     beads = extract_bead_drift(_bead_points(), {}, [])
     window = MbmInfoWindow("run_mbm.npy", beads, data_bounds_nm=data_bounds_nm)
@@ -181,7 +181,7 @@ def test_a_companion_says_why_there_is_no_data_region_box(_app, qtbot):
     """The box is the localization extent, which a bead file does not carry."""
     from PyQt6.QtWidgets import QLabel
 
-    from minflux_viewer.ui.mbm_info_window import NO_DATA_REGION_NOTE
+    from minflux_viewer.ui.tools.mbm_info_window import NO_DATA_REGION_NOTE
 
     window = _window(qtbot)
     page = window._tabs.widget(1)
@@ -195,7 +195,7 @@ def test_a_loaded_dataset_still_gets_its_data_region_and_no_note(_app, qtbot):
     import numpy as np
     from PyQt6.QtWidgets import QLabel
 
-    from minflux_viewer.ui.mbm_info_window import NO_DATA_REGION_NOTE
+    from minflux_viewer.ui.tools.mbm_info_window import NO_DATA_REGION_NOTE
 
     bounds = (np.array([1e4, 1e4, -50.0]), np.array([3.2e4, 3.2e4, 50.0]))
     window = _window(qtbot, data_bounds_nm=bounds)

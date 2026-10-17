@@ -12,7 +12,7 @@ def test_dataset_manager_preference_roundtrips_in_data_show_section(qapp):
     app = QApplication.instance() or QApplication([])
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.preferences_dialog import PreferencesDialog
+    from minflux_viewer.ui.settings.preferences_dialog import PreferencesDialog
 
     state = AppState()
     dlg = PreferencesDialog(state)
@@ -83,7 +83,7 @@ def test_load_option_tooltips_explain_themselves(qapp):
     from PyQt6.QtWidgets import QApplication
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.preferences_dialog import PreferencesDialog
+    from minflux_viewer.ui.settings.preferences_dialog import PreferencesDialog
 
     app = QApplication.instance() or QApplication([])
     dlg = PreferencesDialog(AppState())

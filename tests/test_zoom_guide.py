@@ -11,11 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from minflux_viewer.ui.zoom_guide import (
-    GUIDE_CAP_FRACTION,
-    ZOOM_MODES,
-    zoom_guide_points,
-)
+from minflux_viewer.ui.widgets.zoom_guide import GUIDE_CAP_FRACTION, ZOOM_MODES, zoom_guide_points
 
 VIEW = ((0.0, 100.0), (0.0, 50.0))
 #: A drag near the left edge, low down — where "pinned to the middle" was worst.
@@ -112,7 +108,7 @@ def test_the_attribute_plot_draws_its_guide_at_the_cursor(_app, qtbot, gpu):
     The guide is drawn on the ordinary 2-D ViewBox, which the GPU canvas sits
     behind rather than replacing, so it must behave identically either way.
     """
-    from minflux_viewer.ui.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
 
     window = AttributeWindow(_state_with_data(), dataset_idx=0)
     window.set_gpu_2d(gpu)
@@ -125,7 +121,7 @@ def test_the_attribute_plot_draws_its_guide_at_the_cursor(_app, qtbot, gpu):
 
 
 def test_the_histogram_draws_its_guide_at_the_cursor(_app, qtbot):
-    from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     window = HistogramWindow(_state_with_data(), dataset_idx=0)
     qtbot.addWidget(window)
@@ -138,13 +134,13 @@ def test_the_histogram_draws_its_guide_at_the_cursor(_app, qtbot):
 
 def test_every_plot_with_this_tool_offers_the_same_modes():
     """One tool, one vocabulary — the drift this file exists to prevent."""
-    from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     assert set(HistogramWindow.ZOOM_MODES) == set(ZOOM_MODES)
 
     import inspect
 
-    from minflux_viewer.ui import attribute_window
+    from minflux_viewer.ui.plots import attribute_window
 
     source = inspect.getsource(attribute_window)
     assert "zoom_guide_points" in source, attribute_window.__name__

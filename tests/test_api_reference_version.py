@@ -18,7 +18,7 @@ REFERENCE = Path(__file__).resolve().parents[1] / "docs" / "scripting-api.md"
 
 def test_the_editor_help_names_the_version_and_every_namespace():
     pytest.importorskip("PyQt6")
-    from minflux_viewer.ui.script_editor_window import _API_HELP, _COMPLETION_MAP
+    from minflux_viewer.ui.tools.script_editor_window import _API_HELP, _COMPLETION_MAP
 
     assert _API_HELP.startswith(f"MINFLUX Viewer scripting API {__api_version__}\n")
     for name in NAMESPACES:

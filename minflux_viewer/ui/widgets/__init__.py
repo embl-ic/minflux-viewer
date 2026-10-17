@@ -1,0 +1,1 @@
+"""Widgets UI capabilities."""

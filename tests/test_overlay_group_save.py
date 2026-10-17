@@ -214,7 +214,7 @@ def _app(qapp):
 
 
 def test_the_dialog_names_every_channel_and_the_folder(_app):
-    from minflux_viewer.ui.save_dialog import SaveProcessedDataDialog
+    from minflux_viewer.ui.dialogs.save_dialog import SaveProcessedDataDialog
 
     names = ["1_anti_ELYS", "2_anti_GFP", "3_anti_Nup153"]
     dlg = SaveProcessedDataDialog(names[0], members=names,
@@ -236,7 +236,7 @@ def test_the_dialog_names_every_channel_and_the_folder(_app):
 
 
 def test_a_single_dataset_still_uses_the_plain_path_row(_app):
-    from minflux_viewer.ui.save_dialog import SaveProcessedDataDialog
+    from minflux_viewer.ui.dialogs.save_dialog import SaveProcessedDataDialog
 
     dlg = SaveProcessedDataDialog("only", members=["only"],
                                   prefs={"data": {}, "file": {}})

@@ -13,7 +13,7 @@ from PyQt6.QtCore import QPointF, Qt
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
-from minflux_viewer.ui.ortho_view import ORTHO_AXIS, ortho_pane_labels
+from minflux_viewer.ui.rendering.ortho_view import ORTHO_AXIS, ortho_pane_labels
 
 
 @pytest.fixture
@@ -42,7 +42,7 @@ def _settle(app, turns: int = 8) -> None:
 
 
 def _window(app, state, *, size=(900, 900)):
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     win = RenderWindow(state, dataset_idx=0)
     win.resize(*size)
@@ -350,7 +350,7 @@ def test_floating_geometry_matches_the_embedded_arrangement():
     """YZ to the right sharing the vertical extent, XZ below sharing the
     horizontal one — the same arrangement as the grid, expressed as screen
     rectangles of the *plot area* rather than of the window frame."""
-    from minflux_viewer.ui.ortho_view import floating_geometry
+    from minflux_viewer.ui.rendering.ortho_view import floating_geometry
 
     plot = (100, 100, 600, 500)
     yz = floating_geometry(plot, "YZ", thickness=240, gap=8)
@@ -365,7 +365,7 @@ def test_floating_geometry_matches_the_embedded_arrangement():
 
 def test_floating_geometry_keeps_decorated_frames_apart():
     """Plot alignment must leave room for the windows around those plots."""
-    from minflux_viewer.ui.ortho_view import floating_geometry
+    from minflux_viewer.ui.rendering.ortho_view import floating_geometry
 
     plot = (100, 100, 600, 500)
     owner_chrome = (7, 31, 7, 52)
@@ -565,7 +565,7 @@ def _screen_pos(win, plane, point):
     """Where a 3-D point lands on screen in one pane, in global pixels."""
     from PyQt6.QtCore import QPointF
 
-    from minflux_viewer.ui.ortho_view import ORTHO_AXIS_COLUMNS
+    from minflux_viewer.ui.rendering.ortho_view import ORTHO_AXIS_COLUMNS
 
     view_box = win._ortho.view_box(plane)
     widget = win._pane_widgets[plane]
@@ -638,7 +638,7 @@ def test_the_side_panes_use_the_primary_pane_reconstruction_exactly(_qt_app):
     through the primary path and through the side-pane argument rule and
     requiring the arrays to match bit for bit.
     """
-    from minflux_viewer.ui.render_window import _RENDER_SIZE
+    from minflux_viewer.ui.rendering.render_window import _RENDER_SIZE
 
     state = _state(n=30000)
     win = _window(_qt_app, state, size=(900, 880))

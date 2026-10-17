@@ -109,7 +109,7 @@ __all__ = [
 
 from ..utils.import_compat import resolve_moved_symbol
 
-_MOVED_SYMBOLS = {'run_crlb': 'minflux_viewer.ui.precision_analysis:run_crlb', 'run_frc': 'minflux_viewer.ui.precision_analysis:run_frc', 'run_stddev_per_trace': 'minflux_viewer.ui.precision_analysis:run_stddev_per_trace', 'run_local_density': 'minflux_viewer.ui.density_analysis:run_local_density'}
+_MOVED_SYMBOLS = {'run_crlb': 'minflux_viewer.ui.analysis.precision_analysis:run_crlb', 'run_frc': 'minflux_viewer.ui.analysis.precision_analysis:run_frc', 'run_stddev_per_trace': 'minflux_viewer.ui.analysis.precision_analysis:run_stddev_per_trace', 'run_local_density': 'minflux_viewer.ui.analysis.density_analysis:run_local_density'}
 
 def __getattr__(name):
     return resolve_moved_symbol(__name__, name, _MOVED_SYMBOLS)

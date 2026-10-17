@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from minflux_viewer.analysis.voronoi_density import build_voronoi_3d_field
-from minflux_viewer.ui.volume_window import (
+from minflux_viewer.ui.rendering.volume_window import (
     _clip_region,
     _compose_multichannel_rgba,
     _precision_volume_3d,

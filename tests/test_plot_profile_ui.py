@@ -12,8 +12,8 @@ import pyqtgraph as pg
 from PyQt6.QtWidgets import QWidget
 
 from minflux_viewer.core.roi import RoiRecord, RoiStore
-from minflux_viewer.ui.plot_profile_dialog import PlotProfileDialog
-from minflux_viewer.ui.roi_overlay import RoiOverlayController
+from minflux_viewer.ui.plots.plot_profile_dialog import PlotProfileDialog
+from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController
 
 
 @pytest.fixture(scope="module")

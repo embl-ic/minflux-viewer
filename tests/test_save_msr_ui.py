@@ -9,8 +9,8 @@ pytest.importorskip("PyQt6")
 
 
 from minflux_viewer.core.app_state import AppState
-from minflux_viewer.ui.dataset_manager import DatasetManager
-from minflux_viewer.ui.save_dialog import _ALL_FORMATS, SaveProcessedDataDialog
+from minflux_viewer.ui.dialogs.save_dialog import _ALL_FORMATS, SaveProcessedDataDialog
+from minflux_viewer.ui.tools.dataset_manager import DatasetManager
 
 
 @pytest.fixture(scope="module")

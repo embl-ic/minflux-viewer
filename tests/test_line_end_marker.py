@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import QWidget
 from pyqtgraph.graphicsItems.ROI import Handle
 
 from minflux_viewer.core.roi import RoiRecord, RoiStore
-from minflux_viewer.ui.roi_overlay import RoiOverlayController, _mark_line_end_handle
+from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController, _mark_line_end_handle
 
 
 @pytest.fixture(scope="module")

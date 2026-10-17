@@ -74,7 +74,7 @@ def test_an_offered_colormap_name_is_reserved_but_a_hidden_one_is_not():
 
 def test_the_preset_menu_offers_its_name_for_the_name_field():
     pytest.importorskip("PyQt6")
-    from minflux_viewer.ui.custom_colormap_dialog import CustomColormapDialog
+    from minflux_viewer.ui.dialogs.custom_colormap_dialog import CustomColormapDialog
 
     display = CustomColormapDialog._preset_display_name
     assert display("preset-gradient:thermal") == "thermal"
@@ -147,7 +147,7 @@ def test_the_order_never_hides_a_new_map_or_keeps_a_deleted_one():
 
 def test_sorting_orders_the_maps_and_leaves_the_solid_rows_in_place():
     pytest.importorskip("PyQt6")
-    from minflux_viewer.ui.colormap_order_dialog import sort_entries
+    from minflux_viewer.ui.dialogs.colormap_order_dialog import sort_entries
 
     rows = ["viridis", SOLID_GROUP_TOKEN, "hot", "jet"]
     by_name = sort_entries(rows, "name")
@@ -168,7 +168,7 @@ def test_sorting_orders_the_maps_and_leaves_the_solid_rows_in_place():
 
 def test_the_dialog_folds_and_unfolds_without_losing_anything(qtbot):
     pytest.importorskip("PyQt6")
-    from minflux_viewer.ui.colormap_order_dialog import ColormapOrderDialog
+    from minflux_viewer.ui.dialogs.colormap_order_dialog import ColormapOrderDialog
 
     dialog = ColormapOrderDialog(entries=channel_colormap_names(), fold_solids=True)
     qtbot.addWidget(dialog)
@@ -188,7 +188,7 @@ def test_the_dialog_folds_and_unfolds_without_losing_anything(qtbot):
 
 def test_the_first_click_sorts_ascending_and_the_second_reverses(qtbot):
     pytest.importorskip("PyQt6")
-    from minflux_viewer.ui.colormap_order_dialog import ColormapOrderDialog
+    from minflux_viewer.ui.dialogs.colormap_order_dialog import ColormapOrderDialog
 
     dialog = ColormapOrderDialog(entries=channel_colormap_names(), fold_solids=True)
     qtbot.addWidget(dialog)
@@ -214,8 +214,8 @@ def test_reordering_from_the_lut_dialog_persists_and_reaches_the_list(qtbot,
     from PyQt6.QtWidgets import QDialog
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui import colormap_order_dialog as order_module
-    from minflux_viewer.ui.lut_dialog import LutDialog
+    from minflux_viewer.ui.dialogs import colormap_order_dialog as order_module
+    from minflux_viewer.ui.dialogs.lut_dialog import LutDialog
 
     state = AppState()
     dialog = LutDialog(lambda *a: None, lambda *a: None, state=state)
@@ -258,8 +258,8 @@ def test_cancelling_the_reorder_changes_nothing(qtbot, monkeypatch):
     from PyQt6.QtWidgets import QDialog
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui import colormap_order_dialog as order_module
-    from minflux_viewer.ui.lut_dialog import LutDialog
+    from minflux_viewer.ui.dialogs import colormap_order_dialog as order_module
+    from minflux_viewer.ui.dialogs.lut_dialog import LutDialog
 
     state = AppState()
     dialog = LutDialog(lambda *a: None, lambda *a: None, state=state)
@@ -289,7 +289,7 @@ def test_folding_puts_the_solids_under_a_node_in_the_lut_dropdown(qtbot):
     """
     pytest.importorskip("PyQt6")
     from minflux_viewer.colormaps import colormap_tree_entries
-    from minflux_viewer.ui.colormap_combo import SOLID_GROUP_LABEL, ColormapComboBox
+    from minflux_viewer.ui.widgets.colormap_combo import SOLID_GROUP_LABEL, ColormapComboBox
 
     combo = ColormapComboBox()
     qtbot.addWidget(combo)
@@ -315,7 +315,7 @@ def test_folding_puts_the_solids_under_a_node_in_the_lut_dropdown(qtbot):
 def test_unfolded_the_dropdown_is_flat_again(qtbot):
     pytest.importorskip("PyQt6")
     from minflux_viewer.colormaps import colormap_tree_entries
-    from minflux_viewer.ui.colormap_combo import SOLID_GROUP_LABEL, ColormapComboBox
+    from minflux_viewer.ui.widgets.colormap_combo import SOLID_GROUP_LABEL, ColormapComboBox
 
     configure_colormap_order(["Gray", "jet"], False)
     combo = ColormapComboBox()
@@ -333,7 +333,7 @@ def test_selecting_a_nested_solid_works_where_findText_does_not(qtbot):
     from PyQt6.QtCore import Qt
 
     from minflux_viewer.colormaps import colormap_tree_entries
-    from minflux_viewer.ui.colormap_combo import ColormapComboBox
+    from minflux_viewer.ui.widgets.colormap_combo import ColormapComboBox
 
     combo = ColormapComboBox()
     qtbot.addWidget(combo)
@@ -382,7 +382,7 @@ def test_picking_from_the_open_popup_announces_the_colormap(qtbot):
     """The regression: the dropdown changed nothing in the view it was open on."""
     pytest.importorskip("PyQt6")
     from minflux_viewer.colormaps import colormap_tree_entries
-    from minflux_viewer.ui.colormap_combo import ColormapComboBox
+    from minflux_viewer.ui.widgets.colormap_combo import ColormapComboBox
 
     combo = ColormapComboBox()
     qtbot.addWidget(combo)
@@ -410,7 +410,7 @@ def test_picking_from_the_open_popup_announces_the_colormap(qtbot):
 def test_a_programmatic_selection_is_not_announced_as_a_user_pick(qtbot):
     pytest.importorskip("PyQt6")
     from minflux_viewer.colormaps import colormap_tree_entries
-    from minflux_viewer.ui.colormap_combo import ColormapComboBox
+    from minflux_viewer.ui.widgets.colormap_combo import ColormapComboBox
 
     combo = ColormapComboBox()
     qtbot.addWidget(combo)
@@ -427,7 +427,7 @@ def test_a_programmatic_selection_is_not_announced_as_a_user_pick(qtbot):
 def test_clicking_a_group_row_never_becomes_the_selection(qtbot):
     pytest.importorskip("PyQt6")
     from minflux_viewer.colormaps import colormap_tree_entries
-    from minflux_viewer.ui.colormap_combo import SOLID_GROUP_LABEL, ColormapComboBox
+    from minflux_viewer.ui.widgets.colormap_combo import SOLID_GROUP_LABEL, ColormapComboBox
 
     combo = ColormapComboBox()
     qtbot.addWidget(combo)
@@ -462,8 +462,8 @@ def test_clicking_a_group_row_never_becomes_the_selection(qtbot):
 def test_the_lut_dropdown_keeps_its_selection_across_a_rebuild(qtbot):
     pytest.importorskip("PyQt6")
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.colormap_combo import SOLID_GROUP_LABEL
-    from minflux_viewer.ui.lut_dialog import LutDialog
+    from minflux_viewer.ui.dialogs.lut_dialog import LutDialog
+    from minflux_viewer.ui.widgets.colormap_combo import SOLID_GROUP_LABEL
 
     dialog = LutDialog(lambda *a: None, lambda *a: None, state=AppState())
     qtbot.addWidget(dialog)
@@ -509,7 +509,7 @@ def test_unfolding_from_the_dropdown_keeps_every_entry(qtbot):
     """The end-to-end version of the case collision above."""
     pytest.importorskip("PyQt6")
     from minflux_viewer.colormaps import colormap_tree_entries
-    from minflux_viewer.ui.colormap_combo import ColormapComboBox
+    from minflux_viewer.ui.widgets.colormap_combo import ColormapComboBox
 
     configure_colormap_order([], True)
     combo = ColormapComboBox()
@@ -528,7 +528,7 @@ def test_building_the_list_never_leaves_a_heading_as_the_selection(qtbot):
     """Qt selects row 0 on insert, and folded that row is the group heading."""
     pytest.importorskip("PyQt6")
     from minflux_viewer.colormaps import colormap_tree_entries
-    from minflux_viewer.ui.colormap_combo import SOLID_GROUP_LABEL, ColormapComboBox
+    from minflux_viewer.ui.widgets.colormap_combo import SOLID_GROUP_LABEL, ColormapComboBox
 
     configure_colormap_order([], True)               # folded: the group leads
     combo = ColormapComboBox()
@@ -555,7 +555,7 @@ def test_the_lut_dropdown_actually_recolours_the_view_it_is_open_on(qtbot):
 
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.core.dataset import build_localization_dataset
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     rng = np.random.default_rng(0)
     state = AppState()

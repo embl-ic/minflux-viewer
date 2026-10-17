@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import QWidget
 
 from minflux_viewer.core.roi import RoiRecord, RoiStore
 from minflux_viewer.core.roi_selection import oval_mask, rectangle_mask
-from minflux_viewer.ui.roi_overlay import (
+from minflux_viewer.ui.roi.roi_overlay import (
     RoiOverlayController,
     item_to_geometry,
     normalize_angle_deg,

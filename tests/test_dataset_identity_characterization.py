@@ -115,12 +115,12 @@ def _teardown(win: MainWindow) -> None:
     a registry has lost track of cannot stay open into the next test."""
     from PyQt6.QtWidgets import QApplication
 
-    from minflux_viewer.ui.attribute_window import AttributeWindow
-    from minflux_viewer.ui.data_window import DataWindow
-    from minflux_viewer.ui.filter_dialog import FilterDialog
-    from minflux_viewer.ui.histogram_window import HistogramWindow
-    from minflux_viewer.ui.render_window import RenderWindow
-    from minflux_viewer.ui.scatter_window import ScatterWindow
+    from minflux_viewer.ui.dialogs.filter_dialog import FilterDialog
+    from minflux_viewer.ui.plots.attribute_window import AttributeWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.scatter_window import ScatterWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
+    from minflux_viewer.ui.tools.data_window import DataWindow
 
     kinds = (AttributeWindow, DataWindow, FilterDialog, HistogramWindow,
              RenderWindow, ScatterWindow)

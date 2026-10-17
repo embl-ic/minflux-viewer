@@ -43,7 +43,7 @@ def test_local_density_window_registered_and_closes_with_owner(_qt_app, monkeypa
 
     import minflux_viewer.analysis.local_density as ld
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.modeless import close_modeless
+    from minflux_viewer.ui.common.modeless import close_modeless
 
     state = AppState()
     state.add_dataset(_make_ds())
@@ -173,7 +173,7 @@ def test_run_local_density_does_not_modify_preferences(_qt_app, monkeypatch):
 
     import minflux_viewer.analysis.local_density as ld
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.modeless import close_modeless
+    from minflux_viewer.ui.common.modeless import close_modeless
 
     state = AppState()
     state.add_dataset(_make_ds())

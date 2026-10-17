@@ -16,7 +16,7 @@ from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import QWidget
 
 from minflux_viewer.core.roi import RoiRecord, RoiStore
-from minflux_viewer.ui.roi_overlay import RoiOverlayController, item_to_geometry
+from minflux_viewer.ui.roi.roi_overlay import RoiOverlayController, item_to_geometry
 
 
 @pytest.fixture(scope="module")
@@ -109,7 +109,7 @@ def test_oval_has_bounding_box_handles(_app):
 
 
 def test_box_scale_fracs_rect_corners_vs_oval_on_curve():
-    from minflux_viewer.ui.roi_overlay import box_scale_fracs
+    from minflux_viewer.ui.roi.roi_overlay import box_scale_fracs
 
     rect = set(box_scale_fracs(on_curve=False))
     oval = set(box_scale_fracs(on_curve=True))
@@ -122,7 +122,7 @@ def test_box_scale_fracs_rect_corners_vs_oval_on_curve():
 
 
 def test_rect_handles_square_and_oval_diagonals_on_curve(_app):
-    from minflux_viewer.ui.roi_overlay import SquareHandle
+    from minflux_viewer.ui.roi.roi_overlay import SquareHandle
 
     ctrl = _ctrl(_app)
     rect = ctrl._make_item(RoiRecord.create("rectangle", {"bounds": [0.0, 0.0, 100.0, 50.0]}))
@@ -151,7 +151,7 @@ def test_oval_on_curve_diagonal_handle_resizes(_app):
 def test_center_axis_box_is_long_axis_drag_with_golden_minor():
     """The drag is the long *centre* axis (length + rotation); the short side is the
     golden ratio of it, centred on the axis."""
-    from minflux_viewer.ui.roi_overlay import GOLDEN_MINOR, center_axis_box
+    from minflux_viewer.ui.roi.roi_overlay import GOLDEN_MINOR, center_axis_box
 
     bounds, angle = center_axis_box(0.0, 0.0, 100.0, 0.0)     # horizontal
     x, y, w, h = bounds
@@ -163,7 +163,7 @@ def test_center_axis_box_is_long_axis_drag_with_golden_minor():
 
 
 def test_rotated_variant_handle_fractions():
-    from minflux_viewer.ui.roi_overlay import rotated_variant_handles
+    from minflux_viewer.ui.roi.roi_overlay import rotated_variant_handles
 
     # Fiji-style: BOTH variants put their 4 handles at the edge midpoints, with the
     # solid pivot at the drawing-origin edge middle (0, 0.5).
@@ -209,7 +209,7 @@ def test_draw_ellipse_makes_rotated_oval_record(_app):
 
 @pytest.mark.parametrize("roi_type", ["rectangle", "oval"])
 def test_rotated_variant_item_has_four_handles_one_solid_pivot(_app, roi_type):
-    from minflux_viewer.ui.roi_overlay import SolidSquareHandle
+    from minflux_viewer.ui.roi.roi_overlay import SolidSquareHandle
 
     ctrl = _ctrl(_app)
     item = ctrl._make_item(RoiRecord.create(

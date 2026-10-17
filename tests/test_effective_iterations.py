@@ -86,7 +86,7 @@ def test_histogram_bolds_effective_iterations(qtbot):
     from PyQt6.QtCore import Qt
 
     from minflux_viewer.core.app_state import AppState
-    from minflux_viewer.ui.histogram_window import HistogramWindow
+    from minflux_viewer.ui.plots.histogram_window import HistogramWindow
 
     ds = _make_ds(n_itr=5, cfr_iter=2)
     state = AppState()

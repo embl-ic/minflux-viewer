@@ -177,7 +177,7 @@ from minflux_viewer.plugins.msr_reader.viewer_open_signals import (
 #: parentheses — is kept so an exported image keeps the name the ``.msr`` uses.
 #: Windows refuses these stems whatever the extension.
 #: What to do when an export target already exists.
-from ...ui.background_tasks import BackgroundTaskCancelled
+from minflux_viewer.ui.common.background_tasks import BackgroundTaskCancelled
 
 #: How long after the reader closes its windows are restacked. Zero would
 #: race the window manager's own post-close activation, which is the thing the
@@ -369,7 +369,7 @@ class MsrReaderDialog(QWidget):
         # monitor and only a thin top strip overlapping on a narrow one.
         if not self._positioned:
             self._positioned = True
-            from ...ui.modeless import ensure_on_screen
+            from minflux_viewer.ui.common.modeless import ensure_on_screen
 
             align = "top_left"
             try:
@@ -387,7 +387,7 @@ class MsrReaderDialog(QWidget):
             ensure_on_screen(self, self._owner, align=align)
 
     def closeEvent(self, event):
-        from ...ui.background_tasks import (
+        from minflux_viewer.ui.common.background_tasks import (
             retire_background_tasks,
             retire_qthreads,
         )
@@ -879,7 +879,7 @@ class MsrReaderDialog(QWidget):
             "Switch to Folder (batch) mode to pick a file to preview.")
 
     def _start_parse_worker(self, msr: str, tmp: str):
-        from ...ui.background_tasks import retain_qthread, retire_qthreads
+        from minflux_viewer.ui.common.background_tasks import retain_qthread, retire_qthreads
 
         self._parse_button.setEnabled(False)
         if self._worker is not None:
@@ -1396,9 +1396,10 @@ class MsrReaderDialog(QWidget):
             return False
 
     def _ctx_show_metadata(self):
+        from minflux_viewer.ui.tools.metadata_viewer import MetadataViewDialog
+
         from ...core.tiff_source import MetadataDocument
         from ...msr.io import read_zarr_attrs
-        from ...ui.metadata_viewer import MetadataViewDialog
 
         shown = 0
         legacy_shown = False
@@ -1670,7 +1671,7 @@ class MsrReaderDialog(QWidget):
         task = _ExportEstimateTask(generation, components)
         task.signals.done.connect(self._on_export_estimate_ready)
         self._estimate_task = task
-        from ...ui.background_tasks import shared_thread_pool
+        from minflux_viewer.ui.common.background_tasks import shared_thread_pool
 
         shared_thread_pool("msr-work").start(task)
 
@@ -1868,7 +1869,7 @@ class MsrReaderDialog(QWidget):
         if source is None:
             return False
         try:
-            from ...ui.tiff_viewer_window import TiffViewerWindow
+            from minflux_viewer.ui.tools.tiff_viewer_window import TiffViewerWindow
         except Exception as exc:
             source.close()
             self.log(f"[image] {exc}")
@@ -2652,7 +2653,7 @@ class MsrReaderDialog(QWidget):
         task.signals.finished.connect(self._on_batch_finished)
         self._batch_task = task
         self._set_batch_running(True, len(files))
-        from ...ui.background_tasks import shared_thread_pool
+        from minflux_viewer.ui.common.background_tasks import shared_thread_pool
 
         shared_thread_pool("msr-work").start(task)
 
@@ -2678,7 +2679,7 @@ class MsrReaderDialog(QWidget):
         }
         self._batch_task = task
         self._set_batch_running(True, 1)
-        from ...ui.background_tasks import shared_thread_pool
+        from minflux_viewer.ui.common.background_tasks import shared_thread_pool
 
         shared_thread_pool("msr-work").start(task)
 
@@ -3066,7 +3067,7 @@ class MsrReaderDialog(QWidget):
             signals.progress.emit(1.0, "")
             return built
 
-        from ...ui.background_tasks import BackgroundTask, shared_thread_pool
+        from minflux_viewer.ui.common.background_tasks import BackgroundTask, shared_thread_pool
 
         source_name = msr_path.name or "MSR data"
         task = BackgroundTask(
@@ -3201,7 +3202,9 @@ class MsrReaderDialog(QWidget):
                     # Confocal mapping stays on this thread: its manual
                     # alignment is a modal dialog parented to this reader.
                     if confocal_options is not None and confocal_options.choices:
-                        from ...ui.confocal_mapping_dialog import apply_confocal_mapping_options
+                        from minflux_viewer.ui.analysis.confocal_mapping_dialog import (
+                            apply_confocal_mapping_options,
+                        )
 
                         mapping_results = apply_confocal_mapping_options(
                             dataset,

@@ -27,7 +27,7 @@ def _viewer(tmp_path, qtbot, *, rgb=False, name="plain.tif"):
 
     from minflux_viewer.core.app_state import AppState
     from minflux_viewer.core.tiff_source import TiffImageSource
-    from minflux_viewer.ui.tiff_viewer_window import TiffViewerWindow
+    from minflux_viewer.ui.tools.tiff_viewer_window import TiffViewerWindow
 
     rng = np.random.default_rng(0)
     image = ((rng.random((48, 64, 3)) * 255).astype(np.uint8) if rgb

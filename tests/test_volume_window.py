@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from minflux_viewer.analysis.voronoi_density import build_voronoi_3d_field
-from minflux_viewer.ui.volume_window import make_volume_payload
+from minflux_viewer.ui.rendering.volume_window import make_volume_payload
 
 
 def test_make_volume_payload_caps_shape_and_returns_rgba() -> None:

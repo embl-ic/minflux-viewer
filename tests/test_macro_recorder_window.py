@@ -16,7 +16,7 @@ def _state():
 
 
 def test_window_is_parentless_starts_recording_and_renders_silent_mode(qapp) -> None:
-    from minflux_viewer.ui.macro_recorder_window import MacroRecorderWindow
+    from minflux_viewer.ui.tools.macro_recorder_window import MacroRecorderWindow
 
     state = _state()
     owner = QWidget()
@@ -48,7 +48,7 @@ def test_window_is_parentless_starts_recording_and_renders_silent_mode(qapp) -> 
 
 
 def test_create_script_uses_the_public_editor_handoff(qapp) -> None:
-    from minflux_viewer.ui.macro_recorder_window import MacroRecorderWindow
+    from minflux_viewer.ui.tools.macro_recorder_window import MacroRecorderWindow
 
     received = {}
 
@@ -83,7 +83,7 @@ def test_create_script_uses_the_public_editor_handoff(qapp) -> None:
 
 
 def test_save_adds_a_python_suffix_and_logs(qapp, tmp_path, monkeypatch) -> None:
-    import minflux_viewer.ui.macro_recorder_window as recorder_ui
+    import minflux_viewer.ui.tools.macro_recorder_window as recorder_ui
 
     state = _state()
     window = recorder_ui.MacroRecorderWindow(state)

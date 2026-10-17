@@ -24,8 +24,8 @@ from PyQt6.QtWidgets import QMenu
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.dataset import build_localization_dataset
 from minflux_viewer.core.dataset_reset import reset_dataset
-from minflux_viewer.ui.dataset_manager import DatasetManager
 from minflux_viewer.ui.main_window import MainWindow
+from minflux_viewer.ui.tools.dataset_manager import DatasetManager
 
 
 @pytest.fixture(scope="module")

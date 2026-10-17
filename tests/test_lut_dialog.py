@@ -15,7 +15,7 @@ pytest.importorskip("pytestqt")
 
 from PyQt6.QtWidgets import QApplication
 
-from minflux_viewer.ui.lut_dialog import make_colormap
+from minflux_viewer.ui.dialogs.lut_dialog import make_colormap
 
 
 # --------------------------------------------------------------------------- pure
@@ -34,7 +34,7 @@ def test_make_colormap_gamma_warps_midtones():
 
 # --------------------------------------------------------------------------- UI
 def _dialog(qtbot):
-    from minflux_viewer.ui.lut_dialog import LutDialog
+    from minflux_viewer.ui.dialogs.lut_dialog import LutDialog
     rec = {"levels": [], "cmaps": [], "gammas": []}
     dlg = LutDialog(
         on_levels_changed=lambda lo, hi: rec["levels"].append((lo, hi)),
@@ -48,7 +48,7 @@ def _dialog(qtbot):
 
 def test_custom_colormap_saved_from_lut_menu_is_selected(qtbot):
     from minflux_viewer.colormaps import configure_custom_colormaps
-    from minflux_viewer.ui.lut_dialog import LutDialog
+    from minflux_viewer.ui.dialogs.lut_dialog import LutDialog
 
     configure_custom_colormaps({})
 
@@ -211,8 +211,8 @@ def test_viewbox_left_drag_routes_to_gamma(qtbot):
 
 
 def test_auto_uses_same_repeated_imagej_cycle_as_brightness_contrast(qtbot):
-    from minflux_viewer.ui.lut_dialog import LutDialog
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.dialogs.lut_dialog import LutDialog
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     rng = np.random.default_rng(7)
     pixels = np.zeros(20_000, dtype=float)
@@ -257,7 +257,7 @@ def test_auto_uses_same_repeated_imagej_cycle_as_brightness_contrast(qtbot):
 
 
 def test_owner_managed_auto_updates_lut_controls_without_double_emitting(qtbot):
-    from minflux_viewer.ui.lut_dialog import LutDialog
+    from minflux_viewer.ui.dialogs.lut_dialog import LutDialog
 
     auto_calls = []
     level_calls = []
@@ -289,7 +289,7 @@ def test_owner_managed_auto_updates_lut_controls_without_double_emitting(qtbot):
 def _render_window(qtbot):
     from minflux_viewer.core.app_state import AppState, default_prefs
     from minflux_viewer.core.dataset import build_localization_dataset
-    from minflux_viewer.ui.render_window import RenderWindow
+    from minflux_viewer.ui.rendering.render_window import RenderWindow
 
     state = AppState()
     state.prefs = default_prefs()
@@ -344,7 +344,7 @@ def test_render_invert_flips_the_ramp_and_the_background(qtbot):
 
 def _close_stray_lut_dialogs():
     """Hide LUT dialogs left visible by an earlier test in the same session."""
-    from minflux_viewer.ui.lut_dialog import LutDialog
+    from minflux_viewer.ui.dialogs.lut_dialog import LutDialog
 
     for widget in QApplication.topLevelWidgets():
         if isinstance(widget, LutDialog):
@@ -400,7 +400,7 @@ def test_only_one_lut_dialog_is_visible_app_wide(qtbot):
 
     gc.collect()
     QApplication.processEvents()
-    from minflux_viewer.ui.lut_dialog import LutDialog
+    from minflux_viewer.ui.dialogs.lut_dialog import LutDialog
     instances = [w for w in QApplication.topLevelWidgets() if isinstance(w, LutDialog)]
     assert len(instances) == 1
     assert instances[0] is state._shared_lut_dialog
@@ -413,7 +413,7 @@ def test_shared_lut_dialog_is_closed_with_the_application(qtbot):
     """It is parentless, so it would otherwise outlive the main window."""
     from minflux_viewer.core.app_state import AppState, default_prefs
     from minflux_viewer.core.dataset import build_localization_dataset
-    from minflux_viewer.ui.lut_dialog import LutDialog
+    from minflux_viewer.ui.dialogs.lut_dialog import LutDialog
     from minflux_viewer.ui.main_window import MainWindow
 
     _close_stray_lut_dialogs()
@@ -453,7 +453,7 @@ def test_shared_lut_dialog_is_closed_with_the_application(qtbot):
     ]
     assert survivors == []
 
-    from minflux_viewer.ui.qt_lifecycle import qobject_alive
+    from minflux_viewer.ui.common.qt_lifecycle import qobject_alive
 
     if qobject_alive(rwin):
         rwin.close()

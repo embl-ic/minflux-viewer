@@ -182,7 +182,9 @@ def test_report_matrix_does_not_hide_unexpected_conversion_failure(error):
 def test_child_shutdown_tolerates_deleted_qobjects_but_not_arbitrary_failures(monkeypatch, slot, error):
     from types import SimpleNamespace
 
-    from minflux_viewer.ui import lut_dialog, modeless, window_controller
+    from minflux_viewer.ui.common import modeless
+    from minflux_viewer.ui.controllers import window_controller
+    from minflux_viewer.ui.dialogs import lut_dialog
 
     closed = []
     monkeypatch.setattr(lut_dialog, "close_shared_lut_dialog", lambda state: None)
@@ -212,7 +214,7 @@ def test_child_shutdown_tolerates_deleted_qobjects_but_not_arbitrary_failures(mo
 def test_modeless_shutdown_only_ignores_deleted_qobjects(error):
     from types import SimpleNamespace
 
-    from minflux_viewer.ui.modeless import close_modeless
+    from minflux_viewer.ui.common.modeless import close_modeless
 
     closed = []
     owner = SimpleNamespace(_modeless_windows=[SimpleNamespace(close=_raises(error)),

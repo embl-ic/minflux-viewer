@@ -31,7 +31,7 @@ def _state():
 
 
 def _dialog(state):
-    from minflux_viewer.ui.preferences_dialog import PreferencesDialog
+    from minflux_viewer.ui.settings.preferences_dialog import PreferencesDialog
 
     return PreferencesDialog(state)
 
