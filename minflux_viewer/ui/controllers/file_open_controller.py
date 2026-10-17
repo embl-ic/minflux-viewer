@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 from minflux_viewer.core import formats as _formats
 from minflux_viewer.ui.common.background_tasks import BackgroundTask
+from minflux_viewer.ui.common.qt_lifecycle import gui_action
 from minflux_viewer.ui.controllers.window_support import _FMT_LOADERS, _SUPPORTED_EXTS, _ZarrIoTask
 
 if TYPE_CHECKING:
@@ -451,6 +452,7 @@ def _generate_sim_single(self: MainWindow, p: dict) -> None:
         self._status_label.setText("Sample data failed.")
 
 
+@gui_action("Open file")
 def _route_file(self: MainWindow, path: str) -> None:
     """
         Route a single file path to the correct loader based on extension.

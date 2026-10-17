@@ -291,6 +291,7 @@ def test_preference_failure_does_not_replace_saved_settings(error, monkeypatch):
 @pytest.mark.parametrize("command", ["file", "roi_channel"])
 def test_gui_command_reports_backend_failure_without_continuing(error, command, monkeypatch, tmp_path):
     from PyQt6.QtWidgets import QMessageBox
+
     from minflux_viewer.core import channel_labels, formats
     from minflux_viewer.ui.analysis.attribute_separation_dialog import AttributeSeparationDialog
     from minflux_viewer.ui.controllers.file_open_controller import _route_file

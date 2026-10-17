@@ -81,6 +81,7 @@ from minflux_viewer.core.loader_raw_access import (
     mfx_get,
 )
 from minflux_viewer.ui.common.dataset_binding import DatasetIndex
+from minflux_viewer.ui.common.qt_lifecycle import gui_action
 from minflux_viewer.ui.plots.plot_format import apply_spatial_y_direction
 from minflux_viewer.ui.widgets.attribute_help import apply_attribute_tooltips
 from minflux_viewer.utils.filters import raw_trace_aggregate
@@ -952,6 +953,7 @@ class AttributeSeparationDialog(QDialog):
             finally:
                 combo.blockSignals(blocked)
 
+    @gui_action("Add channel from ROI")
     def _on_roi_source_picked(self, index: int) -> None:
         if index <= 0:
             return

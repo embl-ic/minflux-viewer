@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from functools import wraps
 from typing import Any
 
 # The teardown helpers below reach into pyqtgraph internals that are not part
@@ -22,6 +23,28 @@ from typing import Any
 TESTED_PYQTGRAPH_VERSIONS = ("0.13", "0.14")
 
 _MISSING = object()
+
+
+def gui_action(title: str):
+    """Report a failed GUI command and stop it at the Qt callback boundary.
+
+    Backend functions still raise. Only an entire user action is wrapped, so
+    an error never becomes missing data or permission to continue that action.
+    """
+    def decorate(command):
+        @wraps(command)
+        def run(owner, *args, **kwargs):
+            try:
+                return command(owner, *args, **kwargs)
+            except Exception as exc:  # No Python exception may escape this Qt slot.
+                from PyQt6.QtWidgets import QMessageBox
+
+                logging.getLogger(__name__).exception("%s failed", title)
+                owner._state.log(f"{title} failed: {exc}", "ERROR")
+                QMessageBox.critical(owner, title, str(exc))
+                return None
+        return run
+    return decorate
 
 
 def cleanup_callback(callback, *, context: str) -> bool:
