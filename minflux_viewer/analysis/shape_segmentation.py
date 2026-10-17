@@ -51,9 +51,6 @@ ship here.
 
 This module is pure NumPy/SciPy and has no Qt dependency.
 
-Note: :mod:`minflux_viewer.analysis.hlyb_clustering` carries its own private
-Otsu/disk helpers that mirror specific MATLAB behaviour inside a validated
-pipeline; they are intentionally left untouched.
 """
 
 from __future__ import annotations

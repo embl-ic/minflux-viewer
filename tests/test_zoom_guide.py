@@ -144,10 +144,9 @@ def test_every_plot_with_this_tool_offers_the_same_modes():
 
     import inspect
 
-    from minflux_viewer.ui import attribute_window, hlyb_clustering_dialog
+    from minflux_viewer.ui import attribute_window
 
-    for module in (attribute_window, hlyb_clustering_dialog):
-        source = inspect.getsource(module)
-        assert "zoom_guide_points" in source, module.__name__
-        # No plot may keep a private copy of the geometry again.
-        assert "* 0.08" not in source, module.__name__
+    source = inspect.getsource(attribute_window)
+    assert "zoom_guide_points" in source, attribute_window.__name__
+    # No plot may keep a private copy of the geometry again.
+    assert "* 0.08" not in source, attribute_window.__name__

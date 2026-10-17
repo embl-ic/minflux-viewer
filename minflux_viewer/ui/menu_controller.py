@@ -179,17 +179,7 @@ def _connect_actions(self: MainWindow) -> None:
     self.actionKNearestNeighbour.triggered.connect(
         lambda: self._placeholder("K nearest neighbour", "a later implementation")
     )
-    # The HlyB/D subunit pair analysis moved out of Clustering and is now a
-    # direct built-in plugin under *Plugins* (it is one
-    # project-specific workflow, not a family of general clustering tools).
-    # Its earlier menu entries —
-    # "2D"/"3D", "Pair-distance model fit (2D/3D)" and "Template matching
-    # (2D/3D)" — are retired, but every one of those analysis modules is
-    # deliberately KEPT (analysis/hlyb_clustering.py, analysis/hlyb_pairwise.py,
-    # ui/hlyb_clustering_dialog.py, ui/hlyb_pairwise_dialog.py) together with
-    # the E. coli cell delineation, so a 2-D workflow or a template
-    # comparison can be rebuilt on them.  The handlers below them (_run_hlyb_pair_analysis,
-    # _run_hlyb_pairwise_analysis) are likewise kept and remain callable.
+    # The live HlyB/D workflow is offered by its built-in plugin.
     self.menuAnalyzeClustering.addAction(self.actionDbscan)
     self.menuAnalyzeClustering.addAction(self.actionKNearestNeighbour)
     # Trace submenu — trace-specific measurements.

@@ -26,16 +26,6 @@
    "arg-type": 4,
    "misc": 2
   },
-  "minflux_viewer/analysis/hlyb_clustering.py": {
-   "assignment": 2
-  },
-  "minflux_viewer/analysis/hlyb_pairwise.py": {
-   "arg-type": 3,
-   "assignment": 6,
-   "operator": 5,
-   "type-var": 3,
-   "union-attr": 6
-  },
   "minflux_viewer/analysis/hlyb_staged.py": {
    "arg-type": 2,
    "assignment": 5,
@@ -443,21 +433,8 @@
    "union-attr": 12,
    "var-annotated": 1
   },
-  "minflux_viewer/ui/hlyb_clustering_dialog.py": {
-   "arg-type": 1,
-   "assignment": 15,
-   "attr-defined": 56,
-   "misc": 1,
-   "return-value": 1,
-   "union-attr": 42,
-   "var-annotated": 3
-  },
   "minflux_viewer/ui/hlyb_collection_dialog.py": {
    "union-attr": 2
-  },
-  "minflux_viewer/ui/hlyb_pairwise_dialog.py": {
-   "attr-defined": 6,
-   "union-attr": 3
   },
   "minflux_viewer/ui/hlyb_staged_dialog.py": {
    "assignment": 4,
@@ -684,9 +661,9 @@
    "union-attr": 6
   },
   "minflux_viewer/ui/window_controller.py": {
-   "arg-type": 6,
-   "assignment": 8,
-   "attr-defined": 13,
+   "arg-type": 2,
+   "assignment": 7,
+   "attr-defined": 11,
    "return-value": 1,
    "union-attr": 1
   },
@@ -802,16 +779,6 @@
   },
   "tests/test_dataset_manager_preference.py": {
    "F841": 1
-  },
-  "tests/test_hlyb_clustering.py": {
-   "E702": 4
-  },
-  "tests/test_hlyb_pairwise.py": {
-   "E702": 13
-  },
-  "tests/test_hlyb_pairwise_window.py": {
-   "E702": 2,
-   "I001": 1
   },
   "tests/test_image_source.py": {
    "F841": 1

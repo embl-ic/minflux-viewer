@@ -31,7 +31,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from .hlyb_pairwise import pair_distance_profile, trace_centroids
+from .pair_statistics import pair_distance_profile, trace_centroids
 
 
 @dataclass

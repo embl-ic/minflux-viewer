@@ -97,7 +97,7 @@ def test_roi_2d_analysis_keeps_pairs_and_null_inside_drawn_shape():
     assert np.all(result["site_centers_nm"][:, 2] == 0.0)
     assert np.all(result["null_preview_sites_nm"][:, 2] == 0.0)
     assert _inside_roi_xy(result["null_preview_sites_nm"][:, :2], roi).all()
-    from minflux_viewer.analysis.hlyb_pairwise import pair_distance_profile
+    from minflux_viewer.analysis.pair_statistics import pair_distance_profile
     exact, _ = pair_distance_profile(result["site_centers_nm"], cfg.r_max_nm, cfg.bin_nm)
     assert np.array_equal(result["observed"], exact)
 

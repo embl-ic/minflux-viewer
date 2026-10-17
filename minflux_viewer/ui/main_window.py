@@ -69,8 +69,6 @@ from .window_support import roi_tool_labels as roi_tool_labels
 from .window_support import roi_tool_status as roi_tool_status
 
 if TYPE_CHECKING:
-    from ..analysis.hlyb_clustering import HlyBConfig
-    from ..analysis.hlyb_pairwise import PairFitConfig
     from ..core.dataset import MinfluxDataset
     from .command_finder import SearchLineEdit
     from .preferences_dialog import PreferencesDialog
@@ -226,8 +224,6 @@ class MainWindow(QMainWindow):
     _sim_bead_spec: tuple[np.ndarray, dict, list] | None
     _roi_tool_buttons: dict
     _wand_dialog: MagicWandDialog | None
-    _hlyb_pair_cfg: PairFitConfig
-    _hlyb_cfg: HlyBConfig
     _last_active_log_ds: ReferenceType[MinfluxDataset]
 
     def __init__(self, state: AppState) -> None:
@@ -1040,15 +1036,7 @@ class MainWindow(QMainWindow):
         from . import roi_command_controller as controller
         return controller._restore_roi(self)
 
-    def _run_hlyb_pairwise_analysis(self, dimensions: int=3) -> None:
-        'Analyze › Clustering › HlyB subunit pair analysis › Pair-distance model'
-        from . import window_controller as controller
-        return controller._run_hlyb_pairwise_analysis(self, dimensions)
 
-    def _run_hlyb_pair_analysis(self, mode: str='3D') -> None:
-        'Analyze › Clustering › HlyB subunit pair analysis › 2D/3D/template — detect'
-        from . import window_controller as controller
-        return controller._run_hlyb_pair_analysis(self, mode)
 
     def _show_conv_segmentation(self) -> None:
         'Analyze › Segmentation › Convolution… — open the interactive'

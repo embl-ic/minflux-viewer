@@ -12,7 +12,7 @@ Stages:
 
 1. project the localizations into an XY density image and delineate the cells
    exactly as the 2-D E. coli pipeline already does -- reusing
-   :func:`minflux_viewer.analysis.hlyb_clustering.compute_cell_mask` (smooth ->
+   :func:`minflux_viewer.analysis.cell_mask.compute_cell_mask` (smooth ->
    Otsu -> morphological close -> fill -> open -> area despeckle) rather than
    re-implementing it;
 2. distance-transform the mask, in nm;
@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..core.min_enclosing import min_area_rectangle
-from .hlyb_clustering import compute_cell_mask
+from .cell_mask import compute_cell_mask
 
 # Guard against a large field of view combined with a fine pixel silently
 # allocating a huge grid.  Raised as an error with the remedy, never worked
