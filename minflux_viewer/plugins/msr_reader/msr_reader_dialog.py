@@ -2430,17 +2430,17 @@ class MsrReaderDialog(QWidget):
             # data region and their drift (skip the save-outputs dialog).
             self._show_single_channel_beads(datasets[0])
             return
-        ref_name = datasets[0].get("display_name") or datasets[0].get("did") or "channel_1"
-        ref_mbm = self._aligned_mbm_points(ref_name)
-        if ref_mbm is None:
-            QMessageBox.critical(self, "Align channel", "Could not find bead points (`grd/mbm/points`) for the reference channel.")
-            return
-        ref_mbm_for_alignment = self._filter_mbm_points_to_used_beads(
-            ref_name, ref_mbm, log_prefix="[align]"
-        )
-        transform_type = self._mbm_transform_type()
-        self.log(f"[align] MBM-handling transform: {transform_type}")
         try:
+            ref_name = datasets[0].get("display_name") or datasets[0].get("did") or "channel_1"
+            ref_mbm = self._aligned_mbm_points(ref_name)
+            if ref_mbm is None:
+                QMessageBox.critical(self, "Align channel", "Could not find bead points (`grd/mbm/points`) for the reference channel.")
+                return
+            ref_mbm_for_alignment = self._filter_mbm_points_to_used_beads(
+                ref_name, ref_mbm, log_prefix="[align]"
+            )
+            transform_type = self._mbm_transform_type()
+            self.log(f"[align] MBM-handling transform: {transform_type}")
             results = []
             loc_bound_names = [ref_name]
             for ds in datasets[1:]:

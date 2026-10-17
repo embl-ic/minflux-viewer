@@ -238,7 +238,7 @@
   },
   "minflux_viewer/core/tiff_source.py": {
    "arg-type": 1,
-   "union-attr": 3
+   "union-attr": 2
   },
   "minflux_viewer/core/user_libs.py": {
    "arg-type": 2,

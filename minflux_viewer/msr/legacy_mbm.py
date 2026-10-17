@@ -21,6 +21,8 @@ metadata is stored alongside (see ``state.mbm_meta_map``) so "Show beads drift" 
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 #: Model bead-points dtype (matches the modern ``grd/mbm/points`` fields used by
@@ -29,21 +31,23 @@ from ..core.mbm_schema import POINTS_DTYPE as POINTS_DTYPE
 
 
 def _node_attrs(node) -> dict:
+    attrs = getattr(node, "attrs", None)
+    if attrs is None:
+        return {}
+    asdict = getattr(attrs, "asdict", None)
+    value = asdict() if callable(asdict) else attrs
     try:
-        return dict(node.attrs.asdict())
-    except Exception:
-        try:
-            return dict(node.attrs)
-        except Exception:
-            return {}
+        return dict(value)
+    except (TypeError, ValueError):
+        return {}
 
 
 def _bead_rid_keys(mbm_group) -> list[str]:
     """The per-bead R-ID child arrays of the ``grd/mbm`` group."""
-    try:
-        return list(mbm_group.array_keys())
-    except Exception:
+    array_keys = getattr(mbm_group, "array_keys", None)
+    if not callable(array_keys):
         return []
+    return list(array_keys())
 
 
 def build_legacy_mbm(arch, log=print):
@@ -56,7 +60,7 @@ def build_legacy_mbm(arch, log=print):
         if "grd/mbm" not in arch:
             return None
         mbm = arch["grd/mbm"]
-    except Exception:
+    except KeyError:
         return None
 
     rids = _bead_rid_keys(mbm)
@@ -68,7 +72,7 @@ def build_legacy_mbm(arch, log=print):
     for rid in rids:
         try:
             node = arch[f"grd/mbm/{rid}"]
-        except Exception:
+        except KeyError:
             continue
         na = _node_attrs(node)
         gri = na.get("gri")
@@ -81,10 +85,9 @@ def build_legacy_mbm(arch, log=print):
         name = str(na.get("name", rid)) or str(rid)
         points_by_gri[str(gri)] = {"name": name, "gri": gri}
 
-        try:
-            a = node[:]
-        except Exception:
-            a = None
+        # array_keys() identified an array. A failed chunk read/decoder is a
+        # data error, not evidence that this bead was absent from acquisition.
+        a = node[:]
         if a is None or getattr(a, "dtype", None) is None or a.dtype.names is None:
             continue
         names = set(a.dtype.names)
@@ -120,6 +123,6 @@ def build_legacy_mbm(arch, log=print):
     try:
         log(f"    [mbm] legacy layout: {len(points_by_gri)} bead(s), "
             f"{points.size} measurement(s), {len(used)} used")
-    except Exception:
-        pass
+    except Exception:  # caller-supplied logging must not invalidate decoded data
+        logging.getLogger(__name__).exception("Legacy bead summary callback failed")
     return points, points_by_gri, used

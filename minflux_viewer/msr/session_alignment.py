@@ -371,14 +371,12 @@ class AlignmentSession:
         points = MFSTATE.mbm_map.get(name)
         if not self._bead_unchecked_gris or points is None:
             return points
-        try:
-            import numpy as np
-            if "gri" in (getattr(points, "dtype", None).names or ()):
-                gri = np.asarray(points["gri"]).ravel()
-                return points[~np.isin(gri, list(self._bead_unchecked_gris))]
-        except Exception:
-            pass
-        return points
+        names = getattr(getattr(points, "dtype", None), "names", ()) or ()
+        if "gri" not in names:
+            return points
+        gri = np.asarray(points["gri"]).ravel()
+        # Never turn a failed restriction into permission to use every bead.
+        return points[~np.isin(gri, list(self._bead_unchecked_gris))]
 
 
     def _bead_gri_to_rid(self, names) -> dict[int, str]:

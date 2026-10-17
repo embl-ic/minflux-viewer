@@ -8,6 +8,33 @@ import pytest
 _POINT_DTYPE = np.dtype([("gri", "<i4"), ("xyz", "<f8", (3,))])
 
 
+@pytest.mark.parametrize("stage", ["selection", "restriction"])
+@pytest.mark.parametrize("error", [MemoryError, RuntimeError])
+def test_reference_bead_failure_stays_inside_the_gui_error_boundary(stage, error, monkeypatch):
+    from types import SimpleNamespace
+
+    from minflux_viewer.plugins.msr_reader import msr_reader_dialog as ui
+
+    dialog = ui.MsrReaderDialog.__new__(ui.MsrReaderDialog)
+    dialog._msr_state = lambda: SimpleNamespace(mfx_map={}, mbm_map={})
+    dialog._ensure_single_file_parsed = lambda: True
+    dialog.parsed = {"mode": "modern", "datasets": [{"display_name": "ref"}, {"display_name": "moving"}]}
+    logs = []
+    warnings = []
+    dialog.log = logs.append
+
+    def fail(*args, **kwargs):
+        raise error("reference bead failure")
+
+    dialog._aligned_mbm_points = fail if stage == "selection" else lambda name: _points([1, 2])
+    dialog._filter_mbm_points_to_used_beads = fail
+    monkeypatch.setattr(ui.QMessageBox, "critical", lambda *args: warnings.append(args[-1]))
+    monkeypatch.setattr(ui, "AlignmentSaveDialog", lambda *args: pytest.fail("offered to save failed alignment"))
+    dialog.on_align_channel()
+    assert warnings == ["Alignment failed:\nreference bead failure"]
+    assert any("[align] failed" in message for message in logs)
+
+
 def _points(bead_ids: list[int]) -> np.ndarray:
     points = np.zeros(len(bead_ids), dtype=_POINT_DTYPE)
     points["gri"] = bead_ids

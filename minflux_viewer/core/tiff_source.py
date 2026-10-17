@@ -218,16 +218,18 @@ class TiffImageSource:
         else:
             try:
                 index = int(np.ravel_multi_index(tuple(prefix_indices), tuple(prefix_shape)))
-            except Exception:
+            except (TypeError, ValueError):
                 return None
 
         pages = self._series.pages
-        try:
-            if len(pages) <= index:
-                return None
-            return pages[index].asarray()
-        except Exception:
+        if len(pages) <= index:
             return None
+        page = pages[index]
+        if page is None:
+            return None
+        # Layout fallback is for a missing page, not failed decoding. Retrying
+        # as a whole volume after an I/O/OOM error can make the failure worse.
+        return page.asarray()
 
     @staticmethod
     def _normalize_plane(plane: np.ndarray, axes_hint: str | None) -> np.ndarray:

@@ -33,10 +33,12 @@ def convex_hull_vertices(points) -> np.ndarray:
     if P.shape[0] < 3:
         return P.copy()
     try:
-        from scipy.spatial import ConvexHull
-
+        from scipy.spatial import ConvexHull, QhullError
+    except ImportError:
+        return P.copy()
+    try:
         return P[ConvexHull(P).vertices]
-    except Exception:
+    except QhullError:
         return P.copy()
 
 

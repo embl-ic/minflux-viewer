@@ -95,10 +95,6 @@
     "broad": 1,
     "silent": 0
   },
-  "minflux_viewer/core/min_enclosing.py": {
-    "broad": 1,
-    "silent": 0
-  },
   "minflux_viewer/core/minflux_zarr.py": {
     "broad": 5,
     "silent": 0
@@ -119,10 +115,6 @@
     "broad": 1,
     "silent": 0
   },
-  "minflux_viewer/core/post_load.py": {
-    "broad": 4,
-    "silent": 0
-  },
   "minflux_viewer/core/roi.py": {
     "broad": 1,
     "silent": 0
@@ -132,10 +124,6 @@
     "silent": 0
   },
   "minflux_viewer/core/roi_crop.py": {
-    "broad": 1,
-    "silent": 0
-  },
-  "minflux_viewer/core/roi_depth.py": {
     "broad": 1,
     "silent": 0
   },
@@ -160,7 +148,7 @@
     "silent": 0
   },
   "minflux_viewer/core/tiff_source.py": {
-    "broad": 14,
+    "broad": 12,
     "silent": 5
   },
   "minflux_viewer/core/tracking_time.py": {
@@ -184,8 +172,8 @@
     "silent": 1
   },
   "minflux_viewer/msr/legacy_mbm.py": {
-    "broad": 7,
-    "silent": 1
+    "broad": 1,
+    "silent": 0
   },
   "minflux_viewer/msr/mbm_drift.py": {
     "broad": 1,
@@ -200,8 +188,8 @@
     "silent": 1
   },
   "minflux_viewer/msr/session_alignment.py": {
-    "broad": 9,
-    "silent": 4
+    "broad": 8,
+    "silent": 3
   },
   "minflux_viewer/msr/session_export.py": {
     "broad": 2,

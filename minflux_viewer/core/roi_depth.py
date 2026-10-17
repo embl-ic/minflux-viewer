@@ -75,7 +75,7 @@ def weighted_depths(
         try:
             from scipy.spatial import cKDTree
             tree = cKDTree(np.column_stack([in_a, in_b]))
-        except Exception:
+        except ImportError:
             tree = None
 
     out: list = []

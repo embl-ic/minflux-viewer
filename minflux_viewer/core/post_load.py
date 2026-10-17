@@ -149,7 +149,7 @@ def compute_post_load_results(
                         (f"Z scaling factor for '{ds.name}': estimate {shown} outside "
                          "[0.5, 1.0] — reset to 1.0.", "WARN")
                     )
-            except Exception as exc:  # noqa: BLE001 - optional computation
+            except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
                 z_factor = 1.0
                 result["z_update"] = {
                     "value": z_factor,
@@ -187,7 +187,7 @@ def compute_post_load_results(
                  f"({elapsed:.1f}s): median sigma=({median[0]:.3g}, {median[1]:.3g}, "
                  f"{median[2]:.3g}) nm.", "INFO")
             )
-        except Exception as exc:  # noqa: BLE001 - optional computation
+        except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
             logs.append(
                 (f"Localization precision computation skipped for '{ds.name}': {exc}", "WARN")
             )
@@ -216,7 +216,7 @@ def compute_post_load_results(
                 (f"Computed local density for '{ds.name}' using {method} "
                  f"({detail}, {elapsed:.1f}s).", "INFO")
             )
-        except Exception as exc:  # noqa: BLE001 - optional computation
+        except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
             logs.append(
                 (f"Local density computation skipped for '{ds.name}': {exc}", "WARN")
             )
@@ -242,7 +242,7 @@ def compute_post_load_results(
             logs.append(
                 (f"Computed last-valid local density for '{ds.name}' using {method} ({detail}).", "INFO")
             )
-        except Exception as exc:  # noqa: BLE001 - optional computation
+        except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
             logs.append(
                 (f"Last-valid local density computation skipped for '{ds.name}': {exc}", "WARN")
             )
