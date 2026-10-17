@@ -173,7 +173,7 @@ def _dataset_tim(ds):
             values = raw.get("tim")
             if values is not None and len(values):
                 return values
-        except Exception:
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
             pass
     try:
         from minflux_viewer.core.loader_raw_access import attr_values_1d
@@ -181,11 +181,11 @@ def _dataset_tim(ds):
         values = attr_values_1d(ds, "tim")
         if values is not None:
             return values
-    except Exception:
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         pass
     try:
         return ds.attr["tim"]
-    except Exception:
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         return None
 
 

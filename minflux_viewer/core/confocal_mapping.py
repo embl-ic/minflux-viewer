@@ -193,7 +193,7 @@ def _stack_geometry(stack: Mapping) -> dict | None:
             (x_lo, x_hi), (y_lo, y_hi) = extent
             x_start, y_start = float(x_lo), float(y_lo)
             x_step, y_step = (float(x_hi) - x_start) / nx, (float(y_hi) - y_start) / ny
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return None
 
     if not all(np.isfinite(v) and v != 0.0 for v in (x_step, y_step)):

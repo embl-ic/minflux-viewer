@@ -51,10 +51,7 @@ def _looks_text(head: bytes) -> str | None:
     try:
         return head.decode("utf-8-sig", errors="strict")
     except UnicodeDecodeError:
-        try:
-            return head.decode("utf-8", errors="ignore")
-        except Exception:
-            return None
+        return head.decode("utf-8", errors="ignore")
 
 
 def sniff_format(path: str | Path) -> str | None:

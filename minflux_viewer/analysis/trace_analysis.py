@@ -144,7 +144,7 @@ def estimate_size_nd_details(
         popt, _ = curve_fit(_gauss1, fit_x, fit_y, p0=p0, maxfev=10000)
         fit_params = (float(popt[0]), float(popt[1]), float(popt[2]))
         sizes[3] = np.exp(fit_params[1])
-    except Exception:
+    except (RuntimeError, ValueError, FloatingPointError, np.linalg.LinAlgError):
         sizes[3] = sizes[2]
 
     return SizeFitResult(sizes, logdist, counts, edges, bin_centers, fit_params)

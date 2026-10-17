@@ -135,7 +135,7 @@ def flatten_overlay(datasets) -> FlattenResult:
         report.n_total += int(coords.shape[0])
         try:
             itr_counts.add(int(ds.prop.num_itr))
-        except Exception:
+        except (AttributeError, TypeError, ValueError, OverflowError):
             pass
     if len(itr_counts) > 1:
         report.notes.append(
@@ -160,7 +160,7 @@ def flatten_overlay(datasets) -> FlattenResult:
         for src in (getattr(ds, "attr", {}) or {}, getattr(ds, "derived", {}) or {}):
             try:
                 candidate.update(src.keys())
-            except Exception:
+            except (AttributeError, TypeError):
                 pass
     candidate -= _STRUCTURAL
 
@@ -178,7 +178,7 @@ def flatten_overlay(datasets) -> FlattenResult:
         try:
             attrs[name] = np.concatenate(cols)
             report.kept_attrs.append(name)
-        except Exception as exc:                                  # pragma: no cover
+        except (TypeError, ValueError) as exc:                     # pragma: no cover
             report.dropped.append((name, f"could not concatenate ({exc})"))
 
     return FlattenResult(coords_nm=coords_all, tid=tid_all, attrs=attrs, report=report)

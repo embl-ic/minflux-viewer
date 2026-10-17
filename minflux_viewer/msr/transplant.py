@@ -132,7 +132,7 @@ def transplant_payloads(template: str | Path, payload_for_did: dict,
         if tag:
             try:
                 did = json.loads(tag).get("did")
-            except Exception:                            # noqa: BLE001 - not ours
+            except (AttributeError, TypeError, ValueError):
                 did = None
         if did and did in payload_for_did:
             data, side = square_pad(payload_for_did[did])

@@ -573,7 +573,7 @@ def _write_store(ds, target: Path, *, roi_records=None) -> None:
     root.attrs[CREATED_ATTR] = datetime.now().astimezone().isoformat(timespec="seconds")
     try:
         from .. import __version__
-    except Exception:  # pragma: no cover - defensive during isolated module use
+    except ImportError:  # pragma: no cover - defensive during isolated module use
         __version__ = "unknown"
     root.attrs[APP_VERSION_ATTR] = str(__version__)
 
@@ -1287,7 +1287,7 @@ def write_minflux_zarr_project(
         root.attrs[CREATED_ATTR] = datetime.now().astimezone().isoformat(timespec="seconds")
         try:
             from .. import __version__
-        except Exception:  # pragma: no cover
+        except ImportError:  # pragma: no cover
             __version__ = "unknown"
         root.attrs[APP_VERSION_ATTR] = str(__version__)
         root.require_group("datasets")

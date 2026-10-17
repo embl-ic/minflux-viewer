@@ -373,7 +373,7 @@ def resolve_open(path) -> FormatSpec | None:
         try:
             if _load_predicate(spec.detect)(p):
                 return spec
-        except Exception:
+        except (OSError, TypeError, ValueError, EOFError):
             continue
     return None
 

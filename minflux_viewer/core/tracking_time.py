@@ -514,7 +514,7 @@ def dataset_time_inputs(ds) -> tuple:
     def read(name):
         try:
             values = attr_values_1d(ds, name)
-        except Exception:
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
             return None
         if values is None:
             return None

@@ -164,10 +164,7 @@ def roi_mask_for_record(ds, record, *, exact_shape: bool = True) -> np.ndarray |
     stored = ds.derived.get(key) if key else None
     if stored is not None and not bool(getattr(record, "selection_dirty", False)):
         return _as_mask(stored, n)
-    try:
-        return _as_mask(compute_crop_mask(ds, record, exact_shape=exact_shape), n)
-    except Exception:
-        return None
+    return _as_mask(compute_crop_mask(ds, record, exact_shape=exact_shape), n)
 
 
 def labels_from_rois(

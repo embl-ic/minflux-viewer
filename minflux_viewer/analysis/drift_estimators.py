@@ -271,7 +271,7 @@ def estimate_drift_dme(xyz_nm: np.ndarray, t_s: np.ndarray, *,
         try:
             initial = estimate_drift_rcc(xyz, t, n_segments=min(rcc_segments, n_bins),
                                          bin_nm=rcc_bin_nm)
-        except Exception:                                         # noqa: BLE001
+        except (ValueError, FloatingPointError, np.linalg.LinAlgError):
             initial = None
     offsets = (initial.at(times) if initial is not None
                else np.zeros((n_bins, 3)))

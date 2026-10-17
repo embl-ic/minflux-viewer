@@ -510,7 +510,7 @@ def is_roi_json_file(path: str | Path) -> bool:
         if prefix.startswith("["):
             return False
         data = json.loads(source.read_text(encoding="utf-8-sig"))
-    except Exception:
+    except (OSError, TypeError, ValueError):
         return False
     if not isinstance(data, dict) or not isinstance(data.get("rois"), list):
         return False

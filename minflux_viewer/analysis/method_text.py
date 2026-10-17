@@ -20,6 +20,7 @@ Pure Python (no Qt) → unit-testable.
 from __future__ import annotations
 
 import html as _html
+import logging
 from datetime import datetime
 
 from minflux_viewer.analysis.method_citations import (
@@ -250,8 +251,12 @@ def _collect(state, events):
         # of the built-in rules: it knows what it did and they do not.
         try:
             declared = plugin_method_entry(ev)
-        except Exception:                                   # noqa: BLE001
-            declared = None                                 # never block a report
+        except MemoryError:
+            raise
+        except Exception:                                   # plugin boundary
+            logging.getLogger(__name__).exception("Plugin method declaration failed")
+            by_stage["other"].append(f"Plugin method details unavailable: {msg}")
+            continue
         if declared is not None:
             stage, sentence, cites = declared
             by_stage[stage].append(sentence)

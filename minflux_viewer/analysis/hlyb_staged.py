@@ -1477,7 +1477,7 @@ def analyze_hlyb_staged_3d(
             )
             cell_detection_field = assisted.field
             cell_detection_provenance = assisted.provenance
-        except Exception as exc:
+        except (OSError, IndexError, KeyError, TypeError, ValueError) as exc:
             cell_detection_provenance = {
                 "used": False,
                 "source_path": str(associated_image_source.get("source_path") or ""),
@@ -2028,7 +2028,7 @@ def analyze_hlyb_staged_pooled(
                 _variant_pooled, variant = build(
                     merge_nm, stratum, cfg.sensitivity_replicates,
                     cfg.rng_seed + 977 * (vi + 1))
-            except Exception:                                     # noqa: BLE001
+            except (ValueError, FloatingPointError, np.linalg.LinAlgError):
                 continue
             if not variant["components"]["components"]:
                 continue

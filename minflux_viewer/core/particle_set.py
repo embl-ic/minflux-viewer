@@ -257,5 +257,5 @@ def is_particle_set_file(path: str | Path) -> bool:
         import h5py
         with h5py.File(Path(path), "r") as f:
             return f.attrs.get("format") == PARTICLE_SET_MARKER
-    except Exception:
+    except (OSError, TypeError, ValueError):
         return False

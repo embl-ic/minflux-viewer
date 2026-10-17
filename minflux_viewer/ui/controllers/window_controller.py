@@ -1531,6 +1531,7 @@ def _drain_background_tasks(self: MainWindow) -> None:
         clear_pool_nonblocking,
         retire_background_tasks,
     )
+    from minflux_viewer.ui.common.qt_lifecycle import cleanup_callback
     retire_background_tasks(
         getattr(self, "_update_tasks", set()), signal_names=("done",)
     )
@@ -1553,22 +1554,16 @@ def _drain_background_tasks(self: MainWindow) -> None:
     )
     if hasattr(self, "_post_load_tasks"):
         self._post_load_tasks.clear()
-    try:
-        pool = QThreadPool.globalInstance()
-        clear_pool_nonblocking(pool)
-    except Exception:
-        pass
+    cleanup_callback(lambda: clear_pool_nonblocking(QThreadPool.globalInstance()),
+                     context="clear global thread pool")
     # The named process-owned pools outlive this window, so work already
     # queued on them would still start after it closed. Retirement above
     # cancelled those tasks, but dropping what has not begun is cheaper
     # than starting each one only to have it exit at its first checkpoint.
     # Still non-blocking: clear() never touches work already running.
-    try:
-        from minflux_viewer.ui.common.background_tasks import shared_thread_pools
-        for pool in shared_thread_pools():
-            clear_pool_nonblocking(pool)
-    except Exception:
-        pass
+    from minflux_viewer.ui.common.background_tasks import shared_thread_pools
+    for pool in shared_thread_pools():
+        cleanup_callback(lambda: clear_pool_nonblocking(pool), context="clear shared thread pool")
 
 
 def _close_all_child_windows(self: MainWindow, *, keep_log_console: bool = False) -> None:
@@ -1586,6 +1581,7 @@ def _close_all_child_windows(self: MainWindow, *, keep_log_console: bool = False
         With ``keep_log_console=True`` the Log and Console windows are left open
         (used by the *Close All Windows* command, which clears everything else).
         """
+    from minflux_viewer.ui.common.qt_lifecycle import cleanup_callback
     from minflux_viewer.ui.dialogs.lut_dialog import close_shared_lut_dialog
     close_shared_lut_dialog(self._state)
     # Per-dataset windows
@@ -1611,10 +1607,7 @@ def _close_all_child_windows(self: MainWindow, *, keep_log_console: bool = False
     for win in list(self._filter_dlgs.values()):
         try: win.close()
         except RuntimeError: pass
-    try:
-        self._state.mfv.close_windows()
-    except Exception:
-        pass
+    cleanup_callback(self._state.mfv.close_windows, context="close scripting windows")
     # Singleton tool windows
     singletons = [
         "_filter_dlg",  "_ds_manager",

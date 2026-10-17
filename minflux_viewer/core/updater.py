@@ -64,14 +64,8 @@ def _normalize(tag: str) -> str:
 
 def is_newer(latest: str, current: str) -> bool:
     """True if release version *latest* is strictly newer than *current*."""
-    try:
-        from packaging.version import parse as vparse
-        return vparse(_normalize(latest)) > vparse(_normalize(current))
-    except Exception:
-        # Fallback: compare dot-separated integer components.
-        def _t(s: str) -> tuple:
-            return tuple(int(p) for p in _normalize(s).split(".") if p.isdigit())
-        return _t(latest) > _t(current)
+    from packaging.version import Version
+    return Version(_normalize(latest)) > Version(_normalize(current))
 
 
 def fetch_latest_release(*, timeout: float = _TIMEOUT) -> ReleaseInfo:
@@ -120,6 +114,7 @@ def check_for_update(current_version: str, *, timeout: float = _TIMEOUT) -> Upda
     """
     try:
         latest = fetch_latest_release(timeout=timeout)
+        newer = is_newer(latest.version, current_version)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return UpdateCheckResult("up_to_date", current_version, None)
@@ -133,7 +128,7 @@ def check_for_update(current_version: str, *, timeout: float = _TIMEOUT) -> Upda
     except Exception as exc:  # malformed JSON, etc.
         return UpdateCheckResult("error", current_version, None, str(exc))
 
-    if is_newer(latest.version, current_version):
+    if newer:
         return UpdateCheckResult("update_available", current_version, latest)
     return UpdateCheckResult("up_to_date", current_version, latest)
 

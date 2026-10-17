@@ -22,6 +22,7 @@ window on top can simply poll it.
 from __future__ import annotations
 
 import itertools
+import logging
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -205,10 +206,15 @@ class TaskRegistry:
             if not entry.info.active:
                 return False
             cancel = entry.cancel
+            previous_status = entry.info.status
             entry.info = replace(entry.info, status="cancelling")
         try:
             cancel()
-        except Exception:                                       # noqa: BLE001
+        except Exception:  # Arbitrary worker cancellation callback.
+            logging.getLogger(__name__).exception("Task %s stop request failed", task_id)
+            with self._lock:
+                if self._entries.get(int(task_id)) is entry and entry.info.status == "cancelling":
+                    entry.info = replace(entry.info, status=previous_status)
             return False
         return True
 

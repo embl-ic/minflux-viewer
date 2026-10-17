@@ -66,13 +66,10 @@ class ImageRoiOverlay:
     def detach(self) -> None:
         """Restore the ViewBox and drop the item (call before the window dies)."""
         self.clear()
-        try:
-            if self._had_own_drag:
-                self._vb.mouseDragEvent = self._original_drag
-            else:
-                vars(self._vb).pop("mouseDragEvent", None)
-        except Exception:
-            pass
+        if self._had_own_drag:
+            self._vb.mouseDragEvent = self._original_drag
+        else:
+            vars(self._vb).pop("mouseDragEvent", None)
 
     def set_pixel_size(self, sx: float, sy: float) -> None:
         """Re-scale the displayed ROI when the series (hence calibration) changes."""

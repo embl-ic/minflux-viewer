@@ -83,7 +83,7 @@ def build_viewer_dataset(job, *, msr_path, prefs, logs, progress,
             if _done:
                 logs.append(f"[viewer] restored saved state for "
                                 f"'{display_name}': {', '.join(_done)}")
-    except Exception as _exc:                       # noqa: BLE001
+    except (OSError, AttributeError, IndexError, KeyError, TypeError, ValueError) as _exc:
         logs.append(f"[warn] embedded viewer state in "
                         f"'{msr_path.name}' could not be applied: {_exc}")
     # A recipe sidecar saved beside this .msr (File > Save As >
@@ -111,7 +111,7 @@ def build_viewer_dataset(job, *, msr_path, prefs, logs, progress,
                 if _applied:
                     logs.append(f"[viewer] applied '{_side.name}' to "
                                     f"'{display_name}': {', '.join(_applied)}")
-    except Exception as _exc:
+    except (OSError, AttributeError, IndexError, KeyError, TypeError, ValueError) as _exc:
         logs.append(f"[warn] recipe sidecar beside '{msr_path.name}' "
                         f"could not be applied: {_exc}")
     progress(1.0)

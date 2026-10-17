@@ -17,6 +17,55 @@ def _app(qapp):
     return qapp
 
 
+@pytest.mark.parametrize("error", [MemoryError, ValueError, RuntimeError])
+def test_cleanup_boundary_reports_unexpected_failures_and_allows_next_step(error, caplog):
+    from minflux_viewer.ui.common.qt_lifecycle import cleanup_callback
+
+    def broken():
+        raise error("injected cleanup failure")
+
+    assert not cleanup_callback(broken, context="test resource")
+    assert "Cleanup failed: test resource" in caplog.text
+    assert caplog.records[-1].exc_info[0] is error
+    completed = []
+    assert cleanup_callback(lambda: completed.append(True), context="next resource")
+    assert completed == [True]
+
+
+def test_cleanup_boundary_tolerates_deleted_qt_objects(caplog):
+    from minflux_viewer.ui.common.qt_lifecycle import cleanup_callback
+
+    def deleted():
+        raise RuntimeError("wrapped C/C++ object of type QWidget has been deleted")
+
+    assert not cleanup_callback(deleted, context="deleted widget")
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_image_source_lease_closes_once_and_reports_cleanup_failure(deferred, caplog):
+    from minflux_viewer.ui.tools.tiff_viewer_window import _SourceLease
+
+    class Source:
+        calls = 0
+
+        def close(self):
+            self.calls += 1
+            raise OSError("injected close failure")
+
+    source = Source()
+    lease = _SourceLease(source)
+    if deferred:
+        lease.acquire()
+    lease.request_close()
+    assert source.calls == (0 if deferred else 1)
+    if deferred:
+        lease.release()
+    lease.request_close()
+    assert source.calls == 1
+    assert "injected close failure" in caplog.text
+
+
 def test_image_view_boxes_are_closed_and_unregistered_idempotently(_app):
     import pyqtgraph as pg
     from pyqtgraph.graphicsItems.ViewBox.ViewBox import ViewBox

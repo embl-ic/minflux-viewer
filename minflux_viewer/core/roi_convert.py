@@ -94,7 +94,7 @@ def _depth_of(record: RoiRecord) -> float:
     ctx = record.context if isinstance(record.context, dict) else {}
     try:
         return float(ctx.get("depth_value", 0.0) or 0.0)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return 0.0
 
 
@@ -159,11 +159,13 @@ def _convex_hull(points: np.ndarray) -> list[list[float]]:
     if pts.shape[0] < 3:
         return [[float(p[0]), float(p[1])] for p in pts]
     try:
-        from scipy.spatial import ConvexHull
-
+        from scipy.spatial import ConvexHull, QhullError
+    except ImportError:
+        return [[float(p[0]), float(p[1])] for p in pts]
+    try:
         hull = ConvexHull(pts)
         return [[float(pts[i, 0]), float(pts[i, 1])] for i in hull.vertices]
-    except Exception:
+    except QhullError:
         return [[float(p[0]), float(p[1])] for p in pts]
 
 

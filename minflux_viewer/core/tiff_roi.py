@@ -22,6 +22,7 @@ importable without a GUI; the ``RoiRecord`` conversion lives in ``core/roi.py``.
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
 
 import numpy as np
@@ -90,7 +91,7 @@ def _imagej_roi_summary(roi) -> tuple[str, str, tuple[float, float, float, float
             coords = np.asarray(roi.coordinates(), dtype=float)
             if coords.ndim == 2 and coords.shape[0] and coords.shape[1] >= 2:
                 points = coords[:, :2]
-        except Exception:
+        except (AttributeError, TypeError, ValueError, NotImplementedError):
             points = None
 
     left, top = float(roi.left), float(roi.top)
@@ -109,7 +110,7 @@ def decode_roi(blob: bytes | None) -> TiffRoi | None:
     try:
         from roifile import ImagejRoi
         roi = ImagejRoi.frombytes(bytes(blob))
-    except Exception:
+    except (IndexError, TypeError, ValueError, struct.error):
         return None
     roi_type, name, bounds, points = _imagej_roi_summary(roi)
     return TiffRoi(blob=bytes(blob), roi_type=roi_type, name=name,
@@ -219,7 +220,7 @@ def read_roi_from_tiff(tiff) -> TiffRoi | None:
     produces **OME**-TIFFs that also carry the tag."""
     try:
         tag = tiff.pages[0].tags.get(IJ_METADATA_TAG)
-    except Exception:
+    except (AttributeError, IndexError, KeyError, TypeError):
         return None
     value = getattr(tag, "value", None)
     if not isinstance(value, dict):

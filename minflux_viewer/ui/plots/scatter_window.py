@@ -3708,7 +3708,7 @@ class ScatterWindow(QWidget):
         self._on_lut_cmap_changed(self._cmap_combo.currentText(), self._lut_invert)
 
     def closeEvent(self, event) -> None:
-        from minflux_viewer.ui.common.qt_lifecycle import close_plot_widgets
+        from minflux_viewer.ui.common.qt_lifecycle import cleanup_callback, close_plot_widgets
         from minflux_viewer.ui.dialogs.lut_dialog import release_shared_lut_owner
 
         # The debounced ortho redraw must not outlive the plots it draws into:
@@ -3730,10 +3730,7 @@ class ScatterWindow(QWidget):
         # go before the panes do -- a store change arriving at a controller whose
         # plot is half torn down is the documented route to a Qt abort.
         for _controller in (getattr(self, "_pane_roi_controllers", None) or {}).values():
-            try:
-                _controller.dispose()
-            except Exception:
-                pass
+            cleanup_callback(_controller.dispose, context="dispose scatter pane ROI controller")
         self._pane_roi_controllers = {}
         for _item, _handler in getattr(self, "_ortho_click_handlers", []):
             try:

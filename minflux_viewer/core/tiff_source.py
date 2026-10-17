@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -132,8 +133,8 @@ class TiffImageSource:
     def close(self) -> None:
         try:
             self._tf.close()
-        except Exception:
-            pass
+        except OSError:
+            logging.getLogger(__name__).exception("Could not close TIFF source")
 
     # -- series ---------------------------------------------------------------
     @property
@@ -486,19 +487,19 @@ def _parse_imagej_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     if spacing is not None:
         try:
             result["pixel_size_z"] = PhysicalSize(float(spacing), unit)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             pass
     interval = metadata.get("finterval")
     if interval is None:
         try:
             fps = float(metadata.get("fps"))
             interval = 1.0 / fps if fps > 0 else None
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             interval = None
     if interval is not None:
         try:
             result["time_interval"] = PhysicalSize(float(interval), "s")
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             pass
     return result
 
@@ -508,19 +509,19 @@ def _parse_tiff_resolution(series) -> dict[str, Any]:
     try:
         page = series.pages[0]
         tags = page.tags
-    except Exception:
+    except (AttributeError, IndexError, KeyError, TypeError):
         return {}
     result: dict[str, Any] = {}
     try:
         result["acquisition_date"] = str(tags["DateTime"].value)
-    except Exception:
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         pass
     try:
         x_res = _resolution_value(tags["XResolution"].value)
         y_res = _resolution_value(tags["YResolution"].value)
         raw_unit = tags["ResolutionUnit"].value
         unit_name = str(getattr(raw_unit, "name", raw_unit)).upper()
-    except Exception:
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
         return result
     if x_res <= 0 or y_res <= 0:
         return result
@@ -532,7 +533,7 @@ def _parse_tiff_resolution(series) -> dict[str, Any]:
         # ResolutionUnit=NONE is commonly paired with ImageJ's unit string.
         try:
             unit = str((page.parent.imagej_metadata or {}).get("unit") or "")
-        except Exception:
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
             unit = ""
     if not unit:
         return result
@@ -585,7 +586,7 @@ def _tiff_header_document(series) -> str:
     """Readable JSON representation of the first page's TIFF IFD tags."""
     try:
         page = series.pages[0]
-    except Exception:
+    except (AttributeError, IndexError, KeyError, TypeError):
         return ""
     values: dict[str, Any] = {}
     for tag in page.tags.values():
@@ -608,7 +609,7 @@ def _physical_size(attrs: dict[str, str], value_key: str, unit_key: str) -> Phys
         return None
     try:
         return PhysicalSize(float(value), str(attrs.get(unit_key) or "um"))
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -648,9 +649,10 @@ class EmbeddedImageSource:
             try:
                 with tifffile.TiffFile(str(path)) as handle:
                     count = max(len(handle.series), 1)
-            except Exception:
+            except (OSError, ValueError, tifffile.TiffFileError):
                 # A file that cannot be read is skipped rather than aborting the
                 # whole list: one bad image must not hide the others.
+                logging.getLogger(__name__).exception("Could not inspect TIFF %s", path)
                 continue
             for inner in range(count):
                 name = label if count == 1 else f"{label} [{inner + 1}]"
@@ -682,8 +684,8 @@ class EmbeddedImageSource:
                     series = handle.series[inner]
                     shape = tuple(int(v) for v in getattr(series, "shape", ()) or ())
                     dtype = str(getattr(series, "dtype", ""))
-            except Exception:
-                pass
+            except (OSError, IndexError, KeyError, TypeError, ValueError, tifffile.TiffFileError):
+                logging.getLogger(__name__).exception("Could not inspect TIFF series in %s", path)
             out.append({
                 "index": index,
                 "name": name,

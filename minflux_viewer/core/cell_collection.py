@@ -237,7 +237,7 @@ def is_cell_collection_file(path) -> bool:
     try:
         with h5py.File(str(path), "r") as handle:
             return str(handle.attrs.get("format", "")) == FORMAT
-    except Exception:                                             # noqa: BLE001
+    except (OSError, TypeError, ValueError):
         return False
 
 

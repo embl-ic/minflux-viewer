@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import itertools
 import json
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1048,8 +1049,8 @@ class AppState(QObject):
                         f"'{dataset.name}': MINFLUX quality attributes missing "
                         f"({', '.join(missing)}) — quality filtering on these is "
                         "unavailable.", "WARN")
-        except Exception:
-            pass
+        except Exception:  # An optional warning must not undo dataset admission.
+            logging.getLogger(__name__).exception("Could not report dataset quality")
         # Record to processing journal for the methods-text generator
         try:
             self.journal.add(
@@ -1060,8 +1061,8 @@ class AppState(QObject):
                 num_dim=int(dataset.prop.num_dim),
                 source=str(dataset.file.path),
             )
-        except Exception:
-            pass
+        except Exception:  # Journal callbacks run after dataset admission.
+            logging.getLogger(__name__).exception("Could not record dataset load")
         # Parseable, dataset-tagged load summary for the method-text generator.
         try:
             md = dataset.metadata
@@ -1075,8 +1076,8 @@ class AppState(QObject):
                 f"{dataset.prop.num_traces} trace(s), {dataset.prop.num_dim}D [{ver_str}].",
                 dataset_idx=idx,
             )
-        except Exception:
-            pass
+        except Exception:  # Presentation callbacks do not own admitted data.
+            logging.getLogger(__name__).exception("Could not report dataset load")
         return idx
 
     def remove_dataset(self, idx: int) -> None:
@@ -1312,8 +1313,8 @@ class AppState(QObject):
         if raw:
             try:
                 return _migrate_prefs(_merge(json.loads(raw), DEFAULT_PREFS))
-            except Exception:
-                pass
+            except (AttributeError, KeyError, TypeError, ValueError):
+                logging.getLogger(__name__).exception("Invalid saved preferences; using defaults")
         return default_prefs()
 
     def save_prefs(self) -> None:

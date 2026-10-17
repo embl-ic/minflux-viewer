@@ -156,7 +156,7 @@ def read_viewer_state(zroot) -> dict | None:
 
     try:
         attrs = read_zarr_attrs(zroot, VIEWER_GROUP)
-    except Exception:                                   # noqa: BLE001 - absent
+    except (KeyError, TypeError, ValueError):
         return None
     if not isinstance(attrs, dict):
         return None
@@ -164,7 +164,7 @@ def read_viewer_state(zroot) -> dict | None:
     if isinstance(payload, str):                        # tolerated: JSON text
         try:
             payload = json.loads(payload)
-        except Exception:                               # noqa: BLE001
+        except (TypeError, ValueError):
             return None
     if not isinstance(payload, dict):
         return None

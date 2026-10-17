@@ -84,7 +84,7 @@ def dataset_group_id(ds) -> str | None:
 def dataset_overlay_index(ds) -> int | None:
     try:
         return int(getattr(ds, "state", {}).get("overlay_index"))
-    except Exception:
+    except (AttributeError, TypeError, ValueError, OverflowError):
         return None
 
 

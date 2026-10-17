@@ -18,6 +18,8 @@ metadata changes are needed.
 from __future__ import annotations
 
 import json
+import logging
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -107,7 +109,7 @@ def _stack_dtype_name(header) -> str:
     try:
         from msr_reader.obffile import _parse_dtype
         return np.dtype(_parse_dtype(int(getattr(header, "dtype", 0)))[0]).name
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return ""
 
 
@@ -132,8 +134,6 @@ def _scan_extent(footer) -> tuple[tuple[float, float], tuple[float, float]] | No
     if not xml:
         return None
     try:
-        import xml.etree.ElementTree as ET
-
         root = ET.fromstring(xml)
         spans = []
         for axis in ("x", "y"):
@@ -146,7 +146,7 @@ def _scan_extent(footer) -> tuple[tuple[float, float], tuple[float, float]] | No
                 return None
             spans.append((centre - length / 2.0, centre + length / 2.0))
         return spans[0], spans[1]
-    except Exception:
+    except (ET.ParseError, TypeError, ValueError):
         return None
 
 
@@ -161,7 +161,7 @@ def _minflux_tag(footer) -> dict:
         return {}
     try:
         data = json.loads(raw)
-    except Exception:
+    except (TypeError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -185,7 +185,7 @@ def _scan_stacks(path) -> list[dict]:
             sizes = tuple(int(s) for s in (obf.shapes[i].sizes or []))
             try:
                 pixel = tuple(float(p) for p in (obf.pixel_sizes[i].sizes or []))
-            except Exception:
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError):
                 pixel = ()
             header = obf.stack_headers[i]
             try:
@@ -193,7 +193,7 @@ def _scan_stacks(path) -> list[dict]:
                 tag = _minflux_tag(footer)
                 extent = _scan_extent(footer)
                 dimension_labels = tuple(getattr(footer, "dimension_labels", ()) or ())
-            except Exception:
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError):
                 tag, extent, dimension_labels = {}, None, ()
             name = (getattr(header, "description", "") or getattr(header, "name", "")
                     or f"Series {i + 1}")
@@ -242,7 +242,7 @@ def msr_is_image_only(path) -> bool:
     """True when *path* is an image-only ``.msr`` (route it to the image viewer)."""
     try:
         return classify_image_only(_scan_stacks(path))
-    except Exception:
+    except (OSError, TypeError, ValueError, KeyError, IndexError, EOFError):
         return False
 
 
@@ -425,8 +425,8 @@ class ObfImageSource:
     def close(self) -> None:
         try:
             self._obf.close()
-        except Exception:
-            pass
+        except OSError:
+            logging.getLogger(__name__).exception("Could not close OBF source")
 
     # -- metadata -------------------------------------------------------------
     def _build_metadata(self) -> TiffMetadata:
@@ -456,7 +456,7 @@ class ObfImageSource:
             imspector_xml = str(
                 (getattr(footer, "tag_dictionary", None) or {}).get("imspector") or ""
             )
-        except Exception:
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
             imspector_xml = ""
         if imspector_xml:
             documents.append(MetadataDocument("Imspector XML", "xml", imspector_xml))
@@ -526,7 +526,7 @@ class ObfImageSource:
         try:
             xml = self._obf.get_ome_xml_metadata()
             return str(xml) if xml else None
-        except Exception:
+        except (OSError, AttributeError, IndexError, KeyError, TypeError, ValueError, ET.ParseError):
             return None
 
 

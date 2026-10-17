@@ -1283,14 +1283,13 @@ class OrthoCrosshair:
                     pass
 
     def dispose(self) -> None:
+        from minflux_viewer.ui.common.qt_lifecycle import cleanup_callback
+
         for plane, lines in list(self._lines.items()):
             item = plot_item_of(self._panes.get(plane))
             for line in lines:
-                try:
-                    if item is not None:
-                        item.removeItem(line)
-                except Exception:
-                    pass
+                if item is not None:
+                    cleanup_callback(lambda: item.removeItem(line), context="remove orthogonal crosshair")
         self._lines.clear()
 
 

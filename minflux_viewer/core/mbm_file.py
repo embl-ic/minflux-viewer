@@ -84,11 +84,15 @@ def _mat_struct_names(path: Path) -> list[str]:
     named ``mbm`` is then loaded, and a bead struct is a few kilobytes.
     """
     from scipy.io import loadmat, whosmat
+    from scipy.io.matlab import MatReadError
 
-    variables = {str(name) for name, _shape, _cls in whosmat(str(path))}
-    if "mbm" not in variables:
-        return []
-    value = loadmat(str(path), variable_names=["mbm"]).get("mbm")
+    try:
+        variables = {str(name) for name, _shape, _cls in whosmat(str(path))}
+        if "mbm" not in variables:
+            return []
+        value = loadmat(str(path), variable_names=["mbm"]).get("mbm")
+    except MatReadError as exc:
+        raise ValueError("Invalid MAT bead-table header") from exc
     dtype = getattr(value, "dtype", None)
     return list(getattr(dtype, "names", None) or ())
 
@@ -155,7 +159,7 @@ def is_mbm_points_file(path) -> bool:
         return False
     try:
         names = reader(target)
-    except Exception:                                       # noqa: BLE001
+    except (OSError, TypeError, ValueError, EOFError, NotImplementedError):
         return False
     return is_mbm_points_fields(names)
 

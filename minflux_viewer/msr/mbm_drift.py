@@ -294,7 +294,7 @@ def used_bead_gris(store) -> list[int]:
     try:
         used = (read_zarr_attrs(store, "mbm") or {}).get("used") or []
         by_gri = (read_zarr_attrs(store, "grd/mbm/points") or {}).get("points_by_gri") or {}
-    except Exception:
+    except (KeyError, TypeError, ValueError):
         return []
     name_to_gri = {}
     for key, info in by_gri.items():

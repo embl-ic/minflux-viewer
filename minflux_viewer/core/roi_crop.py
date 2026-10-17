@@ -99,10 +99,7 @@ def parse_channel_spec(text: str, n_channels: int) -> list[int]:
 
 def display_coords(ds) -> np.ndarray:
     """Read-only (N, 3) coordinates in **display nm**, shared when cached."""
-    try:
-        loc = display_coordinate_view(ds)
-    except Exception:
-        return np.empty((0, 3), dtype=float)
+    loc = display_coordinate_view(ds)
     if loc.ndim != 2 or loc.shape[1] < 2:
         return np.empty((0, 3), dtype=float)
     if loc.shape[1] == 2:

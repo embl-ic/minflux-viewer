@@ -1,3 +1,4 @@
+import logging
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -20,6 +21,7 @@ def _ome_xml_metadata(msr_file: str) -> str | None:
         raise
     except Exception:
         # Optional metadata crosses an opaque third-party decoder boundary.
+        logging.getLogger(__name__).exception("Could not decode OBF OME metadata")
         return None
 
 
@@ -113,7 +115,7 @@ class LegacyMSRParser:
             try:
                 log(f"[warn] could not read OBF image-series tree: {exc}")
             except Exception:  # caller-supplied logging must not mask the decoder error
-                pass
+                logging.getLogger(__name__).exception("OBF series warning callback failed")
         return entries
 
 
@@ -223,13 +225,11 @@ class GeneralMSRParser:
             tag_label = str((stack_tag or {}).get("label", "") or "")
             name = label_map.get(did) or tag_label or str(desc) or f"minflux_{stack_idx}"
             arr = mfx_node[:]
-            set_mfx_for(name, arr)
             log(f"    [mfx] loaded key='{name}' shape={arr.shape} dtype={arr.dtype}")
             if "grd/mbm/points" in arch:
                 beads = arch["grd/mbm/points"][:]
                 if getattr(beads, "size", 0):
                     mbm_arr = beads
-                    set_mbm_for(name, beads)
                     log(f"    [mbm] loaded key='{name}' shape={beads.shape}")
             else:
                 # Legacy bead layout: nested grd/mbm/<R-ID> structured arrays.
@@ -240,29 +240,33 @@ class GeneralMSRParser:
                     pts, pbg, used = legacy
                     if getattr(pts, "size", 0):
                         mbm_arr = pts
-                        set_mbm_for(name, pts)
                     mbm_meta = {"points_by_gri": pbg, "used": used}
-                    set_mbm_meta_for(name, mbm_meta)
+            entry = {
+                "did": did or f"mfxdta:{stack_idx}",
+                "obf_stack_index": int(stack_idx),
+                "display_name": name,
+                "zroot": store,
+                "fields": collect_zarr_fields(store),
+                "source_format": SOURCE_FORMAT,
+                "mfxdta_version": container_version(blob),
+                # Per-parse arrays belong to this reader, not the global aliases.
+                "_mfx": arr,
+                "_mbm": mbm_arr,
+                "_mbm_meta": mbm_meta,
+            }
         except MemoryError:
             raise
         except Exception as e:  # report a failed stack without discarding other stacks
             log(f"    [warn] stack {stack_idx}: mfx load failed: {e}")
             return None
-        return {
-            "did": did or f"mfxdta:{stack_idx}",
-            "obf_stack_index": int(stack_idx),
-            "display_name": name,
-            "zroot": store,                             # in-memory zarr store
-            "fields": collect_zarr_fields(store),
-            "source_format": SOURCE_FORMAT,
-            "mfxdta_version": container_version(blob),
-            # Per-parse arrays carried on the entry so each reader dialog keeps its
-            # OWN parsed data (the module-global ``state.mfx_map`` holds only the
-            # most-recently-parsed file — multiple readers would clobber it).
-            "_mfx": arr,
-            "_mbm": mbm_arr,
-            "_mbm_meta": mbm_meta,
-        }
+        # Publish only after the entire stack (including beads and metadata) is
+        # decoded. A failed bead chunk must not leave a half-loaded channel.
+        set_mfx_for(name, arr)
+        if mbm_arr is not None:
+            set_mbm_for(name, mbm_arr)
+        if mbm_meta is not None:
+            set_mbm_meta_for(name, mbm_meta)
+        return entry
 
 
 def parse_general(msr_file: str, tmp_dir: str, log=print) -> dict[str, Any]:

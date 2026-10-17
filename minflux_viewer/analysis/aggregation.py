@@ -252,7 +252,7 @@ def _final_flags_from_raw(raw) -> np.ndarray | None:
         from minflux_viewer.core.loader_raw_access import _raw_loc_id
 
         loc_id = _raw_loc_id(raw)
-    except Exception:
+    except (KeyError, TypeError, ValueError):
         loc_id = None
     if loc_id is None:
         return None

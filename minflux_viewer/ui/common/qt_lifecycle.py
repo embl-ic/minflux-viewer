@@ -9,6 +9,7 @@ their QWidget hierarchy is destroyed.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from typing import Any
 
@@ -21,6 +22,25 @@ from typing import Any
 TESTED_PYQTGRAPH_VERSIONS = ("0.13", "0.14")
 
 _MISSING = object()
+
+
+def cleanup_callback(callback, *, context: str) -> bool:
+    """Run one terminal cleanup step without preventing the remaining steps.
+
+    Only Qt's already-deleted-object error is routine. All other failures,
+    including allocation errors, are logged with their traceback. This is a
+    shutdown boundary, never a fallback for computation on live data.
+    """
+    try:
+        callback()
+    except RuntimeError as exc:
+        if "has been deleted" not in str(exc):
+            logging.getLogger(__name__).exception("Cleanup failed: %s", context)
+        return False
+    except Exception:  # Arbitrary cleanup must not strand the other resources.
+        logging.getLogger(__name__).exception("Cleanup failed: %s", context)
+        return False
+    return True
 
 
 def _pyqtgraph_version_is_tested(version: str) -> bool:
@@ -50,9 +70,8 @@ def install_pyqtgraph_lifecycle_guards() -> None:
         from PyQt6 import sip
         from pyqtgraph import __version__ as pyqtgraph_version
         from pyqtgraph.graphicsItems.LabelItem import LabelItem
-    except Exception:  # pragma: no cover - non-GUI/minimal installations
-        # A missing or broken pyqtgraph must not make ``import minflux_viewer.ui``
-        # fail; the guard is an optimisation, not a requirement.
+    except ImportError:  # pragma: no cover - non-GUI/minimal installations
+        # The guard is optional when pyqtgraph is not installed.
         return
     if getattr(LabelItem, "_mfv_deleted_object_guard", False):
         return
@@ -127,7 +146,7 @@ def _install_infinite_line_guard(sip, warnings) -> None:
     try:
         from pyqtgraph import QtCore
         from pyqtgraph.graphicsItems.InfiniteLine import InfiniteLine
-    except Exception:                       # pragma: no cover - minimal install
+    except ImportError:                     # pragma: no cover - minimal install
         return
     if getattr(InfiniteLine, "_mfv_deleted_object_guard", False):
         return

@@ -131,7 +131,7 @@ def image_series_of(parsed: dict, log=None) -> list[dict]:
     try:
         from minflux_viewer.core.obf_image_source import list_obf_image_series
         return list_obf_image_series(msr_path)
-    except Exception as exc:                                   # noqa: BLE001
+    except (OSError, IndexError, KeyError, TypeError, ValueError, EOFError) as exc:
         if log is not None:
             log(f"[image] could not list image series: {exc}")
         return []

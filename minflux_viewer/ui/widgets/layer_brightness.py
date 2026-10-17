@@ -110,11 +110,10 @@ class LayerBrightness:
         self._dialog.activateWindow()
 
     def close(self) -> None:
+        from minflux_viewer.ui.common.qt_lifecycle import cleanup_callback
+
         if self._dialog is not None:
-            try:
-                self._dialog.close()
-            except Exception:
-                pass
+            cleanup_callback(self._dialog.close, context="close layer brightness dialog")
             self._dialog = None
 
     def refresh_if_open(self) -> None:

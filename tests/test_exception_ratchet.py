@@ -1,7 +1,9 @@
 """Broad catches and silent broad catches may not grow per source file."""
 
+import ast
 import importlib.util
 import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,54 @@ _PATH = Path(__file__).resolve().parents[1] / "tools" / "exception_ratchet.py"
 _SPEC = importlib.util.spec_from_file_location("exception_ratchet", _PATH)
 ratchet = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(ratchet)
+
+
+# These are terminal callbacks, decoder boundaries or cleanup-and-reraise,
+# never permission to substitute different scientific data on execution error.
+_BACKEND_BOUNDARIES = {
+    "core/app_state.py:AppState.add_dataset": (3, "Optional reporting after dataset admission"),
+    "core/app_state.py:AppState.log": (1, "Attribution failure reported on stderr"),
+    "core/app_state.py:AppState.task": (1, "Mark failed and re-raise"),
+    "core/coordinates.py:CoordinateService._get": (1, "Propagate builder error to waiting callers and re-raise"),
+    "core/minflux_zarr.py:_replace_viewer_directories": (1, "Rollback and re-raise"),
+    "core/minflux_zarr.py:write_minflux_zarr": (1, "Restore backup and re-raise"),
+    "core/minflux_zarr.py:write_minflux_zarr_project": (1, "Restore backup and re-raise"),
+    "core/task_registry.py:TaskRegistry.request_stop": (1, "Report arbitrary cancellation callback failure"),
+    "core/updater.py:check_for_update": (1, "Explicit error result at network boundary"),
+    "core/user_libs.py:discard_install": (1, "Report cancellation cleanup failure"),
+    "analysis/method_text.py:_collect": (1, "Report broken plugin declaration, retain event; do not guess attribution"),
+    "msr/legacy_mbm.py:build_legacy_mbm": (1, "Report caller-supplied logging failure"),
+    "msr/msr_parser.py:_ome_xml_metadata": (1, "Opaque optional decoder; propagate allocation failure"),
+    "msr/msr_parser.py:LegacyMSRParser.build_series_tree_entries": (2, "Opaque decoder and warning callback; report failures"),
+    "msr/msr_parser.py:GeneralMSRParser.parse": (1, "Report opaque decoder error; propagate allocation failure"),
+    "msr/msr_parser.py:GeneralMSRParser._mfxdta_dataset_entry": (2, "Report malformed stack before publication; propagate allocation failure"),
+    "msr/session_export.py:export_image_series": (1, "Report failed export and re-raise; always close source"),
+}
+
+
+def test_backend_broad_boundaries_are_reviewed_per_function_not_just_per_file():
+    package = _PATH.parents[1] / "minflux_viewer"
+    found = Counter()
+    for layer in ("core", "analysis", "msr"):
+        for path in (package / layer).rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+            parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+            for handler in (node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)):
+                # Reuse the ratchet's bare/qualified/tuple/import-alias semantics.
+                imports = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+                probe = ast.Try(body=[ast.Pass()], handlers=[ast.ExceptHandler(
+                    type=handler.type, name=None, body=[ast.Pass()])], orelse=[], finalbody=[])
+                if not ratchet.count_handlers(ast.unparse(ast.Module(body=[*imports, probe], type_ignores=[])))["broad"]:
+                    continue
+                owner, names = handler, []
+                while owner in parents:
+                    owner = parents[owner]
+                    if isinstance(owner, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                        names.append(owner.name)
+                key = f"{path.relative_to(package).as_posix()}:{'.'.join(reversed(names))}"
+                found[key] += 1
+                assert not (len(handler.body) == 1 and isinstance(handler.body[0], ast.Pass)), key
+    assert dict(found) == {key: count for key, (count, reason) in _BACKEND_BOUNDARIES.items()}
 
 
 @pytest.mark.parametrize("clause", [

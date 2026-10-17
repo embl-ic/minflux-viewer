@@ -166,7 +166,7 @@ def field_from_points_with_associated_image(
             image = _project_image(load_confocal_candidate_array(
                 msr_path, candidate.image))
             sampled = _sample_on_field(image, candidate, primary)
-        except Exception as exc:
+        except (OSError, IndexError, KeyError, TypeError, ValueError) as exc:
             reports.append({
                 "name": candidate.name,
                 "raw_index": int(candidate.raw_index),

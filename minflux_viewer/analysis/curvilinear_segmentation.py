@@ -387,7 +387,7 @@ def fit_spline_path(path_nm, *, sample_step_nm: float = 20.0,
             per=False,
         )
         out = np.column_stack(splev(sample, tck))
-    except Exception:
+    except (TypeError, ValueError):
         out = np.column_stack([
             np.interp(sample, arc, pts[:, 0]),
             np.interp(sample, arc, pts[:, 1]),
@@ -460,7 +460,7 @@ def point_cloud_spline_paths(
         try:
             _, _, vh = np.linalg.svd(centred, full_matrices=False)
             along = vh[0]
-        except Exception:
+        except np.linalg.LinAlgError:
             along = np.array([1.0, 0.0])
         if along[0] < 0:
             along = -along

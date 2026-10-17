@@ -92,7 +92,7 @@ def is_metadata_json_file(path) -> bool:
     try:
         with open(path, encoding="utf-8") as fh:
             return is_metadata_json_payload(json.load(fh))
-    except Exception:
+    except (OSError, TypeError, ValueError):
         return False
 
 

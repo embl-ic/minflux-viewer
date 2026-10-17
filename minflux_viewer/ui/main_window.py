@@ -2104,13 +2104,12 @@ class MainWindow(QMainWindow):
         (default ``True``). Set it to ``False`` to let ParaView survive.
         """
         self._is_shutting_down = True
+        from minflux_viewer.ui.common.qt_lifecycle import cleanup_callback, remove_event_filter
+
         app = QApplication.instance()
         if app is not None:
-            try:
-                app.removeEventFilter(self)
-            except Exception:
-                pass
-        self._state.save_prefs()
+            remove_event_filter(app, self)
+        cleanup_callback(self._state.save_prefs, context="save preferences on exit")
         # A pending regroup question would fire into a closing window.
         regroup = getattr(self, "_regroup_timer", None)
         if regroup is not None:
@@ -2122,11 +2121,8 @@ class MainWindow(QMainWindow):
         )
         if close_paraview:
             self._terminate_paraview_processes()
-        try:
-            from minflux_viewer.ui.tools.console_window import restore_redirection
-            restore_redirection()
-        except Exception:
-            pass
+        from minflux_viewer.ui.tools.console_window import restore_redirection
+        cleanup_callback(restore_redirection, context="restore console redirection")
         super().closeEvent(event)
 
     # ------------------------------------------------------------------

@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
 from minflux_viewer import resource_path
 from minflux_viewer.colormaps import make_colormap, named_colormap_names
 from minflux_viewer.colors import solid_color_names
+from minflux_viewer.ui.common.qt_lifecycle import cleanup_callback
 from minflux_viewer.ui.rendering.render_window import DepthRangeSlider
 from minflux_viewer.ui.tools.metadata_viewer import MetadataDocumentView
 
@@ -75,10 +76,7 @@ class _SourceLease:
                 self._closed = True
                 close = True
         if close:
-            try:
-                self._source.close()
-            except Exception:
-                pass
+            cleanup_callback(self._source.close, context="close released image source")
 
     def request_close(self) -> None:
         close = False
@@ -88,10 +86,7 @@ class _SourceLease:
                 self._closed = True
                 close = True
         if close:
-            try:
-                self._source.close()
-            except Exception:
-                pass
+            cleanup_callback(self._source.close, context="close image source")
 
 
 def _z_sum_dtype(dtype) -> np.dtype:
@@ -176,22 +171,13 @@ class TiffViewerWindow(QWidget):
         from minflux_viewer.ui.dialogs.lut_dialog import release_shared_lut_owner
 
         if self._roi_overlay is not None:
-            try:
-                self._roi_overlay.detach()
-            except Exception:
-                pass
+            cleanup_callback(self._roi_overlay.detach, context="detach image ROI overlay")
             self._roi_overlay = None
         if self._info_window is not None:
-            try:
-                self._info_window.close()
-            except Exception:
-                pass
+            cleanup_callback(self._info_window.close, context="close image information window")
         release_shared_lut_owner(self)
         if self._bc_dialog is not None:
-            try:
-                self._bc_dialog.close()
-            except Exception:
-                pass
+            cleanup_callback(self._bc_dialog.close, context="close image brightness dialog")
         retire_background_tasks(
             self._save_tasks,
             signal_names=("stage", "done", "failed", "cancelled", "finished"),

@@ -36,7 +36,7 @@ def collect_zarr_fields(store) -> list[dict[str, Any]]:
                     ent["dtype_fields"] = tree
                     if len(tree) == 1 and tree[0].get("kind") == "struct-root":
                         ent["dtype_singleton_root"] = tree[0]["name"]
-            except Exception:
+            except (KeyError, IndexError, TypeError, ValueError, OverflowError):
                 pass
         else:
             ent["description"] = describe_path(path, is_array=False)
@@ -126,7 +126,7 @@ def pick_one_msr(input_path: str | None) -> str | None:
         return None
     try:
         p = Path(input_path)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
     if p.is_file() and p.suffix.lower() == ".msr":

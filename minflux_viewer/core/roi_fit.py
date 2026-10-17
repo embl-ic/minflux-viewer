@@ -96,10 +96,12 @@ def concave_hull(points, *, alpha_factor: float = 2.5) -> list[list[float]]:
     if P.shape[0] < 4:
         return _convex_hull(P)
     try:
-        from scipy.spatial import Delaunay
-
+        from scipy.spatial import Delaunay, QhullError
+    except ImportError:
+        return _convex_hull(P)
+    try:
         tri = Delaunay(P)
-    except Exception:
+    except QhullError:
         return _convex_hull(P)
     s = tri.simplices
     a, b, c = P[s[:, 0]], P[s[:, 1]], P[s[:, 2]]

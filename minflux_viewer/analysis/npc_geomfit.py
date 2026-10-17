@@ -138,7 +138,7 @@ def _subunit_centers(points, tid):
         return None
     try:
         from .npc_wanlu import estimate_trace_size, locate_unit_clusters
-    except Exception:
+    except ImportError:
         return None
     P = np.asarray(points, float)
     if P.ndim != 2 or P.shape[1] < 3:
@@ -149,7 +149,7 @@ def _subunit_centers(points, tid):
     try:
         d_unit = 2.0 * float(estimate_trace_size(P[:, :3], t))
         centers, _ = locate_unit_clusters(P[:, :3], t, d_unit)
-    except Exception:
+    except (ValueError, FloatingPointError, np.linalg.LinAlgError):
         return None
     centers = np.asarray(centers, float)
     return centers if (centers.ndim == 2 and centers.shape[0] >= 3) else None

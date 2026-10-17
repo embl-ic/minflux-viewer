@@ -5864,7 +5864,7 @@ class RenderWindow(QWidget):
 
     def closeEvent(self, event) -> None:
         from minflux_viewer.ui.common.background_tasks import retire_qthreads
-        from minflux_viewer.ui.common.qt_lifecycle import close_image_views
+        from minflux_viewer.ui.common.qt_lifecycle import cleanup_callback, close_image_views
         from minflux_viewer.ui.dialogs.lut_dialog import release_shared_lut_owner
 
         self._closing = True
@@ -5896,10 +5896,7 @@ class RenderWindow(QWidget):
             # go before the panes do -- a store change arriving at a controller whose
             # plot is half torn down is the documented route to a Qt abort.
             for _controller in (getattr(self, "_pane_roi_controllers", None) or {}).values():
-                try:
-                    _controller.dispose()
-                except Exception:
-                    pass
+                cleanup_callback(_controller.dispose, context="dispose render pane ROI controller")
             self._pane_roi_controllers = {}
             self._ortho.dispose()
             from minflux_viewer.ui.common.qt_lifecycle import dispose_plot_widgets
@@ -5910,10 +5907,7 @@ class RenderWindow(QWidget):
             self._roi_overlay.dispose()
             self._roi_overlay = None
         if self._volume_window is not None:
-            try:
-                self._volume_window.close()
-            except Exception:
-                pass
+            cleanup_callback(self._volume_window.close, context="close volume window")
             self._volume_window = None
         if self._sigma_dialog is not None:
             try:
@@ -5925,10 +5919,7 @@ class RenderWindow(QWidget):
         # window, so it does not hide with this viewer on its own — close it
         # explicitly or it lingers orphaned over the desktop.
         if self._bc_dialog is not None:
-            try:
-                self._bc_dialog.close()
-            except Exception:
-                pass
+            cleanup_callback(self._bc_dialog.close, context="close render brightness dialog")
         release_shared_lut_owner(self)
         retire_qthreads(
             self._export_workers,

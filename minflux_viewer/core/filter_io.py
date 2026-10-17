@@ -55,7 +55,7 @@ def is_filter_json_file(path: str | Path) -> bool:
     """Return True only for JSON files shaped like saved filter rows."""
     try:
         load_filter_json(path)
-    except Exception:
+    except (OSError, TypeError, ValueError):
         return False
     return True
 

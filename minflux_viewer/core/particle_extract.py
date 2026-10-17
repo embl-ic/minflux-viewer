@@ -71,7 +71,7 @@ def _capturable_attr_names(ds) -> list[str]:
     for src in (getattr(ds, "attr", {}) or {}, getattr(ds, "derived", {}) or {}):
         try:
             keys = list(src.keys())
-        except Exception:
+        except (AttributeError, TypeError):
             keys = []
         for k in keys:
             if k in seen or k in _SKIP_ATTRS:
@@ -133,7 +133,7 @@ def extract_particles(
 
     try:
         z_scaling_factor = float(getattr(ds.cali, "z_scaling_factor", 1.0))
-    except Exception:
+    except (AttributeError, TypeError, ValueError, OverflowError):
         z_scaling_factor = 1.0
     state = getattr(ds, "state", {}) or {}
     # Overlay datasets store the transform as a display_transform_record *dict*;

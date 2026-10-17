@@ -69,7 +69,7 @@ def stamp_msr_dataset(ds, *, entry: dict, msr_path, key: str,
             if mbm_points is not None and not mbm_points_by_gri:
                 mbm_points_by_gri = dict(
                     (read_zarr_attrs(zroot, "grd/mbm/points") or {}).get("points_by_gri") or {})
-        except Exception as exc:                            # noqa: BLE001
+        except (OSError, AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError) as exc:
             if log is not None:
                 log(f"[warn] '{key}': native metadata could not be read: {exc}")
 

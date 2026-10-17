@@ -1512,7 +1512,7 @@ def set_volume_extent(record, columns, bounds) -> dict | None:
     try:
         h_axis, v_axis = int(columns[0]), int(columns[1])
         x, y, w, h = (float(v) for v in bounds)
-    except Exception:
+    except (IndexError, TypeError, ValueError, OverflowError):
         return None
     if not all(np.isfinite(v) for v in (x, y, w, h)):
         return None
@@ -1698,9 +1698,12 @@ def _convex_level(plane_pts: np.ndarray, pad: float) -> list | None:
     if plane_pts.shape[0] < 3:
         return None
     try:
-        from scipy.spatial import ConvexHull
+        from scipy.spatial import ConvexHull, QhullError
+    except ImportError:
+        return None
+    try:
         hull = ConvexHull(plane_pts)
-    except Exception:
+    except QhullError:
         return None
     verts = plane_pts[hull.vertices]
     centre = verts.mean(axis=0)

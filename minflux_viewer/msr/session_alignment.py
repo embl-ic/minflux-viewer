@@ -60,7 +60,7 @@ class AlignmentSession:
         min_beads = MIN_BEADS_FOR_ALIGNMENT
         try:
             ref_ids = set(extract_bead_summaries(ref_mbm))
-        except Exception as exc:
+        except (IndexError, KeyError, TypeError, ValueError) as exc:
             return False, f"reference bead points are not parseable ({exc})"
         ref_used = self._viewer_used_bead_gri_for_dataset(ref_name)
         if ref_used is not None:
@@ -75,7 +75,7 @@ class AlignmentSession:
                 return False, f"no bead points for {moving_name}"
             try:
                 moving_ids = set(extract_bead_summaries(moving_mbm))
-            except Exception as exc:
+            except (IndexError, KeyError, TypeError, ValueError) as exc:
                 return False, f"bead points for {moving_name} are not parseable ({exc})"
             moving_used = self._viewer_used_bead_gri_for_dataset(moving_name)
             if moving_used is not None:
@@ -141,7 +141,7 @@ class AlignmentSession:
 
             attrs = read_zarr_attrs(zroot, path)
             return attrs if isinstance(attrs, dict) else {}
-        except Exception:
+        except (KeyError, TypeError, ValueError):
             return {}
 
 
@@ -163,7 +163,7 @@ class AlignmentSession:
                 if "name" in node and "gri" in node:
                     try:
                         gri = int(node.get("gri"))
-                    except Exception:
+                    except (TypeError, ValueError, OverflowError):
                         gri = None
                     name = str(node.get("name", "")).strip()
                     if gri is not None and name:
@@ -211,7 +211,7 @@ class AlignmentSession:
             finite = np.isfinite(loc_z)
             if np.count_nonzero(finite) and np.ptp(loc_z[finite]) > 1e-12:
                 return True
-        except Exception:
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
             pass
         mbm = MFSTATE.mbm_map.get(name)
         try:
@@ -222,7 +222,7 @@ class AlignmentSession:
                     z = xyz[..., 2]
                     finite = np.isfinite(z)
                     return bool(np.count_nonzero(finite) and np.ptp(z[finite]) > 1e-12)
-        except Exception:
+        except (IndexError, KeyError, TypeError, ValueError):
             pass
         return False
 
@@ -340,26 +340,23 @@ class AlignmentSession:
     def _mfx_centroid_nm(self, mfx) -> np.ndarray:
         if mfx is None:
             return np.zeros(3, dtype=np.float64)
-        try:
-            from minflux_viewer.core.loader_normalization import _normalize_mfx_attrs
+        from minflux_viewer.core.loader_normalization import _normalize_mfx_attrs
 
-            attrs, num_raw, _num_itr, _version, _detail = _normalize_mfx_attrs(
-                mfx,
-                load_all_itr=False,   # always last-valid; browse via mfx_raw
-            )
-            loc_x = np.asarray(attrs.get("loc_x", np.full(num_raw, np.nan)), dtype=np.float64).ravel()
-            loc_y = np.asarray(attrs.get("loc_y", np.full(num_raw, np.nan)), dtype=np.float64).ravel()
-            loc_z = np.asarray(attrs.get("loc_z", np.zeros_like(loc_x)), dtype=np.float64).ravel()
-            mask = np.isfinite(loc_x) & np.isfinite(loc_y) & np.isfinite(loc_z)
-            if "vld" in attrs:
-                vld = np.asarray(attrs["vld"], dtype=bool).ravel()
-                if vld.size == mask.size:
-                    mask &= vld
-            if not np.any(mask):
-                return np.zeros(3, dtype=np.float64)
-            return np.nanmedian(np.column_stack([loc_x[mask], loc_y[mask], loc_z[mask]]) * 1e9, axis=0)
-        except Exception:
+        attrs, num_raw, _num_itr, _version, _detail = _normalize_mfx_attrs(
+            mfx,
+            load_all_itr=False,   # always last-valid; browse via mfx_raw
+        )
+        loc_x = np.asarray(attrs.get("loc_x", np.full(num_raw, np.nan)), dtype=np.float64).ravel()
+        loc_y = np.asarray(attrs.get("loc_y", np.full(num_raw, np.nan)), dtype=np.float64).ravel()
+        loc_z = np.asarray(attrs.get("loc_z", np.zeros_like(loc_x)), dtype=np.float64).ravel()
+        mask = np.isfinite(loc_x) & np.isfinite(loc_y) & np.isfinite(loc_z)
+        if "vld" in attrs:
+            vld = np.asarray(attrs["vld"], dtype=bool).ravel()
+            if vld.size == mask.size:
+                mask &= vld
+        if not np.any(mask):
             return np.zeros(3, dtype=np.float64)
+        return np.nanmedian(np.column_stack([loc_x[mask], loc_y[mask], loc_z[mask]]) * 1e9, axis=0)
 
 
     def _aligned_mbm_points(self, name):
@@ -435,7 +432,7 @@ class AlignmentSession:
                         "points_by_gri", {})
                 if not used:
                     used = (self._read_zarr_attrs_safe(zroot, "mbm") or {}).get("used", [])
-            except Exception:
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError):
                 pass
         return dict(pbg or {}), list(used or [])
 

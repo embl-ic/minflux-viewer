@@ -72,19 +72,13 @@ def loaded_z_scaling_factor(ds) -> float | None:
 def clear_filters(ds) -> bool:
     """Drop every filter row and un-gate every localization."""
     had = bool(ds.state.get("filter_specs")) or not _mask_is_all(ds)
+    ds.filter_mask = np.ones(int(ds.prop.num_loc), dtype=bool)
     ds.state["filter_specs"] = []
-    try:
-        ds.filter_mask = np.ones(int(ds.prop.num_loc), dtype=bool)
-    except Exception:
-        pass
     return had
 
 
 def _mask_is_all(ds) -> bool:
-    try:
-        mask = np.asarray(ds.filter_mask, dtype=bool)
-    except Exception:
-        return True
+    mask = np.asarray(ds.filter_mask, dtype=bool)
     return bool(mask.size == 0 or mask.all())
 
 

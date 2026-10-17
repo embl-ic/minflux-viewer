@@ -522,19 +522,15 @@ class ConvSegmentationWindow(QDialog):
         }
         try:
             self._state.save_prefs()
-        except Exception:
-            pass
+        except (OSError, TypeError, ValueError):
+            import logging
+            logging.getLogger(__name__).exception("Could not save segmentation preferences")
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
-        try:
-            self._save_prefs()
-        except Exception:
-            pass
-        try:
-            self._bc.close()
-        except Exception:
-            pass
-        from minflux_viewer.ui.common.qt_lifecycle import dispose_plot_widgets
+        from minflux_viewer.ui.common.qt_lifecycle import cleanup_callback, dispose_plot_widgets
+
+        cleanup_callback(self._save_prefs, context="save segmentation preferences on exit")
+        cleanup_callback(self._bc.close, context="close segmentation brightness dialog")
 
         # Retire the pyqtgraph plots last, after this window's own
         # teardown, so nothing here touches an already-inert plot.

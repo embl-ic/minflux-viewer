@@ -222,7 +222,7 @@ def extract_minflux_stack_tags(msr_path) -> dict[int, dict]:
                     continue
                 if isinstance(tag, dict):
                     out[index] = tag
-    except Exception:
+    except (OSError, ValueError, TypeError, IndexError, KeyError, EOFError):
         return {}
     return out
 
@@ -247,7 +247,7 @@ def read_obf_mfxdta_stacks(msr_path) -> list[tuple[int, str, bytes]]:
                 continue
             try:
                 desc = f.stack_headers[i].description or f"minflux_{i}"
-            except Exception:
+            except (AttributeError, IndexError, TypeError):
                 desc = f"minflux_{i}"
             out.append((i, str(desc), arr.tobytes()))
     return out
