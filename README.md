@@ -190,6 +190,20 @@ The entry points are `run_app.py` and `minflux_viewer/__main__.py`.
 
 ---
 
+## Release authentication
+
+Automatic installation on frozen Windows/Linux builds requires an Ed25519-signed
+release manifest and a trusted public key pinned in the application. No key is
+configured by default; manual release links and update checks remain available.
+GitHub's asset checksums alone are not publisher authentication.
+
+The maintainer can create manifests locally with `tools/sign_release.py --help`.
+Use an encrypted private key outside the checkout and outside GitHub/CI; publish
+only the manifest, detached signature and exact archives. Distribute public-key
+pins separately in a reviewed build. Expiry relies on the system clock, rollback
+protection compares the installed version, and key rotation is manual: this is
+not a full TUF implementation or operating-system code signing/notarization.
+
 ## License and contact
 
 MIT License. Ziqiang Huang, [ziqiang.huang@embl.de](mailto:ziqiang.huang@embl.de),

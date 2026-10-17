@@ -164,20 +164,30 @@ def download_url(url: str, dest, *, progress=None, expected_size: int = 0,
     dest.parent.mkdir(parents=True, exist_ok=True)
     done = 0
     hasher = hashlib.sha256()
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-        total = int(resp.headers.get("Content-Length") or expected_size or 0)
-        if progress:
-            progress(0, total)
-        with open(dest, "wb") as fh:
-            while True:
-                block = resp.read(chunk)
-                if not block:
-                    break
-                fh.write(block)
-                hasher.update(block)
-                done += len(block)
-                if progress:
-                    progress(done, total)
+    completed = False
+    opened = False
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            total = expected_size or int(resp.headers.get("Content-Length") or 0)
+            if progress:
+                progress(0, total)
+            with open(dest, "wb") as fh:
+                opened = True
+                while True:
+                    block = resp.read(chunk)
+                    if not block:
+                        break
+                    if expected_size and done + len(block) > expected_size:
+                        raise ValueError("Downloaded data exceeds its expected size.")
+                    fh.write(block)
+                    hasher.update(block)
+                    done += len(block)
+                    if progress:
+                        progress(done, total)
+        completed = True
+    finally:
+        if opened and not completed:
+            dest.unlink(missing_ok=True)
     problem = None
     if expected_size and dest.stat().st_size != int(expected_size):
         problem = (f"Downloaded size {dest.stat().st_size} != expected "
@@ -205,10 +215,9 @@ def asset_sha256(asset: ReleaseAsset) -> str:
 def download_asset(asset: ReleaseAsset, dest, *, progress=None, timeout: float = 60.0):
     """Download a :class:`ReleaseAsset` to *dest*, verifying size and SHA-256.
 
-    GitHub publishes a SHA-256 digest for every release asset. The self-updater
-    replaces the running executable with what it downloads, so an asset without
-    one is refused rather than installed unverified; the caller then offers
-    the release page instead.
+    This checks transport integrity, not publisher authenticity: GitHub's API
+    and the archive can be compromised together. Automatic installation uses
+    signed_updates.download_release instead, with a separately pinned key.
     """
     sha256 = asset_sha256(asset)
     if not sha256:

@@ -10,6 +10,11 @@ Retired HlyB workflows and unreachable tiled-render levels were removed while
 preserving the live staged workflow and its shared numerical helpers. Late tile
 results no longer replace direct, precision or image-mode renders.
 
+Automatic updates now require Ed25519-signed release manifests verified against
+public keys shipped in the application. Unconfigured builds offer manual
+downloads only. The updater rechecks authenticity, expiry and archive integrity
+before installation, stages off the GUI thread, and cancels safely on dismissal.
+
 ## v0.4.4
 
 Adds trajectory playback and quantitative analysis, richer 3-D ROI and magic-wand workflows, reproducible plugin methods, and an improved HlyB/D pair-distance workflow.

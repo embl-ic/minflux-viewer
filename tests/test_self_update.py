@@ -316,3 +316,58 @@ def test_a_python_without_the_tar_filter_refuses_a_tarball(tmp_path, monkeypatch
     with pytest.raises(RuntimeError, match="cannot extract a .tar archive safely"):
         su.stage_update(tgz, exe_name="minflux_viewer")
     assert not list((tmp_path / "staging").iterdir())    # nothing was staged
+
+
+def test_failed_staging_removes_its_owned_directory(tmp_path):
+    archive = tmp_path / "bad.zip"
+    archive.write_bytes(b"not a zip")
+    with pytest.raises(zipfile.BadZipFile):
+        su.stage_update(archive)
+    assert not list((tmp_path / "staging").iterdir())
+
+
+def test_failed_helper_launch_keeps_install_and_cleans_staging(tmp_path, monkeypatch):
+    archive = _make_release_zip(tmp_path)
+    exe = tmp_path / "install" / "minflux_viewer.exe"
+    exe.parent.mkdir()
+    exe.write_bytes(b"OLD")
+    monkeypatch.setattr(su, "is_windows", lambda: True)
+
+    def fail(*args):
+        raise OSError("launch refused")
+
+    monkeypatch.setattr(su, "launch_helper", fail)
+    with pytest.raises(OSError, match="launch refused"):
+        su.apply_update(archive, exe_path=exe)
+    assert exe.read_bytes() == b"OLD"
+    assert not list((tmp_path / "staging").iterdir())
+
+
+def test_an_abandoned_queued_preparation_cleans_itself(tmp_path, monkeypatch):
+    import gc
+
+    monkeypatch.setattr(su, "is_windows", lambda: True)
+    prepared = su.prepare_update(_make_release_zip(tmp_path), exe_path=tmp_path / "minflux_viewer.exe")
+    owned = prepared.extract_dir
+    assert owned.is_dir()
+    del prepared
+    gc.collect()
+    assert not owned.exists()
+
+
+def test_handoff_owns_staging_until_helper_finishes(tmp_path, monkeypatch):
+    import gc
+
+    monkeypatch.setattr(su, "is_windows", lambda: True)
+    prepared = su.prepare_update(_make_release_zip(tmp_path), exe_path=tmp_path / "minflux_viewer.exe")
+    owned = prepared.extract_dir
+    monkeypatch.setattr(su, "launch_helper", lambda *args: None)
+    su.launch_prepared_update(prepared)
+    with pytest.raises(ValueError, match="already"):
+        su.launch_prepared_update(prepared)
+    del prepared
+    gc.collect()
+    assert owned.is_dir()
+    # No real helper ran in this test; explicitly finish its cleanup contract.
+    import shutil
+    shutil.rmtree(owned)

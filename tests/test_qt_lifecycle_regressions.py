@@ -613,13 +613,18 @@ def test_update_dialog_close_does_not_destroy_a_running_download_thread() -> Non
                 for index in range(200):
                     self._report(index, 200)   # the real cancellation checkpoint
                     time.sleep(0.01)
-                self.finished_ok.emit(str(self._dest))
+                self.finished_ok.emit(None)  # cancellation must happen first
             except _DownloadCancelled:
                 return
             except Exception as exc:
                 self.failed.emit(str(exc))
 
         _DownloadWorker.run = fake_run
+
+        from minflux_viewer.core import self_update, signed_updates
+        self_update.can_self_update = lambda: True
+        # Public test pin only; this fake worker tests lifetime, not auth.
+        signed_updates.TRUSTED_RELEASE_KEYS = ("00" * 32,)
 
         app = QApplication([])
         # One asset per platform: the dialog downloads only the one that
@@ -659,6 +664,71 @@ def test_update_dialog_close_does_not_destroy_a_running_download_thread() -> Non
     """
     result = _run_python(code)
     _assert_clean(result, "update dialog close during download")
+
+
+@pytest.mark.parametrize("dismiss", ["close", "reject"])
+def test_update_dialog_dismiss_during_staging_is_nonblocking(dismiss):
+    """Native extraction may finish after close/Esc; its result must be retired."""
+    code = """
+        import gc
+        import tempfile
+        import threading
+        import time
+        from pathlib import Path
+        from types import SimpleNamespace
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QApplication
+        from minflux_viewer.core import self_update as su, signed_updates
+        from minflux_viewer.core.updater import ReleaseInfo, UpdateCheckResult
+        from minflux_viewer.ui.common.background_tasks import shared_thread_pool
+        from minflux_viewer.ui.dialogs.update_dialog import _UpdateAvailableDialog
+
+        app = QApplication([])
+        su.can_self_update = lambda: True
+        signed_updates.TRUSTED_RELEASE_KEYS = ("00" * 32,)  # public test pin only
+        started = threading.Event()
+        cleanup_calls = []
+
+        def forbidden(*args):
+            raise AssertionError("closing dialog launched a helper")
+
+        su.launch_prepared_update = forbidden
+        with tempfile.TemporaryDirectory() as temporary:
+            staging = Path(temporary) / "staging"
+
+            def slow_prepare(download, **kwargs):
+                staging.mkdir()
+                script = staging / "dummy-helper.txt"
+                script.write_text("test fixture")
+                started.set()
+                time.sleep(0.4)  # represents native extraction, not cancellable mid-call
+                return su.PreparedUpdate(script, staging, Path(temporary) / "install")
+
+            signed_updates.prepare_download = slow_prepare
+            release = ReleaseInfo("9.9.9", "v9.9.9", "Test", "", "")
+            dialog = _UpdateAvailableDialog(UpdateCheckResult("update_available", "0.4.4", release))
+            dialog._downloaded = SimpleNamespace(cleanup=lambda: cleanup_calls.append(1))
+            dialog._apply_and_quit()
+            if not started.wait(2):
+                raise AssertionError("preparation worker did not start")
+            begin = time.perf_counter()
+            getattr(dialog, DISMISS_METHOD)()
+            dialog.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            app.processEvents()
+            del dialog
+            gc.collect()
+            app.processEvents()
+            if time.perf_counter() - begin >= 0.2:
+                raise AssertionError("dismissal waited for staging")
+            shared_thread_pool("file-io").waitForDone()
+            app.processEvents()
+            if staging.exists():
+                raise AssertionError("cancelled staging leaked")
+            if cleanup_calls != [1]:
+                raise AssertionError(f"download cleanup count: {cleanup_calls}")
+    """.replace("DISMISS_METHOD", repr(dismiss))
+    _assert_clean(_run_python(code), f"update dialog {dismiss} during staging")
 
 
 def test_results_table_window_teardown_is_clean():

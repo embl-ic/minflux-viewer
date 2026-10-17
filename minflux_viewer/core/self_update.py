@@ -23,11 +23,15 @@ falls back to opening the download page.
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import weakref
 import zipfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 #: Fallback app exe name (real name is taken from the running executable).
@@ -132,13 +136,22 @@ def stage_update(archive_path, *, exe_name: str = APP_EXE_NAME) -> tuple[Path, P
                 "This Python cannot extract a .tar archive safely (no tarfile "
                 "data filter); download the update from the release page.")
     extract_dir = Path(tempfile.mkdtemp(prefix="mfv_update_"))
-    if is_tar:
-        with tarfile.open(archive_path) as tf:
-            tf.extractall(extract_dir, filter="data")
-    else:
-        with zipfile.ZipFile(archive_path) as zf:
-            zf.extractall(extract_dir)
-    return find_app_root(extract_dir, exe_name), extract_dir
+    completed = False
+    try:
+        payload_dir = extract_dir / "payload"
+        payload_dir.mkdir()
+        if is_tar:
+            with tarfile.open(archive_path) as tf:
+                tf.extractall(payload_dir, filter="data")
+        else:
+            with zipfile.ZipFile(archive_path) as zf:
+                zf.extractall(payload_dir)
+        result = find_app_root(payload_dir, exe_name), extract_dir
+        completed = True
+        return result
+    finally:
+        if not completed:
+            _remove_staging(extract_dir)
 
 
 def build_helper_bat(*, pid: int, staged_dir, install_dir, exe_path, extract_dir) -> str:
@@ -231,8 +244,10 @@ def launch_helper(script_path, target_dir) -> None:
         else:
             import ctypes
             # SW_SHOWNORMAL = 1; 'runas' triggers UAC; 5th arg = neutral CWD.
-            ctypes.windll.shell32.ShellExecuteW(  # type: ignore[attr-defined]
+            outcome = ctypes.windll.shell32.ShellExecuteW(  # type: ignore[attr-defined]
                 None, "runas", "cmd.exe", f'/c "{script_path}"', neutral_cwd, 1)
+            if outcome <= 32:
+                raise OSError(f"Could not launch elevated update helper ({outcome}).")
     else:
         subprocess.Popen(
             ["/bin/sh", script_path], cwd=neutral_cwd,
@@ -240,29 +255,87 @@ def launch_helper(script_path, target_dir) -> None:
             start_new_session=True, close_fds=True)
 
 
-def apply_update(archive_path, *, pid: int | None = None, exe_path=None,
-                 target_dir=None) -> Path:
-    """Stage *archive_path* and launch the swap-and-relaunch helper.
+@dataclass(frozen=True)
+class PreparedUpdate:
+    script_path: Path
+    extract_dir: Path
+    target_dir: Path
+    _finalizer: weakref.finalize = field(init=False, repr=False, compare=False)
 
-    The caller must **quit the app immediately after** this returns so the helper
-    (which waits on *pid*) can replace the files. Returns the helper-script path.
-    ``pid``/``exe_path``/``target_dir`` default to the running process.
+    def __post_init__(self) -> None:
+        # A queued result can be abandoned between signal emission and UI
+        # delivery. Resource ownership must survive that gap without leaking.
+        object.__setattr__(self, "_finalizer", weakref.finalize(self, _remove_staging, self.extract_dir))
+
+
+def _remove_staging(directory: Path) -> None:
+    try:
+        shutil.rmtree(directory)
+    except FileNotFoundError:
+        return
+    except OSError:
+        logging.getLogger(__name__).exception("Could not remove update staging directory")
+
+
+def discard_prepared_update(prepared: PreparedUpdate) -> None:
+    """Release an unlaunched helper and only its owned staging directory."""
+    prepared._finalizer()
+
+
+def launch_prepared_update(prepared: PreparedUpdate) -> None:
+    """Transfer cleanup ownership to the helper only after a successful launch."""
+    if not prepared._finalizer.alive:
+        raise ValueError("Prepared update was already discarded or handed off.")
+    launch_helper(prepared.script_path, prepared.target_dir)
+    prepared._finalizer.detach()
+
+
+def prepare_update(archive_path, *, pid: int | None = None, exe_path=None,
+                   target_dir=None) -> PreparedUpdate:
+    """Extract already-authenticated bytes and build, but do not launch, a helper.
+
+    This is blocking I/O; the GUI schedules it on the shared file-I/O pool.
+    The private staging directory also owns the helper (no predictable temp
+    script name). Authentication is the caller's responsibility.
     """
     exe = Path(exe_path) if exe_path else current_exe()
     target = Path(target_dir) if target_dir else install_dir()
     the_pid = int(pid if pid is not None else os.getpid())
 
     staged_root, extract_dir = stage_update(archive_path, exe_name=exe.name)
-    kw = dict(pid=the_pid, staged_dir=staged_root, install_dir=target,
-              exe_path=exe, extract_dir=extract_dir)
-    if is_windows():
-        script = build_helper_bat(**kw)
-        script_path = Path(tempfile.gettempdir()) / f"mfv_apply_update_{the_pid}.bat"
-        script_path.write_text(script, encoding="ascii")
-    else:
-        script = build_helper_sh(**kw)
-        script_path = Path(tempfile.gettempdir()) / f"mfv_apply_update_{the_pid}.sh"
-        script_path.write_text(script, encoding="utf-8")
-        os.chmod(script_path, 0o755)
-    launch_helper(script_path, target)
-    return script_path
+    completed = False
+    try:
+        kw = dict(pid=the_pid, staged_dir=staged_root, install_dir=target,
+                  exe_path=exe, extract_dir=extract_dir)
+        if is_windows():
+            script = build_helper_bat(**kw)
+            script_path = extract_dir / "apply-update.bat"
+            script_path.write_text(script, encoding="ascii")
+        else:
+            script = build_helper_sh(**kw)
+            script_path = extract_dir / "apply-update.sh"
+            script_path.write_text(script, encoding="utf-8")
+            os.chmod(script_path, 0o755)
+        completed = True
+        return PreparedUpdate(script_path, extract_dir, target)
+    finally:
+        if not completed:
+            _remove_staging(extract_dir)
+
+
+def apply_update(archive_path, *, pid: int | None = None, exe_path=None,
+                 target_dir=None) -> Path:
+    """Blocking low-level staging/handoff; caller authenticates and then quits.
+
+    The GUI uses signed_updates.prepare_download on an I/O worker instead.
+    This compatibility helper does not establish publisher authenticity.
+    """
+    prepared = prepare_update(archive_path, pid=pid, exe_path=exe_path, target_dir=target_dir)
+    launched = False
+    try:
+        launch_prepared_update(prepared)
+        launched = True
+        return prepared.script_path
+    finally:
+        if not launched:
+            discard_prepared_update(prepared)

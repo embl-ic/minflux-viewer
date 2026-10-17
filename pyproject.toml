@@ -32,6 +32,8 @@ zarr      = ">=2.17,<3.0"
 tifffile  = ">=2024.2"
 openpyxl  = ">=3.1"
 psutil    = ">=5.9"
+cryptography = ">=46,<51"  # Ed25519 release-manifest authentication
+packaging = ">=23"       # strict release-version validation
 msr-reader = ">=0.2.1,<0.3"   # pure-Python, cross-platform OBF/.msr reader
 # Capped below the next minor release: msr/obf_compat.py patches its private
 # _read_file_header, and msr/transplant.py and the image sources call its
