@@ -124,7 +124,7 @@ class TileWorker(QRunnable):
 
         if count == 0:
             result = np.zeros((tile_px, tile_px), dtype=np.float32)
-        elif count < PER_LOC_SWITCH_COUNT or key.lod >= 3:
+        elif count < PER_LOC_SWITCH_COUNT:
             result = _render_per_localization(x, y, tile_x0, tile_y0, px_nm, tile_px, self._sigma_nm)
         else:
             result = _render_histogram(x, y, tile_x0, tile_x1, tile_y0, tile_y1, tile_px, self._sigma_nm, px_nm)

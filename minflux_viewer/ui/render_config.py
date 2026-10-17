@@ -22,7 +22,7 @@ PHYSICAL_TILE_NM: float = 5_000.0
 # LOD pyramid
 # ---------------------------------------------------------------------------
 
-LOD_BREAKPOINTS_NM: list[float] = [100.0, 20.0, 5.0, 1.0]
+LOD_BREAKPOINTS_NM: list[float] = [100.0]
 """nm/pixel thresholds that separate LOD levels.
    LOD 0 fires when pixel_size >= LOD_BREAKPOINTS_NM[0], etc.
    LOD len(LOD_BREAKPOINTS_NM) is the finest level."""
@@ -30,9 +30,6 @@ LOD_BREAKPOINTS_NM: list[float] = [100.0, 20.0, 5.0, 1.0]
 RENDER_TILE_PX: dict[int, int] = {
     0: 50,
     1: 100,
-    2: 256,
-    3: 512,
-    4: 1024,
 }
 """Render resolution (pixels per tile side) at each LOD level."""
 
@@ -46,7 +43,7 @@ PER_LOC_SWITCH_COUNT: int = 500
 
 TILE_CACHE_CAPACITY: int = 512
 """Maximum number of rendered tiles kept in the LRU cache.
-   At LOD 2 (256×256 float32) this is roughly 128 MB."""
+   At the finest tiled level (100×100 float32) this is roughly 20 MiB."""
 
 # ---------------------------------------------------------------------------
 # Async scheduler
@@ -78,7 +75,10 @@ def lod_for_pixel_size(pixel_size_nm: float) -> int:
 
 def render_tile_px(lod: int) -> int:
     """Return the render resolution (px per side) for a given LOD."""
-    return RENDER_TILE_PX.get(lod, RENDER_TILE_PX[max(RENDER_TILE_PX)])
+    try:
+        return RENDER_TILE_PX[lod]
+    except KeyError:
+        raise ValueError(f"Unsupported tiled render level {lod}; expected 0 or 1") from None
 
 
 def actual_pixel_size_nm(lod: int) -> float:

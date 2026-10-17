@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..core.dataset_key import DatasetKey
-from .render_config import TILE_CACHE_CAPACITY
+from .render_config import TILE_CACHE_CAPACITY, render_tile_px
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,7 @@ class TileKey:
     """'XY' | 'XZ' | 'YZ'"""
 
     lod: int
-    """Level-of-detail index (0 = coarsest, 4 = finest)."""
+    """Tiled level-of-detail index (0 = coarse, 1 = fine)."""
 
     tile_row: int
     """Y-axis tile index in the physical grid."""
@@ -50,6 +50,11 @@ class TileKey:
 
     depth_range: tuple[float, float] | None
     """Active depth gate as (lo_nm, hi_nm) rounded to 1 nm, or None for all-depth."""
+
+
+    def __post_init__(self) -> None:
+        # Reject removed levels before scheduling or allocating a tile.
+        render_tile_px(self.lod)
 
 
 class PhysicalTileCache:
@@ -108,8 +113,6 @@ class PhysicalTileCache:
         Returns a float32 array of shape (target_px, target_px) or None.
         """
         from scipy.ndimage import zoom as ndimage_zoom
-
-        from .render_config import render_tile_px
 
         for coarser_lod in range(key.lod - 1, -1, -1):
             coarser_key = TileKey(

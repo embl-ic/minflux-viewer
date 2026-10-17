@@ -3221,6 +3221,11 @@ class RenderWindow(QWidget):
         self._phys_tile_cache.put(key, array)
         self._pending_tile_keys.discard(key)
 
+        # A queued result may arrive after direct/precision/image rendering took
+        # ownership of the display. Retain the valid tile, not its old repaint.
+        if self._last_lod < 0 or self._render_mode == "image":
+            return
+
         # Manual alignment owns the displayed image until Apply/Cancel. Keep
         # accepting completed tiles into the cache, but do not let an async
         # full-resolution recomposite replace its capped interactive preview.
@@ -3243,7 +3248,8 @@ class RenderWindow(QWidget):
 
     def _recomposite_from_tiles(self) -> None:
         """Re-assemble the display image from whatever is in the tile cache."""
-        if self._last_tile_geometry is None:
+        if (self._last_tile_geometry is None or self._last_lod < 0
+                or self._render_mode == "image"):
             return
         x0, x1, y0, y1 = self._last_tile_geometry
         lod = self._last_lod

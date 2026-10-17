@@ -619,9 +619,16 @@ def test_a_tiled_render_keeps_the_ortho_coordinate_in_the_status_line(_qt_app, q
     wiped the coordinate, which showed up as the test above failing under
     parallel load. Driven directly here, so it does not depend on timing."""
     win = _window(_qt_app)
+    qtbot.addWidget(win)
     try:
         win._set_orientation(ORTHO_AXIS)
-        qtbot.waitUntil(lambda: win._last_tile_geometry is not None, timeout=10_000)
+        from minflux_viewer.ui.render_window import _RENDER_SIZE
+
+        half_span = 25.0 * _RENDER_SIZE
+        win._view_box.setRange(xRange=(-half_span, half_span),
+                               yRange=(-half_span, half_span), padding=0)
+        win._render()
+        assert win._last_lod in (0, 1)
         win._recomposite_from_tiles()
         assert "crosshair X=" in win._info_label.text()
     finally:
