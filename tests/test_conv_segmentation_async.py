@@ -236,3 +236,156 @@ def test_switch_backend_discards_late_cuda_result(state, qtbot, monkeypatch):
         release.set()
     _ready(qtbot, win)
     assert win._fft_provenance["backend"] == "cpu-scipy"
+
+
+@pytest.fixture
+def npc_state(state):
+    from minflux_viewer.core.simulate import simulate_localizations
+
+    xyz, tid, attrs = simulate_localizations(
+        "npc", n_points=5000, locs_per_trace=4., precision_nm=1., dim=3, seed=38,
+        params=dict(size_nm=5000., n_pores=100, diameter_nm=120., ring_sep_nm=55.,
+                    field_curvature=.05, local_tilt_deg=1.))
+    state.add_dataset(build_localization_dataset(name="3D NPC", x_nm=xyz[:, 0], y_nm=xyz[:, 1],
+                                                z_nm=xyz[:, 2], tid=tid, attrs=attrs,
+                                                source_version="simulation"))
+    state.prefs["conv_segmentation"] = dict(
+        model="disk", pixel_size=2., memory_budget_mib=512, sqrt=True, dog=True,
+        min_response=.14, min_separation=80., show_detection=False, show_response=False,
+        show_data=True, model_params=dict(disk=dict(diameter_nm=25., edge_nm=5.5)))
+    return state
+
+
+def _npc_window(npc_state, qtbot):
+    win = ConvSegmentationWindow(npc_state, 1)
+    qtbot.addWidget(win)
+    win.show()
+    return win
+
+
+def _data_ready(qtbot, win):
+    qtbot.waitUntil(lambda: win._task is None and not win._pending and win._H.size > 0,
+                   timeout=15000)
+
+
+def test_npc_budget_refusal_keeps_exact_data_and_explicit_recovery(npc_state, qtbot, monkeypatch):
+    calls, original = [], cs.convolution_maps
+    def count(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(cs, "convolution_maps", count)
+    win = _npc_window(npc_state, qtbot)
+    _data_ready(qtbot, win)
+    assert not calls and win._map_key is None and win._response.size == 0
+    assert win._H.sum() == len(win._xy) and not win._add_btn.isEnabled()
+    assert win._hist_img.isVisible() and win._hist_img.image is not None
+    assert win._preview_notice.isVisible() and "512" in win._preview_notice.text()
+    assert win._budget_btn.isVisible() and win._memory_spin.value() == 512
+    assert win._pixel_spin.value() == 2.
+    assert win._plot.getViewBox().viewRect().intersects(win._hist_img.mapRectToParent(win._hist_img.boundingRect()))
+    old = win._H
+    win._response_spin.setValue(.2)
+    qtbot.wait(200)
+    assert win._H is old and not calls  # unavailable FFT is not retried for thresholds
+    win._bc.set_target("Data")
+    win._bc.open(win)
+    assert win._hist_img.image is not None
+    win._budget_btn.click()
+    _ready(qtbot, win)
+    assert len(calls) == 1 and win._centers.size > 0
+    assert win._pixel_spin.value() == 2. and win._memory_spin.value() > 512
+    assert not win._preview_notice.isVisible() and not win._budget_btn.isVisible()
+    win._show_detection.setChecked(True)
+    win._show_response.setChecked(True)
+    assert win._resp_img.isVisible() and win._ring_scatters[0].isVisible()
+
+
+def test_missing_cuda_environment_keeps_data_not_a_cpu_fft(npc_state, qtbot, monkeypatch):
+    npc_state.prefs["conv_segmentation"].update(fft_backend="cuda", cuda_python="", memory_budget_mib=1536)
+    monkeypatch.setattr(cs, "convolution_maps", lambda *a, **kw: pytest.fail("started fallback FFT"))
+    win = _npc_window(npc_state, qtbot)
+    _data_ready(qtbot, win)
+    assert win._hist_img.isVisible() and "absolute path" in win._preview_notice.text()
+    assert win._map_key is None and not win._add_btn.isEnabled()
+
+
+def test_native_fft_failure_retains_current_input_data(state, qtbot, monkeypatch):
+    win = _window(state, qtbot)
+    _ready(qtbot, win)
+    old = win._H
+    def fail(*a, **kw):
+        raise RuntimeError("backend unavailable")
+    monkeypatch.setattr(cs, "convolve_response", fail)
+    win._sqrt.setChecked(True)
+    qtbot.waitUntil(lambda: win._task is None and "backend unavailable" in win._preview_notice.text())
+    assert win._H is old and win._hist_img.image is not None
+    assert win._response.size == 0 and not win._add_btn.isEnabled()
+
+
+def test_initially_hidden_layers_still_fit_the_data_extent(state, qtbot):
+    state.prefs["conv_segmentation"] = dict(show_detection=False, show_response=False, show_data=False)
+    win = _window(state, qtbot)
+    _ready(qtbot, win)
+    win._show_image.setChecked(True)
+    view = win._plot.getViewBox().viewRect()
+    bounds = win._hist_img.mapRectToParent(win._hist_img.boundingRect())
+    assert view.contains(bounds.center())
+    assert view.width() >= bounds.width() and view.height() >= bounds.height()
+
+
+def test_data_preview_source_edit_rejects_late_histogram(npc_state, qtbot, monkeypatch):
+    original, started, release = cs.histogram_maps, threading.Event(), threading.Event()
+    def slow(*a, **kw):
+        started.set()
+        assert release.wait(5)
+        return original(*a, **kw)
+    monkeypatch.setattr(cs, "histogram_maps", slow)
+    win = _npc_window(npc_state, qtbot)
+    try:
+        qtbot.waitUntil(started.is_set)
+        npc_state.datasets[1].filter_mask = np.arange(npc_state.datasets[1].prop.num_loc) % 2 == 0
+        npc_state.notify_filter_changed(1)
+    finally:
+        release.set()
+    _data_ready(qtbot, win)
+    assert win._H.sum() == len(win._xy) and len(win._xy) < npc_state.datasets[1].prop.num_loc
+    assert win._map_key is None and not win._add_btn.isEnabled()
+
+
+def test_npc_actual_cuda_budget_recovery(npc_state, qtbot):
+    import os
+
+    python = os.environ.get("MFV_CUDA_PYTHON")
+    if not python:
+        pytest.skip("set MFV_CUDA_PYTHON for the actual CUDA dialog regression")
+    npc_state.prefs["conv_segmentation"].update(fft_backend="cuda", cuda_python=python)
+    win = _npc_window(npc_state, qtbot)
+    _data_ready(qtbot, win)
+    assert win._response.size == 0 and win._hist_img.isVisible()
+    assert win._cuda_memory.value() == 512 and win._budget_btn.isVisible()
+    win._budget_btn.click()
+    _ready(qtbot, win)
+    assert win._fft_provenance["backend"] == "cuda-cupy" and win._centers.size > 0
+    assert win._pixel_spin.value() == 2. and win._cuda_memory.value() > 512
+    expected = cs.convolution_maps(win._xy, model_key=win._model_key(), params=win._params(),
+                                   pixel_size_nm=2., sqrt_stabilize=True, dog=True,
+                                   budget_bytes=win._memory_spin.value() * 1024**2)
+    np.testing.assert_allclose(win._response, expected["response_map"], atol=1e-11, rtol=1e-11)
+    detections = cs.threshold_response_maps(
+        win._xy, expected, model_key=win._model_key(), params=win._params(), pixel_size_nm=2.,
+        min_response=.14, min_distance_nm=80.)
+    np.testing.assert_array_equal(win._centers, detections["centers"])
+
+
+def test_error_banner_is_bounded_and_retains_full_diagnostics(state, qtbot):
+    from types import SimpleNamespace
+
+    win = _window(state, qtbot)
+    _ready(qtbot, win)
+    message = "\n".join(["external backend error"] * 500)
+    win._show_map_error(message)
+    assert len(win._preview_notice.text()) < 850
+    assert win._preview_notice.text().count("\n") == 1
+    assert win._preview_notice.toolTip() == message
+    win._owner = SimpleNamespace(add_segmentation_rois=lambda *a, **kw: pytest.fail("published stale detections"))
+    win._add_to_manager()

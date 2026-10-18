@@ -233,7 +233,8 @@ class ConvolutionEstimate:
 def _check_budget(required: int, budget: int) -> None:
     if budget <= 0 or required > budget:
         raise ValueError(f"Convolution memory estimate {required / 1024**2:,.1f} MiB exceeds "
-                         f"the {budget / 1024**2:,.1f} MiB budget; increase pixel size or reduce the region/model.")
+                         f"the {budget / 1024**2:,.1f} MiB budget; explicitly increase the memory budget, "
+                         "increase pixel size or reduce the region/model.")
 
 
 def _pixel_size(pixel: float) -> float:
@@ -279,14 +280,37 @@ def _histogram_shape(x: np.ndarray, y: np.ndarray, pixel: float) -> tuple[int, i
     return max(1, math.ceil(spans[0] / pixel) + 1), max(1, math.ceil(spans[1] / pixel) + 1)
 
 
-def preflight_convolution(xy: np.ndarray, model_key: str, params: dict, pixel_size_nm: float,
-                          *, budget_bytes: int = DEFAULT_MEMORY_BUDGET) -> ConvolutionEstimate:
+def estimate_convolution(xy: np.ndarray, model_key: str, params: dict,
+                         pixel_size_nm: float) -> ConvolutionEstimate:
+    """Validate dimensions and estimate work without allocating maps or admitting it."""
     pixel = _pixel_size(pixel_size_nm)
     kernel = _kernel_shape(model_key, params, pixel)
     image = _histogram_shape(xy[:, 0], xy[:, 1], pixel) if len(xy) else (1, 1)
-    estimate = _fft_estimate(image, kernel, 8 * xy.nbytes)
+    return _fft_estimate(image, kernel, 8 * xy.nbytes)
+
+
+def preflight_convolution(xy: np.ndarray, model_key: str, params: dict, pixel_size_nm: float,
+                          *, budget_bytes: int = DEFAULT_MEMORY_BUDGET) -> ConvolutionEstimate:
+    estimate = estimate_convolution(xy, model_key, params, pixel_size_nm)
     _check_budget(estimate.bytes_required, budget_bytes)
     return estimate
+
+
+def preflight_histogram(xy: np.ndarray, pixel_size_nm: float, *,
+                        budget_bytes: int = DEFAULT_MEMORY_BUDGET) -> int:
+    """Histogram/display-only bound, excluding FFT, kernel and detection work."""
+    pixel = _pixel_size(pixel_size_nm)
+    shape = _histogram_shape(xy[:, 0], xy[:, 1], pixel) if len(xy) else (1, 1)
+    required = _histogram_bytes(shape, len(xy))
+    _check_budget(required, budget_bytes)
+    return required
+
+
+def _histogram_bytes(shape: tuple[int, int], points: int) -> int:
+    # Dense bincount + float histogram, image orientation/levels/RGBA temporaries
+    # and headroom (64 bytes/bin), plus digitized/raveled point-index work. The
+    # full convolution bound separately includes FFT, normalized maps and NMS.
+    return 64 * math.prod(shape) + 64 * points
 
 
 def build_kernel(model_key: str, params: dict, pixel_size_nm: float, *,
@@ -316,7 +340,7 @@ def render_histogram_2d(x: np.ndarray, y: np.ndarray, pixel_size_nm: float, *,
     """XY localizations → counts image ``H`` (nx, ny) + bin edges (nm)."""
     px = _pixel_size(pixel_size_nm)
     shape = _histogram_shape(x, y, px)
-    _check_budget(96 * math.prod(shape) + 32 * len(x), budget_bytes)
+    _check_budget(_histogram_bytes(shape, len(x)), budget_bytes)
     xedge = np.arange(x.min(), x.max() + px, px)
     yedge = np.arange(y.min(), y.max() + px, px)
     if xedge.size < 2:
@@ -325,6 +349,20 @@ def render_histogram_2d(x: np.ndarray, y: np.ndarray, pixel_size_nm: float, *,
         yedge = np.array([y.min(), y.min() + px])
     H, _, _ = np.histogram2d(x, y, bins=[xedge, yedge])
     return H, xedge, yedge
+
+
+def histogram_maps(xy: np.ndarray, *, pixel_size_nm: float,
+                   budget_bytes: int = DEFAULT_MEMORY_BUDGET,
+                   report: Callable[[str], None] = lambda text: None) -> dict:
+    """Exact-resolution input preview; not a convolution result or fallback FFT."""
+    preflight_histogram(xy, pixel_size_nm, budget_bytes=budget_bytes)
+    report("Rendering convolution input data only")
+    if not len(xy):
+        return dict(histogram=np.zeros((0, 0)), xedge=np.zeros(0), yedge=np.zeros(0))
+    image, xedge, yedge = render_histogram_2d(xy[:, 0], xy[:, 1], pixel_size_nm,
+                                            budget_bytes=budget_bytes)
+    report("Input data preview ready; convolution unavailable")
+    return dict(histogram=image, xedge=xedge, yedge=yedge)
 
 
 def stabilize_histogram(H, sqrt_stabilize: bool = DEFAULT_SQRT) -> np.ndarray:

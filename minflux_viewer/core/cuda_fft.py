@@ -47,10 +47,14 @@ class CudaFftSettings:
 
     def preflight(self, image_shape, kernel_shape) -> int:
         self.validate()
-        required = wire.device_estimate(image_shape, kernel_shape)
+        required = self.estimate(image_shape, kernel_shape)
         if required > self.budget_bytes:
             raise ValueError(f"CUDA estimate {required / 1024**2:.1f} MiB exceeds the device budget")
         return required
+
+    @staticmethod
+    def estimate(image_shape, kernel_shape) -> int:
+        return wire.device_estimate(image_shape, kernel_shape)
 
 
 def _worker_environment(python: Path) -> dict[str, str]:

@@ -118,6 +118,12 @@ detection remain on CPU. A fresh isolated worker is started for each new map;
 small maps can be slower because startup and transfers are included. Threshold
 edits reuse the map. There is no automatic CPU fallback on CUDA failure.
 
+If convolution cannot run, a notice above the plot explains why. The **Data**
+histogram remains available at the requested pixel size when its own estimate
+fits; this data-only preview is not a response/detection result. **Use required
+budgets** explicitly raises estimated RAM/GPU limits without changing resolution
+or backend. Shared admission and available VRAM checks still apply.
+
 Use a **separate trusted Python environment**, not the viewer's managed package
 panel or its own environment. For NVIDIA hardware with an installed CUDA 13.x
 toolkit and compatible driver, create an external Python 3.12 environment and

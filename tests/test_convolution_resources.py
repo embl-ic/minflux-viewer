@@ -26,6 +26,8 @@ def test_full_preflight_includes_fft_padding_and_input_memory():
 def test_invalid_pixels_fail_before_allocation(pixel):
     with pytest.raises(ValueError):
         cs.build_kernel("gaussian", {}, pixel)
+    with pytest.raises(ValueError):
+        cs.histogram_maps(np.empty((0, 2)), pixel_size_nm=pixel)
 
 
 def test_histogram_and_direct_fft_are_guarded(monkeypatch):
@@ -56,3 +58,33 @@ def test_registered_extents_bound_generated_grids(key):
         predicted = cs._kernel_shape(key, {}, pixel)
         actual = cs.build_kernel(key, {}, pixel).shape
         assert all(a <= bound for a, bound in zip(actual, predicted))
+
+
+def test_histogram_preview_has_its_own_bound_without_relaxing_fft_budget():
+    xy = np.array([[0., 0.], [4800., 4800.], [100., 150.]])
+    required = cs.preflight_histogram(xy, 2.)
+    assert 300 * 1024**2 < required < cs.DEFAULT_MEMORY_BUDGET
+    estimate = cs.estimate_convolution(xy, "disk", {}, 2.)
+    assert estimate.bytes_required > cs.DEFAULT_MEMORY_BUDGET
+    with pytest.raises(ValueError, match="budget"):
+        cs.preflight_convolution(xy, "disk", {}, 2.)
+    with pytest.raises(ValueError, match="budget"):
+        cs.preflight_histogram(xy, 2., budget_bytes=1024)
+
+
+def test_data_only_maps_match_exact_histogram_and_never_start_fft(monkeypatch):
+    monkeypatch.setattr(cs, "convolve_response", lambda *a, **kw: pytest.fail("started FFT"))
+    xy = np.array([[0., 0.], [40., 50.], [10., 20.], [10., 20.]])
+    maps = cs.histogram_maps(xy, pixel_size_nm=2.)
+    histogram, xedge, yedge = cs.render_histogram_2d(xy[:, 0], xy[:, 1], 2.)
+    np.testing.assert_array_equal(maps["histogram"], histogram)
+    np.testing.assert_array_equal(maps["xedge"], xedge)
+    np.testing.assert_array_equal(maps["yedge"], yedge)
+    assert not {"response_map", "centers", "fft_provenance"}.intersection(maps)
+
+
+def test_empty_data_preview_and_oversized_histogram_are_bounded():
+    maps = cs.histogram_maps(np.empty((0, 2)), pixel_size_nm=4.)
+    assert maps["histogram"].shape == (0, 0)
+    with pytest.raises(ValueError, match="budget"):
+        cs.histogram_maps(np.array([[0., 0.], [1e9, 1e9]]), pixel_size_nm=1.)
