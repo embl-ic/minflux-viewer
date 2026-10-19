@@ -33,12 +33,10 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
-    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -51,7 +49,7 @@ from PyQt6.QtWidgets import (
 from minflux_viewer.analysis import conv_segmentation as cs
 from minflux_viewer.colormaps import colormap_lut
 from minflux_viewer.core.computation_snapshot import input_signature
-from minflux_viewer.core.cuda_fft import CudaFftSettings
+from minflux_viewer.core.inspection_raster import peak_preview
 from minflux_viewer.ui.common.background_tasks import (
     BackgroundTask,
     detach_task_signals,
@@ -61,6 +59,7 @@ from minflux_viewer.ui.common.background_tasks import (
 from minflux_viewer.ui.common.dataset_binding import DatasetIndex, window_dataset_key
 from minflux_viewer.ui.common.qt_lifecycle import qobject_alive
 from minflux_viewer.ui.plots.plot_format import apply_spatial_y_direction
+from minflux_viewer.ui.rendering.inspection_layer import InspectionLayer, render_appearance
 from minflux_viewer.ui.roi.roi_overlay import PointMarkerItem
 from minflux_viewer.ui.widgets.layer_brightness import LayerBrightness, percentile_levels
 
@@ -93,14 +92,14 @@ class ConvSegmentationWindow(QDialog):
         self._pending = False
         self._map_key = None
         self._data_key: tuple | None = None
-        self._preview_error: str | None = None
         self._map_error: str | None = None
-        self._required_budgets: tuple[int, int] | None = None
+        self._required_budgets: int | None = None
         self._fft_provenance: dict = {}
         self._kernel = np.empty((0, 0))
         self._param_spins: dict[str, QDoubleSpinBox] = {}
         self._H = np.zeros((0, 0))
         self._response = np.zeros((0, 0))
+        self._response_display = np.zeros((0, 0))
         self._xedge = np.zeros(0)
         self._yedge = np.zeros(0)
         self._centers = np.empty((0, 2))
@@ -109,10 +108,7 @@ class ConvSegmentationWindow(QDialog):
         self._support = np.empty(0)       # ring support score per detection (ring validation)
         self._labels: list[str] = []
         self._suspend = False
-        self._fitted = False       # auto-range the response view only on first draw
-        self._data_vmax = 1.0      # current Data-layer default high level
         self._bc = LayerBrightness()
-        self._image_lut = self._alpha_white_lut()
         self._model_params: dict[str, dict] = {}   # per-model param cache (persisted)
         self._active_model_key: str | None = None
 
@@ -122,8 +118,12 @@ class ConvSegmentationWindow(QDialog):
         self._recompute_timer.timeout.connect(self._recompute)
 
         self._build_ui()
+        self._data_preview = InspectionLayer(
+            self, self._plot, self._hist_img, render_appearance(owner, state, dataset_idx),
+            self._data_ready, self._data_failed)
         self._register_bc_layers()
         self._restore_prefs()      # restore last-session model + params (builds param spins)
+        self._data_preview.set_points(self._xy)
         for signal in (state.dataset_events.filter_changed, state.dataset_events.attributes_changed,
                        state.dataset_events.calibration_changed, state.dataset_events.overlay_transform_changed,
                        state.dataset_events.removed):
@@ -166,7 +166,7 @@ class ConvSegmentationWindow(QDialog):
         self._kernel_plot.hideAxis("left")
         self._kernel_plot.setMenuEnabled(False)
         self._kernel_plot.setMouseEnabled(False, False)
-        self._kernel_img = pg.ImageItem()
+        self._kernel_img = pg.ImageItem(axisOrder="row-major")
         self._kernel_plot.addItem(self._kernel_img)
         left.addWidget(QLabel("Kernel:"))
         left.addWidget(self._kernel_plot)
@@ -176,44 +176,10 @@ class ConvSegmentationWindow(QDialog):
         left.addLayout(self._param_form)
 
         common = QFormLayout()
-        self._backend_combo = QComboBox()
-        self._backend_combo.addItem("CPU (SciPy)", "cpu")
-        self._backend_combo.addItem("CUDA FFT (CuPy)", "cuda")
-        self._backend_combo.setToolTip(
-            "Accelerates the FFT only, using float64. No automatic CPU fallback. "
-            "Requires a separate trusted Python environment with CuPy and CUDA.")
-        self._backend_combo.currentIndexChanged.connect(self._backend_changed)
-        common.addRow("FFT backend:", self._backend_combo)
-        self._cuda_controls = QWidget()
-        cuda_form = QFormLayout(self._cuda_controls)
-        cuda_form.setContentsMargins(0, 0, 0, 0)
-        self._cuda_python = QLineEdit()
-        self._cuda_python.setPlaceholderText("External Python executable")
-        self._cuda_python.setToolTip("Absolute path to a trusted external Python; not site-packages or the viewer executable.")
-        self._cuda_python.textChanged.connect(self._schedule_recompute)
-        browse = QPushButton("…")
-        browse.setFixedWidth(28)
-        browse.clicked.connect(self._choose_cuda_python)
-        python_row = QHBoxLayout()
-        python_row.addWidget(self._cuda_python)
-        python_row.addWidget(browse)
-        cuda_form.addRow("Python:", python_row)
-        self._cuda_device = QSpinBox()
-        self._cuda_device.setRange(0, 63)
-        self._cuda_device.valueChanged.connect(self._schedule_recompute)
-        cuda_form.addRow("Device index:", self._cuda_device)
-        self._cuda_memory = QSpinBox()
-        self._cuda_memory.setRange(64, 65536)
-        self._cuda_memory.setValue(512)
-        self._cuda_memory.setSuffix(" MiB")
-        self._cuda_memory.setToolTip("Conservative device estimate cap; also refuses estimates over 80% of free VRAM. Not total VRAM usage.")
-        self._cuda_memory.valueChanged.connect(self._schedule_recompute)
-        cuda_form.addRow("GPU budget:", self._cuda_memory)
-        self._cuda_controls.hide()
-        common.addRow(self._cuda_controls)
         self._pixel_spin = self._spin(0.5, 200.0, 4.0, 1, 0.5, " nm")
         self._pixel_spin.valueChanged.connect(self._schedule_recompute)
-        common.addRow("Pixel size:", self._pixel_spin)
+        self._pixel_spin.setToolTip("Scientific histogram/FFT bin size. Does not set monitor preview resolution.")
+        common.addRow("Compute pixel:", self._pixel_spin)
         self._memory_spin = QSpinBox()
         self._memory_spin.setRange(32, 16384)
         self._memory_spin.setValue(cs.DEFAULT_MEMORY_BUDGET // 1024**2)
@@ -339,6 +305,11 @@ class ConvSegmentationWindow(QDialog):
         self._bc_btn.clicked.connect(self._open_bc)
         layers.addWidget(self._bc_btn)
         center.addLayout(layers)
+        self._copy_appearance_btn = QPushButton("Copy render appearance")
+        self._copy_appearance_btn.setToolTip("Copy this dataset channel's LUT and B/C clipping percentiles. Render view is not changed.")
+        self._copy_appearance_btn.clicked.connect(self._copy_render_appearance)
+        center.addWidget(self._copy_appearance_btn)
+        center.addWidget(QLabel("Inspection preview adapts to the monitor; detections use exact compute pixels."))
 
         notice = QHBoxLayout()
         self._preview_notice = QLabel()
@@ -348,7 +319,7 @@ class ConvSegmentationWindow(QDialog):
         self._preview_notice.hide()
         notice.addWidget(self._preview_notice, 1)
         self._budget_btn = QPushButton("Use required budgets")
-        self._budget_btn.setToolTip("Explicitly raise only the estimated RAM/GPU budgets; keep the pixel size and backend unchanged.")
+        self._budget_btn.setToolTip("Explicitly raise the estimated RAM budget; keep the compute pixel size unchanged.")
         self._budget_btn.clicked.connect(self._use_required_budgets)
         self._budget_btn.hide()
         notice.addWidget(self._budget_btn)
@@ -365,17 +336,17 @@ class ConvSegmentationWindow(QDialog):
             preference_key="render_xy_origin",
         )
 
-        self._resp_img = pg.ImageItem()
-        self._resp_img.setZValue(0)
+        self._resp_img = pg.ImageItem(axisOrder="row-major")
+        self._resp_img.setZValue(5)
+        self._resp_img.setOpacity(.65)
         try:
             self._resp_img.setLookupTable(colormap_lut(_RESPONSE_CMAP, alpha=False))
         except Exception:
             pass
         self._plot.addItem(self._resp_img)
 
-        self._hist_img = pg.ImageItem()
-        self._hist_img.setZValue(5)
-        self._hist_img.setLookupTable(self._image_lut)
+        self._hist_img = pg.ImageItem(axisOrder="row-major")
+        self._hist_img.setZValue(0)
         self._hist_img.setVisible(False)
         self._plot.addItem(self._hist_img)
 
@@ -467,29 +438,35 @@ class ConvSegmentationWindow(QDialog):
         """Register the Response and Data image layers with the shared B/C dialog."""
         self._bc.add_layer(
             "Response",
-            get_pixels=lambda: self._response if self._response.size else None,
+            get_pixels=lambda: self._response_display if self._response_display.size else None,
             apply=lambda lo, hi: self._resp_img.setLevels((lo, hi)),
-            auto=lambda: percentile_levels(self._response, 0.0, 99.5),
+            auto=lambda: percentile_levels(self._response_display, 0.0, 99.5),
             default=lambda: (0.0, 1.0))
         self._bc.add_layer(
             "Data",
-            get_pixels=lambda: (self._H[self._H > 0] if self._H.size else None),
+            get_pixels=lambda: self._data_preview.pixels,
             apply=lambda lo, hi: self._hist_img.setLevels((lo, hi)),
-            auto=lambda: percentile_levels(self._H, 0.0, 99.5, positive_only=True),
-            default=lambda: (0.0, self._data_vmax))
+            auto=lambda: percentile_levels(self._data_preview.pixels, 0.0, 99.5, positive_only=True),
+            default=lambda: self._data_preview.levels)
 
     def _open_bc(self) -> None:
         self._bc.set_target(self._bc_target.currentText())
         self._bc.open(self)
 
-    @staticmethod
-    def _alpha_white_lut() -> np.ndarray:
-        """White RGBA LUT whose alpha ramps with intensity (gamma 0.5), so the
-        rendered image overlays the response with the empty background transparent."""
-        lut = np.zeros((256, 4), dtype=np.ubyte)
-        lut[:, :3] = 255
-        lut[:, 3] = (255.0 * (np.linspace(0.0, 1.0, 256) ** 0.5)).astype(np.ubyte)
-        return lut
+    def _copy_render_appearance(self) -> None:
+        if self._idx is None:
+            return
+        self._data_preview.set_appearance(render_appearance(self._owner, self._state, self._idx))
+        self._bc.reset_layer("Data")
+
+    def _data_ready(self) -> None:
+        self._hist_img.setLevels(self._bc.effective_levels("Data"))
+        self._update_layer_visibility()
+        self._bc.refresh_if_open()
+
+    def _data_failed(self, message) -> None:
+        self._preview_notice.setText(f"Data inspection preview unavailable: {message}")
+        self._preview_notice.show()
 
     # ----------------------------------------------------------- data path
     def _dataset(self):
@@ -545,21 +522,6 @@ class ConvSegmentationWindow(QDialog):
             self._schedule_recompute()
 
     # ----------------------------------------------------- persistence
-    def _backend_changed(self, *_args) -> None:
-        self._cuda_controls.setVisible(self._backend_combo.currentData() == "cuda")
-        self._schedule_recompute()
-
-    def _choose_cuda_python(self) -> None:
-        path, _filter = QFileDialog.getOpenFileName(self, "Select trusted CUDA Python executable")
-        if path:
-            self._cuda_python.setText(path)
-
-    def _cuda_settings(self) -> CudaFftSettings | None:
-        if self._backend_combo.currentData() == "cpu":
-            return None
-        return CudaFftSettings(self._cuda_python.text().strip(), self._cuda_device.value(),
-                               self._cuda_memory.value() * 1024**2)
-
     def _restore_prefs(self) -> None:
         """Restore the last-session parameters from ``state.prefs`` (or fall back
         to the built-in defaults), then build the param spins for the model."""
@@ -577,10 +539,6 @@ class ConvSegmentationWindow(QDialog):
             return
         self._suspend = True
         try:
-            self._cuda_python.setText(str(cfg.get("cuda_python", "")))
-            self._cuda_device.setValue(int(cfg.get("cuda_device", 0)))
-            self._cuda_memory.setValue(int(cfg.get("cuda_memory_mib", 512)))
-            self._backend_combo.setCurrentIndex(max(0, self._backend_combo.findData(cfg.get("fft_backend", "cpu"))))
             for spin, key in ((self._pixel_spin, "pixel_size"),
                               (self._response_spin, "min_response"),
                               (self._sep_spin, "min_separation"),
@@ -610,10 +568,6 @@ class ConvSegmentationWindow(QDialog):
             self._model_params[self._active_model_key] = self._params()
         self._state.prefs["conv_segmentation"] = {
             "model": self._model_key(),
-            "fft_backend": self._backend_combo.currentData(),
-            "cuda_python": self._cuda_python.text().strip(),
-            "cuda_device": self._cuda_device.value(),
-            "cuda_memory_mib": self._cuda_memory.value(),
             "pixel_size": self._pixel_spin.value(),
             "memory_budget_mib": self._memory_spin.value(),
             "zero_mean": self._zero_mean.isChecked(),
@@ -645,6 +599,7 @@ class ConvSegmentationWindow(QDialog):
         self._generation += 1
         self._pending = False
         self._recompute_timer.stop()
+        self._data_preview.close()
         if self._task is not None:
             retire_background_tasks([self._task])
             self._task = None
@@ -659,7 +614,7 @@ class ConvSegmentationWindow(QDialog):
     # ----------------------------------------------------------- compute
     def _schedule_recompute(self) -> None:
         if not self._suspend and not self._closed:
-            self._preview_error = self._map_error = None
+            self._map_error = None
             self._required_budgets = None
             self._preview_notice.hide()
             self._budget_btn.hide()
@@ -690,13 +645,14 @@ class ConvSegmentationWindow(QDialog):
             if self._task is not None:
                 self._task.cancel()
             self._reset_maps("Dataset is closed.")
+            self._data_preview.set_points(np.empty((0, 2)))
             self._required_budgets = None
             self._budget_btn.hide()
             self._show_map_error("Dataset is closed.")
             return
         self._xy = self._load_xy()
         self._xy.flags.writeable = False
-        self._fitted = False
+        self._data_preview.set_points(self._xy)
         self._schedule_recompute()
 
     def _recompute(self) -> None:
@@ -712,36 +668,19 @@ class ConvSegmentationWindow(QDialog):
         generation, stamp, xy = self._generation, self._source_stamp(), self._xy
         zero, sqrt, dog = self._zero_mean.isChecked(), self._sqrt.isChecked(), self._dog.isChecked()
         budget = int(self._memory_spin.value()) * 1024**2
-        cuda_settings = self._cuda_settings()
-        map_key = (stamp, key, tuple(params.items()), px, zero, sqrt, dog, budget, cuda_settings)
+        map_key = (stamp, key, tuple(params.items()), px, zero, sqrt, dog, budget)
         cached = (dict(kernel=self._kernel, histogram=self._H, response_map=self._response,
                        xedge=self._xedge, yedge=self._yedge, fft_provenance=self._fft_provenance)
                   if self._map_key == map_key else None)
-        error, self._preview_error = self._preview_error, None
         estimated_bytes = 0
         try:
             estimate = cs.estimate_convolution(xy, key, params, px)
-            self._offer_budgets(estimate.bytes_required,
-                                cuda_settings.estimate(estimate.image_shape, estimate.kernel_shape)
-                                if cuda_settings is not None else 0)
-            if error is None:
-                cs.preflight_convolution(xy, key, params, px, budget_bytes=budget)
-                if cuda_settings is not None:
-                    cuda_settings.preflight(estimate.image_shape, estimate.kernel_shape)
-                estimated_bytes = estimate.bytes_required
+            self._offer_budgets(estimate.bytes_required)
+            cs.preflight_convolution(xy, key, params, px, budget_bytes=budget)
+            estimated_bytes = estimate.bytes_required
         except (ValueError, MemoryError) as exc:
-            error = str(exc)
-        data_only = error is not None
-        if error is not None:
-            self._show_map_error(error)
-            if self._data_key == (stamp, px):
-                self._draw_layers()
-                return
-            try:
-                estimated_bytes = cs.preflight_histogram(xy, px, budget_bytes=budget)
-            except (ValueError, MemoryError) as exc:
-                self._show_map_error(f"{error}\nData preview also unavailable: {exc}")
-                return
+            self._show_map_error(str(exc))
+            return  # Monitor preview has its own independent bounded job.
         threshold = dict(model_key=key, params=params, pixel_size_nm=px,
                          min_response=float(self._response_spin.value()),
                          min_distance_nm=float(self._sep_spin.value()),
@@ -752,25 +691,21 @@ class ConvSegmentationWindow(QDialog):
                                           if self._ring_validate.isChecked() else None))
 
         def work(report):
-            if data_only:
-                return cs.histogram_maps(xy, pixel_size_nm=px, budget_bytes=budget,
-                                          report=report), None
             maps = cached if cached is not None else cs.convolution_maps(
                 xy, model_key=key, params=params, pixel_size_nm=px, zero_mean=zero,
-                sqrt_stabilize=sqrt, dog=dog, budget_bytes=budget, report=report,
-                cuda_settings=cuda_settings)
+                sqrt_stabilize=sqrt, dog=dog, budget_bytes=budget, report=report)
+            if cached is None:
+                maps["response_display"] = peak_preview(maps["response_map"])
             detections = cs.threshold_response_maps(xy, maps, **threshold, report=report)
             report("Convolution preview ready")
             return maps, detections
 
-        task = BackgroundTask(work, description=("Convolution input preview (FFT unavailable)" if data_only
-                                                else "Convolution segmentation preview"), category="analysis",
+        task = BackgroundTask(work, description="Convolution segmentation preview", category="analysis",
                               estimated_bytes=estimated_bytes)
         self._task = task
         task.signals.done.connect(lambda result: self._computed(task, generation, stamp,
-                                                               None if data_only else map_key, result))
-        task.signals.failed.connect(lambda message: self._compute_failed(task, generation, stamp, message,
-                                                                        data_only=data_only))
+                                                               map_key, result))
+        task.signals.failed.connect(lambda message: self._compute_failed(task, generation, stamp, message))
         task.signals.finished.connect(lambda: self._compute_finished(task))
         shared_thread_pool("convolution-segmentation").start(task)
 
@@ -786,13 +721,10 @@ class ConvSegmentationWindow(QDialog):
         self._H = maps["histogram"]
         self._xedge, self._yedge = maps["xedge"], maps["yedge"]
         self._data_key = (stamp, float(self._pixel_spin.value()))
-        if map_key is None:
-            self._draw_layers()
-            self._info_label.setText(f"{len(self._xy):,} localizations · Data only · {self._map_error}")
-            return
         self._map_key = map_key
         self._kernel = maps["kernel"]
         self._response = maps["response_map"]
+        self._response_display = maps.get("response_display", self._response_display)
         self._fft_provenance = maps["fft_provenance"]
         self._map_error = None
         self._required_budgets = None
@@ -813,14 +745,11 @@ class ConvSegmentationWindow(QDialog):
         self._status_label.setText("" if len(self._xy) >= 3 else "Need at least 3 localizations.")
         self._add_btn.setEnabled(len(self._centers) > 0)
 
-    def _compute_failed(self, task, generation, stamp, message, *, data_only=False) -> None:
+    def _compute_failed(self, task, generation, stamp, message) -> None:
         if self._delivery_current(task, generation, stamp):
             self._map_key = None
             self._reset_maps(message)
             self._show_map_error(message)
-            if not data_only and self._data_key != (stamp, float(self._pixel_spin.value())):
-                self._preview_error = message
-                self._pending = True
 
     def _show_map_error(self, message: str) -> None:
         self._map_key = None
@@ -836,16 +765,15 @@ class ConvSegmentationWindow(QDialog):
         self._status_label.setText(message)
         self._add_btn.setEnabled(False)
 
-    def _offer_budgets(self, host_bytes: int, device_bytes: int) -> None:
+    def _offer_budgets(self, host_bytes: int) -> None:
         mib = 1024**2
         host = max(self._memory_spin.value(), (host_bytes + mib - 1) // mib)
-        device = max(self._cuda_memory.value(), (device_bytes + mib - 1) // mib)
-        needed = host > self._memory_spin.value() or device > self._cuda_memory.value()
-        possible = host <= self._memory_spin.maximum() and device <= self._cuda_memory.maximum()
-        self._required_budgets = (host, device) if needed and possible else None
+        needed = host > self._memory_spin.value()
+        possible = host <= self._memory_spin.maximum()
+        self._required_budgets = host if needed and possible else None
         self._budget_btn.setVisible(self._required_budgets is not None)
-        self._budget_btn.setToolTip(f"Explicitly use RAM {host:,} MiB and GPU {device:,} MiB estimate limits. "
-                                    "Does not change pixel size/backend or override shared admission/free VRAM.")
+        self._budget_btn.setToolTip(f"Explicitly use RAM {host:,} MiB estimate limit. "
+                                    "Does not change compute pixel size or override shared admission.")
 
     def _use_required_budgets(self) -> None:
         budgets = self._required_budgets
@@ -853,8 +781,7 @@ class ConvSegmentationWindow(QDialog):
             return
         self._suspend = True
         try:
-            self._memory_spin.setValue(budgets[0])
-            self._cuda_memory.setValue(budgets[1])
+            self._memory_spin.setValue(budgets)
         finally:
             self._suspend = False
         self._schedule_recompute()
@@ -877,8 +804,8 @@ class ConvSegmentationWindow(QDialog):
             self._xedge = self._yedge = np.zeros(0)
             self._data_key = None
         self._response = np.zeros((0, 0))
+        self._response_display = np.zeros((0, 0))
         self._resp_img.clear()
-        self._hist_img.clear()
         self._set_rings(None)
         self._sel_peaks.clear()
         self._centers = np.empty((0, 2))
@@ -978,38 +905,26 @@ class ConvSegmentationWindow(QDialog):
     def _draw_layers(self) -> None:
         if self._H.size == 0:
             self._resp_img.clear()
-            self._hist_img.clear()
+            self._update_layer_visibility()
             return
         rect = QRectF(float(self._xedge[0]), float(self._yedge[0]),
                       float(self._xedge[-1] - self._xedge[0]),
                       float(self._yedge[-1] - self._yedge[0]))
-        pos = self._H[self._H > 0]
-        self._data_vmax = float(np.percentile(pos, 99.0)) if pos.size else 1.0
-        self._data_vmax = max(self._data_vmax, 1.0)
-
         resp_lv = self._bc.effective_levels("Response") or (0.0, 1.0)
         if self._response.size:
-            self._resp_img.setImage(self._oriented(self._response), levels=resp_lv)
+            self._resp_img.setImage(self._oriented(self._response_display), levels=resp_lv)
             self._resp_img.setRect(rect)
         else:
             self._resp_img.clear()
 
-        data_lv = self._bc.effective_levels("Data") or (0.0, self._data_vmax)
-        self._hist_img.setImage(self._oriented(self._H), levels=data_lv)
-        self._hist_img.setRect(rect)
         self._update_layer_visibility()
         self._bc.refresh_if_open()
 
-        if not self._fitted:        # keep the user's pan/zoom on later recomputes
-            # Hidden layers have no childrenBounds. Fit the captured image's
-            # world rectangle even when the user initially hid all three layers.
-            self._plot.getViewBox().setRange(rect, padding=0.02)
-            self._fitted = True
 
     def _update_layer_visibility(self) -> None:
         self._resp_img.setVisible(self._show_response.isChecked()
                                   and self._response.size > 0)
-        self._hist_img.setVisible(self._show_image.isChecked() and self._H.size > 0)
+        self._hist_img.setVisible(self._show_image.isChecked() and self._data_preview.pixels.size > 0)
         det = self._show_detection.isChecked()
         for sc in self._ring_scatters:
             sc.setVisible(det)
@@ -1018,15 +933,8 @@ class ConvSegmentationWindow(QDialog):
 
     @staticmethod
     def _oriented(img: np.ndarray) -> np.ndarray:
-        """Account for the app's global pyqtgraph image axis order.
-
-        Our arrays are indexed ``[x_bin, y_bin]``; row-major ImageItems expect
-        ``[row=y, col=x]`` so they need a transpose (the app runs row-major)."""
-        try:
-            row_major = pg.getConfigOption("imageAxisOrder") == "row-major"
-        except Exception:
-            row_major = True
-        return img.T if row_major else img
+        """Scientific XY arrays become YX for explicitly row-major ImageItems."""
+        return img.T  # Every ImageItem here explicitly owns row-major axes.
 
     # ----------------------------------------------------------- commit
     def _add_to_manager(self) -> None:

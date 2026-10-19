@@ -34,7 +34,7 @@ def _fake_worker(python, directory, timeout, check):
     kernel = np.load(directory / "kernel.npy", allow_pickle=False)
     output = fftconvolve(image, kernel, mode="same")
     np.save(directory / "output.npy", output, allow_pickle=False)
-    provenance = dict(backend="cuda-cupy", dtype="float64", mode="same", boundary="zero", axes=[0, 1],
+    provenance = dict(backend="cuda-cupy", dtype="float64", mode="same", boundary="zero", axes=list(range(image.ndim)),
                       device=request["device"], fft_shape=list(wire.fft_shape(image.shape, kernel.shape)),
                       input_sha256=request["input_sha256"], output_sha256=wire.array_digest(output))
     result = dict(protocol=wire.PROTOCOL, job_id=request["job_id"], status="ok", provenance=provenance)
@@ -49,6 +49,26 @@ def test_protocol_round_trip_and_no_cuda_import_in_parent(monkeypatch):
     np.testing.assert_array_equal(result, fftconvolve(image, kernel, mode="same"))
     assert provenance["wall_seconds"] >= 0 and provenance["protocol"] == 1
     assert not any(name == "cupy" or name.startswith("cupy.") for name in sys.modules)
+
+
+def test_xyz_protocol_round_trip_has_explicit_operation_and_axes(monkeypatch):
+    requests = []
+    def worker(python, directory, timeout, check):
+        requests.append(wire.read_metadata(directory / "request.json"))
+        return _fake_worker(python, directory, timeout, check)
+    monkeypatch.setattr(cuda, "_run_worker", worker)
+    image, kernel = np.arange(120.).reshape(4, 5, 6), np.arange(24.).reshape(2, 3, 4)
+    result, provenance = cuda.cuda_fftconvolve(image, kernel, _settings())
+    np.testing.assert_array_equal(result, fftconvolve(image, kernel, mode="same"))
+    assert requests[0]["operation"] == "fftconvolve3d-same-f64"
+    assert provenance["axes"] == [0, 1, 2]
+
+
+def test_xyz_device_budget_refuses_before_process_start(monkeypatch):
+    monkeypatch.setattr(cuda, "_run_worker", lambda *a: pytest.fail("Started oversized CUDA request"))
+    with pytest.raises(ValueError, match="device budget"):
+        cuda.cuda_fftconvolve(np.ones((50, 40, 30)), np.ones((30, 30, 30)),
+                              replace(_settings(), budget_bytes=1))
 
 
 @pytest.mark.parametrize("field,value", [
@@ -260,7 +280,8 @@ def test_hardware_zero_impulse_and_recovery_after_cancel_timeout():
     np.testing.assert_allclose(result, fftconvolve(image, kernel, mode="same"), atol=1e-12, rtol=1e-12)
 
 
-def test_low_free_vram_refuses_before_any_device_array(monkeypatch, tmp_path):
+@pytest.mark.parametrize("shape", [(2, 3), (2, 3, 4)])
+def test_low_free_vram_refuses_before_any_device_array(monkeypatch, tmp_path, shape):
     from types import SimpleNamespace
 
     class Device:
@@ -272,11 +293,11 @@ def test_low_free_vram_refuses_before_any_device_array(monkeypatch, tmp_path):
             pass
     fake = SimpleNamespace(cuda=SimpleNamespace(Device=Device, runtime=SimpleNamespace(memGetInfo=lambda: (1, 2))))
     monkeypatch.setitem(sys.modules, "cupy", fake)
-    image = np.zeros((2, 3))
-    kernel = np.ones((2, 2))
+    image = np.zeros(shape)
+    kernel = np.ones((2,) * len(shape))
     np.save(tmp_path / "image.npy", image)
     np.save(tmp_path / "kernel.npy", kernel)
-    request = dict(protocol=wire.PROTOCOL, operation="fftconvolve2d-same-f64", device=0,
+    request = dict(protocol=wire.PROTOCOL, operation=f"fftconvolve{len(shape)}d-same-f64", device=0,
                    budget_bytes=512 * 1024**2, image_shape=image.shape, kernel_shape=kernel.shape,
                    input_sha256=[wire.array_digest(image), wire.array_digest(kernel)])
     with pytest.raises(MemoryError, match="free device memory"):

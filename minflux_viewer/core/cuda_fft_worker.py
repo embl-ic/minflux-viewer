@@ -41,14 +41,14 @@ def _fast_length(size: int) -> int:
     return best
 
 
-def fft_shape(image_shape, kernel_shape) -> tuple[int, int]:
+def fft_shape(image_shape, kernel_shape) -> tuple[int, ...]:
     """Deterministic smooth zero padding; avoids nearly 4x power-of-two waste."""
-    if len(image_shape) != 2 or len(kernel_shape) != 2:
-        raise ValueError("CUDA convolution requires two-dimensional inputs")
+    if len(image_shape) not in (2, 3) or len(kernel_shape) != len(image_shape):
+        raise ValueError("CUDA convolution requires matching 2D or 3D inputs")
     dims = [int(a) + int(b) - 1 for a, b in zip(image_shape, kernel_shape)]
     if any(int(v) < 1 for v in (*image_shape, *kernel_shape)):
         raise ValueError("CUDA convolution requires nonempty inputs")
-    return _fast_length(dims[0]), _fast_length(dims[1])
+    return tuple(_fast_length(n) for n in dims)
 
 
 def device_estimate(image_shape, kernel_shape) -> int:
@@ -97,7 +97,9 @@ def load_array(path: Path, shape) -> np.ndarray:
 def execute(directory: Path, request: dict) -> dict:
     import cupy as cp
 
-    if request.get("protocol") != PROTOCOL or request.get("operation") != "fftconvolve2d-same-f64":
+    ndim = len(request.get("image_shape", []))
+    if (ndim not in (2, 3) or request.get("protocol") != PROTOCOL
+            or request.get("operation") != f"fftconvolve{ndim}d-same-f64"):
         raise ValueError("Unsupported CUDA worker protocol/operation")
     device, budget = request["device"], request["budget_bytes"]
     if type(device) is not int or device < 0 or type(budget) is not int or budget < 1:
@@ -117,16 +119,17 @@ def execute(directory: Path, request: dict) -> dict:
         cp.fft.config.get_plan_cache().set_size(0)
         cp.fft.config.get_plan_cache().set_memsize(0)
         shape = fft_shape(image.shape, kernel.shape)
+        axes = tuple(range(ndim))
         start = time.perf_counter()
-        left = cp.fft.rfftn(cp.asarray(image), s=shape, axes=(0, 1))
-        right = cp.fft.rfftn(cp.asarray(kernel), s=shape, axes=(0, 1))
+        left = cp.fft.rfftn(cp.asarray(image), s=shape, axes=axes)
+        right = cp.fft.rfftn(cp.asarray(kernel), s=shape, axes=axes)
         left *= right
         del right
-        full = cp.fft.irfftn(left, s=shape, axes=(0, 1))
+        full = cp.fft.irfftn(left, s=shape, axes=axes)
         # SciPy's same output is centered with respect to the full convolution,
         # with the first input's shape; even kernels must not shift by one pixel.
-        row, col = ((n - 1) // 2 for n in kernel.shape)
-        output = cp.asnumpy(full[row:row + image.shape[0], col:col + image.shape[1]])
+        crop = tuple(slice((k-1)//2, (k-1)//2+n) for n, k in zip(image.shape, kernel.shape))
+        output = cp.asnumpy(full[crop])
         elapsed = time.perf_counter() - start  # asnumpy synchronizes this work
         if not np.isfinite(output).all():
             raise ValueError("CUDA produced nonfinite output")
@@ -136,7 +139,7 @@ def execute(directory: Path, request: dict) -> dict:
                           device=device, device_name=name.decode() if isinstance(name, bytes) else str(name),
                           compute_capability=cp.cuda.Device(device).compute_capability,
                           driver=cp.cuda.runtime.driverGetVersion(), runtime=cp.cuda.runtime.runtimeGetVersion(),
-                          dtype="float64", axes=[0, 1], mode="same", boundary="zero",
+                          dtype="float64", axes=list(axes), mode="same", boundary="zero",
                           fft_shape=list(shape), device_estimate_bytes=required,
                           device_total_bytes=total, device_free_bytes=free, compute_seconds=elapsed,
                           input_sha256=request["input_sha256"], output_sha256=array_digest(output))

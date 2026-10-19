@@ -3520,6 +3520,43 @@ class RenderWindow(QWidget):
         except Exception:
             return default
 
+    def inspection_region(self, dataset_key):
+        """Committed display-space XYZ box represented by this render viewport."""
+        from minflux_viewer.core.roi_crop import display_xyz_filtered
+
+        ds = self._state.dataset_for(dataset_key)
+        if ds is None or not any(ch.get("dataset_key") == dataset_key for ch in self._channels):
+            return None
+        xyz = display_xyz_filtered(ds)
+        if not len(xyz):
+            return None
+        bounds = np.column_stack((xyz.min(axis=0), xyz.max(axis=0)))
+        axes = {"XY": (0, 1, 2), "XZ": (0, 2, 1), "YZ": (1, 2, 0)}[self._active_plane()]
+        bounds[axes[0]], bounds[axes[1]] = self._view_box.viewRange()
+        if self._has_depth and not self._all_depth_check.isChecked():
+            bounds[axes[2]] = self._depth_range
+        return tuple(tuple(float(v) for v in interval) for interval in bounds)
+
+    def inspection_appearance(self, dataset_key):
+        """Copy this dataset channel's rendered LUT and scale-independent B/C."""
+        from minflux_viewer.ui.rendering.inspection_layer import InspectionAppearance
+
+        for i, channel in enumerate(self._channels):
+            if channel.get("dataset_key") != dataset_key or channel.get("kind") != "localizations":
+                continue
+            ramp = np.linspace(0., 1., 256, dtype=np.float32)
+            ramp = ramp ** float(channel.get("gamma", 1.) or 1.)
+            lut_name = channel.get("lut") or self._active_cmap
+            if self._white_bg:
+                rgb = self._channel_rgb_white(ramp, lut_name)
+            else:
+                rgb = self._map_norm_to_rgb(ramp, lut_name, invert=_channel_invert(channel))
+            lut = np.rint(np.clip(rgb, 0., 1.) * 255).astype(np.uint8)
+            lut.flags.writeable = False
+            return InspectionAppearance(lut, self._volume_contrast_pct_for_channel(i),
+                                         self._white_bg, "open render channel")
+        return None
+
     def _volume_display_state(self) -> dict | None:
         """Snapshot cheap 2-D display state for an open 3-D volume.
 

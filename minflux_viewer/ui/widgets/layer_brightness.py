@@ -79,6 +79,15 @@ class LayerBrightness:
             return None
         return lay.levels if lay.levels is not None else lay.default()
 
+    def reset_layer(self, name: str) -> None:
+        """Return one layer to its default without changing the current target."""
+        layer = self._layers[name]
+        layer.levels = None
+        levels = layer.default()
+        if levels is not None:
+            layer.apply(*levels)
+        self.refresh_if_open()
+
     # ------------------------------------------------------------- target
     def set_target(self, name: str) -> None:
         if name in self._layers:

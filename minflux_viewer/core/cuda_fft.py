@@ -104,7 +104,7 @@ def _run_worker(python: Path, directory: Path, timeout: float, check: Callable[[
 
 def cuda_fftconvolve(image, kernel, settings: CudaFftSettings, *,
                      check_cancelled: Callable[[], None] = lambda: None) -> tuple[np.ndarray, dict]:
-    """Finite real 2D -> float64, zero boundary, same shape as the first input.
+    """Finite real 2D/3D -> float64, zero boundary, first-input same shape.
 
     Startup, transfers and synchronization are included in wall_seconds. This
     intentionally cold worker retains no device arrays/plans after completion.
@@ -127,7 +127,8 @@ def cuda_fftconvolve(image, kernel, settings: CudaFftSettings, *,
         if not np.isfinite(image).all() or not np.isfinite(kernel).all():
             raise ValueError("CUDA convolution requires finite inputs")
         job_id = uuid.uuid4().hex
-        request = dict(protocol=wire.PROTOCOL, operation="fftconvolve2d-same-f64", job_id=job_id,
+        axes = list(range(image.ndim))
+        request = dict(protocol=wire.PROTOCOL, operation=f"fftconvolve{image.ndim}d-same-f64", job_id=job_id,
                        device=settings.device, budget_bytes=settings.budget_bytes,
                        image_shape=list(image.shape), kernel_shape=list(kernel.shape),
                        input_sha256=[wire.array_digest(image), wire.array_digest(kernel)])
@@ -152,7 +153,7 @@ def cuda_fftconvolve(image, kernel, settings: CudaFftSettings, *,
                 raise CudaFftError("CUDA worker provenance is missing/invalid")
             if (provenance.get("input_sha256") != request["input_sha256"]
                     or provenance.get("dtype") != "float64" or provenance.get("mode") != "same"
-                    or provenance.get("boundary") != "zero" or provenance.get("axes") != [0, 1]
+                    or provenance.get("boundary") != "zero" or provenance.get("axes") != axes
                     or provenance.get("device") != settings.device
                     or provenance.get("fft_shape") != list(wire.fft_shape(image.shape, kernel.shape))):
                 raise CudaFftError("CUDA worker numerical contract mismatch")

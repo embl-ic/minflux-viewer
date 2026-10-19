@@ -277,6 +277,7 @@ def ensure_loaded() -> None:
     # Built-in plugins — registration (and thus Plugins-menu) order follows the
     # import order here.
     from . import (
+        convolution_3d,  # noqa: F401
         data_simulator,  # noqa: F401  (immediately under ParaView)
         drift_correction,  # noqa: F401
         generate_method_text,  # noqa: F401

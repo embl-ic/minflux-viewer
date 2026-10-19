@@ -45,7 +45,7 @@ class PoolPolicy:
 #: sizes of one queue's pools add up to at most that queue's limit.
 POOLS: dict[str, PoolPolicy] = {
     # interactive: work a view is waiting on to draw
-    "render-tiles": PoolPolicy("interactive", 4, "render view tiles"),
+    "render-tiles": PoolPolicy("interactive", 4, "render tiles and bounded inspection rasters"),
     "precision-render": PoolPolicy("interactive", 4, "advanced render view tiles"),
     "precision-render-ortho": PoolPolicy(
         "interactive", 2, "advanced render view, Ortho-View side panes"),
