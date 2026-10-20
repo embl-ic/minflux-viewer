@@ -240,7 +240,7 @@ def test_input_aliases_cannot_bypass_coordinate_revision():
 
 
 @pytest.mark.parametrize("dimensions", [2, 3])
-def test_chunked_transform_is_bit_identical_to_whole_array_math(dimensions):
+def test_chunked_transform_matches_whole_array_math_to_rounding(dimensions):
     rng = np.random.default_rng(63)
     points = rng.normal(size=(coordinates._TRANSFORM_CHUNK_ROWS + 17, 3))
     matrix = rng.normal(size=(dimensions + 1, dimensions + 1))
@@ -248,7 +248,11 @@ def test_chunked_transform_is_bit_identical_to_whole_array_math(dimensions):
     homogeneous = np.column_stack([points[:, :dimensions], np.ones(len(points))])
     expected[:, :dimensions] = (matrix @ homogeneous.T).T[:, :dimensions]
     result = apply_display_transform_nm(points, {f"matrix_{dimensions+1}x{dimensions+1}": matrix})
-    np.testing.assert_array_equal(result, expected)
+    # Equal bits are not portable: the BLAS kernel and its summation order depend
+    # on the array's size, so a chunk can round differently from the whole array
+    # (seen with Apple Accelerate on macOS: 4-20 of 786,483 values, 2 ulp at most).
+    eps = np.finfo(np.float64).eps
+    np.testing.assert_allclose(result, expected, rtol=0, atol=16 * eps * np.abs(expected).max())
 
 
 def test_dataset_like_adapter_does_not_require_weak_reference_support():
