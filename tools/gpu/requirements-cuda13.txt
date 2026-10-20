@@ -1,6 +1,0 @@
-# Optional external worker environment only; never install into the viewer.
-# Requires an installed CUDA 13.x toolkit and compatible NVIDIA driver.
-numpy==2.2.6
-cupy-cuda13x==14.2.0
-fastrlock==0.8.3
-cuda-pathfinder==1.8.3

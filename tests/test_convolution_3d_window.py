@@ -1,7 +1,5 @@
-"""The separate 3D plugin owns immutable requests, not the existing CPU dialog."""
+"""The separate 3D plugin owns immutable requests, not the existing 2D dialog."""
 
-import os
-import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -36,7 +34,6 @@ def window(state, qtbot, owner=None):
         spin.setValue(value)
     win._model.setCurrentIndex(win._model.findData("gaussian"))
     win._width.setValue(6.)
-    win._python.setText(sys.executable)
     return win
 
 
@@ -44,24 +41,22 @@ def ready(qtbot, win):
     qtbot.waitUntil(lambda: win._task is None and win._accepted_stamp is not None, timeout=15000)
 
 
-def fake_cuda(image, kernel, settings, **kwargs):
-    return fftconvolve(image, kernel, mode="same"), dict(backend="cuda-cupy", device_name="test GPU", axes=[0, 1, 2])
-
-
 def test_real_xyz_worker_publication_cache_and_display_independence(state, qtbot, monkeypatch):
     calls, published = [], []
-    def gpu(*a, **kw):
+    def recording(*a, **kw):
         calls.append((a[0].shape, threading.get_ident()))
-        return fake_cuda(*a, **kw)
-    monkeypatch.setattr(conv, "cuda_fftconvolve", gpu)
+        return fftconvolve(*a, **kw)
+    monkeypatch.setattr(conv, "fftconvolve", recording)
     owner = SimpleNamespace(add_point_rois_3d=lambda *a, **kw: published.append((a, kw)))
     win = window(state, qtbot, owner)
     win._submit()
     ready(qtbot, win)
-    assert calls == [((50, 40, 160), calls[0][1])]
+    # The 50 x 40 x 160 region plus its 4-sigma edge margin on every side.
+    assert calls == [((62, 50, 184), calls[0][1])]
     assert calls[0][1] != threading.get_ident()
     assert len(win._centers) == 2
     original = win._maps["response"]
+    assert original.shape == (50, 40, 160)
     for plane in ("XZ", "YZ", "XY"):
         win._plane.setCurrentText(plane)
     win._plot.getViewBox().scaleBy((.8, .8))
@@ -73,28 +68,45 @@ def test_real_xyz_worker_publication_cache_and_display_independence(state, qtbot
     assert len(calls) == 1 and win._maps["response"] is original
     win._publish()
     assert len(published) == 1 and published[0][0][1].shape == (2, 3)
-    assert "test GPU" in published[0][1]["log_message"]
+    assert published[0][1]["source"] == "convolution_3d"
+    assert '"backend": "cpu-scipy"' in published[0][1]["log_message"]
     assert '"voxel_xyz": [4.0, 5.0, 2.0]' in published[0][1]["log_message"]
     view_before = win._plot.getViewBox().viewRange()
     win._voxels[0].setValue(5.)
     assert win._plot.getViewBox().viewRange() == view_before
     assert win._maps is None and not win._add.isEnabled()
     win.close()
-    assert "convolution_3d" in state.prefs and "conv_segmentation" not in state.prefs
+    assert state.prefs["convolution_3d"]["voxel_limit"] == 8_000_000
+    assert "conv_segmentation" not in state.prefs
 
 
-def test_refusal_keeps_inspection_preview_and_never_falls_back(state, qtbot, monkeypatch):
-    monkeypatch.setattr(conv, "fftconvolve", lambda *a, **kw: pytest.fail("CPU fallback"))
+def test_refusal_keeps_inspection_preview_and_computes_nothing(state, qtbot, monkeypatch):
+    monkeypatch.setattr(conv, "fftconvolve", lambda *a, **kw: pytest.fail("ran a refused request"))
     win = window(state, qtbot)
-    win._python.clear()
-    win._submit()
-    assert "absolute path" in win._status.text()
-    qtbot.waitUntil(lambda: win._data_preview.pixels.size > 0)
-    assert win._data_item.image is not None and win._maps is None and not win._add.isEnabled()
-    win._python.setText(sys.executable)
     win._voxel_budget.setValue(10)
     win._submit()
     assert "voxels" in win._status.text() and win._task is None
+    qtbot.waitUntil(lambda: win._data_preview.pixels.size > 0)
+    assert win._data_item.image is not None and win._maps is None and not win._add.isEnabled()
+
+
+def test_the_default_region_runs_at_default_settings_on_thick_data(qapp, qtbot, monkeypatch):
+    """Regression: the default region used to exceed the window's own 512 MiB
+    budget whenever the data were thicker than about 250 nm in Z."""
+    state = AppState()
+    monkeypatch.setattr(state, "save_prefs", lambda: None)
+    state.prefs["convolution_3d"] = {}
+    rng = np.random.default_rng(5)
+    xyz = rng.uniform((0., 0., 0.), (2000., 2000., 800.), size=(20000, 3))
+    state.add_dataset(build_localization_dataset(name="thick", x_nm=xyz[:, 0], y_nm=xyz[:, 1], z_nm=xyz[:, 2]))
+    win = Convolution3DWindow(state, 0)
+    qtbot.addWidget(win)
+    bounds = np.asarray(win._request().bounds_xyz)
+    np.testing.assert_allclose(bounds[:, 1] - bounds[:, 0], 400., atol=.02)
+    win._submit()
+    ready(qtbot, win)
+    # 400 nm at 4 nm voxels; the region buttons round outward, hence 100 or 101.
+    assert win._maps is not None and all(n in (100, 101) for n in win._maps["shape"])
 
 
 def test_filter_change_and_close_retire_inflight_xyz_results(state, qtbot, monkeypatch):
@@ -102,8 +114,8 @@ def test_filter_change_and_close_retire_inflight_xyz_results(state, qtbot, monke
     def slow(*a, **kw):
         started.set()
         assert release.wait(5)
-        return fake_cuda(*a, **kw)
-    monkeypatch.setattr(conv, "cuda_fftconvolve", slow)
+        return fftconvolve(*a, **kw)
+    monkeypatch.setattr(conv, "fftconvolve", slow)
     win = window(state, qtbot)
     win._submit()
     try:
@@ -127,8 +139,7 @@ def test_filter_change_and_close_retire_inflight_xyz_results(state, qtbot, monke
         release.set()
 
 
-def test_late_source_replacement_never_enables_roi_publication(state, qtbot, monkeypatch):
-    monkeypatch.setattr(conv, "cuda_fftconvolve", fake_cuda)
+def test_late_source_replacement_never_enables_roi_publication(state, qtbot):
     published = []
     win = window(state, qtbot, SimpleNamespace(add_point_rois_3d=lambda *a, **kw: published.append(a)))
     win._submit()
@@ -139,8 +150,10 @@ def test_late_source_replacement_never_enables_roi_publication(state, qtbot, mon
 
 
 def test_plugin_is_separate_and_rejects_2d_without_opening_window(state, monkeypatch):
+    from minflux_viewer.core.plugin_registry import available
     from minflux_viewer.plugins import convolution_3d
 
+    assert any(entry.name == "3D Convolution…" for entry in available())
     state.datasets[0].prop.num_dim = 2
     messages = []
     monkeypatch.setattr(state, "log", lambda *args: messages.append(args))
@@ -158,15 +171,3 @@ def test_initial_region_never_clips_a_small_dataset(state, qtbot):
     bounds = np.asarray(win._request().bounds_xyz)
     assert np.all(bounds[:, 0] <= win._xyz.min(axis=0))
     assert np.all(bounds[:, 1] >= win._xyz.max(axis=0))
-
-
-def test_actual_cuda_dialog_with_two_overlapping_xy_sites(state, qtbot):
-    python = os.environ.get("MFV_CUDA_PYTHON")
-    if not python:
-        pytest.skip("Set MFV_CUDA_PYTHON for real CUDA dialog validation")
-    win = window(state, qtbot)
-    win._python.setText(python)
-    win._submit()
-    ready(qtbot, win)
-    assert len(win._centers) == 2 and win._maps["provenance"]["axes"] == [0, 1, 2]
-    assert win._response_item.image is not None

@@ -336,9 +336,6 @@
   "minflux_viewer/ui/analysis/channel_combine_dialog.py": {
    "union-attr": 3
   },
-  "minflux_viewer/ui/analysis/conv_segmentation_dialog.py": {
-   "arg-type": 1
-  },
   "minflux_viewer/ui/analysis/curvilinear_segmentation_dialog.py": {
    "arg-type": 2,
    "assignment": 3

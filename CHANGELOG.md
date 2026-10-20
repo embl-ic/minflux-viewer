@@ -36,6 +36,10 @@ choices, and embedded image extraction follows package versions.
 Convolution segmentation previews run in the background, coalesce edits, and
 check kernel/histogram/FFT memory estimates before allocation. The preview's
 memory budget is adjustable; it is not a total application memory limit.
+Its data preview now follows the render view's colours and contrast, does not
+depend on the computation pixel size, and stays visible when a computation is
+refused. A separate Plugins › 3D Convolution performs XYZ matched filtering on a
+chosen region, reading a margin around it so structures at its edge are not cut.
 
 UI internals are grouped into capability packages. Plugins that import private
 `minflux_viewer.ui` modules must use their new paths; old UI module paths are

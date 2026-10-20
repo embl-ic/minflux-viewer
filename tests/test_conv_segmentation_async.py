@@ -166,9 +166,9 @@ def test_completed_jobs_release_captured_maps_and_callbacks(state, qtbot, monkey
     assert all(reference() is None for reference in references)
 
 
-def test_legacy_cuda_preferences_do_not_change_cpu_tool(state, qtbot, monkeypatch):
+def test_legacy_cuda_preferences_do_not_change_cpu_tool(state, qtbot):
+    # Preferences saved while a CUDA option briefly existed must be ignored.
     state.prefs["conv_segmentation"] = dict(fft_backend="cuda", cuda_python="missing")
-    monkeypatch.setattr(cs, "cuda_fftconvolve", lambda *a, **kw: pytest.fail("CPU tool invoked CUDA"))
     win = _window(state, qtbot)
     _ready(qtbot, win)
     assert not hasattr(win, "_backend_combo")

@@ -1,4 +1,4 @@
-"""Separate, explicitly submitted 3D CUDA convolution workflow."""
+"""Separate, explicitly submitted 3D (XYZ) convolution workflow on the CPU."""
 
 from __future__ import annotations
 
@@ -14,11 +14,9 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
-    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QPushButton,
     QScrollArea,
@@ -36,7 +34,6 @@ from minflux_viewer.analysis.convolution_3d import (
 )
 from minflux_viewer.colormaps import colormap_lut
 from minflux_viewer.core.computation_snapshot import input_signature
-from minflux_viewer.core.cuda_fft import CudaFftSettings
 from minflux_viewer.core.inspection_raster import peak_preview
 from minflux_viewer.core.roi_crop import display_xyz_filtered
 from minflux_viewer.ui.common.background_tasks import (
@@ -65,8 +62,8 @@ class Convolution3DWindow(QDialog):
         self._idx = dataset_idx
         ds = state.datasets[dataset_idx]
         if ds.prop.num_dim != 3:
-            raise ValueError("GPU 3D Convolution requires a 3D localization dataset")
-        self.setWindowTitle(f"GPU 3D Convolution — {ds.name}")
+            raise ValueError("3D Convolution requires a 3D localization dataset")
+        self.setWindowTitle(f"3D Convolution — {ds.name}")
         self.resize(1240, 800)
         self._closed, self._generation = False, 0
         self._task = None
@@ -117,9 +114,11 @@ class Convolution3DWindow(QDialog):
         root = QHBoxLayout(self)
         controls = QWidget()
         form = QFormLayout(controls)
-        description = QLabel("True XYZ matched filtering; zero outside the region.\n"
-                             "NPC template assumes rings normal to Z (no tilt search).\n"
-                             "Set a region and exact voxels, then Run. No CPU fallback.")
+        description = QLabel("True XYZ matched filtering. Localizations up to one template radius "
+                             "outside the region are included, so structures at its edge are not cut; "
+                             "detections are reported inside the region only.\n"
+                             "NPC template assumes rings normal to Z (no tilt search). "
+                             "Set a region and exact voxels, then Run.")
         description.setWordWrap(True)
         form.addRow(description)
         self._bounds = []
@@ -160,24 +159,13 @@ class Convolution3DWindow(QDialog):
             check.setChecked(True)
             check.toggled.connect(self._map_changed)
             form.addRow(check)
-        self._python = QLineEdit()
-        self._python.setPlaceholderText("Absolute path to trusted CUDA Python")
-        self._python.textChanged.connect(self._map_changed)
-        form.addRow("External Python:", self._python)
-        browse = QPushButton("Choose Python…")
-        browse.clicked.connect(self._browse)
-        form.addRow(browse)
-        self._device, self._gpu_budget, self._host_budget, self._voxel_budget = (QSpinBox() for _ in range(4))
-        for name, spin, lo, hi, value, suffix in (
-                ("CUDA device:", self._device, 0, 63, 0, ""),
-                ("Device estimate budget:", self._gpu_budget, 64, 65536, 512, " MiB"),
-                ("Host estimate budget:", self._host_budget, 32, 65536, 512, " MiB"),
-                ("Voxel limit:", self._voxel_budget, 1, 64000000, 8000000, "")):
-            spin.setRange(lo, hi)
-            spin.setValue(value)
-            spin.setSuffix(suffix)
-            spin.valueChanged.connect(self._map_changed)
-            form.addRow(name, spin)
+        self._voxel_budget = QSpinBox()
+        self._voxel_budget.setRange(1, 64000000)
+        self._voxel_budget.setValue(8000000)
+        self._voxel_budget.setToolTip("Largest grid (region plus edge margin) a run may use. Memory is "
+                                      "checked against the background-work budget in Preferences > Data.")
+        self._voxel_budget.valueChanged.connect(self._map_changed)
+        form.addRow("Voxel limit:", self._voxel_budget)
         self._threshold, self._distance = self._spin(.3, 0., 1., .05, ""), self._spin(100.)
         self._cap = QSpinBox()
         self._cap.setRange(1, 10000)
@@ -186,7 +174,7 @@ class Convolution3DWindow(QDialog):
                            ("Max detections:", self._cap)):
             spin.valueChanged.connect(self._threshold_changed)
             form.addRow(name, spin)
-        self._run = QPushButton("Run GPU 3D convolution")
+        self._run = QPushButton("Run 3D convolution")
         self._run.clicked.connect(self._submit)
         self._cancel = QPushButton("Request stop")
         self._cancel.setEnabled(False)
@@ -199,7 +187,7 @@ class Convolution3DWindow(QDialog):
         scroll.setMinimumWidth(390)
         root.addWidget(scroll)
         right = QVBoxLayout()
-        self._status = QLabel("Select a region; configure the CUDA environment before Run.")
+        self._status = QLabel("Select a region and voxel sizes, then Run.")
         self._status.setTextFormat(Qt.TextFormat.PlainText)
         self._status.setWordWrap(True)
         right.addWidget(self._status)
@@ -251,11 +239,7 @@ class Convolution3DWindow(QDialog):
                              tuple(s.value() for s in self._voxels), self._model.currentData(),
                              self._diameter.value(), self._width.value(), self._ring_separation.value(),
                              self._zero.isChecked(), self._sqrt.isChecked(),
-                             self._host_budget.value() * 1024**2, self._voxel_budget.value())
-
-    def _settings(self):
-        return CudaFftSettings(self._python.text().strip(), self._device.value(),
-                               self._gpu_budget.value() * 1024**2)
+                             max_voxels=self._voxel_budget.value())
 
     def _stamp(self):
         key = window_dataset_key(self)
@@ -374,11 +358,6 @@ class Convolution3DWindow(QDialog):
         self._bc.set_target(self._target.currentText())
         self._bc.open(self)
 
-    def _browse(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select trusted external CUDA Python executable")
-        if path:
-            self._python.setText(path)
-
     def _submit(self):
         if self._closed or self._task is not None or self._idx is None:
             return
@@ -386,21 +365,19 @@ class Convolution3DWindow(QDialog):
         self._centers, self._scores = np.empty((0, 3)), np.empty(0)
         self._list.clear()
         self._markers.clear()
-        request, settings = self._request(), self._settings()
+        request = self._request()
         stamp, generation, xyz = self._stamp(), self._generation, self._xyz
-        map_key = (stamp, request, settings)
+        map_key = (stamp, request)
         cached = self._maps if self._maps_key == map_key else None
         try:
             estimate = preflight_volume(request, len(xyz))
-            if cached is None:
-                settings.preflight(estimate.image_shape, estimate.kernel_shape)
         except (ValueError, MemoryError) as exc:
             self._error(str(exc))
             return
         threshold, distance, cap = self._threshold.value(), self._distance.value(), self._cap.value()
 
         def work(report):
-            maps = cached if cached is not None else volume_maps(xyz, request, cuda=settings, report=report)
+            maps = cached if cached is not None else volume_maps(xyz, request, report=report)
             centers, scores = volume_detections(maps, min_response=threshold, min_distance_nm=distance,
                                                 max_detections=cap, report=report)
             if cached is None:
@@ -409,13 +386,14 @@ class Convolution3DWindow(QDialog):
             report("3D convolution ready")
             return maps, centers, scores
 
-        task = BackgroundTask(work, description="GPU 3D convolution", category="analysis",
-                              estimated_bytes=estimate.host_bytes)
+        task = BackgroundTask(work, description="3D convolution", category="analysis",
+                              estimated_bytes=0 if cached is not None else estimate.host_bytes)
         self._task = task
         self._add.setEnabled(False)
         self._run.setEnabled(False)
         self._cancel.setEnabled(True)
-        self._status.setText(f"Computing exact XYZ {estimate.image_shape}; host estimate "
+        self._status.setText(f"Computing exact XYZ {estimate.region_shape} (with edge margin "
+                             f"{estimate.image_shape}); memory estimate "
                              f"{estimate.host_bytes / 1024**2:,.1f} MiB. Preview is display-only.")
 
         def current():
@@ -432,7 +410,7 @@ class Convolution3DWindow(QDialog):
             self._list.addItems([f"{i+1}: X={x:.1f}, Y={y:.1f}, Z={z:.1f} nm · r={score:.3f}"
                                  for i, ((x, y, z), score) in enumerate(zip(self._centers, self._scores))])
             self._status.setText(f"{len(self._centers)} 3D detections · {self._maps['selected_count']:,} localizations · "
-                                 f"XYZ grid {self._maps['shape']} · CUDA float64. "
+                                 f"XYZ grid {self._maps['shape']} · CPU float64. "
                                  "Threshold changes reuse this volume after Run.")
             self._status.setToolTip(json.dumps(self._maps["provenance"], indent=2))
             self._add.setEnabled(bool(len(self._centers)))
@@ -502,19 +480,16 @@ class Convolution3DWindow(QDialog):
         rows = sorted(self._list.row(item) for item in self._list.selectedItems()) or list(range(len(self._centers)))
         request = asdict(self._maps["request"])
         provenance = self._maps["provenance"]
-        self._owner.add_point_rois_3d(self._idx, self._centers[rows], name_prefix="GPU3D", source="gpu_convolution_3d",
-                                      log_message=f"GPU 3D convolution: added {len(rows)} XYZ point ROI(s); "
+        self._owner.add_point_rois_3d(self._idx, self._centers[rows], name_prefix="Conv3D", source="convolution_3d",
+                                      log_message=f"3D convolution: added {len(rows)} XYZ point ROI(s); "
                                       f"request={json.dumps(request, sort_keys=True)}; "
                                       f"threshold={self._threshold.value()}, separation_nm={self._distance.value()}, "
                                       f"cap={self._cap.value()}; FFT={json.dumps(provenance, sort_keys=True)}")
 
     def _restore(self):
         cfg = self._state.prefs.get("convolution_3d", {})
-        self._python.setText(str(cfg.get("cuda_python", "")))
-        for name, spin in (("device", self._device), ("gpu_budget_mib", self._gpu_budget),
-                           ("host_budget_mib", self._host_budget), ("voxel_limit", self._voxel_budget)):
-            if name in cfg:
-                spin.setValue(int(cfg[name]))
+        if "voxel_limit" in cfg:
+            self._voxel_budget.setValue(int(cfg["voxel_limit"]))
         self._model.setCurrentIndex(max(0, self._model.findData(cfg.get("model", "npc"))))
         for key, spin in (("diameter_nm", self._diameter), ("width_nm", self._width),
                           ("ring_separation_nm", self._ring_separation), ("min_response", self._threshold),
@@ -539,10 +514,7 @@ class Convolution3DWindow(QDialog):
         if self._task is not None:
             retire_background_tasks([self._task])
             self._task = None
-        self._state.prefs["convolution_3d"] = dict(cuda_python=self._python.text().strip(), device=self._device.value(),
-                                                 gpu_budget_mib=self._gpu_budget.value(),
-                                                 host_budget_mib=self._host_budget.value(),
-                                                 voxel_limit=self._voxel_budget.value())
+        self._state.prefs["convolution_3d"] = dict(voxel_limit=self._voxel_budget.value())
         self._state.prefs["convolution_3d"].update(
             model=self._model.currentData(), diameter_nm=self._diameter.value(), width_nm=self._width.value(),
             ring_separation_nm=self._ring_separation.value(), zero_mean=self._zero.isChecked(),
@@ -550,7 +522,7 @@ class Convolution3DWindow(QDialog):
             min_distance_nm=self._distance.value(), max_detections=self._cap.value(),
             show_data=self._show_data.isChecked(), show_response=self._show_response.isChecked(),
             **{f"voxel_{axis}_nm": spin.value() for axis, spin in zip("xyz", self._voxels)})
-        cleanup_callback(self._state.save_prefs, context="save GPU 3D convolution preferences")
-        cleanup_callback(self._bc.close, context="close GPU 3D brightness dialog")
+        cleanup_callback(self._state.save_prefs, context="save 3D convolution preferences")
+        cleanup_callback(self._bc.close, context="close 3D convolution brightness dialog")
         dispose_plot_widgets(self)
         super().closeEvent(event)

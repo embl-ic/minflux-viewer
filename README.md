@@ -109,7 +109,7 @@ minflux-viewer /path/to/data.msr  # open a file on launch
 
 On Linux, the Qt/OpenGL system libraries listed above may also be required.
 
-### Convolution previews and optional GPU 3D plugin
+### Convolution previews and the 3D convolution plugin
 
 **Analyze › Segmentation › Convolution…** is the existing CPU (SciPy) 2D tool.
 Its scientific histogram, FFT and detections use the exact **Compute pixel**
@@ -125,43 +125,22 @@ across different bin sizes; raw count levels are not interchangeable. With no
 open render, the dataset/render-default LUT is used. **Copy render appearance**
 re-copies later edits; local B/C changes do not change the render view.
 
-**Plugins › GPU 3D Convolution…** is separate. It performs true XYZ matched
+**Plugins › 3D Convolution…** is separate. It performs true XYZ matched
 filtering on an explicit region and exact X/Y/Z voxels, then physical-distance
 3D peak suppression. Templates: 3D Gaussian, spherical shell and NPC two rings
 (normal along Z; no tilt search). Inspect XY/XZ/YZ projections and explicitly
 add selected XYZ point ROIs to the ROI Manager. The initial small region is near
 the data centre; use the render viewport, whole extent or edit XYZ bounds.
-Region boundaries are zero-padded: structures cut by the region can be biased.
+Localizations up to one template radius outside the region are included, so a
+structure at the region's edge is not cut; detections are reported inside the
+region only. Scores are relative to the strongest response in the region.
 
-Press **Run** after setting parameters. Threshold-only changes reuse the volume
-on the next Run. CPU histogram/template/detection surround an isolated float64
-CUDA FFT, with zero padding and first-input `same` alignment. No automatic CPU
-fallback. A fresh worker is started per map, so startup/transfers can outweigh
-GPU compute savings even in 3D; speedup is workload-dependent, not guaranteed.
-
-Use a **separate trusted Python environment**, not the viewer's managed package
-panel or its own environment. For NVIDIA hardware with an installed CUDA 13.x
-toolkit and compatible driver, create an external Python 3.12 environment and
-install the pinned worker requirements:
-
-```powershell
-py -3.12 -m venv C:\path\to\cuda-worker
-C:\path\to\cuda-worker\Scripts\python.exe -m pip install --only-binary=:all: -r tools/gpu/requirements-cuda13.txt
-```
-
-On Linux use `python3.12 -m venv /path/to/cuda-worker` and its `bin/python`.
-In the GPU 3D plugin select that environment's **Python executable**, the
-CUDA device index (default 0), and a GPU memory estimate budget (default 512 MiB).
-The worker checks available VRAM, reports failures and records device/runtime/
-precision information in the preview tooltip and ROI log. Memory estimates are
-not hard total-RSS/VRAM limits. Request stop/closing retires work without blocking
-Qt; cancellation or a 120-second timeout stops only the owned child process.
-Only one CUDA convolution runs at a time per viewer process; other processes
-and applications are not coordinated. OpenGL rendering does not establish CUDA
-availability. The host/device estimate defaults are 512 MiB each, with an
-adjustable 8-million-voxel limit. Refusals require explicit region/voxel/budget
-changes, never automatic downsampling of scientific data. AMD/Intel, macOS GPU
-computing, fitting and deconvolution are not implemented by this option.
+Press **Run** after setting parameters; threshold-only changes reuse the volume
+on the next Run. The convolution runs on the CPU (SciPy, float64) in the
+background. Its memory estimate is checked against the background-work budget in
+**Preferences › Data**; the voxel limit (default 8 million, adjustable) bounds
+the grid. Refusals ask for a smaller region or a larger voxel size and never
+downsample the data silently.
 
 ---
 

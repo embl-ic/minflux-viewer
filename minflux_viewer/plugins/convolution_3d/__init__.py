@@ -1,4 +1,4 @@
-"""Optional region-focused CUDA 3D convolution plugin."""
+"""Region-focused 3D (XYZ) convolution plugin, computed on the CPU."""
 
 from __future__ import annotations
 
@@ -11,12 +11,12 @@ def _launch(state, parent=None):
 
     idx = state.active_idx
     if idx is None or state.datasets[idx].prop.num_dim != 3:
-        state.log("GPU 3D Convolution requires an active 3D localization dataset.", "WARNING")
+        state.log("3D Convolution requires an active 3D localization dataset.", "WARNING")
         return
     show_modeless(Convolution3DWindow(state, idx, owner=parent), parent)
 
 
-register(PluginEntry(name="GPU 3D Convolution…", launch=_launch,
-                     tooltip="Region-focused XYZ matched filtering using an isolated CUDA Python environment. "
-                             "Separate from the CPU 2D convolution tool; no automatic CPU fallback.",
-                     keywords=("GPU", "CUDA", "3D", "convolution", "segmentation", "NPC")))
+register(PluginEntry(name="3D Convolution…", launch=_launch,
+                     tooltip="Region-focused XYZ matched filtering of the active 3D dataset. "
+                             "Separate from the 2D convolution tool (Analyze › Segmentation).",
+                     keywords=("3D", "convolution", "matched filter", "segmentation", "NPC", "XYZ")))

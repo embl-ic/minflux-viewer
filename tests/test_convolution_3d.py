@@ -1,7 +1,5 @@
-"""XYZ numerical semantics, resource refusal and optional real CUDA parity."""
+"""XYZ numerical semantics, the region's edge margin and resource refusal."""
 
-import os
-import sys
 from dataclasses import replace
 
 import numpy as np
@@ -9,7 +7,6 @@ import pytest
 from scipy.signal import fftconvolve
 
 from minflux_viewer.analysis import convolution_3d as conv
-from minflux_viewer.core import cuda_fft, cuda_fft_worker
 from minflux_viewer.core.inspection_raster import histogram_preview, peak_preview
 
 
@@ -23,8 +20,12 @@ def points():
     return np.vstack([rng.normal((30., -40., z), 2., size=(300, 3)) for z in (-80., 80.)])
 
 
+def blob(center, n=300, sigma=4., seed=0):
+    return np.random.default_rng(seed).normal(center, sigma, size=(n, 3))
+
+
 def test_exact_anisotropic_xyz_grid_separates_overlapping_xy_objects():
-    maps = conv.volume_maps(points(), request(), cuda=None)
+    maps = conv.volume_maps(points(), request())
     centers, values = conv.volume_detections(maps, min_response=.5, min_distance_nm=100.)
     assert maps["response"].shape == (50, 40, 160)
     assert len(centers) == 2
@@ -33,6 +34,25 @@ def test_exact_anisotropic_xyz_grid_separates_overlapping_xy_objects():
     assert np.max(values) == 1.
     np.testing.assert_array_equal(conv.volume_detections(maps, min_response=.5,
                                   min_distance_nm=100., max_detections=1)[0], centers[:1])
+
+
+def test_cpu_convolution_is_scipy_on_the_region_plus_its_margin():
+    req = request()
+    estimate = conv.preflight_volume(req)
+    assert estimate.halo_voxels == (6, 5, 12)          # 4 sigma / voxel, rounded up
+    assert estimate.kernel_shape == tuple(2 * h + 1 for h in estimate.halo_voxels)
+    assert estimate.image_shape == tuple(n + 2 * h for n, h in
+                                         zip(estimate.region_shape, estimate.halo_voxels))
+    maps = conv.volume_maps(points(), req)
+    full_edges = maps["full_edges"]
+    histogram, _ = np.histogramdd(points(), bins=full_edges)
+    values = np.sqrt(histogram) / np.sqrt(histogram).max()
+    expected = fftconvolve(values, conv.build_volume_kernel(req, estimate.kernel_shape), mode="same")
+    expected /= expected[maps["inner"]].max()
+    np.testing.assert_allclose(maps["full_response"], expected, rtol=1e-12, atol=1e-12)
+    assert maps["provenance"]["backend"] == "cpu-scipy"
+    for edge, full, h in zip(maps["edges"], full_edges, estimate.halo_voxels):
+        np.testing.assert_array_equal(edge, full[h:len(full) - h])
 
 
 @pytest.mark.parametrize("model", list(conv.MODELS))
@@ -53,23 +73,40 @@ def test_refuse_invalid_or_oversized_volume_before_histogram_or_kernel(monkeypat
     monkeypatch.setattr(conv.np, "histogramdd", lambda *a, **kw: pytest.fail("allocated histogram"))
     monkeypatch.setattr(conv, "build_volume_kernel", lambda *a: pytest.fail("allocated kernel"))
     with pytest.raises(ValueError):
-        conv.volume_maps(points(), replace(request(), **change), cuda=None)
+        conv.volume_maps(points(), replace(request(), **change))
 
 
-def test_region_is_explicit_and_outside_coordinates_do_not_contribute():
+def test_coordinates_beyond_the_margin_do_not_contribute():
     xyz = points()
-    base = conv.volume_maps(xyz, request(), cuda=None)
-    augmented = conv.volume_maps(np.vstack((xyz, [[10000., 10000., 10000.]])), request(), cuda=None)
-    np.testing.assert_array_equal(base["response"], augmented["response"])
+    base = conv.volume_maps(xyz, request())
+    augmented = conv.volume_maps(np.vstack((xyz, [[10000., 10000., 10000.]])), request())
+    np.testing.assert_array_equal(base["full_response"], augmented["full_response"])
     assert augmented["selected_count"] == len(xyz)
     with pytest.raises(ValueError, match="three localizations"):
-        conv.volume_maps(np.ones((2, 3)), request(), cuda=None)
+        conv.volume_maps(np.ones((2, 3)), request())
 
 
-def test_missing_runtime_is_not_a_cpu_fallback(monkeypatch):
-    monkeypatch.setattr(conv, "fftconvolve", lambda *a, **kw: pytest.fail("CPU fallback"))
-    with pytest.raises(ValueError, match="absolute path"):
-        conv.volume_maps(points(), request(), cuda=cuda_fft.CudaFftSettings(""))
+def test_an_object_on_the_region_edge_scores_like_one_in_the_middle():
+    """Its localizations beyond the edge are read from the margin, not dropped."""
+    req = conv.VolumeRequest(((-100., 100.), (-100., 100.), (-50., 50.)), (4., 4., 4.),
+                              "gaussian", width_nm=6.)
+    xyz = np.vstack([blob((0., 0., 0.), seed=1), blob((98., 0., 0.), seed=2)])
+    centers, scores = conv.volume_detections(conv.volume_maps(xyz, req), min_response=.5,
+                                             min_distance_nm=50.)
+    assert len(centers) == 2
+    edge = np.argmax(centers[:, 0])
+    np.testing.assert_allclose(centers[edge], (98., 0., 0.), atol=3.)
+    assert scores[edge] == pytest.approx(scores[1 - edge], rel=.1)
+
+
+def test_an_object_centred_outside_the_region_is_not_reported():
+    req = conv.VolumeRequest(((-100., 100.), (-100., 100.), (-50., 50.)), (4., 4., 4.),
+                              "gaussian", width_nm=6.)
+    xyz = np.vstack([blob((0., 0., 0.), seed=1), blob((108., 0., 0.), n=600, seed=3)])
+    centers, _ = conv.volume_detections(conv.volume_maps(xyz, req), min_response=.2,
+                                        min_distance_nm=30.)
+    assert len(centers) == 1
+    np.testing.assert_allclose(centers[0], (0., 0., 0.), atol=3.)
 
 
 def test_simulated_npc_two_ring_template_finds_pore_centre_in_xyz():
@@ -81,7 +118,7 @@ def test_simulated_npc_two_ring_template_finds_pore_centre_in_xyz():
     center = xyz.mean(axis=0)
     req = conv.VolumeRequest(tuple((float(c-100), float(c+100)) for c in center),
                               (4., 4., 2.), "npc", width_nm=6.)
-    maps = conv.volume_maps(xyz, req, cuda=None)
+    maps = conv.volume_maps(xyz, req)
     centers, _ = conv.volume_detections(maps, min_response=.7, min_distance_nm=100.)
     assert len(centers) == 1
     np.testing.assert_allclose(centers[0], center, atol=4.)
@@ -101,13 +138,13 @@ def test_cancellation_propagates_between_volume_stages():
         if len(stages) == 2:
             raise InterruptedError("stop")
     with pytest.raises(InterruptedError):
-        conv.volume_maps(points(), request(), cuda=None, report=report)
+        conv.volume_maps(points(), request(), report=report)
     assert len(stages) == 2
 
 
 def test_display_only_rasters_are_bounded_and_do_not_mutate_scientific_values():
     xyz = points()
-    maps = conv.volume_maps(xyz, request(), cuda=None)
+    maps = conv.volume_maps(xyz, request())
     before = maps["response"].copy()
     image = histogram_preview(xyz[:, :2], (-100., 100., -100., 100.), (320, 240))
     assert image.shape == (320, 240)
@@ -117,31 +154,3 @@ def test_display_only_rasters_are_bounded_and_do_not_mutate_scientific_values():
     np.testing.assert_array_equal(before, maps["response"])
     with pytest.raises(ValueError):
         histogram_preview(xyz[:, :2], (0., 1., 0., 1.), (100000, 100000))
-
-
-@pytest.mark.parametrize("shape,kshape", [((7, 9, 11), (3, 4, 2)), ((4, 6, 8), (8, 3, 10)),
-                                        ((1, 7, 1), (2, 4, 3)), ((1, 1, 1), (1, 1, 1))])
-def test_actual_cuda_xyz_fft_matches_signed_asymmetric_cpu_convolution(shape, kshape):
-    python = os.environ.get("MFV_CUDA_PYTHON")
-    if not python:
-        pytest.skip("Set MFV_CUDA_PYTHON for real CUDA validation")
-    rng = np.random.default_rng(98)
-    image, kernel = rng.normal(size=shape), rng.normal(size=kshape)
-    image.flat[0] += 20.
-    result, provenance = cuda_fft.cuda_fftconvolve(image, kernel, cuda_fft.CudaFftSettings(python))
-    np.testing.assert_allclose(result, fftconvolve(image, kernel, mode="same"), rtol=1e-11, atol=1e-11)
-    assert provenance["axes"] == [0, 1, 2]
-    assert provenance["fft_shape"] == list(cuda_fft_worker.fft_shape(shape, kshape))
-    assert "cupy" not in sys.modules
-
-
-def test_actual_cuda_volume_and_3d_centres_match_cpu_reference():
-    python = os.environ.get("MFV_CUDA_PYTHON")
-    if not python:
-        pytest.skip("Set MFV_CUDA_PYTHON for real CUDA validation")
-    cpu = conv.volume_maps(points(), request(), cuda=None)
-    gpu = conv.volume_maps(points(), request(), cuda=cuda_fft.CudaFftSettings(python))
-    np.testing.assert_allclose(cpu["response"], gpu["response"], rtol=1e-11, atol=1e-11)
-    left, right = conv.volume_detections(cpu), conv.volume_detections(gpu)
-    np.testing.assert_array_equal(left[0], right[0])
-    np.testing.assert_allclose(left[1], right[1], rtol=1e-11, atol=1e-11)

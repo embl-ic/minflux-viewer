@@ -40,7 +40,7 @@ Optional refinements:
   criterion the radial count ratios cannot express: they see whether the hole and
   the surround are empty, not whether the annulus is populated *all the way round*.
 
-NumPy/SciPy with an optional isolated CUDA FFT — Qt-free. Distances are in nm.
+Pure NumPy/SciPy — Qt-free and unit-testable. Distances are in nm.
 """
 
 from __future__ import annotations
@@ -50,8 +50,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
-
-from minflux_viewer.core.cuda_fft import CudaFftSettings, cuda_fftconvolve
 
 DEFAULT_PIXEL_NM = 4.0
 DEFAULT_MIN_RESPONSE = 0.30        # fraction of the max response
@@ -433,8 +431,7 @@ def non_max_suppression(response: np.ndarray, min_height: float,
 
 
 def convolve_response(H, kernel, *, dog_radius_px: float | None = None,
-                       budget_bytes: int = DEFAULT_MEMORY_BUDGET,
-                       fft: Callable | None = None) -> np.ndarray:
+                       budget_bytes: int = DEFAULT_MEMORY_BUDGET) -> np.ndarray:
     """FFT-convolve a histogram with a kernel; rescale the result to its own max.
 
     With ``dog_radius_px`` a difference-of-Gaussians band-pass is applied to the
@@ -452,7 +449,7 @@ def convolve_response(H, kernel, *, dog_radius_px: float | None = None,
     _check_budget(_fft_estimate(H.shape, kernel.shape).bytes_required, budget_bytes)
     H = np.asarray(H, dtype=float)
     kernel = np.asarray(kernel, dtype=float)
-    response = fftconvolve(H, kernel, mode="same") if fft is None else fft(H, kernel)
+    response = fftconvolve(H, kernel, mode="same")
     if dog_radius_px:
         response = dog_bandpass(response, dog_radius_px)
     rmax = float(response.max()) if response.size else 0.0
@@ -610,16 +607,12 @@ def ring_validation_mask(xy, centers, radius_nm: float, rim_nm: float, *,
 def convolution_maps(xy: np.ndarray, *, model_key: str, params: dict, pixel_size_nm: float,
                      zero_mean: bool = DEFAULT_ZERO_MEAN, sqrt_stabilize: bool = DEFAULT_SQRT,
                      dog: bool = DEFAULT_DOG, budget_bytes: int = DEFAULT_MEMORY_BUDGET,
-                     report: Callable[[str], None] = lambda text: None,
-                     cuda_settings: CudaFftSettings | None = None) -> dict:
+                     report: Callable[[str], None] = lambda text: None) -> dict:
     """Captured-input numerical preview, reusable independently of thresholding."""
-    estimate = preflight_convolution(xy, model_key, params, pixel_size_nm, budget_bytes=budget_bytes)
+    preflight_convolution(xy, model_key, params, pixel_size_nm, budget_bytes=budget_bytes)
     import scipy
     backend = dict(backend="cpu-scipy", scipy=scipy.__version__, dtype="float64",
                    axes=[0, 1], mode="same", boundary="zero")
-    if cuda_settings is not None:
-        cuda_settings.preflight(estimate.image_shape, estimate.kernel_shape)
-        backend = dict(backend="cuda-cupy", status="not-run", dtype="float64")
     report("Building convolution kernel")
     kernel = build_kernel(model_key, params, pixel_size_nm, zero_mean=zero_mean,
                           budget_bytes=budget_bytes)
@@ -634,17 +627,7 @@ def convolution_maps(xy: np.ndarray, *, model_key: str, params: dict, pixel_size
     model = get_model(model_key)
     radius = .5 * model.size({**model.defaults(), **params}) / pixel_size_nm if dog else None
     report("FFT convolution")
-    def accelerated(image, kernel):
-        assert cuda_settings is not None
-        response, provenance = cuda_fftconvolve(
-            image, kernel, cuda_settings,
-            check_cancelled=lambda: report("CUDA FFT convolution"))
-        backend.clear()
-        backend.update(provenance)
-        return response
-
-    response = convolve_response(H_conv, kernel, dog_radius_px=radius, budget_bytes=budget_bytes,
-                                 fft=accelerated if cuda_settings is not None else None)
+    response = convolve_response(H_conv, kernel, dog_radius_px=radius, budget_bytes=budget_bytes)
     out.update(histogram=H, response_map=response, xedge=xedge, yedge=yedge)
     return out
 
