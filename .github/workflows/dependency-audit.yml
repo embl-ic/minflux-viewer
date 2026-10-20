@@ -7,8 +7,8 @@
 #            the project itself; neither is part of the lock.
 #   vendored the pip that the frozen app carries for its plugin package
 #            installer (tools/vendor_pip.py, DEFAULT_PIP_VERSION). It is not a
-#            declared dependency, so Dependabot does not see it; it is vendored
-#            here exactly as a build would do it and audited as installed.
+#            declared dependency, so it is vendored here exactly as a build
+#            would do it and audited as installed.
 #
 # Runs on every push and weekly, because an advisory can appear for a version
 # that has not changed. Windows, like the release builds, so the lock resolves

@@ -14,7 +14,7 @@
 # libraries are what differ there, and the pure tests are where they show.
 # Dependencies come from poetry.lock, including the PyInstaller "build" group,
 # which the packaging tests need. Actions are pinned to a commit, with the
-# release in a comment; Dependabot (.github/dependabot.yml) proposes updates.
+# release in a comment; they are updated by hand.
 # Known vulnerabilities are checked by dependency-audit.yml.
 
 name: CI
