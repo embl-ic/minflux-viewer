@@ -41,6 +41,12 @@ MINFLUX data exists in several structural versions (`m2410`, `m2205`, and older
   precision, or trace length), applied across all views.
 - Iteration/validity browsing; filters are re-evaluated across iterations. Filter
   definitions can be saved and reloaded.
+- **Auto** filtering from editable rules (Preferences ▸ Process ▸ Filter): an upper
+  `efo` bound from a single- plus double-emitter model of the photon rates (fitted in
+  log space, double emitters at exactly twice the single rate, no histogram binning),
+  a robust `cfr` bound (median + k·σ from the median absolute deviation), and a
+  trace-length range. Every suggested bound is reported and lands in an ordinary
+  filter row.
 
 ## Regions of interest
 
@@ -49,7 +55,8 @@ MINFLUX data exists in several structural versions (`m2410`, `m2205`, and older
 
 ## Analysis
 
-- Local density; localization precision (StdDev, CRLB, FRC); Z scaling factor estimation from trace anisotropy
+- Local density; localization precision (StdDev, CRLB) and FRC resolution, also as it
+  develops over acquisition time; Z scaling factor estimation from trace anisotropy
   estimation; DCR channel separation; structure segmentation (NPC ring detection
   and general 2-D/3-D convolution matched-filter); sub-unit clustering; and
   particle averaging, including a canonical NPC two-ring model fit that reports
@@ -143,6 +150,14 @@ the grid. Refusals ask for a smaller region or a larger voxel size and never
 downsample the data silently.
 
 ---
+
+## Documentation
+
+The [`docs/`](docs) folder holds the published documentation:
+
+- [`docs/scripting-api.md`](docs/scripting-api.md) — the `mfv` scripting and plugin API.
+- [`docs/zarr-v2-format.md`](docs/zarr-v2-format.md) — the MINFLUX Viewer Zarr v2 dataset format.
+- [`docs/ui-designer.md`](docs/ui-designer.md) — editing the main window with Qt Designer.
 
 ## For developers
 

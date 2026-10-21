@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+The Filter dialog has an **Auto** button that adds one ordinary, editable
+filter row per rule, with every bound reported in the dialog, the Log and the
+generated method text. Rules live in a new Preferences > Process page (Filter,
+Channel, ROI sections) and run in order, each on the data the earlier filters
+let through. Defaults: an `efo` single-emitter cut from a single- plus
+double-emitter model fitted in log space (double emitters held at exactly twice
+the single rate; the values are dequantized and no histogram bin size is
+involved, with an explicit fallback when single emitters do not dominate), a
+robust `cfr` bound (median + 2.5·σ from the median absolute deviation, Leys et
+al. 2013) and at least 10 localizations per trace up to the 99th percentile.
+Filter... moved from Edit to the top of the Process menu. Deleting a filter row
+no longer leaves the buttons of the rows below acting on the wrong row.
+
+Analyze > Loc Precision / Resolution lists CRLB and StdDev per Trace, then FRC
+Resolution Estimation below a separator. The FRC window can follow the
+resolution over acquisition time: FRC on cumulative time windows, all on the
+whole dataset's field of view and pixel size, computed in the background, with
+the per-split spread as error bars; the last window reproduces the
+whole-acquisition value.
+
+Raw `.npy` exports use the layout Imspector itself writes (boolean flags, an
+N×k `dcr`), so readers written against Imspector's files can open them; older
+exports still load. PNG and JPEG figure exports record the resolution they
+were drawn at. The public documentation now lives in `docs/`.
+
 Scripting API 1.4 adds detached CPU load/save and sequential batch processing,
 with no-overwrite outputs, cooperative cancellation and hash-verified resume.
 The folder template runs CPU work in the background. Unimplemented built-in
