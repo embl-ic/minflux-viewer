@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## v0.4.5
+
+Adds data-driven Auto filtering, FRC resolution over acquisition time and raw `.npy`
+exports in Imspector's own layout, on top of a broad stabilization release: safer
+background work and exports, signed-update verification, CPU 3-D convolution and
+scripting API 1.4 (detached load/save and resumable batches).
 
 The Filter dialog has an **Auto** button that adds one ordinary, editable
 filter row per rule, with every bound reported in the dialog, the Log and the
