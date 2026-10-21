@@ -450,7 +450,7 @@ def _configure_menus(self: MainWindow) -> None:
     u.actionRender.setText("Render")
     u.actionLog.setText("Log (Events)")
     u.actionConsole.setText("Console (stdout / stderr)")
-    u.actionLocPrecisionFrc.setText("FRC (Fourier Ring Correlation)")
+    u.actionLocPrecisionFrc.setText("FRC Resolution Estimation")
     u.actionLocPrecisionCrlb.setText("CRLB (Cramer-Rao Lower Bound)")
     u.actionLocPrecisionStdDev.setText("StdDev per Trace")
     u.actionLocalDensity.setText("Local Density")
@@ -488,7 +488,16 @@ def _configure_menus(self: MainWindow) -> None:
     self.actionSaveAsOmeTiff.setText("OME-TIFF...")
     u.menuBatchProcessing.setTitle("Batch Processing")
     u.menuAnalysis.setTitle("Analyze")
-    u.menuLocPrecision.setTitle("Localization Precision")
+    # Precision (how well one emitter is localized) and resolution (how finely
+    # the reconstruction resolves structure) are different quantities with no
+    # honest common name, so the menu names both and a separator keeps them
+    # apart: the per-localization estimators first, the image measure below.
+    u.menuLocPrecision.setTitle("Loc Precision / Resolution")
+    u.menuLocPrecision.clear()
+    u.menuLocPrecision.addAction(u.actionLocPrecisionCrlb)
+    u.menuLocPrecision.addAction(u.actionLocPrecisionStdDev)
+    u.menuLocPrecision.addSeparator()
+    u.menuLocPrecision.addAction(u.actionLocPrecisionFrc)
     u.menuTracking.setTitle("Tracking")
     self._keep_standard_actions_in_declared_menus()
     u.menuFile.clear()
@@ -522,7 +531,6 @@ def _configure_menus(self: MainWindow) -> None:
     self._rebuild_sample_menu()          # populate File › Open Sample Data presets
     u.menuEdit.clear()
     u.menuEdit.addAction(u.actionDatasetManager)
-    u.menuEdit.addAction(u.actionFilter)
     u.menuEdit.addSeparator()
     u.menuEdit.addAction(u.actionDuplicate)
     u.menuEdit.addSeparator()
@@ -539,6 +547,7 @@ def _configure_menus(self: MainWindow) -> None:
     u.menuView.addAction(u.actionLog)
     u.menuView.setToolTipsVisible(True)
     u.menuProcess.clear()
+    u.menuProcess.addAction(u.actionFilter)
     u.menuProcess.addAction(self.menuProcessChannel.menuAction())
     u.menuProcess.addAction(self.menuProcessRoi.menuAction())
     u.menuProcess.addAction(self.actionAggregate)

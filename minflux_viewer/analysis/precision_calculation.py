@@ -244,6 +244,9 @@ class FRCResult:
     status: str               # "" or a human-readable note
     mode: str = "localization"  # "localization" | "combined"
     n_points: int = 0           # points fed to FRC (locs, or traces if combined)
+    # Resolution read from each random split's own curve (NaN where one never
+    # crossed): their spread says how much the headline depends on the split.
+    repeat_resolutions_nm: np.ndarray = field(default_factory=lambda: np.empty(0))
 
 
 def _radial_frc(img1: np.ndarray, img2: np.ndarray,
@@ -306,6 +309,7 @@ def frc_resolution(
     threshold: float = FRC_THRESHOLD,
     seed: int = 0,
     progress=None,
+    fov_nm: tuple[float, float, float, float] | None = None,
 ) -> FRCResult:
     """Estimate image resolution by Fourier Ring Correlation.
 
@@ -335,6 +339,10 @@ def frc_resolution(
         Number of independent random half-splits whose FRC curves are averaged.
     threshold : float
         Resolution criterion (default 1/7).
+    fov_nm : (x0, x1, y0, y1), optional
+        Render this field of view instead of the points' own extent, so several
+        calls (the cumulative windows of :func:`frc_time_course`) share one grid
+        and their curves are sampled at the same frequencies.
     """
     x = np.asarray(x_nm, dtype=float).ravel()
     y = np.asarray(y_nm, dtype=float).ravel()
@@ -365,23 +373,15 @@ def frc_resolution(
     if n_points < 20:
         return _fail(f"Too few {pts} for FRC (need ≥ 20).")
 
-    x0, x1 = float(x.min()), float(x.max())
-    y0, y1 = float(y.min()), float(y.max())
+    if fov_nm is not None:
+        x0, x1, y0, y1 = (float(v) for v in fov_nm)
+    else:
+        x0, x1 = float(x.min()), float(x.max())
+        y0, y1 = float(y.min()), float(y.max())
     extent = max(x1 - x0, y1 - y0)
     if extent <= 0:
         return _fail("Localizations span zero area — cannot render an image.")
-
-    # Size the square grid so it always *covers* the data extent. When the pixel
-    # is user-specified, derive the grid size from it (capped). Otherwise target
-    # a fine ~1 nm pixel (the reference value), growing the grid from ``image_px``
-    # up to the cap so large fields of view still resolve without a recompute.
-    if pixel_size_nm and pixel_size_nm > 0:
-        pixel = float(pixel_size_nm)
-        n_px = int(min(FRC_MAX_IMAGE_PX, max(64, np.ceil(extent / pixel))))
-    else:
-        n_px = int(min(FRC_MAX_IMAGE_PX,
-                       max(int(image_px), np.ceil(extent / FRC_TARGET_PIXEL_NM))))
-        pixel = extent / n_px
+    n_px, pixel = _frc_grid(extent, pixel_size_nm, image_px)
     # Centre the (square) field of view on the data.
     cx_mid, cy_mid = 0.5 * (x0 + x1), 0.5 * (y0 + y1)
     half = 0.5 * n_px * pixel
@@ -417,6 +417,11 @@ def frc_resolution(
     keep = freq <= 0.8 * freq[-1]
     freq, frc_mean, frc_std = freq[keep], frc_mean[keep], frc_std[keep]
 
+    repeat_res = []
+    for curve in frc_stack[:, keep]:
+        q_i = _frc_crossing(freq, _smooth_frc(curve), threshold)
+        repeat_res.append(1.0 / q_i if np.isfinite(q_i) and q_i > 0 else float("nan"))
+
     qc = _frc_crossing(freq, _smooth_frc(frc_mean), threshold)
     status = ""
     if not np.isfinite(qc):
@@ -434,7 +439,171 @@ def frc_resolution(
         threshold=threshold, resolution_nm=float(resolution), crossing_freq=float(qc),
         pixel_size_nm=pixel, image_px=n_px, n_locs=n_locs,
         n_repeats=len(curves), status=status, mode=mode_used, n_points=n_points,
+        repeat_resolutions_nm=np.asarray(repeat_res, dtype=float),
     )
+
+
+def _frc_grid(extent: float, pixel_size_nm: float | None, image_px: int) -> tuple[int, float]:
+    """``(pixels per side, pixel size)`` of the square FRC render grid.
+
+    The grid always *covers* the extent. A user-specified pixel sets the grid
+    size (capped); otherwise a fine ~2 nm pixel is targeted, the grid growing from
+    ``image_px`` up to the cap so a large field of view still resolves.
+    """
+    if pixel_size_nm and pixel_size_nm > 0:
+        pixel = float(pixel_size_nm)
+        # The tolerance keeps a pixel read back from an automatic grid
+        # (extent / n) from rounding up to n + 1 pixels.
+        n_px = int(min(FRC_MAX_IMAGE_PX, max(64, np.ceil(extent / pixel - 1e-9))))
+    else:
+        n_px = int(min(FRC_MAX_IMAGE_PX,
+                       max(int(image_px), np.ceil(extent / FRC_TARGET_PIXEL_NM))))
+        pixel = extent / n_px
+    return n_px, pixel
+
+
+# ---------------------------------------------------------------------------
+# FRC over acquisition time
+# ---------------------------------------------------------------------------
+#
+# The resolution a MINFLUX image reaches depends on how much of the acquisition
+# went into it: early on it is limited by labelling coverage (too few emitters
+# have been localized to sample the structure), later by localization precision
+# and drift. Evaluating FRC on cumulative windows [t0, t_k] shows where the
+# curve levels off -- whether a longer acquisition would still have improved the
+# image, or whether it stopped paying off. Every window is rendered on the same
+# grid (the whole dataset's field of view and pixel) so the curves are sampled at
+# the same frequencies and the windows differ only in the localizations used.
+
+FRC_TIME_DEFAULT_STEPS: int = 10
+
+
+@dataclass
+class FRCTimeCourse:
+    t0_s: float                 # first localization's time (s)
+    times_s: np.ndarray         # end of each cumulative window, relative to t0 (s)
+    resolution_nm: np.ndarray   # resolution of each window's split-averaged curve
+    spread_nm: np.ndarray       # SD of the per-split resolutions (NaN if < 2)
+    n_points: np.ndarray        # points fed to FRC per window
+    n_repeats: int
+    pixel_size_nm: float
+    image_px: int
+    mode: str
+    statuses: list[str] = field(default_factory=list)
+
+    @property
+    def final_resolution_nm(self) -> float:
+        finite = self.resolution_nm[np.isfinite(self.resolution_nm)]
+        return float(finite[-1]) if finite.size else float("nan")
+
+
+def frc_window_ends(t_s: np.ndarray, *, n_steps: int = FRC_TIME_DEFAULT_STEPS,
+                    step_s: float | None = None) -> np.ndarray:
+    """Ends of the cumulative windows, in the units of *t_s*.
+
+    ``step_s`` > 0 places one every ``step_s`` after the first localization (the
+    last window always ends at the last one); otherwise ``n_steps`` equal steps.
+    """
+    t = np.asarray(t_s, dtype=float)
+    t = t[np.isfinite(t)]
+    if t.size == 0:
+        return np.empty(0)
+    t0, t1 = float(t.min()), float(t.max())
+    if not t1 > t0:
+        return np.array([t1])
+    if step_s is not None and step_s > 0:
+        ends = t0 + step_s * np.arange(1, int(np.ceil((t1 - t0) / step_s)) + 1)
+        ends = ends[ends < t1]
+        return np.append(ends, t1)
+    return np.linspace(t0, t1, max(1, int(n_steps)) + 1)[1:]
+
+
+def frc_time_course(
+    x_nm: np.ndarray,
+    y_nm: np.ndarray,
+    t_s: np.ndarray,
+    tid: np.ndarray | None = None,
+    *,
+    n_steps: int = FRC_TIME_DEFAULT_STEPS,
+    step_s: float | None = None,
+    mode: str = "localization",
+    pixel_size_nm: float | None = None,
+    repeats: int = FRC_DEFAULT_REPEATS,
+    threshold: float = FRC_THRESHOLD,
+    seed: int = 0,
+    progress=None,
+) -> FRCTimeCourse:
+    """FRC resolution of the cumulative windows ``[t0, t_k]`` of an acquisition.
+
+    Each window is an ordinary :func:`frc_resolution` (same mode, threshold and
+    number of random splits) on the localizations recorded up to ``t_k``, all on
+    the full dataset's field of view and pixel. ``progress(done, total)`` is
+    called after every split of every window and is also where a caller cancels.
+    """
+    x = np.asarray(x_nm, dtype=float).ravel()
+    y = np.asarray(y_nm, dtype=float).ravel()
+    t = np.asarray(t_s, dtype=float).ravel()
+    if not (x.shape == y.shape == t.shape):
+        raise ValueError("x, y and t must have one value per localization")
+    tid_arr = None if tid is None else np.asarray(tid).ravel()
+    if tid_arr is not None and tid_arr.shape != x.shape:
+        raise ValueError("tid must have one value per localization")
+    finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(t)
+    x, y, t = x[finite], y[finite], t[finite]
+    if tid_arr is not None:
+        tid_arr = tid_arr[finite]
+    empty = FRCTimeCourse(t0_s=float("nan"), times_s=np.empty(0), resolution_nm=np.empty(0),
+                          spread_nm=np.empty(0), n_points=np.empty(0, dtype=int),
+                          n_repeats=int(repeats), pixel_size_nm=float("nan"), image_px=0,
+                          mode=mode)
+    if x.size == 0:
+        empty.statuses.append("No localization has finite coordinates and time.")
+        return empty
+    fov = (float(x.min()), float(x.max()), float(y.min()), float(y.max()))
+    extent = max(fov[1] - fov[0], fov[3] - fov[2])
+    if extent <= 0:
+        empty.statuses.append("Localizations span zero area — cannot render an image.")
+        return empty
+    n_px, pixel = _frc_grid(extent, pixel_size_nm, FRC_DEFAULT_IMAGE_PX)
+
+    ends = frc_window_ends(t, n_steps=n_steps, step_s=step_s)
+    total = max(1, ends.size * max(1, int(repeats)))
+    res, spread, counts, statuses = [], [], [], []
+    for k, end in enumerate(ends):
+        # A boolean mask keeps the points in their original order and every
+        # window uses the same seed, so the last window -- all localizations --
+        # repeats the whole-acquisition FRC split for split.
+        upto = t <= end
+
+        def window_progress(done, _total, k=k):
+            if progress is not None:
+                progress(k * max(1, int(repeats)) + done, total)
+
+        result = frc_resolution(
+            x[upto], y[upto], None if tid_arr is None else tid_arr[upto],
+            mode=mode, pixel_size_nm=pixel, repeats=repeats, threshold=threshold,
+            seed=seed, progress=window_progress, fov_nm=fov)
+        res.append(result.resolution_nm if not result.status.startswith("Too few")
+                   else float("nan"))
+        per_split = result.repeat_resolutions_nm[np.isfinite(result.repeat_resolutions_nm)]
+        spread.append(float(np.std(per_split, ddof=1)) if per_split.size >= 2 else float("nan"))
+        counts.append(int(result.n_points))
+        if result.status:
+            statuses.append(f"window {k + 1} (≤ {end - float(t.min()):.4g} s): {result.status}")
+    return FRCTimeCourse(
+        t0_s=float(t.min()), times_s=ends - float(t.min()),
+        resolution_nm=np.asarray(res, dtype=float), spread_nm=np.asarray(spread, dtype=float),
+        n_points=np.asarray(counts, dtype=int), n_repeats=int(repeats),
+        pixel_size_nm=float(pixel), image_px=int(n_px), mode=mode, statuses=statuses)
+
+
+def frc_time_course_log_line(name: str, course: FRCTimeCourse) -> str:
+    """The Log/journal line for a time course; ``method_rules`` renders it."""
+    span = float(course.times_s[-1]) if course.times_s.size else float("nan")
+    return (f"Resolution over acquisition time (FRC) of '{name}': "
+            f"{course.times_s.size} cumulative windows over {span:.1f} s, "
+            f"final {course.final_resolution_nm:.2f} nm (1/7 threshold, {course.mode}, "
+            f"{course.n_repeats} splits per window, pixel {course.pixel_size_nm:.2f} nm).")
 
 
 # ---------------------------------------------------------------------------

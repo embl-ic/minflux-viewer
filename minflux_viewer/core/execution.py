@@ -61,6 +61,7 @@ POOLS: dict[str, PoolPolicy] = {
     "particle-average": PoolPolicy("analysis", 1, "particle averaging"),
     "convolution-segmentation": PoolPolicy("analysis", 1, "bounded convolution previews and detection"),
     "drift-correction": PoolPolicy("analysis", 1, "drift correction"),
+    "resolution-analysis": PoolPolicy("analysis", 1, "FRC resolution over acquisition time"),
     "tracking-analysis": PoolPolicy("analysis", 1, "tracking analysis"),
     "mfv-script": PoolPolicy("analysis", 2, "mfv.run.background from scripts and plugins"),
     # io: reading and writing files
@@ -73,8 +74,10 @@ POOLS: dict[str, PoolPolicy] = {
     "update-check": PoolPolicy("io", 1, "checking for an application update"),
 }
 
-#: The most threads each queue may run at once.
-QUEUE_LIMITS: dict[str, int] = {"interactive": 14, "analysis": 8, "io": 11}
+#: The most threads each queue may run at once. (analysis went 8 -> 9 with
+#: ``resolution-analysis``; its FFTs lease native threads from CPU_THREADS like
+#: every other analysis, so the extra pool thread mostly waits on them.)
+QUEUE_LIMITS: dict[str, int] = {"interactive": 14, "analysis": 9, "io": 11}
 
 
 def _check_policy() -> None:

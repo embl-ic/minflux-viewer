@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
@@ -93,11 +95,15 @@ def run_frc(parent, state) -> None:
     y = np.asarray(loc_y, dtype=float) * 1.0e9
     tid = ds.attr.get("tid")
     tid = None if tid is None else np.asarray(tid)
+    tim = attr_values_1d(ds, "tim")
+    tim = None if tim is None or np.asarray(tim).shape != x.shape else np.asarray(tim, dtype=float)
     ftr = np.asarray(ds.filter_mask, dtype=bool)
     if ftr.shape[0] == x.shape[0]:
         x, y = x[ftr], y[ftr]
         if tid is not None:
             tid = tid[ftr]
+        if tim is not None:
+            tim = tim[ftr]
 
     with state.task(f"Computing FRC of dataset {ds.name}…") as t:
         result = _calculation.frc_resolution(
@@ -114,7 +120,8 @@ def run_frc(parent, state) -> None:
 
     # Modeless result window (project convention for analysis output).
     from minflux_viewer.ui.common.modeless import show_modeless
-    show_modeless(FRCResultDialog(result, x, y, tid), parent)
+    show_modeless(FRCResultDialog(result, x, y, tid, t_s=tim, state=state,
+                                  dataset_name=ds.name), parent)
 
 
 def run_stddev_per_trace(parent, state) -> None:
@@ -396,12 +403,20 @@ class FRCResultDialog(QDialog):
     """
 
     def __init__(self, result: FRCResult, x_nm: np.ndarray, y_nm: np.ndarray,
-                 tid: np.ndarray | None = None, parent=None) -> None:
+                 tid: np.ndarray | None = None, parent=None, *,
+                 t_s: np.ndarray | None = None, state=None, dataset_name: str = "") -> None:
         super().__init__(parent)
-        self._x, self._y, self._tid = x_nm, y_nm, tid
-        self.setWindowTitle("Localization Precision — FRC resolution")
+        self._x, self._y, self._tid, self._t = x_nm, y_nm, tid, t_s
+        self._state = state
+        self._dataset_name = dataset_name
+        self._result = result
+        self._course = None            # FRCTimeCourse, kept across rebuilds
+        self._course_task: Any = None   # BackgroundTask while one runs
+        self._course_settings = (_calculation.FRC_TIME_DEFAULT_STEPS, result.n_repeats or 5)
+        self._tab_index = 0
+        self.setWindowTitle("Resolution — FRC")
         self.setModal(False)
-        self.resize(820, 700)
+        self.resize(820, 760)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
@@ -414,6 +429,7 @@ class FRCResultDialog(QDialog):
         # Clear any previously built widgets (on recompute), sub-layouts included.
         _clear_layout(self._root)
         root = self._root
+        self._result = result
         res = result.resolution_nm
 
         if result.mode == "combined":
@@ -444,16 +460,25 @@ class FRCResultDialog(QDialog):
             warn.setStyleSheet("color: #d2a24a; font-size: 11px;")
             root.addWidget(warn)
 
+        # The curve and the time course share one tab widget, so neither is
+        # squeezed by the other on a screen of ordinary height.
+        from PyQt6.QtWidgets import QTabWidget
+
+        self._tabs = QTabWidget()
         try:
-            grp = QGroupBox("FRC curve")
-            box = QVBoxLayout(grp)
+            curve_page = QWidget()
+            box = QVBoxLayout(curve_page)
             box.setContentsMargins(8, 8, 8, 8)
             box.addWidget(_frc_curve_plot(result))
-            root.addWidget(grp, stretch=1)
+            self._tabs.addTab(curve_page, "FRC curve")
         except Exception as exc:
             warn = QLabel(f"FRC plot could not be created: {exc}")
             warn.setStyleSheet("color: #a66;")
             root.addWidget(warn)
+        self._tabs.addTab(self._build_time_course(), "Over acquisition time")
+        self._tabs.setCurrentIndex(min(self._tab_index, self._tabs.count() - 1))
+        self._tabs.currentChanged.connect(self._remember_tab)
+        root.addWidget(self._tabs, stretch=1)
 
         note = QLabel(
             "The localizations are split into two independent images by a random "
@@ -472,7 +497,11 @@ class FRCResultDialog(QDialog):
             "are localized many times; <b>per-trace combined</b> first collapses each "
             "trace to its mean position, so it measures the resolution of the molecule "
             "positions themselves (one point per emitter) — the value Ostersehlt "
-            "<i>et al.</i> report beside the per-localization one."
+            "<i>et al.</i> report beside the per-localization one.<br>"
+            "<i>Over acquisition time</i>: the same FRC on the localizations recorded "
+            "up to the end of each cumulative window, all on this field of view and "
+            "pixel, so the curve shows when the resolution stops improving. Error "
+            "bars: standard deviation of the per-split resolutions."
             + _references_html(
                 "<a href='https://www.nature.com/articles/s41592-019-0688-0'>Gwosch "
                 "<i>et al.</i>, <i>Nat. Methods</i> 17:217 (2020)</a>",
@@ -531,15 +560,191 @@ class FRCResultDialog(QDialog):
         except Exception as exc:
             self._status_lbl.setText(f"failed: {exc}")
             return
+        self._retire_course_task()
+        self._course = None      # it belonged to the previous mode / pixel
         self._build(result)
         self._status_lbl.setText(f"recomputed ({result.mode}) @ {pixel:.2f} nm/px")
+
+    # -- resolution over acquisition time --------------------------------
+    def _remember_tab(self, index: int) -> None:
+        self._tab_index = int(index)
+
+    def _build_time_course(self) -> QWidget:
+        from PyQt6.QtWidgets import QSpinBox
+
+        grp = QWidget()
+        box = QVBoxLayout(grp)
+        box.setContentsMargins(8, 8, 8, 8)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("cumulative windows:"))
+        self._course_steps = QSpinBox()
+        self._course_steps.setRange(2, 100)
+        self._course_steps.setValue(int(self._course_settings[0]))
+        self._course_steps.setToolTip(
+            "Number of equal time steps; window k holds every localization recorded "
+            "from the first one up to the end of step k.")
+        row.addWidget(self._course_steps)
+        row.addSpacing(8)
+        row.addWidget(QLabel("splits per window:"))
+        self._course_splits = QSpinBox()
+        self._course_splits.setRange(1, 50)
+        self._course_splits.setValue(int(self._course_settings[1]))
+        self._course_splits.setToolTip("Random half-splits averaged in each window (as above).")
+        row.addWidget(self._course_splits)
+        row.addStretch()
+        self._course_status = QLabel("")
+        self._course_status.setStyleSheet("color: gray;")
+        row.addWidget(self._course_status)
+        self._course_btn = QPushButton("Compute")
+        self._course_btn.setToolTip(
+            "Run the FRC above (same mode and pixel) on each cumulative window, "
+            "in the background.")
+        self._course_btn.clicked.connect(self._start_time_course)
+        row.addWidget(self._course_btn)
+        self._course_stop = QPushButton("Stop")
+        self._course_stop.setEnabled(self._course_task is not None)
+        self._course_stop.clicked.connect(self._stop_time_course)
+        row.addWidget(self._course_stop)
+        box.addLayout(row)
+
+        has_time = self._t is not None and np.isfinite(np.asarray(self._t, dtype=float)).any()
+        if not has_time:
+            self._course_btn.setEnabled(False)
+            self._course_status.setText("this dataset has no time stamps (tim)")
+        elif self._course_task is not None:
+            self._course_btn.setEnabled(False)
+            self._course_status.setText("computing …")
+        if self._course is not None:
+            box.addWidget(_frc_time_course_plot(self._course))
+            if self._course.statuses:
+                warn = QLabel("<br>".join(self._course.statuses[:4]))
+                warn.setWordWrap(True)
+                warn.setStyleSheet("color: #d2a24a; font-size: 11px;")
+                box.addWidget(warn)
+        else:
+            hint = QLabel(
+                "FRC of the localizations recorded up to the end of each cumulative "
+                "window, with this window's mode and pixel. Press Compute.")
+            hint.setWordWrap(True)
+            hint.setStyleSheet("color: gray;")
+            box.addWidget(hint)
+            box.addStretch(1)
+        return grp
+
+    def _start_time_course(self) -> None:
+        if self._t is None or self._course_task is not None:
+            return
+        from minflux_viewer.ui.common.background_tasks import BackgroundTask, shared_thread_pool
+
+        steps = int(self._course_steps.value())
+        splits = int(self._course_splits.value())
+        self._course_settings = (steps, splits)
+        result = self._result
+        x, y, t = self._x, self._y, self._t
+        tid = self._tid if result.mode == "combined" else None
+        mode, pixel = result.mode, result.pixel_size_nm
+
+        def work(report):
+            def progress(done, total):
+                report(f"FRC over acquisition time  {100.0 * done / max(1, total):.0f}%")
+            return _calculation.frc_time_course(
+                x, y, t, tid, n_steps=steps, mode=mode, pixel_size_nm=pixel,
+                repeats=splits, progress=progress)
+
+        task = BackgroundTask(work, description="FRC over acquisition time",
+                              category="analysis", estimated_bytes=48 * int(np.size(x)))
+        task.signals.stage.connect(self._on_course_stage)
+        task.signals.done.connect(self._on_course_done)
+        task.signals.failed.connect(self._on_course_failed)
+        task.signals.cancelled.connect(self._on_course_cancelled)
+        task.signals.finished.connect(self._on_course_finished)
+        self._course_task = task
+        self._course_btn.setEnabled(False)
+        self._course_stop.setEnabled(True)
+        self._course_status.setText("computing …")
+        shared_thread_pool("resolution-analysis").start(task)
+
+    def _stop_time_course(self) -> None:
+        if self._course_task is not None:
+            self._course_task.cancel()
+            self._course_status.setText("stopping …")
+
+    def _on_course_stage(self, text: str) -> None:
+        try:
+            self._course_status.setText(text.rsplit("  ", 1)[-1])
+        except RuntimeError:
+            pass
+
+    def _on_course_done(self, course) -> None:
+        self._course = course
+        self._tab_index = 1
+        if self._state is not None and course.times_s.size:
+            _try_journal(self._state, _calculation.frc_time_course_log_line(
+                self._dataset_name, course))
+        self._build(self._result)
+
+    def _on_course_failed(self, message: str) -> None:
+        self._course_status.setText(f"failed: {message}")
+
+    def _on_course_cancelled(self) -> None:
+        self._course_status.setText("stopped")
+
+    def _on_course_finished(self) -> None:
+        from minflux_viewer.ui.common.background_tasks import detach_task_signals
+
+        if self._course_task is not None:
+            detach_task_signals(self._course_task)
+        self._course_task = None
+        try:
+            self._course_stop.setEnabled(False)
+            self._course_btn.setEnabled(self._t is not None)
+        except RuntimeError:
+            pass
+
+    def _retire_course_task(self) -> None:
+        from minflux_viewer.ui.common.background_tasks import retire_background_tasks
+
+        if self._course_task is not None:
+            retire_background_tasks([self._course_task])
+            self._course_task = None
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
         """Retire this window's pyqtgraph plots before Qt deletes them."""
         from minflux_viewer.ui.common.qt_lifecycle import dispose_plot_widgets
 
+        self._retire_course_task()
         dispose_plot_widgets(self)
         super().closeEvent(event)
+
+
+def _frc_time_course_plot(course):
+    """Resolution of each cumulative window against acquisition time."""
+    import pyqtgraph as pg
+
+    pw = pg.PlotWidget(background="#222")
+    pw.setMinimumHeight(240)
+    pw.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+    pw.showGrid(x=True, y=True, alpha=0.22)
+    span = float(course.times_s[-1]) if course.times_s.size else 0.0
+    minutes = span > 180.0
+    t = course.times_s / 60.0 if minutes else course.times_s
+    pw.setLabel("bottom", "acquisition time up to (min)" if minutes else "acquisition time up to (s)")
+    pw.setLabel("left", "FRC resolution (nm)")
+    finite = np.isfinite(course.resolution_nm)
+    if not np.any(finite):
+        pw.setTitle("No window had enough points for FRC")
+        return pw
+    color = _precision_color("FRC resolution")
+    pw.plot(t[finite], course.resolution_nm[finite],
+            pen=pg.mkPen(color, width=2.0), symbol="o", symbolSize=7,
+            symbolBrush=color, symbolPen=None)
+    spread = np.where(np.isfinite(course.spread_nm), course.spread_nm, 0.0)
+    pw.addItem(pg.ErrorBarItem(x=t[finite], y=course.resolution_nm[finite],
+                               height=2.0 * spread[finite], beam=0.0,
+                               pen=pg.mkPen(color, width=1.2)))
+    pw.setTitle(f"final {course.final_resolution_nm:.2f} nm  ·  {course.mode}, "
+                f"{course.n_repeats} splits per window, pixel {course.pixel_size_nm:.2f} nm")
+    return pw
 
 
 def _res(val: float) -> str:

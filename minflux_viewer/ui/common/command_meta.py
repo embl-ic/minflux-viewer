@@ -125,8 +125,6 @@ COMMAND_META: dict[str, CommandMeta] = {
     # ---- Edit -----------------------------------------------------------------
     "actionDatasetManager": CommandMeta(U + 'tools/dataset_manager.py', ("datasets", "layers", "manager", "list"),
                               "Open the Dataset Manager (list / activate / organize datasets).", "edit", gui_class=GuiClass.GUI_ONLY),
-    "actionFilter": CommandMeta(U + 'dialogs/filter_dialog.py', ("threshold", "gate", "select", "efo", "cfr", "dcr"),
-                              "Filter localizations by attribute ranges.", "edit", gui_class=GuiClass.GUI_RESULT),
     "actionDuplicate": CommandMeta(C + "roi_crop.py", ("crop", "copy", "subset", "roi"),
                               "Duplicate / crop the dataset (optionally to an ROI).", "edit", gui_class=GuiClass.GUI_RESULT),
     "actionPreferences": CommandMeta(U + 'settings/preferences_dialog.py', ("settings", "options", "config"),
@@ -165,6 +163,14 @@ COMMAND_META: dict[str, CommandMeta] = {
                               gui_class=GuiClass.GUI_ONLY,
                               record="mfv.view.render()"),
     "actionLog": CommandMeta(U + 'tools/log_window.py', ("events", "messages"), "Event log window.", "view", gui_class=GuiClass.GUI_ONLY),
+
+    # ---- Process ----------------------------------------------------------------
+    "actionFilter": CommandMeta(U + 'dialogs/filter_dialog.py',
+                              ("threshold", "gate", "select", "efo", "cfr", "dcr", "auto", "outlier",
+                               "mad", "percentile"),
+                              "Filter localizations by attribute ranges; Auto adds data-derived bounds "
+                              "from the Preferences ▸ Process ▸ Filter rules.", "process",
+                              gui_class=GuiClass.GUI_RESULT),
 
     # ---- Process › Channel ----------------------------------------------------
     "actionChannelTool": CommandMeta(U + 'analysis/channel_combine_dialog.py', ("channel", "multicolor"),
@@ -280,15 +286,20 @@ COMMAND_META: dict[str, CommandMeta] = {
                               inputs=("active dataset (loc, tid)",),
                               outputs=("per-trace σ (x,y,z) nm", "median σ"), gui_class=GuiClass.GUI_FREE),
     "actionLocPrecisionCrlb": CommandMeta(A + "localization_precision.py",
-                              ("precision", "crlb", "cramer rao", "photons", "eco", "mortensen"),
-                              "Cramér-Rao lower bound from eco/efo/fbg at the last valid iteration. "
-                              "Ref: Mortensen 2010.", "analysis",
+                              ("precision", "crlb", "cramer rao", "photons", "eco", "balzarotti"),
+                              "MINFLUX Cramér-Rao bound of the targeted-donut model from the "
+                              "measured photon counts and background. Refs: Balzarotti 2017, "
+                              "Marin & Ries 2024.", "analysis",
                               inputs=("active dataset (eco, efo, fbg)",), outputs=("CRLB precision (nm)",), gui_class=GuiClass.GUI_RESULT),
     "actionLocPrecisionFrc": CommandMeta(A + "localization_precision.py",
-                              ("precision", "frc", "fourier ring correlation", "resolution", "banterle", "nieuwenhuizen"),
-                              "Fourier ring correlation resolution (1/7 threshold). "
+                              ("frc", "fourier ring correlation", "resolution", "time", "temporal",
+                               "banterle", "nieuwenhuizen"),
+                              "Image resolution by Fourier ring correlation (1/7 threshold), for the "
+                              "whole acquisition or as it develops over acquisition time. "
                               "Refs: Banterle 2013, Nieuwenhuizen 2013.", "analysis",
-                              inputs=("active dataset (loc)",), outputs=("FRC resolution (nm)",), gui_class=GuiClass.GUI_FREE),
+                              inputs=("active dataset (loc; tim for the time course)",),
+                              outputs=("FRC resolution (nm)", "resolution vs acquisition time"),
+                              gui_class=GuiClass.GUI_FREE),
 
     # ---- Analyze › Local density ---------------------------------------------
     "actionLocalDensity": CommandMeta(A + "local_density.py",

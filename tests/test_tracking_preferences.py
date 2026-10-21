@@ -24,6 +24,7 @@ def test_preference_categories_have_requested_order(_app) -> None:
             "File",
             "Data",
             "Attributes",
+            "Process",
             "Tracking",
             "Appearance",
             "MBM Handling",
@@ -56,7 +57,8 @@ def test_tracking_precision_round_trip_and_reset(_app) -> None:
             "timestamp_precision_unit": "ms",
         }
 
-        dialog._page_list.setCurrentRow(3)
+        names = [dialog._page_list.item(row).text() for row in range(dialog._page_list.count())]
+        dialog._page_list.setCurrentRow(names.index("Tracking"))
         dialog._reset_current_tab()
         assert dialog._draft["tracking"] == DEFAULT_PREFS["tracking"]
     finally:

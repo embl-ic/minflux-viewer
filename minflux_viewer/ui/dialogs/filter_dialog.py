@@ -442,6 +442,13 @@ class FilterDialog(QDialog):
         all_off_btn.clicked.connect(lambda _checked=False: self._set_all_rows_enabled(False))
         bar.addWidget(all_off_btn)
 
+        self._auto_btn = QPushButton("Auto")
+        self._auto_btn.setAutoDefault(False)
+        self._auto_btn.setDefault(False)
+        self._auto_btn.clicked.connect(lambda _checked=False: self._apply_auto_rules())
+        bar.addWidget(self._auto_btn)
+        self._refresh_auto_tooltip()
+
         bar.addStretch()
 
         save_btn = QPushButton("Save")
@@ -654,7 +661,11 @@ class FilterDialog(QDialog):
         elif self._numeric_attrs:
             attr_combo.setCurrentIndex(0)
         attr_combo.blockSignals(False)
-        attr_combo.currentTextChanged.connect(lambda text, r=row: self._on_row_attr_changed(text, r))
+        # Each handler looks its row up when it fires: a row index captured
+        # here goes stale as soon as a row above it is deleted, and would then
+        # act on the wrong row (or on none).
+        attr_combo.currentTextChanged.connect(
+            lambda text, w=attr_combo: self._with_row(w, _COL_ATTR, self._on_row_attr_changed, text))
         self._table.setCellWidget(row, _COL_ATTR, attr_combo)
 
         # Mode combo
@@ -663,7 +674,8 @@ class FilterDialog(QDialog):
         mode_combo.addItems(_AGG_MODES)
         mode_combo.setCurrentText(mode)
         mode_combo.blockSignals(False)
-        mode_combo.currentTextChanged.connect(lambda _text, r=row: self._on_row_mode_changed(r))
+        mode_combo.currentTextChanged.connect(
+            lambda _text, w=mode_combo: self._with_row(w, _COL_MODE, self._on_row_mode_changed))
         self._table.setCellWidget(row, _COL_MODE, mode_combo)
 
         # Iteration combo — which loop iteration the bound applies to.
@@ -675,7 +687,7 @@ class FilterDialog(QDialog):
         self._table.setCellWidget(row, _COL_ITER, iter_combo)
         self._set_row_iteration(row, itr, attr_combo.currentText())
         iter_combo.currentTextChanged.connect(
-            lambda _text, r=row: self._on_row_selection_changed(r)
+            lambda _text, w=iter_combo: self._with_row(w, _COL_ITER, self._on_row_selection_changed)
         )
 
         # Min / Max spinners — use debounce timer so dragging doesn't hammer the renderer
@@ -694,7 +706,8 @@ class FilterDialog(QDialog):
         eye_btn.setToolTip("Show this filter in the histogram")
         eye_btn.setAutoDefault(False)
         eye_btn.setDefault(False)
-        eye_btn.clicked.connect(lambda _, r=row: self._display_filter(r))
+        eye_btn.clicked.connect(
+            lambda _=False, w=eye_btn: self._with_row(w, _COL_DISPLAY, self._display_filter))
         self._table.setCellWidget(row, _COL_DISPLAY, eye_btn)
 
         # Delete button
@@ -702,7 +715,8 @@ class FilterDialog(QDialog):
         del_btn.setFixedWidth(30)
         del_btn.setAutoDefault(False)
         del_btn.setDefault(False)
-        del_btn.clicked.connect(lambda _, r=row: self._delete_row(r))
+        del_btn.clicked.connect(
+            lambda _=False, w=del_btn: self._with_row(w, _COL_DELETE, self._delete_row))
         self._table.setCellWidget(row, _COL_DELETE, del_btn)
 
         self._enforce_trace_mode(row)
@@ -776,6 +790,18 @@ class FilterDialog(QDialog):
             )
             spin.blockSignals(False)
 
+    def _row_of(self, widget: QWidget, col: int) -> int | None:
+        """The row whose *col* cell holds *widget* now (rows shift on delete)."""
+        for row in range(self._table.rowCount()):
+            if self._table.cellWidget(row, col) is widget:
+                return row
+        return None
+
+    def _with_row(self, widget: QWidget, col: int, handler, *args) -> None:
+        row = self._row_of(widget, col)
+        if row is not None:
+            handler(*args, row)
+
     def _delete_row(self, row: int) -> None:
         self._table.removeRow(row)
         self._apply_all()  # views update immediately when a row is removed
@@ -824,49 +850,13 @@ class FilterDialog(QDialog):
         specs: list[dict] = []
 
         for row in range(self._table.rowCount()):
-            chk  = self._table.cellWidget(row, _COL_ENABLED)
-            if not (isinstance(chk, QCheckBox) and chk.isChecked()):
+            evaluated = self._row_filter(ds, row)
+            if evaluated is None:
                 continue
-
-            attr_combo = self._table.cellWidget(row, _COL_ATTR)
-            mode_combo = self._table.cellWidget(row, _COL_MODE)
-            min_spin   = self._table.cellWidget(row, _COL_MIN)
-            max_spin   = self._table.cellWidget(row, _COL_MAX)
-            if any(widget is None for widget in (attr_combo, mode_combo, min_spin, max_spin)):
-                continue
-
-            attr = attr_combo.currentText()
-            mode = mode_combo.currentText()
-            lo   = min_spin.value()
-            hi   = max_spin.value()
-            lo_inc = bool(min_spin.property("inclusive") if min_spin.property("inclusive") is not None else True)
-            hi_inc = bool(max_spin.property("inclusive") if max_spin.property("inclusive") is not None else True)
-
-            if attr not in ds.attr:
-                continue
-
-            itr_sel = self._row_iteration(row)
-
-            # Persist the spec so it can be re-evaluated against the raw
-            # all-iteration store (Stage B iteration/validity browsing). "itr"
-            # records the iteration the bound was authored against, so the
-            # filter is reproducible across iteration browsing and JSON
-            # round-trips.
-            specs.append({
-                "attribute": attr, "mode": mode,
-                "lo": float(lo), "hi": float(hi),
-                "lo_inc": lo_inc, "hi_inc": hi_inc,
-                "itr": itr_sel,
-            })
-
-            raw = attr_values_for_selection(ds, attr, itr=itr_sel)
-            if raw is None:
-                # No per-loc 1-D representation; the persisted spec still
-                # applies on the raw store in the plot windows.
-                continue
-            raw = np.asarray(raw).ravel().astype(float)
-            row_mask = _compute_mask(raw, mode, lo, hi, ds, lo_inc, hi_inc)
-            mask &= row_mask
+            spec, row_mask = evaluated
+            specs.append(spec)
+            if row_mask is not None:
+                mask &= row_mask
 
         ds.state["filter_specs"] = specs
 
@@ -880,6 +870,222 @@ class FilterDialog(QDialog):
         self._info.setText(
             f"{n_pass:,} / {ds.prop.num_loc:,} localisations pass all enabled filters."
         )
+
+    def _row_filter(self, ds, row: int) -> tuple[dict, np.ndarray | None] | None:
+        """``(spec, per-loc mask)`` of one switched-on row; ``None`` when it is
+        off or incomplete. The mask is ``None`` when the attribute has no per-loc
+        1-D representation (the spec still applies on the raw store in the plot
+        windows)."""
+        chk = self._table.cellWidget(row, _COL_ENABLED)
+        if not (isinstance(chk, QCheckBox) and chk.isChecked()):
+            return None
+
+        attr_combo = self._table.cellWidget(row, _COL_ATTR)
+        mode_combo = self._table.cellWidget(row, _COL_MODE)
+        min_spin   = self._table.cellWidget(row, _COL_MIN)
+        max_spin   = self._table.cellWidget(row, _COL_MAX)
+        if any(widget is None for widget in (attr_combo, mode_combo, min_spin, max_spin)):
+            return None
+
+        attr = attr_combo.currentText()
+        mode = mode_combo.currentText()
+        lo   = min_spin.value()
+        hi   = max_spin.value()
+        lo_inc = bool(min_spin.property("inclusive") if min_spin.property("inclusive") is not None else True)
+        hi_inc = bool(max_spin.property("inclusive") if max_spin.property("inclusive") is not None else True)
+
+        if attr not in ds.attr:
+            return None
+
+        itr_sel = self._row_iteration(row)
+
+        # Persist the spec so it can be re-evaluated against the raw
+        # all-iteration store (Stage B iteration/validity browsing). "itr"
+        # records the iteration the bound was authored against, so the
+        # filter is reproducible across iteration browsing and JSON
+        # round-trips.
+        spec = {
+            "attribute": attr, "mode": mode,
+            "lo": float(lo), "hi": float(hi),
+            "lo_inc": lo_inc, "hi_inc": hi_inc,
+            "itr": itr_sel,
+        }
+
+        raw = attr_values_for_selection(ds, attr, itr=itr_sel)
+        if raw is None:
+            return spec, None
+        raw = np.asarray(raw).ravel().astype(float)
+        return spec, _compute_mask(raw, mode, lo, hi, ds, lo_inc, hi_inc)
+
+    # ------------------------------------------------------------------
+    # Auto: data-derived bounds from the Preferences ▸ Process rules
+    # ------------------------------------------------------------------
+
+    def _auto_rules(self) -> tuple[list[dict], list[str]]:
+        """The switched-on rules, in order, and a reason per unusable rule."""
+        from minflux_viewer.core import auto_filter as af
+
+        stored = (((self._state.prefs or {}).get("process") or {}).get("filter") or {}).get(
+            "auto_rules")
+        rules, skipped = af.normalize_rules(af.default_auto_rules() if stored is None else stored)
+        return [rule for rule in rules if rule["enabled"]], skipped
+
+    def _refresh_auto_tooltip(self) -> None:
+        from minflux_viewer.core import auto_filter as af
+
+        rules, skipped = self._auto_rules()
+        lines = [af.describe_rule(rule) for rule in rules] or ["(no rule is switched on)"]
+        self._auto_btn.setToolTip(
+            "Add or update one filter row per rule, with bounds computed from the data.\n"
+            "Rules run top to bottom, each on the localizations passing the filters\n"
+            "already on and the rules above it:\n  "
+            + "\n  ".join(lines + skipped)
+            + "\nEdit the rules in Preferences ▸ Process ▸ Filter.")
+
+    def _target_row(self, attr: str, used: set[int]) -> int | None:
+        """The row an Auto rule for *attr* updates: the one Auto made earlier,
+        else the first row on that attribute -- so one attribute keeps one row
+        rather than gaining a second that would AND with the first."""
+        candidates = []
+        for row in range(self._table.rowCount()):
+            combo = self._table.cellWidget(row, _COL_ATTR)
+            if isinstance(combo, QComboBox) and combo.currentText() == attr and row not in used:
+                candidates.append((not bool(combo.property("auto_rule")), row))
+        return min(candidates)[1] if candidates else None
+
+    def _gated_values(self, ds, raw: np.ndarray, mode: str, gate: np.ndarray) -> np.ndarray:
+        """The values a rule sees: per localization, or one per trace that still
+        has a localization passing *gate*."""
+        if mode == "per loc":
+            return raw[gate]
+        fn = trace_agg_func(mode)
+        trace_idx = np.asarray(getattr(ds.prop, "trace_idx", np.empty((0, 2))), dtype=int)
+        n_traces = int(getattr(ds.prop, "num_traces", 0) or trace_idx.shape[0])
+        values: list[float] = []
+        with np.errstate(all="ignore"):
+            for start, stop in trace_idx[:n_traces]:
+                s, e = max(0, int(start)), min(int(stop), raw.size - 1) + 1
+                if e > s and gate[s:e].any():
+                    values.append(float(fn(raw[s:e])))
+        return np.asarray(values, dtype=float)
+
+    def _apply_auto_rules(self) -> None:
+        """*Auto*: one filter row per Preferences ▸ Process ▸ Filter rule.
+
+        Each rule is evaluated, in order, on the localizations that pass the
+        rows already switched on (other than those Auto is about to update) and
+        the rules before it; its bounds are entered as an ordinary row, which
+        the user can then edit. A rule that finds nothing to suggest leaves the
+        table as it was and is reported, as is every bound that was set.
+        """
+        from minflux_viewer.core import auto_filter as af
+
+        ds = self._dataset()
+        if ds is None:
+            return
+        self._refresh_auto_tooltip()
+        rules, notes = self._auto_rules()
+        if not rules:
+            self._info.setText("Auto: no rule is switched on "
+                               "(Preferences ▸ Process ▸ Filter).")
+            return
+
+        targets: dict[int, int | None] = {}
+        used: set[int] = set()
+        for position, rule in enumerate(rules):
+            row = self._target_row(rule["attribute"], used)
+            targets[position] = row
+            if row is not None:
+                used.add(row)
+        gate = np.ones(ds.prop.num_loc, dtype=bool)
+        for row in range(self._table.rowCount()):
+            if row in used:
+                continue
+            evaluated = self._row_filter(ds, row)
+            if evaluated is not None and evaluated[1] is not None:
+                gate &= evaluated[1]
+
+        applied: list[str] = []
+        for position, rule in enumerate(rules):
+            attr = rule["attribute"]
+            if attr not in ds.attr or attr not in self._numeric_attrs:
+                notes.append(f"{attr}: not an attribute of this dataset")
+                continue
+            row = targets[position]
+            created = row is None
+            if row is None:
+                mode = "trace mean" if is_trace_wise_attribute(attr) else "per loc"
+                self._add_row(attr=attr, mode=mode, enabled=False, auto_range=True)
+                row = self._table.rowCount() - 1
+            mode_combo = self._table.cellWidget(row, _COL_MODE)
+            mode = mode_combo.currentText() if isinstance(mode_combo, QComboBox) else "per loc"
+            itr_sel = self._row_iteration(row)
+            raw = attr_values_for_selection(ds, attr, itr=itr_sel)
+            if raw is None:
+                notes.append(f"{attr}: no per-localization values")
+                if created:
+                    self._table.removeRow(row)
+                continue
+            raw = np.asarray(raw).ravel().astype(float)
+            bound = af.suggest_bounds(self._gated_values(ds, raw, mode, gate), rule)
+            if not bound.ok:
+                notes.append(f"{attr}: {bound.note}")
+                if created:
+                    self._table.removeRow(row)
+                continue
+
+            _raw, range_values = _filter_spinner_values(ds, attr, mode, itr=itr_sel)
+            finite = range_values.astype(float, copy=False)
+            finite = finite[np.isfinite(finite)]
+            if finite.size == 0:
+                notes.append(f"{attr}: no finite values")
+                if created:
+                    self._table.removeRow(row)
+                continue
+            data_lo, data_hi = float(finite.min()), float(finite.max())
+            lo = data_lo if bound.lo is None else float(bound.lo)
+            hi = data_hi if bound.hi is None else float(bound.hi)
+            self._set_row_bounds(row, lo, hi, data_lo, data_hi, raw, mode)
+            attr_combo = self._table.cellWidget(row, _COL_ATTR)
+            if attr_combo is not None:
+                attr_combo.setProperty("auto_rule", True)
+            gate &= _compute_mask(raw, mode, lo, hi, ds)
+            applied.append(f"{attr} {_bounds_text(bound, lo, hi)} ({bound.note})")
+
+        self._table.resizeColumnsToContents()
+        self._apply_all()
+        n_pass = int(np.asarray(ds.filter_mask, dtype=bool).sum())
+        if applied:
+            line = (f"Auto filter on '{ds.name}': " + "; ".join(applied)
+                    + f". Rules evaluated in order, each on the localizations passing "
+                      f"the filters before it; {n_pass:,} of {ds.prop.num_loc:,} "
+                      f"localizations pass.")
+            self._state.log(line, "INFO")
+        report = "Auto: " + ("; ".join(applied) if applied else "no bound was set")
+        if notes:
+            report += "  |  " + "; ".join(notes)
+        self._info.setText(report)
+        self._info.setToolTip(report)
+        self._info.setWordWrap(True)
+
+    def _set_row_bounds(self, row: int, lo: float, hi: float, data_lo: float,
+                        data_hi: float, raw: np.ndarray, mode: str) -> None:
+        """Write *lo*/*hi* into a row and tick it, without triggering an apply."""
+        for col, value in ((_COL_MIN, lo), (_COL_MAX, hi)):
+            spin = self._table.cellWidget(row, col)
+            if isinstance(spin, SmartBoundsSpinBox):
+                spin.blockSignals(True)
+                spin.configure(value=value, values=raw, data_min=min(data_lo, lo),
+                               data_max=max(data_hi, hi), mode=mode)
+                spin.setProperty("inclusive", True)
+                spin.blockSignals(False)
+        chk = self._table.cellWidget(row, _COL_ENABLED)
+        if isinstance(chk, QCheckBox):
+            blocked = chk.blockSignals(True)
+            try:
+                chk.setChecked(True)
+            finally:
+                chk.blockSignals(blocked)
 
     def _record_filter(self, ds, specs: list[dict]) -> None:
         """Write the applied filter into a macro recording, as runnable code.
@@ -1181,6 +1387,17 @@ class FilterDialog(QDialog):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _bounds_text(bound, lo: float, hi: float) -> str:
+    """``≤ hi`` / ``≥ lo`` / ``lo–hi`` for the sides the rule actually bounded."""
+    from minflux_viewer.core.auto_filter import format_value
+
+    if bound.lo is None:
+        return f"≤ {format_value(hi)}"
+    if bound.hi is None:
+        return f"≥ {format_value(lo)}"
+    return f"{format_value(lo)}–{format_value(hi)}"
+
 
 def _make_spin(value: float) -> SmartBoundsSpinBox:
     spin = SmartBoundsSpinBox()

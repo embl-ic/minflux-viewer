@@ -52,6 +52,12 @@ CITE_FRC_NIEUWENHUIZEN = (
 )
 
 
+CITE_ROBUST_MAD = (
+    "Leys et al., J. Exp. Soc. Psychol. 49:764 (2013)",
+    "https://doi.org/10.1016/j.jesp.2013.03.013",
+)
+
+
 ANISOTROPY_NOTE = (
     "Z scaling factor estimation from trace anisotropy (custom, MINFLUX Data "
     "Viewer): the factor is estimated from single-molecule traces by Gaussian fits to "

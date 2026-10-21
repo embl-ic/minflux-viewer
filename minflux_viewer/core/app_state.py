@@ -36,6 +36,7 @@ from ..colors import (
     normalize_rgba,
 )
 from . import formats as _formats
+from .auto_filter import default_auto_rules
 from .coordinates import DEFAULT_CACHE_PERCENT, CoordinateService, cache_budget_bytes
 from .dataset import MinfluxDataset
 from .dataset_events import (
@@ -131,6 +132,14 @@ DEFAULT_PREFS: dict = {
         "export_include_derived": False,         # freeze derived attributes (snapshot)
         "export_include_recipe": True,           # write the metadata sidecar
         "export_filter_mode": "flag",            # "apply" (drop rows) | "flag" (ftr col)
+    },
+    "process": {
+        # Preferences ▸ Process ▸ Filter: the rules the Filter dialog's *Auto*
+        # button applies, in order (core/auto_filter.py). A list is a value, so a
+        # saved list replaces this one whole.
+        "filter": {
+            "auto_rules": default_auto_rules(),
+        },
     },
     "tracking": {
         # ``tim`` is canonical seconds.  Keep a user-facing value + unit so a

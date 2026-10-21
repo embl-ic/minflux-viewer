@@ -16,6 +16,7 @@ from minflux_viewer.analysis.method_citations import (
     CITE_FRC_NIEUWENHUIZEN,
     CITE_MINFLUX_STABILISATION,
     CITE_NPC,
+    CITE_ROBUST_MAD,
     CITE_SIMUFLUX,
     CITE_STDDEV,
 )
@@ -639,6 +640,33 @@ def _render_frc(m, ev, state):
         f"1/7 threshold: {m.group('res')} nm ({m.group('mode')}, {m.group('n')} points, "
         f"{m.group('px')} nm pixels)."
     ), [CITE_FRC_BANTERLE, CITE_FRC_NIEUWENHUIZEN]
+
+
+def _render_frc_time_course(m, ev, state):
+    name = m.group("name") or _ds_name(state, ev)
+    return (
+        f"The development of the image resolution of '{name}' over the acquisition was "
+        f"followed by FRC on {m.group('n')} cumulative time windows spanning "
+        f"{m.group('span')} s (each window holding every localization recorded up to its "
+        f"end, all rendered on the full field of view at {m.group('px')} nm pixels and "
+        f"averaged over {m.group('rep')} random half-splits; 1/7 threshold, "
+        f"{m.group('mode')}). The complete acquisition reached {m.group('res')} nm."
+    ), [CITE_FRC_BANTERLE, CITE_FRC_NIEUWENHUIZEN]
+
+
+def _render_auto_filter(m, ev, state):
+    body = m.group("body").strip().rstrip(".")
+    cites = [CITE_ROBUST_MAD] if "σ_MAD" in body else []
+    return (
+        f"Localizations of '{m.group('name')}' were filtered with data-derived bounds, each "
+        f"rule evaluated in turn on the localizations passing the filters before it: {body}. "
+        "A single-emitter frequency cut models the log photon rates as single emitters "
+        "plus double emitters held at exactly twice their rate, fitted by expectation-"
+        "maximization, and bounds where a value becomes more likely double than single "
+        "(or, without a double population, at a stated multiple of the single rate); a "
+        "robust spread bound is the median ± k·σ with σ = 1.4826 × the median absolute "
+        "deviation."
+    ), cites
 
 
 def _method_number(value, digits: int = 3, *, strip: bool = True) -> str:
@@ -1713,6 +1741,13 @@ RULES = [
     (re.compile(r"Localization precision \(FRC\): resolution = (?P<res>[\d.]+) nm "
                 r"\(1/7 threshold, (?P<mode>[^,]+), (?P<n>[\d,]+) points, "
                 r"pixel (?P<px>[\d.]+) nm\)"), "analysis", _render_frc),
+    (re.compile(r"^Resolution over acquisition time \(FRC\) of '(?P<name>.+?)': "
+                r"(?P<n>\d+) cumulative windows over (?P<span>[\d.]+) s, "
+                r"final (?P<res>[\d.]+|nan) nm \(1/7 threshold, (?P<mode>[^,]+), "
+                r"(?P<rep>\d+) splits per window, pixel (?P<px>[\d.]+) nm\)"),
+     "analysis", _render_frc_time_course),
+    (re.compile(r"^Auto filter on '(?P<name>.+?)': (?P<body>.+?)\. Rules evaluated in order"),
+     "filter", _render_auto_filter),
     # The plugin's current log prefix, plus the pre-plugin one so method text can
     # still be generated from a Log written before the menu move.
     (re.compile(r"^HlyB/D subunit pair analysis on '(?P<name>.+?)':"),

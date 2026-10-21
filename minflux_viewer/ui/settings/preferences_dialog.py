@@ -368,6 +368,9 @@ class PreferencesDialog(QDialog):
         self._add_page("File", self._build_file_tab(), ["file"])
         self._add_page("Data", self._build_data_tab(), ["data"])
         self._add_page("Attributes", self._build_attributes_tab(), ["attributes"])
+        from minflux_viewer.ui.settings.prefs_process import build_process_page
+        self._process_page = build_process_page()
+        self._add_page("Process", self._process_page, ["process"])
         self._add_page("Tracking", self._build_tracking_tab(), ["tracking"])
         self._add_page("Appearance", self._build_plot_tab(), ["plot", "colors"])
         self._add_page("MBM Handling", self._build_mbm_tab(), ["mbm_handling"])
@@ -1504,6 +1507,9 @@ class PreferencesDialog(QDialog):
         self._show_hist.setChecked(bool(d.get("show_histogram", False)))
         self._show_render.setChecked(bool(d.get("show_render", False)))
 
+        # Process
+        self._process_page.load(self._draft)
+
         # Tracking
         self._tracking_precision_value.setValue(
             float(t.get("timestamp_precision_value", 1.0))
@@ -1706,6 +1712,9 @@ class PreferencesDialog(QDialog):
         d["show_scatter"] = bool(self._show_scatter.isChecked())
         d["show_histogram"] = bool(self._show_hist.isChecked())
         d["show_render"] = bool(self._show_render.isChecked())
+
+        # Process
+        self._process_page.save(self._draft)
 
         # Tracking
         t["timestamp_precision_value"] = float(
