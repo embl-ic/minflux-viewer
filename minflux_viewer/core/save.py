@@ -225,6 +225,48 @@ def dataset_to_mfx_array(ds) -> np.ndarray:
     return arr
 
 
+#: m2410 flags Imspector writes as booleans. A MATLAB source loads ``logical``
+#: as ``uint8``, and the raw array keeps each column's source dtype.
+_IMSPECTOR_BOOL_FIELDS = ("vld", "fnl", "bot", "eot")
+
+
+def imspector_npy_layout(mfx: np.ndarray) -> np.ndarray:
+    """The raw array in the layout Imspector itself writes to an m2410 ``.npy``.
+
+    Two details differ from the canonical array when it came from a ``.mat``
+    file: the flags ``vld/fnl/bot/eot`` are 0/1 integers there, and a
+    single-channel ``dcr`` is a 1-D column. Imspector writes the flags as
+    ``bool`` and ``dcr`` as an N×k matrix (k = 1 or 2). Readers built against
+    Imspector's files depend on both -- they select rows with ``a[a["vld"]]``,
+    which a ``uint8`` column turns into integer indexing, and take
+    ``a["dcr"][:, 0]``. Our m2410 parser reads either form, so this only widens
+    who can read the file. Values are unchanged; a flag column holding anything
+    other than 0/1 is left as it is.
+    """
+    fields = mfx.dtype.fields or {}
+    descr: list[tuple] = []
+    changed = False
+    for name in mfx.dtype.names or ():
+        dtype = fields[name][0]
+        base, shape = dtype.base, dtype.shape
+        if (name in _IMSPECTOR_BOOL_FIELDS and not shape and base.kind in "iu"
+                and np.isin(mfx[name], (0, 1)).all()):
+            descr.append((name, np.bool_))
+            changed = True
+        elif name == "dcr" and not shape:
+            descr.append((name, base, (1,)))
+            changed = True
+        else:
+            descr.append((name, base, shape) if shape else (name, base))
+    if not changed:
+        return mfx
+    out = np.empty(mfx.shape, dtype=descr)
+    for name in mfx.dtype.names or ():
+        values = mfx[name]
+        out[name] = values[:, None] if name == "dcr" and values.ndim == 1 else values
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Flat columns (CSV) and the processed snapshot
 # ---------------------------------------------------------------------------
@@ -1057,6 +1099,8 @@ def _save_processed(
                              "n_rows": len(next(iter(columns.values()))) if columns else 0}
         else:
             mfx = dataset_to_mfx_array(ds)
+            if fmt == "npy":
+                mfx = imspector_npy_layout(mfx)
             write_raw_array(data_path, fmt, mfx)
         written.append(data_path)
         if fmt in {"zarr", "zarr_zip"}:

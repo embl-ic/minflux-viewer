@@ -231,3 +231,21 @@ def test_each_view_names_its_plot_type_and_view_mode(_qt_app):
     finally:
         for w in windows:
             w.close()
+
+
+def test_png_and_jpeg_record_the_exported_resolution(_qt_app, tmp_path):
+    """A 3× pixel export says 288 dpi, as the TIFF writer already did; it used
+    to carry the screen's 96 dpi, so it opened three times too large."""
+    from PyQt6.QtGui import QImage
+
+    widget = _qtw.QWidget()
+    widget.resize(40, 30)
+    figure = fe.figure_of(widget, name="t")
+    for fmt in ("png", "jpg"):
+        path = tmp_path / f"fig.{fmt}"
+        fe.save_figure(figure, path, fmt, scale=3)
+        image = QImage(str(path))
+        assert image.width() == 120
+        assert image.dotsPerMeterX() == pytest.approx(96 * 3 / 0.0254, abs=2)
+        assert image.dotsPerMeterY() == pytest.approx(96 * 3 / 0.0254, abs=2)
+    widget.deleteLater()

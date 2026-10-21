@@ -340,6 +340,12 @@ def save_figure(figure: Figure, path, fmt: str, *, scale: int = 1,
             out = image
             if fmt == "jpg":
                 out = image.convertToFormat(QImage.Format.Format_RGB32)
+            # Record the resolution the pixels were drawn at (96 dpi × scale), as
+            # the TIFF writer does, so a 4× PNG opens at the view's physical size
+            # rather than four times larger at the screen's default 96 dpi.
+            dots_per_metre = int(round(96.0 * int(max(1, min(MAX_SCALE, scale))) / 0.0254))
+            out.setDotsPerMeterX(dots_per_metre)
+            out.setDotsPerMeterY(dots_per_metre)
             ok = out.save(str(path), "PNG" if fmt == "png" else "JPG",
                           int(jpeg_quality) if fmt == "jpg" else -1)
             if not ok:
