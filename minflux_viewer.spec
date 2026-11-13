@@ -229,6 +229,14 @@ hidden_imports = sorted(stdlib_hidden_imports | api_hidden_imports | {
     "minflux_viewer.plugins.generate_method_text",
 })
 
+# PyOpenGL selects its Linux backend dynamically from the display session.
+# The standard hook includes GLX, but Wayland sessions also need EGL.
+if sys.platform.startswith("linux"):
+    hidden_imports = sorted(set(hidden_imports) | {
+        "OpenGL.platform.egl",
+        "OpenGL.platform.glx",
+    })
+
 # ---------------------------------------------------------------------------
 # Modules to deliberately exclude (keeps the bundle smaller)
 # ---------------------------------------------------------------------------

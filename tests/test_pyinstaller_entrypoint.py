@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,7 +22,7 @@ def _need_pyinstaller() -> None:
         "PyInstaller", reason="the spec needs PyInstaller: poetry sync --with build")
 
 
-def _evaluate_spec():
+def _evaluate_spec(*, platform: str | None = None):
     """Run the spec with PyInstaller's heavy builders stubbed out.
 
     Returns ``(namespace, calls)`` where ``calls`` maps a builder name to the
@@ -50,6 +52,17 @@ def _evaluate_spec():
         "DISTPATH": str(ROOT / "dist"),
         **{name: _stub(name) for name in ("Analysis", "PYZ", "EXE", "COLLECT", "BUNDLE")},
     }
+    if platform is not None:
+        # Change only the spec's view of sys; imported build tools must keep
+        # seeing the real host platform when this runs outside Linux.
+        spec_sys = SimpleNamespace(**(vars(sys) | {"platform": platform}))
+
+        def spec_import(name, *args, **kwargs):
+            if name == "sys":
+                return spec_sys
+            return builtins.__import__(name, *args, **kwargs)
+
+        namespace["__builtins__"] = {**vars(builtins), "__import__": spec_import}
     code = compile(SPEC.read_text(encoding="utf-8"), str(SPEC), "exec")
     # resources/pip is a generated, gitignored build input (tools/vendor_pip.py),
     # so a fresh clone -- and CI -- does not have it, and the spec stops at its
@@ -220,6 +233,18 @@ def test_spec_build_instructions_match_the_platform() -> None:
     expected = (r".\.venv\Scripts\python.exe" if sys.platform == "win32"
                 else ".venv/bin/python")
     assert namespace["VENV_PYTHON"] == expected
+
+
+def test_linux_bundle_contains_the_session_selected_opengl_backends() -> None:
+    """A bundle built under X11 must also load PyOpenGL under Wayland."""
+    from OpenGL.plugins import PlatformPlugin
+
+    _namespace, calls = _evaluate_spec(platform="linux")
+    bundled = calls["Analysis"][0][1]["hiddenimports"]
+    for session in ("wayland", "xwayland", "x11"):
+        plugin = PlatformPlugin.match((session,))
+        module = plugin.import_path.rpartition(".")[0]
+        assert module in bundled, f"{session} needs the dynamically loaded {module}"
 
 
 def test_macos_bundle_has_an_icon() -> None:
