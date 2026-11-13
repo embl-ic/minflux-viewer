@@ -240,6 +240,20 @@ def test_input_aliases_cannot_bypass_coordinate_revision():
 
 
 @pytest.mark.parametrize("dimensions", [2, 3])
+def test_large_display_transform_has_no_spurious_floating_point_errors(dimensions):
+    points = np.tile([1000.0, -2000.0, 3000.0], (10_000, 1))
+    matrix = np.eye(dimensions + 1)
+    matrix[0, -1] = 25.0
+    expected = points.copy()
+    expected[:, 0] += 25.0
+    with np.errstate(all="raise"):
+        result = apply_display_transform_nm(
+            points, {f"matrix_{dimensions + 1}x{dimensions + 1}": matrix}
+        )
+    np.testing.assert_array_equal(result, expected)
+
+
+@pytest.mark.parametrize("dimensions", [2, 3])
 def test_chunked_transform_matches_whole_array_math_to_rounding(dimensions):
     rng = np.random.default_rng(63)
     points = rng.normal(size=(coordinates._TRANSFORM_CHUNK_ROWS + 17, 3))

@@ -413,7 +413,11 @@ def transform_precision_marginals(
     if matrix.shape != (4, 4):
         return sigma
     variances = sigma * sigma
-    transformed = variances @ (matrix[:3, :3] * matrix[:3, :3]).T
+    # Avoid Accelerate BLAS's spurious floating-point warnings on macOS for
+    # tall, narrow products; keep genuine arithmetic errors visible.
+    transformed = np.einsum(
+        "nj,ij->ni", variances, matrix[:3, :3] * matrix[:3, :3], optimize=False
+    )
     return np.sqrt(np.maximum(transformed, _MIN_SIGMA_NM**2))
 
 

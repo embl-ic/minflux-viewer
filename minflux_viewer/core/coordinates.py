@@ -73,12 +73,15 @@ def apply_display_transform_nm(points_nm: np.ndarray, transform: dict | None) ->
         dimensions = 2
     else:
         return out
-    # Keep the original homogeneous matrix multiplication (including its
-    # rounding), but bound its two temporary arrays independently of N.
+    # Bound temporary arrays independently of N. Explicit contraction avoids
+    # Accelerate BLAS emitting spurious floating-point warnings on macOS for
+    # these tall, narrow products, even with finite inputs and an identity.
     for start in range(0, len(out), _TRANSFORM_CHUNK_ROWS):
         part = out[start:start + _TRANSFORM_CHUNK_ROWS, :dimensions]
         homogeneous = np.column_stack([part, np.ones(len(part), dtype=np.float64)])
-        part[:] = (matrix @ homogeneous.T).T[:, :dimensions]
+        part[:] = np.einsum(
+            "ij,nj->ni", matrix[:dimensions], homogeneous, optimize=False
+        )
     return out
 
 

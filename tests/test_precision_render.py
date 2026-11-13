@@ -304,6 +304,15 @@ def test_precision_resolution_prefers_per_loc_then_per_trace():
     assert "per-trace StdDev" in source
 
 
+def test_large_precision_transform_has_no_spurious_floating_point_errors():
+    sigma = np.tile([2.0, 5.0, 8.0], (10_000, 1))
+    matrix = np.eye(4)
+    matrix[:2, :2] = [[0.0, -1.0], [1.0, 0.0]]
+    with np.errstate(all="raise"):
+        transformed = transform_precision_marginals(sigma, matrix)
+    np.testing.assert_array_equal(transformed, np.tile([5.0, 2.0, 8.0], (10_000, 1)))
+
+
 def test_rigid_rotation_projects_anisotropic_precision():
     sigma = np.array([[2.0, 5.0, 8.0]])
     matrix = np.eye(4)
