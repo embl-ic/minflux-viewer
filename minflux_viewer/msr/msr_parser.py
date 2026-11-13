@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import xml.etree.ElementTree as ET
 from typing import Any
@@ -8,14 +9,21 @@ from ..utils import zarr2
 from .state import reset as reset_state
 from .state import set_mbm_for, set_mbm_meta_for, set_mfx_for
 
+#: Expected failures of the pixel-free OBF stack scan (as image_series_of).
+_SCAN_ERRORS = (OSError, IndexError, KeyError, TypeError, ValueError, EOFError)
 
-def _ome_xml_metadata(msr_file: str) -> str | None:
-    """Return the file-level OME-XML document exactly as stored in OBF."""
+
+def _ome_xml_metadata(msr_file: str, obf=None) -> str | None:
+    """Return the file-level OME-XML document exactly as stored in OBF.
+
+    *obf* is an already-open ``OBFFile`` of *msr_file* to read it from, so
+    the parse does not open the file again; it is left open."""
     try:
         from msr_reader import OBFFile
 
-        with OBFFile(msr_file) as obf:
-            xml = obf.get_ome_xml_metadata()
+        opened = contextlib.nullcontext(obf) if obf is not None else OBFFile(msr_file)
+        with opened as handle:
+            xml = handle.get_ome_xml_metadata()
         return str(xml) if xml else None
     except MemoryError:
         raise
@@ -77,7 +85,9 @@ class LegacyMSRParser:
         except (ImportError, KeyError, TypeError, ValueError, OverflowError):
             return ""
 
-    def build_series_tree_entries(self, msr_file: str, meta=None, log=print) -> list[dict]:
+    def build_series_tree_entries(self, msr_file: str, meta=None, log=print,
+                                  obf=None) -> list[dict]:
+        """*obf*: an already-open ``OBFFile`` of *msr_file* (left open)."""
         entries: list[dict] = []
         try:
             from msr_reader import OBFFile
@@ -87,7 +97,8 @@ class LegacyMSRParser:
         # Defense-in-depth: a malformed/variant OBF header must not crash the open
         # (the patched reader handles meta_data_position==0; this catches the rest).
         try:
-            with OBFFile(msr_file) as obf:
+            opened = contextlib.nullcontext(obf) if obf is not None else OBFFile(msr_file)
+            with opened as obf:
                 for i in range(obf.num_stacks):
                     header = obf.stack_headers[i]
                     sh = obf.shapes[i]
@@ -134,29 +145,98 @@ class GeneralMSRParser:
         ``{key: bytes}`` dict, not written to disk (``tmp_dir`` is unused, kept
         only for call-site compatibility). Writing a store to disk is now an
         explicit ``.zarr`` export option, not a parse-time cache.
+
+        **The file is opened and read once.** Its OBF headers give the dataset
+        labels, the per-stack ``minflux`` tags and the image-series list; only
+        the ``uint8`` payload stacks are read beyond that, each in one large
+        read, inflated and decoded on threads leased from the process budget
+        (:func:`minflux_viewer.core.execution.acquire_cpu_threads`). What later steps
+        would otherwise re-read from the file travels with the result:
+
+        * ``did_label_map`` -- dataset ``did`` → label;
+        * ``acquisition_rois`` -- the MINFLUX acquisition rectangles, from each
+          dataset store's root ``.zattrs`` (compressed stacks included);
+        * ``obf_stacks`` -- the pixel-free scan of every stack
+          (:func:`~minflux_viewer.core.obf_image_source.scan_obf`), ``None``
+          when that scan failed, and ``image_series`` -- the viewable ones.
         """
+        from msr_reader import OBFFile
+
+        from ..core.execution import acquire_cpu_threads
+        from ..core.obf_image_source import image_series_from_scan, scan_obf
         from .io import collect_zarr_fields
         from .mfxdta import (
             SOURCE_FORMAT,
-            extract_did_label_map,
-            extract_minflux_stack_tags,
-            read_obf_mfxdta_stacks,
+            minflux_stack_tags_from_obf,
+            read_mfxdta_stacks_from_obf,
         )
 
         reset_state()
 
+        obf = None
+        # Threads for inflating and decoding, leased from the process budget
+        # for the whole parse and given back however it ends.
+        lease = acquire_cpu_threads()
         try:
-            stacks = read_obf_mfxdta_stacks(msr_file)
-        except MemoryError:
-            raise
-        except Exception as e:  # report third-party decoding failures
-            log(f"[warn] msr-reader could not read stacks: {e}")
-            stacks = []
+            try:
+                obf = OBFFile(str(msr_file))
+                stacks = read_mfxdta_stacks_from_obf(obf, lease=lease)
+            except MemoryError:
+                raise
+            except Exception as e:  # report third-party decoding failures
+                log(f"[warn] msr-reader could not read stacks: {e}")
+                stacks = []
 
-        if stacks:
-            log(f"[parse] {SOURCE_FORMAT}: {len(stacks)} MINFLUX dataset(s)")
-            label_map = extract_did_label_map(msr_file)
-            stack_tags = extract_minflux_stack_tags(msr_file)
+            obf_stacks = None
+            if obf is not None:
+                try:
+                    obf_stacks = scan_obf(obf)
+                except _SCAN_ERRORS as e:
+                    log(f"[image] could not list image series: {e}")
+            scan = {
+                "obf_stacks": obf_stacks,
+                "image_series": (None if obf_stacks is None
+                                 else image_series_from_scan(obf_stacks)),
+            }
+
+            if stacks:
+                result = self._modern_result(
+                    msr_file, obf, stacks, lease, collect_zarr_fields,
+                    minflux_stack_tags_from_obf(obf), SOURCE_FORMAT, log)
+                if result is not None:
+                    result.update(scan)
+                    return result
+                log(f"[parse] {SOURCE_FORMAT} detected but could not be decoded")
+
+            log("[parse] no MINFLUX data — building legacy image-series tree")
+            metadata_xml = _ome_xml_metadata(msr_file, obf=obf)
+            return {
+                "mode": "legacy",
+                "msr": str(msr_file),
+                "metadata": _ome_metadata(msr_file, metadata_xml),
+                "metadata_xml": metadata_xml,
+                "legacy_series_tree": self.legacy.build_series_tree_entries(
+                    str(msr_file), log=log, obf=obf),
+                **scan,
+            }
+        finally:
+            lease.release()
+            if obf is not None:
+                obf.close()
+
+    def _modern_result(self, msr_file, obf, stacks, lease, collect_zarr_fields,
+                       stack_tags, source_format, log) -> dict[str, Any] | None:
+        """The ``mode="modern"`` result for the decoded MFXDTA *stacks*, or
+        ``None`` when none of them decodes."""
+        from ..core.acquisition_metadata import (
+            did_label_map_from_obf,
+            rois_from_attrs,
+            unique_rois,
+        )
+
+        log(f"[parse] {source_format}: {len(stacks)} MINFLUX dataset(s)")
+        label_map = did_label_map_from_obf(obf)
+        with zarr2.decode_threads(lease):
             datasets = [
                 entry
                 for idx, desc, blob in stacks
@@ -164,32 +244,27 @@ class GeneralMSRParser:
                     idx, desc, blob, collect_zarr_fields, label_map,
                     stack_tags.get(idx, {}), log)) is not None
             ]
-            if datasets:
-                # Per-parse maps (name -> array) assembled from the entries, so a
-                # reader dialog can keep its own copy independent of the shared
-                # module-global ``state`` (which only holds the last parse).
-                mfx_map = {d["display_name"]: d["_mfx"] for d in datasets if d.get("_mfx") is not None}
-                mbm_map = {d["display_name"]: d["_mbm"] for d in datasets if d.get("_mbm") is not None}
-                mbm_meta_map = {d["display_name"]: d["_mbm_meta"] for d in datasets if d.get("_mbm_meta")}
-                return {
-                    "mode": "modern",
-                    "msr": str(msr_file),
-                    "datasets": datasets,
-                    "source_format": SOURCE_FORMAT,
-                    "mfx_map": mfx_map,
-                    "mbm_map": mbm_map,
-                    "mbm_meta_map": mbm_meta_map,
-                }
-            log(f"[parse] {SOURCE_FORMAT} detected but could not be decoded")
-
-        log("[parse] no MINFLUX data — building legacy image-series tree")
-        metadata_xml = _ome_xml_metadata(msr_file)
+        if not datasets:
+            return None
+        # Per-parse maps (name -> array) assembled from the entries, so a
+        # reader dialog can keep its own copy independent of the shared
+        # module-global ``state`` (which only holds the last parse).
+        mfx_map = {d["display_name"]: d["_mfx"] for d in datasets if d.get("_mfx") is not None}
+        mbm_map = {d["display_name"]: d["_mbm"] for d in datasets if d.get("_mbm") is not None}
+        mbm_meta_map = {d["display_name"]: d["_mbm_meta"] for d in datasets if d.get("_mbm_meta")}
+        rois = unique_rois(
+            roi for d in datasets
+            for roi in rois_from_attrs((d.get("zroot") or {}).get(".zattrs") or b"{}"))
         return {
-            "mode": "legacy",
+            "mode": "modern",
             "msr": str(msr_file),
-            "metadata": _ome_metadata(msr_file, metadata_xml),
-            "metadata_xml": metadata_xml,
-            "legacy_series_tree": self.legacy.build_series_tree_entries(str(msr_file), log=log),
+            "datasets": datasets,
+            "source_format": source_format,
+            "mfx_map": mfx_map,
+            "mbm_map": mbm_map,
+            "mbm_meta_map": mbm_meta_map,
+            "did_label_map": label_map,
+            "acquisition_rois": rois,
         }
 
     def _mfxdta_dataset_entry(

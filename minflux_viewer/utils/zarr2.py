@@ -41,6 +41,16 @@ call sites read the same as before:
 
 Not covered (raises rather than guessing, per the project's no-silent-fallback
 rule): zarr v3 stores, resizing, partial chunk writes, object dtypes.
+
+Parallel decoding
+-----------------
+Inside a :func:`decode_threads` block, a full read decodes its chunks on the
+threads of a lease from the process budget (``core.execution``): ``zlib`` and
+``blosc`` release the GIL, and every chunk writes a disjoint region of the
+output, so the result is byte-identical to a sequential read. The lease is a
+context variable of the calling thread, set by a caller that holds one (the
+``.msr`` parse); every other read decodes on the calling thread, as it always
+has.
 """
 
 from __future__ import annotations
@@ -48,12 +58,33 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-__all__ = ["open", "Group", "Array", "Attrs", "ZarrV2Error"]
+__all__ = ["open", "Group", "Array", "Attrs", "ZarrV2Error", "decode_threads"]
+
+#: The thread lease full array reads may decode chunks on (see :func:`decode_threads`).
+_DECODE_LEASE: ContextVar[Any] = ContextVar("zarr2_decode_lease", default=None)
+
+
+@contextmanager
+def decode_threads(lease) -> Iterator[None]:
+    """Decode chunks of full array reads on the threads of *lease* in this block.
+
+    *lease* is a lease from the process thread budget
+    (``core.execution.acquire_cpu_threads``; anything with a ``threads``
+    count), which the caller holds for the block and releases afterwards.
+    Belongs to the calling thread only, so it changes no one else's reads."""
+    token = _DECODE_LEASE.set(lease)
+    try:
+        yield
+    finally:
+        _DECODE_LEASE.reset(token)
 
 _ZARRAY = ".zarray"
 _ZGROUP = ".zgroup"
@@ -320,26 +351,40 @@ class Array:
             codec, filters = self._codecs()
             return self._decode_chunk(raw, codec, filters, 1).reshape(())
 
+        # Every element lies in exactly one chunk's region, and each chunk
+        # writes its own region -- decoded, or the fill value when the chunk
+        # is missing -- so no fill pass over the whole array is needed and the
+        # chunks may be decoded in any order, on any thread.
         out = np.empty(self.shape, self.dtype)
-        if self._fill is not None:
-            out[...] = self._fill
-        else:
-            out[...] = np.zeros((), self.dtype)
+        fill = self._fill if self._fill is not None else np.zeros((), self.dtype)
         codec, filters = self._codecs()
         grid = self._chunk_grid()
-        for flat in range(int(np.prod(grid)) if grid else 0):
+        n_items = int(np.prod(self.chunks))
+        n_chunks = int(np.prod(grid)) if grid else 0
+
+        def read_chunk(flat: int) -> None:
             idx = np.unravel_index(flat, grid) if len(grid) > 1 else (flat,)
             key = f"{self._path}/{self._sep.join(str(int(i)) for i in idx)}"
-            raw = self._store.get(key)
-            if raw is None:                             # missing chunk = fill value
-                continue
-            n_items = int(np.prod(self.chunks))
-            block = self._decode_chunk(raw, codec, filters, n_items)
-            block = block.reshape(self.chunks, order=self._order)
             sel = tuple(slice(int(i) * c, min(int(i) * c + c, s))
                         for i, c, s in zip(idx, self.chunks, self.shape))
+            raw = self._store.get(key)
+            if raw is None:                             # missing chunk = fill value
+                out[sel] = fill
+                return
+            block = self._decode_chunk(raw, codec, filters, n_items)
+            block = block.reshape(self.chunks, order=self._order)
             trimmed = tuple(slice(0, s.stop - s.start) for s in sel)
             out[sel] = block[trimmed]
+
+        lease = _DECODE_LEASE.get()
+        if lease is None or min(int(lease.threads), n_chunks) <= 1:
+            for flat in range(n_chunks):
+                read_chunk(flat)
+        else:
+            with ThreadPoolExecutor(max_workers=min(int(lease.threads), n_chunks),
+                                    thread_name_prefix="zarr2-decode") as pool:
+                for _ in pool.map(read_chunk, range(n_chunks)):
+                    pass                                # re-raises a chunk's error
         return out
 
     def __repr__(self) -> str:            # pragma: no cover - debugging aid

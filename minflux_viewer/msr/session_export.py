@@ -124,7 +124,14 @@ def subset_struct_fields(arr, names_sel):
 
 
 def image_series_of(parsed: dict, log=None) -> list[dict]:
-    """Viewable OBF image series of a parsed ``.msr`` (empty when it has none)."""
+    """Viewable OBF image series of a parsed ``.msr`` (empty when it has none).
+
+    The parse lists them while it has the file open (``parsed["image_series"]``);
+    only a result without that list (its scan failed, or it came from
+    elsewhere) has the file's headers read again."""
+    cached = (parsed or {}).get("image_series")
+    if cached is not None:
+        return [dict(entry) for entry in cached]
     msr_path = (parsed or {}).get("msr")
     if not msr_path:
         return []

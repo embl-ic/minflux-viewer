@@ -195,7 +195,16 @@ class MsrReaderDialog(QWidget):
         state=None,
         msr_path: str | None = None,
         parent: QWidget | None = None,
+        *,
+        parsed: dict | None = None,
+        parse_log=(),
+        parse_error: str | None = None,
     ):
+        """*parsed* / *parse_error*: the result (or failure) of parsing
+        *msr_path* before this window opened, with the parse's Log lines in
+        *parse_log*. The file-open route parses once to decide between this
+        reader and a direct restore, and hands the result over rather than
+        having the file read again."""
         # Deliberately a NON-owned top-level window: passing the main window as
         # the QWidget parent (with the Qt.Window flag) makes the OS keep this
         # dialog permanently above its owner in Z-order, so it sits in front of
@@ -262,7 +271,14 @@ class MsrReaderDialog(QWidget):
             self.input_path_edit.setText(msr_path)
             self._last_input_dir = str(Path(msr_path).parent)
             self._save_settings()
-            self._start_parse_worker(msr_path, self._temp_dir())
+            for line in parse_log or ():
+                self.log(str(line))
+            if parse_error is not None:
+                self._on_parse_failed(str(parse_error))
+            elif parsed is not None:
+                self._on_parse_done(parsed)
+            else:
+                self._start_parse_worker(msr_path, self._temp_dir())
 
     # ------------------------------------------------------------------
     # Settings persistence
@@ -1825,7 +1841,13 @@ class MsrReaderDialog(QWidget):
 
     def _gather_image_series_for_dialog(self) -> list[dict]:
         """The viewable OBF image series of the parsed .msr (both legacy and modern
-        files may carry confocal images), for the Fields dialog + Open-in-viewer."""
+        files may carry confocal images), for the Fields dialog + Open-in-viewer.
+
+        The parse lists them while it has the file open; the file's headers
+        are read again only when that list is missing (its scan failed)."""
+        cached = self.parsed.get("image_series")
+        if cached is not None:
+            return [dict(entry) for entry in cached]
         msr_path = self.parsed.get("msr")
         if not msr_path:
             return []
@@ -2027,6 +2049,26 @@ class MsrReaderDialog(QWidget):
         session = AlignmentSession(self.parsed, self._msr_state(), log=self.log)
         return session._viewer_zroot_for_dataset_name(name)
 
+    def _discover_confocal_candidates(self, msr_path: Path, selected_info: list[dict]):
+        """Confocal channels matching the selected datasets' acquisition ROIs.
+
+        Runs on the GUI thread, so it uses what the parse already read -- the
+        stack scan, the acquisition ROIs and the dataset labels -- rather than
+        reading the file again (two whole-file scans, seconds each over a
+        network share). A parse result without them (its stack scan failed)
+        falls back to reading the file."""
+        from ...core.confocal_mapping import (
+            detect_confocal_candidates,
+            discover_confocal_candidates,
+        )
+
+        stacks = self.parsed.get("obf_stacks")
+        rois = self.parsed.get("acquisition_rois")
+        labels = self.parsed.get("did_label_map")
+        if stacks is None or rois is None or labels is None:
+            return discover_confocal_candidates(msr_path, selected_info)
+        return detect_confocal_candidates(stacks, rois, selected_info, did_label_map=labels)
+
     def _ask_viewer_channel_alignment(self, import_plan: dict[str, set[str] | None]):
         """Ask for confocal mapping plus reference dataset/alignment mode.
 
@@ -2051,9 +2093,7 @@ class MsrReaderDialog(QWidget):
                 selected_info.append({"dataset_key": key, "did": ds.get("did", "")})
         if msr_path.is_file():
             try:
-                from ...core.confocal_mapping import discover_confocal_candidates
-
-                confocal_candidates = discover_confocal_candidates(msr_path, selected_info)
+                confocal_candidates = self._discover_confocal_candidates(msr_path, selected_info)
                 if confocal_candidates:
                     self.log(
                         f"[viewer] detected {len(confocal_candidates)} potential fluorescent "
@@ -3390,12 +3430,18 @@ def open_msr(
     msr_path: str,
     state=None,
     parent: QWidget | None = None,
+    *,
+    parsed: dict | None = None,
+    parse_log=(),
+    parse_error: str | None = None,
 ) -> None:
-    """Open a new MSR reader dialog for *msr_path* (auto-parses a single file)."""
+    """Open a new MSR reader dialog for *msr_path* (auto-parses a single file,
+    unless the caller already did: see :class:`MsrReaderDialog`)."""
     if not msr_available():
         QMessageBox.warning(parent, "MSR reader not available", msr_unavailable_message())
         return
-    dlg = MsrReaderDialog(state=state, msr_path=msr_path, parent=parent)
+    dlg = MsrReaderDialog(state=state, msr_path=msr_path, parent=parent,
+                          parsed=parsed, parse_log=parse_log, parse_error=parse_error)
     register_msr_dialog(parent, dlg)
     dlg.show()
     dlg.raise_()

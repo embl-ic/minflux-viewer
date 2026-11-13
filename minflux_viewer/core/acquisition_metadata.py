@@ -17,23 +17,35 @@ localization extent to ~50 nm.
 Nothing in the file binds a ROI to an *image* stack; the association is purely
 geometric, which is why :func:`rois_within` takes the image's physical extent.
 
-Reading is a byte scan of the file (mmap + a bracket-matched JSON slice), the
-same cheap approach ``mfxdta.extract_did_label_map`` uses.  Decoding the MFXDTA
-container instead would mean reading every localization blob — tens of
-megabytes — just to learn where a rectangle is.
+**Reading.** The ROIs come from each MINFLUX payload stack's root ``.zattrs``
+record, read through :func:`~minflux_viewer.core.mfxdta_container.read_root_attrs`,
+which inflates only the first kilobytes of the payload. A byte scan of the whole
+file used to be the reader; it read every byte of a multi-hundred-MB file (slow
+over a network share) and found nothing at all in files whose stacks Imspector
+zlib-compresses -- the JSON is not plain text there.
+
+The dataset labels come from the OBF stack headers and footers that opening the
+file parses anyway: Imspector keeps the ``{"did":…,"label":…}`` descriptor in each
+payload stack's ``minflux`` footer tag, and this application's minimal writer in
+the file description.
 """
 
 from __future__ import annotations
 
 import json
-import mmap
 import re
+import struct
+import zlib
 from dataclasses import dataclass
 
-#: Marker of the attribute block that holds the acquisition rectangles.
-_ROIS_KEY = b'"rois"'
-#: A ``.zattrs`` block is small; refuse to bracket-match beyond this.
-_MAX_BLOCK_BYTES = 1 << 20
+import numpy as np
+
+from .mfxdta_container import read_root_attrs
+
+#: Expected failures of reading an OBF file that is missing, truncated or not
+#: an OBF file at all -- metadata that cannot be read is absent, not an error.
+#: Resource and programming errors (MemoryError, AssertionError, …) propagate.
+_UNREADABLE_OBF = (OSError, ValueError, struct.error, EOFError, zlib.error)
 
 
 @dataclass(frozen=True)
@@ -54,46 +66,38 @@ class AcquisitionRoi:
         return x0, y0, x1 - x0, y1 - y0
 
 
-def _json_object_at(data, start: int) -> dict | None:
-    """Parse the JSON object that encloses *start* (the offset of a key).
+def _open_obf(path):
+    """An ``msr_reader.OBFFile`` for *path*, with the compatibility patches on."""
+    from msr_reader import OBFFile
 
-    Scans back to the opening brace, then forward with a brace counter that
-    ignores braces inside strings, and hands the slice to ``json.loads``.
-    """
-    begin = data.rfind(b"{", max(0, start - _MAX_BLOCK_BYTES), start)
-    if begin < 0:
-        return None
-    depth = 0
-    in_string = False
-    escaped = False
-    limit = min(len(data), begin + _MAX_BLOCK_BYTES)
-    for pos in range(begin, limit):
-        ch = data[pos]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == 0x5C:                       # backslash
-                escaped = True
-            elif ch == 0x22:                       # closing quote
-                in_string = False
-            continue
-        if ch == 0x22:
-            in_string = True
-        elif ch == 0x7B:                           # {
-            depth += 1
-        elif ch == 0x7D:                           # }
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(data[begin:pos + 1].decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    return None
-    return None
+    from ..utils.obf_compat import apply_obf_reader_patches
+
+    apply_obf_reader_patches()
+    return OBFFile(str(path))
+
+
+def _is_byte_stack(header) -> bool:
+    """True for a ``uint8`` OBF stack -- the only kind that carries MFXDTA."""
+    from msr_reader.obffile import _parse_dtype
+
+    try:
+        return np.dtype(_parse_dtype(int(header.dtype))[0]) == np.uint8
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def _rois_from_block(block: dict) -> list[AcquisitionRoi]:
+    """The well-formed rectangles of one ``{"rois": [...]}`` object.
+
+    The ROIs are optional metadata read during the parse, so a malformed value
+    -- not a list, entries that are not objects, corners that are not two
+    coordinate pairs -- contributes nothing rather than failing the import of
+    the localizations beside it."""
     out: list[AcquisitionRoi] = []
-    for entry in block.get("rois") or []:
+    entries = block.get("rois")
+    if not isinstance(entries, list):
+        return out
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
         corners = entry.get("corners")
@@ -109,33 +113,68 @@ def _rois_from_block(block: dict) -> list[AcquisitionRoi]:
     return out
 
 
-def read_acquisition_rois(msr_path) -> list[AcquisitionRoi]:
-    """Every MINFLUX acquisition rectangle in *msr_path*, in file order.
+def rois_from_attrs(attrs) -> list[AcquisitionRoi]:
+    """The acquisition rectangles in one zarr ``.zattrs`` document.
 
-    Duplicates are dropped: a ``.msr`` can embed the same measurement's
-    attributes more than once (a run and its aggregated companion share a
-    ``did`` and repeat the ROI list)."""
+    *attrs* is the record's raw JSON (``bytes``/``str``) or the parsed value.
+    Every JSON object holding a ``"rois"`` list contributes; unreadable JSON
+    (including nesting too deep for the decoder) contributes nothing."""
+    if isinstance(attrs, (bytes, bytearray, str)):
+        try:
+            attrs = json.loads(attrs)
+        except (ValueError, RecursionError):     # JSONDecodeError, UnicodeDecodeError
+            return []
+    out: list[AcquisitionRoi] = []
+    pending = [attrs]                            # preorder: document order
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            if "rois" in node:
+                out.extend(_rois_from_block(node))
+            pending.extend(reversed(list(node.values())))
+        elif isinstance(node, list):
+            pending.extend(reversed(node))
+    return out
+
+
+def unique_rois(rois) -> list[AcquisitionRoi]:
+    """*rois* in order, each rectangle once.
+
+    A ``.msr`` can embed the same measurement's attributes more than once (a
+    run and its aggregated companion share a ``did`` and repeat the ROI list)."""
     found: list[AcquisitionRoi] = []
     seen: set[tuple] = set()
-    try:
-        with open(msr_path, "rb") as fh:
-            data = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
-            try:
-                pos = data.find(_ROIS_KEY)
-                while pos >= 0:
-                    block = _json_object_at(data, pos)
-                    if block is not None:
-                        for roi in _rois_from_block(block):
-                            key = (roi.did, roi.x0, roi.y0, roi.x1, roi.y1)
-                            if key not in seen:
-                                seen.add(key)
-                                found.append(roi)
-                    pos = data.find(_ROIS_KEY, pos + len(_ROIS_KEY))
-            finally:
-                data.close()
-    except (OSError, ValueError):  # unavailable or empty file
-        return []
+    for roi in rois:
+        key = (roi.did, roi.x0, roi.y0, roi.x1, roi.y1)
+        if key not in seen:
+            seen.add(key)
+            found.append(roi)
     return found
+
+
+def read_acquisition_rois(msr_path) -> list[AcquisitionRoi]:
+    """Every MINFLUX acquisition rectangle in *msr_path*, in file order, once.
+
+    Reads the OBF headers, then the first kilobytes of each ``uint8`` stack's
+    payload -- inflated when the stack is compressed -- up to the MFXDTA zarr
+    root ``.zattrs`` record. A missing or non-OBF file has no ROIs; a stack
+    that cannot be decoded contributes none and the others are still read."""
+    rois: list[AcquisitionRoi] = []
+    try:
+        with _open_obf(msr_path) as obf:
+            for header in obf.stack_headers:
+                if not _is_byte_stack(header):
+                    continue
+                try:
+                    raw = read_root_attrs(obf.fd, header.data_position,
+                                          header.data_length, header.compressed)
+                except (zlib.error, ValueError, EOFError):     # one corrupt stack
+                    continue
+                if raw is not None:
+                    rois.extend(rois_from_attrs(raw))
+    except _UNREADABLE_OBF:
+        return []
+    return unique_rois(rois)
 
 
 def rois_within(rois, extent_m) -> list[AcquisitionRoi]:
@@ -188,6 +227,40 @@ _DID_LABEL_RE = re.compile(
 )
 
 
+def _obf_header_texts(obf):
+    """Every metadata text an opened OBF file's headers and footers carry, in
+    file order: the file description and metadata, then per stack its name,
+    description, footer metadata and footer tags."""
+    yield obf.main_header.description or ""
+    yield from ((obf.main_header.metadata or {}).values())
+    for header, footer in zip(obf.stack_headers, obf.stack_footers):
+        yield header.name or ""
+        yield header.description or ""
+        yield getattr(footer, "metadata", "") or ""
+        yield from ((getattr(footer, "tag_dictionary", None) or {}).values())
+
+
+def did_label_map_from_obf(obf) -> dict[str, str]:
+    """Map each dataset ``did`` (UUID) → its human label, from an open OBF file.
+
+    Imspector keeps the ``{"did":…,"label":…}`` descriptor in each payload
+    stack's ``minflux`` footer tag; this application's minimal writer puts the
+    list in the file description. Both are parsed when the file is opened, so
+    no payload byte is read. Checked against the former whole-file byte scan
+    on every sample file: the same map each time. The first label seen for a
+    ``did`` wins."""
+    out: dict[str, str] = {}
+    for text in _obf_header_texts(obf):
+        if not text or '"did"' not in text:
+            continue
+        for m in _DID_LABEL_RE.finditer(str(text).encode("utf-8")):
+            out.setdefault(
+                m.group(1).decode("ascii"),
+                m.group(2).decode("utf-8", "replace"),
+            )
+    return out
+
+
 def extract_did_label_map(msr_path) -> dict[str, str]:
     """Map each dataset ``did`` (UUID) → its human label.
 
@@ -195,20 +268,11 @@ def extract_did_label_map(msr_path) -> dict[str, str]:
     (e.g. ``1_anti_ELYS_F2_Atto655_100pM``). Newer stores may repeat ``did`` in
     ``mfx/.zattrs``; m2205 stores often keep it only in the enclosing OBF stack
     tag (handled by :func:`extract_minflux_stack_tags`). Returns ``{}`` for early
-    single-channel files that carry no labels.
+    single-channel files that carry no labels, and for a missing or non-OBF
+    file. Reads headers only (see :func:`did_label_map_from_obf`).
     """
-    out: dict[str, str] = {}
     try:
-        with open(msr_path, "rb") as fh:
-            mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
-            try:
-                for m in _DID_LABEL_RE.finditer(mm):
-                    out.setdefault(
-                        m.group(1).decode("ascii"),
-                        m.group(2).decode("utf-8", "replace"),
-                    )
-            finally:
-                mm.close()
-    except (OSError, ValueError):  # unavailable or empty file
-        pass
-    return out
+        with _open_obf(msr_path) as obf:
+            return did_label_map_from_obf(obf)
+    except _UNREADABLE_OBF:
+        return {}

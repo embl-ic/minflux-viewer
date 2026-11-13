@@ -339,3 +339,59 @@ def test_dropping_our_msr_adds_the_datasets_and_records_it_as_recent(_app, tmp_p
     finally:
         win.close()
         _app.processEvents()
+
+
+def test_a_plain_open_parses_once_and_routes_by_what_it_found(_app, tmp_path, monkeypatch, qtbot):
+    """Both routes need the parse, so it happens once, before the route is
+    chosen; the whole-file marker scan that used to decide first read every
+    byte a second time (seconds per file over a network share)."""
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.core.loader import build_localization_dataset
+    from minflux_viewer.core.save import dataset_to_mfx_array
+    from minflux_viewer.msr import msr_parser, quick_open
+    from minflux_viewer.msr.writer import MsrChannel, write_datasets_msr, write_minflux_msr
+    from minflux_viewer.ui.main_window import MainWindow
+
+    rng = np.random.default_rng(0)
+    ds = build_localization_dataset(name="mine", x_nm=rng.normal(0, 100, 60),
+                                    y_nm=rng.normal(0, 100, 60))
+    ds.state["overlay_lut"] = "Green"
+    ours = write_datasets_msr(tmp_path / "ours.msr", [ds])
+    # The same data without our state: what a vendor file looks like to the route.
+    vendor = write_minflux_msr(tmp_path / "vendor.msr",
+                               [MsrChannel(mfx=dataset_to_mfx_array(ds), name="theirs")])
+
+    parses: list[str] = []
+    real_parse = msr_parser.parse_general
+    monkeypatch.setattr(msr_parser, "parse_general",
+                        lambda path, *a, **k: (parses.append(str(path)), real_parse(path, *a, **k))[1])
+
+    def no_scan(_path):
+        raise AssertionError("the route was decided by a separate file scan")
+
+    monkeypatch.setattr(quick_open, "is_viewer_msr", no_scan)
+
+    state = AppState()
+    state.prefs.setdefault("data", {}).update({"show_data_info": False, "show_render": False,
+                                               "compute_local_density": False,
+                                               "compute_loc_prec": False})
+    win = MainWindow(state)
+    try:
+        win._open_msr_dialog(str(ours))
+        qtbot.waitUntil(lambda: len(state.datasets) == 1, timeout=30000)
+        assert parses == [str(ours)]
+        assert state.datasets[0].state["overlay_lut"] == "Green"
+        assert not getattr(win, "_plugin_msr_reader_dialogs", [])
+
+        win._open_msr_dialog(str(vendor))
+        qtbot.waitUntil(lambda: bool(getattr(win, "_plugin_msr_reader_dialogs", [])),
+                        timeout=30000)
+        reader = win._plugin_msr_reader_dialogs[-1]
+        assert parses == [str(ours), str(vendor)]
+        assert reader._worker is None and reader.parsed["msr"] == str(vendor)
+        assert len(state.datasets) == 1
+    finally:
+        for reader in list(getattr(win, "_plugin_msr_reader_dialogs", [])):
+            reader.close()
+        win.close()
+        _app.processEvents()

@@ -9,6 +9,13 @@ overridden by the restored state anyway.
 
 The reader stays reachable from the Plugins menu for these files, exactly as for
 any other ``.msr``; this is only about what a plain *open* does.
+
+**How a plain open decides.** It parses the file once (both routes need the
+parse) and asks :func:`parsed_has_viewer_state`; :func:`datasets_from_parsed`
+then builds the datasets from that same parse. Deciding first with
+:func:`is_viewer_msr` -- a scan of every byte -- and then parsing read the whole
+file twice, which over a network share was the slowest part of opening it.
+:func:`is_viewer_msr` remains for callers that need the answer without a parse.
 """
 
 from __future__ import annotations
@@ -18,7 +25,8 @@ from pathlib import Path
 
 from .viewer_state import STATE_FORMAT
 
-__all__ = ["is_viewer_msr", "load_viewer_msr"]
+__all__ = ["datasets_from_parsed", "is_viewer_msr", "load_viewer_msr",
+           "parsed_has_viewer_state"]
 
 #: The marker as it appears in a channel's ``viewer/.zattrs``. That attrs file
 #: is plain JSON text inside the MFXDTA archive, which is not itself compressed,
@@ -44,21 +52,39 @@ def is_viewer_msr(path) -> bool:
         return False                                        # unreadable: not ours
 
 
+def parsed_has_viewer_state(parsed: dict | None) -> bool:
+    """True when a parse result carries processing state this application
+    wrote (a valid ``viewer`` group in any dataset's store)."""
+    from .viewer_state import read_viewer_state
+
+    return any(read_viewer_state(entry.get("zroot")) is not None
+               for entry in (parsed or {}).get("datasets") or [])
+
+
 def load_viewer_msr(path, *, prefs: dict | None = None, log=None) -> list:
     """Every MINFLUX dataset in *path*, stamped and with its state restored.
 
     Returns them in file order, which is the order they were saved in, so the
     overlay indices the state carries line up with the list.
     """
-    from minflux_viewer.core.loader_format_readers import load_from_mfx_array
-
-    from .import_stamp import stamp_msr_dataset
     from .msr_parser import parse_general
-    from .viewer_state import apply_viewer_state, read_viewer_state
 
     source = Path(path)
     parsed = parse_general(str(source), str(source.parent),
                            log=log or (lambda *_a: None))
+    return datasets_from_parsed(parsed, source, prefs=prefs, log=log)
+
+
+def datasets_from_parsed(parsed: dict, path, *, prefs: dict | None = None,
+                         log=None) -> list:
+    """The datasets of an already-parsed *path*, as :func:`load_viewer_msr`
+    returns them."""
+    from minflux_viewer.core.loader_format_readers import load_from_mfx_array
+
+    from .import_stamp import stamp_msr_dataset
+    from .viewer_state import apply_viewer_state, read_viewer_state
+
+    source = Path(path)
     datasets = []
     for entry in parsed.get("datasets") or []:
         mfx = entry.get("_mfx")

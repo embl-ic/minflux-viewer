@@ -86,12 +86,10 @@ def test_write_probe_reports_expected_permission_failure(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("operation", ["read_acquisition_rois", "extract_did_label_map"])
 @pytest.mark.parametrize("error", [MemoryError, AssertionError])
-def test_metadata_scan_does_not_hide_unexpected_mapping_failures(tmp_path, monkeypatch, operation, error):
-    import mmap
-
+def test_metadata_read_does_not_hide_unexpected_failures(tmp_path, monkeypatch, operation, error):
     path = tmp_path / "input.msr"
     path.write_bytes(b"not empty")
-    monkeypatch.setattr(mmap, "mmap", _raises(error))
+    monkeypatch.setattr(acquisition_metadata, "_open_obf", _raises(error))
     with pytest.raises(error, match="injected failure"):
         getattr(acquisition_metadata, operation)(path)
 

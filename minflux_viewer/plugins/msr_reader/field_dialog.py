@@ -20,6 +20,14 @@ class FieldDialog(QDialog):
     ``prechecked_images`` mirrors the mfx/mbm "all" convention: ``None`` means
     *every* image series (the master checkbox), a set means exactly those raw
     stack indices, and the default empty set means none.
+
+    **"Include dataset" hides and shows that dataset's field ticks.** Unticking
+    it remembers every tick below it (both "All …" boxes included), clears them
+    and disables the two field boxes; ticking it again brings the remembered
+    ticks back exactly, so a field that was off stays off. It changes nothing
+    else: an excluded dataset is skipped wherever the selection is used, and
+    :meth:`result_payload` reports its *remembered* fields, so they are still
+    there the next time the dialog opens and the dataset is included again.
     """
 
     def __init__(self, datasets: list[dict], prechecked: dict[str, dict] | None = None,
@@ -29,6 +37,8 @@ class FieldDialog(QDialog):
         self.setWindowTitle("Datasets / Fields included…")
         self.resize(max(560, 320 * max(1, len(datasets))), 560)
         self._vars: dict[str, dict[str, Any]] = {}
+        # Field ticks of an excluded dataset, remembered while they are hidden.
+        self._hidden: dict[str, dict[str, Any]] = {}
         self._image_checks: dict[int, QCheckBox] = {}
         self._image_all: QCheckBox | None = None
 
@@ -81,9 +91,16 @@ class FieldDialog(QDialog):
                 "ds": include,
                 "mfx_all": mfx_all,
                 "mfx": mfx_checks,
+                "mfx_box": mfx_box,
                 "mbm_all": mbm_all,
                 "mbm": mbm_checks,
+                "mbm_box": mbm_box,
             }
+            include.toggled.connect(
+                lambda checked, key=ds["key"]: self._show_dataset_fields(key, checked))
+            if not include.isChecked():
+                # Built with the remembered ticks above; hide them now.
+                self._show_dataset_fields(ds["key"], False)
 
         # Image series (OBF stacks) → opened in the standalone image viewer, not
         # as MINFLUX datasets. Checked ones open on "Open in MINFLUX viewer".
@@ -129,13 +146,49 @@ class FieldDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
+    def _field_ticks(self, key: str) -> dict[str, Any]:
+        """The current ticks of one dataset's field boxes."""
+        vv = self._vars[key]
+        return {
+            "mfx_all": vv["mfx_all"].isChecked(),
+            "mfx": {name: cb.isChecked() for name, cb in vv["mfx"].items()},
+            "mbm_all": vv["mbm_all"].isChecked(),
+            "mbm": {name: cb.isChecked() for name, cb in vv["mbm"].items()},
+        }
+
+    def _show_dataset_fields(self, key: str, shown: bool) -> None:
+        """Hide (remember, clear, disable) or show (restore, enable) the field
+        ticks of dataset *key* -- what "Include dataset" does."""
+        vv = self._vars[key]
+        ticks: dict[str, Any] | None
+        if not shown:
+            if key not in self._hidden:
+                self._hidden[key] = self._field_ticks(key)
+            ticks = {"mfx_all": False, "mbm_all": False,
+                     "mfx": dict.fromkeys(vv["mfx"], False),
+                     "mbm": dict.fromkeys(vv["mbm"], False)}
+        else:
+            ticks = self._hidden.pop(key, None)
+        if ticks is not None:
+            for kind in ("mfx", "mbm"):
+                # The "All" box first: its toggle sets every field, and each
+                # field then gets its own remembered tick.
+                vv[f"{kind}_all"].setChecked(bool(ticks[f"{kind}_all"]))
+                for name, cb in vv[kind].items():
+                    cb.setChecked(bool(ticks[kind].get(name, False)))
+        vv["mfx_box"].setEnabled(shown)
+        vv["mbm_box"].setEnabled(shown)
+
     def result_payload(self):
         out = {}
         for key, vv in self._vars.items():
+            # An excluded dataset reports the ticks it will get back, not the
+            # cleared boxes, so they survive until it is included again.
+            ticks = self._hidden.get(key) or self._field_ticks(key)
             out[key] = {
                 "checked": vv["ds"].isChecked(),
-                "mfx": None if vv["mfx_all"].isChecked() else {name for name, cb in vv["mfx"].items() if cb.isChecked()},
-                "mbm": None if vv["mbm_all"].isChecked() else {name for name, cb in vv["mbm"].items() if cb.isChecked()},
+                "mfx": None if ticks["mfx_all"] else {name for name, on in ticks["mfx"].items() if on},
+                "mbm": None if ticks["mbm_all"] else {name for name, on in ticks["mbm"].items() if on},
             }
         return out
 

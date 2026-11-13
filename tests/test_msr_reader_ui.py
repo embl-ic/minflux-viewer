@@ -90,3 +90,54 @@ def test_auto_parse_only_fires_for_a_single_existing_file(_app, tmp_path, monkey
     dlg._auto_parse_single_input()
     assert calls == ["parsed"]                              # single existing file → parse
     dlg.close()
+
+
+def _sim_mfx(seed=0):
+    from minflux_viewer.core.dataset import build_localization_dataset
+    from minflux_viewer.core.save import dataset_to_mfx_array
+
+    rng = np.random.default_rng(seed)
+    return dataset_to_mfx_array(build_localization_dataset(
+        name="sim", x_nm=rng.normal(0, 100, 80), y_nm=rng.normal(0, 100, 80)))
+
+
+def test_a_result_parsed_before_the_window_opens_is_not_read_again(_app, tmp_path, monkeypatch):
+    """The file-open route parses once to choose between this reader and a
+    direct restore, then hands the result over: the reader must show it -- tree,
+    Log lines, image series -- without touching the file again."""
+    from minflux_viewer.core.app_state import AppState
+    from minflux_viewer.msr.msr_parser import parse_general
+    from minflux_viewer.msr.writer import MsrChannel, write_minflux_msr
+
+    path = write_minflux_msr(tmp_path / "two.msr", [MsrChannel(mfx=_sim_mfx(0), name="red"),
+                                                     MsrChannel(mfx=_sim_mfx(1), name="green")])
+    parsed = parse_general(str(path), str(tmp_path), log=lambda *_a: None)
+
+    def read_again(*_a, **_k):
+        raise AssertionError("the file was read again")
+
+    monkeypatch.setattr(MsrReaderDialog, "_start_parse_worker", read_again)
+    monkeypatch.setattr("minflux_viewer.core.obf_image_source.list_obf_image_series", read_again)
+    state = AppState()
+    seen: list[str] = []
+    state.log_message.connect(lambda message, *_a: seen.append(message))
+
+    dlg = MsrReaderDialog(state=state, msr_path=str(path), parsed=parsed,
+                          parse_log=["[parse] line from before the window"])
+    try:
+        assert dlg._worker is None and dlg.parsed is parsed
+        root = dlg.tree.topLevelItem(0)
+        assert [root.child(i).text(0) for i in range(root.childCount())] == ["red", "green"]
+        early = seen.index("[parse] line from before the window")
+        assert any(line.startswith("[parsed] mfx datasets: 2") for line in seen[early:])
+        assert dlg._gather_image_series_for_dialog() == []
+    finally:
+        dlg.close()
+
+    seen.clear()
+    dlg = MsrReaderDialog(state=state, msr_path=str(path), parse_error="cannot decode")
+    try:
+        assert dlg._worker is None and not dlg.parsed
+        assert any("[ERROR] cannot decode" in line for line in seen), seen
+    finally:
+        dlg.close()

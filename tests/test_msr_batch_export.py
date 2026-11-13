@@ -473,6 +473,53 @@ def test_field_dialog_has_an_include_all_images_master(_app):
     dlg.close()
 
 
+def test_include_dataset_hides_and_restores_its_field_ticks(_app):
+    """Unticking "Include dataset" clears every tick below it -- both "All"
+    boxes too -- and ticking it again brings back exactly what was there, so a
+    field that was off stays off. It is a show/hide of the dataset's fields:
+    what the selection means for exports and the viewer is unchanged."""
+    from minflux_viewer.plugins.msr_reader.msr_reader_dialog import FieldDialog
+
+    datasets = [{"key": "a", "name": "run", "mfx_fields": ["tid", "loc", "efo"],
+                 "mbm_fields": ["gri", "xyz"]}]
+
+    def ticks(vv):
+        return [vv["mfx_all"], vv["mbm_all"], *vv["mfx"].values(), *vv["mbm"].values()]
+
+    dlg = FieldDialog(datasets, None, None)
+    vv = dlg._vars["a"]
+    vv["mfx_all"].setChecked(False)            # takes every mfx field off with it
+    vv["mfx"]["tid"].setChecked(True)
+    vv["mfx"]["loc"].setChecked(True)          # efo stays off
+    vv["mbm"]["xyz"].setChecked(False)         # "All mbm fields" stays ticked
+    before = dlg.result_payload()
+    assert before["a"] == {"checked": True, "mfx": {"tid", "loc"}, "mbm": None}
+
+    vv["ds"].setChecked(False)
+    assert not any(cb.isChecked() for cb in ticks(vv))
+    assert not vv["mfx_box"].isEnabled() and not vv["mbm_box"].isEnabled()
+    # Excluded datasets are skipped wherever the selection is used; what it
+    # reports for the fields is what they will be when it is included again.
+    assert dlg.result_payload()["a"] == {**before["a"], "checked": False}
+
+    vv["ds"].setChecked(True)
+    assert vv["mfx_box"].isEnabled() and vv["mbm_box"].isEnabled()
+    assert dlg.result_payload() == before
+    assert not vv["mfx"]["efo"].isChecked()
+    assert vv["mbm_all"].isChecked() and not vv["mbm"]["xyz"].isChecked()
+    dlg.close()
+
+    # Reopened on an excluded dataset: hidden at first, its fields come back.
+    dlg = FieldDialog(datasets, {"a": {"checked": False, "mfx": {"tid"}, "mbm": None}}, None)
+    vv = dlg._vars["a"]
+    assert not any(cb.isChecked() for cb in ticks(vv))
+    assert dlg.result_payload()["a"] == {"checked": False, "mfx": {"tid"}, "mbm": None}
+    vv["ds"].setChecked(True)
+    assert {name for name, cb in vv["mfx"].items() if cb.isChecked()} == {"tid"}
+    assert vv["mbm_all"].isChecked() and all(cb.isChecked() for cb in vv["mbm"].values())
+    dlg.close()
+
+
 def test_exported_image_keeps_the_name_the_msr_uses(_app):
     """Imspector names its stacks ``Ch1 {1}``; ``Ch1__1_img.tif`` was neither
     findable nor matchable back to the source."""

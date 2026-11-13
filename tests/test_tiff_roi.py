@@ -176,29 +176,26 @@ def _zattrs(*boxes, did="d1"):
     return ('{"rois": [' + rois + '], "version": "2.1"}').encode()
 
 
-def test_acquisition_rois_are_read_out_of_the_raw_file(tmp_path):
-    """They are scanned from the file bytes: decoding the MFXDTA container to
-    reach them would mean reading every localization blob."""
-    from minflux_viewer.msr.acquisition_roi import read_acquisition_rois
+def test_acquisition_rois_are_read_from_the_root_attributes():
+    """The MFXDTA root ``.zattrs`` carries them. Reading them out of real files
+    -- compressed stacks included, where a byte scan of the file finds nothing
+    -- is covered in ``test_msr_single_pass.py``."""
+    from minflux_viewer.msr.acquisition_roi import rois_from_attrs
 
-    blob = (b"\x00\x01binary junk" + _zattrs((1e-6, 2e-6, 2e-6, 4e-6), did="run-a")
-            + b"more junk\xff" + _zattrs((5e-6, 5e-6, 6e-6, 7e-6), did="run-b"))
-    path = tmp_path / "fake.msr"
-    path.write_bytes(blob)
-
-    rois = read_acquisition_rois(path)
-    assert [r.did for r in rois] == ["run-a", "run-b"]
+    rois = rois_from_attrs(_zattrs((1e-6, 2e-6, 2e-6, 4e-6), (5e-6, 5e-6, 6e-6, 7e-6),
+                                   did="run-a"))
+    assert [r.did for r in rois] == ["run-a", "run-a"]
     assert rois[0].bounds == pytest.approx((1e-6, 2e-6, 1e-6, 2e-6))
+    assert rois_from_attrs(b"{not json") == []
+    assert rois_from_attrs(b'{"version": "2.1"}') == []
 
 
-def test_repeated_roi_blocks_are_not_counted_twice(tmp_path):
+def test_repeated_roi_blocks_are_not_counted_twice():
     """A run and its aggregated companion share a did and repeat the ROI list."""
-    from minflux_viewer.msr.acquisition_roi import read_acquisition_rois
+    from minflux_viewer.msr.acquisition_roi import rois_from_attrs, unique_rois
 
     block = _zattrs((1e-6, 2e-6, 2e-6, 4e-6), did="run-a")
-    path = tmp_path / "dup.msr"
-    path.write_bytes(block + b"pad" + block)
-    assert len(read_acquisition_rois(path)) == 1
+    assert len(unique_rois(rois_from_attrs(block) + rois_from_attrs(block))) == 1
 
 
 def test_rois_group_by_the_run_that_drew_them():

@@ -11,12 +11,15 @@ def fail(error):
     return broken
 
 
-def test_parser_does_not_reclassify_allocation_failure_as_image_only(monkeypatch):
+def test_parser_does_not_reclassify_allocation_failure_as_image_only(monkeypatch, tmp_path):
     from minflux_viewer.msr import mfxdta, msr_parser
+    from minflux_viewer.msr.writer import ObfStack, obf_bytes
 
-    monkeypatch.setattr(mfxdta, "read_obf_mfxdta_stacks", fail(MemoryError))
+    path = tmp_path / "one.msr"
+    path.write_bytes(obf_bytes([ObfStack(payload=b"MFXDTA\x00" + b"\x00" * 32)]))
+    monkeypatch.setattr(mfxdta, "read_mfxdta_stacks_from_obf", fail(MemoryError))
     with pytest.raises(MemoryError, match="injected"):
-        msr_parser.GeneralMSRParser().parse("unused.msr", log=lambda *_: None)
+        msr_parser.GeneralMSRParser().parse(str(path), log=lambda *_: None)
 
 
 def test_mfxdta_store_allocation_failure_is_not_a_skipped_dataset(monkeypatch):

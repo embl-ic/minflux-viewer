@@ -36,8 +36,15 @@ Imspector bookkeeping manifest, ignored) and the real ``zarr`` store. The key
 separator is version-dependent — ``\\`` in container v2 (early files), ``/`` in
 v3 (modern files) — so keys are normalised before use.
 
-The decode is pure Python: the stack bytes come from the cross-platform
-``msr-reader`` (``OBFFile.read_stack``); no Abberior ``specpy`` SDK is needed.
+The decode is pure Python: the stack headers come from the cross-platform
+``msr-reader`` (``OBFFile``); no Abberior ``specpy`` SDK is needed. Only the
+``uint8`` stacks are read, each with one large read, and their zlib streams
+(newer Imspector versions compress every stack) are inflated on a thread pool
+while the next stack is read -- ``zlib`` releases the GIL.
+
+The record primitives (``parse_mfxdta_entries`` and friends) live in
+:mod:`minflux_viewer.core.mfxdta_container` so the ``core`` metadata readers
+can use them; they are re-exported here unchanged.
 
 This module only decodes the container and reconstructs the zarr store; the
 decoded ``mfx`` array is consumed by the existing
@@ -48,15 +55,21 @@ channel alignment are intentionally **not** handled here.
 from __future__ import annotations
 
 import json
+import math
 import struct
+import zlib
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 
 from ..core.acquisition_metadata import extract_did_label_map as extract_did_label_map
+from ..core.mfxdta_container import MFXDTA_MAGIC as MFXDTA_MAGIC
+from ..core.mfxdta_container import _first_record_offset as _first_record_offset
+from ..core.mfxdta_container import _looks_like_record as _looks_like_record
+from ..core.mfxdta_container import parse_mfxdta_entries as parse_mfxdta_entries
 
-#: Magic at the start of the OBF stack payload.
-MFXDTA_MAGIC = b"MFXDTA"
 #: ``source_version`` label written onto datasets loaded from this format.
 SOURCE_FORMAT = "obf / mfxdta"
 
@@ -83,75 +96,6 @@ def container_timestamp(blob: bytes) -> int:
     if blob[:6] != MFXDTA_MAGIC:
         raise ValueError("not an MFXDTA container")
     return int(struct.unpack_from("<I", blob, 11)[0])
-
-
-def _looks_like_record(blob: bytes, off: int) -> bool:
-    """Cheap validity test that *off* is the start of an entry record."""
-    n = len(blob)
-    if off + 8 > n:
-        return False
-    nlen = struct.unpack_from("<Q", blob, off)[0]
-    if not (0 < nlen <= 256) or off + 8 + nlen + 1 > n:
-        return False
-    name = blob[off + 8: off + 8 + nlen]
-    if not all(32 <= b < 127 for b in name):
-        return False
-    return blob[off + 8 + nlen] in (0, 1)
-
-
-def _first_record_offset(blob: bytes) -> int:
-    """Locate the first entry record after the fixed header.
-
-    The header (magic + version + timestamp) is followed by zero padding; the
-    first record's ``name_len`` begins at the first non-zero byte after it.
-    A short brute-force scan is the fallback if that heuristic misses.
-    """
-    n = len(blob)
-    candidates: list[int] = []
-    i = 15                                   # past magic(7) + version(4) + ts(4)
-    while i < n and blob[i] == 0:
-        i += 1
-    candidates.append(i)
-    candidates.extend(range(8, min(512, n)))
-    for off in candidates:
-        if _looks_like_record(blob, off):
-            return off
-    raise ValueError("MFXDTA: could not locate the entry table")
-
-
-def parse_mfxdta_entries(blob: bytes) -> dict[str, bytes]:
-    """Parse the container into ``{key: payload}`` for every leaf entry.
-
-    Keys keep their original backslash separators. Group nodes carry no
-    payload and are omitted.
-    """
-    if blob[:6] != MFXDTA_MAGIC:
-        raise ValueError("not an MFXDTA container")
-    n = len(blob)
-    pos = _first_record_offset(blob)
-    store: dict[str, bytes] = {}
-    while pos < n - 8:
-        nlen = struct.unpack_from("<Q", blob, pos)[0]
-        pos += 8
-        if not (0 < nlen <= 1024) or pos + nlen > n:
-            break
-        name = blob[pos:pos + nlen].decode("latin1")
-        pos += nlen
-        if pos >= n:
-            break
-        flag = blob[pos]
-        pos += 1
-        if flag == 1:                        # group node — no payload
-            continue
-        if pos + 8 > n:
-            break
-        dlen = struct.unpack_from("<Q", blob, pos)[0]
-        pos += 8
-        if pos + dlen > n:
-            break
-        store[name] = blob[pos:pos + dlen]
-        pos += dlen
-    return store
 
 
 def extract_zarr_store(blob: bytes) -> dict[str, bytes]:
@@ -194,9 +138,21 @@ def read_mfxdta_mfx(blob: bytes) -> np.ndarray:
     return np.asarray(zarr2.open(store, mode="r")["mfx"])
 
 
-#: Matches the embedded ``{"did":"<uuid>","label":"<…>"}`` dataset descriptors.
-
-
+def minflux_stack_tags_from_obf(obf) -> dict[int, dict]:
+    """Parsed per-stack ``minflux`` JSON tags of an open OBF file, keyed by
+    stack index (see :func:`extract_minflux_stack_tags`)."""
+    out: dict[int, dict] = {}
+    for index, footer in enumerate(obf.stack_footers):
+        raw = (getattr(footer, "tag_dictionary", None) or {}).get("minflux")
+        if not raw:
+            continue
+        try:
+            tag = json.loads(raw)
+        except (TypeError, ValueError, RecursionError):   # incl. JSONDecodeError
+            continue
+        if isinstance(tag, dict):
+            out[index] = tag
+    return out
 
 
 def extract_minflux_stack_tags(msr_path) -> dict[int, dict]:
@@ -209,45 +165,98 @@ def extract_minflux_stack_tags(msr_path) -> dict[int, dict]:
     """
     from msr_reader import OBFFile
 
-    out: dict[int, dict] = {}
     try:
         with OBFFile(str(msr_path)) as obf:
-            for index, footer in enumerate(obf.stack_footers):
-                raw = (getattr(footer, "tag_dictionary", None) or {}).get("minflux")
-                if not raw:
-                    continue
-                try:
-                    tag = json.loads(raw)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    continue
-                if isinstance(tag, dict):
-                    out[index] = tag
+            return minflux_stack_tags_from_obf(obf)
     except (OSError, ValueError, TypeError, IndexError, KeyError, EOFError):
         return {}
-    return out
 
 
-def read_obf_mfxdta_stacks(msr_path) -> list[tuple[int, str, bytes]]:
+def _payload_bytes(header) -> int | None:
+    """Declared payload size of a ``uint8`` stack, or None for another dtype.
+
+    ``samples_per_pixel`` is part of it: RGB/RGBA byte stacks are ``uint8``
+    too. An unknown dtype flag is simply not a candidate payload."""
+    from msr_reader.obffile import _parse_dtype
+
+    try:
+        dtype, samples = _parse_dtype(int(header.dtype))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if np.dtype(dtype) != np.uint8:
+        return None
+    # Python integers: a corrupt header cannot wrap the product around.
+    return math.prod(int(s) for s in header.size) * int(samples)
+
+
+def _inflate(index: int, raw: bytes, compressed: bool, expected: int) -> bytes:
+    blob = zlib.decompress(raw) if compressed else raw
+    if len(blob) != expected:
+        # What msr-reader's reshape to the declared stack shape rejected.
+        raise ValueError(f"OBF stack {index}: payload holds {len(blob)} bytes, "
+                         f"its header declares {expected}")
+    return blob
+
+
+def read_mfxdta_stacks_from_obf(obf, *, lease=None) -> list[tuple[int, str, bytes]]:
+    """``[(stack_index, description, blob), …]`` for every MFXDTA stack of an
+    open OBF file, in file order.
+
+    Only ``uint8`` stacks are read -- image stacks never are -- each with one
+    large sequential read. With a thread *lease* from the process budget
+    (``core.execution.acquire_cpu_threads``, held by the caller) the zlib
+    streams are inflated on its threads while the following stacks are read,
+    which overlaps the file transfer (a network share) with decompression. At
+    most two stacks per thread are in flight, so the compressed copies do not
+    all pile up in memory. Any read or decode failure raises, as a single
+    unreadable stack always did.
+    """
+    candidates = []
+    for i, header in enumerate(obf.stack_headers):
+        expected = _payload_bytes(header)
+        if expected is not None and expected >= 16:
+            candidates.append((i, header, expected))
+
+    def description(i, header):
+        return str(getattr(header, "description", "") or f"minflux_{i}")
+
+    def read_raw(header):
+        obf.fd.seek(header.data_position)
+        return obf.fd.read(header.data_length)
+
+    blobs: list[tuple[int, str, bytes]] = []
+    if lease is None or int(lease.threads) <= 1 or len(candidates) < 2:
+        for i, header, expected in candidates:
+            blobs.append((i, description(i, header),
+                          _inflate(i, read_raw(header), bool(header.compressed), expected)))
+    else:
+        with ThreadPoolExecutor(max_workers=int(lease.threads),
+                                thread_name_prefix="mfxdta-inflate") as pool:
+            in_flight: deque = deque()
+            for i, header, expected in candidates:
+                if len(in_flight) >= 2 * int(lease.threads):
+                    j, header_j, fut = in_flight.popleft()
+                    blobs.append((j, description(j, header_j), fut.result()))
+                fut = pool.submit(_inflate, i, read_raw(header),
+                                  bool(header.compressed), expected)
+                in_flight.append((i, header, fut))
+            while in_flight:
+                j, header_j, fut = in_flight.popleft()
+                blobs.append((j, description(j, header_j), fut.result()))
+    return [(i, desc, blob) for i, desc, blob in blobs
+            if blob[:len(MFXDTA_MAGIC)] == MFXDTA_MAGIC]
+
+
+def read_obf_mfxdta_stacks(msr_path, *, lease=None) -> list[tuple[int, str, bytes]]:
     """Specpy-free MFXDTA scan using the pure-Python ``msr-reader``.
 
     Returns ``[(stack_index, description, blob_bytes), …]`` for every uint8
     stack whose payload begins with ``MFXDTA``. The description comes from the
     OBF stack header (``220601-132142_minflux`` in early files; empty in modern
     multi-channel files, where a synthetic ``minflux_<idx>`` is used instead).
+    *lease*: see :func:`read_mfxdta_stacks_from_obf`.
     """
     from msr_reader import OBFFile
 
-    out: list[tuple[int, str, bytes]] = []
     with OBFFile(str(msr_path)) as f:
-        for i in range(f.num_stacks):
-            arr = np.ascontiguousarray(f.read_stack(i)).ravel()
-            if arr.dtype != np.uint8 or arr.size < 16:
-                continue
-            if arr[:6].tobytes() != MFXDTA_MAGIC:
-                continue
-            try:
-                desc = f.stack_headers[i].description or f"minflux_{i}"
-            except (AttributeError, IndexError, TypeError):
-                desc = f"minflux_{i}"
-            out.append((i, str(desc), arr.tobytes()))
-    return out
+        return read_mfxdta_stacks_from_obf(f, lease=lease)

@@ -161,7 +161,7 @@ def _minflux_tag(footer) -> dict:
         return {}
     try:
         data = json.loads(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):   # too deeply nested: unreadable
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -172,53 +172,59 @@ def source_did_from_minflux_tag(tag: dict) -> str:
 
 
 def _scan_stacks(path) -> list[dict]:
-    """Header/footer-only scan of every OBF stack: ``sizes``/``ndim``/``dtype``/
-    ``name`` plus the ``minflux`` tag's ``type`` and source dataset. No pixel
-    data is read.
+    """Header/footer-only scan of every OBF stack of the file at *path* (see
+    :func:`scan_obf`)."""
+    with _open_obf(path) as obf:
+        return scan_obf(obf)
+
+
+def scan_obf(obf) -> list[dict]:
+    """Header/footer-only scan of every stack of an open ``OBFFile``:
+    ``sizes``/``ndim``/``dtype``/``name`` plus the ``minflux`` tag's ``type``
+    and source dataset. No pixel data is read; *obf* is left open.
 
     ``name`` is the stack name **exactly as the ``.msr`` records it** — it is
     what Imspector shows (``Ch1 {1}``) and what image exports are named after,
     so it must not be reworded here."""
     out: list[dict] = []
-    with _open_obf(path) as obf:
-        for i in range(obf.num_stacks):
-            sizes = tuple(int(s) for s in (obf.shapes[i].sizes or []))
-            try:
-                pixel = tuple(float(p) for p in (obf.pixel_sizes[i].sizes or []))
-            except (AttributeError, IndexError, KeyError, TypeError, ValueError):
-                pixel = ()
-            header = obf.stack_headers[i]
-            try:
-                footer = obf.stack_footers[i]
-                tag = _minflux_tag(footer)
-                extent = _scan_extent(footer)
-                dimension_labels = tuple(getattr(footer, "dimension_labels", ()) or ())
-            except (AttributeError, IndexError, KeyError, TypeError, ValueError):
-                tag, extent, dimension_labels = {}, None, ()
-            name = (getattr(header, "description", "") or getattr(header, "name", "")
-                    or f"Series {i + 1}")
-            out.append({
-                "raw_index": i,
-                "name": str(name).strip() or f"Series {i + 1}",
-                "sizes": sizes,
-                "ndim": len(sizes),
-                "pixel_m": pixel,
-                "dtype": _stack_dtype_name(header),
-                "minflux_type": str(tag.get("type", "") or ""),
-                # m2410 density/value renders use ``source``; older m2205
-                # trace/tid renders put the source dataset directly in ``did``.
-                # Plain confocal stacks have neither.
-                "source_did": source_did_from_minflux_tag(tag),
-                "minflux_tag": tag,
-                "extent_m": extent,
-                "stack_version": int(getattr(header, "stack_version", 0) or 0),
-                "data_length": int(getattr(header, "data_length", 0) or 0),
-                "data_position": int(getattr(header, "data_position", 0) or 0),
-                "compressed": bool(getattr(header, "compressed", False)),
-                "offset": tuple(getattr(header, "offset", ()) or ()),
-                "length": tuple(getattr(header, "length", ()) or ()),
-                "dimension_labels": dimension_labels,
-            })
+    for i in range(obf.num_stacks):
+        sizes = tuple(int(s) for s in (obf.shapes[i].sizes or []))
+        try:
+            pixel = tuple(float(p) for p in (obf.pixel_sizes[i].sizes or []))
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            pixel = ()
+        header = obf.stack_headers[i]
+        try:
+            footer = obf.stack_footers[i]
+            tag = _minflux_tag(footer)
+            extent = _scan_extent(footer)
+            dimension_labels = tuple(getattr(footer, "dimension_labels", ()) or ())
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            tag, extent, dimension_labels = {}, None, ()
+        name = (getattr(header, "description", "") or getattr(header, "name", "")
+                or f"Series {i + 1}")
+        out.append({
+            "raw_index": i,
+            "name": str(name).strip() or f"Series {i + 1}",
+            "sizes": sizes,
+            "ndim": len(sizes),
+            "pixel_m": pixel,
+            "dtype": _stack_dtype_name(header),
+            "minflux_type": str(tag.get("type", "") or ""),
+            # m2410 density/value renders use ``source``; older m2205
+            # trace/tid renders put the source dataset directly in ``did``.
+            # Plain confocal stacks have neither.
+            "source_did": source_did_from_minflux_tag(tag),
+            "minflux_tag": tag,
+            "extent_m": extent,
+            "stack_version": int(getattr(header, "stack_version", 0) or 0),
+            "data_length": int(getattr(header, "data_length", 0) or 0),
+            "data_position": int(getattr(header, "data_position", 0) or 0),
+            "compressed": bool(getattr(header, "compressed", False)),
+            "offset": tuple(getattr(header, "offset", ()) or ()),
+            "length": tuple(getattr(header, "length", ()) or ()),
+            "dimension_labels": dimension_labels,
+        })
     return out
 
 
@@ -233,11 +239,6 @@ def scan_obf_stacks(path) -> list[dict]:
     return _scan_stacks(path)
 
 
-def _image_stacks(path) -> list[dict]:
-    """Every scanned stack of *path* that is a viewable image series."""
-    return [s for s in _scan_stacks(path) if is_image_stack(s)]
-
-
 def msr_is_image_only(path) -> bool:
     """True when *path* is an image-only ``.msr`` (route it to the image viewer)."""
     try:
@@ -246,12 +247,9 @@ def msr_is_image_only(path) -> bool:
         return False
 
 
-def list_obf_image_series(path) -> list[dict]:
-    """The viewable image series of a ``.msr``, in file order:
-    ``[{"raw_index", "name", "shape_str", "dtype", "source_did"}, …]``.
-
-    ``source_did`` is the ``did`` of the MINFLUX dataset a density/trace render
-    was computed from, or ``""`` for a standalone image (a confocal channel)."""
+def image_series_from_scan(stacks) -> list[dict]:
+    """The viewable image series among scanned *stacks* (see :func:`scan_obf`),
+    in file order, in the form :func:`list_obf_image_series` returns."""
     return [
         {
             "raw_index": s["raw_index"],
@@ -261,8 +259,17 @@ def list_obf_image_series(path) -> list[dict]:
             "source_did": s["source_did"],
             "minflux_type": s["minflux_type"],
         }
-        for s in _image_stacks(path)
+        for s in stacks if is_image_stack(s)
     ]
+
+
+def list_obf_image_series(path) -> list[dict]:
+    """The viewable image series of a ``.msr``, in file order:
+    ``[{"raw_index", "name", "shape_str", "dtype", "source_did"}, …]``.
+
+    ``source_did`` is the ``did`` of the MINFLUX dataset a density/trace render
+    was computed from, or ``""`` for a standalone image (a confocal channel)."""
+    return image_series_from_scan(_scan_stacks(path))
 
 
 class ObfImageSource:
@@ -285,7 +292,15 @@ class ObfImageSource:
     def __init__(self, path, *, series_index: int = 0, raw_stack_index: int | None = None) -> None:
         self.path = Path(path)
         self._obf = _open_obf(self.path)
-        self._stacks = _image_stacks(self.path)
+        scanned = False
+        try:
+            # The handle just opened already holds every header: scanning it
+            # rather than the path saves parsing them all a second time.
+            self._stacks = [s for s in scan_obf(self._obf) if is_image_stack(s)]
+            scanned = True
+        finally:
+            if not scanned:
+                self.close()
         if not self._stacks:
             self.close()
             raise ValueError(f"'{self.path.name}' contains no readable OBF image series")

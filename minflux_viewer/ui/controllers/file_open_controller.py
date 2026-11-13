@@ -42,20 +42,69 @@ def _open_msr_dialog(self: MainWindow, msr_path: str) -> None:
         **Every** ``.msr`` opens in the MSR reader — including image-only files
         with no MINFLUX data. Their OBF image series are viewable from the reader
         (right-click a Series node › *Preview* / *Open as image*, or select them in
-        *Datasets / Fields included…* and *Open in MINFLUX viewer*)."""
+        *Datasets / Fields included…* and *Open in MINFLUX viewer*).
+
+        ...except one we wrote ourselves. The reader exists to ask which
+        datasets to import, how to align the channels and whether to map a
+        confocal image; our own file already answers all three, and the saved
+        state would override the answers anyway. The reader stays reachable
+        from the Plugins menu for these files.
+
+        **The file is read once.** It is parsed in the background *before* the
+        route is chosen, because both routes need that parse; the reader then
+        opens with the result instead of reading the file again. Choosing by a
+        separate scan of every byte first used to double the reading, the
+        slowest part of opening a file on a network share."""
     if not msr_path:
         return
-    # ...except one we wrote ourselves. The reader exists to ask which
-    # datasets to import, how to align the channels and whether to map a
-    # confocal image; our own file already answers all three, and the saved
-    # state would override the answers anyway. The reader stays reachable
-    # from the Plugins menu for these files.
-    from minflux_viewer.msr.quick_open import is_viewer_msr
-    if is_viewer_msr(msr_path):
-        self._open_viewer_msr(msr_path)
-        return
+    from minflux_viewer.msr.msr_parser import parse_general
+    from minflux_viewer.msr.quick_open import datasets_from_parsed, parsed_has_viewer_state
     from minflux_viewer.ui.dialogs.msr_import_dialog import open_msr
-    open_msr(msr_path, self._state, parent=self)
+
+    name = Path(msr_path).name
+    prefs = self._state.prefs
+    # Set by the worker before the restore starts, read on the GUI thread once
+    # the task has ended: a failure after it is a failed restore of our own
+    # file, one before it a file the reader should show the error for.
+    restoring = {"ours": False}
+
+    def work(report):
+        report(f"Reading {name}")
+        # The worker must not touch Qt, so its Log lines are collected here
+        # and written on the GUI thread; list.append is all this is.
+        messages: list[str] = []
+        parsed = parse_general(msr_path, str(Path(msr_path).parent), log=messages.append)
+        if not parsed_has_viewer_state(parsed):
+            return parsed, None, messages
+        restoring["ours"] = True
+        report(f"Restoring {name}")
+        return None, datasets_from_parsed(parsed, msr_path, prefs=prefs,
+                                          log=messages.append), messages
+
+    def done(result) -> None:
+        if self._is_shutting_down:
+            return
+        parsed, datasets, messages = result
+        if datasets is None:
+            open_msr(msr_path, self._state, parent=self, parsed=parsed, parse_log=messages)
+            return
+        self._state.log(f"Opening '{name}': MINFLUX Viewer .msr, "
+                        "restoring its saved processing state.")
+        self._on_viewer_msr_loaded(datasets, name, msr_path, messages=messages)
+
+    def failed(message: str) -> None:
+        if self._is_shutting_down:
+            return
+        if restoring["ours"]:
+            self._on_msr_open_failed(name, message)
+        else:
+            open_msr(msr_path, self._state, parent=self, parse_error=message)
+
+    task = BackgroundTask(work, description=f"Reading {name}", category="load")
+    task.signals.stage.connect(lambda text: self._state.status_progress(text))
+    task.signals.done.connect(done)
+    task.signals.failed.connect(failed)
+    self._begin_file_io(task)
 
 
 def _open_viewer_msr(self: MainWindow, msr_path: str) -> None:
