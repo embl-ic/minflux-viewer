@@ -153,11 +153,10 @@ downsample the data silently.
 
 ## Documentation
 
-The [`docs/`](docs) folder holds the published documentation:
-
-- [`docs/scripting-api.md`](docs/scripting-api.md) — the `mfv` scripting and plugin API.
-- [`docs/zarr-v2-format.md`](docs/zarr-v2-format.md) — the MINFLUX Viewer Zarr v2 dataset format.
-- [`docs/ui-designer.md`](docs/ui-designer.md) — editing the main window with Qt Designer.
+The [manual](docs/README.md) in the `docs/` folder covers getting started, the
+concepts behind the data, filtering, the precision and resolution methods, a
+complete command reference, the `mfv` scripting and plugin API, the application's
+Zarr v2 format, and a developer guide.
 
 ## For developers
 

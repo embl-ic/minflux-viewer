@@ -169,7 +169,7 @@ COMMAND_META: dict[str, CommandMeta] = {
                               ("threshold", "gate", "select", "efo", "cfr", "dcr", "auto", "outlier",
                                "mad", "percentile"),
                               "Filter localizations by attribute ranges; Auto adds data-derived bounds "
-                              "from the Preferences ▸ Process ▸ Filter rules.", "process",
+                              "from the Preferences › Process › Filter rules.", "process",
                               gui_class=GuiClass.GUI_RESULT),
 
     # ---- Process › Channel ----------------------------------------------------
@@ -281,7 +281,7 @@ COMMAND_META: dict[str, CommandMeta] = {
     "actionLocPrecisionStdDev": CommandMeta(A + "localization_precision.py",
                               ("precision", "sigma", "std dev", "per trace", "resolution", "ostersehlt"),
                               "Localization precision as the per-trace standard deviation "
-                              "(traces with ≥ MIN_LOCS locs; raw z). Ref: Ostersehlt 2022.", "analysis",
+                              "(traces with at least 5 localizations; raw z). Ref: Ostersehlt 2022.", "analysis",
                               params=(ParamMeta("min_locs", "int", 5, "", "min localizations per trace"),),
                               inputs=("active dataset (loc, tid)",),
                               outputs=("per-trace σ (x,y,z) nm", "median σ"), gui_class=GuiClass.GUI_FREE),
@@ -392,8 +392,14 @@ COMMAND_META: dict[str, CommandMeta] = {
     # ---- Analyze › Tracking ---------------------------------------------------
     "actionParticleTracking": CommandMeta(U + "main_window.py", ("tracking", "linking", "trajectory"),
                               "Particle tracking (placeholder).", "analysis", gui_class=GuiClass.GUI_RESULT),
-    "actionMsdAnalysis": CommandMeta(U + "main_window.py", ("msd", "diffusion", "mean square displacement"),
-                              "MSD / diffusion analysis (placeholder).", "analysis", gui_class=GuiClass.GUI_RESULT),
+    "actionMsdAnalysis": CommandMeta(U + "plots/tracking_analysis_window.py",
+                              ("msd", "diffusion", "mean square displacement", "trajectory",
+                               "confinement", "ergodicity"),
+                              "Trajectory workbench, computed in the background: mean squared "
+                              "displacement per uninterrupted segment (irregular time steps), "
+                              "step and turning-angle statistics, confinement and ergodicity "
+                              "diagnostics; accepted results can be added as attributes or "
+                              "exported.", "analysis", gui_class=GuiClass.GUI_RESULT),
 
     # ---- Help -----------------------------------------------------------------
     "actionConsole": CommandMeta(U + 'tools/console_window.py', ("stdout", "stderr", "console", "output"),

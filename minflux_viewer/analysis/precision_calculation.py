@@ -333,7 +333,7 @@ def frc_resolution(
     image_px : int
         Minimum square render size in pixels per side (auto pixel path).
     pixel_size_nm : float, optional
-        Super-resolution pixel size. Defaults to a ~1 nm target, the grid
+        Super-resolution pixel size. Defaults to a ~2 nm target, the grid
         growing (capped) so it always covers the data extent.
     repeats : int
         Number of independent random half-splits whose FRC curves are averaged.

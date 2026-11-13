@@ -482,7 +482,7 @@ class FRCResultDialog(QDialog):
 
         note = QLabel(
             "The localizations are split into two independent images by a random "
-            "50/50 per-localization assignment, each rendered as a ~1 nm-pixel "
+            "50/50 per-localization assignment, each rendered as a fine-pixel "
             "histogram.<br>"
             "FRC(q) = Σ<sub>ring</sub> Re{ F<sub>1</sub>(q)·F<sub>2</sub>*(q) } ∕ "
             "√( Σ<sub>ring</sub>|F<sub>1</sub>(q)|² · Σ<sub>ring</sub>|F<sub>2</sub>(q)|² )<br>"
