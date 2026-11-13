@@ -6,9 +6,12 @@ import numpy as np
 import pytest
 
 from minflux_viewer.analysis.voronoi_density import build_voronoi_3d_field
+from minflux_viewer.core.dataset import build_localization_dataset
 from minflux_viewer.ui.rendering.volume_window import (
     _clip_region,
     _compose_multichannel_rgba,
+    _finite_filtered_locs,
+    _finite_filtered_precision,
     _precision_volume_3d,
     lut_rgb,
     make_multichannel_volume_payload,
@@ -149,6 +152,103 @@ def test_multichannel_caches_compact_norms_for_display_sync():
     )
     assert np.any(red_only[..., 0] > 0)
     assert np.all(red_only[..., 1] == 0)
+
+
+def _two_channels(n=2000):
+    rng = np.random.default_rng(5)
+    red = rng.normal([0.0, 0.0, 0.0], [30.0, 30.0, 25.0], size=(n, 3))
+    green = rng.normal([150.0, 0.0, 0.0], [30.0, 30.0, 25.0], size=(n, 3))
+    return [red, green]
+
+
+def _overlay_scalar(method, sigma_xyz, precision=None):
+    return make_multichannel_volume_payload(
+        _two_channels(), [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+        xy_voxel_nm=5.0, z_voxel_nm=5.0, max_dim=96, opacity=1.0,
+        render_method=method, sigma_nm_xyz=sigma_xyz,
+        channel_precision_sigma_nm=precision,
+    ).scalar
+
+
+def test_multichannel_volume_follows_the_render_method_not_the_fixed_sigma():
+    # The reported bug: an overlay volume blurred every channel by the Fixed
+    # Gaussian sigma whatever the method, so after a large sigma the precision
+    # Gaussian and the histogram kept showing the large blur.
+    small, large = (5.0, 5.0, 5.0), (60.0, 60.0, 60.0)
+    for method in ("histogram", "bilinear", "bicubic", "basic"):
+        np.testing.assert_array_equal(
+            _overlay_scalar(method, small), _overlay_scalar(method, large))
+    counts = _overlay_scalar("histogram", large)
+    assert np.array_equal(counts, np.round(counts)) and counts.sum() == 4000
+
+    tight = [np.full((2000, 3), 2.0), np.full((2000, 3), 2.0)]
+    broad = [np.full((2000, 3), 12.0), np.full((2000, 3), 12.0)]
+    np.testing.assert_array_equal(
+        _overlay_scalar("precision_gaussian", small, tight),
+        _overlay_scalar("precision_gaussian", large, tight))
+    assert (_overlay_scalar("precision_gaussian", small, broad).max()
+            < _overlay_scalar("precision_gaussian", small, tight).max())
+
+    # The fixed sigma still drives Fixed Gaussian, and the basic view's volume
+    # (no method) keeps its own sigma.
+    for method in ("fixed_gaussian", None):
+        assert _overlay_scalar(method, large).max() < _overlay_scalar(method, small).max()
+
+
+def test_multichannel_volume_matches_the_single_channel_voxelisation():
+    red, green = _two_channels()
+    sigma = np.column_stack([np.full(len(red), 3.0), np.full(len(red), 4.0),
+                             np.full(len(red), 9.0)])
+    for method, precision in (("histogram", None), ("bicubic", None),
+                              ("fixed_gaussian", None), ("precision_gaussian", sigma)):
+        overlay = make_multichannel_volume_payload(
+            [red, red.copy()], [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+            xy_voxel_nm=5.0, z_voxel_nm=5.0, max_dim=96, max_voxels=8_000_000,
+            render_method=method, sigma_nm_xyz=(7.0, 7.0, 7.0),
+            channel_precision_sigma_nm=[precision, precision],
+        )
+        single = make_volume_payload(
+            red, xy_voxel_nm=5.0, z_voxel_nm=5.0, max_dim=96, max_voxels=8_000_000,
+            render_method=method, sigma_nm_xyz=(7.0, 7.0, 7.0),
+            precision_sigma_nm=precision,
+        )
+        np.testing.assert_allclose(overlay.scalar, 2.0 * single.scalar, rtol=1e-6, atol=1e-6)
+
+
+def test_multichannel_precision_rows_must_match_the_channel():
+    with pytest.raises(ValueError, match="precision rows"):
+        make_multichannel_volume_payload(
+            _two_channels(), [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+            xy_voxel_nm=5.0, z_voxel_nm=5.0, max_dim=64,
+            render_method="precision_gaussian",
+            channel_precision_sigma_nm=[np.full((10, 3), 2.0), None],
+        )
+
+
+def test_overlay_channel_precision_is_filtered_and_rotated_with_its_localizations():
+    n = 6
+    ds = build_localization_dataset(
+        name="volume-precision-rows",
+        x_nm=np.arange(n, dtype=float) * 10.0,
+        y_nm=np.zeros(n),
+        z_nm=np.linspace(-20.0, 20.0, n),
+        tid=np.arange(n),
+        attrs={"sx_nm": np.arange(1.0, n + 1.0), "sy_nm": np.full(n, 20.0),
+               "sz_nm": np.full(n, 30.0)},
+    )
+    ds.filter_mask = np.array([True, False, True, True, False, True])
+    quarter_turn = {"matrix_4x4": [[0.0, -1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0],
+                                   [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]}
+
+    locs = _finite_filtered_locs(ds, transform=quarter_turn)
+    sigma = _finite_filtered_precision(ds, transform=quarter_turn)
+
+    assert sigma.shape == locs.shape == (4, 3)
+    # Kept rows 0, 2, 3, 5; a quarter turn swaps the X and Y marginals.
+    np.testing.assert_allclose(sigma[:, 0], 20.0)
+    np.testing.assert_allclose(sigma[:, 1], [1.0, 3.0, 4.0, 6.0])
+    np.testing.assert_allclose(sigma[:, 2], 30.0)
+    np.testing.assert_allclose(locs[:, 1], [0.0, 20.0, 30.0, 50.0])
 
 
 def test_multichannel_requires_z_range():

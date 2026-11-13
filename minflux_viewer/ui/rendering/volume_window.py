@@ -70,12 +70,37 @@ def _finite_filtered_locs(dataset, *, transform=None) -> np.ndarray:
         return np.empty((0, 3), dtype=np.float64)
     if locs.shape[1] == 2:
         locs = np.column_stack([locs, np.zeros(locs.shape[0], dtype=np.float64)])
-    mask = np.asarray(dataset.filter_mask, dtype=bool)
-    finite = np.all(np.isfinite(locs[:, :3]), axis=1)
-    if mask.shape[0] == locs.shape[0]:
-        finite &= mask
+    finite = _finite_filtered_rows(dataset, locs)
     displayed = coordinate_view(dataset, transform=transform)
     return np.ascontiguousarray(displayed[finite, :3], dtype=np.float64)
+
+
+def _finite_filtered_rows(dataset, locs: np.ndarray) -> np.ndarray:
+    """Rows of the calibrated *locs* that pass the filter and are finite."""
+    finite = np.all(np.isfinite(locs[:, :3]), axis=1)
+    mask = np.asarray(dataset.filter_mask, dtype=bool)
+    if mask.shape[0] == locs.shape[0]:
+        finite &= mask
+    return finite
+
+
+def _finite_filtered_precision(dataset, *, transform=None) -> np.ndarray:
+    """Per-localization precision ``(N, 3)`` nm, row for row with
+    :func:`_finite_filtered_locs`. Through an overlay transform its marginals
+    are rotated as the advanced 2-D view rotates them."""
+    from minflux_viewer.core.overlay import transform_to_matrix4
+    from minflux_viewer.ui.rendering.precision_render import (
+        resolve_precision_xyz_nm,
+        transform_precision_marginals,
+    )
+
+    locs = coordinate_view(dataset)
+    sigma, _source = resolve_precision_xyz_nm(dataset, locs.shape[0])
+    sigma = sigma[_finite_filtered_rows(dataset, locs)]
+    return np.ascontiguousarray(
+        transform_precision_marginals(sigma, transform_to_matrix4(transform)),
+        dtype=np.float64,
+    )
 
 
 def _clip_region(locs, sigma, region):
@@ -435,6 +460,7 @@ def make_multichannel_volume_payload(
     channel_contrast_pct: list[tuple[float, float]] | None = None,
     render_method: str | None = None,
     voronoi_fields: list[Voronoi3DField] | None = None,
+    channel_precision_sigma_nm: list[np.ndarray | None] | None = None,
 ) -> VolumePayload:
     """Composite several overlay channels into one RGBA volume.
 
@@ -442,31 +468,39 @@ def make_multichannel_volume_payload(
     normalised to its own percentile, and **additively colored** by its LUT
     color (so e.g. red + green overlap → yellow). Per-voxel alpha is the maximum
     channel response, so a voxel visible in any channel shows.
+
+    Each channel is voxelised by *render_method* exactly as a single channel is
+    (:func:`_voxelize_volume`); ``sigma_nm_xyz`` is the Fixed Gaussian sigma
+    and blurs only that method (or ``render_method=None``, the basic view).
+    ``channel_precision_sigma_nm`` gives each channel's per-localization
+    ``(N, 3)`` precision for the precision Gaussian.
     """
+    sigmas = list(channel_precision_sigma_nm or [])
     valid = []
-    for locs, rgb in zip(channel_locs_nm, channel_rgb):
+    for index, (locs, rgb) in enumerate(zip(channel_locs_nm, channel_rgb)):
         arr = np.asarray(locs, dtype=np.float64)
         if arr.ndim == 2 and arr.shape[1] == 3 and arr.shape[0] > 0:
-            valid.append((arr, np.asarray(rgb, dtype=np.float64).ravel()[:3]))
+            sigma = sigmas[index] if index < len(sigmas) else None
+            if sigma is not None and len(sigma) != arr.shape[0]:
+                raise ValueError(
+                    f"Channel {index + 1}: {len(sigma)} precision rows for "
+                    f"{arr.shape[0]} localizations."
+                )
+            valid.append((arr, np.asarray(rgb, dtype=np.float64).ravel()[:3], sigma))
     if not valid:
         raise ValueError("No localisations pass the current filter.")
 
-    all_locs = np.vstack([a for a, _ in valid])
+    all_locs = np.vstack([a for a, _, _ in valid])
     edges, counts, voxel_xyz = _volume_grid(
         all_locs, xy_voxel_nm, z_voxel_nm, max_dim, max_voxels)
     shape = (int(counts[0]), int(counts[1]), int(counts[2]))
-
-    sigma_px = []
-    for sigma_nm, step_nm in zip(sigma_nm_xyz, voxel_xyz):
-        sigma_px.append(max(float(sigma_nm) / max(step_nm, 1e-12), 0.0)
-                        if sigma_nm > 0.0 else 0.75)
 
     channel_norms: list[np.ndarray] = []
     scalar_sum = np.zeros(shape, dtype=np.float32)
     n_total = 0
     op = float(np.clip(opacity, 0.0, 1.0))
     method = (render_method or "").lower()
-    for channel_index, (locs, _rgb) in enumerate(valid):
+    for channel_index, (locs, _rgb, sigma) in enumerate(valid):
         if method == "voronoi_density":
             if voronoi_fields is None or channel_index >= len(voronoi_fields):
                 raise ValueError("3-D Voronoi rendering requires one field per channel.")
@@ -477,10 +511,12 @@ def make_multichannel_volume_payload(
                 shape,
             )
         else:
-            hist, _ = np.histogramdd(locs, bins=edges)
-            vol = hist.astype(np.float32, copy=False)
-            if max(sigma_px) >= 0.1:
-                vol = gaussian_filter(vol, sigma=tuple(sigma_px), mode="constant")
+            vol = _voxelize_volume(
+                locs, edges, voxel_xyz,
+                render_method=render_method,
+                sigma_nm_xyz=sigma_nm_xyz,
+                precision_sigma_nm=sigma,
+            )
         if channel_contrast_pct is not None and channel_index < len(channel_contrast_pct):
             channel_black, channel_white = channel_contrast_pct[channel_index]
         else:
@@ -491,7 +527,7 @@ def make_multichannel_volume_payload(
         n_total += int(locs.shape[0])
 
     rgba = _compose_multichannel_rgba(
-        channel_norms, [rgb for _, rgb in valid], op
+        channel_norms, [rgb for _, rgb, _ in valid], op
     )
 
     smax = float(scalar_sum.max()) if scalar_sum.size else 1.0
@@ -763,9 +799,11 @@ class VolumeRenderWindow(QWidget):
                 self._overlay_transforms[key] = deepcopy(transform)
 
     def _overlay_channels(self):
-        """Visible overlay channels as ``[(locs_nm, rgb01), …]`` (display-space,
-        each channel's transform applied), or ``None`` when the dataset is not a
-        multi-channel overlay."""
+        """Visible overlay channels as ``[(locs_nm, rgb01, sigma_nm), …]``
+        (display-space, each channel's transform applied), or ``None`` when the
+        dataset is not a multi-channel overlay. ``sigma_nm`` is the row-aligned
+        ``(N, 3)`` precision when the reflected method is the precision
+        Gaussian, else None."""
         from minflux_viewer.core.overlay import dataset_group_id, overlay_members
 
         if not (self._idx is not None and 0 <= self._idx < len(self._state.datasets)):
@@ -775,6 +813,7 @@ class VolumeRenderWindow(QWidget):
         members = overlay_members(self._state, self._idx)
         if len(members) < 2:
             return None
+        precision = (self._render_method or "").lower() == "precision_gaussian"
         out = []
         display_map = self._display_channel_map()
         self._volume_channel_ids = ()
@@ -801,7 +840,10 @@ class VolumeRenderWindow(QWidget):
                          or ds.state.get("render_channel_lut") or "Gray")
             )
             rgb = lut_rgb(lut)
-            out.append((np.ascontiguousarray(locs[:, :3], dtype=np.float64), rgb))
+            sigma = (
+                _finite_filtered_precision(ds, transform=transform) if precision else None
+            )
+            out.append((np.ascontiguousarray(locs[:, :3], dtype=np.float64), rgb, sigma))
             channel_ids.append(key)
         self._volume_channel_ids = tuple(channel_ids)
         return out or None
@@ -876,10 +918,11 @@ class VolumeRenderWindow(QWidget):
                 f"3D Volume Preview - {ds.name} (+{len(channels) - 1} channel(s))")
             voronoi_source_channels = list(channels)
             if self._region_bounds is not None:
-                channels = [
-                    (_clip_region(locs, None, self._region_bounds)[0], rgb)
-                    for locs, rgb in channels
-                ]
+                clipped = []
+                for locs, rgb, sigma in channels:
+                    locs, sigma = _clip_region(locs, sigma, self._region_bounds)
+                    clipped.append((locs, rgb, sigma))
+                channels = clipped
             all_locs = np.vstack([c[0] for c in channels])
         else:
             self._volume_channel_ids = ()
@@ -924,7 +967,7 @@ class VolumeRenderWindow(QWidget):
                 if render_method == "voronoi_density":
                     voronoi_fields = [
                         build_voronoi_3d_field(locs)
-                        for locs, _rgb in voronoi_source_channels
+                        for locs, _rgb, _sigma in voronoi_source_channels
                     ]
                 payload = make_multichannel_volume_payload(
                     [c[0] for c in channels], [c[1] for c in channels],
@@ -939,6 +982,7 @@ class VolumeRenderWindow(QWidget):
                     channel_contrast_pct=channel_contrast_pct,
                     render_method=self._render_method,
                     voronoi_fields=voronoi_fields,
+                    channel_precision_sigma_nm=[c[2] for c in channels],
                 )
             else:
                 contrast = self._display_contrast(self._dataset_key)
