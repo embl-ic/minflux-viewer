@@ -228,8 +228,13 @@ def test_macos_bundle_has_an_icon() -> None:
     icns = ROOT / "resources" / "icons" / "minflux_viewer_logo.icns"
     assert icns.is_file(), "run: python tools/make_icns.py"
     assert icns.read_bytes()[:4] == b"icns"
-    namespace, _calls = _evaluate_spec()
+    namespace, calls = _evaluate_spec()
     assert namespace["MAC_ICON"] == str(icns)
+    if sys.platform == "darwin":
+        bundle = calls["BUNDLE"][0][1]
+        assert bundle["name"] == "MINFLUX Data Viewer.app"
+        assert bundle["info_plist"]["CFBundleName"] == "MINFLUX Data Viewer"
+        assert bundle["info_plist"]["CFBundleDisplayName"] == "MINFLUX Data Viewer"
 
 
 def test_hlyb_builtin_plugin_metadata_is_bundled() -> None:

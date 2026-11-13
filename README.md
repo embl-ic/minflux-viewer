@@ -82,7 +82,7 @@ Prebuilt applications for each operating system are provided on the
 | OS | File | Run |
 |----|------|-----|
 | Windows | `MINFLUX-Viewer-<version>-win.zip` | Unzip, then run `minflux_viewer.exe`. |
-| macOS | `MINFLUX-Viewer-<version>-macOS.zip` | Unzip, then open `MINFLUX Viewer.app`. The application is not code-signed, so on first launch use right-click → Open, or run `xattr -dr com.apple.quarantine "MINFLUX Viewer.app"` once. |
+| macOS | `MINFLUX-Viewer-<version>-macOS.zip` | Unzip, then open `MINFLUX Data Viewer.app`. The application is not code-signed, so on first launch use right-click → Open, or run `xattr -dr com.apple.quarantine "MINFLUX Data Viewer.app"` once. |
 | Linux | `MINFLUX-Viewer-<version>-linux.tar.gz` | Extract, then run `./minflux_viewer/minflux_viewer`. If it does not start, install the Qt/OpenGL runtime libraries: `sudo apt install libgl1 libegl1 libxcb-cursor0`. |
 
 The on-startup update check is disabled by default. It can be enabled in the

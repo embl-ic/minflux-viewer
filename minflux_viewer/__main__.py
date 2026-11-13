@@ -13,7 +13,51 @@ from __future__ import annotations
 import sys
 
 
+def _set_macos_application_name(name: str) -> None:
+    """Override the Python launcher's bundle name before Cocoa/Qt reads it.
+
+    This changes only this process's in-memory metadata, never Python's plist.
+    Frozen builds also carry the name in their own Info.plist.
+    """
+    if sys.platform != "darwin":
+        return
+
+    import ctypes
+
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    cf.CFBundleGetMainBundle.argtypes = []
+    cf.CFBundleGetMainBundle.restype = ctypes.c_void_p
+    cf.CFBundleGetInfoDictionary.argtypes = [ctypes.c_void_p]
+    cf.CFBundleGetInfoDictionary.restype = ctypes.c_void_p
+    cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+    cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+    cf.CFDictionarySetValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    cf.CFDictionarySetValue.restype = None
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    cf.CFRelease.restype = None
+
+    bundle = cf.CFBundleGetMainBundle()
+    info = cf.CFBundleGetInfoDictionary(bundle) if bundle else None
+    if not info:
+        return
+    # kCFStringEncodingUTF8
+    value = cf.CFStringCreateWithCString(None, name.encode("utf-8"), 0x08000100)
+    if not value:
+        return
+    try:
+        for key in (b"CFBundleName", b"CFBundleDisplayName"):
+            key_ref = cf.CFStringCreateWithCString(None, key, 0x08000100)
+            if key_ref:
+                try:
+                    cf.CFDictionarySetValue(info, key_ref, value)
+                finally:
+                    cf.CFRelease(key_ref)
+    finally:
+        cf.CFRelease(value)
+
+
 def main() -> int:
+    _set_macos_application_name("MINFLUX Data Viewer")
     # Install stdout/stderr redirection ASAP so even early prints get captured
     from minflux_viewer.ui.tools.console_window import install_redirection
 
@@ -38,6 +82,7 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("MINFLUX Data Viewer")
+    app.setApplicationDisplayName("MINFLUX Data Viewer")
     app.setApplicationVersion(__version__)
     app.setOrganizationName("EMBL-IC")
     app.setWindowIcon(QIcon(str(resource_path("icons", "minflux_viewer_logo.png"))))

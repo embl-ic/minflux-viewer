@@ -7,12 +7,13 @@ registries and menus; forwarding methods preserve existing callers and signals.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 from weakref import ReferenceType
 
 import numpy as np
-from PyQt6.QtCore import QEvent, Qt, QTimer
+from PyQt6.QtCore import QEvent, QSize, Qt, QTimer
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
@@ -296,6 +297,35 @@ class MainWindow(QMainWindow):
             "  background: rgba(0, 120, 215, 0.26);"
             "}"
         )
+        if sys.platform == "darwin":
+            # Cocoa's default toolbar icons are larger and its idle tool
+            # buttons have no outline. Match the compact, framed Windows row.
+            self._ui.toolbar.setIconSize(QSize(24, 24))
+            # Keep the menu and ROI toolbar backgrounds unified, with a line
+            # along each horizontal toolbar edge. Append so checked-tool
+            # styling above remains in effect.
+            self.menuBar().setStyleSheet(
+                "QMenuBar { background: palette(window); border: 0; }"
+            )
+            self._ui.toolbar.setStyleSheet(
+                self._ui.toolbar.styleSheet()
+                + "QToolBar#toolbar { background: palette(window); border: 0;"
+                " border-top: 1px solid palette(mid);"
+                " border-bottom: 1px solid palette(mid); }"
+                "QToolButton { background: palette(button);"
+                " border: 1px solid rgba(128, 128, 128, 0.35); border-radius: 2px;"
+                " padding: 2px; margin: 1px; }"
+                "QToolButton:hover:!checked { background: rgba(0, 120, 215, 0.08);"
+                " border-color: rgba(0, 120, 215, 0.55); }"
+                "QToolButton:checked { border-radius: 2px; }"
+                "QToolButton:pressed { background: rgba(0, 120, 215, 0.30); }"
+            )
+            # Replace Cocoa's etched status-panel edge with the same flat
+            # background as the welcome panel above it.
+            self.statusBar().setStyleSheet(
+                "QStatusBar#statusbar { background: palette(window); border: 0; }"
+                "QStatusBar#statusbar::item { border: 0; }"
+            )
 
         # Override the central widget with the live drop-target WelcomeWidget.
         # Designer cannot declare custom widget subclasses without a plugin;

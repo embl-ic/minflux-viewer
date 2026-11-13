@@ -23,7 +23,7 @@
 # the resources/pip guard below. Do not use a global ``pyinstaller`` command;
 # it cannot see project packages.
 #
-# Output:  dist/minflux_viewer/  (dist/MINFLUX Viewer.app on macOS)
+# Output:  dist/minflux_viewer/  (dist/MINFLUX Data Viewer.app on macOS)
 
 from pathlib import Path
 from contextlib import contextmanager
@@ -363,13 +363,13 @@ coll = COLLECT(
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,
-        name="MINFLUX Viewer.app",
+        name="MINFLUX Data Viewer.app",
         icon=MAC_ICON,
         bundle_identifier="eu.embl.ic.minflux-viewer",
         version=VERSION,
         info_plist={
-            "CFBundleName": "MINFLUX Viewer",
-            "CFBundleDisplayName": "MINFLUX Viewer",
+            "CFBundleName": "MINFLUX Data Viewer",
+            "CFBundleDisplayName": "MINFLUX Data Viewer",
             "CFBundleShortVersionString": VERSION,
             "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,
