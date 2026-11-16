@@ -53,7 +53,9 @@ _RULES_HELP = (
     "already switched on and the rules above it, then entered as an ordinary "
     "filter row, which can be edited like any other. A trace-wise attribute "
     "(siz, dur, len) is evaluated once per trace. Every suggestion, and every "
-    "rule that finds nothing to suggest, is reported in the dialog and the Log."
+    "rule that finds nothing to suggest, is reported in the dialog and the Log. "
+    "EFO/CFR bounds stay within the data range and EFO ≥ 0 / CFR 0–1. "
+    "SIZ only cuts small traces; its maximum always keeps the largest trace."
 )
 
 _METHOD_TIPS = {
@@ -124,6 +126,7 @@ class AutoRuleRow(QWidget):
         self.params = QStackedWidget()
         self.params.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._build_params()
+        self.attribute.currentTextChanged.connect(self._on_attribute_changed)
         below.addWidget(self.params, stretch=1)
 
         for text, tip, slot in (("▲", "Move up", lambda: page.move_row(self, -1)),
@@ -206,6 +209,16 @@ class AutoRuleRow(QWidget):
         self.params.setCurrentIndex(self._pages.get(key, 0))
         self.method.setToolTip(_METHOD_TIPS.get(key, ""))
 
+    def _on_attribute_changed(self, _text: str) -> None:
+        size_rule = self.attribute.currentText().strip() == "siz"
+        self.upper_pct.setEnabled(not size_rule)
+        self.side.setEnabled(not size_rule)
+        self.upper_pct.setToolTip("SIZ keeps the largest trace (P100)." if size_rule else "")
+        self.side.setToolTip("SIZ only imposes a lower bound." if size_rule else "")
+        if size_rule:
+            self.upper_pct.setValue(100.0)
+            self.side.setCurrentIndex(self.side.findData("lower"))
+
     # -- value exchange -------------------------------------------------
     def set_rule(self, rule: dict) -> None:
         defaults = {key: dict(value) for key, value in _af.METHOD_DEFAULTS.items()}
@@ -234,6 +247,7 @@ class AutoRuleRow(QWidget):
         self.use_floor.setChecked(floor is not None)
         self.floor.setValue(float(floor) if floor is not None else 0.0)
         self.floor.setEnabled(floor is not None)
+        self._on_attribute_changed(self.attribute.currentText())
 
     def rule(self) -> dict:
         method = str(self.method.currentData())

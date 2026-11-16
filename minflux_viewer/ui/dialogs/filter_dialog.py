@@ -130,7 +130,10 @@ class SmartBoundsSpinBox(QDoubleSpinBox):
             self._data_max = float(data_max)
         lo, hi = sorted((self._data_min, self._data_max))
         span = max(abs(hi - lo), abs(lo), abs(hi), 1.0)
-        self.setRange(lo - span, hi + span)
+        # A lower threshold may exceed every value (e.g. all traces have fewer
+        # than ten points). Preserve it so the filter correctly rejects them all.
+        self.setRange(min(lo - span, value) if value is not None else lo - span,
+                      max(hi + span, value) if value is not None else hi + span)
         self._apply_display_rules()
         if value is not None:
             self.setValue(float(value))
@@ -167,9 +170,10 @@ class SmartBoundsSpinBox(QDoubleSpinBox):
         elif self._kind == "int":
             self.setDecimals(0)
         else:
-            # Keep enough decimals internally for metre-scale values while
-            # textFromValue controls the visible representation.
-            self.setDecimals(12)
+            # Preserve exact floating-point endpoints: rounding a data minimum
+            # up or maximum down can exclude it even with inclusive bounds.
+            # Qt supports 323 decimal places; textFromValue controls display.
+            self.setDecimals(323)
 
     def _smart_step(self) -> float:
         if self._kind == "bool":

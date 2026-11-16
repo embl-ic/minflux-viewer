@@ -23,7 +23,7 @@ def test_single_emitter_model_separates_one_and_two_emitter_populations():
     rates = _two_emitter_rates()
     bound = af.suggest_bounds(rates, RULE)
     assert bound.ok, bound.note
-    assert bound.lo is None                       # only an upper bound
+    assert bound.lo == rates.min()
     # Where 0.88·N(60k, 7k) and 0.12·N(120k, 10k) become equally likely (log space).
     assert 85_000.0 < bound.hi < 100_000.0
     assert "(fitted), double share 12.0 %" in bound.note
@@ -76,10 +76,12 @@ def _one_population(seed: int = 2):
 
 
 def test_without_doubles_the_stated_fallback_multiple_is_used_and_said():
-    bound = af.suggest_bounds(_one_population(), RULE)
+    rates = _one_population()
+    bound = af.suggest_bounds(rates, RULE)
     assert bound.ok
     f1 = float(bound.note.split("f1 = ")[1].split(" ")[0].replace(",", ""))
-    assert bound.hi == pytest.approx(2.0 * f1, rel=1e-4)       # f1 is printed rounded
+    assert rates.max() < 2.0 * f1
+    assert bound.hi == rates.max()
     assert "no double-emitter population" in bound.note
     assert "fallback bound 2·f1" in bound.note
 
@@ -117,12 +119,12 @@ def test_robust_spread_is_median_plus_k_scaled_mad():
     values = np.array([1.0, 2.0, 3.0, 4.0, 100.0] * 10)
     med = 3.0
     sigma = af.MAD_TO_SIGMA * 1.0                 # |x - 3| -> median 1
-    bound = af.suggest_bounds(values, {"attribute": "cfr", "method": "robust_spread",
+    bound = af.suggest_bounds(values, {"attribute": "dcr", "method": "robust_spread",
                                        "params": {"k": 2.0, "side": "upper"}})
     assert bound.ok
     assert bound.lo is None
     assert bound.hi == pytest.approx(med + 2.0 * sigma)
-    both = af.suggest_bounds(values, {"attribute": "cfr", "method": "robust_spread",
+    both = af.suggest_bounds(values, {"attribute": "dcr", "method": "robust_spread",
                                       "params": {"k": 2.0, "side": "both"}})
     assert both.lo == pytest.approx(med - 2.0 * sigma)
     assert both.hi == pytest.approx(med + 2.0 * sigma)
@@ -141,15 +143,57 @@ def test_percentile_with_a_floor_on_trace_length():
                                                    "min_value": 10.0}})
     assert bound.ok
     assert bound.lo == 10.0
-    assert bound.hi == pytest.approx(np.percentile(lengths, 99.0))
+    assert bound.hi is None                      # caller uses the full data maximum
     assert "at least 10" in bound.note
 
 
-def test_percentile_floor_above_the_upper_percentile_suggests_nothing():
+def test_size_floor_above_an_old_upper_percentile_still_keeps_large_traces():
     bound = af.suggest_bounds(np.arange(1, 41, dtype=float),
                               {"attribute": "siz", "method": "percentile",
                                "params": {"upper_pct": 50.0, "min_value": 30.0}})
+    assert bound.ok
+    assert bound.lo == 30.0 and bound.hi is None
+
+
+@pytest.mark.parametrize("attribute, values, expected", [
+    ("cfr", [0.125, 0.25, 0.5, 0.75, 0.875], (0.125, 0.875)),
+    ("cfr", [-0.5, 0.0, 0.5, 1.0, 1.5], (0.0, 1.0)),
+    ("efo", [10.0, 20.0, 30.0, 40.0, 50.0], (10.0, 50.0)),
+    ("efo", [-20.0, 0.0, 20.0, 40.0, 60.0], (0.0, 60.0)),
+])
+def test_robust_bounds_respect_data_extrema_and_attribute_domain(attribute, values, expected):
+    bound = af.suggest_bounds(values * 10, {"attribute": attribute, "method": "robust_spread",
+                                           "params": {"side": "both", "k": 10.0}})
+    assert bound.ok
+    assert (bound.lo, bound.hi) == expected
+
+
+@pytest.mark.parametrize("method, params", [
+    ("robust_spread", {"side": "upper", "k": 10.0}),
+    ("robust_spread", {"side": "lower", "k": 10.0}),
+    ("percentile", {"lower_pct": 1.0, "upper_pct": 99.0}),
+])
+def test_one_sided_and_percentile_cfr_rules_enforce_both_domain_limits(method, params):
+    bound = af.suggest_bounds(np.linspace(-0.5, 1.5, 101),
+                              {"attribute": "cfr", "method": method, "params": params})
+    assert bound.ok
+    assert bound.lo == 0.0 and bound.hi == 1.0
+
+
+@pytest.mark.parametrize("attribute, values", [("cfr", np.linspace(2, 3, 30)),
+                                             ("efo", np.linspace(-3, -2, 30))])
+def test_data_outside_the_allowed_range_is_reported(attribute, values):
+    bound = af.suggest_bounds(values, {"attribute": attribute, "method": "robust_spread"})
     assert not bound.ok
+    assert "does not overlap" in bound.note
+
+
+def test_size_robust_rule_only_suggests_a_lower_cut():
+    bound = af.suggest_bounds(np.arange(1, 101),
+                              {"attribute": "siz", "method": "robust_spread",
+                               "params": {"side": "both", "k": 1.0}})
+    assert bound.ok
+    assert bound.lo is not None and bound.hi is None
 
 
 def test_too_few_values_are_reported_not_bounded():

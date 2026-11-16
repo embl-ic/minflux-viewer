@@ -74,7 +74,8 @@ def test_auto_adds_one_ticked_row_per_default_rule(_app):
         mask = np.asarray(ds.filter_mask, dtype=bool)
         assert 0 < mask.sum() < ds.prop.num_loc
         assert [spec["attribute"] for spec in ds.state["filter_specs"]] == ["efo", "cfr", "siz"]
-        assert dialog._info.text().startswith("Auto: efo ≤")
+        assert rows["siz"][1] == np.max(ds.attr["siz"])
+        assert dialog._info.text().startswith("Auto: efo ")
         assert any(line["message"].startswith("Auto filter on 'auto.mat': efo")
                    for line in _log_lines(state))
     finally:
@@ -103,7 +104,7 @@ def test_the_auto_log_line_becomes_a_filtering_sentence_with_its_citation(_app):
             pytest.fail("no method rule matches the Auto filter log line")
         assert stage == "filter"
         assert sentence.startswith("Localizations of 'auto.mat' were filtered")
-        assert "efo ≤" in sentence and "cfr ≤" in sentence and "siz 10–" in sentence
+        assert "efo " in sentence and "cfr " in sentence and "siz ≥ 10" in sentence
         assert [cite[0] for cite in cites] == ["Leys et al., J. Exp. Soc. Psychol. 49:764 (2013)"]
     finally:
         dialog.close()
@@ -164,6 +165,65 @@ def test_rules_are_chained_in_order(_app):
         efo = np.asarray(ds.attr["efo"], dtype=float)
         cfr = np.asarray(ds.attr["cfr"], dtype=float)
         assert cfr_hi == pytest.approx(np.percentile(cfr[efo <= efo_hi], 50.0), rel=1e-3)
+    finally:
+        dialog.close()
+
+
+def test_auto_cfr_clamps_both_ends_and_keeps_inclusive_endpoints(_app):
+    ds = _dataset(seed=8)
+    cfr = np.resize(np.array([-0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25]), ds.prop.num_loc)
+    ds.attr["cfr"] = cfr
+    rule = {"attribute": "cfr", "method": "robust_spread",
+            "params": {"side": "both", "k": 10.0}}
+    dialog, _state = _dialog(ds, [rule])
+    try:
+        dialog._apply_auto_rules()
+        assert _rows(dialog) == [("cfr", 0.0, 1.0, True)]
+        np.testing.assert_array_equal(ds.filter_mask, (cfr >= 0.0) & (cfr <= 1.0))
+        assert ds.state["filter_specs"][0]["lo_inc"] is True
+        assert ds.state["filter_specs"][0]["hi_inc"] is True
+    finally:
+        dialog.close()
+
+
+def test_auto_preserves_exact_data_extrema_in_the_filter_widgets(_app):
+    ds = _dataset(seed=9)
+    endpoints = (0.12345678901265, 0.87654321098734)
+    ds.attr["cfr"] = np.linspace(*endpoints, ds.prop.num_loc)
+    rule = {"attribute": "cfr", "method": "robust_spread",
+            "params": {"side": "both", "k": 10.0}}
+    dialog, _state = _dialog(ds, [rule])
+    try:
+        dialog._apply_auto_rules()
+        assert _rows(dialog) == [("cfr", *endpoints, True)]
+        assert np.all(ds.filter_mask)
+        dialog._table.setRowCount(0)
+        dialog._restore_saved_filter_specs()
+        dialog._apply_all()
+        assert np.all(ds.filter_mask)
+    finally:
+        dialog.close()
+
+
+@pytest.mark.parametrize("lengths", [np.array([9, 10, 11, 20] * 10 + [200]),
+                                     np.array([1, 2] * 20)])
+def test_auto_size_keeps_ten_and_the_largest_trace_with_an_old_saved_rule(_app, lengths):
+    from minflux_viewer.core.dataset import build_localization_dataset
+
+    tid = np.repeat(np.arange(lengths.size), lengths)
+    ds = build_localization_dataset(name="sizes", x_nm=np.arange(tid.size),
+                                    y_nm=np.zeros(tid.size), tid=tid)
+    rule = {"attribute": "siz", "method": "percentile",
+            "params": {"lower_pct": 0.0, "upper_pct": 99.0, "min_value": 10.0}}
+    dialog, _state = _dialog(ds, [rule])
+    try:
+        dialog._apply_auto_rules()
+        assert _rows(dialog) == [("siz", 10.0, float(lengths.max()), True)]
+        np.testing.assert_array_equal(ds.filter_mask, np.repeat(lengths >= 10, lengths))
+        dialog._table.setRowCount(0)
+        dialog._restore_saved_filter_specs()
+        dialog._apply_all()
+        np.testing.assert_array_equal(ds.filter_mask, np.repeat(lengths >= 10, lengths))
     finally:
         dialog.close()
 
@@ -237,6 +297,25 @@ def test_switching_method_keeps_each_methods_values(_app):
     assert row.rule() == {"enabled": True, "attribute": "cfr", "method": "robust_spread",
                           "params": {"k": 3.0, "side": "both"}}
     row.deleteLater()
+    page.deleteLater()
+
+
+def test_size_preferences_show_the_effective_limits_for_saved_rules(_app):
+    from minflux_viewer.ui.settings.prefs_process import build_process_page
+
+    page = build_process_page()
+    page.load({"process": {"filter": {"auto_rules": [
+        {"attribute": "siz", "method": "percentile",
+         "params": {"upper_pct": 99.0, "min_value": 10.0}}
+    ]}}})
+    row = page.rows()[0]
+    assert row.upper_pct.value() == 100.0
+    assert not row.upper_pct.isEnabled()
+    row.method.setCurrentIndex(row.method.findData("robust_spread"))
+    assert row.rule()["params"]["side"] == "lower"
+    assert not row.side.isEnabled()
+    row.attribute.setCurrentText("cfr")
+    assert row.upper_pct.isEnabled() and row.side.isEnabled()
     page.deleteLater()
 
 

@@ -25,6 +25,12 @@ switched-on row.
 Trace-wise attributes such as `siz` (localizations per trace) are always read
 per trace.
 
+Bounds are inclusive by default (`Min ≤ value ≤ Max`). To exclude either
+endpoint, click the row's eye button, then double-click inside its highlighted
+histogram range to open **Filter bounds**. Clear **Inclusive** for Min, Max, or
+both, confirm with **OK**, then **Update Filter** or **Finish Edit**. Auto sets
+both endpoints inclusive.
+
 Below the table:
 
 - **Add filter row** adds a row covering the attribute's full range, switched
@@ -55,6 +61,11 @@ obtained, and the same account goes to the Log and into the generated methods
 text. A rule that cannot suggest a bound says why and adds nothing. The rows are
 ordinary rows: check them, adjust them or switch them off as with any other.
 
+Automatic `efo` and `cfr` bounds stay within the finite data range used by the
+rule and the allowed attribute range: `efo ≥ 0` and `0 ≤ cfr ≤ 1`. This also
+limits robust-spread estimates and single-emitter fallback bounds that would
+otherwise extend beyond the data.
+
 Three methods are available, for any numeric attribute:
 
 **Single-emitter frequency cut** (default for `efo`). One active emitter emits
@@ -77,8 +88,11 @@ deviation, unaffected by the outliers it is meant to remove. The default
 *k = 2.5* follows Leys et al. (2013). The bound can be upper, lower or both.
 
 **Percentile range** (default for `siz`). Keeps values between two percentiles,
-optionally with an absolute floor. The default keeps traces with at least 10
-localizations, up to the 99th percentile of trace length.
+optionally with an absolute floor. For `siz`, Auto only imposes a lower cut:
+the default keeps traces with at least 10 localizations, including exactly 10.
+Max is set to the dataset's largest trace size, so the largest traces are kept.
+Previously saved SIZ rules with an upper percentile below 100 also use this
+behavior. The minimum remains editable in Preferences or in the filter row.
 
 The **+** button on the preferences page adds a rule, and *Restore default
 rules* brings back the three defaults.

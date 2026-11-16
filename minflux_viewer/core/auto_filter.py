@@ -5,8 +5,9 @@ looks only at the values it is handed and returns the bounds it suggests,
 together with a one-line account of how they were obtained, so a suggestion is
 always reported and reproducible rather than applied silently.
 
-Three methods are provided. Each is attribute-agnostic, so a rule may apply any
-of them to any numeric attribute:
+Three statistical methods are provided. EFO/CFR suggestions are limited to the
+finite data range and their allowed domains (EFO >= 0; 0 <= CFR <= 1). SIZ rules
+only impose a lower cut; the caller uses the full data maximum on the upper side.
 
 ``single_emitter`` -- *single-emitter frequency cut.*  The photon emission rate
     (``efo``) of one active emitter forms the main population; two emitters
@@ -48,7 +49,7 @@ from __future__ import annotations
 import copy
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -109,7 +110,7 @@ DEFAULT_AUTO_RULES: list[dict] = [
     {"enabled": True, "attribute": "cfr", "method": METHOD_ROBUST_SPREAD,
      "params": {"k": 2.5, "side": "upper"}},
     {"enabled": True, "attribute": "siz", "method": METHOD_PERCENTILE,
-     "params": {"lower_pct": 0.0, "upper_pct": 99.0, "min_value": 10.0}},
+     "params": {"lower_pct": 0.0, "upper_pct": 100.0, "min_value": 10.0}},
 ]
 
 
@@ -162,10 +163,11 @@ def normalize_rule(rule: Mapping) -> dict:
         side = str(params["side"]).strip().lower()
         if side not in ROBUST_SIDES:
             raise ValueError(f"robust spread side must be one of {ROBUST_SIDES}, not {side!r}")
-        params["side"] = side
+        params["side"] = "lower" if attribute == "siz" else side
     else:
         lower = _finite(params["lower_pct"], "lower percentile")
-        upper = _finite(params["upper_pct"], "upper percentile")
+        # Also correct saved rules that used to discard the longest traces.
+        upper = 100.0 if attribute == "siz" else _finite(params["upper_pct"], "upper percentile")
         if not 0.0 <= lower < upper <= 100.0:
             raise ValueError("percentiles must satisfy 0 <= lower < upper <= 100")
         params["lower_pct"], params["upper_pct"] = lower, upper
@@ -215,11 +217,39 @@ def suggest_bounds(values, rule: Mapping) -> AutoBound:
                          f"only {x.size} finite value(s); at least {MIN_VALUES} are needed",
                          int(x.size), ok=False)
     if method == METHOD_SINGLE_EMITTER:
-        return _single_emitter(attribute, x, params["expected"], params["fallback"])
-    if method == METHOD_ROBUST_SPREAD:
-        return _robust_spread(attribute, x, params["k"], params["side"])
-    return _percentile(attribute, x, params["lower_pct"], params["upper_pct"],
-                       params["min_value"])
+        bound = _single_emitter(attribute, x, params["expected"], params["fallback"])
+    elif method == METHOD_ROBUST_SPREAD:
+        bound = _robust_spread(attribute, x, params["k"], params["side"])
+    else:
+        bound = _percentile(attribute, x, params["lower_pct"], params["upper_pct"],
+                            params["min_value"])
+    return _constrain_attribute_bounds(bound, x)
+
+
+def _constrain_attribute_bounds(bound: AutoBound, x: np.ndarray) -> AutoBound:
+    """Apply attribute limits after estimation, without changing the input data."""
+    if not bound.ok:
+        return bound
+    if bound.attribute == "siz":
+        note = bound.note + "; no upper cut; Max uses the largest trace"
+        if bound.lo is None:
+            return replace(bound, hi=None, note=note + "; no lower bound suggested", ok=False)
+        return replace(bound, hi=None, note=note)
+    if bound.attribute not in {"efo", "cfr"}:
+        return bound
+
+    data_lo, data_hi = float(x.min()), float(x.max())
+    allowed_lo = max(data_lo, 0.0)
+    allowed_hi = min(data_hi, 1.0) if bound.attribute == "cfr" else data_hi
+    domain = "0–1" if bound.attribute == "cfr" else "≥ 0"
+    if allowed_lo > allowed_hi:
+        return replace(bound, lo=None, hi=None, ok=False,
+                       note=f"data range does not overlap the allowed {bound.attribute} range {domain}")
+    lo = allowed_lo if bound.lo is None else float(np.clip(bound.lo, allowed_lo, allowed_hi))
+    hi = allowed_hi if bound.hi is None else float(np.clip(bound.hi, allowed_lo, allowed_hi))
+    return replace(bound, lo=lo, hi=hi,
+                   note=bound.note + f"; bounded by data range {format_value(data_lo)}–"
+                   f"{format_value(data_hi)} and {bound.attribute} {domain}")
 
 
 # ---------------------------------------------------------------------------
