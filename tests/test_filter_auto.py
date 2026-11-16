@@ -205,6 +205,39 @@ def test_auto_preserves_exact_data_extrema_in_the_filter_widgets(_app):
         dialog.close()
 
 
+def test_auto_bounds_use_the_whole_datasets_range_not_the_gated_one(_app):
+    """A rule sees only what the rows before it let through, but its row must
+    stand on its own: an open side gets the dataset's extreme and a clip uses
+    the dataset's range, so the row cuts nothing once the other rows go."""
+    from PyQt6.QtWidgets import QCheckBox
+
+    from minflux_viewer.ui.dialogs import filter_dialog as fd
+
+    ds = _dataset(seed=10)
+    n = ds.prop.num_loc
+    ds.attr["cfr"] = np.linspace(0.0, 0.9, n)
+    ds.attr["efo"] = np.linspace(50_000.0, 90_000.0, n)       # rises with cfr
+    rule = {"attribute": "cfr", "method": "robust_spread",
+            "params": {"side": "upper", "k": 10.0}}
+    dialog, _state = _dialog(ds, [rule])
+    try:
+        dialog._add_row(attr="efo", mode="per loc", lo=60_000.0, hi=80_000.0, enabled=True,
+                        auto_range=False)                       # the rule sees cfr 0.225-0.675
+        dialog._apply_all()
+        dialog._apply_auto_rules()
+        rows = {attr: (lo, hi, on) for attr, lo, hi, on in _rows(dialog)}
+        assert rows["cfr"] == (0.0, 0.9, True)                  # not (0.225, 0.675)
+        efo = np.asarray(ds.attr["efo"], dtype=float)
+        np.testing.assert_array_equal(ds.filter_mask, (efo >= 60_000.0) & (efo <= 80_000.0))
+        efo_row = next(row for row, entry in enumerate(_rows(dialog)) if entry[0] == "efo")
+        chk = dialog._table.cellWidget(efo_row, fd._COL_ENABLED)
+        assert isinstance(chk, QCheckBox)
+        chk.setChecked(False)                                   # the cfr row on its own
+        assert np.all(ds.filter_mask)
+    finally:
+        dialog.close()
+
+
 @pytest.mark.parametrize("lengths", [np.array([9, 10, 11, 20] * 10 + [200]),
                                      np.array([1, 2] * 20)])
 def test_auto_size_keeps_ten_and_the_largest_trace_with_an_old_saved_rule(_app, lengths):

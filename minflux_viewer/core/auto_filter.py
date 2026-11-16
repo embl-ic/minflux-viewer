@@ -6,8 +6,12 @@ together with a one-line account of how they were obtained, so a suggestion is
 always reported and reproducible rather than applied silently.
 
 Three statistical methods are provided. EFO/CFR suggestions are limited to the
-finite data range and their allowed domains (EFO >= 0; 0 <= CFR <= 1). SIZ rules
-only impose a lower cut; the caller uses the full data maximum on the upper side.
+attribute's data range and its allowed domain (EFO >= 0; 0 <= CFR <= 1): the
+range of the whole dataset when the caller states it (``data_range``), so a
+rule evaluated on the localizations other rows let through still writes a row
+that bounds only what it found, else the range of the values handed in. SIZ
+rules only impose a lower cut; the caller uses the full data maximum on the
+upper side.
 
 ``single_emitter`` -- *single-emitter frequency cut.*  The photon emission rate
     (``efo``) of one active emitter forms the main population; two emitters
@@ -206,8 +210,16 @@ def describe_rule(rule: Mapping) -> str:
     return f"{r['attribute']}: {METHOD_LABELS[r['method']]} ({detail})"
 
 
-def suggest_bounds(values, rule: Mapping) -> AutoBound:
-    """Apply *rule* to *values* (non-finite values are ignored)."""
+def suggest_bounds(values, rule: Mapping, *,
+                   data_range: tuple[float, float] | None = None) -> AutoBound:
+    """Apply *rule* to *values* (non-finite values are ignored).
+
+    *data_range* is the attribute's ``(min, max)`` over the whole dataset, in
+    the same value space as *values*. EFO/CFR bounds are kept within it (and
+    an open side is set to its end); without it the range of *values* is used.
+    *values* may be a subset of the dataset, so the range is widened to hold
+    them whatever is given.
+    """
     r = normalize_rule(rule)
     x = np.asarray(values, dtype=float).ravel()
     x = x[np.isfinite(x)]
@@ -223,10 +235,11 @@ def suggest_bounds(values, rule: Mapping) -> AutoBound:
     else:
         bound = _percentile(attribute, x, params["lower_pct"], params["upper_pct"],
                             params["min_value"])
-    return _constrain_attribute_bounds(bound, x)
+    return _constrain_attribute_bounds(bound, x, data_range)
 
 
-def _constrain_attribute_bounds(bound: AutoBound, x: np.ndarray) -> AutoBound:
+def _constrain_attribute_bounds(bound: AutoBound, x: np.ndarray,
+                                data_range: tuple[float, float] | None = None) -> AutoBound:
     """Apply attribute limits after estimation, without changing the input data."""
     if not bound.ok:
         return bound
@@ -239,6 +252,11 @@ def _constrain_attribute_bounds(bound: AutoBound, x: np.ndarray) -> AutoBound:
         return bound
 
     data_lo, data_hi = float(x.min()), float(x.max())
+    if data_range is not None:
+        range_lo, range_hi = (float(v) for v in data_range)
+        if not (math.isfinite(range_lo) and math.isfinite(range_hi)):
+            raise ValueError("data_range must be two finite numbers")
+        data_lo, data_hi = min(data_lo, range_lo, range_hi), max(data_hi, range_lo, range_hi)
     allowed_lo = max(data_lo, 0.0)
     allowed_hi = min(data_hi, 1.0) if bound.attribute == "cfr" else data_hi
     domain = "0–1" if bound.attribute == "cfr" else "≥ 0"

@@ -1055,8 +1055,12 @@ class FilterDialog(QDialog):
         Each rule is evaluated, in order, on the localizations that pass the
         rows already switched on (other than those Auto is about to update) and
         the rules before it; its bounds are entered as an ordinary row, which
-        the user can then edit. A rule that finds nothing to suggest leaves the
-        table as it was and is reported, as is every bound that was set.
+        the user can then edit. The row stands on its own: its bounds are kept
+        within the whole dataset's range for the attribute (the range the row's
+        Min/Max cover), not the range of the localizations the rule saw, so it
+        bounds only what the rule found whatever the other rows do. A rule that
+        finds nothing to suggest leaves the table as it was and is reported, as
+        is every bound that was set.
         """
         from minflux_viewer.core import auto_filter as af
 
@@ -1107,13 +1111,6 @@ class FilterDialog(QDialog):
                     self._table.removeRow(row)
                 continue
             raw = np.asarray(raw).ravel().astype(float)
-            bound = af.suggest_bounds(self._gated_values(ds, raw, mode, gate), rule)
-            if not bound.ok:
-                notes.append(f"{attr}: {bound.note}")
-                if created:
-                    self._table.removeRow(row)
-                continue
-
             _raw, range_values = _filter_spinner_values(ds, attr, mode, itr=itr_sel)
             finite = range_values.astype(float, copy=False)
             finite = finite[np.isfinite(finite)]
@@ -1123,6 +1120,14 @@ class FilterDialog(QDialog):
                     self._table.removeRow(row)
                 continue
             data_lo, data_hi = float(finite.min()), float(finite.max())
+            bound = af.suggest_bounds(self._gated_values(ds, raw, mode, gate), rule,
+                                      data_range=(data_lo, data_hi))
+            if not bound.ok:
+                notes.append(f"{attr}: {bound.note}")
+                if created:
+                    self._table.removeRow(row)
+                continue
+
             lo = data_lo if bound.lo is None else float(bound.lo)
             hi = data_hi if bound.hi is None else float(bound.hi)
             self._set_row_bounds(row, lo, hi, data_lo, data_hi, raw, mode)

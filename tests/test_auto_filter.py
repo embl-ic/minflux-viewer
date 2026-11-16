@@ -188,6 +188,30 @@ def test_data_outside_the_allowed_range_is_reported(attribute, values):
     assert "does not overlap" in bound.note
 
 
+@pytest.mark.parametrize("attribute, scale", [("cfr", 1.0), ("efo", 1e5)])
+def test_a_stated_data_range_bounds_efo_and_cfr_instead_of_the_values_seen(attribute, scale):
+    seen = np.linspace(0.3, 0.6, 40) * scale        # the gated subset a chained rule sees
+    rule = {"attribute": attribute, "method": "robust_spread",
+            "params": {"side": "upper", "k": 10.0}}
+    bound = af.suggest_bounds(seen, rule, data_range=(0.0, 0.9 * scale))
+    assert bound.ok
+    assert (bound.lo, bound.hi) == (0.0, 0.9 * scale)   # open side and clip: whole dataset
+    assert af.suggest_bounds(seen, rule).hi == 0.6 * scale   # without it: the values' range
+    narrow = af.suggest_bounds(seen, rule, data_range=(0.4 * scale, 0.5 * scale))
+    assert (narrow.lo, narrow.hi) == (0.3 * scale, 0.6 * scale)   # never inside the values
+    with pytest.raises(ValueError):
+        af.suggest_bounds(seen, rule, data_range=(0.0, np.nan))
+
+
+def test_a_stated_data_range_is_still_limited_to_the_cfr_domain():
+    bound = af.suggest_bounds(np.linspace(0.3, 0.6, 40),
+                              {"attribute": "cfr", "method": "robust_spread",
+                               "params": {"side": "both", "k": 10.0}},
+                              data_range=(-0.5, 1.5))
+    assert bound.ok
+    assert (bound.lo, bound.hi) == (0.0, 1.0)
+
+
 def test_size_robust_rule_only_suggests_a_lower_cut():
     bound = af.suggest_bounds(np.arange(1, 101),
                               {"attribute": "siz", "method": "robust_spread",

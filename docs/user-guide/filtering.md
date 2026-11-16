@@ -78,10 +78,14 @@ text. A bound on both sides is written as a closed interval, for example
 bound says why and adds nothing. The rows are ordinary rows: check them, adjust
 them or switch them off as with any other.
 
-Automatic `efo` and `cfr` bounds stay within the finite data range used by the
-rule and the allowed attribute range: `efo ≥ 0` and `0 ≤ cfr ≤ 1`. This also
-limits robust-spread estimates and single-emitter fallback bounds that would
-otherwise extend beyond the data.
+Automatic `efo` and `cfr` bounds stay within the attribute's range over the
+whole dataset (for the row's mode and iteration) and the allowed attribute
+range: `efo ≥ 0` and `0 ≤ cfr ≤ 1`. A side the rule leaves open is set to the
+dataset's extreme on that side. The rule is computed on the localizations
+passing the rows before it, but the row it writes bounds only what the rule
+found, so it stands on its own when those rows are changed or switched off.
+This also limits robust-spread estimates and single-emitter fallback bounds
+that would otherwise extend beyond the data.
 
 Three methods are available, for any numeric attribute:
 
