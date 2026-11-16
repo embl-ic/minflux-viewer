@@ -10,6 +10,7 @@ file routing without duplicating schema checks or JSON read/write details.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -19,17 +20,48 @@ from typing import Any
 FILTER_KEYS = {"apply", "attribute", "value_as", "min", "max", "iteration"}
 MINFLUX_DATA_KEYS = {"loc", "lnc", "ext", "tid", "tim", "itr", "vld", "efo", "cfr", "dcr"}
 
+#: Whether a row's Min / Max themselves pass. Absent = inclusive (files saved
+#: before the fields existed).
+INCLUSIVE_KEYS = ("min_inclusive", "max_inclusive")
+
+
+def inclusive_flag(row: Mapping[str, Any], key: str) -> bool:
+    """A preset row's ``min_inclusive`` / ``max_inclusive``.
+
+    Absent means inclusive. Present, it must be a JSON ``true`` / ``false``:
+    ``bool("false")`` is True, so a hand-edited string would otherwise turn an
+    exclusive bound into an inclusive one without a word.
+    """
+    value = row.get(key, True)
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{key} must be true or false, not {value!r}")
+
+
+def _row_problems(rows: list[dict[str, Any]]) -> list[str]:
+    problems: list[str] = []
+    for number, row in enumerate(rows, start=1):
+        for key in INCLUSIVE_KEYS:
+            try:
+                inclusive_flag(row, key)
+            except ValueError as exc:
+                problems.append(f"row {number}: {exc}")
+    return problems
+
 
 class FilterIO:
     """Namespace for filter preset read/write helpers."""
 
     @staticmethod
-    def load_filter_json(path: str | Path) -> list[dict[str, Any]]:
+    def load_filter_json(path: str | Path, *, validate: bool = True) -> list[dict[str, Any]]:
         path = Path(path)
         with path.open(encoding="utf-8") as f:
             payload = json.load(f)
         if not is_filter_json_payload(payload):
             raise ValueError(f"'{path.name}' is not a MINFLUX Viewer filter preset.")
+        problems = _row_problems(payload) if validate else []
+        if problems:
+            raise ValueError(f"'{path.name}': " + "; ".join(problems))
         return list(payload)
 
     @staticmethod
@@ -37,13 +69,20 @@ class FilterIO:
         path = Path(path)
         if not is_filter_json_payload(rows):
             raise ValueError("Filter rows do not match the filter preset JSON schema.")
+        problems = _row_problems(rows)
+        if problems:
+            raise ValueError("; ".join(problems))
         with path.open("w", encoding="utf-8") as f:
             json.dump(rows, f, indent=2)
 
 
-def load_filter_json(path: str | Path) -> list[dict[str, Any]]:
-    """Load and validate a filter preset JSON file."""
-    return FilterIO.load_filter_json(path)
+def load_filter_json(path: str | Path, *, validate: bool = True) -> list[dict[str, Any]]:
+    """Load a filter preset JSON file.
+
+    ``validate=False`` checks only the file's shape -- enough to recognize a
+    preset; a full load also checks the field values and names any it refuses.
+    """
+    return FilterIO.load_filter_json(path, validate=validate)
 
 
 def save_filter_json(path: str | Path, rows: list[dict[str, Any]]) -> None:
@@ -52,9 +91,13 @@ def save_filter_json(path: str | Path, rows: list[dict[str, Any]]) -> None:
 
 
 def is_filter_json_file(path: str | Path) -> bool:
-    """Return True only for JSON files shaped like saved filter rows."""
+    """Return True only for JSON files shaped like saved filter rows.
+
+    Recognition is by shape, so a preset with a bad field value is still routed
+    to the filter loader, which then says what is wrong with it.
+    """
     try:
-        load_filter_json(path)
+        load_filter_json(path, validate=False)
     except (OSError, TypeError, ValueError):
         return False
     return True
@@ -107,8 +150,8 @@ def filter_specs_from_rows(rows, *, only_enabled: bool = True) -> list[dict[str,
             "mode": str(row.get("value_as", "per loc") or "per loc"),
             "lo": float(row.get("min", 0.0)),
             "hi": float(row.get("max", 1.0)),
-            "lo_inc": bool(row.get("min_inclusive", True)),
-            "hi_inc": bool(row.get("max_inclusive", True)),
+            "lo_inc": inclusive_flag(row, "min_inclusive"),
+            "hi_inc": inclusive_flag(row, "max_inclusive"),
         }
         if row.get("iteration", None) is not None:
             spec["itr"] = row["iteration"]

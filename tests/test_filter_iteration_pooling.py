@@ -293,9 +293,11 @@ def test_dialog_has_an_iter_column_and_no_weighted_column(qapp):
     dlg, _ds, _state = _dialog()
     try:
         headers = [dlg._table.horizontalHeaderItem(c).text() for c in range(fd._NCOLS)]
-        assert headers == ["On", "Attribute", "Mode", "Iter", "Min", "Max", "", ""]
+        assert headers == ["On", "Attribute", "Mode", "Iter", "", "Min", "Max", "", "", ""]
         # Iter sits between Mode and Min; there is no Weighted column at all.
         assert fd._COL_MODE < fd._COL_ITER < fd._COL_MIN
+        # The inclusive brackets frame the bounds: [ Min  Max ].
+        assert fd._COL_MIN_INC + 1 == fd._COL_MIN and fd._COL_MAX + 1 == fd._COL_MAX_INC
         assert not hasattr(fd, "_COL_WEIGHT")
         assert not hasattr(dlg, "_row_weighted")
     finally:

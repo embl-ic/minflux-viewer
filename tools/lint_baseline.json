@@ -435,7 +435,7 @@
   },
   "minflux_viewer/ui/dialogs/filter_dialog.py": {
    "override": 3,
-   "union-attr": 66
+   "union-attr": 64
   },
   "minflux_viewer/ui/dialogs/global_color_dialog.py": {
    "attr-defined": 1,

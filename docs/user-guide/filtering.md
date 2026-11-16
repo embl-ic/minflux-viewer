@@ -19,17 +19,24 @@ switched-on row.
 | **Mode** | *per loc* bounds each localization; a *trace* mode (mean, median, min, max, 1st, last, stdev, range) computes one value per trace and keeps or drops the **whole trace** |
 | **Iter** | which iteration the value comes from: the final one (default), a single iteration, or all iterations summed or averaged; `cfr` and `efc` default to the iteration where they are measured |
 | **Min / Max** | the bounds; the step and number format follow the attribute |
+| **[ ( / ] )** | whether Min and Max themselves pass (next paragraph) |
 | 👁 | show this filter in the attribute histogram |
 | ✕ | remove the row |
 
 Trace-wise attributes such as `siz` (localizations per trace) are always read
 per trace.
 
-Bounds are inclusive by default (`Min ≤ value ≤ Max`). To exclude either
-endpoint, click the row's eye button, then double-click inside its highlighted
-histogram range to open **Filter bounds**. Clear **Inclusive** for Min, Max, or
-both, confirm with **OK**, then **Update Filter** or **Finish Edit**. Auto sets
-both endpoints inclusive.
+The brackets around Min and Max make the row read as the interval it keeps.
+`[` and `]` include the bound itself, `(` and `)` exclude it: `[ 0.1  0.8 )`
+keeps `0.1 ≤ value < 0.8`. Click a bracket to switch it; the filter is applied
+at once. A new row is inclusive at both ends, and a row whose bounds are reset
+to the attribute's range (by choosing another attribute or iteration) becomes
+inclusive again, so it keeps every value. Auto always writes inclusive bounds.
+
+In a filter file the two settings are `min_inclusive` and `max_inclusive`,
+`true` or `false`. A file without them (saved before they existed) is read as
+inclusive; a file with any other value, such as the text `"false"`, is refused
+with the row and field named rather than guessed.
 
 Below the table:
 
@@ -50,6 +57,14 @@ Double-clicking the histogram starts editing the bounds by dragging;
 *Update Filter* applies them, *Finish Edit* applies and stops, *Cancel Edit*
 restores the previous bounds.
 
+An inclusive bound is drawn as a solid line and an exclusive one as a dashed
+line, as for `≤` and `<` in a graph; the label beside the range names each
+bound inclusive or exclusive and counts the localizations with the same rule.
+Double-clicking inside the range opens **Filter bounds**, where Min and Max can
+be typed and their **Inclusive** boxes set. The edit starts from the row's own
+setting and gives it back, so an exclusive bound stays exclusive unless you
+change it.
+
 ## Auto filtering
 
 **Auto** adds one ordinary filter row per rule — or updates the row already
@@ -58,8 +73,10 @@ edited in *Edit › Preferences › Process › Filter* and applied top to botto
 each rule is computed on the localizations that pass the rows already switched
 on and the rules before it. The result line lists every bound and how it was
 obtained, and the same account goes to the Log and into the generated methods
-text. A rule that cannot suggest a bound says why and adds nothing. The rows are
-ordinary rows: check them, adjust them or switch them off as with any other.
+text. A bound on both sides is written as a closed interval, for example
+`cfr ∈ [0, 0.553]`; a one-sided one as `siz ≥ 10`. A rule that cannot suggest a
+bound says why and adds nothing. The rows are ordinary rows: check them, adjust
+them or switch them off as with any other.
 
 Automatic `efo` and `cfr` bounds stay within the finite data range used by the
 rule and the allowed attribute range: `efo ≥ 0` and `0 ≤ cfr ≤ 1`. This also

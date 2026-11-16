@@ -221,11 +221,21 @@ def value_range_mask(
     hi: float,
     *,
     base_mask: np.ndarray | None = None,
+    lo_inclusive: bool = True,
+    hi_inclusive: bool = True,
 ) -> np.ndarray:
-    """Return a boolean mask for values inside an inclusive numeric range."""
+    """Return a boolean mask for values inside a numeric range.
+
+    Each end is inclusive unless its flag says otherwise; a flag stays with its
+    value when *lo* and *hi* arrive reversed.
+    """
     values = np.asarray(values, dtype=float).ravel()
-    lo, hi = sorted((float(lo), float(hi)))
-    out = np.isfinite(values) & (values >= lo) & (values <= hi)
+    lo, hi = float(lo), float(hi)
+    if lo > hi:
+        lo, hi, lo_inclusive, hi_inclusive = hi, lo, hi_inclusive, lo_inclusive
+    above = values >= lo if lo_inclusive else values > lo
+    below = values <= hi if hi_inclusive else values < hi
+    out = np.isfinite(values) & above & below
     if base_mask is not None:
         base = np.asarray(base_mask, dtype=bool).ravel()
         if base.size == out.size:

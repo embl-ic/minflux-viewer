@@ -119,6 +119,11 @@ def _format_filter_report_number(value: float) -> str:
     return f"{mantissa:.2f} x 10^{exponent}"
 
 
+def _inclusive_word(inclusive: bool) -> str:
+    """How the filter report names a bound (its line is solid / dashed)."""
+    return "(inclusive)" if inclusive else "(exclusive)"
+
+
 class HistogramWindow(QWidget):
     """Interactive attribute histogram without dataset filtering."""
 
@@ -1355,7 +1360,9 @@ class HistogramWindow(QWidget):
         }
         return ds, mask, context
 
-    def _per_loc_histogram_mask(self, ds, raw: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    def _per_loc_histogram_mask(self, ds, raw: np.ndarray, lo: float, hi: float, *,
+                                lo_inclusive: bool = True,
+                                hi_inclusive: bool = True) -> np.ndarray:
         n = min(raw.size, ds.prop.num_loc)
         values = raw[:n].astype(float, copy=True)
         base = np.asarray(ds.filter_mask, dtype=bool).ravel()
@@ -1368,14 +1375,17 @@ class HistogramWindow(QWidget):
             values = np.where(positive, np.log(values), np.nan)
         if self._zero_chk.isChecked():
             display_mask &= values != 0.0
-        mask = value_range_mask(values, lo, hi, base_mask=display_mask)
+        mask = value_range_mask(values, lo, hi, base_mask=display_mask,
+                                lo_inclusive=lo_inclusive, hi_inclusive=hi_inclusive)
         if mask.size != ds.prop.num_loc:
             full = np.zeros(ds.prop.num_loc, dtype=bool)
             full[:mask.size] = mask
             mask = full
         return mask
 
-    def _trace_histogram_mask(self, ds, raw: np.ndarray, agg_mode: str, lo: float, hi: float) -> np.ndarray:
+    def _trace_histogram_mask(self, ds, raw: np.ndarray, agg_mode: str, lo: float, hi: float, *,
+                              lo_inclusive: bool = True,
+                              hi_inclusive: bool = True) -> np.ndarray:
         vals = self._aggregate(raw, ds.filter_mask, agg_mode, ds).astype(float, copy=True)
         display_mask = np.isfinite(vals)
         if self._log_chk.isChecked():
@@ -1384,7 +1394,8 @@ class HistogramWindow(QWidget):
             vals = np.where(positive, np.log(vals), np.nan)
         if self._zero_chk.isChecked():
             display_mask &= vals != 0.0
-        selected_traces = value_range_mask(vals, lo, hi, base_mask=display_mask)
+        selected_traces = value_range_mask(vals, lo, hi, base_mask=display_mask,
+                                           lo_inclusive=lo_inclusive, hi_inclusive=hi_inclusive)
         mask = np.zeros(ds.prop.num_loc, dtype=bool)
         trace_idx = np.asarray(ds.prop.trace_idx, dtype=int)
         for trace_id in np.flatnonzero(selected_traces):
@@ -1496,12 +1507,18 @@ class HistogramWindow(QWidget):
         on_cancel=None,
         restore_view_on_finish: bool = True,
         restore_view_on_cancel: bool = True,
+        inclusive_min: bool = True,
+        inclusive_max: bool = True,
     ) -> None:
         """Display and edit a filter range on top of this histogram.
 
         ``itr`` mirrors the filter row's own value space onto the plot, so the
         region the user drags is over exactly the numbers the filter tests.
         ``None`` keeps the histogram's current setting.
+
+        ``inclusive_min`` / ``inclusive_max`` are the row's own: the edit starts
+        from them and hands them back on Update/Finish, so editing an exclusive
+        bound does not quietly make it inclusive.
         """
         self._clear_filter_edit(restore=False)
         # Set the attribute first so cfr/efc can pick their effective iteration.
@@ -1593,9 +1610,11 @@ class HistogramWindow(QWidget):
         self._filter_edit.update({
             "region": region,
             "report_label": report_label,
-            "inclusive_min": True,
-            "inclusive_max": True,
+            "inclusive_min": bool(inclusive_min),
+            "inclusive_max": bool(inclusive_max),
         })
+        region.sigRegionChanged.connect(self._style_filter_bound_lines)
+        self._style_filter_bound_lines()
         self._set_filter_edit_buttons_visible(True)
         self._fit_histogram_view()
         self._update_filter_edit_labels()
@@ -1656,15 +1675,47 @@ class HistogramWindow(QWidget):
         y_span = max(abs(y1 - y0), 1e-12)
         attr_name = self._attr_combo.currentText()
         x_label = self._value_label(attr_name)
+        lo_inc = bool(edit.get("inclusive_min", True))
+        hi_inc = bool(edit.get("inclusive_max", True))
         report_label.setText(
             f"filtering {x_label} as {self._agg_combo.currentText()}\n"
-            f"loc in filter {self._filter_count_text(lo, hi)}\n"
-            f"min: {_format_filter_report_number(float(lo))}\n"
-            f"max: {_format_filter_report_number(float(hi))}"
+            f"loc in filter {self._filter_count_text(lo, hi, lo_inc, hi_inc)}\n"
+            f"min: {_format_filter_report_number(float(lo))} {_inclusive_word(lo_inc)}\n"
+            f"max: {_format_filter_report_number(float(hi))} {_inclusive_word(hi_inc)}"
         )
         report_label.setPos(x1 - 0.02 * x_span, y1 - 0.03 * y_span)
 
-    def _filter_count_text(self, lo: float, hi: float) -> str:
+    def _style_filter_bound_lines(self, *_args, force: bool = False) -> None:
+        """Draw an inclusive bound solid and an exclusive one dashed.
+
+        The graphing convention for ``≤`` versus ``<``. Styled by position, not
+        by index: the region's two lines may be dragged past each other, and the
+        lower one is then ``lines[1]``. Pens are only replaced when the ordering,
+        a flag or the colour changed, since this runs on every drag step.
+        """
+        edit = self._filter_edit or {}
+        region = edit.get("region")
+        lines = list(getattr(region, "lines", ())) if region is not None else []
+        if len(lines) != 2:
+            return
+        _range_color, _alpha, bounds_color, _text = self._filter_style()
+        lower, upper = sorted(lines, key=lambda line: float(line.value()))
+        lo_inc = bool(edit.get("inclusive_min", True))
+        hi_inc = bool(edit.get("inclusive_max", True))
+        key = (lines.index(lower), lo_inc, hi_inc, bounds_color.rgba())
+        if not force and edit.get("line_style_key") == key:
+            return
+        edit["line_style_key"] = key
+        for line, inclusive in ((lower, lo_inc), (upper, hi_inc)):
+            style = Qt.PenStyle.SolidLine if inclusive else Qt.PenStyle.DashLine
+            line.setPen(pg.mkPen(bounds_color, width=4, style=style))
+            try:
+                line.setHoverPen(pg.mkPen(bounds_color, width=5, style=style))
+            except Exception:
+                pass
+
+    def _filter_count_text(self, lo: float, hi: float,
+                           lo_inclusive: bool = True, hi_inclusive: bool = True) -> str:
         ds = self._dataset()
         if ds is None:
             return ""
@@ -1675,10 +1726,11 @@ class HistogramWindow(QWidget):
         if raw.size == 0:
             return f"0 / {ds.prop.num_loc:,}"
         try:
+            flags = {"lo_inclusive": lo_inclusive, "hi_inclusive": hi_inclusive}
             if agg_mode == "per loc":
-                mask = self._per_loc_histogram_mask(ds, raw, lo, hi)
+                mask = self._per_loc_histogram_mask(ds, raw, lo, hi, **flags)
             else:
-                mask = self._trace_histogram_mask(ds, raw, agg_mode, lo, hi)
+                mask = self._trace_histogram_mask(ds, raw, agg_mode, lo, hi, **flags)
             selected = int(np.count_nonzero(mask))
         except Exception:
             selected = 0
@@ -1701,12 +1753,7 @@ class HistogramWindow(QWidget):
             region.setBrush(pg.mkBrush(
                 range_color.red(), range_color.green(), range_color.blue(), range_alpha
             ))
-            for line in getattr(region, "lines", ()):
-                line.setPen(pg.mkPen(bounds_color, width=4))
-                try:
-                    line.setHoverPen(pg.mkPen(bounds_color, width=5))
-                except Exception:
-                    pass
+            self._style_filter_bound_lines(force=True)
         if report is not None:
             report.setColor(text_color)
             try:
@@ -1786,9 +1833,10 @@ class HistogramWindow(QWidget):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             new_lo = min(lo_spin.value(), hi_spin.value())
             new_hi = max(lo_spin.value(), hi_spin.value())
-            region.setRegion((new_lo, new_hi))
             edit["inclusive_min"] = lo_inc.isChecked()
             edit["inclusive_max"] = hi_inc.isChecked()
+            region.setRegion((new_lo, new_hi))
+            self._style_filter_bound_lines()
             self._update_filter_edit_labels()
 
     def _filter_log_data_range(self) -> tuple[float, float] | None:
@@ -1954,12 +2002,16 @@ class HistogramWindow(QWidget):
         return float(x0), float(x1)
 
     def _reset_filter_region_to_current_data(self) -> None:
+        """Span the current data again. Both ends become inclusive: a range
+        reset to the data's own extremes must not drop the extremes."""
         edit = self._filter_edit or {}
         region = edit.get("region")
         bounds = self._current_histogram_x_bounds()
         if region is None or bounds is None:
             return
+        edit["inclusive_min"] = edit["inclusive_max"] = True
         region.setRegion(bounds)
+        self._style_filter_bound_lines()
         self._update_filter_edit_labels()
 
     def _transform_filter_region_for_log_change(self, old_log: bool, new_log: bool) -> bool:

@@ -4,7 +4,8 @@ minflux_viewer.ui.dialogs.filter_dialog
 Filter dialog — port of ``dialog_filter.mlapp``.
 
 A table of filter rows.  Each row specifies:
-  attribute | aggregation mode | min | max | enabled
+  enabled | attribute | aggregation mode | iteration | [ min  max ]
+where each bracket shows (and toggles) whether that bound itself passes.
 
 Filters are combined with logical AND.  The result is written to
 ``dataset.filter_mask`` and ``state.notify_filter_changed`` announces it.
@@ -18,7 +19,7 @@ import math
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -40,7 +41,7 @@ from PyQt6.QtWidgets import (
 
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.attributes import is_trace_wise_attribute, plot_attribute_names
-from minflux_viewer.core.filter_io import is_filter_json_file
+from minflux_viewer.core.filter_io import inclusive_flag, is_filter_json_file
 from minflux_viewer.core.filter_io import load_filter_json as load_filter_json_file
 from minflux_viewer.core.filter_io import save_filter_json as save_filter_json_file
 from minflux_viewer.core.iteration import (
@@ -79,16 +80,19 @@ _ITER_TOOLTIP = (
     "all [sum] / all [average] — pooled over every iteration of the localization.\n"
     "cfr / efc default to the iteration they are actually measured at."
 )
-# Column indices
+# Column indices. The bracket columns frame Min and Max, so a row reads as the
+# interval it keeps: [ 0.1  0.8 ) keeps 0.1 <= value < 0.8.
 _COL_ENABLED = 0
 _COL_ATTR    = 1
 _COL_MODE    = 2
 _COL_ITER    = 3
-_COL_MIN     = 4
-_COL_MAX     = 5
-_COL_DISPLAY = 6
-_COL_DELETE  = 7
-_NCOLS       = 8
+_COL_MIN_INC = 4
+_COL_MIN     = 5
+_COL_MAX     = 6
+_COL_MAX_INC = 7
+_COL_DISPLAY = 8
+_COL_DELETE  = 9
+_NCOLS       = 10
 
 
 class SmartBoundsSpinBox(QDoubleSpinBox):
@@ -208,6 +212,67 @@ class SmartBoundsSpinBox(QDoubleSpinBox):
         if abs_value != 0.0 and (abs_value < cls._SCI_LOW or abs_value >= cls._SCI_HIGH):
             return f"{value:.3e}"
         return f"{value:.3f}"
+
+
+def _bound_inclusive(spin: QObject | None) -> bool:
+    """Whether a Min/Max cell's own value passes (its ``"inclusive"`` property;
+    unset = inclusive). Callers skip rows with a missing cell; ``None`` is
+    accepted only because ``cellWidget`` is typed optional."""
+    value = None if spin is None else spin.property("inclusive")
+    return True if value is None else bool(value)
+
+
+class _BoundBracket(QPushButton):
+    """``[`` / ``(`` beside Min, ``]`` / ``)`` beside Max: shows and toggles
+    whether that bound's own value passes.
+
+    The flag has ONE home, the ``"inclusive"`` property of the bound's
+    :class:`SmartBoundsSpinBox`, which the filter spec, the preset file and the
+    histogram edit all read. This button holds no state of its own. It watches
+    the property through an event filter -- a dynamic-property change arrives
+    as an event even while the spin box's signals are blocked -- so every
+    writer (Auto, a loaded preset, the histogram's Update/Finish) shows here
+    without having to remember to refresh it.
+    """
+
+    def __init__(self, spin: SmartBoundsSpinBox, side: str, on_toggled) -> None:
+        super().__init__()
+        self._spin = spin
+        self._side = side                     # "min" | "max"
+        self.setFixedWidth(26)
+        self.setAutoDefault(False)
+        self.setDefault(False)
+        font = self.font()
+        font.setBold(True)
+        self.setFont(font)
+        spin.installEventFilter(self)
+        self.clicked.connect(lambda _checked=False: self._toggle(on_toggled))
+        self._refresh()
+
+    def _toggle(self, on_toggled) -> None:
+        self._spin.setProperty("inclusive", not _bound_inclusive(self._spin))
+        on_toggled()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt API
+        if (obj is self._spin and event.type() == QEvent.Type.DynamicPropertyChange
+                and bytes(event.propertyName()) == b"inclusive"):
+            self._refresh()
+        return False
+
+    def _refresh(self) -> None:
+        inclusive = _bound_inclusive(self._spin)
+        name, rel_in, rel_ex = (("Min", "≥", ">") if self._side == "min"
+                                else ("Max", "≤", "<"))
+        if self._side == "min":
+            self.setText("[" if inclusive else "(")
+        else:
+            self.setText("]" if inclusive else ")")
+        state = "inclusive" if inclusive else "exclusive"
+        rel = rel_in if inclusive else rel_ex
+        verb = "passes" if inclusive else "is filtered out"
+        other = "exclude" if inclusive else "include"
+        self.setToolTip(f"{name} is {state}: a value equal to {name} {verb} "
+                        f"(value {rel} {name}).\nClick to {other} it.")
 
 
 class FilterDialog(QDialog):
@@ -399,11 +464,13 @@ class FilterDialog(QDialog):
         # ── Filter table ──────────────────────────────────────────
         self._table = QTableWidget(0, _NCOLS)
         self._table.setHorizontalHeaderLabels(
-            ["On", "Attribute", "Mode", "Iter", "Min", "Max", "", ""]
+            ["On", "Attribute", "Mode", "Iter", "", "Min", "Max", "", "", ""]
         )
         hh = self._table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(_COL_ENABLED, QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(_COL_MIN_INC, QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(_COL_MAX_INC, QHeaderView.ResizeMode.Fixed)
         hh.setSectionResizeMode(_COL_DISPLAY, QHeaderView.ResizeMode.Fixed)
         hh.setSectionResizeMode(_COL_DELETE,  QHeaderView.ResizeMode.Fixed)
         hh.setStretchLastSection(False)
@@ -411,8 +478,10 @@ class FilterDialog(QDialog):
         self._table.setColumnWidth(_COL_ATTR,   170)
         self._table.setColumnWidth(_COL_MODE,   130)
         self._table.setColumnWidth(_COL_ITER,   120)
+        self._table.setColumnWidth(_COL_MIN_INC, 30)
         self._table.setColumnWidth(_COL_MIN,    130)
         self._table.setColumnWidth(_COL_MAX,    130)
+        self._table.setColumnWidth(_COL_MAX_INC, 30)
         self._table.setColumnWidth(_COL_DISPLAY, 36)
         self._table.setColumnWidth(_COL_DELETE,  36)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -703,6 +772,10 @@ class FilterDialog(QDialog):
         max_spin.editingFinished.connect(self._apply_all)
         self._table.setCellWidget(row, _COL_MIN, min_spin)
         self._table.setCellWidget(row, _COL_MAX, max_spin)
+        # Brackets: whether Min / Max themselves pass; a click applies at once,
+        # like the On box.
+        self._table.setCellWidget(row, _COL_MIN_INC, _BoundBracket(min_spin, "min", self._apply_all))
+        self._table.setCellWidget(row, _COL_MAX_INC, _BoundBracket(max_spin, "max", self._apply_all))
 
         # Eye / display-in-histogram button
         eye_btn = QPushButton("👁")
@@ -834,11 +907,14 @@ class FilterDialog(QDialog):
             return
         lo, hi = float(np.nanmin(finite)), float(np.nanmax(finite))
 
+        # Bounds reset to the data's own extremes become inclusive: an
+        # exclusive end left over from the previous attribute would drop them.
         for col, val in ((_COL_MIN, lo), (_COL_MAX, hi)):
             spin = self._table.cellWidget(row, col)
             if isinstance(spin, SmartBoundsSpinBox):
                 spin.blockSignals(True)
                 spin.configure(value=val, values=raw_vals, data_min=lo, data_max=hi, mode=mode)
+                spin.setProperty("inclusive", True)
                 spin.blockSignals(False)
 
     # ------------------------------------------------------------------
@@ -895,8 +971,8 @@ class FilterDialog(QDialog):
         mode = mode_combo.currentText()
         lo   = min_spin.value()
         hi   = max_spin.value()
-        lo_inc = bool(min_spin.property("inclusive") if min_spin.property("inclusive") is not None else True)
-        hi_inc = bool(max_spin.property("inclusive") if max_spin.property("inclusive") is not None else True)
+        lo_inc = _bound_inclusive(min_spin)
+        hi_inc = _bound_inclusive(max_spin)
 
         if attr not in ds.attr:
             return None
@@ -1191,8 +1267,8 @@ class FilterDialog(QDialog):
             "mode": mode_combo.currentText(),
             "lo": float(min_spin.value()),
             "hi": float(max_spin.value()),
-            "lo_inc": bool(min_spin.property("inclusive") if min_spin.property("inclusive") is not None else True),
-            "hi_inc": bool(max_spin.property("inclusive") if max_spin.property("inclusive") is not None else True),
+            "lo_inc": _bound_inclusive(min_spin),
+            "hi_inc": _bound_inclusive(max_spin),
             "mask": ds.filter_mask.copy(),
         }
 
@@ -1259,6 +1335,10 @@ class FilterDialog(QDialog):
             on_cancel=cancel,
             restore_view_on_finish=histogram_existed,
             restore_view_on_cancel=histogram_existed,
+            # The edit hands these back on Update/Finish; without them it
+            # started inclusive and turned an exclusive row inclusive.
+            inclusive_min=snapshot["lo_inc"],
+            inclusive_max=snapshot["hi_inc"],
         )
 
     def _main_window(self):
@@ -1294,8 +1374,8 @@ class FilterDialog(QDialog):
                 "value_as":  mode.currentText() if isinstance(mode, QComboBox) else "per loc",
                 "min":       lo.value() if isinstance(lo, QDoubleSpinBox) else 0.0,
                 "max":       hi.value() if isinstance(hi, QDoubleSpinBox) else 1.0,
-                "min_inclusive": bool(lo.property("inclusive") if isinstance(lo, QDoubleSpinBox) and lo.property("inclusive") is not None else True),
-                "max_inclusive": bool(hi.property("inclusive") if isinstance(hi, QDoubleSpinBox) and hi.property("inclusive") is not None else True),
+                "min_inclusive": _bound_inclusive(lo) if isinstance(lo, QDoubleSpinBox) else True,
+                "max_inclusive": _bound_inclusive(hi) if isinstance(hi, QDoubleSpinBox) else True,
                 # Iteration the bound is authored against. NB: NOT "itr" — that
                 # key collides with the raw MINFLUX data-column name and would
                 # make filter_io misclassify the file as data (see filter_io.py).
@@ -1322,6 +1402,8 @@ class FilterDialog(QDialog):
         if not path:
             return
         try:
+            # Validates the field values too, so a bad one is named here
+            # rather than guessed at (bool("false") is True).
             rows = load_filter_json_file(path)
         except Exception as exc:
             QMessageBox.critical(self, "Load error", str(exc))
@@ -1335,8 +1417,8 @@ class FilterDialog(QDialog):
                 lo      = float(r.get("min", 0.0)),
                 hi      = float(r.get("max", 1.0)),
                 enabled = bool(r.get("apply", False)),
-                min_inclusive = bool(r.get("min_inclusive", True)),
-                max_inclusive = bool(r.get("max_inclusive", True)),
+                min_inclusive = inclusive_flag(r, "min_inclusive"),
+                max_inclusive = inclusive_flag(r, "max_inclusive"),
                 auto_range = False,
                 # Absent in a filter file saved before the column existed:
                 # iteration -> the attribute's default (effective for cfr/efc,
@@ -1393,14 +1475,33 @@ class FilterDialog(QDialog):
 # ---------------------------------------------------------------------------
 
 def _bounds_text(bound, lo: float, hi: float) -> str:
-    """``≤ hi`` / ``≥ lo`` / ``lo–hi`` for the sides the rule actually bounded."""
+    """``≤ hi`` / ``≥ lo`` for a one-sided rule, ``∈ [lo, hi]`` for both sides.
+
+    Auto always writes inclusive bounds (``_set_row_bounds``), hence ``≤``,
+    ``≥`` and the closed brackets.
+    """
     from minflux_viewer.core.auto_filter import format_value
 
     if bound.lo is None:
         return f"≤ {format_value(hi)}"
     if bound.hi is None:
         return f"≥ {format_value(lo)}"
-    return f"{format_value(lo)}–{format_value(hi)}"
+    return "∈ " + _interval_text(lo, hi, lo_inc=True, hi_inc=True)
+
+
+def _interval_text(lo: float, hi: float, *, lo_inc: bool, hi_inc: bool) -> str:
+    """``[lo, hi]`` with ``(`` / ``)`` on an exclusive end.
+
+    The numbers carry no thousands separators: inside an interval a grouping
+    comma would read as the comma between the two ends.
+    """
+    from minflux_viewer.core.auto_filter import format_value
+
+    def number(value: float) -> str:
+        return format_value(value).replace(",", "")
+
+    return (("[" if lo_inc else "(") + f"{number(lo)}, {number(hi)}"
+            + ("]" if hi_inc else ")"))
 
 
 def _make_spin(value: float) -> SmartBoundsSpinBox:
