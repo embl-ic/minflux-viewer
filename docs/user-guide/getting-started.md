@@ -11,6 +11,9 @@ has the per-platform details, and how to run from source.
 
 - *File › Open* (**Ctrl+O**), or drag files or folders onto the main window.
 - *File › Open Recent* lists recently opened files.
+- A Python script (`.py`) dropped on the main window opens in the Script Editor.
+  Opening never runs it; press *Run* when you want to. A dropped folder opens
+  the data in it, not its scripts.
 - *File › Open Sample Data* opens a synthetic dataset — useful to try the
   application without your own data. The presets are managed in
   *Plugins › Data Simulator*.

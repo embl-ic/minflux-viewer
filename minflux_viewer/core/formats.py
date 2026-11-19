@@ -13,7 +13,8 @@ Two things are declared per format:
 * **What opening it should DO** -- which is not always "load a dataset". A
   ``.msr`` opens the MSR reader, a filter preset opens the Filter dialog, a ROI
   set goes to the ROI Manager, a metadata sidecar is applied as a recipe to an
-  existing dataset. :class:`OpenAction` names those routes so the router can
+  existing dataset, a ``.py`` script opens in the Script Editor without being
+  run. :class:`OpenAction` names those routes so the router can
   dispatch without a chain of special cases.
 
 **Ambiguous extensions are resolved by content, in a declared order.** ``.json``
@@ -45,6 +46,8 @@ __all__ = [
     "label_for",
     "spec_for",
     "supported_extensions",
+    "folder_scan_extensions",
+    "action_extensions",
     "roi_extensions",
     "drop_on_dataset_extensions",
     "resolve_open",
@@ -63,6 +66,7 @@ class OpenAction(str, Enum):
     FILTER_DIALOG = "filter_dialog"      # filter preset -> Filter dialog rows
     METADATA_RECIPE = "metadata_recipe"  # sidecar -> applied to a dataset
     MBM_INFO = "mbm_info"                # standalone bead table -> MBM info window
+    SCRIPT_EDITOR = "script_editor"      # Python script -> Script Editor, never run
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,9 @@ class FormatSpec:
     detect_order: int = 100
     #: May be dropped **onto a dataset row** to act on that dataset.
     drop_on_dataset: bool = False
+    #: Picked up when a FOLDER is dropped. A folder drop means "open the data
+    #: in it"; a format that is not data is opened only when named itself.
+    folder_scan: bool = True
     notes: str = ""
     #: Lazy writer registered by a backend; resolved only when selected.
     writer: str | None = None
@@ -234,6 +241,15 @@ FORMATS: tuple[FormatSpec, ...] = (
               "file. It is bead reference data, not localizations, so it opens "
               "the MBM info window rather than loading as an (empty) dataset.",
     ),
+    # --- not data at all ---------------------------------------------------
+    FormatSpec(
+        "python_script", "Python script (.py)", (".py",), OpenAction.SCRIPT_EDITOR,
+        folder_scan=False,
+        notes="Opens in the Script Editor to read or edit. Opening never runs "
+              "it, so a script that would fail, or is not finished, opens the "
+              "same way. Skipped when a folder is dropped: that means 'open the "
+              "data in it', and a data folder often holds analysis scripts.",
+    ),
 )
 
 _BY_KEY = {spec.key: spec for spec in FORMATS}
@@ -312,6 +328,31 @@ def supported_extensions() -> tuple[str, ...]:
             if ext not in seen:
                 seen.append(ext)
     return tuple(seen)
+
+
+def folder_scan_extensions() -> tuple[str, ...]:
+    """The extensions a dropped folder is scanned for: its data, not scripts."""
+    seen: list[str] = []
+    for spec in FORMATS:
+        if not (spec.readable and spec.folder_scan):
+            continue
+        for ext in spec.extensions:
+            if ext not in seen:
+                seen.append(ext)
+    return tuple(seen)
+
+
+def action_extensions(action: OpenAction) -> tuple[str, ...]:
+    """Extensions that are opened by *action* whatever their content.
+
+    Only an extension no other format shares qualifies, so the answer never
+    depends on probing a file.
+    """
+    owned = [ext for spec in FORMATS if spec.readable and spec.action is action
+             for ext in spec.extensions]
+    shared = {ext for spec in FORMATS if spec.readable and spec.action is not action
+              for ext in spec.extensions}
+    return tuple(dict.fromkeys(ext for ext in owned if ext not in shared))
 
 
 def roi_extensions() -> frozenset[str]:

@@ -15,7 +15,7 @@ from minflux_viewer.ui.common.dataset_binding import (
     window_dataset_index,
     window_draws_dataset,
 )
-from minflux_viewer.ui.controllers.window_support import _raise_or_create
+from minflux_viewer.ui.controllers.window_support import _SCRIPT_EXTS, _raise_or_create
 
 if TYPE_CHECKING:
     from minflux_viewer.ui.main_window import MainWindow
@@ -1188,6 +1188,23 @@ def route_paths(self: MainWindow, paths) -> None:
     try:
         data_first = [path for path in paths
                       if str(Path(path).resolve()).casefold() not in sidecars]
+        # There is one Script Editor, holding one script: opening several in a
+        # row would leave only the last one visible while the Log claimed all
+        # of them were opened. Open the first and name the others.
+        kept, opened_script, skipped_scripts = [], None, []
+        for path in data_first:
+            if Path(path).suffix.lower() in _SCRIPT_EXTS and Path(path).is_file():
+                if opened_script is not None:
+                    skipped_scripts.append(Path(path).name)
+                    continue
+                opened_script = Path(path).name
+            kept.append(path)
+        if skipped_scripts:
+            names = ", ".join(f"'{name}'" for name in skipped_scripts)
+            self._state.log(
+                f"The Script Editor holds one script at a time: opened "
+                f"'{opened_script}'; not opened: {names}.", "WARN")
+        data_first = kept
         for path in data_first:
             self._route_path(path)
         for key, path in sidecars.items():

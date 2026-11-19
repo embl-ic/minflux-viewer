@@ -11,6 +11,10 @@ from minflux_viewer.core.app_state import AppState
 from minflux_viewer.ui.common.background_tasks import BackgroundTask
 
 _SUPPORTED_EXTS: tuple[str, ...] = _formats.supported_extensions()
+#: What a dropped folder is scanned for: its data, never the scripts beside it.
+_FOLDER_SCAN_EXTS: tuple[str, ...] = _formats.folder_scan_extensions()
+#: Opened in the Script Editor (never run), whatever the file contains.
+_SCRIPT_EXTS: tuple[str, ...] = _formats.action_extensions(_formats.OpenAction.SCRIPT_EDITOR)
 
 
 _FMT_LOADERS: dict[str, str] = {

@@ -10,7 +10,13 @@ from PyQt6.QtWidgets import QDialog, QFileDialog, QMessageBox
 from minflux_viewer.core import formats as _formats
 from minflux_viewer.ui.common.background_tasks import BackgroundTask
 from minflux_viewer.ui.common.qt_lifecycle import gui_action
-from minflux_viewer.ui.controllers.window_support import _FMT_LOADERS, _SUPPORTED_EXTS, _ZarrIoTask
+from minflux_viewer.ui.controllers.window_support import (
+    _FMT_LOADERS,
+    _FOLDER_SCAN_EXTS,
+    _SCRIPT_EXTS,
+    _SUPPORTED_EXTS,
+    _ZarrIoTask,
+)
 
 if TYPE_CHECKING:
     from minflux_viewer.ui.main_window import MainWindow
@@ -540,6 +546,9 @@ def _route_file(self: MainWindow, path: str) -> None:
         if action is _formats.OpenAction.MBM_INFO:
             self._load_mbm_companion(path)
             return
+        if action is _formats.OpenAction.SCRIPT_EDITOR:
+            self._open_script_in_editor(path)
+            return
     # Dataset and spreadsheet paths still go through content sniffing, which
     # resolves an extension that disagrees with the bytes (a .npz that is
     # really an .xlsx, and so on) and reports the mismatch.
@@ -561,6 +570,20 @@ def _route_file(self: MainWindow, path: str) -> None:
     getattr(self, loader)(path)
 
 
+def _open_script_in_editor(self: MainWindow, path: str) -> None:
+    """Show a Python script in the Script Editor. Opening never runs it.
+
+        A script that would fail, or is still being written, opens exactly like
+        a working one: only reading the file can fail, and that is reported by
+        the caller's ``gui_action`` boundary rather than skipped.
+        """
+    name = Path(path).name
+    editor = self._show_script_editor()
+    editor.open_script_file(path)
+    self._state.log(f"Opened script '{name}' in the Script Editor (not run).", "INFO")
+    self._status_label.setText(f"Opened script {name}.")
+
+
 def _route_path(self: MainWindow, path: str) -> None:
     """
         Route a path that may be a file OR a directory.
@@ -573,9 +596,11 @@ def _route_path(self: MainWindow, path: str) -> None:
         self._route_file(path)
         return
     if p.is_dir():
+        # Data only: a folder drop means "open the data in it", and the
+        # analysis scripts that often sit beside it are not opened.
         found = sorted(
             f for f in p.iterdir()
-            if f.is_file() and f.suffix.lower() in _SUPPORTED_EXTS
+            if f.is_file() and f.suffix.lower() in _FOLDER_SCAN_EXTS
         )
         if found:
             self._state.log(
@@ -1264,6 +1289,12 @@ def drop_file_on_dataset(self: MainWindow, idx: int, path: str) -> bool:
     # Not an apply-to-a-dataset kind. If the application can open it at
     # all, open it -- the row is simply not a meaningful target for a data
     # file, which the Log says rather than leaving the drop looking broken.
+    if ext in _SCRIPT_EXTS:
+        self._state.log(
+            f"Drop on '{ds.name}': '{p.name}' is a Python script — opening it "
+                "in the Script Editor (the row it was dropped on is not used).")
+        self._route_path(str(p))
+        return True
     if ext in _SUPPORTED_EXTS or (p.is_dir() and ext == ".zarr"):
         self._state.log(
             f"Drop on '{ds.name}': '{p.name}' is a data file — opening it "

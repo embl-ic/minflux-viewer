@@ -43,6 +43,26 @@ def test_matches_the_router_tables():
     assert set(F.drop_on_dataset_extensions()) <= set(MainWindow.DROP_ON_DATASET_EXTS)
 
 
+def test_router_folder_and_script_tables_match_the_registry():
+    from minflux_viewer.ui.controllers.window_support import _FOLDER_SCAN_EXTS, _SCRIPT_EXTS
+
+    assert _FOLDER_SCAN_EXTS == F.folder_scan_extensions()
+    assert _SCRIPT_EXTS == F.action_extensions(OpenAction.SCRIPT_EDITOR) == (".py",)
+
+
+def test_a_script_opens_when_named_but_a_folder_drop_skips_it():
+    """A folder drop means "open the data in it"; scripts beside it stay shut."""
+    assert ".py" in F.supported_extensions()
+    assert ".py" not in F.folder_scan_extensions()
+    assert set(F.folder_scan_extensions()) == set(F.supported_extensions()) - {".py"}
+
+
+def test_action_extensions_are_only_the_unshared_ones():
+    """A shared extension is decided by content, so it never belongs to one action."""
+    assert set(F.action_extensions(OpenAction.ROI_MANAGER)) == set(F.roi_extensions())
+    assert ".json" not in F.action_extensions(OpenAction.FILTER_DIALOG)
+
+
 def test_msr_export_is_available_but_not_ticked():
     """The writer is reverse-engineered, so it is opt-in."""
     msr = next(spec for spec in F.FORMATS if spec.key == "msr")
@@ -70,6 +90,7 @@ def test_npz_reads_but_no_longer_writes():
     ("book.xlsx", OpenAction.SPREADSHEET_DIALOG),
     ("set.roi", OpenAction.ROI_MANAGER),
     ("set.zip", OpenAction.ROI_MANAGER),
+    ("analysis.py", OpenAction.SCRIPT_EDITOR),
 ])
 def test_extension_routes_to_its_action(tmp_path, name, action):
     path = tmp_path / name

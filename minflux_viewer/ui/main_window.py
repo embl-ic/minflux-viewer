@@ -683,6 +683,11 @@ class MainWindow(QMainWindow):
         from minflux_viewer.ui.controllers import file_open_controller as controller
         return controller._route_path(self, path)
 
+    def _open_script_in_editor(self, path: str) -> None:
+        'Show a Python script in the Script Editor. Opening never runs it.'
+        from minflux_viewer.ui.controllers import file_open_controller as controller
+        return controller._open_script_in_editor(self, path)
+
     # -- individual loaders ----------------------------------------
 
     def _start_dataset_load(self, path: str, loader, *, kind: str) -> None:

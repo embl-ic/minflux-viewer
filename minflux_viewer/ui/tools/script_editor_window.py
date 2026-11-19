@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import io
+import tokenize
 import traceback
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import QEvent, QRect, QSize, QStringListModel, Qt, QTimer
+from PyQt6.QtCore import QEvent, QRect, QSize, QStringListModel, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QFontDatabase, QPainter, QPalette, QTextCursor, QTextOption
 from PyQt6.QtWidgets import (
     QCompleter,
@@ -28,6 +29,7 @@ from PyQt6.QtWidgets import (
 from minflux_viewer import __file__ as _package_file
 from minflux_viewer.scripting import install_runtime_module
 from minflux_viewer.ui.tools.console_window import ConsoleWindow
+from minflux_viewer.ui.tools.python_highlighter import PythonHighlighter
 
 _DEFAULT_SCRIPT = """import mfv
 import numpy as np
@@ -390,6 +392,11 @@ class _ScriptCodeEdit(QPlainTextEdit):
     _RIGHT_PADDING = 7
     _LEFT_PADDING = 5
 
+    #: Emitted after this editor's own palette changed (light/dark switch).
+    #: Qt notifies a parent before its children re-resolve their palettes, so
+    #: only the editor itself knows when its background is final.
+    palette_changed = pyqtSignal()
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._line_number_area = _LineNumberArea(self)
@@ -424,6 +431,11 @@ class _ScriptCodeEdit(QPlainTextEdit):
 
         if rect.contains(self.viewport().rect()):
             self._update_line_number_area_width()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.PaletteChange:
+            self.palette_changed.emit()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)
@@ -498,6 +510,9 @@ class ScriptEditorWindow(QWidget):
         self._state = state
         self._parent_window = parent
         self._path: Path | None = None
+        #: The encoding the open file was read with, so Save writes it back the
+        #: same way (a PEP 263 declaration or a UTF-8 BOM is kept).
+        self._encoding = "utf-8"
         self._namespace: dict[str, object] = {}
         self._force_close = False
         self._completion_prefix = ""
@@ -539,6 +554,11 @@ class ScriptEditorWindow(QWidget):
         self.editor.document().setDefaultTextOption(QTextOption(Qt.AlignmentFlag.AlignLeft))
         self.editor.setFont(self._mono_font(10))
         self.editor._update_line_number_area_width()
+        document = self.editor.document()
+        self._highlighter = (
+            PythonHighlighter(document, dark=self._editor_is_dark())
+            if document is not None else None)
+        self.editor.palette_changed.connect(self._sync_highlighter_scheme)
         splitter.addWidget(self.editor)
 
         output_wrap = QWidget(self)
@@ -557,6 +577,15 @@ class ScriptEditorWindow(QWidget):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
         root.addWidget(splitter, 1)
+
+    def _editor_is_dark(self) -> bool:
+        """The main window's dark-mode rule, applied to the editor background."""
+        return self.editor.palette().color(QPalette.ColorRole.Base).lightness() < 128
+
+    def _sync_highlighter_scheme(self) -> None:
+        """Follow a light/dark switch of the editor's background."""
+        if self._highlighter is not None:
+            self._highlighter.set_dark(self._editor_is_dark())
 
     def _mono_font(self, size: int) -> QFont:
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
@@ -670,6 +699,7 @@ class ScriptEditorWindow(QWidget):
     def set_script(self, text: str, *, source_name: str | None = None) -> None:
         """Replace the editor contents with generated or externally supplied code."""
         self._path = None
+        self._encoding = "utf-8"
         self.editor.setPlainText(str(text))
         suffix = f" - {source_name}" if source_name else ""
         self.setWindowTitle(f"Script Editor{suffix}")
@@ -728,12 +758,31 @@ class ScriptEditorWindow(QWidget):
         if not path:
             return
         try:
-            text = Path(path).read_text(encoding="utf-8")
-        except Exception as exc:
+            self.open_script_file(path)
+        except (OSError, SyntaxError, UnicodeDecodeError) as exc:
             QMessageBox.critical(self, "Open script", f"Could not open script:\n{exc}")
-            return
-        self._path = Path(path)
+
+    def open_script_file(self, path) -> None:
+        """Load *path* into the editor as text. It is never run.
+
+        Opening is reading, nothing more: a script with a syntax error, or one
+        that would fail, opens like any other. The encoding is Python's own
+        rule for source files -- a PEP 263 declaration or a UTF-8 BOM, else
+        UTF-8 -- so a script that declares another encoding reads correctly.
+        Raises ``OSError``, ``SyntaxError`` (an invalid encoding declaration)
+        or ``UnicodeDecodeError``; the editor is left unchanged on failure.
+        Like *Open…*, it replaces the current text.
+        """
+        source = Path(path)
+        with tokenize.open(source) as handle:
+            text = handle.read()
+            encoding = handle.encoding
+        self._path = source
+        self._encoding = encoding
         self.editor.setPlainText(text)
+        document = self.editor.document()
+        if document is not None:
+            document.setModified(False)
         self._update_title()
         self._reset_namespace()
 
@@ -752,13 +801,15 @@ class ScriptEditorWindow(QWidget):
         )
         if not path:
             return
+        # The encoding stays with the text: a declaration inside the script
+        # must keep describing the bytes of every copy saved from it.
         self._path = Path(path)
         self._write_script(self._path)
         self._update_title()
 
     def _write_script(self, path: Path) -> None:
         try:
-            path.write_text(self.editor.toPlainText(), encoding="utf-8")
+            path.write_text(self.editor.toPlainText(), encoding=self._encoding)
         except Exception as exc:
             QMessageBox.critical(self, "Save script", f"Could not save script:\n{exc}")
             return
