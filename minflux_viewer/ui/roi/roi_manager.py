@@ -6,7 +6,7 @@ import copy
 import html
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtCore import QEvent, QItemSelectionModel, Qt
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -35,6 +35,10 @@ class RoiManagerWindow(QWidget):
         self._state = state
         self._store = state.rois
         self._refreshing = False
+        # True while the list itself is pushing its selection into the store, so
+        # `_refresh_selection` can tell the user's own list click (leave the list
+        # where it is) from a selection made elsewhere (bring it into view).
+        self._selecting_from_list = False
 
         self.setWindowTitle("ROI Manager")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -268,16 +272,33 @@ class RoiManagerWindow(QWidget):
     def _refresh_selection(self) -> None:
         self._refreshing = True
         selected = set(self._store.selected_ids)
+        first = None
         for i in range(self._list.count()):
             item = self._list.item(i)
-            item.setSelected(item.data(Qt.ItemDataRole.UserRole) in selected)
+            is_selected = item.data(Qt.ItemDataRole.UserRole) in selected
+            item.setSelected(is_selected)
+            if is_selected and first is None:
+                first = item
+        if first is not None and not self._selecting_from_list:
+            # Selected somewhere else -- a click on the ROI or its label in a view,
+            # Select All, a newly added ROI: make the entry current and scroll it
+            # into view, as Fiji's ``RoiManager.selectAndMakeVisible`` does. Only
+            # the current item moves (NoUpdate), so the list's arrow keys continue
+            # from the ROI just picked. A click in the list itself is left alone:
+            # jumping to the first selected row would fight a Ctrl/Shift click.
+            self._list.setCurrentItem(first, QItemSelectionModel.SelectionFlag.NoUpdate)
+            self._list.scrollToItem(first)
         self._refreshing = False
 
     def _on_list_selection(self) -> None:
         if self._refreshing:
             return
         ids = [item.data(Qt.ItemDataRole.UserRole) for item in self._list.selectedItems()]
-        self._store.select(ids)
+        self._selecting_from_list = True
+        try:
+            self._store.select(ids)
+        finally:
+            self._selecting_from_list = False
 
     def _add(self) -> None:
         adapter = self._store.active_adapter

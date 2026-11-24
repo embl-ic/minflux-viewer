@@ -1108,6 +1108,13 @@ class RoiOverlayController(QObject):
                 # before the scene handles this same press; this also hands over
                 # an unfiled volume draft if hover has not already done so.
                 self.activate()
+                # Pressing a stored ROI (or its label) selects its ROI Manager
+                # entry, before the keyboard target is worked out, so the arrow
+                # keys then act on the ROI just picked.
+                pos = self._event_to_view(event)
+                clicked = self._clicked_roi(event, pos) if pos is not None else None
+                if clicked is not None and clicked[0] == "stored":
+                    self._select_from_view(clicked[1])
                 self._track_kbd_handle_selection(event)
             return False
         if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
@@ -1155,8 +1162,16 @@ class RoiOverlayController(QObject):
             # current selection — even (especially, for Alt) when the press lands
             # on it, where a plain press would edit it instead.
             starts_op = self._begin_shape_op(event, tool)
-            if not starts_op and self._record_at(pos) is not None:
-                return False
+            if not starts_op:
+                clicked = self._clicked_roi(event, pos)
+                if clicked is not None:
+                    kind, record, on_label = clicked
+                    if kind == "stored":
+                        self._select_from_view(record)
+                    # A press on a ROI edits it (pyqtgraph takes the press) rather
+                    # than drawing over it; a press on a label only selects -- the
+                    # label is not a place to start a new shape, as in Fiji.
+                    return on_label
             if tool == "magic_wand":
                 # One click grows a region; the tool stays armed so several
                 # structures can be picked in a row, like the point tool.
@@ -2965,6 +2980,56 @@ class RoiOverlayController(QObject):
                 return "stored", record
         return None
 
+    def _label_record_at(self, event) -> RoiRecord | None:
+        """The displayed stored ROI whose label (ROI Manager *Labels*) is under
+        *event*, topmost first. Labels exist only for ROIs this view draws, so
+        they are already scoped like ``refresh``."""
+        if not self.labels:
+            return None
+        point = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        scene_pos = self.view_widget.mapToScene(point)
+        for record in reversed(self.store.records):
+            label = self.labels.get(record.id)
+            if (label is not None and label.isVisible()
+                    and label.sceneBoundingRect().contains(scene_pos)):
+                return record
+        return None
+
+    def _clicked_roi(self, event, pos) -> tuple[str, RoiRecord, bool] | None:
+        """What a left press lands on: ``(kind, record, on_label)``, or ``None``.
+
+        The draft and session points come first: they are the ROIs being worked
+        on, so a label lying over them must not take the press away (Fiji's
+        ``overOverlayLabel`` likewise ignores a label inside the active ROI).
+        Then a stored ROI's label, then a stored ROI's shape.
+        """
+        hit = self._record_at(pos)
+        if hit is not None and hit[0] != "stored":
+            return hit[0], hit[1], False
+        labelled = self._label_record_at(event)
+        if labelled is not None:
+            return "stored", labelled, True
+        if hit is not None:
+            return hit[0], hit[1], False
+        return None
+
+    def _select_from_view(self, record: RoiRecord) -> None:
+        """A press on a stored ROI -- its shape or its label -- selects its ROI
+        Manager entry, as Fiji's canvas does (``ImageCanvas.activateOverlayRoi``
+        → ``roiManagerSelect``); the Manager highlights it through
+        ``selection_changed``.
+
+        It is an ordinary ``RoiStore.select``, so it behaves like picking the
+        entry in the list: another ROI's uncommitted move is restored. A ROI that
+        is already selected is left as it is -- the press starts an edit of it,
+        and re-selecting would restore (discard) that edit, or collapse a
+        multi-selection under the cursor. A press on empty space changes nothing,
+        as in Fiji.
+        """
+        if record.id in self.store.selected_ids:
+            return
+        self.store.select([record.id])
+
     def _hit_tolerance(self) -> float:
         try:
             (x0, x1), (y0, y1) = self.view_box.viewRange()
@@ -3003,8 +3068,7 @@ class RoiOverlayController(QObject):
             stroker.setWidth(max(2.0 * float(tolerance), 1e-9))
             return stroker.createStroke(path).contains(pt)
         if record.type not in {"rectangle", "oval"}:
-            x, y, w, h = _bounds(record.geometry)
-            return x - tolerance <= pos[0] <= x + w + tolerance and y - tolerance <= pos[1] <= y + h + tolerance
+            return self._hits_drawn_outline(pos, record, tolerance)
         # rectangle / oval: bounds is the unrotated box centred at the true centre,
         # so the rotated hit-test about that centre is correct for both.
         x, y, w, h = _bounds(record.geometry)
@@ -3020,16 +3084,71 @@ class RoiOverlayController(QObject):
         dy = float(pos[1]) - cy
         local_x = cos_t * dx + sin_t * dy
         local_y = -sin_t * dx + cos_t * dy
-        if abs(local_x) <= half_w + tolerance and abs(local_y) <= half_h + tolerance:
-            return True
-        handle_offset = max(half_h * 0.22, tolerance * 2.0)
-        hit_radius = max(tolerance * 3.0, min(half_w, half_h) * 0.18)
-        for rotation_y in (-half_h - handle_offset, half_h + handle_offset):
-            rot_x = cx + (-sin_t * rotation_y)
-            rot_y = cy + (cos_t * rotation_y)
-            if (float(pos[0]) - rot_x) ** 2 + (float(pos[1]) - rot_y) ** 2 <= hit_radius ** 2:
+        # No zone beyond the box: the rotate handle that used to sit outside it
+        # is gone (a rotated variant's pivot is on an edge), and since a press
+        # selects the ROI in the Manager a phantom zone would pick it from empty
+        # space.
+        if record.type == "oval":
+            # The ellipse, not its bounding box: every oval handle sits on the
+            # curve, so a press in a corner of the box is beside the shape.
+            a = half_w + tolerance
+            b = half_h + tolerance
+            return bool(a > 0 and b > 0 and (local_x / a) ** 2 + (local_y / b) ** 2 <= 1.0)
+        return bool(abs(local_x) <= half_w + tolerance and abs(local_y) <= half_h + tolerance)
+
+    def _drawn_vertices(self, record: RoiRecord) -> tuple[np.ndarray, bool]:
+        """``(vertices (N, 2), closed)`` of a vertex-list ROI as ``_make_item``
+        draws it -- the same projection and the same ``closed`` default -- so a
+        press is tested against the outline on screen."""
+        g = record.geometry
+        if record.type == "line":
+            pts = self._project_points(record)[:2]
+            closed = False
+        elif record.type == "angle":
+            pts = [p[:2] for p in g.get("points", [])[:3]]
+            closed = False
+        elif record.type in {"polyline", "freehand_line"}:
+            pts = self._project_points(record)
+            closed = bool(g.get("closed", False))
+        else:
+            pts = [p[:2] for p in g.get("points", [])]
+            closed = bool(g.get("closed", record.type != "line"))
+        arr = np.array([[float(p[0]), float(p[1])] for p in pts], dtype=float)
+        return arr.reshape(-1, 2), closed
+
+    def _hits_drawn_outline(self, pos: tuple[float, float], record: RoiRecord,
+                            tolerance: float) -> bool:
+        """Inside a closed outline (even-odd, as the selection mask), or within
+        *tolerance* of the drawn line.
+
+        The bounding box alone is not enough once a press selects the ROI in the
+        Manager: a diagonal line's or an L-shaped polygon's box is mostly empty
+        space, and pressing there would pick the ROI (or block drawing a new one).
+        """
+        from minflux_viewer.core.roi_vertex_edit import nearest_edge
+
+        pts, closed = self._drawn_vertices(record)
+        if not len(pts):
+            return False
+        px, py = float(pos[0]), float(pos[1])
+        lo = pts.min(axis=0) - tolerance
+        hi = pts.max(axis=0) + tolerance
+        if not (lo[0] <= px <= hi[0] and lo[1] <= py <= hi[1]):
+            return False                                  # cheap reject first
+        if len(pts) == 1:
+            return bool(np.hypot(pts[0, 0] - px, pts[0, 1] - py) <= tolerance)
+        if closed and len(pts) >= 3:
+            path = QPainterPath()
+            path.addPolygon(QPolygonF([QPointF(float(x), float(y)) for x, y in pts]))
+            path.setFillRule(Qt.FillRule.OddEvenFill)
+            if path.contains(QPointF(px, py)):
                 return True
-        return False
+        i, t = nearest_edge(pts, (px, py), closed=closed)
+        if i < 0:
+            return False
+        a, b = pts[i], pts[(i + 1) % len(pts)]
+        nx, ny = a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])
+        return bool(np.hypot(nx - px, ny - py) <= tolerance)
 
     def _show_roi_context_menu(self, hit: tuple[str, RoiRecord], global_pos,
                                view_pos: tuple[float, float] | None = None) -> None:

@@ -2,7 +2,9 @@
 1. arrow keys navigate the list and switch the active/selected ROI (previously a
    selection-triggered `changed` signal rebuilt the whole list mid-navigation);
 2. a ROI selected in the Manager is drawn in a distinct color in the views so it
-   stands out from the other (Show-all) ROIs.
+   stands out from the other (Show-all) ROIs;
+3. the other direction, as in Fiji: pressing a ROI (or its label) in a view
+   selects its Manager entry and brings it into view.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ pytest.importorskip("PyQt6")
 pytest.importorskip("pyqtgraph")
 
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtWidgets import QWidget
 
 from minflux_viewer.core.app_state import AppState
@@ -247,3 +249,216 @@ def test_update_commits_the_edit_and_it_then_survives_selection(_app):
     st.rois.select([st.rois.records[0].id])      # restore now finds the new geometry
     assert ctrl.items[st.rois.records[0].id].pos().x() == pytest.approx(500.0)
     w.close()
+
+
+# ------------------- a press in a view selects the Manager entry (Fiji)
+# Fiji's canvas activates a Show-All ROI from the image and selects it in the
+# ROI Manager (``ImageCanvas.activateOverlayRoi`` → ``roiManagerSelect`` →
+# ``RoiManager.selectAndMakeVisible``), from the ROI or from its label.
+
+def _box(name, x, w=30.0):
+    return RoiRecord.create("rectangle", {"bounds": [float(x), 0.0, w, 30.0]},
+                            name=name, coordinate_space="pixel")
+
+
+def _shown_ctrl(qtbot, store):
+    """A controller on a plot that is on screen, showing data x/y −10…110."""
+    from PyQt6.QtTest import QTest
+
+    ctrl = _ctrl(None, store=store)
+    plot = ctrl.view_widget
+    qtbot.addWidget(plot)
+    plot.resize(420, 420)
+    plot.show()
+    QTest.qWaitForWindowExposed(plot)
+    ctrl.view_box.setRange(xRange=(-10.0, 110.0), yRange=(-10.0, 110.0), padding=0)
+    for _ in range(3):
+        qtbot.wait(1)
+    return ctrl
+
+
+def _click_view(ctrl, x, y):
+    """A real left click at data (x, y), through the viewport's event filter."""
+    from PyQt6.QtTest import QTest
+
+    scene = ctrl.view_box.mapViewToScene(QPointF(float(x), float(y)))
+    pt = ctrl.view_widget.mapFromScene(scene)
+    QTest.mouseClick(ctrl.view_widget.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, pt)
+
+
+def _manager(qtbot, st):
+    from minflux_viewer.ui.roi.roi_manager import RoiManagerWindow
+
+    w = RoiManagerWindow(st)
+    qtbot.addWidget(w)
+    return w
+
+
+def _manager_rows(w):
+    return [w._list.row(item) for item in w._list.selectedItems()]
+
+
+def test_pressing_a_roi_in_the_view_selects_its_manager_entry(qtbot):
+    st = AppState()
+    a, b = _box("a", 0.0), _box("b", 60.0)
+    st.rois.add(a)
+    st.rois.add(b)
+    st.rois.deselect()
+    st.rois.set_show_all(True)
+    ctrl = _shown_ctrl(qtbot, st.rois)
+    w = _manager(qtbot, st)
+
+    _click_view(ctrl, 75.0, 15.0)                     # inside b, edit mode
+    assert st.rois.selected_ids == [b.id]
+    assert _manager_rows(w) == [1] and w._list.currentRow() == 1
+    assert (ctrl.items[b.id].pen.color().name().lower()
+            == ctrl.MANAGER_SELECT_COLOR.lower())   # highlighted in the view too
+
+    _click_view(ctrl, 15.0, 15.0)                     # inside a
+    assert st.rois.selected_ids == [a.id]
+    assert _manager_rows(w) == [0] and w._list.currentRow() == 0
+
+    _click_view(ctrl, 50.0, 80.0)                     # empty space: Fiji keeps it
+    assert st.rois.selected_ids == [a.id]
+    ctrl.dispose()
+
+
+def test_pressing_a_roi_with_a_drawing_tool_armed_selects_it_and_draws_nothing(qtbot):
+    st = AppState()
+    a, b = _box("a", 0.0), _box("b", 60.0)
+    st.rois.add(a)
+    st.rois.add(b)
+    st.rois.deselect()
+    st.rois.set_show_all(True)
+    ctrl = _shown_ctrl(qtbot, st.rois)
+    st.rois.set_tool("rectangle")
+
+    _click_view(ctrl, 75.0, 15.0)
+    assert st.rois.selected_ids == [b.id]
+    assert ctrl.draft is None                         # the press edits b; no new shape
+    ctrl.dispose()
+
+
+def test_pressing_the_selected_roi_keeps_its_uncommitted_edit(qtbot):
+    """The press that starts (or continues) an edit must not re-select the ROI:
+    `select` restores the stored geometry, which would throw the edit away."""
+    st = AppState()
+    a = _box("a", 0.0)
+    st.rois.add(a)
+    st.rois.set_show_all(True)
+    st.rois.select([a.id])
+    ctrl = _shown_ctrl(qtbot, st.rois)
+    item = ctrl.items[a.id]
+    ctrl._dirty_items.add(a.id)                       # as after a drag of the copy
+
+    restores = []
+    st.rois.restore_requested.connect(lambda: restores.append(1))
+    _click_view(ctrl, 15.0, 15.0)
+    assert st.rois.selected_ids == [a.id]
+    assert not restores and ctrl.items[a.id] is item
+    ctrl.dispose()
+
+
+def test_pressing_a_roi_label_selects_it(qtbot):
+    """The label of a V-shaped polyline sits at the vertex centroid, well off
+    its line: only the label can take a press there."""
+    st = AppState()
+    vee = RoiRecord.create("polyline", {"points": [[0.0, 0.0], [50.0, 100.0], [100.0, 0.0]]},
+                           name="vee", coordinate_space="pixel")
+    other = _box("other", 70.0, w=20.0)
+    st.rois.add(vee)
+    st.rois.add(other)
+    st.rois.select([other.id])
+    st.rois.set_show_all(True)
+    st.rois.set_show_labels(True)
+    ctrl = _shown_ctrl(qtbot, st.rois)
+    w = _manager(qtbot, st)
+
+    label = ctrl.labels[vee.id]
+    centre = ctrl.view_box.mapSceneToView(label.sceneBoundingRect().center())
+    lx, ly = float(centre.x()), float(centre.y())
+    assert not ctrl._point_hits_record((lx, ly), vee, ctrl._hit_tolerance())  # off the line
+
+    st.rois.set_tool("rectangle")                     # a label press never draws
+    _click_view(ctrl, lx, ly)
+    assert st.rois.selected_ids == [vee.id]
+    assert _manager_rows(w) == [0]
+    assert ctrl.draft is None
+
+    # Without labels the same spot is empty space: nothing is picked and the
+    # armed tool draws there as usual.
+    st.rois.select([other.id])
+    st.rois.set_show_labels(False)
+    _click_view(ctrl, lx, ly)
+    assert st.rois.selected_ids == [other.id]
+    ctrl.dispose()
+
+
+def test_hit_test_follows_the_drawn_shape(_app):
+    """A press selects what it lands on, so the hit-test is the shape, not its
+    bounding box (nor the zone of the removed rotate handle beyond it)."""
+    ctrl = _ctrl(_app)
+    line = RoiRecord.create("line", {"points": [[0.0, 0.0], [100.0, 100.0]]})
+    assert ctrl._point_hits_record((50.0, 50.0), line, 1.0)
+    assert not ctrl._point_hits_record((90.0, 10.0), line, 1.0)   # in its box only
+
+    tri = RoiRecord.create("polygon", {"points": [[0.0, 0.0], [100.0, 0.0], [0.0, 100.0]],
+                                       "closed": True})
+    assert ctrl._point_hits_record((20.0, 20.0), tri, 1.0)        # inside
+    assert ctrl._point_hits_record((50.0, 50.5), tri, 1.0)        # on the edge
+    assert not ctrl._point_hits_record((80.0, 80.0), tri, 1.0)    # in its box only
+
+    oval = RoiRecord.create("oval", {"bounds": [0.0, 0.0, 100.0, 100.0]})
+    assert ctrl._point_hits_record((50.0, 50.0), oval, 1.0)
+    assert ctrl._point_hits_record((100.5, 50.0), oval, 1.0)      # on the curve
+    assert not ctrl._point_hits_record((3.0, 3.0), oval, 1.0)     # box corner
+
+    rect = RoiRecord.create("rectangle", {"bounds": [0.0, 0.0, 100.0, 40.0]})
+    assert ctrl._point_hits_record((99.5, 39.5), rect, 1.0)
+    assert not ctrl._point_hits_record((50.0, 44.0), rect, 1.0)   # old rotate zone
+
+
+def test_a_selection_made_elsewhere_is_scrolled_into_view(qtbot):
+    """Fiji's ``selectAndMakeVisible``: the entry becomes current and visible,
+    so the list's arrow keys continue from it."""
+    from PyQt6.QtTest import QTest
+
+    st = AppState()
+    for i in range(80):
+        st.rois.add(_rect(f"r{i}", x=i * 20))
+    st.rois.deselect()
+    w = _manager(qtbot, st)
+    w.show()
+    QTest.qWaitForWindowExposed(w)
+    w._list.scrollToTop()
+
+    last = w._list.count() - 1
+    st.rois.select([st.rois.records[last].id])        # e.g. a press in a view
+    assert w._list.currentRow() == last
+    assert w._list.viewport().rect().intersects(w._list.visualItemRect(w._list.item(last)))
+
+    w._list.setFocus()
+    QTest.keyClick(w._list, Qt.Key.Key_Up)
+    assert st.rois.selected_ids == [st.rois.records[last - 1].id]
+
+
+def test_a_click_in_the_list_does_not_move_its_current_row(qtbot):
+    """Only selections made elsewhere move the current row: a Ctrl-click in the
+    list keeps its own current row instead of jumping to the first selected."""
+    from PyQt6.QtTest import QTest
+
+    st = AppState()
+    for i in range(5):
+        st.rois.add(_rect(f"r{i}", x=i * 20))
+    st.rois.deselect()
+    w = _manager(qtbot, st)
+    w.show()
+    QTest.qWaitForWindowExposed(w)
+    w._list.setCurrentRow(0)
+
+    rect = w._list.visualItemRect(w._list.item(3))
+    QTest.mouseClick(w._list.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.ControlModifier, rect.center())
+    assert sorted(_manager_rows(w)) == [0, 3]
+    assert w._list.currentRow() == 3
