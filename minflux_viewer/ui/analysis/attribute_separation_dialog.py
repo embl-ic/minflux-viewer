@@ -66,7 +66,7 @@ from minflux_viewer.analysis.distribution_fit import (
     fit_mixture,
 )
 from minflux_viewer.colormaps import channel_colormap_names, representative_rgb
-from minflux_viewer.colors import is_solid_color, rgba_hex, solid_color_rgb
+from minflux_viewer.colors import is_solid_color, iteration_color, rgba_hex, solid_color_rgb
 from minflux_viewer.core.iteration import (
     AVERAGE_LABEL,
     FLATTEN_LABEL,
@@ -771,10 +771,9 @@ class AttributeSeparationDialog(QDialog):
 
     def _draw_stacked_series(self, edges: np.ndarray) -> None:
         """One translucent step-histogram per iteration, colored + with a legend."""
-        from minflux_viewer.ui.plots.histogram_window import _iter_color
-
+        n_itr = self._num_itr()
         series = []
-        for k in range(self._num_itr()):
+        for k in range(n_itr):
             vals = self._values_for_itr(k)
             if vals.size:
                 series.append((k, vals))
@@ -784,7 +783,7 @@ class AttributeSeparationDialog(QDialog):
         self._plot.addLegend(offset=(-10, 10))
         for k, vals in series:
             counts, _ = np.histogram(vals, bins=edges)
-            r, g, b, color_alpha = _iter_color(k, self._state.prefs)
+            r, g, b, color_alpha = iteration_color(self._state.prefs, k, n_itr)
             series_alpha = int(round(alpha * color_alpha / 255.0))
             self._plot.plot(
                 edges, counts, stepMode="center", fillLevel=0,

@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
 )
 
 from minflux_viewer.colormaps import colormap_lut, custom_colormap_names, make_colormap
-from minflux_viewer.colors import component_colors, viewer_color
+from minflux_viewer.colors import iteration_color, viewer_color
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.attributes import attribute_description, plot_attribute_names
 from minflux_viewer.core.iteration import (
@@ -134,19 +134,6 @@ def _row_selector(sel):
     meaningless. Every other selector is its own row selector.
     """
     return "last" if is_value_pool_selector(sel) else sel
-
-
-def _iter_color(prefs: dict, k: int, n: int = 1) -> tuple[int, int, int, int]:
-    """Colour of stacked iteration *k* of *n*, from the sequential ramp."""
-    colors = list(component_colors(prefs, "functions", "Iteration series").values())
-    if not colors:
-        return (70, 130, 180, 255)
-    if n <= 1 or len(colors) == 1:
-        return colors[0]
-    # Spread the ramp over the series actually drawn: with three iterations the
-    # plot should still run end to end, not sit in the ramp's dark corner.
-    position = min(k, n - 1) / (n - 1)
-    return colors[min(len(colors) - 1, round(position * (len(colors) - 1)))]
 
 
 class AttributeWindow(QWidget):
@@ -3278,7 +3265,7 @@ class AttributeWindow(QWidget):
                 if values:
                     records.append({
                         "values": values,
-                        "color": _iter_color(self._state.prefs, iteration, n_itr),
+                        "color": iteration_color(self._state.prefs, iteration, n_itr),
                         "name": ordinal(iteration + 1),
                     })
             note = (

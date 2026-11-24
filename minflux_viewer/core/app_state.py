@@ -576,7 +576,7 @@ def _migrate_prefs(prefs: dict) -> dict:
     if not migrations.get("v045_jet_iteration_colours"):
         # The stacked-iteration palette became ``jet`` sampled at TEN points.
         # Eleven stops over a ten-iteration sequence made the index expression
-        # in ``_iter_color`` skip a stop, so the drawn series stopped matching
+        # in ``colors.iteration_color`` skip a stop, so the drawn series stopped matching
         # the legend. Replace a saved palette only while it is still one of the
         # sets this application shipped, so a customised one survives -- and
         # delete the now-surplus 11th key explicitly, because a saved value
@@ -633,7 +633,7 @@ def _migrate_prefs(prefs: dict) -> dict:
         # application shipped, so as not to discard a user's own colours. But an
         # 11th stop is never legitimate: it existed only while the shipped
         # palette had eleven, and the bug it caused is about the *count*, not
-        # the colours (``_iter_color`` indexes ``round(k/(n-1) * (len-1))``,
+        # the colours (``colors.iteration_color`` indexes ``round(k/(n-1) * (len-1))``,
         # which skips a stop when eleven of them span ten iterations). A
         # customised palette therefore kept the surplus row forever, because
         # ``_merge`` preserves a saved key the defaults do not have.

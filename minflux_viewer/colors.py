@@ -279,7 +279,7 @@ def normalize_color_preferences(value) -> dict:
     else:
         result["solid"] = copy.deepcopy(DEFAULT_SOLID_COLORS)
     # ⚠ The iteration palette's SIZE is part of its contract, not just its
-    # colours: ``_iter_color`` indexes ``round(k/(n-1) * (len-1))``, so a stop
+    # colours: ``iteration_color`` indexes ``round(k/(n-1) * (len-1))``, so a stop
     # the defaults no longer declare makes that mapping skip one and mis-colour
     # the last iterations. ``_merge`` keeps a saved key the defaults lack, so a
     # customised palette would carry a retired stop forever; prune it here as
@@ -367,6 +367,33 @@ def component_colors(prefs: Mapping | None, section: str, group: str) -> dict:
         }
 
     return _walk(values)
+
+
+def iteration_color(prefs: Mapping | None, iteration: int, n_iterations: int) -> RGBA:
+    """Colour of 0-based *iteration* in a dataset's *n_iterations*-long sequence.
+
+    The ``Iteration series`` ramp is spread over the dataset's whole sequence:
+    stop ``round(iteration/(n_iterations-1) * (len-1))``, so a short sequence
+    still runs end to end. The colour belongs to the iteration, not to a view.
+    Pass the dataset's iteration count, never the number of series a plot
+    happens to draw: that number changes with the attribute (dcr has no value
+    in the early iterations) and with Hide zeros, which would recolour the
+    surviving series and make plots disagree.
+
+    Raises ``ValueError`` for an iteration outside the sequence instead of
+    clamping it, which painted every late iteration in the ramp's last colour.
+    """
+    if n_iterations < 1 or not 0 <= iteration < n_iterations:
+        raise ValueError(
+            f"iteration index {iteration} is outside a sequence of {n_iterations} iterations"
+        )
+    colors = list(component_colors(prefs, "functions", "Iteration series").values())
+    if not colors:
+        return (70, 130, 180, 255)
+    if n_iterations == 1 or len(colors) == 1:
+        return colors[0]
+    position = iteration / (n_iterations - 1)
+    return colors[round(position * (len(colors) - 1))]
 
 
 _RUNTIME_SOLID_COLORS: dict[str, RGBA] = {

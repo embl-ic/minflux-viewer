@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from minflux_viewer.colors import component_colors, viewer_color
+from minflux_viewer.colors import iteration_color, viewer_color
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.attributes import (
     aggregation_description,
@@ -60,19 +60,6 @@ from minflux_viewer.ui.plots.plot_format import plot_widget
 from minflux_viewer.ui.widgets.attribute_help import apply_attribute_tooltips
 from minflux_viewer.ui.widgets.zoom_guide import zoom_guide_points
 from minflux_viewer.utils.filters import TRACE_AGG_FUNCS, trace_agg_func
-
-
-def _iter_color(k: int, prefs: dict | None = None, n: int = 1) -> tuple[int, int, int, int]:
-    """Colour of stacked iteration *k* of *n*, from the sequential ramp."""
-    colors = list(component_colors(prefs, "functions", "Iteration series").values())
-    if not colors:
-        return (70, 130, 180, 255)
-    if n <= 1 or len(colors) == 1:
-        return colors[0]
-    # Spread the ramp over the series actually drawn: with three iterations the
-    # plot should still run end to end, not sit in the ramp's dark corner.
-    position = min(k, n - 1) / (n - 1)
-    return colors[min(len(colors) - 1, round(position * (len(colors) - 1)))]
 
 #: Trace read-outs offered in the "As" dropdown. Order and membership come from
 #: the shared registry so the histogram, the filter and the raw path can never
@@ -827,7 +814,9 @@ class HistogramWindow(QWidget):
         for k, vals in series:
             counts, _ = np.histogram(vals, bins=edges)
             max_count = max(max_count, float(counts.max()) if counts.size else 1.0)
-            r, g, b, color_alpha = _iter_color(k, self._state.prefs, len(series))
+            # The dataset's count, not len(series): an iteration keeps its colour
+            # whichever others are empty for this attribute or hidden as zeros.
+            r, g, b, color_alpha = iteration_color(self._state.prefs, k, n_itr)
             series_alpha = int(round(alpha * color_alpha / 255.0))
             # self._plot.plot(name=...) registers a legend sample reliably.
             item = self._plot.plot(

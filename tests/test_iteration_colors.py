@@ -6,16 +6,20 @@ sequence that expression skips stop 5 and shifts iterations 5..9 up by one, so
 the drawn series stopped matching the legend swatch. Ten makes it the identity
 for the common case — that is the invariant this file defends.
 
-The Attribute Plot and the Histogram must agree exactly: they draw the same
-series side by side.
+Every stacked view reads the ramp through ONE helper,
+``colors.iteration_color(prefs, k, n_itr)``, with the dataset's iteration count,
+so an iteration has the same colour in every plot. How the plots use it is
+covered by ``tests/test_stacked_iteration_colors.py``.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
-from minflux_viewer.colors import DEFAULT_COLOR_PREFS, component_colors
+from minflux_viewer.colors import DEFAULT_COLOR_PREFS, component_colors, iteration_color
 from minflux_viewer.core.app_state import default_prefs
 
 pytest.importorskip("PyQt6")
@@ -43,38 +47,64 @@ def test_palette_is_ten_stops_of_jet_running_blue_to_red():
 
 def test_ten_stops_map_one_to_one_onto_a_ten_iteration_sequence():
     """The bug: eleven stops skipped one and mis-coloured the last iterations."""
-    from minflux_viewer.ui.plots.attribute_window import _iter_color as attribute_color
-    from minflux_viewer.ui.plots.histogram_window import _iter_color as histogram_color
-
     prefs = default_prefs()
     palette = _colors(prefs)
     for k in range(10):
-        expected = palette[k]                      # stop k, no skipping
-        assert attribute_color(prefs, k, 10) == expected
-        # Same result, different argument order — the two must never diverge.
-        assert histogram_color(k, prefs, 10) == expected
-    assert attribute_color(prefs, 0, 10) == BLUE
-    assert attribute_color(prefs, 9, 10) == RED
+        assert iteration_color(prefs, k, 10) == palette[k]   # stop k, no skipping
+    assert iteration_color(prefs, 0, 10) == BLUE
+    assert iteration_color(prefs, 9, 10) == RED
 
 
 def test_the_legend_swatch_is_the_colour_the_series_is_drawn_in():
     """Legend and plot read the same table, so they cannot disagree."""
-    from minflux_viewer.ui.plots.attribute_window import _iter_color as attribute_color
-
     prefs = default_prefs()
-    drawn = [attribute_color(prefs, k, 10) for k in range(10)]
+    drawn = [iteration_color(prefs, k, 10) for k in range(10)]
     assert len(set(drawn)) == 10               # no two iterations share a colour
     assert drawn == _colors(prefs)
 
 
 def test_a_short_sequence_still_spans_the_whole_ramp():
-    """Three iterations must not sit in one corner of the ramp."""
-    from minflux_viewer.ui.plots.attribute_window import _iter_color as attribute_color
-
+    """A short sequence must not sit in one corner of the ramp."""
     prefs = default_prefs()
-    assert attribute_color(prefs, 0, 4) == BLUE
-    assert attribute_color(prefs, 3, 4) == RED
-    assert attribute_color(prefs, 0, 1) == BLUE     # a single series is defined
+    assert iteration_color(prefs, 0, 4) == BLUE
+    assert iteration_color(prefs, 3, 4) == RED
+    assert iteration_color(prefs, 0, 1) == BLUE     # a single iteration is defined
+
+
+@pytest.mark.parametrize("iteration, n_iterations", [
+    (5, 5),      # the reported failure: 6th..10th drawn as 5 series
+    (2, 2),      # the reported failure: 3rd..5th kept by Hide zeros
+    (10, 10),
+    (-1, 10),
+    (0, 0),
+])
+def test_an_iteration_outside_the_sequence_is_refused_not_clamped(iteration, n_iterations):
+    """The old helper clamped ``min(k, n-1)``, so a call passing the number of
+    drawn series instead of the dataset's iteration count silently painted
+    every late iteration in the ramp's last colour. It must fail loudly."""
+    with pytest.raises(ValueError, match="outside a sequence"):
+        iteration_color(default_prefs(), iteration, n_iterations)
+
+
+def test_the_sequence_length_is_required():
+    """A default length of 1 let a caller omit it and get the first stop for
+    every iteration (the Attribute Separation dialog's stacked view)."""
+    with pytest.raises(TypeError):
+        iteration_color(default_prefs(), 3)        # type: ignore[call-arg]
+
+
+def test_no_module_keeps_a_private_copy_of_the_iteration_ramp():
+    """One helper, one mapping: the copies in the Attribute Plot and the
+    Histogram took their arguments in different orders, and the third caller
+    borrowed one of them with the length left out."""
+    package = Path(__file__).resolve().parents[1] / "minflux_viewer"
+    readers = []
+    for path in package.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        assert "def _iter_color" not in text, path
+        if 'component_colors(prefs, "functions", "Iteration series")' in text:
+            readers.append(path.relative_to(package).as_posix())
+    assert readers == ["colors.py"]
 
 
 def test_migration_replaces_the_shipped_ramps_but_keeps_a_customised_palette():
