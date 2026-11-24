@@ -506,18 +506,29 @@ def default_params(structure: str) -> dict[str, float]:
 # --------------------------------------------------------------------------- #
 # attributes — canonical MINFLUX per-loc values from characteristic distributions
 # --------------------------------------------------------------------------- #
+#: Dwell time the simulated counts are collected over (one pattern dwell), s.
+SIM_DWELL_S = 1.0e-3
+
+
 def simulate_attributes(n: int, rng) -> dict[str, np.ndarray]:
-    """Per-localization MINFLUX attributes (range-clipped):
-    ``efo`` log-normal (Hz), ``cfr``/``dcr`` Gaussian in [0,1], ``eco``/``ecc``
-    Poisson photon counts, ``fbg`` Gaussian background."""
-    return {
-        "efo": rng.lognormal(np.log(8.0e4), 0.4, n),               # ~80 kHz, positive
-        "cfr": np.clip(rng.normal(0.45, 0.12, n), 0.0, 1.0),       # center freq ratio
-        "dcr": np.clip(rng.normal(0.5, 0.15, n), 0.0, 1.0),        # detector channel ratio
-        "eco": rng.poisson(60, n).astype(float),                   # effective counts
-        "ecc": rng.poisson(600, n).astype(float),                  # collected counts
-        "fbg": np.clip(rng.normal(15.0, 5.0, n), 0.0, None),       # background
-    }
+    """Per-localization MINFLUX attributes, related to each other as in recorded data.
+
+    The outer-pattern photon rate is log-normal (~50 kHz). ``eco`` is its
+    Poisson count over one :data:`SIM_DWELL_S` dwell (at least 1: a valid
+    localization always carries photons) and ``efo = eco / dwell``, as in
+    Imspector's files. ``cfr`` (Gaussian, clipped to [0, 1]) is the centre-to-
+    outer rate ratio, so the centre count is ``ecc ~ Poisson(cfr × rate ×
+    dwell)`` with the centre dwell equal to the orbit's (``ctrDwellFactor`` 1).
+    ``dcr`` is Gaussian in [0, 1]; ``fbg`` is a background rate of a few kHz.
+    """
+    rate = rng.lognormal(np.log(5.0e4), 0.4, n)                    # outer photon rate, Hz
+    cfr = np.clip(rng.normal(0.45, 0.12, n), 0.0, 1.0)             # centre / outer rate
+    dcr = np.clip(rng.normal(0.5, 0.15, n), 0.0, 1.0)              # detector channel ratio
+    eco = np.maximum(rng.poisson(rate * SIM_DWELL_S), 1).astype(float)
+    ecc = rng.poisson(cfr * rate * SIM_DWELL_S).astype(float)
+    fbg = np.clip(rng.normal(5.0e3, 1.5e3, n), 0.0, None)          # background rate, Hz
+    return {"efo": eco / SIM_DWELL_S, "cfr": cfr, "dcr": dcr,
+            "eco": eco, "ecc": ecc, "fbg": fbg}
 
 
 def simulate_localizations(

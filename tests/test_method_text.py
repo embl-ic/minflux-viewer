@@ -151,7 +151,10 @@ def test_aggregation_method_text_is_scientific_and_parameterized():
     )
     assert "valid final localizations" in txt
     assert "separately within each trace and in timestamp order" in txt
-    assert "background-corrected effective counts (eco)" in txt
+    assert "summing the effective photon counts (eco)" in txt
+    # The vendor documents eco as background-corrected, recorded files behave as
+    # total counts; the method text must not assert either convention.
+    assert "background-corrected" not in txt
     assert "final-scale iteration(s) [4]" in txt
     assert "0-based raw iteration indices" in txt
     assert "reached or exceeded 500 photons per aggregated localization" in txt

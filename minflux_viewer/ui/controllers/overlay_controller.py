@@ -520,8 +520,8 @@ def _ask_aggregation_threshold(self: MainWindow, ds, pit, n_channels: int = 1) -
     info = QLabel(
         f"<b>{ds.name}</b><br>{overlay_note}{ds.prop.num_loc:,} localizations · "
             f"{ds.prop.num_traces:,} traces · {ds.prop.num_dim}-D<br>"
-            f"Per-localization photon count <i>P</i> is the sum of background-corrected "
-            f"effective counts (<code>eco</code>) over final-scale iterations "
+            f"Per-localization photon count <i>P</i> is the sum of the effective "
+            f"photon counts (<code>eco</code>) over final-scale iterations "
             f"{pit.photon_iters} (lateral itr {pit.lateral_iter}{ax}; "
             f"{pit.source}; 0-based raw iteration indices).<br><br>"
             "Valid final localizations are processed separately for each trace and "

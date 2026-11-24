@@ -1059,7 +1059,8 @@ class CRLBResultDialog(QDialog):
             "(<i>ecc</i>∕<i>eco</i>) ∕ (<i>efc</i>∕<i>efo</i>) from the counts; 0 without a "
             "centre exposure)<br>"
             f"&nbsp;&nbsp;L — lateral pattern diameter of the final iteration "
-            f"&nbsp;({result.L_source}; patGeoFactor × {PATTERN_SCALE_NM:.0f} nm)<br>"
+            f"&nbsp;({result.L_source}; patGeoFactor × {PATTERN_SCALE_NM:.0f} nm × "
+            "wavelength ∕ 642 nm)<br>"
             "&nbsp;&nbsp;σ<sub>q</sub> — donut width of the PSF model; default "
             f"{CRLB_DEFAULT_SIGMA_Q_NM:.1f} nm = SimuFLUX's analytic donut (FWHM 310 nm "
             "∕ √(8 ln 2)) &nbsp;(user input)<br>"
@@ -1203,7 +1204,8 @@ class CRLBResultDialog(QDialog):
         self._l_spin.setValue(result.L_nm)
         self._l_spin.setToolTip(
             "Lateral pattern diameter L of the final iteration. Read from the "
-            "acquisition sequence (patGeoFactor × 360 nm) when the file records it.")
+            "acquisition sequence (patGeoFactor × 360 nm × wavelength / 642 nm) when "
+            "the file records it.")
         btn_row.addWidget(self._l_spin)
         btn_row.addSpacing(8)
         btn_row.addWidget(QLabel("σ_q (nm):"))

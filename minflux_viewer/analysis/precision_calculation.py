@@ -667,7 +667,8 @@ def frc_time_course_log_line(name: str, course: FRCTimeCourse) -> str:
 #     and is labelled as such, never as "background-limited".
 #
 # The pattern size comes from the acquisition sequence (L = patGeoFactor ×
-# 360 nm, the conversion SimuFLUX uses for Abberior sequences); the centre dwell
+# 360 nm × wavelength / 642 nm; at the 642 nm reference, the conversion SimuFLUX
+# uses for Abberior sequences); the centre dwell
 # from ``ctrDwellFactor`` — or, without a sequence, from the counts themselves:
 # c = (ecc/eco) ÷ (efc/efo).
 

@@ -30,7 +30,7 @@ RAW_ATTRIBUTE_DESCRIPTIONS = {
     "itr": "Iteration index. This is the localization step defined in the MINFLUX sequence that iteratively improves localization precision.",
     "tid": "Trace ID. Each burst or molecule track gets a unique ID.",
     "loc": "Calculated fluorophore coordinates in metres for each iteration. These localizations may include applied corrections.",
-    "efo": "Effective frequency offset: fluorophore emission frequency on the outer EOD pattern positions.",
+    "efo": "Effective frequency offset: photon rate (Hz) on the outer positions of the targeted coordinate pattern (TCP), i.e. eco divided by the dwell time.",
     "cfr": "Center frequency ratio computed as efc/efo.",
     "dcr": "Detection channel ratio used for multicolor imaging, computed as detector 1 photon count divided by detector 1 plus detector 2 photon count.",
     "tim": "Time stamp in seconds.",
@@ -42,12 +42,12 @@ RAW_ATTRIBUTE_DESCRIPTIONS = {
     "thi": "Thread value.",
     "sqi": "Sequence index.",
     "lnc": "Final localization coordinates without applied corrections. When MBM is active, this stores the raw uncorrected coordinates.",
-    "eco": "Effective counts offset: background-corrected photons counted on the outer EOD pattern positions.",
-    "ecc": "Effective counts center: background-corrected photons counted at the center EOD position.",
-    "efc": "Effective frequency center: fluorophore emission frequency at the center EOD position.",
-    "fbg": "Estimated background emission frequency, if background correction sensing was enabled.",
+    "eco": "Effective counts offset: photons detected on the outer positions of the targeted coordinate pattern (TCP), summed over the iteration's dwell time.",
+    "ecc": "Effective counts center: photons detected at the TCP center, in iterations with a CFR check (center dwell = iteration dwell × ctrDwellFactor).",
+    "efc": "Effective frequency center: photon rate (Hz) at the TCP center, i.e. ecc divided by the center dwell time.",
+    "fbg": "Estimated background rate (Hz) at the iteration's laser power, measured when background sensing (bgcSense) is on; 0 or a placeholder value when it is off.",
     "xyz": "Spatial coordinates.",
-    "ext": "Physical extension of the EOD pattern diameter in the field of view.",
+    "ext": "Physical diameter of the targeted coordinate pattern (TCP) in the field of view.",
 }
 
 DERIVED_ATTRIBUTE_DESCRIPTIONS = {

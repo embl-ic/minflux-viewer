@@ -26,8 +26,8 @@ axial    σ = Lz / (4 √Nz) · √((1 + ρ)(1 + ρ(1 + c)))
 ```
 
 - `N` — photons of the final-scale iterations of that axis (`eco` + `ecc`).
-- `L` — the pattern diameter, `patGeoFactor × 360 nm` from the acquisition
-  sequence. Without sequence information 39.6 nm is assumed, and the report
+- `L` — the pattern diameter, `patGeoFactor × 360 nm × wavelength / 642 nm`
+  from the acquisition sequence (the standard sequences record 642 nm). Without sequence information 39.6 nm is assumed, and the report
   says so.
 - `σq` — the width of the model's doughnut; 131.6 nm (a 310 nm FWHM doughnut)
   is assumed. It changes the result by about 1 % at L = 40 nm.

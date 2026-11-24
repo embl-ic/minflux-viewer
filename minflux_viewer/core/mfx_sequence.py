@@ -199,6 +199,45 @@ def photon_iterations_for_dataset(ds) -> PhotonIterations:
     return detect_photon_iterations(sequence=sequence_for_dataset(ds), n_itr=n_itr, dims=dims)
 
 
+def localization_photon_counts(ds):
+    """Photon count of each localization, aligned to the dataset's rows.
+
+    ``eco`` summed over the localization's valid photon-bearing iterations
+    (:func:`photon_iterations_for_dataset`: the final lateral + axial pair of a
+    3-D sequence, the final iteration of a 2-D one) -- the count Aggregation
+    uses. Ordered like ``ds.attr`` (the last-valid row of each localization).
+    ``None`` when the per-iteration raw rows or ``eco`` are unavailable, or the
+    alignment to ``ds.attr`` cannot be established.
+    """
+    import numpy as np
+
+    from .loader_raw_access import _mfx_raw_len, _raw_loc_id, mfx_get, mfx_row_mask
+
+    raw = getattr(ds, "mfx_raw", None)
+    if raw is None or _mfx_raw_len(raw) == 0:
+        return None
+    n_rows = _mfx_raw_len(raw)
+    loc_id = _raw_loc_id(raw)
+    eco = mfx_get(ds, "eco", itr="all", vld_only=False)
+    if loc_id is None or eco is None:
+        return None
+    eco = np.asarray(eco, dtype=float).ravel()
+    if eco.shape[0] != n_rows:
+        return None
+    itr = np.asarray(raw.get("itr", np.zeros(n_rows, int))).ravel()
+    vld = np.asarray(raw.get("vld", np.ones(n_rows, bool)), dtype=bool).ravel()
+    iters = np.asarray(photon_iterations_for_dataset(ds).photon_iters, dtype=int)
+    sel = vld & np.isin(itr, iters) & np.isfinite(eco)
+    counts = np.bincount(loc_id[sel], weights=eco[sel], minlength=int(loc_id.max()) + 1)
+    last_mask = mfx_row_mask(raw, itr="last", vld_only=True)
+    if last_mask is None:
+        return None
+    order = loc_id[np.asarray(last_mask, dtype=bool)]
+    if order.shape[0] != int(getattr(getattr(ds, "prop", None), "num_loc", -1)):
+        return None
+    return counts[order]
+
+
 def sequence_for_dataset(ds) -> Optional[dict]:
     """The acquisition sequence of *ds*, or ``None``.
 
@@ -218,10 +257,29 @@ def sequence_for_dataset(ds) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 #: Abberior stores the pattern size as a dimensionless ``patGeoFactor``; the
-#: physical pattern diameter is ``patGeoFactor × 360 nm``. This is the conversion
-#: SimuFLUX uses to simulate Abberior sequences (Marin & Ries, *Nat. Commun.*
-#: 17:246, 2026; ``getAbberiorPattern``).
+#: physical pattern diameter is ``patGeoFactor × 360 nm × wavelength / 642 nm``,
+#: with the iteration's recorded ``wavelength`` (Abberior's definition). At the
+#: 642 nm reference wavelength of the standard sequences this is
+#: ``patGeoFactor × 360 nm``, the conversion SimuFLUX uses to simulate Abberior
+#: sequences (Marin & Ries, *Nat. Commun.* 17:246, 2026; ``getAbberiorPattern``).
 PATTERN_SCALE_NM: float = 360.0
+#: Reference wavelength of ``PATTERN_SCALE_NM``, in metres.
+REFERENCE_WAVELENGTH_M: float = 642e-9
+
+
+def wavelength_scale(wavelength_m) -> float:
+    """``wavelength / 642 nm`` for an iteration's recorded ``wavelength`` (metres).
+
+    1 when the value is missing or not a positive finite number, and when it is
+    the reference itself (Imspector writes 6.420000000000001e-07), so the standard
+    sequences keep exactly ``patGeoFactor × 360 nm``.
+    """
+    if isinstance(wavelength_m, bool) or not isinstance(wavelength_m, (int, float)):
+        return 1.0
+    value = float(wavelength_m)
+    if not (isfinite(value) and value > 0) or abs(value - REFERENCE_WAVELENGTH_M) <= 1e-12:
+        return 1.0
+    return value / REFERENCE_WAVELENGTH_M
 
 #: Final ``patGeoFactor`` of the standard Abberior imaging sequences — every 2-D
 #: and 3-D imaging sequence in the sample data ends at 0.11 (L = 39.6 nm). It is
@@ -339,7 +397,7 @@ def pattern_geometry(sequence: Optional[dict], iteration: Optional[int]) -> Opti
     it = itrs[int(iteration)]
     if not isinstance(it, dict):
         return None
-    L = _geo_to_nm(it.get("patGeoFactor"))
+    L = _geo_to_nm(it.get("patGeoFactor")) * wavelength_scale(it.get("wavelength"))
     if not (L == L and L > 0):           # NaN or non-positive
         return None
     mode = it.get("Mode") or {}

@@ -27,7 +27,13 @@ from math import isfinite
 from pathlib import Path
 from typing import Any
 
-from .mfx_sequence import PATTERN_SCALE_NM, detect_from_sequence, parse_sequence
+from .mfx_sequence import (
+    PATTERN_SCALE_NM,
+    REFERENCE_WAVELENGTH_M,
+    detect_from_sequence,
+    parse_sequence,
+    wavelength_scale,
+)
 
 __all__ = [
     "REFERENCE_WAVELENGTH_M",
@@ -48,9 +54,6 @@ __all__ = [
     "sequences_for_dataset",
 ]
 
-#: The pattern size is defined against the 642 nm laser:
-#: L = patGeoFactor x 360 nm x wavelength / 642 nm.
-REFERENCE_WAVELENGTH_M = 642e-9
 #: Imspector's default when an iteration sets no ``maxOffTime``.
 DEFAULT_MAX_OFF_TIME_S = 0.003
 
@@ -349,16 +352,17 @@ def pattern_role(pattern: str) -> str:
 def pattern_diameters_nm(geo_factor, wavelength_m) -> list[float]:
     """L for a scalar or list ``patGeoFactor`` at the recorded wavelength.
 
-    ``L = patGeoFactor x 360 nm x wavelength / 642 nm``; a missing wavelength is
-    taken as the 642 nm reference.
+    ``L = patGeoFactor x 360 nm x wavelength / 642 nm``
+    (:func:`~minflux_viewer.core.mfx_sequence.wavelength_scale`); a missing
+    wavelength is taken as the 642 nm reference.
     """
-    wavelength = _number(wavelength_m) or REFERENCE_WAVELENGTH_M
+    scale = wavelength_scale(wavelength_m)
     factors = geo_factor if isinstance(geo_factor, (list, tuple)) else [geo_factor]
     out = []
     for factor in factors:
         value = _number(factor)
         if value is not None:
-            out.append(value * PATTERN_SCALE_NM * wavelength / REFERENCE_WAVELENGTH_M)
+            out.append(value * PATTERN_SCALE_NM * scale)
     return out
 
 

@@ -390,12 +390,16 @@ def columns_to_mfx_array(columns: dict[str, np.ndarray]) -> np.ndarray:
 
 def build_snapshot_table(
     ds, *, include_attrs: bool = True, include_derived: bool = False,
-    filter_mode: str = "flag",
+    filter_mode: str = "flag", extra_columns: dict[str, np.ndarray] | None = None,
 ) -> tuple[dict[str, np.ndarray], int]:
     """Build the **processed snapshot** of the current view: the last-valid
     selection with Z scaling and transform baked into ``xnm/ynm/znm`` (canonical
     "baked XOR recipe" rule), the standard attributes, optionally frozen derived
     attributes, and the filter applied (rows dropped) or flagged (``ftr`` column).
+
+    ``extra_columns`` are caller-computed 1-D values aligned to the last-valid
+    rows (``ds.attr`` order); they are filtered with the other columns, and one
+    of another length is left out.
 
     Returns ``(columns, rows_dropped)``. Coordinates are in nm.
     """
@@ -452,6 +456,12 @@ def build_snapshot_table(
             v = np.asarray(v)
             if v.ndim == 1 and v.size == n:
                 cols[name] = v
+    for name, values in (extra_columns or {}).items():
+        if values is None:
+            continue
+        v = np.asarray(values)
+        if v.ndim == 1 and v.size == n:
+            cols[name] = v
 
     rows_dropped = 0
     fm = mfx_filter_mask(ds, itr="last", vld_only=True)
@@ -906,6 +916,16 @@ def _write_simple_yaml_documents(path: Path, docs: list[dict[str, Any]]) -> None
     path.write_text("\n".join(chunks) + "\n", encoding="utf-8")
 
 
+#: Snapshot column holding :func:`~minflux_viewer.core.mfx_sequence.localization_photon_counts`.
+_PICASSO_LOC_PHOTONS = "__localization_photons"
+#: Picasso ``photons`` sources, in order of preference, with the label the YAML records.
+_PICASSO_PHOTON_SOURCES = (
+    ("photons", "photons column of the source table"),
+    (_PICASSO_LOC_PHOTONS, "eco summed over the final-scale iterations"),
+    ("eco", "eco of the last valid iteration"),
+)
+
+
 def _write_picasso_hdf5(
     ds,
     path: str | Path,
@@ -925,8 +945,11 @@ def _write_picasso_hdf5(
     if not np.isfinite(pixel_size_nm) or pixel_size_nm <= 0.0:
         raise ValueError("pixel_size_nm must be a positive finite value")
 
+    from .mfx_sequence import localization_photon_counts
+
     columns, _dropped = build_snapshot_table(
-        ds, include_attrs=True, include_derived=False, filter_mode="apply"
+        ds, include_attrs=True, include_derived=False, filter_mode="apply",
+        extra_columns={_PICASSO_LOC_PHOTONS: localization_photon_counts(ds)},
     )
     xnm = np.asarray(columns.get("xnm"), dtype=np.float64).ravel()
     ynm = np.asarray(columns.get("ynm"), dtype=np.float64).ravel()
@@ -951,14 +974,26 @@ def _write_picasso_hdf5(
     lpx = _picasso_precision_nm(columns, "x", len(finite))[finite] / pixel_size_nm
     lpy = _picasso_precision_nm(columns, "y", len(finite))[finite] / pixel_size_nm
     lpz = _picasso_precision_nm(columns, "z", len(finite))[finite]
-    photons = _first_column(columns, ("photons", "eco", "efo"))
-    if photons is None or photons.size != len(finite):
-        photons_out = np.ones(n, dtype=np.float32)
+    # Picasso's photons/bg are photon COUNTS. A MINFLUX localization's count is
+    # eco summed over its final-scale iterations (the last iteration alone is
+    # only the axial step of a 3-D sequence); efo and fbg are rates (Hz) and are
+    # never written as counts. Which source was used goes into the YAML.
+    photons_out = np.ones(n, dtype=np.float64)
+    photon_source = "not available (1 per localization)"
+    for name, label in _PICASSO_PHOTON_SOURCES:
+        values = _first_column(columns, (name,))
+        if values is not None and values.size == len(finite):
+            photons_out = np.asarray(values, dtype=np.float64)[finite]
+            photons_out[~np.isfinite(photons_out) | (photons_out < 0.0)] = 0.0
+            photon_source = label
+            break
+    bg = _first_column(columns, ("bg",))
+    if bg is None or bg.size != len(finite):
+        bg_out = np.zeros(n, dtype=np.float64)
+        bg_source = "not available (0)"
     else:
-        photons_out = np.asarray(photons, dtype=np.float64)[finite]
-        photons_out[~np.isfinite(photons_out) | (photons_out < 0.0)] = 0.0
-    bg = _first_column(columns, ("bg", "fbg"))
-    bg_out = np.zeros(n, dtype=np.float32) if bg is None or bg.size != len(finite) else np.asarray(bg, dtype=np.float64)[finite]
+        bg_out = np.asarray(bg, dtype=np.float64)[finite]
+        bg_source = "bg column of the source table"
     bg_out[~np.isfinite(bg_out) | (bg_out < 0.0)] = 0.0
     tid = _first_column(columns, ("tid",))
     group = None if tid is None or tid.size != len(finite) else np.asarray(tid)[finite]
@@ -1008,6 +1043,8 @@ def _write_picasso_hdf5(
             "MINFLUX Viewer x_origin_nm": x0,
             "MINFLUX Viewer y_origin_nm": y0,
             "MINFLUX Viewer z_unit": "nm",
+            "MINFLUX Viewer photons": photon_source,
+            "MINFLUX Viewer bg": bg_source,
         }],
     )
     return [path, yaml_path]

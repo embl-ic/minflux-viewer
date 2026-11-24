@@ -354,7 +354,7 @@ def _render_aggregation(m, ev, state):
         f"Photon-threshold aggregation was applied to valid final localizations from "
         f"'{m.group('source')}', separately within each trace and in timestamp order. "
         f"For each localization i, the photon count P_i was calculated by summing the "
-        f"background-corrected effective counts (eco) over final-scale iteration(s) "
+        f"effective photon counts (eco) over final-scale iteration(s) "
         f"{m.group('iters')} (0-based raw iteration indices; iteration selection: "
         f"{m.group('iter_source')}). Consecutive localizations were accumulated until "
         f"ΣP_i reached or exceeded "
@@ -517,8 +517,8 @@ def _render_crlb_provenance(m, ev, state):
                      and abs(float(sigma_q) - _SIMUFLUX_DONUT_SIGMA_Q_NM) < 0.05)
     if from_pattern_scale:
         s += (" The pattern diameter was converted from the sequence's patGeoFactor as "
-              "L = patGeoFactor × 360 nm, the conversion SimuFLUX uses for Abberior "
-              "sequences.")
+              "L = patGeoFactor × 360 nm × (wavelength / 642 nm); at the 642 nm reference "
+              "wavelength this is the conversion SimuFLUX uses for Abberior sequences.")
     if default_donut:
         s += (" σ_q is the width of SimuFLUX's analytic 2-D donut (FWHM 310 nm), an "
               "assumed model parameter rather than a calibration of this microscope.")

@@ -96,8 +96,11 @@ def test_npc_overlay_channels_share_scaffold():
     assert [c["name"] for c in chans] == ["Nup-scaffold", "Nup-inner", "central-cap"]
     assert [c["lut"] for c in chans] == ["Red", "Green", "Blue"]
 
-    # a single pore → all channels share the same XY centre (co-registered)
-    cents = [c["coords"][:, :2].mean(axis=0) for c in chans]
+    # a single pore → all channels share the same XY centre (co-registered).
+    # Centre of the distinct molecule positions (precision 0 makes every
+    # localization of a molecule identical): a plain mean would weight each
+    # molecule by its random number of localizations.
+    cents = [np.unique(c["coords"][:, :2], axis=0).mean(axis=0) for c in chans]
     for c in cents[1:]:
         assert np.linalg.norm(c - cents[0]) < 5.0
     # ring radius follows each channel's own diameter (107 > 70 > 40 → radius/2)
