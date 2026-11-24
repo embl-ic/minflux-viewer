@@ -21,11 +21,18 @@ _WINDOWS_ERROR_MODE = 0x0001 | 0x0002 | 0x8000
 
 
 def _run_python(code: str, *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    # The child is outside conftest's preference isolation, so it gets its own:
+    # fresh-install defaults, never written back. Otherwise a scenario read the
+    # developer's saved preferences (a saved Scatter colormap this build does
+    # not know made one fail) and could have overwritten them.
     prefix = f"""
         import ctypes
         import os
         if os.name == "nt":
             ctypes.windll.kernel32.SetErrorMode({_WINDOWS_ERROR_MODE})
+        from minflux_viewer.core import app_state as _isolated_prefs
+        _isolated_prefs.AppState._load_prefs = lambda self: _isolated_prefs.default_prefs()
+        _isolated_prefs.AppState.save_prefs = lambda self: None
     """
     env = os.environ.copy()
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
