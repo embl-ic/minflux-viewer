@@ -22,6 +22,17 @@ Supported inputs include Imspector `.msr`, `.mat` (m2205 and m2410 layouts),
 `.npy`, `.json`, `.csv` and other tables, and MINFLUX Viewer `.zarr` stores. See
 the [README](../../README.md#input-formats) for the full list.
 
+A MINFLUX **sequence** `.json` (the file Imspector runs a measurement from)
+opens in a read-only viewer rather than as data. It shows the sequence-wide
+settings, one row per iteration (pattern, pattern diameter L, photon limit,
+CFR check, background threshold, which iterations give the final lateral and
+axial localization), and the raw document. For a dataset whose file recorded
+its sequence (an `.msr`, a MINFLUX Viewer `.zarr`, or a `.mat`/`.npy`/`.json`
+saved by this application with its processing-metadata file), the Dataset Manager's
+right-click *View acquisition sequence…* shows every sequence it ran, one per
+measurement thread. A sequence file is never attached to a dataset, and a
+dropped folder does not open the sequence files in it.
+
 ### Opening an Imspector `.msr` file
 
 An `.msr` file opens in the **MSR Reader**, because one file can hold several

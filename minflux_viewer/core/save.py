@@ -38,6 +38,11 @@ from .file_transactions import atomic_file_writer, file_transaction
 
 #: Tag identifying the metadata sidecar JSON (a dict; filter/data JSON are lists).
 METADATA_JSON_MARKER = "minflux_viewer_metadata"
+#: Sidecar block holding the source's native ``mfx/.zattrs`` (see build_metadata).
+NATIVE_ACQUISITION_KEY = "native_acquisition"
+#: ``ds.metadata`` key: where a record restored from a sidecar came from and on
+#: what evidence (``matched_by``, ``verified``). Written into the sidecar block.
+NATIVE_PROVENANCE_KEY = "native_acquisition_provenance"
 
 #: Suffix of the processing-metadata file: ``<data stem>_viewer_metadata.json``.
 #: It names the application, so a user meeting the file months later next to
@@ -89,10 +94,26 @@ def is_metadata_json_payload(payload: Any) -> bool:
 
 
 def is_metadata_json_file(path) -> bool:
-    """True if *path* is a metadata sidecar written by :func:`save_processed`."""
+    """True if *path* is a metadata sidecar written by :func:`save_processed`.
+
+    *path* may be a :class:`~minflux_viewer.core.json_probe.JsonProbe`, so one
+    bounded read serves every ``.json`` question of a routing decision. The
+    marker is the first key the writer emits, so a sidecar is recognised from
+    the prefix. A probe that cannot decide (see ``JsonProbe.conclusive``)
+    answers no; ``formats.resolve_open`` deepens such a probe off the UI thread
+    before it asks.
+    """
+    from .json_probe import as_probe
+
     try:
-        with open(path, encoding="utf-8") as fh:
-            return is_metadata_json_payload(json.load(fh))
+        probe = as_probe(path)
+        if not probe.conclusive:
+            return False
+        # The marker as the first key decides at once (the writer's order);
+        # elsewhere it yields to a wrapped localization array, which is data
+        # (json_probe precedence) -- the same answer at any file size.
+        return probe.marker_first or (bool(probe.has_key(METADATA_JSON_MARKER))
+                                      and not probe.wraps_localizations)
     except (OSError, TypeError, ValueError):
         return False
 
@@ -162,6 +183,12 @@ def dataset_to_mfx_array(ds) -> np.ndarray:
     ``loc_x/y/z → loc (N×3)``, ``lnc/ext`` likewise, ``dcr_0/dcr_1 → dcr (N×2)``;
     every other 1-D field is kept as a scalar column. ``itr`` stays flat, so the
     result loads through the normal m2410 path.
+
+    Fields keep the **source's order** (the raw store's, which every reader
+    fills in the file's own field order), a vector at the place of its first
+    component: an Imspector m2410 source exports as ``vld, fnl, bot, eot, sta,
+    tim, tid, gri, thi, sqi, itr, loc, lnc, eco, …``, as Imspector writes it.
+    It used to be vectors first, then the rest alphabetically.
     """
     raw = getattr(ds, "mfx_raw", None)
     if raw is None or len(raw) == 0:
@@ -185,26 +212,32 @@ def dataset_to_mfx_array(ds) -> np.ndarray:
 
     fields: list[tuple] = []
     fill: dict[str, np.ndarray] = {}
-    used: set[str] = set()
+    vectors: dict[str, tuple] = {}          # base -> its field, placed below
+    owner: dict[str, str] = {}              # component column -> its vector
 
     for base, sfx in _VEC_BASES.items():
         comps = [f"{base}_{s}" for s in sfx]
         if all(c in keys for c in comps):
             cols = [np.asarray(raw[c]).ravel() for c in comps]
             if all(c.size == n for c in cols):
-                fields.append((base, cols[0].dtype, (3,)))
+                vectors[base] = (base, cols[0].dtype, (3,))
                 fill[base] = np.column_stack(cols)
-                used.update(comps)
+                owner.update(dict.fromkeys(comps, base))
 
     if "dcr_0" in keys and "dcr_1" in keys:
         a = np.column_stack([np.asarray(raw["dcr_0"]).ravel(),
                              np.asarray(raw["dcr_1"]).ravel()])
         if a.shape[0] == n:
-            fields.append(("dcr", a.dtype, (2,)))
+            vectors["dcr"] = ("dcr", a.dtype, (2,))
             fill["dcr"] = a
-            used.update({"dcr_0", "dcr_1", "dcr"})
+            owner.update(dict.fromkeys(("dcr_0", "dcr_1", "dcr"), "dcr"))
 
-    for key in sorted(keys - used):
+    for key in (k for k in raw.keys() if k in keys):
+        vector = owner.get(key)
+        if vector is not None:
+            if vector in vectors:
+                fields.append(vectors.pop(vector))
+            continue
         v = np.asarray(raw[key]).ravel()
         if v.ndim == 1 and v.size == n:
             fields.append((key, v.dtype))
@@ -519,6 +552,18 @@ def build_metadata(ds, *, data_filename: str | None = None,
             roi_records if roi_records is not None
             else ds.metadata.get("minflux_viewer_roi_records")),
     }
+    # Imspector's own record of the acquisition (every thread's sequence,
+    # detectors, lasers, version, scan range) -- what the .msr and the Viewer
+    # Zarr carry with the data, and what .mat/.npy/.json can only carry here.
+    # Written only when the dataset has it; nothing is reconstructed. Provenance
+    # like the acquisition date, so on raw and snapshot content alike.
+    native = md.get("native_zarr_mfx_attrs")
+    if isinstance(native, dict) and native:
+        block: dict = {"mfx_attrs": native}
+        provenance = md.get(NATIVE_PROVENANCE_KEY)
+        if isinstance(provenance, dict) and provenance:
+            block["provenance"] = provenance      # e.g. matched by file name only
+        meta[NATIVE_ACQUISITION_KEY] = block
     # One-dataset-per-file formats cannot hold an overlay, so a saved group is
     # several files made a set again by this block: the siblings named by
     # FILENAME, so the folder can be moved or renamed as a whole. An addition to

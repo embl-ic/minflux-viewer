@@ -26,11 +26,17 @@ Three signals, strongest first, all of which already exist:
     The instrument timestamp. Survives renaming and copying, and unlike the
     other two it matches a dataset re-exported to a different format.
 
+Restoring Imspector's acquisition record is the one thing a recipe carries
+that is *not* processing: it describes how the data were acquired, and CRLB and
+aggregation read it. So it is gated, by :func:`acquisition_record_match`, and
+not merely defaulted -- see there.
+
 Pure and Qt-free, so the rules are testable without a window.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -39,10 +45,17 @@ __all__ = [
     "MATCH_DATA_FILE",
     "MATCH_ACQUISITION",
     "MATCH_ORDER",
+    "RECIPE_IDENTITY_KEY",
+    "IDENTITY_BEFORE_RECIPE_KEY",
+    "RecordMatch",
     "sidecar_identity",
     "dataset_identity",
+    "intrinsic_identity",
+    "mark_recipe_identity",
+    "preserve_intrinsic_identity",
     "match_kind",
     "best_match",
+    "acquisition_record_match",
     "describe_match",
     "is_snapshot_recipe",
     "recipe_summary",
@@ -105,6 +118,188 @@ def dataset_identity(ds: Any) -> dict[str, Any]:
         MATCH_DATA_FILE: names,
         MATCH_ACQUISITION: _text(metadata.get("acquisition_date")),
     }
+
+
+#: ``ds.metadata`` key listing the identity keys (``msr_dataset_did``,
+#: ``acquisition_date``) that a processing recipe supplied rather than the data.
+#: It travels with the metadata (Viewer Zarr, our ``.msr``), so an identity a
+#: recipe once copied never becomes evidence that the same recipe fits.
+RECIPE_IDENTITY_KEY = "identity_from_recipe"
+
+_IDENTITY_METADATA = {MATCH_DID: "msr_dataset_did", MATCH_ACQUISITION: "acquisition_date"}
+
+
+def mark_recipe_identity(metadata: dict, key: str) -> None:
+    """Record that ``metadata[key]`` came from a recipe, not from the data."""
+    marked = metadata.get(RECIPE_IDENTITY_KEY)
+    keys = {str(k) for k in marked} if isinstance(marked, (list, tuple, set)) else set()
+    keys.add(str(key))
+    metadata[RECIPE_IDENTITY_KEY] = sorted(keys)
+
+
+#: ``ds.metadata`` key holding the dataset's own identity values that a recipe
+#: replaced (``{"acquisition_date": …}``), written once and never overwritten.
+#: A recipe that overwrites the date therefore cannot erase the evidence that
+#: refused its record: applied again, it meets the same conflict.
+IDENTITY_BEFORE_RECIPE_KEY = "identity_before_recipe"
+
+
+def preserve_intrinsic_identity(metadata: dict, key: str, previous: Any) -> None:
+    """Keep *previous*, the value of ``metadata[key]`` a recipe just replaced,
+    as intrinsic evidence.
+
+    Kept only when it was intrinsic (present, not itself recipe-supplied --
+    call this before :func:`mark_recipe_identity`), and only the first time:
+    later recipes never overwrite it.
+    """
+    value = _text(previous)
+    marked = metadata.get(RECIPE_IDENTITY_KEY)
+    copied = {str(k) for k in marked} if isinstance(marked, (list, tuple, set)) else set()
+    if not value or key in copied:
+        return
+    kept = metadata.get(IDENTITY_BEFORE_RECIPE_KEY)
+    kept = dict(kept) if isinstance(kept, dict) else {}
+    kept.setdefault(str(key), value)
+    metadata[IDENTITY_BEFORE_RECIPE_KEY] = kept
+
+
+def intrinsic_identity(ds: Any) -> dict[str, str]:
+    """The dataset's own DID and acquisition time -- not ones a recipe copied.
+
+    A value a recipe replaced is answered from :data:`IDENTITY_BEFORE_RECIPE_KEY`.
+    """
+    metadata = getattr(ds, "metadata", None) or {}
+    marked = metadata.get(RECIPE_IDENTITY_KEY)
+    copied = {str(k) for k in marked} if isinstance(marked, (list, tuple, set)) else set()
+    kept = metadata.get(IDENTITY_BEFORE_RECIPE_KEY)
+    kept = kept if isinstance(kept, dict) else {}
+    out: dict[str, str] = {}
+    for kind, key in _IDENTITY_METADATA.items():
+        if _text(kept.get(key)):
+            out[kind] = _text(kept.get(key))
+        else:
+            out[kind] = "" if key in copied else _text(metadata.get(key))
+    return out
+
+
+@dataclass(frozen=True)
+class RecordMatch:
+    """Whether a sidecar's acquisition record may be restored onto a dataset.
+
+    ``basis`` is the signal it was accepted on (``None``: refused), ``reason``
+    the plain-language account for the Log.
+    """
+
+    basis: str | None
+    reason: str
+
+    @property
+    def accepted(self) -> bool:
+        return self.basis is not None
+
+    @property
+    def verified(self) -> bool:
+        """Accepted on the acquisition's own identity, not only its file name."""
+        return self.basis in (MATCH_DID, MATCH_ACQUISITION)
+
+
+def _same_time(a: str, b: str) -> bool:
+    """Whether two acquisition timestamps name the same instant.
+
+    Both with a zone: compared as instants. One without: it agrees when it
+    equals the other's time as written (its wall clock) or that time in UTC
+    -- a stamp that dropped its zone is the same acquisition, not a conflict.
+    Unparseable text is compared as text.
+
+    Not transitive: ``12:00`` agrees with ``12:00+02:00`` and with
+    ``12:00+00:00``, which disagree. A caller deciding on several stamps
+    compares every pair.
+    """
+    from datetime import timezone
+
+    from minflux_viewer.core.acquisition_time import parse_acquisition_date
+
+    first, second = parse_acquisition_date(a), parse_acquisition_date(b)
+    if first is None or second is None:
+        return a == b
+    if (first.tzinfo is None) == (second.tzinfo is None):
+        return bool(first == second)
+    naive, aware = (first, second) if first.tzinfo is None else (second, first)
+    return naive in (aware.replace(tzinfo=None),
+                     aware.astimezone(timezone.utc).replace(tzinfo=None))
+
+
+def acquisition_record_match(meta: dict | None, ds: Any,
+                             record: dict | None = None) -> RecordMatch:
+    """Decide whether *meta*'s acquisition *record* belongs to *ds*.
+
+    Unlike :func:`match_kind` (which only picks a dropdown default) this gates,
+    and every rule is about *evidence*:
+
+    * **Any conflict vetoes.** Two different acquisition IDs -- the sidecar's,
+      its record's, the dataset's own -- or two different acquisition times
+      refuse the record, whatever else agrees and whatever the file names
+      say. Agreement on the ID does not excuse a time conflict: the record is
+      restored only when no evidence speaks against it. Times are compared
+      pairwise -- the sidecar's, its record's and the dataset's -- because a
+      time without a zone agrees with two zoned times that disagree with each
+      other. A shared basename is common (``run.npy`` in every folder); a
+      shared ID across acquisitions is not.
+    * **Only intrinsic identity counts.** An ID or time a recipe copied onto
+      the dataset (:data:`RECIPE_IDENTITY_KEY`) is not evidence; otherwise
+      applying an unrelated recipe once would make it "match" the second time.
+      A dataset's own date that a recipe replaced still is
+      (:data:`IDENTITY_BEFORE_RECIPE_KEY`), so repetition cannot turn a
+      refusal into acceptance.
+    * **Agreement on the ID, else the time, is verified acceptance.**
+    * **File name alone is accepted, and says so.** A ``.mat``/``.npy``/
+      ``.json`` file has no ID or time of its own, so "written beside this
+      data file" is the only link it can have to its record. The caller
+      records ``matched_by="data_file"``, ``verified=False`` as provenance,
+      which travels with the record and is reported in the Log.
+    """
+    meta = meta if isinstance(meta, dict) else {}
+    record = record if isinstance(record, dict) else {}
+    want = sidecar_identity(meta)
+    have = intrinsic_identity(ds)
+
+    dids = {d for d in (want[MATCH_DID], _text(record.get("did"))) if d}
+    if len(dids) > 1:
+        return RecordMatch(None, "the sidecar names two different acquisition IDs "
+                                 f"({', '.join(sorted(dids))})")
+    times = [t for t in (want[MATCH_ACQUISITION], _text(record.get("acquisition_date"))) if t]
+    if len(times) == 2 and not _same_time(*times):
+        return RecordMatch(None, "the sidecar names two different acquisition times "
+                                 f"({times[0]}, {times[1]})")
+
+    # Every comparison first; acceptance only when none conflicts.
+    did_agrees = time_agrees = False
+    if dids and have[MATCH_DID]:
+        theirs = next(iter(dids))
+        if theirs != have[MATCH_DID]:
+            return RecordMatch(None, f"a different acquisition: the sidecar's ID {theirs} "
+                                     f"is not this dataset's {have[MATCH_DID]}")
+        did_agrees = True
+    # Each recorded time against the dataset's, not only the first: a stamp
+    # without a zone agrees with both of two zoned stamps that differ from each
+    # other, so agreement is not transitive and every pair is checked.
+    if times and have[MATCH_ACQUISITION]:
+        for recorded in times:
+            if not _same_time(recorded, have[MATCH_ACQUISITION]):
+                return RecordMatch(None, f"a different acquisition: recorded {recorded}, "
+                                         f"this dataset {have[MATCH_ACQUISITION]}")
+        time_agrees = True
+    if did_agrees:
+        return RecordMatch(MATCH_DID, describe_match(MATCH_DID))
+    if time_agrees:
+        return RecordMatch(MATCH_ACQUISITION, describe_match(MATCH_ACQUISITION))
+
+    name = want[MATCH_DATA_FILE]
+    if name and name in dataset_identity(ds)[MATCH_DATA_FILE]:
+        return RecordMatch(MATCH_DATA_FILE,
+                           "matched by file name only - the data carry no acquisition "
+                           "ID or time to check it against")
+    return RecordMatch(None, "nothing shows this sidecar was written for this acquisition")
 
 
 def match_kind(meta: dict | None, ds: Any) -> str | None:

@@ -70,6 +70,9 @@ class MsrChannel:
     points_by_gri: dict | None = None                # {gri: {"name": R-id, "gri": n}}
     used: list | None = None                         # used bead R-ids (e.g. ["R1"])
     acquisition_date: str | None = None              # ISO 8601 instrument timestamp
+    #: Imspector's own ``mfx/.zattrs`` of the source (``measurement`` with every
+    #: thread's sequence, detectors and lasers; ``version``; ``scan_range``).
+    native_mfx_attrs: dict | None = None
 
     def resolved_did(self) -> str:
         return self.did or str(uuid.uuid4())
@@ -95,6 +98,15 @@ def build_channel_store(channel: MsrChannel, did: str) -> dict[str, bytes]:
     store: dict[str, bytes] = {}
     root = zarr2.open(store, mode="w")
     root["mfx"] = mfx.ravel()
+    # Imspector's own record of the acquisition goes back where it came from,
+    # as the Viewer Zarr writer does: without it a re-saved channel lost every
+    # thread's sequence, the detectors and the lasers. Only an m2410 record is
+    # written (it describes the m2410 table this writer emits); our own keys
+    # below are set afterwards and take precedence.
+    native = channel.native_mfx_attrs
+    if isinstance(native, dict) and "measurement" in native:
+        for key, value in native.items():
+            root["mfx"].attrs[str(key)] = _jsonable(value)
     root["mfx"].attrs["did"] = str(did)
     # The instrument acquisition timestamp, in the same place and format
     # Imspector uses (see core.acquisition_time). Without this a round trip
@@ -313,6 +325,7 @@ def channel_from_dataset(ds) -> MsrChannel:
         points_by_gri=meta.get("mbm_points_by_gri"),
         used=meta.get("mbm_used"),
         acquisition_date=str(meta.get("acquisition_date") or "") or None,
+        native_mfx_attrs=meta.get("native_zarr_mfx_attrs"),
     )
 
 

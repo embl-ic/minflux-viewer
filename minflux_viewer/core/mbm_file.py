@@ -45,12 +45,6 @@ _LOCALIZATION_MARKERS: frozenset[str] = frozenset({
     "itr", "vld", "loc", "loc_x", "loc_y", "loc_0", "loc_1", "xnm", "ynm",
     "efo", "cfr", "dcr", "dcr_0", "eco", "tid",
 })
-#: Bytes of a ``.json`` inspected to classify it -- a bead table is small, but
-#: the classifier runs on every ``.json`` the router sees, including a
-#: multi-gigabyte localization array.
-_JSON_PREFIX_BYTES = 4096
-
-
 def is_mbm_points_fields(names) -> bool:
     """Whether a set of column names is a bead table and not localization data."""
     keys = {str(name).strip().lower() for name in names or ()}
@@ -97,29 +91,16 @@ def _mat_struct_names(path: Path) -> list[str]:
     return list(getattr(dtype, "names", None) or ())
 
 
-def _json_prefix_names(path: Path) -> list[str]:
-    """Keys of the first record of a JSON array, from a bounded prefix read."""
-    with open(path, "rb") as handle:
-        prefix = handle.read(_JSON_PREFIX_BYTES)
-    text = prefix.decode("utf-8", errors="ignore").lstrip()
-    if not text.startswith("["):
-        return []
-    start = text.find("{")
-    if start < 0:
-        return []
-    depth = 0
-    for index in range(start, len(text)):
-        char = text[index]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return list(json.loads(text[start:index + 1]).keys())
-                except (ValueError, AttributeError):
-                    return []
-    return []
+def _json_prefix_names(path) -> list[str]:
+    """Keys of the first record of a JSON array, from a bounded prefix read.
+
+    String-aware (``core.json_probe``): a ``"}"`` inside a string value used to
+    end the record early, so a bead table with such a value was not recognised.
+    """
+    from .json_probe import as_probe
+
+    probe = as_probe(path)
+    return list(probe.keys) if probe.top == "array" else []
 
 
 def _csv_header_names(path: Path) -> list[str]:
@@ -151,8 +132,13 @@ def is_mbm_points_file(path) -> bool:
 
     Every check reads only a header / prefix, because the router probes this
     predicate for every ``.mat``, ``.npy``, ``.json`` and ``.csv`` it opens.
+    A ``.json`` may be given as its :class:`~minflux_viewer.core.json_probe.JsonProbe`.
     An unreadable file is simply "not one".
     """
+    from .json_probe import JsonProbe
+
+    if isinstance(path, JsonProbe):
+        return is_mbm_points_fields(_json_prefix_names(path))
     target = Path(path)
     reader = _FIELD_READERS.get(target.suffix.lower())
     if reader is None:

@@ -844,6 +844,31 @@ def view_dataset_mbm(self: MainWindow, idx: int) -> None:
         f"MBM info for '{ds.name}': {len(win._beads)} bead(s).", dataset_idx=idx)
 
 
+def view_dataset_sequence(self: MainWindow, idx: int) -> None:
+    """Dataset Manager *View acquisition sequence…* -- the sequence(s) the source
+        recorded with the data, one per measurement thread. Nothing is re-read:
+        the record travels with the dataset (``.msr`` import, Viewer Zarr, or a
+        sidecar written for this acquisition)."""
+    if not (0 <= idx < len(self._state.datasets)):
+        return
+    from minflux_viewer.core.acquisition_sequence import sequences_for_dataset
+    from minflux_viewer.ui.tools.sequence_viewer import open_sequence_window
+
+    ds = self._state.datasets[idx]
+    sources = sequences_for_dataset(ds)
+    if not sources:
+        message = (f"'{ds.name}' carries no acquisition sequence: its file format did not "
+                   "record one. Open the .msr it came from, or the sequence .json.")
+        self._state.log(f"View acquisition sequence: {message}", "WARN")
+        QMessageBox.information(self, "Acquisition sequence", message)
+        return
+    key = self._state.key_at(idx)
+    open_sequence_window(self, sources, title=ds.name, source_key=f"dataset:{key}",
+                         prefs=self._state.prefs)
+    self._state.log(f"Acquisition sequence of '{ds.name}': "
+                    f"{', '.join(source.label for source in sources)}.", dataset_idx=idx)
+
+
 def view_dataset_image_series(self: MainWindow, idx: int) -> None:
     """Dataset Manager *View image series* — open this dataset's source ``.msr``
         images in the shared image viewer.
@@ -1174,13 +1199,19 @@ def route_paths(self: MainWindow, paths) -> None:
         side: a recipe named in the batch then finds its dataset already loaded
         instead of going through the pending-recipe path.
         """
-    from minflux_viewer.core.save import is_metadata_json_file
+    from minflux_viewer.core import formats as _formats
     paths = [str(path) for path in (paths or []) if str(path or "").strip()]
     sidecars: dict = {}
     for path in paths:
         try:
-            if Path(path).is_file() and is_metadata_json_file(path):
-                sidecars[str(Path(path).resolve()).casefold()] = path
+            # A sidecar is always ``.json``. Probing every path read whole
+            # binary files as text (1.8 GB peak for a 599 MB .mat). Asked
+            # through the registry's bounded fast path; a .json it cannot
+            # decide is simply not paired, and opens on its own once classified.
+            if Path(path).suffix.lower() == ".json" and Path(path).is_file():
+                spec = _formats.resolve_open(path)
+                if spec is not None and spec.key == "metadata_sidecar":
+                    sidecars[str(Path(path).resolve()).casefold()] = path
         except Exception:                                   # noqa: BLE001
             continue
     previous, previous_used = self._batch_sidecars, self._batch_sidecars_used

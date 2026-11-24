@@ -137,7 +137,9 @@ def test_snapshot_writes_each_format(tmp_path, fmt):
 @pytest.mark.parametrize("fmt,loader,expect_ver", [
     ("mat", L.load_dataset, "m2410"),
     ("npy", L.load_npy, "m2410"),
-    ("json", L.load_json, "json"),
+    # JSON is a container too: the records build through the same m2410 builder
+    # and "json" goes in `source_format` (it used to be reported as the version).
+    ("json", L.load_json, "m2410"),
     # A canonical raw CSV reassembles into the m2410 structured mfx, so its
     # *structural* version is m2410; "csv" is the container and is recorded in
     # `source_format`. (Before the raw-CSV reassembly fix this read "csv",

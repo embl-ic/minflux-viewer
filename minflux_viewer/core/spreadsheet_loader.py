@@ -813,18 +813,19 @@ def guess_mapping(table: SpreadsheetTable, *, use_values: bool = False,
     return mapping
 
 
-def minflux_row_mask(itr_values, vld_values) -> np.ndarray | None:
-    """Rows of a raw MINFLUX table that are the **last valid iteration**.
+def minflux_row_mask(itr_values, vld_values, sta_values=None) -> np.ndarray | None:
+    """Rows of a raw MINFLUX table that are the **final valid localizations**.
 
     One row of a raw MINFLUX export is one (localization x iteration) event, so
     a table mapped only to x/y/z/tid/tim pools every iteration of every
     localization into one cloud and keeps the invalid probes too. Given the
-    ``itr`` and/or ``vld`` columns this reproduces the materialization the
-    native loaders use (``loader.mfx_row_mask(itr="last", vld_only=True)``):
-    valid rows at the **global maximum** iteration.
+    ``itr`` and/or ``vld`` (and, when the table has it, ``sta``) columns this
+    reproduces the materialization the native loaders use
+    (``core.final_localization.final_rows``): ``sta == 1`` when the file
+    records its status, else valid rows at the **global maximum** iteration.
 
-    Either input may be ``None`` (that half is simply not constrained), and
-    ``None`` is returned when neither is given.
+    Either of ``itr``/``vld`` may be ``None`` (that half is simply not
+    constrained), and ``None`` is returned when neither is given.
     """
     itr = None if itr_values is None else np.asarray(itr_values, dtype=float).ravel()
     vld = None if vld_values is None else np.asarray(vld_values, dtype=float).ravel()
@@ -834,6 +835,12 @@ def minflux_row_mask(itr_values, vld_values) -> np.ndarray | None:
     mask = np.ones(n, dtype=bool)
     if vld is not None:
         mask &= np.isfinite(vld) & (vld != 0.0)
+    if sta_values is not None:
+        from .final_localization import STA_VALID_FINAL, records_final_status
+
+        sta = np.asarray(sta_values, dtype=float).ravel()
+        if records_final_status(sta, n):
+            return mask & (sta == STA_VALID_FINAL)
     if itr is not None:
         finite = np.isfinite(itr)
         candidates = itr[mask & finite]
@@ -1063,7 +1070,8 @@ def build_dataset_from_mapping(
         return np.concatenate([values, np.full(n - values.size, np.nan)])
 
     citr, cvld = col("itr"), col("vld")
-    rows = minflux_row_mask(column_rows(citr), column_rows(cvld))
+    csta = table.by_name("sta") if citr is not None or cvld is not None else None
+    rows = minflux_row_mask(column_rows(citr), column_rows(cvld), column_rows(csta))
     if rows is not None:
         if not rows.any():
             raise ValueError(

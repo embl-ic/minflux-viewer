@@ -90,17 +90,28 @@ def save_filter_json(path: str | Path, rows: list[dict[str, Any]]) -> None:
     FilterIO.save_filter_json(path, rows)
 
 
-def is_filter_json_file(path: str | Path) -> bool:
+def is_filter_json_file(path) -> bool:
     """Return True only for JSON files shaped like saved filter rows.
 
     Recognition is by shape, so a preset with a bad field value is still routed
-    to the filter loader, which then says what is wrong with it.
+    to the filter loader, which then says what is wrong with it. *path* may be
+    a :class:`~minflux_viewer.core.json_probe.JsonProbe`. A small preset (one
+    the probe decoded) is checked row by row as before; a larger one is
+    recognised by its first row's keys, and the loader validates the rest. An
+    inconclusive probe answers no (``formats.resolve_open`` deepens it).
     """
+    from .json_probe import as_probe
+
     try:
-        load_filter_json(path, validate=False)
+        probe = as_probe(path)
+        if probe.top != "array" or not probe.conclusive:
+            return False
+        if probe.decoded:
+            return is_filter_json_payload(probe.document())
+        keys = set(probe.keys)
+        return bool(keys) and not keys & MINFLUX_DATA_KEYS and bool(keys & FILTER_KEYS)
     except (OSError, TypeError, ValueError):
         return False
-    return True
 
 
 def is_filter_json_payload(payload: Any) -> bool:

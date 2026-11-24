@@ -135,7 +135,7 @@ def test_single_row_menu_has_the_four_sections(manager, monkeypatch):
     assert _menu_entries(mgr, monkeypatch, 0) == [
         "Open file location",
         "---", "Reset", "Save as…", "Close", "Duplicate",
-        "---", "View mbm info…", "View image series",
+        "---", "View mbm info…", "View acquisition sequence…", "View image series",
         "---", "Map confocal signal…",
     ]
 
@@ -154,10 +154,11 @@ def test_source_dependent_entries_are_disabled_not_hidden(manager, monkeypatch):
     pos = mgr._table.visualRect(mgr._table.model().index(0, 1)).center()
     mgr._show_context_menu(pos)
 
-    # A simulated dataset has no file behind it either.
+    # A simulated dataset has no file behind it either, and no recorded sequence.
     assert disabled == [
         "Open file location",
-        "View mbm info…", "View image series", "Map confocal signal…",
+        "View mbm info…", "View acquisition sequence…", "View image series",
+        "Map confocal signal…",
     ]
 
 

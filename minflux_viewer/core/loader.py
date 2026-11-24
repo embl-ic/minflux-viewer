@@ -73,7 +73,7 @@ from minflux_viewer.core.loader_format_readers import (
     _h5_to_dict as _h5_to_dict,
 )
 from minflux_viewer.core.loader_format_readers import (
-    _iter_json_array_records as _iter_json_array_records,
+    _iter_json_records as _iter_json_records,
 )
 from minflux_viewer.core.loader_format_readers import (
     _load_json_streaming_canonical as _load_json_streaming_canonical,

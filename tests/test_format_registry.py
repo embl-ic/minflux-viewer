@@ -383,6 +383,61 @@ def test_dropping_a_sealed_package_opens_it_as_a_dataset(_app, tmp_path):
         window.close()
 
 
+def test_an_undecided_json_is_classified_off_the_ui_thread_then_opened(_app, tmp_path,
+                                                                     monkeypatch):
+    """A ``.json`` the fast path cannot decide is neither guessed to be data nor
+    decoded on the UI thread: a background task classifies it, then it opens."""
+    from types import SimpleNamespace
+
+    from minflux_viewer.ui.controllers import file_open_controller as foc
+
+    path = tmp_path / "padded.json"
+    path.write_text(" " * 70_000 + json.dumps([{"apply": True, "attribute": "efo",
+                                                "value_as": "per loc", "min": 1, "max": 10}]),
+                    encoding="utf-8")
+    started, opened = [], []
+    owner = SimpleNamespace(
+        _status_label=SimpleNamespace(setText=lambda text: None),
+        _state=SimpleNamespace(log=lambda *args: None),
+        _begin_file_io=started.append, _is_shutting_down=False,
+        _on_file_load_failed=lambda *args: opened.append(("failed", args)))
+    monkeypatch.setattr(foc, "_dispatch_open",
+                        lambda _owner, p, spec: opened.append((p, spec.key)))
+    foc._route_file(owner, str(path))
+    assert len(started) == 1 and opened == []        # nothing opened, nothing guessed
+    started[0].run()                                 # the worker, run in-thread here
+    assert opened == [(str(path), "filter_preset")]
+
+
+def test_a_folder_drop_keeps_its_policy_for_an_undecided_json(_app, tmp_path, monkeypatch):
+    """A sequence the fast path cannot decide must not open from a folder drop
+    once the background classification finds it is one (user decision D4)."""
+    from types import SimpleNamespace
+
+    from minflux_viewer.ui.controllers import file_open_controller as foc
+
+    folder = tmp_path / "run"
+    folder.mkdir()
+    sequence = folder / "seq.json"
+    sequence.write_text(" " * 70_000 + json.dumps(
+        {"id": "Imaging_2D", "Itr": [{"Mode": {"id": "mflx", "pattern": "hexagon"}}]}),
+        encoding="utf-8")
+    started, routed, opened, logged = [], [], [], []
+    owner = SimpleNamespace(
+        _status_label=SimpleNamespace(setText=lambda text: None),
+        _state=SimpleNamespace(log=lambda text, *args: logged.append(text)),
+        _begin_file_io=started.append, _is_shutting_down=False,
+        route_paths=routed.append,
+        _on_file_load_failed=lambda *args: opened.append(("failed", args)))
+    monkeypatch.setattr(foc, "_dispatch_open",
+                        lambda _owner, p, spec: opened.append((p, spec.key)))
+    foc._route_path(owner, str(folder))
+    assert routed == [] and len(started) == 1
+    started[0].run()
+    assert opened == []
+    assert any("not opened (not data): seq.json" in text for text in logged)
+
+
 def test_saving_a_sealed_package_matches_the_directory_store(tmp_path):
     """Both Zarr forms carry identical content; only the container differs."""
     import numpy as np
@@ -430,3 +485,43 @@ def test_a_sealed_package_refuses_a_baked_snapshot(tmp_path):
     with pytest.raises(ValueError, match=r"\.zarr\.zip stores canonical raw"):
         save_processed(ds, data_path=tmp_path / "s", fmt="zarr_zip",
                        content="snapshot", include={"recipe": True})
+
+
+@pytest.mark.parametrize("closed_meanwhile", [False, True], ids=["row kept", "row closed"])
+def test_an_undecided_json_dropped_on_a_row_is_applied_to_that_row(
+        _app, tmp_path, closed_meanwhile):
+    """The background classification carries the row's dataset by key: a
+    padded filter preset dropped on dataset B lands on B, not on the active A
+    -- and on nothing if B was closed meanwhile (final review, finding 3)."""
+    from types import SimpleNamespace
+
+    from minflux_viewer.core.dataset_key import DatasetKey
+    from minflux_viewer.ui.controllers import file_open_controller as foc
+
+    path = tmp_path / "padded.json"
+    path.write_text(" " * 70_000 + json.dumps([{"apply": True, "attribute": "efo",
+                                                "value_as": "per loc", "min": 1, "max": 10}]),
+                    encoding="utf-8")
+    keys = [DatasetKey(1), DatasetKey(2)]
+    started, applied, logged = [], [], []
+    state = SimpleNamespace(
+        datasets=[SimpleNamespace(name="A"), SimpleNamespace(name="B")], active_idx=0,
+        log=lambda text, *args, **kwargs: logged.append(text),
+        key_at=lambda idx: keys[idx],
+        index_of=lambda key: keys.index(key) if key in keys else None)
+    owner = SimpleNamespace(
+        _state=state, _status_label=SimpleNamespace(setText=lambda text: None),
+        _begin_file_io=started.append, _is_shutting_down=False,
+        _drop_filter_file=lambda idx, p: applied.append(idx),
+        _drop_roi_file=lambda idx, p: applied.append(("roi", idx)),
+        _drop_metadata_sidecar=lambda idx, p: applied.append(("sidecar", idx)),
+        _on_file_load_failed=lambda *args: applied.append(("failed", args)))
+    assert foc.drop_file_on_dataset(owner, 1, str(path)) is True
+    assert len(started) == 1 and applied == []
+    if closed_meanwhile:
+        keys.remove(DatasetKey(2))
+    started[0].run()
+    if closed_meanwhile:
+        assert applied == [] and any("since been closed" in text for text in logged)
+    else:
+        assert applied == [1]                     # B, while A stayed active

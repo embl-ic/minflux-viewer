@@ -67,6 +67,8 @@ class OpenAction(str, Enum):
     METADATA_RECIPE = "metadata_recipe"  # sidecar -> applied to a dataset
     MBM_INFO = "mbm_info"                # standalone bead table -> MBM info window
     SCRIPT_EDITOR = "script_editor"      # Python script -> Script Editor, never run
+    SEQUENCE_VIEWER = "sequence_viewer"  # MINFLUX acquisition sequence -> read-only viewer
+    UNDETERMINED = "undetermined"        # .json the fast probe could not decide -> classify off the UI thread
 
 
 @dataclass(frozen=True)
@@ -170,14 +172,19 @@ FORMATS: tuple[FormatSpec, ...] = (
     FormatSpec(
         "csv", "Canonical table (.csv)", (".csv",), OpenAction.SPREADSHEET_DIALOG,
         writable=True, default_offered=True, sniff_key="spreadsheet",
-        blurb="Text, and not a MINFLUX format: reopening one goes through "
-              "column mapping. Far larger and slower than .mat or .npy.",
-        notes="Not a MINFLUX format: the interchange path for arbitrary "
-              "localization tables (ThunderSTORM/SMAP/Picasso column "
-              "conventions). This label is the ALL-ITERATION canonical writer, "
-              "which is what the MSR reader exports and what the Save/Export "
-              "dialog reaches under More options; the viewer's menus offer the "
-              "custom column picker under the same .csv extension.",
+        blurb="Text: every field of every iteration, in the source's column "
+              "order. Reopens directly as MINFLUX data; another program's table "
+              "goes through column mapping. Far larger and slower than .mat or .npy.",
+        notes="The interchange path for arbitrary localization tables "
+              "(ThunderSTORM/SMAP/Picasso column conventions) shares the .csv "
+              "extension. A table this application wrote is recognised by its "
+              "header alone (spreadsheet_loader.minflux_table_kind: itr, vld and "
+              "loc_x/loc_y -- or xnm/ynm for a processed table) and loaded by "
+              "load_csv without the mapping dialog; any other opens the dialog. "
+              "This label is the ALL-ITERATION canonical writer, which is what "
+              "the MSR reader exports and what the Save/Export dialog reaches "
+              "under More options; the viewer's menus offer the custom column "
+              "picker under the same .csv extension.",
     ),
     FormatSpec(
         "msr", "Imspector file (.msr)", (".msr",), OpenAction.MSR_READER,
@@ -241,6 +248,17 @@ FORMATS: tuple[FormatSpec, ...] = (
               "file. It is bead reference data, not localizations, so it opens "
               "the MBM info window rather than loading as an (empty) dataset.",
     ),
+    # --- an acquisition description, not data ------------------------------
+    FormatSpec(
+        "sequence", "MINFLUX acquisition sequence", (".json",), OpenAction.SEQUENCE_VIEWER,
+        detect="minflux_viewer.core.acquisition_sequence:is_sequence_json_file",
+        # After the annotation kinds, whose markers win a conflict; before data.
+        detect_order=50, folder_scan=False,
+        notes="The JSON that defines a MINFLUX measurement (iterations, patterns, "
+              "thresholds), as kept in Imspector's sequence folder. Opens a "
+              "read-only viewer; never attached to a dataset. Skipped when a "
+              "folder is dropped: it describes an acquisition, it is not data.",
+    ),
     # --- not data at all ---------------------------------------------------
     FormatSpec(
         "python_script", "Python script (.py)", (".py",), OpenAction.SCRIPT_EDITOR,
@@ -253,6 +271,16 @@ FORMATS: tuple[FormatSpec, ...] = (
 )
 
 _BY_KEY = {spec.key: spec for spec in FORMATS}
+
+#: What :func:`resolve_open` answers for a ``.json`` whose bounded fast-path
+#: read cannot decide its kind (whitespace padding, a first record longer than
+#: the budget, an object whose deciding keys may still follow). Not a format:
+#: the caller finishes the classification with ``resolve_open(path, deep=True)``
+#: -- off the UI thread -- rather than guessing "data".
+UNDETERMINED = FormatSpec(
+    "undetermined_json", "JSON (not yet classified)", (".json",), OpenAction.UNDETERMINED,
+    readable=False,
+)
 
 
 def normalize_path(key: str, path) -> Path:
@@ -379,13 +407,18 @@ def _load_predicate(dotted: str):
     return getattr(import_module(module_name), attr)
 
 
-def resolve_open(path) -> FormatSpec | None:
+def resolve_open(path, *, deep: bool = False) -> FormatSpec | None:
     """The format a path should be opened as, or ``None`` if unsupported.
 
     Candidates sharing the extension are probed in ``detect_order``; a spec with
     no ``detect`` matches unconditionally, which is why plain data sits last.
     Expected I/O, type, value or EOF detection errors mean "not this kind".
     Unexpected failures propagate rather than silently select another reader.
+
+    A ``.json`` is classified from one bounded read (the fast path). When that
+    cannot decide, the answer is :data:`UNDETERMINED` -- never a guess -- and
+    ``deep=True`` reads further until it can (``json_probe.deep_probe_json``),
+    which the application does off the UI thread.
     """
     p = Path(path)
     # Compound suffixes matter: ".zarr.zip" is a sealed store, NOT the ".zip"
@@ -408,11 +441,26 @@ def resolve_open(path) -> FormatSpec | None:
     # ``is_roi_json_file`` would refuse it for not being JSON.
     if len(candidates) == 1:
         return candidates[0]
+    # ``.json`` kinds are all decided from ONE bounded read of the file, shared
+    # by every predicate (they accept the probe as well as a path): a
+    # multi-gigabyte localization array was decoded twice just to be told
+    # apart from a sidecar and a filter preset.
+    target: object = p                      # a Path, or the probe of a .json
+    if p.suffix.lower() == ".json":
+        from .json_probe import deep_probe_json, probe_json
+
+        try:
+            probe = deep_probe_json(p) if deep else probe_json(p)
+        except OSError:
+            probe = None
+        if probe is not None and not probe.conclusive:
+            return UNDETERMINED
+        target = probe if probe is not None else p
     for spec in candidates:
         if spec.detect is None:
             return spec
         try:
-            if _load_predicate(spec.detect)(p):
+            if _load_predicate(spec.detect)(target):
                 return spec
         except (OSError, TypeError, ValueError, EOFError):
             continue

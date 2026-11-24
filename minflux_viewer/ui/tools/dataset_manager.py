@@ -26,6 +26,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -354,6 +355,13 @@ class DatasetManager(QDialog):
         mbm_action.setEnabled(self._has_mbm(ds))
         if not mbm_action.isEnabled():
             mbm_action.setToolTip("This dataset carries no beam-monitoring (MBM) bead data")
+        sequence_action = QAction("View acquisition sequence…", menu)
+        menu.addAction(sequence_action)
+        sequence_action.setEnabled(self._has_sequence(ds))
+        if not sequence_action.isEnabled():
+            sequence_action.setToolTip(
+                "This file format did not record the acquisition sequence; "
+                "open the .msr, or the sequence .json")
         images_action = menu.addAction("View image series")
         images_action.setEnabled(self._has_image_source(ds))
         if not images_action.isEnabled():
@@ -378,6 +386,8 @@ class DatasetManager(QDialog):
             self._duplicate_rows([row])
         elif chosen is mbm_action:
             self._view_mbm(row)
+        elif chosen is sequence_action:
+            self._view_sequence(row)
         elif chosen is images_action:
             self._view_image_series(row)
         elif chosen is map_action:
@@ -420,6 +430,19 @@ class DatasetManager(QDialog):
         except Exception:
             return False
         return points is not None and bool(getattr(points, "size", 0))
+
+    @staticmethod
+    def _has_sequence(ds) -> bool:
+        """True when the dataset carries the acquisition sequence it was run with."""
+        from minflux_viewer.core.acquisition_sequence import sequences_for_dataset
+        return bool(sequences_for_dataset(ds))
+
+    def _view_sequence(self, row: int) -> None:
+        viewer = getattr(self._owner, "view_dataset_sequence", None)
+        if callable(viewer):
+            viewer(row)
+        else:
+            self._state.log("View acquisition sequence: no handler is available.", "WARN")
 
     def _reset_row(self, row: int) -> None:
         resetter = getattr(self._owner, "reset_dataset", None)

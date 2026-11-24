@@ -498,23 +498,25 @@ def is_roi_json_file(path: str | Path) -> bool:
     in the ROI Manager and failed with an unrelated ``RoiRecord.__init__()``
     error.
     """
-    from .save import is_metadata_json_payload
+    from .json_probe import as_probe
+    from .save import METADATA_JSON_MARKER
 
     try:
-        source = Path(path)
-        # Canonical MINFLUX JSON is a top-level array and may be several GiB.
-        # Reject that shape from a bounded prefix instead of reading the whole
-        # localization file once merely to classify it before the real loader.
-        with source.open("r", encoding="utf-8-sig") as handle:
-            prefix = handle.read(4096).lstrip()
-        if prefix.startswith("["):
+        # Decided from the probe's keys and value kinds, never by decoding: a
+        # top-level array (canonical MINFLUX JSON, possibly several GiB), an
+        # object without a "rois" list and a sidecar are all ruled out. An
+        # inconclusive probe answers no (formats.resolve_open deepens it).
+        probe = as_probe(path)
+        if not probe.conclusive:
             return False
-        data = json.loads(source.read_text(encoding="utf-8-sig"))
+        # A wrapped localization array makes the file data, whatever else it
+        # holds (json_probe precedence), so a "rois" key after it cannot
+        # change the answer with the file's size.
+        return (bool(probe.has_key("rois")) and probe.kind("rois") == "array"
+                and not probe.has_key(METADATA_JSON_MARKER)
+                and not probe.wraps_localizations)
     except (OSError, TypeError, ValueError):
         return False
-    if not isinstance(data, dict) or not isinstance(data.get("rois"), list):
-        return False
-    return not is_metadata_json_payload(data)
 
 
 def record_from_imagej(roi) -> RoiRecord:

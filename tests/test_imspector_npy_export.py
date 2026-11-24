@@ -46,9 +46,11 @@ def imspector_mat(tmp_path):
 
 
 def test_raw_npy_export_uses_bool_flags_and_a_dcr_matrix(imspector_mat, tmp_path):
+    # The premise: the file stores MATLAB logical flags as uint8. (Our loader
+    # now reads them as bool, like the same table from .npy or .json; the
+    # export must write bool whichever it was given.)
+    assert sio.loadmat(str(imspector_mat))["vld"].dtype != np.bool_
     ds = io.load(imspector_mat)
-    raw = np.asarray(ds.mfx_raw["vld"])
-    assert raw.dtype != np.bool_                 # the premise: MATLAB logical loads as uint8
     out = io.save(ds, tmp_path / "export.npy", fmt="npy", content="raw")[0]
     arr = np.load(out, allow_pickle=False)
     for flag in ("vld", "fnl", "bot", "eot"):

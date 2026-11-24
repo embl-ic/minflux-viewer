@@ -678,6 +678,23 @@ class MainWindow(QMainWindow):
         from minflux_viewer.ui.controllers import file_open_controller as controller
         return controller._route_file(self, path)
 
+    def _classify_json_in_background(self, path: str, *,
+                                     folder_drop: bool = False, target=None) -> None:
+        'Finish classifying a .json the bounded fast path could not decide.'
+        from minflux_viewer.ui.controllers import file_open_controller as controller
+        return controller._classify_json_in_background(self, path, folder_drop=folder_drop, target=target)
+
+    def _on_json_classified(self, path: str, spec, *,
+                            folder_drop: bool = False, target=None) -> None:
+        'Open a .json once the background classification has decided its kind.'
+        from minflux_viewer.ui.controllers import file_open_controller as controller
+        return controller._on_json_classified(self, path, spec, folder_drop=folder_drop, target=target)
+
+    def _dispatch_open(self, path: str, spec) -> None:
+        'Open path as the format spec the registry resolved it to.'
+        from minflux_viewer.ui.controllers import file_open_controller as controller
+        return controller._dispatch_open(self, path, spec)
+
     def _route_path(self, path: str) -> None:
         'Route a path that may be a file OR a directory.'
         from minflux_viewer.ui.controllers import file_open_controller as controller
@@ -824,6 +841,11 @@ class MainWindow(QMainWindow):
     def _load_json(self, path: str) -> None:
         from minflux_viewer.ui.controllers import file_open_controller as controller
         return controller._load_json(self, path)
+
+    def _open_sequence_file(self, path: str) -> None:
+        'Show a MINFLUX acquisition sequence .json in the read-only viewer.'
+        from minflux_viewer.ui.controllers import file_open_controller as controller
+        return controller._open_sequence_file(self, path)
 
     def _load_roi_json(self, path: str) -> None:
         'Load a native ROI-set file (.json / .roi / .zip) into the ROI Manager,'
@@ -1440,6 +1462,11 @@ class MainWindow(QMainWindow):
         "Dataset Manager *View mbm info…* — the dataset's beam-monitoring beads."
         from minflux_viewer.ui.controllers import window_controller as controller
         return controller.view_dataset_mbm(self, idx)
+
+    def view_dataset_sequence(self, idx: int) -> None:
+        "Dataset Manager *View acquisition sequence…* — the sequence(s) recorded with the data."
+        from minflux_viewer.ui.controllers import window_controller as controller
+        return controller.view_dataset_sequence(self, idx)
 
     def view_dataset_image_series(self, idx: int) -> None:
         "Dataset Manager *View image series* — open this dataset's source ``.msr``"

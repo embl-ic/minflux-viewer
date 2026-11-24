@@ -513,8 +513,6 @@ def _route_file(self: MainWindow, path: str) -> None:
         Route a single file path to the correct loader based on extension.
         Unsupported types are reported to the log.
         """
-    p   = Path(path)
-    ext = p.suffix.lower()
     # Opening a file is not always "load a dataset": the registry says what
     # this one should DO. A .msr opens the MSR reader, a ROI set goes to the
     # ROI Manager, a filter preset to the Filter dialog. The .json fork is
@@ -522,6 +520,81 @@ def _route_file(self: MainWindow, path: str) -> None:
     # code tried to load data first and only looked for a filter preset if
     # that raised, so a malformed data file was indistinguishable from one.
     spec = _formats.resolve_open(path)
+    if spec is _formats.UNDETERMINED:
+        _classify_json_in_background(self, path)
+        return
+    _dispatch_open(self, path, spec)
+
+
+def _classify_json_in_background(self: MainWindow, path: str, *,
+                                 folder_drop: bool = False, target=None) -> None:
+    """Finish classifying a ``.json`` the bounded fast path could not decide.
+
+        Whitespace padding, a first record longer than the fast-path read or an
+        object whose deciding keys come late: the deep probe reads further --
+        possibly the whole file -- so it runs off the UI thread, and the file
+        is then opened as whatever it turned out to be. Nothing is guessed.
+        ``folder_drop``: it came from a dropped folder, so a kind that a folder
+        drop does not open (a sequence) is named in the Log instead.
+        ``target``: the ``DatasetKey`` of the row it was dropped on; an
+        annotation kind (filter preset, ROI set, sidecar) is then applied to
+        that dataset -- by key, so a row closed or moved meanwhile is noticed --
+        and never to whichever dataset happens to be active.
+        """
+    name = Path(path).name
+    self._status_label.setText(f"Identifying {name}…")
+    self._state.log(f"'{name}': classifying its content in the background "
+                    "(the first 64 KiB did not decide what it is).", "INFO")
+
+    def work(report):
+        report(f"Classifying {name}")
+        return _formats.resolve_open(path, deep=True)
+
+    task = BackgroundTask(work, description=f"Classifying {name}", category="load")
+    task.signals.done.connect(
+        lambda spec, _p=path, _f=folder_drop, _t=target: _on_json_classified(
+            self, _p, spec, folder_drop=_f, target=_t))
+    task.signals.failed.connect(
+        lambda message, _n=name: self._on_file_load_failed(_n, message))
+    self._begin_file_io(task)
+
+
+@gui_action("Open file")
+def _on_json_classified(self: MainWindow, path: str, spec, *,
+                        folder_drop: bool = False, target=None) -> None:
+    if self._is_shutting_down:
+        return
+    if spec is _formats.UNDETERMINED:       # cannot happen after a deep probe
+        spec = None
+    if folder_drop and spec is not None and not spec.folder_scan:
+        self._state.log(f"Folder dropped: not opened (not data): {Path(path).name}. "
+                        "Open it on its own to view it.", "INFO")
+        return
+    row_handler = {
+        _formats.OpenAction.ROI_MANAGER: "_drop_roi_file",
+        _formats.OpenAction.FILTER_DIALOG: "_drop_filter_file",
+        _formats.OpenAction.METADATA_RECIPE: "_drop_metadata_sidecar",
+    }.get(spec.action) if spec is not None else None
+    if target is not None and row_handler is not None:
+        # Dropped on a dataset row: apply it there, never to the active one.
+        idx = self._state.index_of(target)
+        if idx is None:
+            self._state.log(
+                f"'{Path(path).name}' was dropped on a dataset that has since been "
+                "closed; it was not applied to any other.", "WARN")
+            return
+        getattr(self, row_handler)(idx, Path(path))
+        return
+    if target is not None:
+        self._state.log(f"'{Path(path).name}' is not something to apply to a dataset — "
+                        "opening it (the row it was dropped on is not used).")
+    _dispatch_open(self, path, spec)
+
+
+def _dispatch_open(self: MainWindow, path: str, spec) -> None:
+    """Open *path* as the format *spec* the registry resolved it to."""
+    p   = Path(path)
+    ext = p.suffix.lower()
     if spec is not None:
         action = spec.action
         if action is _formats.OpenAction.ROI_MANAGER:
@@ -549,6 +622,9 @@ def _route_file(self: MainWindow, path: str) -> None:
         if action is _formats.OpenAction.SCRIPT_EDITOR:
             self._open_script_in_editor(path)
             return
+        if action is _formats.OpenAction.SEQUENCE_VIEWER:
+            self._open_sequence_file(path)
+            return
     # Dataset and spreadsheet paths still go through content sniffing, which
     # resolves an extension that disagrees with the bytes (a .npz that is
     # really an .xlsx, and so on) and reports the mismatch.
@@ -568,6 +644,34 @@ def _route_file(self: MainWindow, path: str) -> None:
         self._status_label.setText(f"Skipped: {p.name} (unsupported type)")
         return
     getattr(self, loader)(path)
+
+
+def _open_sequence_file(self: MainWindow, path: str) -> None:
+    """Show a MINFLUX acquisition sequence ``.json`` in the read-only viewer.
+
+        A sequence describes how a measurement is run; it is not data, opens no
+        dataset and is never attached to one. A damaged file reaches here too
+        (it is recognised by shape) so the error names what is wrong with it.
+        The file is a few tens of kB, read on this thread.
+        """
+    from minflux_viewer.core.acquisition_sequence import SequenceSource, load_sequence_file
+    from minflux_viewer.ui.tools.sequence_viewer import open_sequence_window
+
+    source = Path(path)
+    try:
+        sequence = load_sequence_file(source)
+    except (OSError, ValueError) as exc:
+        self._state.log(f"Could not open sequence '{source.name}': {exc}", "ERROR")
+        QMessageBox.warning(self, "MINFLUX sequence", str(exc))
+        self._status_label.setText(f"Not opened: {source.name}")
+        return
+    label = str(sequence.get("id") or source.stem)
+    open_sequence_window(
+        self, [SequenceSource(label, sequence, str(source))], title=source.name,
+        source_key=f"file:{source.resolve()}", prefs=self._state.prefs)
+    self._state.log(f"Opened MINFLUX sequence '{label}' ({len(sequence['Itr'])} iterations) "
+                    f"from {source.name}.", "INFO")
+    self._status_label.setText(f"Opened sequence {source.name}.")
 
 
 def _open_script_in_editor(self: MainWindow, path: str) -> None:
@@ -598,10 +702,28 @@ def _route_path(self: MainWindow, path: str) -> None:
     if p.is_dir():
         # Data only: a folder drop means "open the data in it", and the
         # analysis scripts that often sit beside it are not opened.
-        found = sorted(
+        candidates = sorted(
             f for f in p.iterdir()
             if f.is_file() and f.suffix.lower() in _FOLDER_SCAN_EXTS
         )
+        # The extension is not enough: a kind that shares one with data (a
+        # sequence .json) declares by its format whether a folder drop opens
+        # it. Each candidate is resolved -- a bounded read -- and its folder
+        # policy applied.
+        found: list[Path] = []
+        not_opened: list[Path] = []
+        undecided: list[Path] = []          # .json the fast path cannot decide
+        for f in candidates:
+            spec = _formats.resolve_open(f)
+            if spec is _formats.UNDETERMINED:
+                undecided.append(f)
+                continue
+            (found if spec is None or spec.folder_scan else not_opened).append(f)
+        if not_opened:
+            self._state.log(
+                f"Folder dropped: not opened (not data): "
+                f"{', '.join(f.name for f in not_opened)}. Open them on their own "
+                "to view them.", "INFO")
         if found:
             self._state.log(
                 f"Folder dropped: found {len(found)} supported file(s) in '{p.name}'",
@@ -610,7 +732,10 @@ def _route_path(self: MainWindow, path: str) -> None:
             # Through the batch router, so a folder holding a data file
             # and its recipe pairs them exactly as dropping both does.
             self.route_paths([str(f) for f in found])
-        else:
+        # Classified off the UI thread, the folder policy applied when known.
+        for f in undecided:
+            _classify_json_in_background(self, str(f), folder_drop=True)
+        if not found and not undecided:
             msg = (
                 f"Folder '{p.name}' contains no supported files "
                     f"(.mat, .npy, .csv, .tsv, .xlsx, .xlsm, .msr, .tif, .tiff, .json, .zarr)."
@@ -1042,14 +1167,8 @@ def _on_tiff_source_loaded(self: MainWindow, source, path: str, resolved: str) -
 def _load_json(self: MainWindow, path: str) -> None:
     self._status_label.setText(f"Loading {Path(path).name}…")
     self._state.log(f"Opening JSON: {path}", "INFO")
-    # A native ROI-set JSON (a dict with a "rois" list) loads ROIs, not data.
-    try:
-        from minflux_viewer.core.roi import is_roi_json_file
-        if is_roi_json_file(path):
-            self._load_roi_json(path)
-            return
-    except Exception:
-        pass
+    # Which kind of JSON this is was decided by the format registry before it
+    # was routed here: a ROI set never reaches this loader.
     source = Path(path)
     if source.stat().st_size >= 1 << 30:
         from minflux_viewer.core.export_size import format_file_size
@@ -1268,23 +1387,32 @@ def drop_file_on_dataset(self: MainWindow, idx: int, path: str) -> bool:
     elif ext in (".roi", ".zip"):
         return self._drop_roi_file(idx, p)
     if ext == ".json":
-        # Resolve by content — the three JSON kinds share an extension.
-        from minflux_viewer.core.filter_io import is_filter_json_file
-        from minflux_viewer.core.roi import is_roi_json_file
-        from minflux_viewer.core.save import is_metadata_json_file
+        # Resolve by content through the format registry -- the one table, in
+        # its declared order, that opening the file uses too (this route used
+        # to keep its own ROI -> filter -> sidecar order).
         try:
-            if is_roi_json_file(str(p)):
-                return self._drop_roi_file(idx, p)
-            if is_filter_json_file(str(p)):
-                return self._drop_filter_file(idx, p)
-            if is_metadata_json_file(str(p)):
-                return self._drop_metadata_sidecar(idx, p)
+            spec = _formats.resolve_open(p)
         except Exception as exc:
             self._state.log(f"Drop on '{ds.name}': could not read '{p.name}': {exc}",
                             "ERROR")
             return False
-        # Not one of the three annotation kinds — it may still be a data
-        # file or an MBM companion, so let the open path decide rather than
+        action = spec.action if spec is not None else None
+        if action is _formats.OpenAction.UNDETERMINED:
+            # Classified off the UI thread; the row's dataset is carried by
+            # key, so an annotation kind still lands on THIS dataset.
+            self._state.log(
+                f"Drop on '{ds.name}': '{p.name}' needs a fuller read to tell what it "
+                "is; it is applied here once identified.")
+            _classify_json_in_background(self, str(p), target=self._state.key_at(idx))
+            return True
+        if action is _formats.OpenAction.ROI_MANAGER:
+            return self._drop_roi_file(idx, p)
+        if action is _formats.OpenAction.FILTER_DIALOG:
+            return self._drop_filter_file(idx, p)
+        if action is _formats.OpenAction.METADATA_RECIPE:
+            return self._drop_metadata_sidecar(idx, p)
+        # Not an annotation kind -- it may still be a data file, an MBM
+        # companion or a sequence, so let the open path decide rather than
         # refusing a .json the application can read.
     # Not an apply-to-a-dataset kind. If the application can open it at
     # all, open it -- the row is simply not a meaningful target for a data

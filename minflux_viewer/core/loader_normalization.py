@@ -978,10 +978,12 @@ def _dtype_base_and_shape(dt: np.dtype) -> tuple[np.dtype, tuple]:
 
 
 def _add_mfx_attr(attrs: AttrStore, field_name: str, val: np.ndarray, num_raw: int) -> None:
-    if field_name in SPATIAL_COORD_FIELDS:
-        arr = np.asarray(val)
-        if arr.ndim == 1:
-            arr = arr.reshape(-1, 1)
+    arr = np.asarray(val)
+    if field_name in SPATIAL_COORD_FIELDS and arr.ndim == 2 and arr.shape[1] >= 2:
+        # A 2- or 3-component vector: x/y(/z), a 2-D one with z = 0 (the
+        # convention for 2-D localizations). A ONE-value field keeps its own
+        # name -- some exports store ``ext`` as a scalar pattern extent, and
+        # splitting it invented y/z columns of zeros.
         attrs[f"{field_name}_x"] = arr[:, 0].ravel()
         attrs[f"{field_name}_y"] = arr[:, 1].ravel() if arr.shape[1] > 1 else np.zeros(len(arr))
         attrs[f"{field_name}_z"] = arr[:, 2].ravel() if arr.shape[1] > 2 else np.zeros(len(arr))

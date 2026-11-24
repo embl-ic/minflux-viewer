@@ -250,6 +250,47 @@ def test_the_bypass_check_reads_only_the_header(canonical_csv, monkeypatch):
     monkeypatch.setattr(core_mod, "read_table_preview", _refuse)
     monkeypatch.setattr(core_mod, "read_table", _refuse)
     assert minflux_direct_load_kind(path) == "raw"
-    assert core_mod.delimited_header_row(path)[:2] == ["loc_x", "loc_y"]
+    assert core_mod.delimited_header_row(path)[:5] == ["itr", "tid", "tim", "vld", "loc_x"]
     # A file that is not delimited text is simply "not one".
     assert core_mod.delimited_header_row(path.parent / "missing.csv") == []
+
+
+def test_the_canonical_export_keeps_the_source_column_order(canonical_csv):
+    """Columns follow the source's fields, a vector at its own place -- not
+    vectors first and the rest alphabetically, as before."""
+    from minflux_viewer.core.spreadsheet_loader import delimited_header_row
+
+    path, _expected = canonical_csv
+    assert delimited_header_row(path) == [
+        "itr", "tid", "tim", "vld", "loc_x", "loc_y", "loc_z", "efo", "cfr",
+        "dcr_0", "dcr_1", "eco"]
+
+
+def test_an_imspector_table_exports_in_imspector_order():
+    from minflux_viewer.core.loader_format_readers import load_from_mfx_array
+    from minflux_viewer.core.save import dataset_to_mfx_array
+    from tests.test_format_equivalence import synthetic_m2410
+
+    source = synthetic_m2410()
+    exported = dataset_to_mfx_array(load_from_mfx_array(source, name="acq.npy"))
+    assert exported.dtype.names == source.dtype.names
+
+
+def test_opening_a_canonical_csv_in_the_window_skips_the_mapping_dialog(canonical_csv):
+    """The open/drop route (not only File > Import) loads it directly: one
+    dataset load with ``load_csv``, and no preview task for the dialog."""
+    from types import SimpleNamespace
+
+    from minflux_viewer.core.loader_format_readers import load_csv
+    from minflux_viewer.ui.controllers.file_open_controller import _load_spreadsheet
+
+    path, _expected = canonical_csv
+    loads, previews, logged = [], [], []
+    owner = SimpleNamespace(
+        _status_label=SimpleNamespace(setText=lambda text: None),
+        _state=SimpleNamespace(log=lambda text, *args: logged.append(text), prefs={}),
+        _start_dataset_load=lambda p, loader, *, kind: loads.append((p, loader)),
+        _begin_file_io=previews.append)
+    _load_spreadsheet(owner, str(path))
+    assert loads == [(str(path), load_csv)] and previews == []
+    assert any("no column mapping needed" in text for text in logged)

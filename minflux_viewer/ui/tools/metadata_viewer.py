@@ -51,9 +51,12 @@ def _pretty_json(content: str) -> str:
 class MetadataDocumentView(QWidget):
     """Name/value table plus a readable raw-document preview."""
 
-    def __init__(self, documents=(), parent=None) -> None:
+    def __init__(self, documents=(), parent=None, *, describe=None) -> None:
         super().__init__(parent)
         self._documents: tuple[MetadataDocument, ...] = ()
+        #: Optional ``describe(path: tuple[str, ...]) -> str`` for JSON keys,
+        #: shown as each row's tooltip (empty -> no tooltip).
+        self._describe = describe
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -169,19 +172,26 @@ class MetadataDocumentView(QWidget):
         for child in element:
             self._add_xml_item(item, child)
 
-    def _add_json_items(self, parent, value, name="root") -> None:
+    def _add_json_items(self, parent, value, name="root", path=()) -> None:
+        path = (*path, str(name))
         if isinstance(value, dict):
             item = QTreeWidgetItem([str(name), "", f"{len(value)} keys"])
             parent.addChild(item)
             for key, child in value.items():
-                self._add_json_items(item, child, str(key))
+                self._add_json_items(item, child, str(key), path)
         elif isinstance(value, list):
             item = QTreeWidgetItem([str(name), "", f"{len(value)} items"])
             parent.addChild(item)
             for index, child in enumerate(value):
-                self._add_json_items(item, child, f"[{index}]")
+                self._add_json_items(item, child, f"[{index}]", path)
         else:
-            parent.addChild(QTreeWidgetItem([str(name), str(value), type(value).__name__]))
+            item = QTreeWidgetItem([str(name), str(value), type(value).__name__])
+            parent.addChild(item)
+        if self._describe is not None:
+            text = self._describe(path)
+            if text:
+                for column in range(self.tree.columnCount()):
+                    item.setToolTip(column, text)
 
     def _apply_filter(self, query: str) -> None:
         needle = query.strip().casefold()

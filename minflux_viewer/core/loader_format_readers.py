@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import itertools
 import json
+from array import array
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,21 +21,19 @@ from minflux_viewer.core.dataset import (
     build_image_dataset,
     build_localization_dataset,
 )
+from minflux_viewer.core.final_localization import final_rows, records_final_status
 from minflux_viewer.core.loader_metadata_recipe import _restore_filter_mask, apply_metadata_sidecar
 from minflux_viewer.core.loader_normalization import (
-    SPATIAL_COORD_FIELDS,
     _add_derived_attributes,
+    _add_mfx_attr,
     _build_channel,
-    _build_mfx_raw_from_json_records,
     _build_mfx_raw_from_raw,
     _compute_properties,
+    _detect_raw_version,
     _effective_iteration_metadata,
     _is_legacy_nested_itr_mfx,
-    _json_coordinate_array_m,
-    _json_scalar_array,
-    _json_values,
-    _json_vector_array,
     _mat_struct_to_dict,
+    _mfx_columns,
     _normalize_mfx_attrs,
     _parse_raw,
     _source_metadata_from_raw,
@@ -45,13 +45,16 @@ from minflux_viewer.core.loader_raw_access import (
     attr_matches_last_valid,
 )
 
-_FLAT_X = ("xnm", "x")
+# Processed coordinate columns in nm, first match wins. The ``*_nm`` spellings
+# are the same family the CSV reader aliases ``xnm`` to; bare ``x`` comes last
+# (nm in a .mat/.npy table, but metres in JSON -- see _is_processed_flat_json).
+_FLAT_X = ("xnm", "x_nm", "loc_x_nm", "x")
 
 
-_FLAT_Y = ("ynm", "y")
+_FLAT_Y = ("ynm", "y_nm", "loc_y_nm", "y")
 
 
-_FLAT_Z = ("znm", "z")
+_FLAT_Z = ("znm", "z_nm", "loc_z_nm", "z")
 
 
 def _flat_table_from_dict(
@@ -86,7 +89,9 @@ def _flat_table_from_dict(
         return None                                  # structured mfx, not flat
     x = np.asarray(raw[xk]).ravel().astype(float)
     y = np.asarray(raw[yk]).ravel().astype(float)
-    if x.ndim != 1 or x.size < 2 or x.size != y.size:
+    # One row is a table too: whether coordinates are final must not depend on
+    # how many there are (a one-localization export was otherwise not pinned).
+    if x.ndim != 1 or x.size < 1 or x.size != y.size:
         return None
     n = x.size
     zk = find(_FLAT_Z)
@@ -167,6 +172,21 @@ def load_dataset(path: str | Path, prefs: dict | None = None, *,
             apply_metadata_sidecar(flat, path)
         return flat
 
+    # 1c. A flat (m2410) table: the same record table Imspector writes to .npy
+    # and .json, so it is built by the same builder -- columns cut out of the
+    # MATLAB arrays, no record buffer. m2205/legacy layouts keep their parser.
+    if _detect_raw_version(raw) == "m2410":
+        ds = load_from_mfx_columns(
+            _bool_flag_columns(_mat_m2410_columns(raw)), path.name,
+            folder=str(path.parent),
+            datetime_str=datetime.fromtimestamp(path.stat().st_mtime).strftime(
+                "%Y-%b-%d, %H:%M:%S"),
+            prefs=prefs)
+        ds.metadata["source_format"] = "mat"
+        if apply_sidecar:
+            apply_metadata_sidecar(ds, path)
+        return ds
+
     # 2. Build mfx_raw — all iterations, all measurements, no filtering
     mfx_raw_store = _build_mfx_raw_from_raw(raw)
 
@@ -212,6 +232,7 @@ def load_dataset(path: str | Path, prefs: dict | None = None, *,
         channel=channel,
     )
     dataset.metadata.update(_source_metadata_from_raw(raw, load_all_itr=load_all_itr))
+    dataset.metadata["source_format"] = "mat"
     dataset.metadata["valid_num_loc"] = _attrs_valid_count(attrs, prop.num_loc)
     dataset.metadata["includes_invalid"] = _attrs_include_invalid(attrs)
     dataset.components.mfx_raw = mfx_raw_store
@@ -223,6 +244,58 @@ def load_dataset(path: str | Path, prefs: dict | None = None, *,
     if apply_sidecar:
         apply_metadata_sidecar(dataset, path)
     return dataset
+
+
+def _mat_m2410_columns(raw: dict) -> dict[str, np.ndarray]:
+    """The m2410 fields of a loaded ``.mat`` dict as builder columns.
+
+    Same field handling the m2410 parser always had: a length-N column as
+    ``(N,)``, ``(1, N)`` or ``(N, 1)``; an ``(N, k)`` or ``(k, N)`` vector as
+    ``(N, k)``; an ``(N, K, k)`` array by its last plane; ``tic`` (the raw FPGA
+    clock, superseded by ``tim``) and the HDF5 ``#refs#`` placeholder skipped,
+    as is anything not numeric or not N long (a struct, the MBM companion).
+    """
+    n = np.asarray(raw["itr"]).ravel().size
+    columns: dict[str, np.ndarray] = {}
+    for key, value in raw.items():
+        arr = np.asarray(value)
+        if key in ("#refs#", "tic") or arr.ndim == 0 or arr.size == 0:
+            continue
+        if arr.dtype.kind not in "biuf":
+            continue
+        if arr.ndim == 1:
+            if arr.shape[0] != n:
+                continue
+            column = arr
+        elif arr.ndim == 2:
+            if arr.shape[0] == n:
+                column = arr
+            elif arr.shape[1] == n:
+                column = arr.T
+            else:
+                continue
+            if column.shape[1] == 1:
+                column = column[:, 0]
+        elif arr.ndim == 3 and arr.shape[0] == n:
+            column = arr[:, -1, :]
+        else:
+            continue
+        columns[str(key)] = column
+    return columns
+
+
+#: m2410 flags: Imspector writes them as booleans; MATLAB's logical loads as
+#: uint8, and a JSON 0/1 as int. A flag column holding only 0/1 becomes bool.
+_FLAG_FIELDS = ("vld", "fnl", "bot", "eot")
+
+
+def _bool_flag_columns(columns: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    for key in _FLAG_FIELDS:
+        values = columns.get(key)
+        if values is not None and values.dtype != np.bool_ and values.ndim == 1:
+            if np.isin(values, (0, 1)).all():
+                columns[key] = values.astype(bool)
+    return columns
 
 
 def _load_mat(path: Path) -> dict:
@@ -310,12 +383,78 @@ def load_from_mfx_array(
     prefs:
         Application preferences dict.
     """
-    prefs = prefs or {}
-    data_prefs = prefs.get("data", {}) or {}
-    load_all_itr = False          # always last-valid; browse via mfx_raw
-    only_valid   = data_prefs.get("only_valid_locs", True)
+    report = _progress_reporter(progress)
+    report(0.0)
+    if _is_legacy_nested_itr_mfx(mfx):
+        normalized = _normalize_mfx_attrs(
+            mfx, load_all_itr=True, progress=lambda f: report(0.7 * f))
+        selected = _normalize_mfx_attrs(mfx, load_all_itr=False)
+        report(0.7)
+        return _assemble_dataset(
+            normalized, selected, raw_num_loc=int(mfx.shape[0]),
+            file_info=_file_info(name, folder, datetime_str, recent_path),
+            prefs=prefs, report=report)
+    # A flat (m2410) table: copy the record buffer into columns ONCE (the copy
+    # dominates the build, ~70 % of it), then build from the columns.
+    names = list(getattr(mfx.dtype, "names", None) or ())
+    if mfx.ndim == 1 and names:
+        columns = _mfx_columns(mfx, progress=lambda f: report(0.7 * f))
+    else:
+        columns = {field: mfx[field] for field in names}
+    return load_from_mfx_columns(
+        columns, name, folder=folder, datetime_str=datetime_str,
+        recent_path=recent_path, prefs=prefs, progress=progress, _started=True)
 
-    file_info = FileInfo(
+
+#: ``source_version_detail`` of a flat table.
+_M2410_DETAIL = "m2410: all iteration value in N by 1 array"
+
+
+def load_from_mfx_columns(
+    columns: dict,
+    name: str,
+    folder: str = "",
+    datetime_str: str = "",
+    recent_path: str | None = None,
+    prefs: dict | None = None,
+    progress=None,
+    *,
+    _started: bool = False,
+) -> MinfluxDataset:
+    """Build a :class:`MinfluxDataset` from flat (m2410) columns.
+
+    ``columns`` maps each field to a ``(N,)`` array, or ``(N, k)`` for a vector
+    field (``loc``/``lnc``/``ext`` in metres, ``dcr``) -- exactly what
+    ``_mfx_columns`` cuts out of a structured array. This is the ONE builder
+    every flat MINFLUX reader ends in: a reader decodes its container into
+    columns and stamps ``source_format``; version, effective iterations,
+    validity, last-iteration materialization and ``mfx_raw`` happen here.
+    Handing columns straight in avoids interleaving them into a record buffer
+    only for it to be copied back out (measured 3.7x slower on a 59 MB .mat).
+    """
+    report = _progress_reporter(progress)
+    if not _started:
+        report(0.0)
+    n = _common_row_count(columns)
+    attrs_all = AttrStore()
+    for field in list(columns):
+        _add_mfx_attr(attrs_all, str(field), columns[field], n)
+    report(0.7)
+    return _assemble_dataset(
+        (attrs_all, n, 1, "m2410", _M2410_DETAIL), None, raw_num_loc=n,
+        file_info=_file_info(name, folder, datetime_str, recent_path),
+        prefs=prefs, report=report)
+
+
+def _progress_reporter(progress):
+    def report(fraction: float) -> None:
+        if progress is not None:
+            progress(float(fraction))
+    return report
+
+
+def _file_info(name, folder, datetime_str, recent_path) -> FileInfo:
+    return FileInfo(
         name=name,
         folder=folder,
         datetime=datetime_str or datetime.now().strftime("%Y-%b-%d, %H:%M:%S"),
@@ -323,17 +462,34 @@ def load_from_mfx_array(
         recent_path=recent_path,
     )
 
-    # Build mfx_raw: all iterations, no vld filtering
-    def _report(fraction: float) -> None:
-        if progress is not None:
-            progress(float(fraction))
 
-    _report(0.0)
-    # The field copy dominates the build (~70 % of it on a flat table).
+def _common_row_count(columns: dict) -> int:
+    """The row count every column shares; a disagreement is a format error."""
+    if not columns:
+        raise ValueError("No MINFLUX fields to build a dataset from.")
+    counts = {str(key): int(np.asarray(values).shape[0]) if np.ndim(values) else -1
+              for key, values in columns.items()}
+    distinct = set(counts.values())
+    if len(distinct) != 1 or -1 in distinct:
+        raise ValueError(f"MINFLUX fields do not share one row count: {counts}")
+    return distinct.pop()
+
+
+def _assemble_dataset(normalized, selected, *, raw_num_loc: int, file_info: FileInfo,
+                      prefs: dict | None, report) -> MinfluxDataset:
+    """Everything after the fields are columns: raw store, validity and
+    last-iteration selection, derived attributes, metadata.
+
+    ``normalized`` is ``_normalize_mfx_attrs``' all-iteration result;
+    ``selected`` its last-iteration result for a nested (m2205) table, or
+    ``None`` for a flat one, whose all-iteration columns are reused.
+    """
+    prefs = prefs or {}
+    data_prefs = prefs.get("data", {}) or {}
+    load_all_itr = False          # always last-valid; browse via mfx_raw
+    only_valid   = data_prefs.get("only_valid_locs", True)
     (attrs_all, num_raw_all, all_num_itr,
-     all_version, all_version_detail) = _normalize_mfx_attrs(
-        mfx, load_all_itr=True, progress=lambda f: _report(0.7 * f))
-    _report(0.7)
+     all_version, all_version_detail) = normalized
     mfx_raw_store = AttrStore()
     for _k, _v in attrs_all.items():
         mfx_raw_store[_k] = np.asarray(_v)
@@ -342,11 +498,8 @@ def load_from_mfx_array(
     if "itr" not in mfx_raw_store:
         mfx_raw_store["itr"] = np.zeros(num_raw_all, dtype=np.int16)
 
-    if _is_legacy_nested_itr_mfx(mfx):
-        attrs, num_raw, detected_num_itr, source_version, source_version_detail = _normalize_mfx_attrs(
-            mfx,
-            load_all_itr=load_all_itr,
-        )
+    if selected is not None:
+        attrs, num_raw, detected_num_itr, source_version, source_version_detail = selected
     else:
         # A flat (m2410) table ignores ``load_all_itr``, so a second pass would
         # copy every field out of the record buffer again for an identical
@@ -376,7 +529,23 @@ def load_from_mfx_array(
 
     itr_arr = attrs.get("itr", None)
     num_itr = max(int(detected_num_itr), 1)
-    if itr_arr is not None:
+    # The acquisition's iteration count comes from EVERY raw row, not from the
+    # valid ones: when no row of the highest iteration is valid, counting only
+    # valid rows under-reported it (2 where the .mat/.json readers said 3), and
+    # iteration browsing and the stacked-iteration colours take this count as
+    # the sequence length. ``num_itr`` below stays the materialized iteration.
+    raw_num_itr = _flat_iteration_count(mfx_raw_store.get("itr"))
+    sta_arr = attrs.get("sta")
+    if selected is None and itr_arr is not None and records_final_status(sta_arr, num_raw):
+        # The file's own per-row status: ``sta == 1`` is a valid final
+        # localization, in whichever thread it ran -- the rule raw browsing
+        # uses too (core.final_localization), so the rows stay aligned.
+        valid_mask &= final_rows(itr_arr, attrs.get("vld"), sta_arr, attrs.get("fnl"),
+                                 vld_only=only_valid)
+        chosen = np.asarray(itr_arr).ravel()[valid_mask]
+        if chosen.size:
+            num_itr = int(np.max(chosen)) + 1
+    elif itr_arr is not None:
         try:
             itr_raw = np.asarray(itr_arr).ravel()
             valid_itr = itr_raw[valid_mask]
@@ -395,12 +564,12 @@ def load_from_mfx_array(
             attrs[key] = arr[valid_mask]
 
     num_loc = int(valid_mask.sum())
-    _report(0.8)
+    report(0.8)
 
     prop = _compute_properties(attrs, num_loc, num_itr, prefs=prefs)
     attrs = _add_derived_attributes(attrs, prop, prefs=prefs)
     prop.attr_names = attrs.keys()
-    _report(0.9)
+    report(0.9)
 
     cali = Calibration()
     channel = _build_channel(attrs, prop)
@@ -416,9 +585,12 @@ def load_from_mfx_array(
         {
             "source_version": source_version,
             "source_version_detail": source_version_detail,
-            "raw_num_loc": int(mfx.shape[0]),
+            "raw_num_loc": int(raw_num_loc),
             "valid_num_loc": _attrs_valid_count(attrs, prop.num_loc),
-            "raw_num_itr": int(num_itr),
+            "raw_num_itr": int(
+                num_itr if source_version != "m2410" or raw_num_itr is None
+                else max(raw_num_itr, num_itr)
+            ),
             "iteration_load_mode": "all" if load_all_itr else "last",
             "includes_invalid": _attrs_include_invalid(attrs),
         }
@@ -430,8 +602,25 @@ def load_from_mfx_array(
     dataset.components.mfx_raw = mfx_raw_store
     if not attr_matches_last_valid(dataset):
         dataset.components.derived_last = _derived_last_from_raw(mfx_raw_store, num_itr, prefs)
-    _report(1.0)
+    report(1.0)
     return dataset
+
+
+def _flat_iteration_count(itr_values) -> int | None:
+    """``max(itr) + 1`` over every row of a flat (m2410) ``itr`` column.
+
+    ``None`` when there is no usable integer column, so the caller keeps its
+    own count rather than inventing one.
+    """
+    if itr_values is None:
+        return None
+    arr = np.asarray(itr_values).ravel()
+    if arr.size == 0 or not np.issubdtype(arr.dtype, np.number):
+        return None
+    finite = arr[np.isfinite(arr)] if np.issubdtype(arr.dtype, np.floating) else arr
+    if finite.size == 0:
+        return None
+    return int(np.max(finite)) + 1
 
 
 def load_npy(path: str | Path, prefs: dict | None = None, *,
@@ -475,6 +664,7 @@ def load_npy(path: str | Path, prefs: dict | None = None, *,
             path.name, str(path.parent), prefs,
         )
         if flat is not None:
+            flat.metadata["source_format"] = "npy"
             if apply_sidecar:
                 apply_metadata_sidecar(flat, path)
             return flat
@@ -485,6 +675,7 @@ def load_npy(path: str | Path, prefs: dict | None = None, *,
             datetime_str=file_info.datetime,
             prefs=prefs,
         )
+        ds.metadata["source_format"] = "npy"
         if apply_sidecar:
             apply_metadata_sidecar(ds, path)
         return ds
@@ -532,6 +723,7 @@ def load_npy(path: str | Path, prefs: dict | None = None, *,
     )
     ds.metadata.update({
         "source_version": "plain_array",
+        "source_format": "npy",
         "raw_num_loc": n,
         "raw_num_itr": 1,
         "iteration_load_mode": "last",
@@ -791,8 +983,6 @@ def load_csv(path: str | Path, prefs: dict | None = None, *,
     data = None
 
     if data is None:
-        from array import array
-
         buffers = {raw: array("d") for raw in raw_cols}
         bad_columns: set[str] = set()
         n = 0
@@ -932,369 +1122,647 @@ def load_json(path: str | Path, prefs: dict | None = None, *,
     Load Abberior-style MINFLUX JSON localization records.
 
     The expected shape is a list of record dictionaries, or a dictionary with
-    an ``mfx``/``records``/``data`` list. Coordinates are expected either in a
-    vector field such as ``loc``/``lnc``/``ext`` using metres, or in explicit
-    nanometre columns such as ``xnm``/``ynm``. The dataset is normalized into
-    the existing internal ``loc_x``/``loc_y``/``loc_z`` metre convention so all
-    current render, filter, plot, and analysis paths keep working.
+    an ``mfx``/``records``/``localizations``/``data`` list. The records are
+    decoded into columns and built by :func:`load_from_mfx_columns`, the same
+    builder ``.npy``, MSR, Zarr and CSV data go through, so a JSON file yields
+    the same dataset -- structural version, effective CFR/EFC iteration,
+    validity -- as the identical table in any other container.
+
+    Coordinates are a ``loc`` (or ``lnc``) vector in metres, or explicit
+    columns: ``loc_x``/``x`` in metres, ``loc_x_nm``/``x_nm``/``xnm`` in nm. A
+    table of ``xnm``/``ynm`` columns without a ``loc`` vector is a processed
+    flat table (what a snapshot export writes) and loads exactly like the same
+    table in ``.npy``/``.mat``: coordinates final, Z scaling factor pinned.
+
+    Files below ``_JSON_STREAM_BYTES`` are decoded with ``json.load`` (the
+    fastest decoder measured); larger ones are streamed record by record. Both
+    accept the same shapes -- a bare record array, or an object wrapping exactly
+    one -- so the size picks only the decoder.
     """
     path = Path(path).resolve()
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
+    if path.stat().st_size >= _JSON_STREAM_BYTES:
+        return _load_json_streaming_canonical(path, prefs, apply_sidecar=apply_sidecar)
 
-    # File > Save writes a flat JSON array.  Use the streaming canonical path
-    # for large arrays so reopening a large MSR export does not first create a
-    # Python list of millions of record dictionaries.
-    if path.stat().st_size >= 128 * 1024 * 1024:
-        return _load_json_streaming_canonical(
-            path, prefs, apply_sidecar=apply_sidecar)
-
-    prefs = prefs or {}
-    data_prefs   = prefs.get("data", {}) or {}
-    only_valid   = data_prefs.get("only_valid_locs", True)
-    load_all_itr = False          # always last-valid; browse via mfx_raw
-
-    with open(path, encoding="utf-8") as f:
-        payload = json.load(f)
-
+    with open(path, encoding="utf-8-sig") as handle:
+        payload = json.load(handle)
     records = _extract_json_records(payload)
     if records is None or not _looks_like_minflux_json_records(records):
         raise ValueError(
             f"'{path.name}' is not recognised as MINFLUX localization JSON."
         )
-
-    # Build mfx_raw from ALL records (no vld/itr filtering)
-    mfx_raw_store = _build_mfx_raw_from_json_records(records)
-
-    # Compute raw iteration count before filtering
-    _itr_all_vals = _json_values(records, "itr")
-    if _itr_all_vals is not None:
-        _itr_all_arr = np.asarray([0 if v is None else int(v) for v in _itr_all_vals], dtype=np.int32)
-        _raw_num_itr = int(_itr_all_arr.max()) + 1 if _itr_all_arr.size else 1
-    else:
-        _raw_num_itr = 1
-
-    loc_m = _json_coordinate_array_m(records)
-    valid = np.isfinite(loc_m).all(axis=1)
-
-    # vld filter — mirrors _parse_m2410 behaviour
-    if only_valid:
-        vld = _json_values(records, "vld")
-        if vld is not None:
-            valid &= np.asarray([bool(v) for v in vld], dtype=bool)
-
-    # Iteration filter — keep only the last (highest) iteration, same as _parse_m2410.
-    # The JSON file is flat m2410-style: one record per localization event, so records
-    # with itr < max_itr are intermediate measurements that the other loaders discard.
-    if not load_all_itr:
-        itr_values = _json_values(records, "itr")
-        if itr_values is not None:
-            itr_arr = np.asarray(
-                [0 if v is None else int(v) for v in itr_values], dtype=np.int32
-            )
-            if valid.any():
-                max_itr = int(itr_arr[valid].max())
-                valid &= (itr_arr == max_itr)
-
-    if not np.any(valid):
-        raise ValueError(f"'{path.name}' contains no valid finite localizations.")
-
-    loc_m = loc_m[valid]
-    kept_records = [record for record, keep in zip(records, valid) if keep]
-    n = int(loc_m.shape[0])
-
-    attrs = AttrStore({
-        "loc_x": loc_m[:, 0],
-        "loc_y": loc_m[:, 1],
-        "loc_z": loc_m[:, 2],
-    })
-
-    keys = sorted({key for record in kept_records for key in record.keys()})
-    vector_xyz_keys = {"loc", "lnc", "ext"}
-    coordinate_aliases = {
-        "x", "y", "z", "xnm", "ynm", "znm",
-        "x_nm", "y_nm", "z_nm",
-        "loc_x", "loc_y", "loc_z",
-        "loc_x_nm", "loc_y_nm", "loc_z_nm",
-    }
-
-    for key in keys:
-        if key in coordinate_aliases:
-            continue
-        values = _json_values(kept_records, key)
-        if values is None:
-            continue
-
-        if key in vector_xyz_keys:
-            arr_m = _json_vector_array(values, width=3)
-            if arr_m is None:
-                continue
-            attrs[f"{key}_x"] = arr_m[:, 0]
-            attrs[f"{key}_y"] = arr_m[:, 1]
-            attrs[f"{key}_z"] = arr_m[:, 2] if arr_m.shape[1] > 2 else np.zeros(n)
-            continue
-
-        vector = _json_vector_array(values)
-        if vector is not None:
-            if key == "dcr":
-                attrs["dcr"] = vector[:, 0]
-                for col in range(vector.shape[1]):
-                    attrs[f"dcr_{col}"] = vector[:, col]
-            elif vector.shape[1] in (2, 3):
-                attrs[f"{key}_x"] = vector[:, 0]
-                attrs[f"{key}_y"] = vector[:, 1]
-                attrs[f"{key}_z"] = vector[:, 2] if vector.shape[1] > 2 else np.zeros(n)
-            continue
-
-        scalar = _json_scalar_array(values)
-        if scalar is not None and scalar.shape[0] == n:
-            attrs[key] = scalar
-
-    if "tid" not in attrs:
-        attrs["tid"] = np.arange(n, dtype=np.int32)
-    if "tim" not in attrs:
-        attrs["tim"] = np.zeros(n, dtype=float)
-    if "itr" not in attrs:
-        attrs["itr"] = np.zeros(n, dtype=np.int16)
-
-    num_itr_arr = attrs.get("itr", None)
-    num_itr = (
-        int(np.nanmax(num_itr_arr) + 1)
-        if num_itr_arr is not None and np.asarray(num_itr_arr).size
-        else 1
-    )
-
-    saved_ftr = attrs.pop("ftr", None)   # before derived attrs reset it
-    prop = _compute_properties(attrs, n, num_itr, prefs=prefs)
-    attrs = _add_derived_attributes(attrs, prop, prefs=prefs)
-    prop.attr_names = attrs.keys()
-
-    ds = MinfluxDataset(
-        file=FileInfo(
-            name=path.name,
-            folder=str(path.parent),
-            datetime=datetime.fromtimestamp(path.stat().st_mtime).strftime(
-                "%Y-%b-%d, %H:%M:%S"
-            ),
-        ),
-        prop=prop,
-        attr=attrs,
-        cali=Calibration(),
-        channel=_build_channel(attrs, prop),
-    )
-    ds.metadata.update({
-        "source_version": "json",
-        "raw_num_loc": len(records),
-        "valid_num_loc": _attrs_valid_count(attrs, prop.num_loc),
-        "raw_num_itr": _raw_num_itr,
-        "iteration_load_mode": "all" if load_all_itr else "last",
-        "includes_invalid": _attrs_include_invalid(attrs),
-    })
-    ds.components.mfx_raw = mfx_raw_store
-    if not attr_matches_last_valid(ds):
-        ds.components.derived_last = _derived_last_from_raw(mfx_raw_store, _raw_num_itr, prefs)
-    _restore_filter_mask(ds, saved_ftr)
+    ds = _dataset_from_json_columns(_json_columns(records), path, prefs)
     if apply_sidecar:
         apply_metadata_sidecar(ds, path)
     return ds
 
 
-def _iter_json_array_records(path: Path):
-    """Yield records from a top-level JSON array without loading the array."""
-    from json import JSONDecodeError, JSONDecoder
+#: At or above this size a JSON file is streamed instead of ``json.load``-ed.
+_JSON_STREAM_BYTES = 128 * 1024 * 1024
+#: A gap in these is a format error, not missing data: they say which row is a
+#: valid localization of which trace at which iteration.
+_JSON_GAP_INTOLERANT = frozenset({"vld", "fnl", "bot", "eot", "itr", "tid"})
+#: Explicit coordinate columns, first match wins: (x, y, z, metres per unit).
+_JSON_COORDINATE_COLUMNS = (
+    ("loc_x", "loc_y", "loc_z", 1.0),
+    ("x", "y", "z", 1.0),
+    ("loc_x_nm", "loc_y_nm", "loc_z_nm", 1e-9),
+    ("xnm", "ynm", "znm", 1e-9),
+    ("x_nm", "y_nm", "z_nm", 1e-9),
+)
+_JSON_COORDINATE_ALIASES = frozenset(
+    name for triple in _JSON_COORDINATE_COLUMNS for name in triple[:3])
+_MISSING = object()
 
-    decoder = JSONDecoder()
-    chunk_size = 1024 * 1024
-    with path.open("r", encoding="utf-8-sig") as handle:
-        buffer = ""
-        position = 0
-        eof = False
 
-        def fill() -> bool:
-            nonlocal buffer, eof
-            if eof:
-                return False
-            chunk = handle.read(chunk_size)
-            if chunk:
-                buffer += chunk
-                return True
-            eof = True
+def _json_columns(records: list[dict]) -> dict[str, np.ndarray]:
+    """Records -> one column per key, in first-seen key order.
+
+    The dtype follows the JSON literals: all booleans -> ``bool``, all integers
+    -> ``int64``, any float -> ``float64``, equal-length lists -> ``(N, k)``
+    ``float64``. A key absent from a record is NaN there (a gap in a flag,
+    ``itr`` or ``tid`` is an error naming the record). Text and objects are not
+    data and are skipped, as before.
+    """
+    keys = list(dict.fromkeys(key for record in records for key in record))
+    columns: dict[str, np.ndarray] = {}
+    for key in keys:
+        values = [record.get(key, _MISSING) for record in records]
+        column = _json_column(str(key), values)
+        if column is not None:
+            columns[str(key)] = column
+    return columns
+
+
+def _json_column(key: str, values: list) -> np.ndarray | None:
+    try:
+        arr = np.asarray(values)
+    except ValueError:                    # ragged lists
+        arr = None
+    if arr is not None and arr.ndim in (1, 2) and arr.dtype.kind in "bif":
+        if arr.ndim == 2 or arr.dtype.kind == "f":
+            return arr.astype(np.float64, copy=False)
+        return arr                        # bool or int64
+    if arr is not None and arr.dtype.kind in "US":
+        return None
+    return _json_column_slow(key, values)
+
+
+def _json_column_slow(key: str, values: list) -> np.ndarray | None:
+    """Gaps, mixed literals or ragged vectors -- the per-value path."""
+    present = [v for v in values if v is not _MISSING and v is not None]
+    if not present:
+        return None
+    gaps = len(present) != len(values)
+    if gaps and key in _JSON_GAP_INTOLERANT:
+        first = next(i for i, v in enumerate(values) if v is _MISSING or v is None)
+        raise ValueError(f"JSON record {first} has no '{key}', which other records carry.")
+    if all(isinstance(v, (list, tuple)) for v in present):
+        width = max(len(v) for v in present)
+        out = np.full((len(values), width), np.nan)
+        try:
+            for row, value in enumerate(values):
+                if isinstance(value, (list, tuple)):
+                    # A short vector is zero-padded (a 2-D ``loc`` gets z = 0),
+                    # as the reader always did; an absent one stays NaN.
+                    out[row, :] = 0.0
+                    out[row, :len(value)] = [_json_number(item) for item in value]
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return out
+    if any(isinstance(v, (list, tuple, dict)) for v in present):
+        return None
+    try:
+        return np.asarray(
+            [np.nan if (v is _MISSING or v is None) else _json_number(v) for v in values],
+            dtype=np.float64)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _json_number(value) -> float:
+    """A JSON number (or boolean) as float; text is not a number here, as the
+    whole-column path (where NumPy makes such a column text) already treats it."""
+    kind = type(value)
+    if kind is not float and kind is not int and kind is not bool:
+        raise TypeError(value)
+    return float(value)
+
+
+#: Coordinate families in nm that mark a processed table (what the snapshot
+#: export writes): final coordinates, so the Z scaling factor is pinned.
+_PROCESSED_JSON_FAMILIES = (("xnm", "ynm"), ("x_nm", "y_nm"), ("loc_x_nm", "loc_y_nm"))
+
+
+def _is_processed_flat_json(columns: dict) -> bool:
+    """Exactly one nm coordinate family and nothing in metres: a processed table.
+
+    ``xnm``, ``x_nm`` and ``loc_x_nm`` qualify alike, at any row count. Bare
+    ``x``/``y`` never do -- they are metres in JSON, while the flat-table
+    builder reads them as nanometres -- and neither does a table that also
+    carries a ``loc``/``lnc`` vector or metre columns (raw data, built as such).
+    """
+    names = set(columns)
+    families = [family for family in _PROCESSED_JSON_FAMILIES if set(family) <= names]
+    raw = {"loc", "lnc", "loc_x", "loc_y", "loc_z", "x", "y", "z"} & names
+    return len(families) == 1 and not raw
+
+
+def _with_loc_column(columns: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """``columns`` with one ``loc (N, 3)`` column in metres, aliases removed.
+
+    First match wins: a ``loc`` vector, an ``lnc`` vector (copied to ``loc``),
+    then the explicit columns of ``_JSON_COORDINATE_COLUMNS``. ``loc`` takes
+    the place of the first column it was made from, so the attribute order
+    follows the file.
+    """
+    def padded(vector: np.ndarray) -> np.ndarray:
+        if vector.ndim != 2 or vector.shape[1] < 2:
+            raise ValueError("JSON 'loc' field must contain numeric xy or xyz values.")
+        if vector.shape[1] == 2:
+            vector = np.column_stack([vector, np.zeros(len(vector))])
+        return vector[:, :3]
+
+    def rebuilt(anchor: str, loc: np.ndarray, drop: set[str]) -> dict[str, np.ndarray]:
+        out: dict[str, np.ndarray] = {}
+        for key, values in columns.items():
+            if key == anchor:
+                out["loc"] = loc
+            if key in drop or key == "loc":
+                continue
+            out[key] = values
+        return out
+
+    aliases = set(_JSON_COORDINATE_ALIASES) & set(columns)
+    if "loc" in columns:
+        return rebuilt("loc", padded(np.asarray(columns["loc"], dtype=float)), aliases)
+    lnc = columns.get("lnc")
+    if lnc is not None and np.ndim(lnc) == 2:
+        return rebuilt("lnc", padded(np.asarray(lnc, dtype=float)).copy(), aliases)
+    for x_key, y_key, z_key, scale in _JSON_COORDINATE_COLUMNS:
+        x, y = columns.get(x_key), columns.get(y_key)
+        if x is None or y is None or np.ndim(x) != 1 or np.ndim(y) != 1:
+            continue
+        z = columns.get(z_key)
+        z = np.zeros(len(x)) if z is None or np.ndim(z) != 1 else z
+        loc = np.column_stack([x, y, z]).astype(float) * scale
+        return rebuilt(x_key, loc, aliases)
+    raise ValueError("JSON data must contain loc/lnc or x/y localization coordinates.")
+
+
+def _dataset_from_json_columns(columns: dict[str, np.ndarray], path: Path,
+                               prefs: dict | None) -> MinfluxDataset:
+    """Decoded JSON columns -> a dataset, through the shared builders."""
+    datetime_str = datetime.fromtimestamp(path.stat().st_mtime).strftime(
+        "%Y-%b-%d, %H:%M:%S")
+    if _is_processed_flat_json(columns):
+        flat = _flat_table_from_dict(dict(columns), path.name, str(path.parent), prefs)
+        if flat is not None:
+            flat.metadata["source_format"] = "json"
+            return flat
+    columns = _with_loc_column(columns)
+    n = len(columns["loc"])
+    has_itr = "itr" in columns
+    defaults = (("tid", np.arange(n, dtype=np.int32)), ("tim", np.zeros(n)),
+                ("itr", np.zeros(n, dtype=np.int32)))
+    for key, value in defaults:
+        columns.setdefault(key, value)
+    columns = _bool_flag_columns(columns)
+    ds = load_from_mfx_columns(columns, path.name, folder=str(path.parent),
+                               datetime_str=datetime_str, prefs=prefs)
+    if ds.prop.num_loc == 0:
+        raise ValueError(f"'{path.name}' contains no valid finite localizations.")
+    ds.metadata["source_format"] = "json"
+    if not has_itr:
+        # Records without an iteration index are not an m2410 table, whatever
+        # else they carry; say "imported" rather than claim the structure.
+        ds.metadata["source_version"] = "imported"
+        ds.metadata.pop("source_version_detail", None)
+    return ds
+
+
+#: Characters that can continue a JSON number (digits, sign, point, exponent).
+_NUMBER_CHARS = frozenset("0123456789+-.eE")
+
+
+class _JsonTextStream:
+    """A JSON text file read in chunks, one complete value at a time."""
+
+    CHUNK = 1024 * 1024
+
+    def __init__(self, handle) -> None:
+        from json import JSONDecoder
+
+        self._handle = handle
+        self._decoder = JSONDecoder()
+        self.buffer = ""
+        self.position = 0
+        self.consumed = 0               # characters dropped from the buffer's front
+        self.eof = False
+
+    @property
+    def offset(self) -> int:
+        return self.consumed + self.position
+
+    def fill(self) -> bool:
+        if self.eof:
             return False
+        chunk = self._handle.read(self.CHUNK)
+        if chunk:
+            self.buffer += chunk
+            return True
+        self.eof = True
+        return False
 
-        while position >= len(buffer) and fill():
-            pass
-        while position < len(buffer) and buffer[position].isspace():
-            position += 1
-        if position >= len(buffer) or buffer[position] != "[":
-            raise ValueError("Large JSON MINFLUX exports must be a top-level record array.")
-        position += 1
+    def peek(self) -> str:
+        """The next non-whitespace character ("" at the end)."""
+        while True:
+            while self.position < len(self.buffer) and self.buffer[self.position] in " \t\r\n":
+                self.position += 1
+            if self.position < len(self.buffer):
+                return self.buffer[self.position]
+            if not self.fill():
+                return ""
+
+    def value(self):
+        """Decode the next complete value (the caller has peeked past whitespace)."""
+        from json import JSONDecodeError
 
         while True:
-            while True:
-                while position >= len(buffer):
-                    if not fill():
-                        raise ValueError("Unexpected end of large JSON record array.")
-                while position < len(buffer) and buffer[position].isspace():
-                    position += 1
-                    if position >= len(buffer) and not fill():
-                        raise ValueError("Unexpected end of large JSON record array.")
-                if position < len(buffer) and buffer[position] == ",":
-                    position += 1
+            try:
+                value, end = self._decoder.raw_decode(self.buffer, self.position)
+            except JSONDecodeError:
+                if self.fill():
                     continue
-                break
-            if buffer[position] == "]":
-                return
+                raise ValueError(f"Malformed JSON at character {self.offset}.") from None
+            # A number cut by the end of what was read may go on in the next
+            # chunk -- "12" of "1234", but also "1" of "1e-09": the decoder
+            # stops before an "e" with no digits yet, so test whether the
+            # characters after its end could still belong to the number, up to
+            # the end of the buffer. Then read on and decode again.
+            tail = end
+            while tail < len(self.buffer) and self.buffer[tail] in _NUMBER_CHARS:
+                tail += 1
+            if tail >= len(self.buffer) and self.fill():
+                continue
+            self.position = end
+            # Do not retain already-decoded text while a large file streams.
+            if self.position >= self.CHUNK * 2:
+                self.buffer = self.buffer[self.position:]
+                self.consumed += self.position
+                self.position = 0
+            return value
 
-            while True:
-                try:
-                    record, end = decoder.raw_decode(buffer, position)
-                    break
-                except JSONDecodeError:
-                    if not fill():
-                        raise ValueError("Malformed large JSON record array.") from None
-            if not isinstance(record, dict):
-                raise ValueError("MINFLUX JSON records must be objects.")
-            yield record
-            position = end
-            # Avoid retaining already-decoded record text indefinitely while a
-            # large array is streamed.
-            if position >= chunk_size * 2:
-                buffer = buffer[position:]
-                position = 0
+
+def _stream_record_array(stream: _JsonTextStream):
+    """Yield the objects of the array at the stream's position.
+
+    As strict as ``json.load``: exactly one comma between records, none after
+    the last. Each error names the character offset.
+    """
+    stream.position += 1                                  # the "["
+    if stream.peek() == "]":
+        stream.position += 1
+        return
+    while True:
+        record = stream.value()
+        if not isinstance(record, dict):
+            raise ValueError("MINFLUX JSON records must be objects.")
+        yield record
+        char = stream.peek()
+        if char == ",":
+            stream.position += 1
+            char = stream.peek()
+            if char in ("]", ","):
+                raise ValueError(
+                    f"Extra comma in the JSON record array at character {stream.offset}.")
+            if char == "":
+                raise ValueError("Unexpected end of the JSON record array.")
+            continue
+        if char == "]":
+            stream.position += 1
+            return
+        if char == "":
+            raise ValueError("Unexpected end of the JSON record array.")
+        raise ValueError(f"Missing ',' between JSON records at character {stream.offset}.")
+
+
+def _several_wrappers(keys) -> ValueError:
+    return ValueError(f"The JSON object holds record arrays under {', '.join(keys)}; "
+                      "a MINFLUX file holds exactly one.")
+
+
+def _iter_json_records(path: Path):
+    """Yield the localization records of a JSON file without loading it whole.
+
+    The same two shapes :func:`_extract_json_records` accepts: a top-level
+    record array, or an object holding exactly one record array under a
+    :data:`~minflux_viewer.core.json_probe.RECORD_WRAPPER_KEYS` key (its other
+    members are decoded and dropped). Strict like ``json.load`` about the
+    surrounding syntax, and nothing but whitespace may follow the document.
+    """
+    from minflux_viewer.core.json_probe import RECORD_WRAPPER_KEYS
+
+    with path.open("r", encoding="utf-8-sig") as handle:
+        stream = _JsonTextStream(handle)
+        top = stream.peek()
+        if top == "[":
+            yield from _stream_record_array(stream)
+        elif top == "{":
+            stream.position += 1
+            wrapper = None
+            if stream.peek() == "}":
+                stream.position += 1
+            else:
+                while True:
+                    if stream.peek() != '"':
+                        raise ValueError(f"Expected a key at character {stream.offset}.")
+                    key = stream.value()
+                    if stream.peek() != ":":
+                        raise ValueError(f"Expected ':' at character {stream.offset}.")
+                    stream.position += 1
+                    if key in RECORD_WRAPPER_KEYS and stream.peek() == "[":
+                        if wrapper is not None:
+                            raise _several_wrappers((wrapper, key))
+                        wrapper = key
+                        yield from _stream_record_array(stream)
+                    else:
+                        if stream.peek() == "":
+                            raise ValueError("Unexpected end of the JSON object.")
+                        stream.value()               # another member: not data
+                    char = stream.peek()
+                    if char == ",":
+                        stream.position += 1
+                        continue
+                    if char == "}":
+                        stream.position += 1
+                        break
+                    raise ValueError(f"Expected ',' or '}}' at character {stream.offset}.")
+            if wrapper is None:
+                raise ValueError("The JSON object holds no record array under "
+                                 f"{'/'.join(RECORD_WRAPPER_KEYS)}.")
+        else:
+            raise ValueError("MINFLUX JSON is a record array or an object wrapping one.")
+        if stream.peek() != "":
+            raise ValueError(
+                f"Unexpected content after the JSON document at character {stream.offset}.")
 
 
 def _load_json_streaming_canonical(path: Path, prefs: dict | None, *,
                                    apply_sidecar: bool = True) -> MinfluxDataset:
-    """Load the large flat JSON representation emitted by the canonical saver."""
-    from array import array
+    """Load a large JSON record array (bare or wrapped) without a list of it.
 
-    iterator = _iter_json_array_records(path)
-    try:
-        first = next(iterator)
-    except StopIteration:
-        raise ValueError(f"'{path.name}' is empty.") from None
-    if not _looks_like_minflux_json_records([first]) or "loc" not in first:
-        raise ValueError(
-            f"'{path.name}' is not a supported large MINFLUX JSON export."
-        )
-
-    # The canonical writer emits numeric scalars and fixed-width loc/dcr
-    # vectors.  Store them in compact C arrays while decoding, then recompose
-    # the normal structured m2410 array once at the end.
-    specs: dict[str, tuple[str, int | None]] = {}
-    buffers: dict[str, array] = {}
-    row_count = 0
-
-    def add_spec(key: str, value: Any) -> None:
-        if key in specs:
-            return
-        def component_name(col: int) -> str:
-            if key == "dcr":
-                return f"{key}_{col}"
-            return f"{key}_{('x', 'y', 'z')[col]}"
-
-        if key in SPATIAL_COORD_FIELDS:
-            specs[key] = ("vector", 3)
-            for suffix in ("x", "y", "z"):
-                buffers[f"{key}_{suffix}"] = array("d")
-        elif key == "dcr" or isinstance(value, (list, tuple)):
-            width = len(value) if isinstance(value, (list, tuple)) else 2
-            if width not in (2, 3):
-                return
-            specs[key] = ("vector", width)
-            for col in range(width):
-                buffers[component_name(col)] = array("d")
-        else:
-            specs[key] = ("scalar", None)
-            buffers[key] = array("d")
-
-    for key, value in first.items():
-        add_spec(str(key), value)
-
-    def append_record(record: dict) -> None:
-        nonlocal row_count
-        for key, value in record.items():
-            add_spec(str(key), value)
-        for key, (kind, width) in specs.items():
-            value = record.get(key)
-            if kind == "vector":
-                values = value if isinstance(value, (list, tuple)) else ()
-                for col in range(int(width or 0)):
-                    item = values[col] if col < len(values) else np.nan
-                    buffer_name = (
-                        f"{key}_{col}" if key == "dcr"
-                        else f"{key}_{('x', 'y', 'z')[col]}"
-                    )
-                    try:
-                        buffers[buffer_name].append(float(item) if item is not None else np.nan)
-                    except (TypeError, ValueError):
-                        buffers[buffer_name].append(np.nan)
-            else:
-                try:
-                    buffers[key].append(float(value) if value is not None else np.nan)
-                except (TypeError, ValueError):
-                    buffers[key].append(np.nan)
-        row_count += 1
-
-    append_record(first)
-    for record in iterator:
-        append_record(record)
-
-    columns: dict[str, np.ndarray] = {}
-    for key, buffer in buffers.items():
-        values = np.frombuffer(buffer, dtype=np.float64)
-        if key == "vld":
-            columns[key] = values.astype(bool)
-        elif key == "itr":
-            columns[key] = np.nan_to_num(values, nan=0.0).astype(np.int32)
-        elif key == "tid":
-            columns[key] = np.nan_to_num(values, nan=0.0).astype(np.int64)
-        else:
-            columns[key] = values
-
-    from minflux_viewer.core.save import columns_to_mfx_array
-
-    mfx = columns_to_mfx_array(columns)
-    ds = load_from_mfx_array(
-        mfx=mfx,
-        name=path.name,
-        folder=str(path.parent),
-        datetime_str=datetime.fromtimestamp(path.stat().st_mtime).strftime(
-            "%Y-%b-%d, %H:%M:%S"
-        ),
-        prefs=prefs,
-    )
-    ds.metadata["source_version"] = "json"
-    ds.metadata["source_format"] = "json"
-    ds.metadata["raw_num_loc"] = row_count
+    Values go straight into compact per-key buffers while decoding
+    (:class:`_StreamedColumn`), by exactly the rules :func:`_json_column`
+    applies to a whole column -- so the size threshold, which picks the
+    decoder, never changes a value, a dtype or which columns are kept. The
+    columns are then built by the same function as a small file's.
+    """
+    ds = _dataset_from_json_columns(_stream_json_columns(path), path, prefs)
     if apply_sidecar:
         apply_metadata_sidecar(ds, path)
     return ds
 
 
+def _stream_json_columns(path: Path) -> dict[str, np.ndarray]:
+    """The columns :func:`_json_columns` would build from the file's records,
+    decoded record by record. Raises for a file that is not MINFLUX JSON."""
+    iterator = _iter_json_records(path)
+    try:
+        first = next(iterator)
+    except StopIteration:
+        raise ValueError(f"'{path.name}' is empty.") from None
+    if not _looks_like_minflux_json_records([first]):
+        raise ValueError(f"'{path.name}' is not recognised as MINFLUX localization JSON.")
+
+    streamed: dict[str, _StreamedColumn] = {}
+    rows = 0
+    for record in itertools.chain((first,), iterator):
+        if not record.keys() <= streamed.keys():               # a key first seen here
+            for key in record:
+                if key not in streamed:
+                    streamed[key] = _StreamedColumn(rows)
+        for key, column in streamed.items():
+            column.add(record.get(key, _MISSING))
+        rows += 1
+
+    columns: dict[str, np.ndarray] = {}
+    for key, column in streamed.items():
+        values = column.result(str(key))
+        if values is not None:
+            columns[str(key)] = values
+    return columns
+
+
+_NAN = float("nan")
+
+
+class _StreamedColumn:
+    """One key's values while a large JSON file streams.
+
+    Follows :func:`_json_column` / :func:`_json_column_slow` exactly, without
+    holding the values as Python objects:
+
+    * integers (and booleans) stay exact in an ``int64`` buffer until a float,
+      a gap or an out-of-range integer turns the column into ``float64`` (as
+      NumPy does for the whole column);
+    * a vector column may grow: a longer vector later adds components, earlier
+      vectors padded with 0 and absent rows NaN;
+    * the kind (scalar or vector) is fixed by the first non-null value, so a
+      column that starts with ``null`` is not lost;
+    * text, objects, a scalar among vectors (or the reverse) and a
+      non-numeric vector item make the column "not data", as in the small path.
+    """
+
+    __slots__ = ("rows", "first_gap", "mode", "kinds", "ints", "floats", "comps", "present")
+
+    def __init__(self, rows: int) -> None:
+        self.rows = rows                     # rows accounted for
+        self.first_gap: int | None = 0 if rows else None
+        self.mode: str | None = None         # None (no value yet), "scalar", "vector", "skip"
+        self.kinds = 0                       # 1 bool, 2 int, 4 float
+        self.ints: array | None = None       # exact integers, while no float or gap
+        self.floats: array | None = None
+        self.comps: list[array] = []         # a vector's components
+        self.present = bytearray()           # a vector row was present (1) or absent (0)
+
+    def _to_floats(self) -> None:
+        assert self.ints is not None
+        self.floats = array("d", (float(v) for v in self.ints))
+        self.ints = None
+
+    def _skip(self) -> None:
+        self.mode = "skip"
+        self.ints = self.floats = None
+        self.comps = []
+        self.present = bytearray()
+
+    def _start(self, value) -> None:
+        kind = type(value)
+        if kind is list:
+            self.mode = "vector"
+            self.present = bytearray(self.rows)      # earlier rows: absent
+        elif kind is int or kind is bool or kind is float:
+            self.mode = "scalar"
+            if self.rows or kind is float:
+                self.floats = array("d", [_NAN]) * self.rows
+            else:
+                self.ints = array("q")
+        else:
+            self.mode = "skip"
+
+    def add(self, value) -> None:
+        # Fast paths for what nearly every row is: a number in a scalar column,
+        # a full-width numeric vector in a vector column. Anything else falls
+        # through to the general rules below.
+        mode = self.mode
+        kind = type(value)
+        if mode == "scalar":
+            if kind is float and self.ints is None:
+                assert self.floats is not None
+                self.floats.append(value)
+                self.kinds |= 4
+                self.rows += 1
+                return
+            if (kind is int or kind is bool) and self.ints is not None:
+                try:
+                    self.ints.append(value)
+                except OverflowError:
+                    pass                          # general path: to float
+                else:
+                    self.kinds |= 1 if kind is bool else 2
+                    self.rows += 1
+                    return
+        elif mode == "vector" and kind is list and len(value) == len(self.comps):
+            try:
+                for comp, item in zip(self.comps, value):
+                    item_kind = type(item)
+                    if item_kind is not float and item_kind is not int and item_kind is not bool:
+                        raise TypeError(item)
+                    comp.append(item)
+            except (TypeError, OverflowError):
+                self._skip()
+            else:
+                self.present.append(1)
+            self.rows += 1
+            return
+        if value is _MISSING or value is None:
+            if self.first_gap is None:
+                self.first_gap = self.rows
+            if self.mode == "scalar":
+                if self.ints is not None:
+                    self._to_floats()
+                assert self.floats is not None
+                self.floats.append(_NAN)
+            elif self.mode == "vector":
+                for comp in self.comps:
+                    comp.append(_NAN)
+                self.present.append(0)
+            self.rows += 1
+            return
+        if self.mode is None:
+            self._start(value)
+        mode = self.mode
+        if mode == "scalar":
+            self._add_scalar(value)
+        elif mode == "vector":
+            self._add_vector(value)
+        self.rows += 1
+
+    def _add_scalar(self, value) -> None:
+        kind = type(value)
+        if kind is int or kind is bool:
+            self.kinds |= 1 if kind is bool else 2
+            if self.ints is not None:
+                try:
+                    self.ints.append(value)
+                    return
+                except OverflowError:           # beyond int64: NumPy goes to float
+                    self._to_floats()
+            try:
+                assert self.floats is not None
+                self.floats.append(float(value))
+            except OverflowError:                # beyond float64: not data
+                self._skip()
+        elif kind is float:
+            self.kinds |= 4
+            if self.ints is not None:
+                self._to_floats()
+            assert self.floats is not None
+            self.floats.append(value)
+        else:
+            self._skip()
+
+    def _add_vector(self, value) -> None:
+        if type(value) is not list:
+            self._skip()
+            return
+        comps = self.comps
+        if len(value) > len(comps):
+            pad = [0.0 if row else _NAN for row in self.present]
+            while len(comps) < len(value):
+                comps.append(array("d", pad))
+        try:
+            for j, comp in enumerate(comps):
+                if j < len(value):
+                    item = value[j]
+                    kind = type(item)
+                    if kind is not float and kind is not int and kind is not bool:
+                        raise TypeError(item)
+                    comp.append(float(item))
+                else:
+                    comp.append(0.0)              # a short vector: zero-padded
+        except (TypeError, OverflowError):
+            self._skip()
+            return
+        self.present.append(1)
+
+    def result(self, key: str) -> np.ndarray | None:
+        """The column, or None when it is not data (or never had a value)."""
+        if self.mode is None:
+            return None
+        if self.first_gap is not None and key in _JSON_GAP_INTOLERANT:
+            raise ValueError(
+                f"JSON record {self.first_gap} has no '{key}', which other records carry.")
+        if self.mode == "skip":
+            return None
+        if self.mode == "vector":
+            if not self.comps:
+                return np.zeros((self.rows, 0))
+            return np.column_stack([np.frombuffer(c, dtype=np.float64) for c in self.comps])
+        if self.floats is not None:
+            return np.frombuffer(self.floats, dtype=np.float64)
+        assert self.ints is not None
+        values = np.frombuffer(self.ints, dtype=np.int64)
+        return values.astype(bool) if self.kinds == 1 else values
+
+
 def _extract_json_records(payload: Any) -> list[dict] | None:
-    if isinstance(payload, list) and all(isinstance(item, dict) for item in payload):
-        return payload
-    if isinstance(payload, dict):
-        for key in ("mfx", "records", "localizations", "localisations", "data"):
-            value = payload.get(key)
-            if isinstance(value, list) and all(isinstance(item, dict) for item in value):
-                return value
-    return None
+    """The record list of a decoded document, by the streaming decoder's rule:
+    a record array, or an object with exactly one record array under a wrapper
+    key (several are an error, not a choice)."""
+    from minflux_viewer.core.json_probe import RECORD_WRAPPER_KEYS
+
+    records = None
+    if isinstance(payload, list):
+        records = payload
+    elif isinstance(payload, dict):
+        wrapped = [key for key in payload if key in RECORD_WRAPPER_KEYS
+                   and isinstance(payload[key], list)]
+        if len(wrapped) > 1:
+            raise _several_wrappers(wrapped)
+        records = payload[wrapped[0]] if wrapped else None
+    if records is None or not all(isinstance(item, dict) for item in records):
+        return None
+    return records
 
 
 def _looks_like_minflux_json_records(records: list[dict]) -> bool:
-    if not records:
-        return False
-    keys = set(records[0].keys())
-    return bool(
-        {"loc", "lnc", "ext"} & keys
-        or {"x", "y"} <= keys
-        or {"xnm", "ynm"} <= keys
-        or {"x_nm", "y_nm"} <= keys
-        or {"loc_x", "loc_y"} <= keys
-        or {"loc_x_nm", "loc_y_nm"} <= keys
-    )
+    # The same test the classifier applies to a wrapped array's first record.
+    from minflux_viewer.core.json_probe import looks_like_localization
+
+    return bool(records) and looks_like_localization(records[0].keys())
 
 
 def load_tiff(path: str | Path, prefs: dict | None = None) -> MinfluxDataset:

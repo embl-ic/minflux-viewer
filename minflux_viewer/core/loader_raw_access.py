@@ -202,8 +202,13 @@ def mfx_row_mask(
     vld_col = np.asarray(raw.get("vld", np.ones(n, bool)), dtype=bool).ravel()
     base = vld_col if vld_only else np.ones(n, bool)
     if itr == "last":
-        max_i = int(itr_col[base].max()) if base.any() else 0
-        return base & (itr_col == max_i)
+        # The file's own final status when it records one (``sta == 1``), so a
+        # multi-thread acquisition keeps every thread's final iteration; the
+        # same rule the dataset was materialized with (core.final_localization).
+        from .final_localization import final_rows
+
+        return final_rows(itr_col, vld_col, raw.get("sta"), raw.get("fnl"),
+                          vld_only=vld_only)
     if itr == "all":
         return base
     if isinstance(itr, (int, np.integer)):

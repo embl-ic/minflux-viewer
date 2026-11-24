@@ -28,15 +28,21 @@ def test_format_resolution_does_not_swallow_detector_failure(error, monkeypatch,
 @pytest.mark.parametrize("error", [MemoryError, RuntimeError])
 @pytest.mark.parametrize("kind", ["filter", "metadata", "collection", "particles", "beads", "image"])
 def test_file_predicates_do_not_treat_unexpected_failures_as_another_format(error, kind, monkeypatch, tmp_path):
+    # The .json predicates read through one bounded probe (core.json_probe), so
+    # that is where a backend failure is injected.
     if kind == "filter":
         from minflux_viewer.core import filter_io as module
-        monkeypatch.setattr(module, "load_filter_json", fail(error))
-        call = partial(module.is_filter_json_file, tmp_path / "test.json")
+        from minflux_viewer.core import json_probe
+        path = tmp_path / "test.json"
+        path.write_text('[{"apply": true, "attribute": "efo"}]')
+        monkeypatch.setattr(json_probe, "probe_json", fail(error))
+        call = partial(module.is_filter_json_file, path)
     elif kind == "metadata":
+        from minflux_viewer.core import json_probe
         from minflux_viewer.core import save as module
         path = tmp_path / "test.json"
         path.write_text("{}")
-        monkeypatch.setattr(module.json, "load", fail(error))
+        monkeypatch.setattr(json_probe, "probe_json", fail(error))
         call = partial(module.is_metadata_json_file, path)
     elif kind in {"collection", "particles"}:
         from minflux_viewer.core import cell_collection, particle_set

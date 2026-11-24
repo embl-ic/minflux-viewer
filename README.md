@@ -19,7 +19,11 @@ as a Python/Qt reimplementation of a previous in-house built MATLAB toolset.
   formats, including any embedded confocal/STED images and
   bead/fiducial reference data (mbm). Read on Windows, macOS, and Linux.
 - `.mat` (Imspector `m2205` and `m2410`), `.npy`, `.csv`, `.json`, `.npz`,
-  `.zarr`, and spreadsheet tables.
+  `.zarr`, and spreadsheet tables. The same acquisition loads into the same
+  dataset whichever of these containers it comes in.
+- MINFLUX sequence `.json` files (the files Imspector runs a measurement from)
+  open in a read-only sequence viewer: iterations, pattern sizes, thresholds,
+  and which iterations give the final localization.
 - Files are opened from the menu or by drag-and-drop. Multiple datasets as multi-channel data are supported as overlay, but need to be imported as the original .msr raw data.
 
 MINFLUX data exists in several structural versions (`m2410`, `m2205`, and older

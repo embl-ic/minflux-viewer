@@ -62,6 +62,42 @@ def _transform_record_from_recipe(tf) -> dict | None:
     }
 
 
+def _restore_native_acquisition(ds: MinfluxDataset, meta: dict, applied: list[str]) -> None:
+    from minflux_viewer.core.metadata_match import acquisition_record_match
+    from minflux_viewer.core.save import NATIVE_ACQUISITION_KEY, NATIVE_PROVENANCE_KEY
+
+    block = meta.get(NATIVE_ACQUISITION_KEY)
+    record = block.get("mfx_attrs") if isinstance(block, dict) else None
+    if not isinstance(record, dict) or not record:
+        return
+    if ds.metadata.get("native_zarr_mfx_attrs"):
+        return                                  # the dataset's own record wins
+    match = acquisition_record_match(meta, ds, record)
+    if not match.accepted:
+        applied.append(
+            "[!] acquisition record (sequence, detectors, lasers) NOT restored - "
+            f"{match.reason}")
+        return
+    ds.metadata["native_zarr_mfx_attrs"] = dict(record)
+    # Where the record came from and on what evidence, kept beside it (not in
+    # Imspector's record itself) and carried by every format that carries the
+    # metadata: a record matched by file name alone stays marked as such.
+    provenance: dict[str, object] = {
+        "source": "processing sidecar",
+        "sidecar_data_file": str(meta.get("data_file") or ""),
+        "matched_by": match.basis, "verified": match.verified}
+    earlier = block.get("provenance") if isinstance(block, dict) else None
+    if isinstance(earlier, dict) and earlier:
+        provenance["earlier"] = earlier
+    ds.metadata[NATIVE_PROVENANCE_KEY] = provenance
+    from minflux_viewer.core.mfx_sequence import extract_sequence_from_zattrs
+
+    sequence = extract_sequence_from_zattrs(record)
+    if sequence and not ds.metadata.get("mfx_sequence"):
+        ds.metadata["mfx_sequence"] = sequence
+    applied.append(f"acquisition record ({match.reason})")
+
+
 def apply_metadata_recipe(ds: MinfluxDataset, meta: dict) -> list[str]:
     """Apply an already-parsed metadata-sidecar payload to *ds*.
 
@@ -72,14 +108,30 @@ def apply_metadata_recipe(ds: MinfluxDataset, meta: dict) -> list[str]:
     """
     applied: list[str] = []
 
+    # Imspector's native acquisition record (sequences, detectors, lasers).
+    # Unlike the DID below it changes results -- CRLB and aggregation read the
+    # sequence -- so it is restored only onto the acquisition it was written
+    # for: the identity must match BEFORE anything from this recipe is copied
+    # onto the dataset (the DID restore would otherwise make every recipe match),
+    # and a record the dataset already has is never replaced.
+    _restore_native_acquisition(ds, meta, applied)
+
     # Identity, restored silently (it is provenance, not processing, so it is
     # not reported as something "applied"). Carrying it onto the dataset is what
     # lets a *later* sidecar find this dataset by DID: the data file itself
     # cannot hold one. Never overwritten -- a dataset that already knows its own
     # DID outranks a recipe that may have come from a different copy.
+    # Marked as recipe-supplied, so it is never later taken as evidence that
+    # this dataset is the recipe's acquisition (see acquisition_record_match).
+    from minflux_viewer.core.metadata_match import (
+        mark_recipe_identity,
+        preserve_intrinsic_identity,
+    )
+
     did = str(meta.get("msr_dataset_did") or "")
     if did and not ds.metadata.get("msr_dataset_did"):
         ds.metadata["msr_dataset_did"] = did
+        mark_recipe_identity(ds.metadata, "msr_dataset_did")
 
     # Overlay membership, recorded silently: it says this file is one of a set,
     # which is provenance until something acts on it. Regrouping is a change to
@@ -98,9 +150,16 @@ def apply_metadata_recipe(ds: MinfluxDataset, meta: dict) -> list[str]:
     if acq.get("date"):
         from minflux_viewer.core.acquisition_time import stamp_acquisition
 
+        before = ds.metadata.get("acquisition_date")
+        # The dataset's own date, if the recipe is about to replace it, is kept
+        # as evidence: otherwise applying a refused recipe twice would erase
+        # the conflict that refused it the first time.
         stamp_acquisition(ds.metadata, acq.get("date"), acq.get("span_s"))
         if ds.metadata.get("acquisition_date"):
             applied.append("acquisition date")
+            if ds.metadata["acquisition_date"] != before:
+                preserve_intrinsic_identity(ds.metadata, "acquisition_date", before)
+                mark_recipe_identity(ds.metadata, "acquisition_date")
 
     calibration = meta.get("calibration") or {}
     z_scaling_factor = calibration.get("z_scaling_factor")
