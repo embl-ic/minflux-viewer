@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
 from minflux_viewer.colormaps import colormap_lut, custom_colormap_names, make_colormap
 from minflux_viewer.colors import iteration_color, viewer_color
 from minflux_viewer.core.app_state import AppState
-from minflux_viewer.core.attributes import attribute_description, plot_attribute_names
+from minflux_viewer.core.attributes import plot_attribute_names
 from minflux_viewer.core.iteration import (
     FLATTEN_LABEL,
     STACKED_LABEL,
@@ -545,7 +545,6 @@ class AttributeWindow(QWidget):
                 value = self._dimension_attrs.get(dimension, "")
                 if value in self._numeric_attrs:
                     combo.setCurrentText(value)
-                combo.setToolTip(attribute_description(combo.currentText()))
                 combo.blockSignals(False)
         finally:
             self._syncing_axis_combos = False

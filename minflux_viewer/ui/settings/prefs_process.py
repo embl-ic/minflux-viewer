@@ -109,9 +109,9 @@ class AutoRuleRow(QWidget):
         self.attribute = QComboBox()
         self.attribute.setEditable(True)
         self.attribute.addItems(_RULE_ATTRIBUTES)
-        apply_attribute_tooltips(self.attribute)
+        apply_attribute_tooltips(
+            self.attribute, note="Attribute the rule bounds. Any attribute name may be typed.")
         self.attribute.setMinimumWidth(78)
-        self.attribute.setToolTip("Attribute the rule bounds. Any attribute name may be typed.")
         row.addWidget(self.attribute)
 
         self.method = QComboBox()

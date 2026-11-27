@@ -278,6 +278,33 @@ def test_deleting_a_row_does_not_misdirect_the_buttons_below_it(_app):
         dialog.close()
 
 
+def test_auto_rows_describe_their_own_attribute_on_hover(_app):
+    """Every Auto row used to show 'Index of localization data points' — the
+    help of the list's first entry, idx — whatever its attribute was."""
+    from PyQt6.QtCore import QEvent, QPoint
+    from PyQt6.QtGui import QHelpEvent
+    from PyQt6.QtWidgets import QApplication, QToolTip
+
+    from minflux_viewer.core.attributes import attribute_description
+    from minflux_viewer.ui.dialogs import filter_dialog as fd
+
+    dialog, _state = _dialog(_dataset(seed=7))
+    try:
+        dialog._apply_auto_rules()
+        shown = {}
+        for row in range(dialog._table.rowCount()):
+            combo = dialog._table.cellWidget(row, fd._COL_ATTR)
+            pos = QPoint(4, 4)
+            QApplication.sendEvent(
+                combo, QHelpEvent(QEvent.Type.ToolTip, pos, combo.mapToGlobal(pos)))
+            QToolTip.hideText()
+            shown[combo.currentText()] = combo.toolTip()
+        assert set(shown) == {"efo", "cfr", "siz"}
+        assert shown == {attr: attribute_description(attr) for attr in shown}
+    finally:
+        dialog.close()
+
+
 def test_auto_tooltip_lists_the_rules(_app):
     dialog, _state = _dialog(_dataset(seed=6))
     try:

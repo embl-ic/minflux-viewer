@@ -33,7 +33,6 @@ from minflux_viewer.colors import iteration_color, viewer_color
 from minflux_viewer.core.app_state import AppState
 from minflux_viewer.core.attributes import (
     aggregation_description,
-    attribute_description,
     is_trace_wise_attribute,
     plot_attribute_names,
 )
@@ -57,7 +56,10 @@ from minflux_viewer.core.roi_selection import rectangle_bounds, value_range_mask
 from minflux_viewer.ui.common.dataset_binding import DatasetIndex, event_index
 from minflux_viewer.ui.dialogs.filter_dialog import SmartBoundsSpinBox, _filter_spinner_values
 from minflux_viewer.ui.plots.plot_format import plot_widget
-from minflux_viewer.ui.widgets.attribute_help import apply_attribute_tooltips
+from minflux_viewer.ui.widgets.attribute_help import (
+    apply_attribute_tooltips,
+    describe_current_entry,
+)
 from minflux_viewer.ui.widgets.zoom_guide import zoom_guide_points
 from minflux_viewer.utils.filters import TRACE_AGG_FUNCS, trace_agg_func
 
@@ -188,17 +190,12 @@ class HistogramWindow(QWidget):
         self._attr_combo = QComboBox()
         self._attr_combo.setMinimumWidth(110)
         self._attr_combo.currentTextChanged.connect(self._on_histogram_attribute_changed)
-        self._attr_combo.currentTextChanged.connect(
-            lambda text: self._attr_combo.setToolTip(attribute_description(text))
-        )
         bar.addWidget(self._attr_combo)
 
         bar.addWidget(QLabel("As:"))
         self._agg_combo = QComboBox()
         self._agg_combo.currentTextChanged.connect(self._on_histogram_aggregation_changed)
-        self._agg_combo.currentTextChanged.connect(
-            lambda text: self._agg_combo.setToolTip(aggregation_description(text))
-        )
+        describe_current_entry(self._agg_combo, self._aggregation_tooltip)
         bar.addWidget(self._agg_combo)
 
         self._iter_label = QLabel("Iter:")
@@ -356,7 +353,6 @@ class HistogramWindow(QWidget):
         elif "cfr" in numeric:
             self._attr_combo.setCurrentText("cfr")
         self._attr_combo.blockSignals(False)
-        self._attr_combo.setToolTip(attribute_description(self._attr_combo.currentText()))
 
         self._agg_combo.blockSignals(True)
         agg_default = saved.get("aggregation", "per loc")
@@ -365,7 +361,6 @@ class HistogramWindow(QWidget):
         else:
             self._agg_combo.setCurrentText("per loc")
         self._agg_combo.blockSignals(False)
-        self._agg_combo.setToolTip(aggregation_description(self._agg_combo.currentText()))
         self._enforce_trace_aggregation()
 
         self._eff_iter_cache = {}                    # dataset (re)loaded → drop cache
@@ -460,6 +455,14 @@ class HistogramWindow(QWidget):
     def _apply_aggregation_combo_tooltips(self, combo: QComboBox) -> None:
         for i in range(combo.count()):
             combo.setItemData(i, aggregation_description(combo.itemText(i)), Qt.ItemDataRole.ToolTipRole)
+
+    def _aggregation_tooltip(self, mode: str) -> str:
+        """The closed ``As:`` box's tooltip: the mode's description, or why the
+        box is locked (`_enforce_trace_aggregation`) for a track-level attribute."""
+        if is_trace_wise_attribute(self._attr_combo.currentText()):
+            return ("This is a track-level attribute expanded per localization; "
+                    "histogram uses trace mean.")
+        return aggregation_description(mode)
 
     # ------------------------------------------------------------------
     # Iteration / validity (Stage B) helpers
@@ -2044,10 +2047,8 @@ class HistogramWindow(QWidget):
                 )
             self._agg_combo.setCurrentText(forced)
             self._agg_combo.setEnabled(False)
-            self._agg_combo.setToolTip("This is a track-level attribute expanded per localization; histogram uses trace mean.")
         else:
             self._agg_combo.setEnabled(True)
-            self._agg_combo.setToolTip("")
         self._agg_combo.blockSignals(False)
 
     def _on_filter_changed(self, idx) -> None:
